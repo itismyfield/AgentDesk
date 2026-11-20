@@ -2531,6 +2531,9 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   ├── restarted.rs
+│   │   │   │   │   │   └── restarted_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs

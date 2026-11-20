@@ -133,7 +133,7 @@ mod turn_mode_restart_tests;
 pub(in crate::services::discord) mod herdr_reader;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_reattach.rs"]
-mod herdr_reattach;
+pub(in crate::services::discord) mod herdr_reattach;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_server_replaced.rs"]
 pub(in crate::services::discord) mod herdr_server_replaced;

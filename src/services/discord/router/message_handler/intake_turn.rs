@@ -980,10 +980,11 @@ pub(super) async fn handle_text_message(
             },
         ).await;
         #[cfg(unix)]
-        let (owner, legacy_busy_diagnostic) = match super::provider_dispatch::OwnerTurn::early(
-            shared, &provider, channel_id, tmux_session_name.as_deref(),
-            adk_session_key.as_deref(), owner,
-            force_fresh_provider_session,
+        let (owner, legacy_busy_diagnostic) = match session_preparation::prepare_intake_owner(
+            shared, (&provider, channel_id, tmux_session_name.as_deref(), adk_session_key.as_deref()),
+            owner,
+            (force_fresh_provider_session, session_was_cleared || dispatch_reset_provider_state || dispatch_recreate_tmux),
+            None,
         ).await {
             Ok(owner) => owner,
             Err(()) => {

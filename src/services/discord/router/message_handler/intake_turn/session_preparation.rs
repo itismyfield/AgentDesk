@@ -99,6 +99,92 @@ pub(in crate::services::discord) async fn restore(
     }
 }
 
+#[cfg(unix)]
+use super::super::provider_dispatch::OwnerTurn;
+#[cfg(unix)]
+use crate::services::discord::session_transition::SessionTransitionLease;
+
+#[cfg(unix)]
+type OwnerRoute<'a> = (
+    &'a ProviderKind,
+    ChannelId,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
+/// The same front is prepared before Busy admission or idle dispatch. The staged path requires
+/// a lease from the caller coordinating restart continuation and resume presentation.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn prepare_owner(
+    shared: &Arc<SharedData>,
+    route: OwnerRoute<'_>,
+    owner: Option<OwnerTurn>,
+    (allows_continuation, lease): (bool, Option<&SessionTransitionLease<'_>>),
+) -> Result<Option<OwnerTurn>, ()> {
+    match (owner, lease.filter(|_| allows_continuation)) {
+        (Some(owner), Some(lease)) => Box::pin(owner.prepare_restarted(shared, route, lease))
+            .await
+            .map(Some),
+        (owner, _) => Ok(owner),
+    }
+}
+
+#[cfg(unix)]
+pub(super) async fn prepare_intake_owner(
+    shared: &Arc<SharedData>,
+    route: OwnerRoute<'_>,
+    owner: Option<OwnerTurn>,
+    (force_fresh, boundary): (bool, bool),
+    lease: Option<&SessionTransitionLease<'_>>,
+) -> Result<(Option<OwnerTurn>, bool), ()> {
+    let owner = prepare_owner(shared, route, owner, (!(force_fresh || boundary), lease)).await?;
+    if owner
+        .as_ref()
+        .is_some_and(OwnerTurn::awaiting_restarted_clear)
+    {
+        // Its own first prompt resolves the Pending. Requiring a bound source here would hold it.
+        return Ok((owner, false));
+    }
+    let (provider, channel, logical, key) = route;
+    OwnerTurn::early(shared, provider, channel, logical, key, owner, force_fresh).await
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn prepare_headless_owner(
+    (shared, cancel): (
+        &Arc<SharedData>,
+        &Arc<crate::services::provider::CancelToken>,
+    ),
+    route: OwnerRoute<'_>,
+    owner: Option<OwnerTurn>,
+    (channel_name, clear_binding, cleared): (Option<&str>, bool, bool),
+    lease: Option<&SessionTransitionLease<'_>>,
+) -> Result<Option<OwnerTurn>, crate::services::discord::router::turn_start::HeadlessTurnStartError>
+{
+    let (provider, channel, logical, _) = route;
+    let mut owner =
+        match prepare_owner(shared, route, owner, (!(clear_binding || cleared), lease)).await {
+            Ok(owner) => owner,
+            Err(()) => {
+                super::super::super::super::mailbox_finish::unwind_unstarted_turn(
+                    shared, channel, cancel,
+                )
+                .await;
+                return Err(
+                    crate::services::discord::router::turn_start::HeadlessTurnStartError::Internal(
+                        "herdr restart held before submit".into(),
+                    ),
+                );
+            }
+        };
+    if let Some(owner) = owner.as_mut() {
+        let channel_pane = channel_name.map(|name| provider.build_tmux_session_name(name));
+        let own = channel_pane.is_some() && channel_pane.as_deref() == logical;
+        owner.read_late(own, clear_binding);
+    }
+    Ok(owner)
+}
+
 #[cfg(test)]
 #[path = "session_preparation/restore_tests.rs"]
 mod tests;

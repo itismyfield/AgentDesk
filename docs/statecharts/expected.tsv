@@ -1235,6 +1235,13 @@ session-lifecycle/HerdrMissingBoundFixedRunning.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedTerminate.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedUnknown.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundOwnerAfter.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundOwnerDeath.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundOwnerNoFirstKey.cfg	HerdrMissingBound	BeforeFirstKey	-
+session-lifecycle/HerdrMissingBoundOwnerNoWake.cfg	HerdrMissingBound	-	OwnerDelivers
+session-lifecycle/HerdrMissingBoundOwnerResendUnknown.cfg	HerdrMissingBound	OwnerExactlyOnce	OwnerDelivers
+session-lifecycle/HerdrMissingBoundOwnerReset.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundOwnerStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound

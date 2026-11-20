@@ -613,17 +613,24 @@ async fn start_reserved_headless_turn_admitted(
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
         }
     }
-    // The owned start's late read takes the session id only for the channel's own pane, and runs
-    // the binding clear a fresh or snapshot start deferred.
     #[cfg(unix)]
-    let owner = owner.map(|mut owner| {
-        let channel_pane = channel_name
-            .as_deref()
-            .map(|name| provider.build_tmux_session_name(name));
-        let own = channel_pane.is_some() && channel_pane == tmux_session_name;
-        owner.read_late(own, force_fresh_provider_session || turn_local_session);
-        owner
-    });
+    let owner = super::intake_turn::session_preparation::prepare_headless_owner(
+        (shared, &cancel_token),
+        (
+            &provider,
+            channel_id,
+            tmux_session_name.as_deref(),
+            adk_session_key.as_deref(),
+        ),
+        owner,
+        (
+            channel_name.as_deref(),
+            force_fresh_provider_session || turn_local_session,
+            session_was_cleared,
+        ),
+        None,
+    )
+    .await?;
     if session_id.is_none() {
         if force_fresh_provider_session || turn_local_session {
             let ts = chrono::Local::now().format("%H:%M:%S");

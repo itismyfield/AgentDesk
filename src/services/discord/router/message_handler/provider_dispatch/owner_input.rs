@@ -28,6 +28,8 @@ use serde_json::{Value, json};
 
 #[path = "../intake_turn/owned_busy.rs"]
 pub(in crate::services::discord) mod owned_busy;
+#[path = "owner_input/restarted.rs"]
+mod restarted;
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
@@ -52,6 +54,7 @@ pub(super) struct Registration {
     /// Only a successfully settled write may attach its native input to this birth episode.
     native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     observation: Option<BusyObservation>,
+    restarted: Option<restarted::ExistingFront>,
     recovery: super::start_failure::MissingRecovery,
 }
 
@@ -138,6 +141,7 @@ impl Registration {
             until_done,
             native_pin_submitted: None,
             observation: None,
+            restarted: None,
             recovery: Default::default(),
         })
     }
@@ -571,13 +575,7 @@ pub(in crate::services::discord) struct OwnerTurn {
     refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
-/// Whether the start's session id names the pane it writes to, and whether its fresh or snapshot
-/// runtime-binding clear waits for that pane to read idle.
-#[derive(Clone, Copy, Default)]
-pub(in crate::services::discord) struct LateRead {
-    own_pane: bool,
-    clear_binding: bool,
-}
+use restarted::LateRead;
 
 impl OwnerTurn {
     pub(super) fn mailbox(&self) -> &ChannelMailboxHandle {
@@ -594,10 +592,7 @@ impl OwnerTurn {
     }
 
     pub(in crate::services::discord) fn read_late(&mut self, own_pane: bool, clear_binding: bool) {
-        self.late = LateRead {
-            own_pane,
-            clear_binding,
-        };
+        self.late.set_headless(own_pane, clear_binding);
     }
 
     pub(in crate::services::discord) fn front(&self) -> &Front {
@@ -1271,7 +1266,7 @@ pub(super) fn execute_owned(
     {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
     }
-    let registered = owned_busy::late(&turn, origin, &mailbox, claim.front(), || {
+    let registered = restarted::register(&late, &turn, origin, &mailbox, claim.front(), || {
         let live = read.unwrap_or_else(|| {
             matches!(turn.host, TurnHost::Tmux)
                 && pane_liveness(session) == PaneLiveness::Live
@@ -1311,7 +1306,7 @@ pub(super) fn execute_owned(
     let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
         Ok(mut owner) => as_restart(restart, || {
-            owner.recovery = recovery;
+            restarted::pass(late.restarted, &turn, recovery, &mut owner);
             execute_front(turn, sender, claim, owner, settled)
         }),
         Err(error) => {
@@ -1627,7 +1622,11 @@ fn created(
             sources: r.sources,
             attempt,
         };
-        let leaf = effect::created(submit_created, writer);
+        let leaf = restarted::guard(
+            r.restarted,
+            &prepared.attempt,
+            effect::created(submit_created, writer),
+        );
         let result = submit((&r.mailbox, r.clock), front, prepared, leaf);
         reply(&result);
         result
@@ -1768,6 +1767,7 @@ fn run(
         sources: r.sources,
         attempt: r.attempt,
     };
+    let leaf = restarted::guard(r.restarted, &prepared.attempt, leaf);
     submit((&r.mailbox, r.clock), front, prepared, leaf)
 }
 

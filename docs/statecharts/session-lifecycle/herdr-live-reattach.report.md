@@ -79,6 +79,22 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | FixedUnknown | - | - |
 | RetireOnlyLaunchFailure | InputResolves, NoRetainedRefusal | InputResolves, NoRetainedRefusal |
 
+## 조각 2의 동일 원본 제출
+
+`OwnerAttachSpec`은 E19–E29와 E51의 admission ticket, Busy/Idle grant, front와 frozen followers 예약, watch/wake, 실제 제출과 receipt를 연결한다. `shellHeld`는 셸이 foreground를 되찾았을 때 기록된 provider가 여전히 살아 있거나 판독할 수 없는 경우다(E07–E09). 제출이 확인되기까지는 실행 행만 있거나 준비 상태를 읽을 수 없는 원본과 같은 방식으로 보류한다. 첫 키 전 사망·stop·reset은 효과를 막고 기존 owner가 다시 판정하도록 한다. 제어가 원본을 명시적으로 폐기하는 경우는 이 전달 liveness의 범위 밖이다.
+
+`SameOriginal`은 같은 원본만 예약·결산하는지 확인한다. `BeforeFirstKey`는 사망·stop·reset이 먼저 온 예약에서 물리 효과를 막는지 확인한다. `OwnerExactlyOnce`는 확인된 제출과 응답 불명의 제출을 모두 센다. `OwnerDelivers`의 fairness는 Held가 풀릴 증거와 AckUnknown을 결산할 receipt가 결국 관찰되는 경우에 적용한다. boot와 첫 intake의 상대 순서는 고정하지 않는다. 조각 2의 production 진입점은 기존 분기를 사용한다. 아래 표는 활성화 전에 준비한 owner 경로의 모델 결과다.
+
+| cfg (HerdrMissingBoundOwner 접두사) | 결과 | 상태 / 전이 | 산출 |
+|---|---|---:|---|
+| After | GREEN | 203 / 397 | [차트](herdr-reattach-owner-After.chart.mmd) · [결과](herdr-reattach-owner-After.report.md) |
+| Death | GREEN | 359 / 664 | [차트](herdr-reattach-owner-Death.chart.mmd) · [결과](herdr-reattach-owner-Death.report.md) |
+| Stop | GREEN | 333 / 625 | [차트](herdr-reattach-owner-Stop.chart.mmd) · [결과](herdr-reattach-owner-Stop.report.md) |
+| Reset | GREEN | 333 / 625 | [차트](herdr-reattach-owner-Reset.chart.mmd) · [결과](herdr-reattach-owner-Reset.report.md) |
+| NoWake | RED `OwnerDelivers` | 93 / 165 | [차트](herdr-reattach-owner-NoWake.chart.mmd) · [6단계](herdr-reattach-owner-NoWake.report.md) |
+| NoFirstKey | RED `BeforeFirstKey` | 251 / 487 | [차트](herdr-reattach-owner-NoFirstKey.chart.mmd) · [7단계](herdr-reattach-owner-NoFirstKey.report.md) |
+| ResendUnknown | RED `OwnerExactlyOnce`, `OwnerDelivers` | 323 / 685 | [차트](herdr-reattach-owner-ResendUnknown.chart.mmd) · [8·11단계](herdr-reattach-owner-ResendUnknown.report.md) |
+
 ## 재현
 
 저장소 루트에서 실행한다. 다른 cfg를 재현하려면 접미사와 출력 경로를 함께 바꾼다.

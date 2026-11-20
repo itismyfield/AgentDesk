@@ -26,14 +26,14 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 };
 use crate::services::tui_prompt_dedupe::{self as dedupe, runtime_binding_for_tmux_session};
 
-const CHANNEL: u64 = 82801;
+pub(in crate::services::discord) const CHANNEL: u64 = 82801;
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 const SUCCESSOR: &str = "fedcba9876543210fedcba9876543210";
 
-struct Fixture {
-    rig: HerdrRig,
-    shared: Arc<SharedData>,
-    record: HostedExecution,
+pub(in crate::services::discord) struct Fixture {
+    pub(in crate::services::discord) rig: Arc<HerdrRig>,
+    pub(in crate::services::discord) shared: Arc<SharedData>,
+    pub(in crate::services::discord) record: HostedExecution,
     pool: PgPool,
     row: HostedObservation,
     source: SourceId,
@@ -163,7 +163,7 @@ impl Fixture {
             Some(source.clone())
         );
         Self {
-            rig,
+            rig: Arc::new(rig),
             shared,
             record,
             pool,
@@ -174,7 +174,7 @@ impl Fixture {
         }
     }
 
-    fn logical(&self) -> &str {
+    pub(in crate::services::discord) fn logical(&self) -> &str {
         &self.record.owner.logical_key
     }
 
@@ -260,7 +260,7 @@ impl Fixture {
         read_row(&self.pool, self.logical()).await
     }
 
-    async fn close(self) {
+    pub(in crate::services::discord) async fn close(self) {
         drop(self.shared);
         self.pool.close().await;
         self.db.drop().await;
@@ -282,7 +282,7 @@ async fn read_row(pool: &PgPool, key: &str) -> HostedObservation {
     }
 }
 
-fn run(
+pub(in crate::services::discord) fn run(
     provider: ProviderKind,
     tag: &str,
     busy: bool,
@@ -294,9 +294,22 @@ fn run(
         .unwrap_or_else(|error| error.into_inner());
     let log_root = BindingLogRoot(binding_events::test_root());
     binding_events::set_test_root(Some(test_root.path()));
+    let stop = test_root.path().join("unwritten-admission-stop");
+    let admission = crate::services::herdr_admission::force_for_test(
+        crate::services::herdr_admission::Admission::new(true, Some(stop.clone())),
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
+        .on_thread_start(move || {
+            std::mem::forget(crate::services::herdr_admission::force_for_test(
+                crate::services::herdr_admission::Admission::new(true, Some(stop.clone())),
+            ));
+            std::mem::forget(crate::config::session_hosts::force_for_test(
+                Some(NODE),
+                &[(CHANNEL, NODE)],
+            ));
+        })
         .build()
         .unwrap();
     let hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
@@ -311,7 +324,10 @@ fn run(
     let codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
     let fixture = runtime.block_on(Fixture::new(rig, provider, tag, busy));
     verify(fixture, &runtime);
-    drop((codex, registry, hosts, log_root, state, test_root));
+    drop(runtime);
+    drop((
+        codex, registry, hosts, log_root, state, admission, test_root,
+    ));
 }
 
 fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
@@ -597,7 +613,7 @@ fn cold_codex_scan_leaves_other_registry_writers_unblocked_pg() {
             })))
         });
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
-        writer.join().unwrap();
+        crate::test_support::wait::join_within(writer, Duration::from_secs(5));
         assert_eq!(fx.owner(), Some(ChannelId::new(CHANNEL)));
         rt.block_on(fx.close());
     });

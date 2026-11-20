@@ -205,12 +205,15 @@ ReasonDelivered == [](input = "discarded" => <> (notices = 1))
 \* The historical Missing Bound variables remain fixed in this projection.
 AttachInit ==
     /\ Init
-    /\ \E target \in (IF ReplaceNonce THEN {"idle"} ELSE {"idle", "busy", "dead", "rowOnly"}) :
+    /\ \E target \in (IF Entry = "owner-reattach" THEN {"idle", "busy", "dead", "rowOnly", "shellHeld"}
+                        ELSE IF ReplaceNonce THEN {"idle"} ELSE {"idle", "busy", "dead", "rowOnly"}) :
        attach = [phase |-> "down", target |-> target, initial |-> target,
                  reconciled |-> FALSE, scan |-> FALSE, mirror |-> FALSE, owner |-> FALSE,
                  route |-> "none", changed |-> FALSE, deadWrite |-> FALSE,
                  delivered |-> 0, receipt |-> "none", redrive |-> FALSE,
-                 banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE]
+                 banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE,
+                 grant |-> "none", front |-> 1, claimed |-> 0, recovery |-> FALSE,
+                 ownerControl |-> "none", submits |-> 0]
 
 Boot ==
     /\ attach.phase = "down"
@@ -317,4 +320,95 @@ EndedResumeShowsRecovery ==
 NoDeadPaneWrite == ~attach.deadWrite
 ExactlyOnce == attach.delivered <= 1 /\ (attach.phase = "done" => attach.delivered = 1)
 FirstInputDelivered == [](attach.phase = "queued" => <>(attach.phase = "done" /\ attach.delivered = 1))
+
+\* The owner projection exercises the existing ticket, grant, reserve and receipt boundary.
+\* The foreground-only shell case keeps its own alive/unreadable provider proof pending.
+OwnerInit ==
+    /\ AttachInit
+    /\ attach.target \in {"idle", "busy", "dead", "rowOnly", "shellHeld"}
+
+OwnerSelect ==
+    /\ attach.phase = "queued" /\ attach.reconciled
+    /\ CASE attach.target = "dead" ->
+             attach' = [attach EXCEPT !.phase = "waiting", !.recovery = TRUE]
+         [] attach.target \in {"rowOnly", "shellHeld"} ->
+             attach' = [attach EXCEPT !.phase = "waiting"]
+         [] attach.target = "busy" ->
+             \/ attach' = [attach EXCEPT !.phase = "waiting"]
+             \/ attach' = [attach EXCEPT !.phase = "granted", !.grant = "busy"]
+         [] OTHER ->
+             attach' = [attach EXCEPT !.phase = "granted", !.grant = "idle"]
+    /\ UNCHANGED vars
+
+OwnerWake ==
+    /\ attach.phase = "waiting" /\ Policy # "owner-no-wake"
+    /\ attach' = [attach EXCEPT !.phase = "queued", !.target = "idle",
+                   !.grant = "none", !.claimed = 0]
+    /\ UNCHANGED vars
+
+OwnerClaim ==
+    /\ attach.phase = "granted" /\ attach.grant \in {"idle", "busy"}
+    /\ attach' = [attach EXCEPT !.phase = "reserved", !.claimed = attach.front]
+    /\ UNCHANGED vars
+
+OwnerCatchUp ==
+    /\ attach.phase \in {"waiting", "granted", "reserved", "unknown", "done"}
+    /\ ~attach.redrive
+    /\ attach' = [attach EXCEPT !.redrive = TRUE]
+    /\ UNCHANGED vars
+
+OwnerInterrupt ==
+    /\ attach.phase = "reserved" /\ attach.ownerControl = "none"
+    /\ Control \in {"death", "stop", "reset"}
+    /\ attach' = [attach EXCEPT !.ownerControl = Control,
+                   !.target = IF Control = "death" THEN "dead" ELSE @]
+    /\ UNCHANGED vars
+
+OwnerRejectBeforeKey ==
+    /\ attach.phase = "reserved" /\ attach.ownerControl \in {"death", "stop", "reset"}
+    /\ Policy # "owner-no-first-key"
+    /\ attach' = [attach EXCEPT !.phase = "waiting", !.ownerControl = "settled",
+                   !.claimed = 0, !.grant = "none"]
+    /\ UNCHANGED vars
+
+OwnerSubmit ==
+    /\ attach.phase = "reserved" /\ attach.claimed = attach.front /\ attach.submits < 2
+    /\ (Control = "none" \/ attach.ownerControl # "none")
+    /\ (attach.ownerControl \in {"none", "settled"} \/ Policy = "owner-no-first-key")
+    /\ \E receipt \in {"confirmed", "unknown"} :
+        attach' = [attach EXCEPT !.phase = IF receipt = "confirmed" THEN "done" ELSE "unknown",
+                   !.submits = @ + 1, !.receipt = receipt,
+                   !.deadWrite = attach.ownerControl \in {"death", "stop", "reset"}]
+    /\ UNCHANGED vars
+
+OwnerReceipt ==
+    /\ attach.phase = "unknown"
+    /\ attach' = [attach EXCEPT !.phase = "done", !.receipt = "confirmed"]
+    /\ UNCHANGED vars
+
+OwnerRepeatUnknown ==
+    /\ Policy = "owner-resend-unknown" /\ attach.phase = "unknown"
+    /\ attach' = [attach EXCEPT !.phase = "reserved"]
+    /\ UNCHANGED vars
+
+OwnerNext ==
+    Boot \/ FirstInput \/ ReconcileIntake \/ ReconnectSource \/ OwnerSelect \/ OwnerWake
+    \/ OwnerClaim \/ OwnerCatchUp \/ OwnerInterrupt \/ OwnerRejectBeforeKey
+    \/ OwnerSubmit \/ OwnerReceipt \/ OwnerRepeatUnknown \/ AttachDone
+
+OwnerAttachSpec ==
+    /\ OwnerInit /\ [][OwnerNext]_allVars
+    /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
+    /\ WF_attach(OwnerSelect) /\ WF_attach(OwnerWake) /\ WF_attach(OwnerClaim)
+    /\ WF_attach(OwnerInterrupt) /\ WF_attach(OwnerRejectBeforeKey)
+    /\ WF_attach(OwnerSubmit) /\ WF_attach(OwnerReceipt)
+
+SameOriginal ==
+    attach.front = 1 /\ (attach.phase \in {"reserved", "unknown", "done"} => attach.claimed = attach.front)
+OwnerExactlyOnce ==
+    attach.submits <= 1 /\ (attach.phase \in {"unknown", "done"} => attach.submits = 1)
+BeforeFirstKey == ~attach.deadWrite
+OwnerDelivers ==
+    [](attach.phase = "queued" => <>(attach.phase = "done" /\ attach.submits = 1))
+
 ====

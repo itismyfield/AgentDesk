@@ -116,7 +116,7 @@ impl OwnerTurn {
             return Ok((None, true));
         };
         if observation.state() == BusyState::Held {
-            if owner.mailbox.has_active_turn().await != Ok(true) {
+            if owner.late.restarted.is_none() && owner.mailbox.has_active_turn().await != Ok(true) {
                 return owner
                     .recover_or_discard(shared, (provider, channel, key, session), &host)
                     .await;
@@ -150,7 +150,9 @@ impl OwnerTurn {
         let registered = match registered {
             Ok(registered) => registered,
             Err(error) => {
-                if owner.mailbox.has_active_turn().await != Ok(true) {
+                if owner.late.restarted.is_none()
+                    && owner.mailbox.has_active_turn().await != Ok(true)
+                {
                     return owner
                         .recover_or_discard(shared, (provider, channel, key, session), &host)
                         .await;
@@ -177,8 +179,11 @@ impl OwnerTurn {
             claim,
             settled,
             runtime,
+            late,
             ..
         } = owner;
+        let mut registered = registered;
+        registered.restarted = late.restarted;
         let runtime = runtime.or_else(|| Some(shared.clone()));
         let _ = paste_busy(
             (shared.pg_pool.clone(), provider.clone(), runtime),

@@ -1,0 +1,121 @@
+---
+title: "재시작 뒤 같은 Herdr 입력의 owner 경로"
+---
+stateDiagram-v2
+  state "작업 중 pane" as s0 {
+    s1: dcserver 종료
+    s2: 첫 입력 대기
+    s3: 같은 ticket과 원본
+    s4: Busy grant
+    s5: 원본 보류와 관찰 대기
+    s6: 같은 front의 효과 예약
+    s7: Idle grant
+    s8: 같은 front의 효과 예약 (첫 키 전 stop)
+    s9: 제출 결산
+    s10: Enter 응답 불명, receipt 관찰 중
+  }
+  state "종료된 실행" as s11 {
+    s12: dcserver 종료
+    s13: 첫 입력 대기
+    s14: 같은 ticket과 원본
+    s15: 원본 보류와 관찰 대기
+    s16: Idle grant
+    s17: 같은 front의 효과 예약
+    s18: 같은 front의 효과 예약 (첫 키 전 stop)
+    s19: 제출 결산
+    s20: Enter 응답 불명, receipt 관찰 중
+  }
+  state "유휴 pane" as s21 {
+    s22: dcserver 종료
+    s23: 첫 입력 대기
+    s24: 같은 ticket과 원본
+    s25: Idle grant
+    s26: 같은 front의 효과 예약
+    s27: 같은 front의 효과 예약 (첫 키 전 stop)
+    s28: 원본 보류와 관찰 대기
+    s29: 제출 결산
+    s30: Enter 응답 불명, receipt 관찰 중
+  }
+  state "실행 행만 확인" as s31 {
+    s32: dcserver 종료
+    s33: 첫 입력 대기
+    s34: 같은 ticket과 원본
+    s35: 원본 보류와 관찰 대기
+    s36: Idle grant
+    s37: 같은 front의 효과 예약
+    s38: 같은 front의 효과 예약 (첫 키 전 stop)
+    s39: 제출 결산
+    s40: Enter 응답 불명, receipt 관찰 중
+  }
+  state "foreground 셸과 살아 있거나 불명인 provider" as s41 {
+    s42: dcserver 종료
+    s43: 첫 입력 대기
+    s44: 같은 ticket과 원본
+    s45: 원본 보류와 관찰 대기
+    s46: Idle grant
+    s47: 같은 front의 효과 예약
+    s48: 같은 front의 효과 예약 (첫 키 전 stop)
+    s49: 제출 결산
+    s50: Enter 응답 불명, receipt 관찰 중
+  }
+  [*] --> s1
+  [*] --> s12
+  [*] --> s22
+  [*] --> s32
+  [*] --> s42
+  s1 --> s2: dcserver 부팅
+  s12 --> s13: dcserver 부팅
+  s22 --> s23: dcserver 부팅
+  s32 --> s33: dcserver 부팅
+  s42 --> s43: dcserver 부팅
+  s2 --> s3: 원본 수락
+  s13 --> s14: 원본 수락
+  s23 --> s24: 원본 수락
+  s33 --> s34: 원본 수락
+  s43 --> s44: 원본 수락
+  s3 --> s4: 현재 증거로 시작 또는 보류
+  s3 --> s5: 현재 증거로 시작 또는 보류
+  s14 --> s15: 현재 증거로 시작 또는 보류
+  s24 --> s25: 현재 증거로 시작 또는 보류
+  s34 --> s35: 현재 증거로 시작 또는 보류
+  s44 --> s45: 현재 증거로 시작 또는 보류
+  s4 --> s6: 동일 front와 followers 예약
+  s25 --> s26: 동일 front와 followers 예약
+  s5 --> s3: 증거 변화로 같은 원본 깨움
+  s15 --> s14: 증거 변화로 같은 원본 깨움
+  s35 --> s34: 증거 변화로 같은 원본 깨움
+  s45 --> s44: 증거 변화로 같은 원본 깨움
+  s3 --> s7: 현재 증거로 시작 또는 보류
+  s14 --> s16: 현재 증거로 시작 또는 보류
+  s34 --> s36: 현재 증거로 시작 또는 보류
+  s44 --> s46: 현재 증거로 시작 또는 보류
+  s6 --> s8: 첫 키 전 사망#183;stop#183;reset
+  s26 --> s27: 첫 키 전 사망#183;stop#183;reset
+  s7 --> s6: 동일 front와 followers 예약
+  s16 --> s17: 동일 front와 followers 예약
+  s36 --> s37: 동일 front와 followers 예약
+  s46 --> s47: 동일 front와 followers 예약
+  s8 --> s5: 키 0건, 같은 front 보류
+  s27 --> s28: 키 0건, 같은 front 보류
+  s17 --> s18: 첫 키 전 사망#183;stop#183;reset
+  s37 --> s38: 첫 키 전 사망#183;stop#183;reset
+  s47 --> s48: 첫 키 전 사망#183;stop#183;reset
+  s28 --> s24: 증거 변화로 같은 원본 깨움
+  s18 --> s15: 키 0건, 같은 front 보류
+  s38 --> s35: 키 0건, 같은 front 보류
+  s48 --> s45: 키 0건, 같은 front 보류
+  s6 --> s9: provider leaf 1회 실행
+  s6 --> s10: provider leaf 1회 실행
+  s26 --> s29: provider leaf 1회 실행
+  s26 --> s30: provider leaf 1회 실행
+  s10 --> s9: 제출 증거 결산
+  s30 --> s29: 제출 증거 결산
+  s17 --> s19: provider leaf 1회 실행
+  s17 --> s20: provider leaf 1회 실행
+  s37 --> s39: provider leaf 1회 실행
+  s37 --> s40: provider leaf 1회 실행
+  s47 --> s49: provider leaf 1회 실행
+  s47 --> s50: provider leaf 1회 실행
+  s20 --> s19: 제출 증거 결산
+  s40 --> s39: 제출 증거 결산
+  s50 --> s49: 제출 증거 결산
