@@ -1315,7 +1315,7 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
     use crate::services::discord::host_teardown_gate::test_support as host;
-    use crate::services::routines::{RoutineSessionCommand, RoutineSessionController};
+    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1382,9 +1382,9 @@ async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
                             &key,
                         )
                         .await;
-                        let kill = RoutineSessionCommand::Kill;
-                        let control = controller.control_persistent_session(&routine, kill, "test");
-                        control.await
+                        controller
+                            .control_persistent_session(&routine, Kill, "test", None)
+                            .await
                     }
                     "fresh" => {
                         controller
@@ -1625,7 +1625,7 @@ fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
 /// disconnects nothing and touches neither session.
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg() {
-    use crate::services::routines::{RoutineSessionCommand, RoutineSessionController};
+    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1709,9 +1709,9 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
                             &key,
                         )
                         .await;
-                        let kill = RoutineSessionCommand::Kill;
-                        let control = controller.control_persistent_session(&routine, kill, "test");
-                        control.await
+                        controller
+                            .control_persistent_session(&routine, Kill, "test", None)
+                            .await
                     }
                     "fresh" => {
                         controller

@@ -1,7 +1,5 @@
 //! Session control targets the execution the routine actually started.
 use super::*;
-use crate::services::discord::admin_host_guard::ManagedReset;
-use crate::services::discord::health::clear_provider_channel_runtime;
 use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::provider_choice::AgentProviderChannels;
 use crate::services::routines::store::RoutineStore;
@@ -60,11 +58,12 @@ fn control_lock_error(error: sqlx::Error) -> anyhow::Error {
 }
 
 impl RoutineSessionController {
-    pub async fn control_persistent_session(
+    pub(crate) async fn control_persistent_session(
         &self,
         routine: &RoutineRecord,
         command: RoutineSessionCommand,
         reason: &str,
+        runtime_reset: Option<&dyn RoutineRuntimeReset>,
     ) -> Result<RoutineSessionControlResult> {
         let mut control_guard = self.lock_control_run(routine).await?;
         let (target, controlled_turn) = self
@@ -84,19 +83,21 @@ impl RoutineSessionController {
 
         match command {
             RoutineSessionCommand::Reset => {
-                if let Some(registry) = self.health_registry.as_deref() {
-                    let reset = clear_provider_channel_runtime(
-                        registry,
-                        target.provider.as_str(),
-                        target.channel_id,
-                        target.session_key.as_deref(),
-                    )
-                    .await;
-                    runtime_cleared = matches!(reset, Some(ManagedReset::Applied(_)));
-                    lifecycle_path = match reset {
-                        Some(ManagedReset::Applied(_)) => "runtime-clear",
-                        Some(ManagedReset::Refused(_)) => "runtime-clear-refused",
-                        None => "runtime-clear-unavailable",
+                if let Some(reset) = runtime_reset {
+                    lifecycle_path = match reset
+                        .reset_runtime(
+                            target.provider.as_str(),
+                            target.channel_id,
+                            target.session_key.as_deref(),
+                        )
+                        .await
+                    {
+                        RuntimeResetOutcome::Applied => {
+                            runtime_cleared = true;
+                            "runtime-clear"
+                        }
+                        RuntimeResetOutcome::Refused => "runtime-clear-refused",
+                        RuntimeResetOutcome::Unavailable => "runtime-clear-unavailable",
                     };
                 }
             }

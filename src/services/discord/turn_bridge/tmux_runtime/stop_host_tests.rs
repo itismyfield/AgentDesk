@@ -961,7 +961,7 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         Stored, busy_turn, channel_key, runtime, seed,
     };
     use crate::services::routines::session_control::{
-        RoutineSessionCommand, RoutineSessionController, seed_started_control_session,
+        RoutineSessionCommand::Reset, RoutineSessionController, seed_started_control_session,
     };
     let fx = Fixture::new();
     let (db, pool) = postgres().await;
@@ -1011,9 +1011,9 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
             updated_at: chrono::Utc::now(),
         };
         seed_started_control_session(&pool, &routine, "claude", &channel.to_string(), &key).await;
-        let reset =
-            controller.control_persistent_session(&routine, RoutineSessionCommand::Reset, "p6ao");
-        let result = reset.await;
+        let result = controller
+            .control_persistent_session(&routine, Reset, "p6ao", Some(registry.as_ref()))
+            .await;
         if !case.has_row() {
             assert!(
                 result

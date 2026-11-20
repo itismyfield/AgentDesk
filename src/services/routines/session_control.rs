@@ -36,6 +36,22 @@ impl RoutineSessionCommand {
     }
 }
 
+pub(crate) enum RuntimeResetOutcome {
+    Applied,
+    Refused,
+    Unavailable,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait RoutineRuntimeReset: Sync {
+    async fn reset_runtime(
+        &self,
+        provider: &str,
+        channel_id: ChannelId,
+        session_key: Option<&str>,
+    ) -> RuntimeResetOutcome;
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutineSessionControlResult {
     pub action: &'static str,
@@ -716,7 +732,7 @@ mod tests {
                 .bind(key).execute(&pool).await.unwrap();
             seed_started_control_session(&pool, &routine, "claude", "6038771", key).await;
             controller
-                .control_persistent_session(&routine, RoutineSessionCommand::Reset, "test")
+                .control_persistent_session(&routine, RoutineSessionCommand::Reset, "test", None)
                 .await
                 .unwrap()
         };
@@ -746,12 +762,17 @@ mod tests {
         let (shared, registry, key) = fixture.shared(&pool).await;
         let queue = fixture.queue_bytes(&shared);
         let pin = fixture.pin_after_legacy_verdict();
-        let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+        let controller = RoutineSessionController::new(Arc::new(pool.clone()), None);
         let channel = fixture.channel.get().to_string();
         let routine = routine_with_thread("persistent", Some(&channel));
         seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;
         let actual = controller
-            .control_persistent_session(&routine, RoutineSessionCommand::Reset, "verified pin race")
+            .control_persistent_session(
+                &routine,
+                RoutineSessionCommand::Reset,
+                "verified pin race",
+                Some(registry.as_ref()),
+            )
             .await
             .unwrap();
         assert_eq!(actual.lifecycle_path, "runtime-clear-refused");
