@@ -499,9 +499,10 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(signal, "setitimer"), "POSIX wall-clock timer required")
     def test_phase_deadline_interrupts_blocking_work(self):
-        previous = driver._arm_phase_deadline(0.02)  # noqa: SLF001
+        previous = signal.getsignal(signal.SIGALRM)
         try:
             with self.assertRaises(driver.PhaseDeadlineExpired):
+                driver._arm_phase_deadline(0.02)  # noqa: SLF001
                 time.sleep(1)
         finally:
             driver._disarm_phase_deadline(previous)  # noqa: SLF001

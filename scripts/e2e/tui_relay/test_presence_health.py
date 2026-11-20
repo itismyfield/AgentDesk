@@ -144,9 +144,10 @@ class PresenceHealth(unittest.TestCase):
             return copy.deepcopy(public if endpoint == "/api/health" else detail)
         with patch.object(driver, "_read_api_json", side_effect=read):
             if adapter == "wait":
-                driver.wait_for_health("http://offline.invalid", timeout_s=0.001, poll_interval_s=0,
-                    allowed_statuses=("healthy", "degraded"), allowed_degraded_reasons=allowed,
-                    target_channel=target)
+                with patch.object(driver.time, "monotonic", side_effect=(0, 0, 1)), patch.object(driver.time, "sleep"):
+                    driver.wait_for_health("http://offline.invalid", timeout_s=1, poll_interval_s=1,
+                        allowed_statuses=("healthy", "degraded"), allowed_degraded_reasons=allowed,
+                        target_channel=target)
             else:
                 driver._assert_health_once("http://offline.invalid", dict(
                     require_status=["healthy", "degraded"], allowed_degraded_reasons=list(allowed)),
