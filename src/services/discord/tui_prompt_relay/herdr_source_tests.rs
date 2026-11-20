@@ -66,7 +66,7 @@ impl HerdrLaunchHost for Launcher {
 }
 
 /// One exact pane as the restart reader sees it.
-struct Pane {
+pub(crate) struct Pane {
     id: &'static str,
     endpoint: Option<HerdrEndpointId>,
     reading: HerdrPaneReading,
@@ -84,19 +84,19 @@ impl HerdrExecutionReader for Pane {
 }
 
 /// A Claude channel's canonical row, its scratch binding log and transcripts, and the receiver.
-struct Herdr {
-    ingress: Ingress,
-    rt: tokio::runtime::Runtime,
+pub(crate) struct Herdr {
+    pub(crate) ingress: Ingress,
+    pub(crate) rt: tokio::runtime::Runtime,
     db: Option<crate::db::auto_queue::test_support::TestPostgresDb>,
-    pool: PgPool,
-    owner: HostedOwner,
-    channel: u64,
+    pub(crate) pool: PgPool,
+    pub(crate) owner: HostedOwner,
+    pub(crate) channel: u64,
     location: Option<HostedLocation>,
     _root: crate::config::TestRuntimeRootGuard,
 }
 
 impl Herdr {
-    fn new(tag: &str) -> Self {
+    pub(crate) fn new(tag: &str) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -147,7 +147,7 @@ impl Herdr {
 
     /// Launches `session` through the production Herdr launch, with the Claude TUI's own
     /// settings and script preparation; returns the execution nonce.
-    fn launch(&mut self, session: &str) -> String {
+    pub(crate) fn launch(&mut self, session: &str) -> String {
         self.launch_on(
             session,
             HerdrLaunchEndpoint {
@@ -222,7 +222,7 @@ impl Herdr {
     }
 
     /// The launched pane still running execution `nonce`, edited by `change`.
-    fn pane(&self, nonce: &str, change: impl FnOnce(&mut HerdrPaneEvidence)) -> Pane {
+    pub(crate) fn pane(&self, nonce: &str, change: impl FnOnce(&mut HerdrPaneEvidence)) -> Pane {
         let stamps = expected("unused", 100);
         let mut evidence = HerdrPaneEvidence {
             binding_nonce: Some(nonce.to_owned()),
@@ -239,7 +239,7 @@ impl Herdr {
         }
     }
 
-    fn launched(&self, nonce: &str, session: &str, reader: &Pane) -> HerdrSourceAttach {
+    pub(crate) fn launched(&self, nonce: &str, session: &str, reader: &Pane) -> HerdrSourceAttach {
         let transcript = self.ingress.path(session);
         let (pool, owner, channel) = (&self.pool, &self.owner, self.channel);
         self.rt.block_on(attach_launched_herdr_source(
@@ -292,7 +292,7 @@ impl Herdr {
             .collect()
     }
 
-    fn bound(&self) -> Option<TuiRuntimeBinding> {
+    pub(crate) fn bound(&self) -> Option<TuiRuntimeBinding> {
         runtime_binding_for_tmux_session(self.logical())
     }
 
@@ -303,7 +303,7 @@ impl Herdr {
     }
 
     /// A UserPromptSubmit of the launched session naming `next` as its transcript.
-    fn switch_hook(&self, launched: &str, next: &str, id: &str) -> u16 {
+    pub(crate) fn switch_hook(&self, launched: &str, next: &str, id: &str) -> u16 {
         let payload = self.ingress.payload(next, None);
         self.ingress
             .claude_hook("UserPromptSubmit", launched, &payload, Some(id))

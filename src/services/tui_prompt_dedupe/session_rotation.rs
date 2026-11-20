@@ -64,6 +64,11 @@ pub(crate) struct ClaudeSessionRotation {
     /// advance. Bounds the "deliver the old transcript first" wait so a tail that
     /// is genuinely dead cannot hold the channel forever.
     pub polls_without_drain_progress: u32,
+    /// The channel's stored selector already moved to `new_session_id` while the record stays.
+    pub selector_followed: bool,
+    /// Every session this pane left while the record stays, oldest first; a channel selector
+    /// still naming one of them follows the pane. The recorder fills it.
+    pub left_session_ids: Vec<String>,
 }
 
 struct TimedRotation {
@@ -117,11 +122,21 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
     let mut rotations = lock_rotations();
     match rotations.get_mut(&rotation.tmux_session_name) {
         Some(existing) => {
+            // A hop to another session leaves the previous target behind for the selector too.
+            if existing.rotation.new_session_id != rotation.new_session_id {
+                let left = std::mem::take(&mut existing.rotation.new_session_id);
+                if !existing.rotation.left_session_ids.contains(&left) {
+                    existing.rotation.left_session_ids.push(left);
+                }
+                existing.rotation.selector_followed = false;
+            }
             existing.rotation.new_session_id = rotation.new_session_id;
             existing.rotation.new_output_path = rotation.new_output_path;
             existing.recorded_at = Instant::now();
         }
         None => {
+            let mut rotation = rotation;
+            rotation.left_session_ids = rotation.old_session_id.iter().cloned().collect();
             rotations.insert(
                 rotation.tmux_session_name.clone(),
                 TimedRotation {
@@ -131,6 +146,26 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
             );
         }
     }
+}
+
+/// Notes that the channel's stored selector moved to `new_session_id`; a later hop clears it.
+pub(crate) fn mark_claude_rotation_selector_followed(
+    tmux_session_name: &str,
+    new_session_id: &str,
+) {
+    if let Some(entry) = lock_rotations().get_mut(tmux_session_name.trim())
+        && entry.rotation.new_session_id == new_session_id
+    {
+        entry.rotation.selector_followed = true;
+    }
+}
+
+/// Whether `tmux_session_name`'s rotation still holds later queued adoptions: a rotation whose
+/// channel selector already followed its target keeps its history but no longer holds them.
+pub(crate) fn claude_rotation_blocks_adoption(tmux_session_name: &str) -> bool {
+    lock_rotations()
+        .get(tmux_session_name.trim())
+        .is_some_and(|entry| !entry.rotation.selector_followed)
 }
 
 /// The unsettled rotation for `tmux_session_name`, if any.
@@ -287,6 +322,8 @@ mod tests {
             new_output_path: new_path.to_string(),
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
+            selector_followed: false,
+            left_session_ids: Vec::new(),
         }
     }
 

@@ -167,6 +167,7 @@ jobs:
               - 'src/services/session_activity.rs'
             rust_or_policy:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'justfile'
@@ -224,6 +225,7 @@ jobs:
             # tracked paths.
             rust_compile:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'Cargo.toml'
@@ -251,6 +253,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'crates/*/Cargo.toml'
               - 'src/services/engine_runtime/mod.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/engine_runtime/relay_state/coord.rs'
@@ -638,7 +641,7 @@ jobs:
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
-          cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json
+          cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json
           python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json
 
       - name: sccache stats
@@ -738,7 +741,7 @@ jobs:
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
           mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
-          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
@@ -1093,7 +1096,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh eee808c6de5e5355ea26749b9cf74f29091a406ddf69718a23b46ff5b789bd45
+          pin scripts/check-ci-runner-hardening.sh dc62fa5b50c85c85e2d55a08e2b0ab93725df06ac9315cd98cb658d1546622f0
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
