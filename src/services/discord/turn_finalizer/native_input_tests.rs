@@ -1556,7 +1556,7 @@ async fn native_8148_s2_withdrawal_preseed_same_and_different_ticket_pg() {
     db.drop().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     let runtime = crate::config::TestRuntimeRootGuard::new();
@@ -1566,26 +1566,12 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
     let f = Fixture::at(runtime.path().join("runtime/blocked.json"), 8148983, false);
     let cleanup = s2_withdraw(&f, &shared).await;
     let held = pool.acquire().await.unwrap();
-    let submit = tokio::spawn({
-        let shared = shared.clone();
-        let history = f.history.clone();
-        async move { b2b_submit(&shared, cleanup, &history).await }
-    });
-    crate::test_support::wait::await_within(
-        async {
-            while f
-                .history
-                .native_settlement("native-fixture", &f.ticket)
-                .unwrap()
-                .outcome
-                .is_none()
-            {
-                tokio::task::yield_now().await;
-            }
-        },
-        crate::test_support::wait::WAIT_CAP,
-    )
-    .await;
+    // Drive the submit to its first await before inspecting it. A concurrent history
+    // read would contend with the submit's nonblocking settlement read.
+    tokio::time::pause();
+    let mut submit = Box::pin(b2b_submit(&shared, cleanup, &f.history));
+    let first_poll = futures::poll!(submit.as_mut());
+    assert!(first_poll.is_pending(), "PG submit returned {first_poll:?}");
     let key = TurnKey::new(ChannelId::new(8148984), 8148985, 1);
     shared
         .turn_finalizer
@@ -1599,15 +1585,16 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
         .await
         .unwrap()
     );
+    let after_start = futures::poll!(submit.as_mut());
     assert!(
-        !submit.is_finished(),
-        "Start must be answered before PG timeout"
+        after_start.is_pending(),
+        "Start must be answered while PG submit is pending, got {after_start:?}"
     );
     let error = crate::test_support::wait::await_within(submit, std::time::Duration::from_secs(5))
         .await
-        .unwrap()
         .unwrap_err();
-    assert!(error.contains("timed out"), "{error}");
+    tokio::time::resume();
+    assert_eq!(error, "native withdrawal outbox timed out");
     let pending = f
         .history
         .native_settlement("native-fixture", &f.ticket)
