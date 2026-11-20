@@ -677,6 +677,7 @@ fn interrupted_tool_turn() -> Vec<u8> {
     bytes.extend(answer("effort-old-text", "old answer"));
     bytes.extend(record(serde_json::json!({
         "type": "assistant", "sessionId": SESSION, "uuid": "effort-old-tool",
+        "apiBlockIndex": 0,
         "message": {"id": "effort-old-tool", "role": "assistant",
         "content": [{"type": "tool_use", "id": "call", "name": "Read",
         "input": {"file_path": "/fixture"}}]}
@@ -875,10 +876,7 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
                 args.is_file(),
                 "the original prefix admitted the cold launch"
             );
-            assert!(
-                refused.contains("source bytes before the cursor changed"),
-                "{refused}"
-            );
+            assert!(refused.contains("composer_not_ready"), "{refused}");
             assert_eq!(resumes.len(), 1);
             assert_eq!(resumes[0].offset, cutoff);
         } else {
