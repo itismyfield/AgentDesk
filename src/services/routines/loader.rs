@@ -970,6 +970,7 @@ fn ensure_acyclic_js_value<'js>(
 mod tests {
     use super::discovery::stable_absolute_path;
     use super::*;
+    use crate::test_support::wait::{WAIT_CAP, join_within};
     use std::io::{self, Write};
     use std::sync::Barrier;
     use std::thread;
@@ -1430,7 +1431,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for handle in handles {
-            assert_eq!(handle.join().unwrap(), 0);
+            assert_eq!(join_within(handle, WAIT_CAP), 0);
         }
         assert_eq!(
             state
@@ -3253,11 +3254,13 @@ mod tests {
         let loader = Arc::new(RoutineScriptLoader::new().unwrap());
 
         let loader_clone = Arc::clone(&loader);
-        let result = thread::spawn(move || {
-            let _lock = loader_clone.state.scripts.lock().unwrap();
-            panic!("intentional panic to poison the lock");
-        })
-        .join();
+        let handle = thread::spawn(move || {
+            std::panic::catch_unwind(|| {
+                let _lock = loader_clone.state.scripts.lock().unwrap();
+                panic!("intentional panic to poison the lock");
+            })
+        });
+        let result = join_within(handle, WAIT_CAP);
         assert!(result.is_err(), "thread should have panicked");
 
         let refs = loader.script_refs();

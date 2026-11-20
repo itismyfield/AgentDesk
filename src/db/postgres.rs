@@ -1400,10 +1400,12 @@ mod tests {
         startup_pool_settings, sync_agents_from_config_pg, with_startup_advisory_lock,
     };
     use crate::services::settings::startup::{shared_config_sync_enabled, startup_reseed};
+    use crate::test_support::wait::{WAIT_CAP, join_within};
     use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
     use std::collections::BTreeMap;
     use std::future::Future;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1753,13 +1755,12 @@ mod tests {
                 ))
             })
             .map_err(|error| format!("cleanup worker spawn failed: {error}"))?;
-        match handle.join() {
-            Ok(result) => result.map_err(|error| format!("async cleanup failed: {error}")),
-            Err(payload) => Err(format!(
-                "cleanup worker panicked: {}",
-                panic_message(payload)
-            )),
-        }
+        // Return join failures to Drop so a timeout can be reported during unwinding.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            join_within(handle, Duration::from_secs(120))
+        }))
+        .map_err(|payload| format!("cleanup worker failed: {}", panic_message(payload)))?;
+        result.map_err(|error| format!("async cleanup failed: {error}"))
     }
 
     async fn migrate_through_version(pool: &PgPool, max_version: i64) -> Result<(), String> {
@@ -3530,8 +3531,6 @@ mod tests {
             message.contains("E -> P"),
             "the tripwire must state the canonical hierarchy; got: {message}"
         );
-        handle
-            .join()
-            .expect("lock-order probe thread should finish");
+        join_within(handle, WAIT_CAP);
     }
 }

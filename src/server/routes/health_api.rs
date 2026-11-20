@@ -1197,6 +1197,7 @@ mod tests {
         RegistryPurgeDecision, discord_control_endpoints_allowed, discord_send_caller_class,
         public_health_json, registry_purge_decision, stale_mailbox_repair_applied,
     };
+    use crate::test_support::wait::{WAIT_CAP, join_within};
     use axum::{
         body::{Body, to_bytes},
         http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
@@ -3126,8 +3127,8 @@ mod tests {
         });
         let response = received.recv_timeout(std::time::Duration::from_secs(3));
         release.wait();
-        writer.join().unwrap();
-        request.join().unwrap();
+        join_within(writer, WAIT_CAP);
+        join_within(request, WAIT_CAP);
         assert!(response.unwrap()["legacy_body_census"]["inventory_source"]["available"] == false);
         let mut collector = Collector::default();
         assert_eq!(
