@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
@@ -51,6 +51,19 @@ impl Default for ResolvedMemorySettings {
             capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
         }
     }
+}
+
+pub(crate) const ANCHOR_CONTEXT_START: &str = "[Memento anchor context]\n";
+pub(crate) const ANCHOR_CONTEXT_END: &str = "\n\n[End Memento anchor context]";
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct AnchorRecord {
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub scope: Option<String>,
+    pub limit: Option<u64>,
+    pub content: String,
 }
 
 #[cfg(test)]

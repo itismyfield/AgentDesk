@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool, types::Json};
 
-use crate::services::memory::AnchorRecord;
+use crate::domain::memory::AnchorRecord;
 
 #[derive(Clone, FromRow)]
 pub struct SessionPrompt {

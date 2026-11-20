@@ -7,7 +7,7 @@ use sqlx::{PgPool, types::Json};
 
 use super::{CancelToken, ProviderKind};
 use crate::db::provider_session_prompts::{self, SessionPrompt};
-use crate::services::memory::AnchorRecord;
+use crate::domain::memory::AnchorRecord;
 
 #[derive(Default)]
 struct State {

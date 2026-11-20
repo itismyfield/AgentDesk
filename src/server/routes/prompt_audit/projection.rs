@@ -4,11 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::db::{prompt_manifests::PromptManifest, provider_session_prompts::SessionPrompt};
-use crate::services::{
-    discord::prompt_builder::audit::CanonPrompt,
-    memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_START},
-    provider::ProviderKind,
-};
+use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_START};
+use crate::services::{discord::prompt_builder::audit::CanonPrompt, provider::ProviderKind};
 
 use super::redaction;
 

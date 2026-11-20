@@ -37,7 +37,7 @@ pub(super) struct BuiltSystemPrompt {
     pub(super) system_prompt: String,
     pub(super) manifest: Option<PromptManifest>,
     pub(super) anchor_count: usize,
-    anchors: Vec<crate::services::memory::AnchorRecord>,
+    anchors: Vec<crate::domain::memory::AnchorRecord>,
     inspection: bool,
 }
 

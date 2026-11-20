@@ -10,7 +10,8 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::prompt_manifests::{
     PromptContentVisibility, PromptManifestBuilder, PromptManifestLayer,
 };
-use crate::services::memory::{AnchorRecord, ExternalMemoryBackendState};
+use crate::domain::memory::AnchorRecord;
+use crate::services::memory::ExternalMemoryBackendState;
 
 use super::*;
 

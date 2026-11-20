@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::db::provider_session_prompts::SessionPrompt;
+use crate::domain::memory::{ANCHOR_CONTEXT_END, AnchorRecord};
 use crate::services::{
-    discord::prompt_builder::audit::CanonPrompt,
-    memory::{ANCHOR_CONTEXT_END, AnchorRecord, ExternalMemoryBackendState},
+    discord::prompt_builder::audit::CanonPrompt, memory::ExternalMemoryBackendState,
     provider::ProviderKind,
 };
 
