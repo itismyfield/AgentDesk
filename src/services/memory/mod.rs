@@ -15,13 +15,16 @@ use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
-    MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_prompt,
-    resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,
+    ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_START, AnchorRecord, MementoBackend, MementoRememberRequest,
+    SessionAnchorRequest, load_session_anchor_snapshot, resolve_memento_agent_id,
+    resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
 pub(crate) use memento_throttle::{
     memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
 };
-pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
+pub(crate) use runtime_state::{
+    ExternalMemoryBackendState, backend_is_active, backend_state, refresh_backend_health,
+};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 

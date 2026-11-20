@@ -1,8 +1,10 @@
 use super::super::cancel_tombstones::tests::StorePgFixture;
 use super::*;
 
-const MIGRATION: &str =
-    include_str!("../../../migrations/postgres/0148_provider_session_system_prompts.sql");
+const MIGRATION: &str = concat!(
+    include_str!("../../../migrations/postgres/0148_provider_session_system_prompts.sql"),
+    include_str!("../../../migrations/postgres/0157_provider_session_prompt_anchors.sql")
+);
 
 fn test_channel() -> String {
     // Advisory keys share the database across fixture schemas.
@@ -18,6 +20,7 @@ fn row(channel: &str, session: usize) -> SessionPrompt {
         started_at: DateTime::from_timestamp(1_700_000_000 + session as i64, 0).unwrap(),
         system_prompt: format!("verbatim prompt {session}\n[ANCHOR MEMORY]\n- item"),
         anchor_count: 1,
+        anchors: None,
     }
 }
 

@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, types::Json};
+
+use crate::services::memory::AnchorRecord;
 
 #[derive(Clone, FromRow)]
 pub struct SessionPrompt {
@@ -10,6 +12,7 @@ pub struct SessionPrompt {
     pub started_at: DateTime<Utc>,
     pub system_prompt: String,
     pub anchor_count: i64,
+    pub anchors: Option<Json<Vec<AnchorRecord>>>,
 }
 
 pub async fn fetch(
@@ -31,6 +34,15 @@ pub async fn fetch_latest_session_id(
         .bind(provider).bind(channel).fetch_optional(pool).await
 }
 
+pub(crate) async fn fetch_latest(
+    pool: &PgPool,
+    provider: &str,
+    channel: &str,
+) -> Result<Option<SessionPrompt>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM provider_session_system_prompts WHERE provider=$1 AND channel_id=$2 ORDER BY started_at DESC, provider_session_id DESC LIMIT 1")
+        .bind(provider).bind(channel).fetch_optional(pool).await
+}
+
 pub async fn save(pool: &PgPool, prompt: &SessionPrompt) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     // Serialize insert/prune for one channel so concurrent starts cannot exceed the bound.
@@ -41,10 +53,10 @@ pub async fn save(pool: &PgPool, prompt: &SessionPrompt) -> Result<(), sqlx::Err
         ))
         .execute(&mut *tx)
         .await?;
-    let inserted = sqlx::query("INSERT INTO provider_session_system_prompts (provider,channel_id,provider_session_id,source_turn_id,started_at,system_prompt,anchor_count) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
+    let inserted = sqlx::query("INSERT INTO provider_session_system_prompts (provider,channel_id,provider_session_id,source_turn_id,started_at,system_prompt,anchor_count,anchors) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
         .bind(&prompt.provider).bind(&prompt.channel_id).bind(&prompt.provider_session_id)
         .bind(&prompt.source_turn_id).bind(prompt.started_at).bind(&prompt.system_prompt)
-        .bind(prompt.anchor_count).execute(&mut *tx).await?.rows_affected();
+        .bind(prompt.anchor_count).bind(&prompt.anchors).execute(&mut *tx).await?.rows_affected();
     if inserted > 0 {
         // Always retain the inserted session, including a start whose clock moved backwards.
         sqlx::query("DELETE FROM provider_session_system_prompts WHERE provider=$1 AND channel_id=$2 AND provider_session_id NOT IN (SELECT provider_session_id FROM provider_session_system_prompts WHERE provider=$1 AND channel_id=$2 ORDER BY (provider_session_id=$3) DESC, started_at DESC, provider_session_id DESC LIMIT 5)")

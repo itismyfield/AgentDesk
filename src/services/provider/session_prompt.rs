@@ -3,10 +3,11 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Json};
 
 use super::{CancelToken, ProviderKind};
 use crate::db::provider_session_prompts::{self, SessionPrompt};
+use crate::services::memory::AnchorRecord;
 
 #[derive(Default)]
 struct State {
@@ -21,7 +22,7 @@ pub(crate) struct Capture {
     provider: String,
     channel: String,
     turn: String,
-    anchors: i64,
+    anchors: Vec<AnchorRecord>,
     state: Mutex<State>,
 }
 
@@ -35,7 +36,7 @@ pub(crate) fn arm(
     provider: &ProviderKind,
     channel: u64,
     turn: &str,
-    anchors: usize,
+    anchors: Vec<AnchorRecord>,
 ) {
     if matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
         let _ = token.prompt_capture.set(Arc::new(Capture {
@@ -43,7 +44,7 @@ pub(crate) fn arm(
             provider: provider.as_str().into(),
             channel: channel.to_string(),
             turn: turn.into(),
-            anchors: i64::try_from(anchors).unwrap_or(i64::MAX),
+            anchors,
             state: Mutex::new(State::default()),
         }));
     }
@@ -137,6 +138,11 @@ impl Capture {
         }
         let (prompt, started_at) = state.launch.as_ref()?;
         let session = state.session.as_ref()?;
+        let anchors = if prompt.is_empty() {
+            &[][..]
+        } else {
+            &self.anchors
+        };
         let snapshot = SessionPrompt {
             provider: self.provider.clone(),
             channel_id: self.channel.clone(),
@@ -144,7 +150,8 @@ impl Capture {
             source_turn_id: self.turn.clone(),
             started_at: *started_at,
             system_prompt: prompt.clone(),
-            anchor_count: if prompt.is_empty() { 0 } else { self.anchors },
+            anchor_count: i64::try_from(anchors.len()).unwrap_or(i64::MAX),
+            anchors: Some(Json(anchors.to_vec())),
         };
         state.saved = true;
         Some(snapshot)

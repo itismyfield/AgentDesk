@@ -51,6 +51,20 @@ pub(in crate::services::discord) fn load_role_prompt(binding: &RoleBinding) -> O
     Some(content)
 }
 
+pub(in crate::services::discord) fn read_canon_prompt(
+    path: &Path,
+    layer: &str,
+    provider: &str,
+) -> Option<(String, Option<SystemTime>)> {
+    let (path, metadata) = resolve_role_prompt_path(path)?;
+    let content = if layer == "shared_agent_rules" {
+        read_shared_prompt_for_profile(&path, provider)?
+    } else {
+        read_role_prompt(&path)?
+    };
+    Some((content, metadata.modified().ok()))
+}
+
 fn read_role_prompt(path: &Path) -> Option<String> {
     Some(
         fs::read_to_string(path)
@@ -194,14 +208,18 @@ pub(in crate::services::discord) fn load_shared_prompt_for_profile(
         }
     })?;
 
-    let raw = fs::read_to_string(Path::new(&path_str)).ok()?;
+    read_shared_prompt_for_profile(Path::new(&path_str), profile)
+}
+
+fn read_shared_prompt_for_profile(path: &Path, profile: &str) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
     let sections = matching_profile_sections(&raw, profile);
     const MAX_CHARS: usize = 12_000;
     let (filtered, truncated) = join_complete_sections_with_limit(&sections, MAX_CHARS);
     if truncated {
         tracing::warn!(
             target: "agentdesk.shared_prompt",
-            path = %path_str,
+            path = %path.display(),
             profile,
             max_chars = MAX_CHARS,
             kept_chars = filtered.chars().count(),
