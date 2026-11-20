@@ -381,7 +381,9 @@ fn hold_resolve_enter_refused_from_real_reserve_clears_paste_settles_reservation
     };
     assert_eq!(
         when_idle("hold-session", &path, empty, None, send),
-        InputRun::Refused(InputRefusal::Unknown)
+        InputRun::Refused(InputRefusal::Waits(
+            crate::services::claude_tui::readiness::WaitCause::Pending
+        ))
     );
     let fake = Fake::on(&shown(FRAME));
     assert_eq!(resolve("hold-session", "refused", &fake), Ok(Verdict::Kept));
