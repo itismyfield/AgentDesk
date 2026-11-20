@@ -51,20 +51,22 @@ Memento workspace names are case-sensitive. `AgentDesk` and `agentdesk` are
 different stores, so a PascalCase write splits AgentDesk memory off the
 canonical workspace.
 
-The AgentDesk workspace id is the lowercase string `agentdesk`. The product
-name, the repository name, and an `AgentDesk` path segment are not workspace
-ids. On every AgentDesk-scoped `context`, `recall`, `remember`,
-`batch_remember`, `reflect`, `amend`, `forget`, and `memory_consolidate` call,
-pass `workspace` as `agentdesk`. Do not pass `AgentDesk`. Do not omit
-`workspace` for AgentDesk-scoped memory. Omitting `workspace` is only the
-global audience, and that audience still uses `agentId` `default`.
+Choose the audience and workspace using the scope rules above. When the chosen
+workspace is AgentDesk, pass `workspace=agentdesk` to calls that accept
+`workspace`. These include `context`, `recall`, `remember`, `batch_remember`,
+`reflect`, and topic-based `forget`. Use the workspace from the scope hint for
+other targets, including legacy private workspaces and other configured groups.
+For global writes, omit `workspace` and use `agentId=default`.
 
-Do not pass `AgentDesk` as `agentId`. `agentId` is the agent's role id, or
-`default` when the write is group-shared or global. The product display name
-is not an agent id.
+Never use `AgentDesk` as `workspace` or `agentId`. Use the role id for private
+writes and `default` for group-shared or global writes.
 
-Other configured groups keep their own workspace names (for example
-`cookingheart`). Do not retarget those calls to `agentdesk`.
+- To correct a fact, take the matching fragment's `id` from a scoped `recall`
+  such as `recall({"workspace":"agentdesk","agentId":"ch-td","topic":"<topic>"})`.
+  Pass the id and correction to `amend`, for example
+  `amend({"id":"<fragment-id>","agentId":"ch-td","content":"<corrected fact>"})`.
+- `memory_consolidate({})` triggers master-key maintenance across workspaces.
+  Its only declared option, `stream`, is deprecated.
 
 ## Choosing an audience
 
@@ -106,8 +108,8 @@ Re-read the authoritative file instead. This includes:
 Treat canonical files as authoritative when a memory duplicates them. Broad
 cleanup, audience changes, and migration of existing memories require review
 of the affected records; this contract does not authorize automatic deletion
-or redistribution. The maintenance `memory.memento_consolidation` job performs
-workspace deduplication and low-importance cleanup, not audience promotion.
+or redistribution. The scheduled `memory.memento_consolidation` job handles
+routine consolidation.
 
 ## PostgreSQL fallback
 
