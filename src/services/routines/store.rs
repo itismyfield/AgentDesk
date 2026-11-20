@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+mod session_interrupt;
+mod thread_choices;
 #[macro_use]
 mod failure_escalation;
 use chrono::{DateTime, Utc};
@@ -22,6 +24,7 @@ use crate::services::automation_candidate_contract::{
 use crate::services::scheduling::{next_due_after, next_due_after_anchor, validate_schedule};
 use crate::utils::api::clamp_api_limit;
 
+use super::execution_mode::ProviderChoice;
 use super::execution_mode::{DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT, ExecutionDefinition};
 
 pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
@@ -661,6 +664,10 @@ pub struct RoutinePatch {
     #[serde(skip)]
     pub execution_definition: Option<ExecutionDefinition>,
     pub headless_failure_notice_limit: Option<i32>,
+    pub agent_id: Option<String>,
+    /// Replaces both provider and model; the route validated it against the routine's agents.
+    #[serde(skip)]
+    pub provider_choice: Option<ProviderChoice>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -2088,11 +2095,29 @@ impl RoutineStore {
     }
 
     /// `None` keeps the legacy null-mode contract; an explicit definition stores a fresh routine.
+    #[cfg(test)]
     pub async fn attach_routine_with_execution(
+        &self,
+        new_routine: NewRoutine,
+        execution: Option<&ExecutionDefinition>,
+        headless_failure_notice_limit: i32,
+    ) -> Result<RoutineRecord> {
+        let choice = ProviderChoice::default();
+        self.attach_routine_with_choice(
+            new_routine,
+            execution,
+            headless_failure_notice_limit,
+            &choice,
+        )
+        .await
+    }
+
+    pub async fn attach_routine_with_choice(
         &self,
         mut new_routine: NewRoutine,
         execution: Option<&ExecutionDefinition>,
         headless_failure_notice_limit: i32,
+        choice: &ProviderChoice,
     ) -> Result<RoutineRecord> {
         if execution.is_some() {
             new_routine.execution_strategy = "fresh".to_string();
@@ -2119,9 +2144,9 @@ impl RoutineStore {
                 id, agent_id, script_ref, name, status, execution_strategy,
                 schedule, next_due_at, checkpoint, discord_thread_id, timeout_secs,
                 fallback_agent_id, max_retries, execution_mode, runner,
-                headless_failure_notice_limit
+                headless_failure_notice_limit, provider, model
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
@@ -2145,6 +2170,8 @@ impl RoutineStore {
         .bind(execution.map(|definition| definition.mode.as_str()))
         .bind(execution.map(|definition| definition.runner.clone()))
         .bind(headless_failure_notice_limit)
+        .bind(&choice.provider)
+        .bind(&choice.model)
         .fetch_one(&*self.pool)
         .await
         .map_err(|e| anyhow!("attach routine: {e}"))
@@ -2177,6 +2204,7 @@ impl RoutineStore {
             .map(|value| normalize_optional_text(value));
         let max_retries_was_set = patch.max_retries.is_some();
         let execution = patch.execution_definition;
+        let choice = patch.provider_choice;
         let next_due_was_set = patch.next_due_at.is_some();
         let mut next_due_at = patch.next_due_at.flatten();
         let mut update_next_due_at = next_due_was_set;
@@ -2203,7 +2231,14 @@ impl RoutineStore {
                 schedule = CASE WHEN $4 THEN $5 ELSE schedule END,
                 next_due_at = CASE WHEN $6 THEN $7 ELSE next_due_at END,
                 checkpoint = CASE WHEN $8 THEN $9 ELSE checkpoint END,
-                discord_thread_id = CASE WHEN $10 THEN $11 ELSE discord_thread_id END,
+                -- A new agent or provider gets its own thread under its own channel.
+                discord_thread_id = CASE WHEN $10 THEN $11
+                                         WHEN $21::text IS DISTINCT FROM agent_id AND $21 IS NOT NULL
+                                           OR ($22 AND $23::text IS DISTINCT FROM provider) THEN NULL
+                                         ELSE discord_thread_id END,
+                agent_id = COALESCE($21, agent_id),
+                provider = CASE WHEN $22 THEN $23 ELSE provider END,
+                model = CASE WHEN $22 THEN $24 ELSE model END,
                 timeout_secs = CASE WHEN $12 THEN $13 ELSE timeout_secs END,
                 fallback_agent_id = CASE WHEN $14 THEN $15 ELSE fallback_agent_id END,
                 max_retries = CASE WHEN $16 THEN $17 ELSE max_retries END,
@@ -2244,6 +2279,10 @@ impl RoutineStore {
         )
         .bind(execution.map(|definition| definition.runner))
         .bind(patch.headless_failure_notice_limit)
+        .bind(patch.agent_id)
+        .bind(choice.is_some())
+        .bind(choice.as_ref().and_then(|choice| choice.provider.clone()))
+        .bind(choice.and_then(|choice| choice.model))
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| anyhow!("patch routine {routine_id}: {e}"))
@@ -2994,6 +3033,7 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    #[cfg(test)]
     pub async fn update_discord_thread_id(
         &self,
         routine_id: &str,
@@ -3030,91 +3070,6 @@ impl RoutineStore {
         .map_err(|e| anyhow!("update routine {routine_id} discord_thread_id: {e}"))?;
 
         Ok(result.is_some())
-    }
-
-    /// Interrupt the current in-flight run for a routine after an explicit
-    /// session reset/kill invalidates the provider context.
-    pub async fn interrupt_in_flight_run(
-        &self,
-        routine_id: &str,
-        error: &str,
-        result_json: Option<Value>,
-    ) -> Result<Option<String>> {
-        let mut tx = self.pool.begin().await?;
-
-        let run_id: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT rr.id
-            FROM routine_runs rr
-            JOIN routines r ON r.in_flight_run_id = rr.id
-            WHERE r.id = $1
-              AND rr.routine_id = $1
-              AND rr.status = 'running'
-            FOR UPDATE OF rr
-            "#,
-        )
-        .bind(routine_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine {routine_id}: lock running run: {e}"))?;
-
-        let Some(run_id) = run_id else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-
-        let routine_updated = sqlx::query(
-            r#"
-            UPDATE routines
-            SET in_flight_run_id = NULL,
-                last_result = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND in_flight_run_id = $3
-            "#,
-        )
-        .bind(routine_id)
-        .bind(error)
-        .bind(&run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine {routine_id}: clear in-flight: {e}"))?;
-
-        if routine_updated.rows_affected() != 1 {
-            tx.commit().await?;
-            return Ok(None);
-        }
-
-        let run_updated = sqlx::query(
-            r#"
-            UPDATE routine_runs
-            SET status = 'interrupted',
-                result_json = COALESCE($3, result_json),
-                error = $2,
-                finished_at = NOW(),
-                lease_expires_at = NULL,
-                updated_at = NOW()
-            WHERE id = $1
-              AND routine_id = $4
-              AND status = 'running'
-            "#,
-        )
-        .bind(&run_id)
-        .bind(error)
-        .bind(result_json)
-        .bind(routine_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine run {run_id}: {e}"))?;
-
-        if run_updated.rows_affected() != 1 {
-            return Err(anyhow!(
-                "interrupt routine run {run_id}: running run guard lost row"
-            ));
-        }
-
-        tx.commit().await?;
-        Ok(Some(run_id))
     }
 
     /// Boot recovery: mark expired-lease `running` runs as `interrupted`, clear

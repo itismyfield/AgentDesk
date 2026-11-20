@@ -44,7 +44,7 @@ impl AgentChannelBindings {
             .find(|provider| self.provider_specific_channel(provider).is_some())
     }
 
-    fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
+    pub(crate) fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),

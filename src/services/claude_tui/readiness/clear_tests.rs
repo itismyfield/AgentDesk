@@ -128,7 +128,11 @@ impl ClearRig {
         let result = self.run(native, &sent);
         assert_eq!(sent.get(), 0, "no payload or Enter for an unproved clear");
         assert!(
-            matches!(result, InputRun::Refused(InputRefusal::Unknown)),
+            // A launch of this run with no current source waits; it is never settled.
+            matches!(
+                result,
+                InputRun::Refused(InputRefusal::Waits(super::WaitCause::NoSource))
+            ),
             "{result:?}"
         );
     }

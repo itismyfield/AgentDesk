@@ -266,20 +266,14 @@ fn recovery_body_claim(
     state: &super::inflight::InflightTurnState,
     destination: u64,
 ) -> BodyClaim<'static> {
-    let kind = (state.channel_id == destination)
-        .then_some(state.runtime_kind)
-        .flatten();
-    BodyClaim::new(destination, kind)
+    state.tui_body_claim(destination)
 }
 
 fn o_owns_recovery_body(
     state: &super::inflight::InflightTurnState,
     destination: u64,
 ) -> Result<bool, IdentityError> {
-    let kind = (state.channel_id == destination)
-        .then_some(state.runtime_kind)
-        .flatten();
-    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(destination, kind)
+    recovery_body_claim(state, destination).peek_o_owns_tui_output_for_channel()
 }
 
 /// Whether `text` carries the turn's answer: blank text and the empty-response notice (the O

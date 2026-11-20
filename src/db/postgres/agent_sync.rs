@@ -124,6 +124,15 @@ async fn upsert_agent_from_config_pg(
     };
     let discord_channel_id = provider_primary.or_else(|| discord_channel_cc.clone());
     let discord_channel_alt = discord_channel_cdx.clone();
+    // Every supported provider's channel target, so a routine can run on a non-primary provider.
+    let provider_channels: serde_json::Map<String, serde_json::Value> = agent
+        .channels
+        .iter()
+        .filter_map(|(key, channel)| {
+            let provider = ProviderKind::from_str(key).filter(ProviderKind::is_supported)?;
+            Some((provider.as_str().to_string(), channel.target()?.into()))
+        })
+        .collect();
 
     // #3667: config-declared intake node-affinity labels. `None` (key absent
     // from yaml) binds SQL NULL; the COALESCE then keeps the existing DB value
@@ -141,9 +150,9 @@ async fn upsert_agent_from_config_pg(
         "INSERT INTO agents (
             id, name, name_ko, provider, department, avatar_emoji,
             discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx,
-            preferred_intake_node_labels
+            preferred_intake_node_labels, provider_channels
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '[]'::JSONB))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '[]'::JSONB), $12)
          ON CONFLICT (id) DO UPDATE
          SET name = EXCLUDED.name,
              name_ko = EXCLUDED.name_ko,
@@ -154,6 +163,7 @@ async fn upsert_agent_from_config_pg(
              discord_channel_alt = EXCLUDED.discord_channel_alt,
              discord_channel_cc = EXCLUDED.discord_channel_cc,
              discord_channel_cdx = EXCLUDED.discord_channel_cdx,
+             provider_channels = EXCLUDED.provider_channels,
              preferred_intake_node_labels =
                  COALESCE($11, agents.preferred_intake_node_labels)",
     )
@@ -168,6 +178,7 @@ async fn upsert_agent_from_config_pg(
     .bind(discord_channel_cc)
     .bind(discord_channel_cdx)
     .bind(preferred_intake_node_labels)
+    .bind(serde_json::Value::Object(provider_channels))
     .execute(conn)
     .await
     .map_err(|error| format!("upsert postgres agent {}: {error}", agent.id))?;

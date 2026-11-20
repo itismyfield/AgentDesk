@@ -76,7 +76,7 @@ impl Lab {
             tmux,
             dir,
             self.root.path(),
-            id,
+            (id, None),
             None,
             Default::default(),
             "".into(),
