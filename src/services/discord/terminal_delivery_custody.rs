@@ -374,7 +374,7 @@ pub(crate) async fn drain(registry: &super::health::HealthRegistry) {
 
 /// Whether a retained episode may belong to `channel`, read without taking record locks; a record
 /// that does not parse counts, since its channel cannot be ruled out.
-pub(in crate::services::discord) fn retains_channel(channel: u64) -> Result<bool, String> {
+pub(crate) fn retains_channel(channel: u64) -> Result<bool, String> {
     retains_channel_at(&root()?, channel)
 }
 

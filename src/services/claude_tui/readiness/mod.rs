@@ -448,6 +448,22 @@ impl Reservation {
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
+    #[cfg(unix)]
+    pub(crate) fn reserve_thread_body(
+        &self,
+        channel: Option<u64>,
+        warm: bool,
+    ) -> Result<(), String> {
+        crate::services::claude::tui_session_launch::reserve_thread_body_before_key(
+            channel,
+            &self.source.session,
+            self.source.nonce.as_deref(),
+            &self.source.native,
+            &self.source.path,
+            warm,
+        )
+    }
+
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)
