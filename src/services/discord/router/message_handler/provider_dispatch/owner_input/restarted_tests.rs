@@ -389,7 +389,15 @@ fn native_modal_after_identity_hold(adopt_after_attach: bool, tag: &str) {
     use std::io::Write;
     use std::path::Path;
 
-    run(ProviderKind::Claude, tag, false, |fixture, runtime| {
+    run(ProviderKind::Claude, tag, false, |mut fixture, runtime| {
+        let generation = 1;
+        let path = crate::services::discord::runtime_store::generation_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, generation.to_string()).unwrap();
+        Arc::get_mut(&mut fixture.shared)
+            .unwrap()
+            .restart
+            .current_generation = generation;
         fixture.rig.foreground(&[SHELL]);
         let (mailbox, ticket, old_due) = runtime.block_on(async {
             let (owner, ticket, _) = claimed(&fixture).await;
@@ -476,6 +484,8 @@ fn native_modal_after_identity_hold(adopt_after_attach: bool, tag: &str) {
                 MessageId::new(FOLLOWER + 1), &lease,
             ).await, "the production synthetic claim starts native B");
             assert_eq!(mailbox.has_active_turn().await, Ok(true));
+            let live = crate::services::discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).unwrap();
+            assert_eq!(live.born_generation, generation);
             let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
             assert!(crate::services::claude_tui::busy_inject::modal(modal));
             fixture.rig.answer("pane.read", json!({"type":"pane_read","read":{
@@ -514,7 +524,11 @@ fn native_modal_after_identity_hold(adopt_after_attach: bool, tag: &str) {
             if adopt_after_attach {
                 assert!(attached_snapshot["readiness_holds"][0]["identity_held_at_ms"].is_u64());
             } else {
-                assert!(attached_snapshot["readiness_holds"].is_null());
+                assert!(
+                    attached_snapshot["readiness_holds"].is_null(),
+                    "background confirmation still held the old deadline: {}",
+                    attached_snapshot["readiness_holds"],
+                );
             }
             assert!(due > old_due);
             assert!(snapshot["readiness_holds"][0]["identity_held_at_ms"].is_null());
