@@ -167,11 +167,44 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Observes the existing prefix read without acquiring a file or writer.
+pub(crate) trait PrefixConsumer {
+    fn prefix_bytes(&mut self, bytes: &[u8]);
+}
+impl PrefixConsumer for () {
+    fn prefix_bytes(&mut self, _bytes: &[u8]) {}
+}
+
 /// Streams `0..len` into a hasher and returns it with the trailing guard bytes.
-fn hash_prefix(mut file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
+fn hash_prefix(file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
+    hash_prefix_into(file, len, &mut ())
+}
+
+fn hash_prefix_into(
+    mut file: &File,
+    len: u64,
+    consumer: &mut dyn PrefixConsumer,
+) -> io::Result<(Sha256, Vec<u8>)> {
+    struct HashPass<'f, 'c> {
+        reader: io::Take<&'f File>,
+        consumer: &'c mut dyn PrefixConsumer,
+    }
+    impl Read for HashPass<'_, '_> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let count = self.reader.read(bytes)?;
+            self.consumer.prefix_bytes(&bytes[..count]);
+            Ok(count)
+        }
+    }
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    let copied = io::copy(&mut file.take(len), &mut hasher)?;
+    let copied = io::copy(
+        &mut HashPass {
+            reader: file.take(len),
+            consumer,
+        },
+        &mut hasher,
+    )?;
     #[cfg(all(test, unix))]
     self::io_trace::record_source(file, "source_prefix", copied);
     #[cfg(test)]
@@ -205,6 +238,16 @@ impl SourceCapture {
     /// Reopens a stored source at its cursor. A renumbered dev is accepted like an exact one, as
     /// the bytes before `through` must hash to `prefix_hash` either way (`InvalidData` if not).
     pub fn reopen(source: SourceId, through: u64, prefix_hash: &str) -> io::Result<Self> {
+        Self::reopen_with_prefix(source, through, prefix_hash, ()).map(|(capture, _)| capture)
+    }
+
+    /// The consumer stays private until this same FD's stored prefix hash is verified.
+    pub(crate) fn reopen_with_prefix<T: PrefixConsumer>(
+        source: SourceId,
+        through: u64,
+        prefix_hash: &str,
+        mut consumer: T,
+    ) -> io::Result<(Self, T)> {
         let invalid = |detail: String| io::Error::new(io::ErrorKind::InvalidInput, detail);
         let file = File::open(&source.path)?;
         let meta = file.metadata()?;
@@ -218,7 +261,7 @@ impl SourceCapture {
             return Err(invalid(detail));
         }
         let renumbered = dev != source.dev;
-        let opened = Self::opened(source, file, &meta, through)?;
+        let opened = Self::opened_with_prefix(source, file, &meta, through, &mut consumer)?;
         if opened.prefix_hash() != prefix_hash {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -229,11 +272,21 @@ impl SourceCapture {
             let (path, old_dev) = (opened.source.path.display(), opened.source.dev);
             tracing::info!(%path, old_dev, new_dev = dev, "[tui_o] source volume renumbered");
         }
-        Ok(opened)
+        Ok((opened, consumer))
     }
 
     fn opened(source: SourceId, file: File, meta: &Metadata, start: u64) -> io::Result<Self> {
-        let (prefix, guard) = hash_prefix(&file, start)?;
+        Self::opened_with_prefix(source, file, meta, start, &mut ())
+    }
+
+    fn opened_with_prefix(
+        source: SourceId,
+        file: File,
+        meta: &Metadata,
+        start: u64,
+        consumer: &mut dyn PrefixConsumer,
+    ) -> io::Result<Self> {
+        let (prefix, guard) = hash_prefix_into(&file, start, consumer)?;
         Ok(Self {
             skip_torn_line: guard.last().is_some_and(|byte| *byte != b'\n'),
             source,
@@ -254,6 +307,11 @@ impl SourceCapture {
     /// Bytes read so far, including a buffered line still missing its newline.
     pub fn read_through(&self) -> u64 {
         self.captured_through + self.partial.len() as u64
+    }
+
+    /// The buffered bytes after `captured_through`, still missing their newline.
+    pub(crate) fn tail(&self) -> &[u8] {
+        &self.partial
     }
 
     /// Hex sha256 of bytes `0..captured_through`.

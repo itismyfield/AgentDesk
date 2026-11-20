@@ -37,6 +37,7 @@ pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr:
     stale_resume::stream_error_has_stale_resume_error(message, stderr)
 }
 
+pub(in crate::services::discord) mod native_input;
 mod status_panel;
 mod stream_loop;
 #[cfg(test)]
@@ -100,6 +101,8 @@ pub(super) use cancel_finalize_policy::{
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
     should_record_final_turn_transcript, should_suppress_headless_delivery_for_cancel,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_guard::RuntimeDatabase;
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
     fail_dispatch_tmux_session_died, fail_dispatch_with_retry, guard_review_dispatch_completion,
@@ -162,7 +165,9 @@ use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
-use completion_guard::complete_work_dispatch_on_turn_end;
+pub(in crate::services::discord) use completion_guard::complete_work_dispatch_on_turn_end;
+#[cfg(unix)]
+pub(in crate::services::discord) use completion_postlude::native_completion_scope;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use current_message_anchor::{
     cleanup_unbound_bridge_anchor, detached_current_msg_id_from_durable,
@@ -673,8 +678,12 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         .await;
         let busy_attempt_cost = turn_start.elapsed();
         match stream_loop_output.outcome {
-            stream_loop::StreamLoopOutcome::Completed => {}
-            stream_loop::StreamLoopOutcome::AuthorityLost => {
+            stream_loop::StreamLoopOutcome::Completed if !native_input::enabled() || !native_input::neutral_exit(&shared_owned, &provider, &inflight_state, &cancel_token).await => {}
+            _ => {
+                #[cfg(all(test, unix))]
+                if stream_loop_output.outcome != stream_loop::StreamLoopOutcome::AuthorityLost {
+                    inflight::o_seed_observation::record_event(&provider, channel_id.get(), "bridge_native_exit");
+                }
                 completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
                 return;

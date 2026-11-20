@@ -238,6 +238,14 @@ pub(super) async fn poll_watcher_output_or_continue(
         }
     };
 
+    #[cfg(test)]
+    crate::services::discord::inflight::o_seed_observation::source_read(
+        watcher_provider,
+        channel_id.get(),
+        source_file_identity,
+        current_offset,
+        new_offset,
+    );
     *loop_poll_state.retained_source = Some(source_file);
     let source_stamp = source_witness.and_then(|marker| {
         crate::services::discord::delivery_lease_cell::source_epoch_observer::source_stamp(
