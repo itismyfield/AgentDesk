@@ -737,7 +737,8 @@ src/
 │   │   │   ├── execution_mode_http_tests.rs
 │   │   │   ├── handlers.rs
 │   │   │   ├── helpers.rs
-│   │   │   └── responses.rs
+│   │   │   ├── responses.rs
+│   │   │   └── session_patch_tests.rs
 │   │   ├── scheduled_messages/
 │   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
@@ -1873,6 +1874,7 @@ src/
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
 │   │   │   ├── routine_process.rs
+│   │   │   ├── routine_reset.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -2468,7 +2470,8 @@ src/
 │   │   │   │   │   │   ├── routine_presentation_tests.rs
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── replay_start_tests/
-│   │   │   │   │   │   └── routine_policy_tests.rs
+│   │   │   │   │   │   ├── routine_policy_tests.rs
+│   │   │   │   │   │   └── routine_provider_model_tests.rs
 │   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
@@ -4094,6 +4097,7 @@ src/
 │   │   │   ├── owner_input_tests.rs
 │   │   │   ├── owner_launch_tests.rs
 │   │   │   ├── owner_review_tests.rs
+│   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   ├── run_policy.rs
 │   │   │   ├── start_deferral.rs
@@ -4102,16 +4106,23 @@ src/
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
 │   │   │   └── presentation.rs
+│   │   ├── execution_mode/
+│   │   │   └── provider_choice.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
 │   │   ├── run_diagnostics/
 │   │   │   └── formatting.rs
+│   │   ├── session_control/
+│   │   │   ├── persistent_target.rs
+│   │   │   └── provider_choice_tests.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
-│   │   │   └── failure_escalation.rs
+│   │   │   ├── failure_escalation.rs
+│   │   │   ├── session_interrupt.rs
+│   │   │   └── thread_choices.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
@@ -4124,6 +4135,7 @@ src/
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
+│   │   ├── provider_choice.rs
 │   │   ├── reliability_pg_tests.rs
 │   │   ├── run_diagnostics.rs
 │   │   ├── runtime.rs
