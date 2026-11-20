@@ -4,6 +4,7 @@ use crate::services::tui_o::channel_policy::LegacyRun;
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::rotation::bound_source;
+use crate::services::tui_prompt_dedupe::binding_events::claude_fold;
 use std::sync::Arc;
 
 fn current(events: &[BindingEvent]) -> Option<&BindingEvent> {
@@ -134,6 +135,24 @@ async fn observe<B: BindingEvents>(
             if now.is_some_and(|now| {
                 now.channel_id != channel || now.provider != run.binding.provider
             }) {
+                return;
+            }
+            if run.binding.provider == ShadowProvider::Claude
+                && candidate.child_surface().is_some_and(|surface| {
+                    claude_fold::read_thread_resumes(channel).is_ok_and(|entries| {
+                        entries.iter().any(|entry| {
+                            entry.parent == surface.parent()
+                                && entry.tmux == run.binding.tmux_session
+                                && crate::services::tui_o::shadow::capture::same_file(
+                                    &entry.source,
+                                    &observed_source,
+                                )
+                        })
+                    })
+                })
+                && candidate
+                    .retry_child_at_boundary(&run, events.last().map_or(0, |event| event.seq))
+            {
                 return;
             }
             if let Ok(epoch) = legacy.late_epoch(channel) {

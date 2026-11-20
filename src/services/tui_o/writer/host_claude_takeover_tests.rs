@@ -248,6 +248,15 @@ async fn reserved_for(
     parent: Option<u64>,
     before: impl FnOnce(&Harness, &Binds) -> PathBuf,
 ) -> Reserved {
+    reserved_for_with_custody(channel, parent, Custody::Free, before).await
+}
+
+async fn reserved_for_with_custody(
+    channel: u64,
+    parent: Option<u64>,
+    custody: Custody,
+    before: impl FnOnce(&Harness, &Binds) -> PathBuf,
+) -> Reserved {
     let harness = fresh_on(channel);
     harness.gate.acquired();
     let reserved = reserve_for(channel, parent);
@@ -255,6 +264,7 @@ async fn reserved_for(
     let binds = Binds::new(channel);
     let path = before(&harness, &binds);
     let io = TestIo::over(&harness);
+    *io.custody.lock().unwrap() = Ok(custody);
     io.late_enabled.store(true, Ordering::SeqCst);
     let legacy = Arc::new(Legacy {
         path,
@@ -633,7 +643,10 @@ async fn resumed_thread_keeps_old_history_and_posts_only_its_new_turn_pg() {
 async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) {
     use crate::services::claude::tui_session_launch::{ResumePane, reserve_thread_body_before_key};
     use crate::services::provider::ProviderKind;
-    use crate::services::tui_o::cutover::{BodyClaim, IdentityError};
+    use crate::services::tui_o::cutover::{
+        BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
+    };
+    use crate::services::tui_o::writer::binding::BindingEvents;
     use crate::services::turn_host::{self, TurnHost};
 
     let tmux = Binds::new(ch).tmux;
@@ -652,8 +665,18 @@ async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) 
         TurnHost::Tmux
     ));
     tokio::time::pause();
-    let mut f = reserved_for(ch, Some(parent), |h, binds| {
+    let custody = if warm {
+        Custody::PendingStart
+    } else {
+        Custody::Free
+    };
+    let mut f = reserved_for_with_custody(ch, Some(parent), custody, |h, binds| {
         let root = h._runtime.path();
+        if warm {
+            let prior = root.join("before-resume.jsonl");
+            std::fs::write(&prior, closed_reply(SESSION, "prior", "prior answer")).unwrap();
+            binds.source(root, "prior-execution", &prior);
+        }
         let path = root.join("resumed.jsonl");
         std::fs::write(&path, closed_reply(SESSION, "old", "old answer")).unwrap();
         let source = binds.source(root, "old-execution", &path);
@@ -670,18 +693,39 @@ async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) 
     let path = &f.legacy.path;
     let start = path.metadata().unwrap().len();
     let source = source_id_for(SESSION, path).unwrap();
-    if warm {
+    assert!(cutover::record_thread_child(&thread_for(ch, parent), false));
+    let log = f.io.bindings(ch, ShadowProvider::Claude);
+    let before = log.binding_events_since(ch, 0).unwrap();
+    let parked = if warm {
+        let candidate = test_override::with_channels(|boot| {
+            boot.unwrap().child(ch).unwrap().unwrap().candidate
+        });
+        assert_eq!(candidate.late_boundary().unwrap().baseline, 0);
+        *f.io.custody.lock().unwrap() = Ok(Custody::Free);
+        settle().await;
+        assert!(candidate.child_parked());
+        let run = candidate.legacy_run().unwrap();
+        assert_eq!(Some(&run.binding), before.last());
+        assert!(run.turn.is_none() && run.delivery.is_none());
+        assert_eq!(candidate.sends(), (0, 0));
+        assert!(p5::claude_fold::read_thread_resumes(ch).unwrap().is_empty());
         let nonce = mark_fixture_launch(&f, SESSION, true);
-        assert!(cutover::record_thread_child(&thread_for(ch, parent), false));
         reserve_thread_body_before_key(Some(ch), &tmux, Some(&nonce), SESSION, path, true).unwrap();
+        Some(candidate)
     } else {
         cutover::claude_thread::reserve_resume(ch, &tmux, SESSION, path, ResumePane::Cold).unwrap();
         let nonce = mark_fixture_launch(&f, SESSION, true);
         reserve_thread_body_before_key(Some(ch), &tmux, Some(&nonce), SESSION, path, false)
             .unwrap();
-    }
+        None
+    };
     let body = BodyClaim::tmux(ch, Some(&f.binds.tmux));
-    assert_eq!(body.peek(), Err(IdentityError::ChildDeliveryHeld));
+    let legacy_posts = std::cell::Cell::new(0);
+    let send = || async { legacy_posts.set(legacy_posts.get() + 1) };
+    assert_eq!(
+        claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+        Err(IdentityError::ChildDeliveryHeld)
+    );
     append(path, &closed_reply(SESSION, "new", "new answer"));
     *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
     tokio::time::resume();
@@ -694,7 +738,15 @@ async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) 
     .unwrap();
     assert_eq!(f.init(), [(source, start)]);
     assert_eq!(f.harness.port.posts(), ["new answer"]);
-    assert_eq!(body.peek(), Ok(true));
+    assert_eq!(log.binding_events_since(ch, 0).unwrap(), before);
+    if let Some(candidate) = parked {
+        assert_eq!(candidate.child_boundary_epoch(), 1);
+    }
+    assert_eq!(
+        claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+        Ok(BodySend::OwnedByO)
+    );
+    assert_eq!(legacy_posts.get(), 0);
     f.stop_host().await;
 }
 
