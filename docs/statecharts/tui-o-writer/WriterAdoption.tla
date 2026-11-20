@@ -507,7 +507,8 @@ AgyFinish ==
 AgyApplyEnd ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "finishing" /\ agy.authority /\ agy.effects < 3
-    /\ agy.applied = agy.effects \/ (Mut = "doubleRelease" /\ agy.effects = 1 /\ agy.rejected)
+    /\ agy.applied = agy.effects
+       \/ (Mut = "doubleRelease" /\ agy.effects = 1 /\ agy.rejected /\ agy.releases = 1)
     /\ agy' = [agy EXCEPT !.applied = agy.effects + 1,
                           !.releases = IF agy.effects = 1 THEN @ + 1 ELSE @,
                           !.kicked = @ \/ agy.effects = 2,
