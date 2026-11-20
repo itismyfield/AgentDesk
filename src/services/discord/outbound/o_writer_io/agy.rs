@@ -154,7 +154,7 @@ mod tests {
     use crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root;
     use crate::services::provider::CancelToken;
     use crate::services::tui_o::writer::agy_delivery::TurnKey;
-    use serenity::{MessageId, UserId};
+    use poise::serenity_prelude::{MessageId, UserId};
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
