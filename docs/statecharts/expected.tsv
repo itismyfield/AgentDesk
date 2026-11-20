@@ -123,10 +123,14 @@ catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvan
 catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
 claude-stop/ClaudeStopBefore.cfg	ClaudeStop	ActiveScreenStops,UnreadFooterStops	-
 claude-stop/ClaudeStopBlind.cfg	ClaudeStop	NoEscapeOnIdleScreen	-
+claude-stop/ClaudeStopFirstRepair.cfg	ClaudeStop	ActiveScreenStops,NoEscapeOnIdleScreen,UnreadFooterStops,UnreadNeedsFooter	-
 claude-stop/ClaudeStopFixed.cfg	ClaudeStop	-	-
 claude-stop/ClaudeStopNoScreenFirst.cfg	ClaudeStop	ActiveScreenStops	-
 claude-stop/ClaudeStopNoUnreadFooter.cfg	ClaudeStop	UnreadFooterStops	-
+claude-stop/ClaudeStopOpenTailOnly.cfg	ClaudeStop	ActiveScreenStops	-
+claude-stop/ClaudeStopUnreadEnded.cfg	ClaudeStop	UnreadFooterStops	-
 claude-stop/ClaudeStopUnreadSpinner.cfg	ClaudeStop	UnreadNeedsFooter	-
+claude-stop/ClaudeStopWideReader.cfg	ClaudeStop	NoEscapeOnIdleScreen,UnreadNeedsFooter	-
 decision-request/Auth.cfg	DecisionRequest	OperatorOnly	-
 decision-request/BusyForever.cfg	DecisionRequest	-	EventuallySettled
 decision-request/DiscussionClassify.cfg	DecisionDiscussion	ClassMatches	-
