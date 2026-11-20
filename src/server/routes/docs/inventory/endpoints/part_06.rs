@@ -514,6 +514,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "headless_failure_notice_limit",
                 body_param("integer", false, "Headless failure notices before escalation, 1..100; default 3"),
             ),
+            (
+                "provider",
+                body_param("string", false, "Provider channel the agent turn runs on (claude, codex, antigravity, ...); requires agent_id; omitted inherits the agent primary. 422 when the agent or fallback agent has no channel for it"),
+            ),
+            (
+                "model",
+                body_param("string", false, "Model passed to the provider turn ahead of the channel model setting; requires provider"),
+            ),
         ])
         .with_example(
             json!({"body": {"script_ref": "daily-summary.js", "name": "Daily Summary", "agent_id": "codex", "fallback_agent_id": "claude", "max_retries": 1, "execution_strategy": "fresh"}}),
@@ -523,7 +531,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/routines/{id}",
             "routines",
-            "Get one durable routine row with its explicit/effective execution mode, compatibility state (explicit, legacy_fresh, legacy_persistent), runner and headless_failure_notice_limit.",
+            "Get one durable routine row with its explicit/effective execution mode, compatibility state (explicit, legacy_fresh, legacy_persistent), runner, headless_failure_notice_limit, and provider/model with effective_provider and provider_source/model_source (explicit or inherited from the agent primary and its channel model setting).",
         )
         .with_params([("id", path_param("Routine id"))])
         .with_example(
@@ -534,11 +542,20 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/routines/{id}",
             "routines",
-            "Patch routine metadata, scheduling fields, checkpoint, or execution definition. Definition changes apply from the next claim; an in-flight run keeps its claim-time run_spec.",
+            "Patch routine metadata, scheduling fields, checkpoint, execution definition, agent, provider or model. Definition changes apply from the next claim; an in-flight run keeps its claim-time run_spec. A new agent or provider drops the saved routine thread.",
         )
         .with_params([
             ("id", path_param("Routine id")),
             ("name", body_param("string", false, "New routine name")),
+            ("agent_id", body_param("string", false, "New attached agent id; cannot be cleared")),
+            (
+                "provider",
+                body_param("string|null", false, "Provider channel for the agent turn, or null to inherit the agent primary; 422 when the agent or fallback agent has no channel for it"),
+            ),
+            (
+                "model",
+                body_param("string|null", false, "Model for the provider turn, or null to use the channel setting; requires provider. For persistent routines, model changes take effect when the next new conversation starts."),
+            ),
             (
                 "fallback_agent_id",
                 body_param("string|null", false, "Fallback agent id or null to clear it"),
