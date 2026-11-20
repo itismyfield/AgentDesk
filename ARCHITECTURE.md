@@ -446,6 +446,8 @@ src/
 │   │   ├── verification_run.rs
 │   │   ├── workflow_options.rs
 │   │   └── workspace.rs
+│   ├── human_input/
+│   │   └── native_source.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
@@ -1954,6 +1956,8 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── native_input_custody.rs
+│   │   │   │   ├── native_input_tests.rs
 │   │   │   │   ├── restart_marker_lifetime_tests.rs
 │   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
@@ -2214,6 +2218,7 @@ src/
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── native_intent_tests.rs
 │   │   │   │   ├── native_receipt_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
@@ -2510,6 +2515,7 @@ src/
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
+│   │   │   │   │   ├── dispatch_runtime_tests.rs
 │   │   │   │   │   ├── feature_settings.rs
 │   │   │   │   │   ├── first_key_gate_paths_tests.rs
 │   │   │   │   │   ├── host_refusal.rs
@@ -2532,6 +2538,12 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   ├── native_input/
+│   │   │   │   │   │   │   ├── tests/
+│   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
+│   │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   └── native_input.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2629,6 +2641,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_missing_input_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_race_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_native_work_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2740,6 +2753,7 @@ src/
 │   │   │   ├── intake.rs
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
+│   │   │   ├── native_input.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
@@ -3393,6 +3407,7 @@ src/
 │   │   │   ├── headless_delivery.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── native_input.rs
 │   │   │   ├── output_lifecycle.rs
 │   │   │   ├── panel_lifecycle.rs
 │   │   │   ├── post_loop_finalize.rs
@@ -3446,6 +3461,21 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── native_abstain.rs
+│   │   │   ├── native_binding.rs
+│   │   │   ├── native_binding_tests.rs
+│   │   │   ├── native_completion.rs
+│   │   │   ├── native_completion_tests.rs
+│   │   │   ├── native_completion_work_tests.rs
+│   │   │   ├── native_input_tests.rs
+│   │   │   ├── native_key_tests.rs
+│   │   │   ├── native_policy.rs
+│   │   │   ├── native_prepare.rs
+│   │   │   ├── native_restore.rs
+│   │   │   ├── native_restore_gc_tests.rs
+│   │   │   ├── native_supply.rs
+│   │   │   ├── native_terminal.rs
+│   │   │   ├── native_terminal_tests.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
@@ -3510,6 +3540,7 @@ src/
 │   │   │   │   ├── effort_restart.rs
 │   │   │   │   ├── effort_restart_baseline_tests.rs
 │   │   │   │   ├── effort_restart_tests.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -3518,7 +3549,8 @@ src/
 │   │   │   ├── activity_tests/
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── large_tests.rs
-│   │   │   │   └── local_control_tests.rs
+│   │   │   │   ├── local_control_tests.rs
+│   │   │   │   └── native_input_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
@@ -4358,6 +4390,12 @@ src/
 │   │   │   │   │   ├── carried_tests.rs
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
+│   │   │   │   │   ├── native.rs
+│   │   │   │   │   ├── native_barrier.rs
+│   │   │   │   │   ├── native_binding.rs
+│   │   │   │   │   ├── native_control.rs
+│   │   │   │   │   ├── native_receipt.rs
+│   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs
@@ -4529,6 +4567,7 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
@@ -4570,6 +4609,13 @@ src/
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
+│   │   │   │   ├── native/
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── terminal_tests.rs
+│   │   │   │   │   ├── receipt.rs
+│   │   │   │   │   ├── terminal.rs
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── reactions.rs
@@ -4941,6 +4987,7 @@ src/
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── clear.rs
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
@@ -4963,6 +5010,7 @@ src/
 │   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── v2_types/
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   └── effort_restart.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs

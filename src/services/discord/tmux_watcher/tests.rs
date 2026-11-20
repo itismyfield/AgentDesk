@@ -168,11 +168,27 @@ fn watcher_terminal_delivery_commit_mirrors_bridge_inflight_fields() {
     crate::services::discord::inflight::save_inflight_state(&state).expect("save inflight");
     let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
 
+    assert!(!mark_watcher_terminal_delivery_committed(
+        &provider,
+        channel_id,
+        tmux_session_name,
+        (Some(&identity), true),
+        "foreign response",
+        64,
+        Some(7),
+        128,
+        Some(crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome::ProviderError),
+    ));
+    let held = crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+        .expect("load held inflight");
+    assert!(!held.terminal_delivery_committed);
+    assert!(held.full_response.is_empty());
+
     assert!(mark_watcher_terminal_delivery_committed(
         &provider,
         channel_id,
         tmux_session_name,
-        Some(&identity),
+        (Some(&identity), false),
         "delivered response",
         64,
         Some(7),
@@ -231,7 +247,7 @@ fn watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id() {
             &provider,
             channel_id,
             tmux_session_name,
-            Some(&identity),
+            (Some(&identity), false),
             "loop delivered response",
             64,
             Some(7),
@@ -261,7 +277,7 @@ fn watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id() {
             &provider,
             channel_id,
             tmux_session_name,
-            Some(&unanchored_identity),
+            (Some(&unanchored_identity), false),
             "loop delivered response",
             64,
             Some(7),
@@ -555,7 +571,7 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
         &provider,
         channel_id,
         tmux_session_name,
-        Some(&identity),
+        (Some(&identity), false),
         "delivered response",
         64,
         Some(7),

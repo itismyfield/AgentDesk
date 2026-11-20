@@ -9,6 +9,8 @@ use completion_context::*;
 use completion_postgres::*;
 
 pub(crate) use completion_context::build_work_dispatch_completion_result;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_postgres::RuntimeDatabase;
 pub(in crate::services::discord) use completion_postgres::{
     queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
     streaming_final_complete_dispatch_with_result,
@@ -547,7 +549,7 @@ async fn fail_dispatch_with_policy(
 /// Retries finalize_dispatch 3x with 1-second backoff. On exhaustion, falls back
 /// to direct DB UPDATE + reconciliation marker for onTick hook chain.
 /// When Db/Engine are unavailable, retries API PATCH 3x then DB fallback.
-pub(super) async fn complete_work_dispatch_on_turn_end(
+pub(in crate::services::discord) async fn complete_work_dispatch_on_turn_end(
     shared: &Arc<super::super::SharedData>,
     dispatch_id: Option<&str>,
     adk_cwd: Option<&str>,

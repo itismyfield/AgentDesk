@@ -1,6 +1,7 @@
 //! Each queued input Claude received, kept until the native turn that ran it closes; only a record
 //! tied to that input by body, or Claude's own FIFO dequeue, moves it on.
 
+use super::native::{QueueRecord as Record, classify};
 use serde_json::Value;
 
 use crate::services::tui_o::shadow::ShadowProvider;
@@ -15,27 +16,6 @@ enum Stage {
     Attached,
     /// Run by the open turn; its close settles it.
     Running,
-}
-
-/// What one record says about the queue.
-pub(crate) enum Record {
-    Enqueue(String),
-    /// Removed without running (`remove` other than mid-turn absorption).
-    Withdraw(String),
-    /// Handed to another agent (`remove`, `delivered_to_agent`); Claude writes no dequeue for it.
-    Delivered(String),
-    /// Every queued input pulled back to the prompt.
-    WithdrawAll,
-    Dequeue,
-    /// Taken into the turn (`remove`, `absorbed_mid_turn`); Claude writes no dequeue for it, and its
-    /// `queued_command` row may come before it, after it, or not at all.
-    Absorbed(String),
-    /// A human prompt command (`queued_command`, `prompt` mode, human origin).
-    Human(String),
-    /// Any other `queued_command`, such as a background task's notification drained mid-turn.
-    Command(String),
-    /// A user prompt row, or a meta row (a notification opening its own turn).
-    Prompt(String),
 }
 
 /// One received input, with which of its own command and absorption records were read.
@@ -190,51 +170,5 @@ impl QueuedInputs {
 
     fn find(&self, matches: impl Fn(&Input) -> bool) -> Option<usize> {
         self.inputs.iter().position(matches)
-    }
-}
-
-pub(crate) fn classify(value: &Value) -> Option<Record> {
-    let text = |key: &str| value.get(key).and_then(body);
-    match value["type"].as_str()? {
-        "queue-operation" => match value["operation"].as_str()? {
-            "enqueue" => Some(Record::Enqueue(text("content")?)),
-            "remove" if value["reason"] == "absorbed_mid_turn" => {
-                Some(Record::Absorbed(text("content")?))
-            }
-            "remove" if value["reason"] == "delivered_to_agent" => {
-                Some(Record::Delivered(text("content")?))
-            }
-            "remove" => Some(Record::Withdraw(text("content")?)),
-            "popAll" => Some(Record::WithdrawAll),
-            "dequeue" => Some(Record::Dequeue),
-            _ => None,
-        },
-        "attachment" if value["attachment"]["type"] == "queued_command" => {
-            let command = &value["attachment"];
-            let human = command["commandMode"] == "prompt" && command["origin"]["kind"] == "human";
-            let prompt = body(&command["prompt"])?;
-            match human {
-                true => Some(Record::Human(prompt)),
-                false => Some(Record::Command(prompt)),
-            }
-        }
-        "user" => body(&value["message"]["content"]).map(Record::Prompt),
-        _ => None,
-    }
-}
-
-/// A body as Claude records it: a string, or its text blocks joined.
-fn body(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.trim().to_string()),
-        Value::Array(blocks) => {
-            let texts: Vec<&str> = blocks
-                .iter()
-                .filter(|block| block["type"] == "text")
-                .filter_map(|block| block["text"].as_str())
-                .collect();
-            (!texts.is_empty()).then(|| texts.join("\n").trim().to_string())
-        }
-        _ => None,
     }
 }

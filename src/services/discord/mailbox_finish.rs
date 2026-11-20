@@ -411,6 +411,9 @@ async fn settle_clear(
         }
     };
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if result.persistence.failed.contains(&"native_input") {
+        return result;
+    }
     // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
     // a watcher that subscribed to the recovery latch is freed even when
     // recovery is aborted rather than completed. An absent actor has no latch.

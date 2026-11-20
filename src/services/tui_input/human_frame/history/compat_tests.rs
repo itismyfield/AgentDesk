@@ -16,7 +16,7 @@ fn history_v2_envelope_is_not_a_v1_store_with_an_ignored_version() {
         panic!("V2 read-only")
     };
     assert_eq!(read.passive[0]["row"], "native-A");
-    assert!(compat::inspect(br#"{"version":3,"live":[],"passive":[]}"#).is_err());
+    assert!(compat::inspect(br#"{"version":4,"live":[],"passive":[]}"#).is_err());
     assert!(compat::inspect(br#"{"version":2,"entries":[],"live":[],"passive":[]}"#).is_err());
     assert!(matches!(
         compat::inspect(br#"{"entries":[]}"#).unwrap(),

@@ -440,13 +440,44 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
         .unwrap();
     for token in [
         "run_bot_build_shared_data(",
-        "reap_inflight_rows_at_boot_blocking(",
+        "queued_recovery::prepare_native_boot(",
         "spawn_tui_prompt_relay(",
         "run_bot_spawn_execution_runtime_tasks(",
         "o_writer_host::spawn_execution(",
     ] {
         assert!(ready < runtime.find(token).unwrap(), "{token}");
     }
+    let boot_call = runtime
+        .find("queued_recovery::prepare_native_boot(")
+        .unwrap();
+    for token in [
+        "spawn_tui_prompt_relay(",
+        "run_bot_spawn_execution_runtime_tasks(",
+        "o_writer_host::spawn_execution(",
+    ] {
+        assert!(boot_call < runtime.find(token).unwrap(), "{token}");
+    }
+    let queued = source(
+        "src/services/discord/runtime_bootstrap/queued_recovery.rs",
+        include_str!("../discord/runtime_bootstrap/queued_recovery.rs"),
+    );
+    assert!(queued.contains("use native_input::prepare_native_boot;"));
+    let native_boot = source(
+        "src/services/discord/runtime_bootstrap/native_input.rs",
+        include_str!("../discord/runtime_bootstrap/native_input.rs"),
+    );
+    let native_boot = native_boot
+        .split("async fn prepare_native_boot(")
+        .nth(1)
+        .unwrap();
+    let reaps: Vec<_> = native_boot
+        .match_indices("reap_inflight_rows_at_boot_blocking(")
+        .map(|(offset, _)| offset)
+        .collect();
+    assert_eq!(reaps.len(), 2, "native and fallback reapers remain guarded");
+    let prepare = native_boot.find("BootInputs::prepare(").unwrap();
+    let restore = native_boot.find("plan.restore(shared).await").unwrap();
+    assert!(prepare < reaps[0] && reaps[0] < restore && restore < reaps[1]);
     let drain_source = source(
         "src/server/outbox_worker.rs",
         include_str!("../../server/outbox_worker.rs"),
