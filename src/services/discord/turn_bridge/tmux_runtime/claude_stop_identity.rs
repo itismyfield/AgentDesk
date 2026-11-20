@@ -517,7 +517,9 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
     let mut line = String::new();
     let mut offset = start;
     if start > 0 {
-        offset = offset.saturating_add(reader.read_line(&mut line).ok()? as u64);
+        // The seek can land inside a multi-byte character, so the cut row is skipped as bytes.
+        let mut cut = Vec::new();
+        offset = offset.saturating_add(reader.read_until(b'\n', &mut cut).ok()? as u64);
     }
 
     let mut latest = None;

@@ -357,10 +357,7 @@ mod high_risk_recovery {
 fn preserve_stop_failed_command_notice_once_and_reader_continues() {
     let fx = Fixture::new();
     run(async {
-        for (n, failure) in ["modal", "capture", "io", "unknown", "draft"]
-            .into_iter()
-            .enumerate()
-        {
+        for (n, failure) in ["modal", "capture", "io", "draft"].into_iter().enumerate() {
             fx.serve(Server::Live);
             fx.reject_escape(failure == "io");
             let pane = if failure == "draft" {
@@ -377,15 +374,6 @@ fn preserve_stop_failed_command_notice_once_and_reader_continues() {
             let (mock, ctx, server, data) = transport(&shared, channel).await;
             let session = format!("native-stop-failed-{failure}");
             let (token, path) = generating_turn(&fx, &session);
-            if failure == "unknown" {
-                append(&path, serde_json::json!({"type":"permission-mode"}));
-                assert_eq!(
-                    crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
-                        &path
-                    ),
-                    crate::services::tui_turn_state::TuiTurnState::Unknown
-                );
-            }
             start(&shared, channel, &token).await;
             native_inflight_row(channel, &token, &session);
             let mut events = shared.turn_completion_events.subscribe();

@@ -755,6 +755,8 @@ fn herdr_user_stop_reads_a_long_turn_and_never_calls_an_unread_turn_idle() {
         } else {
             let reply = json!({"type":"assistant","message":{"content":[]}});
             std::fs::write(&case.path, format!("{reply}\n")).unwrap();
+            // Without the interrupt footer the unread turn is neither stopped nor called idle.
+            case.screen(false);
             assert_eq!(
                 user_stop(case, runtime, "!stop"),
                 HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved))
