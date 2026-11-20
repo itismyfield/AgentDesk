@@ -376,6 +376,40 @@ async fn pipeline_running_or_occupied_state_uses_fresh_transaction_snapshot_pg()
 async fn pipeline_template_migration_preserves_stages_pins_and_scheduler_pg() {
     let mut h = Harness::new().await;
     let mut state = domain::running();
+    use crate::domain::campaign::{
+        decision_item::{ApprovalBinding, ApprovalTarget, ForumApproval},
+        workflow_options::{ApprovalGate, WorkflowOptions},
+    };
+    let mut input = state.definition.input().clone();
+    input.workflow_options = Some(WorkflowOptions {
+        implementation: true,
+        ..Default::default()
+    });
+    state.definition = crate::domain::campaign::definition::validate_definition(input).unwrap();
+    let binding = ApprovalBinding {
+        run_id: "run".into(),
+        node_id: "a".into(),
+        gate: ApprovalGate::Implementation,
+        definition_revision: 1,
+        policy_hash: "approval-pin".into(),
+        target: ApprovalTarget::Candidate {
+            base_sha: "base".into(),
+            head_sha: "candidate".into(),
+        },
+    };
+    let approvals = &mut state.run.as_mut().unwrap().approvals;
+    approvals.open(binding.clone()).unwrap();
+    approvals
+        .approve(
+            &binding,
+            ForumApproval {
+                decision_ref: "approval".into(),
+                response_ref: "https://forum.example/decision/1".into(),
+                response_at: domain::now(),
+            },
+            domain::now(),
+        )
+        .unwrap();
     state.control = CampaignControl::Stopped;
     state
         .run
@@ -408,6 +442,7 @@ async fn pipeline_template_migration_preserves_stages_pins_and_scheduler_pg() {
     let (_, migrated) = request(&h.app, "GET", PIPELINE, None).await;
     assert_eq!(migrated["pipeline"], template["pipeline"]);
     assert_eq!(migrated["execution_hash"], template["execution_hash"]);
+    assert_eq!(migrated["execution"]["definition_revision"], 1);
     assert_eq!(migrated["execution"], original["execution"]);
     assert_eq!(migrated["migration_available"], false);
     let after = store::get(&h.pool, "campaign").await.unwrap().unwrap();
@@ -445,11 +480,12 @@ async fn pipeline_template_migration_preserves_stages_pins_and_scheduler_pg() {
             state.control = CampaignControl::Running;
             state.nodes.get_mut("a").unwrap().stage = stage;
         }
-        assert_eq!(
-            next_action(&reference, "a"),
-            next_action(&migrated, "a"),
-            "{stage:?}"
-        );
+        let legacy = next_action(&reference, "a");
+        if stage == Stage::Implementation {
+            use crate::domain::campaign::lifecycle::NextAction;
+            assert!(matches!(legacy, NextAction::AssignWork { .. }));
+        }
+        assert_eq!(legacy, next_action(&migrated, "a"), "{stage:?}");
     }
     let mut prepared = create_body();
     prepared["id"] = json!("prepared");

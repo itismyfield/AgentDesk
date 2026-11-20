@@ -121,7 +121,8 @@ pub(super) fn save(
     };
     definition::validate_pipeline(&candidate).map_err(Rejection::invalid_definition)?;
     require_references(state, &candidate)?;
-    state.definition.set_pipeline(candidate);
+    let active_revision = state.run.as_ref().map(|_| state.definition_revision);
+    state.definition.set_pipeline(candidate, active_revision);
     state.definition_revision += 1;
     Ok(Some(EventKind::PipelineSaved { migrated }))
 }

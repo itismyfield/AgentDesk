@@ -383,6 +383,13 @@ pub struct CampaignState {
     pub last_event_at: Option<DateTime<Utc>>,
 }
 
+impl CampaignState {
+    pub(crate) fn legacy_execution_revision(&self) -> u64 {
+        self.definition
+            .legacy_execution_revision(self.definition_revision)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {

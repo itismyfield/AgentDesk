@@ -134,7 +134,12 @@ pub(in crate::server::routes) async fn detail(
         "source":source,
         "editable":control::edit_guard(&state).is_ok(),
         "migration_available":pipeline_editor::migration_available(&state),
-        "execution":{"mode":"legacy_stage","run_id":state.run.as_ref().map(|run| &run.id),"state_ids":legacy_state_ids},
+        "execution":{
+            "mode":"legacy_stage",
+            "run_id":state.run.as_ref().map(|run| &run.id),
+            "definition_revision":state.run.as_ref().map(|_| state.legacy_execution_revision()),
+            "state_ids":legacy_state_ids,
+        },
     })))
 }
 

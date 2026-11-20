@@ -71,6 +71,8 @@ pub struct DefinitionHashes {
 pub struct ValidatedDefinition {
     input: DefinitionInput,
     hashes: BTreeMap<String, DefinitionHashes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_execution_revision: Option<u64>,
 }
 
 impl ValidatedDefinition {
@@ -80,8 +82,16 @@ impl ValidatedDefinition {
     pub fn hashes(&self) -> &BTreeMap<String, DefinitionHashes> {
         &self.hashes
     }
-    pub(crate) fn set_pipeline(&mut self, pipeline: Box<PipelineDefinition>) {
+    pub(crate) fn set_pipeline(
+        &mut self,
+        pipeline: Box<PipelineDefinition>,
+        active_revision: Option<u64>,
+    ) {
+        self.legacy_execution_revision = self.legacy_execution_revision.or(active_revision);
         self.input.pipeline = Some(pipeline);
+    }
+    pub(super) fn legacy_execution_revision(&self, current: u64) -> u64 {
+        self.legacy_execution_revision.unwrap_or(current)
     }
     pub fn superseded_nodes(&self, next: &Self) -> Vec<String> {
         self.hashes
@@ -246,7 +256,11 @@ pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition
             .map(|n| (n.id.as_str(), n.dependencies.as_slice())),
     )
     .map_err(graph_error)?;
-    Ok(ValidatedDefinition { input, hashes })
+    Ok(ValidatedDefinition {
+        input,
+        hashes,
+        legacy_execution_revision: None,
+    })
 }
 
 #[cfg(test)]
