@@ -91,7 +91,7 @@ async fn m4_adk_adapter_observes_roles_before_start_and_replays_archive_pg() {
     .unwrap();
     let shim = pipeline.join("scripts/cargo-shim/cargo");
     std::fs::write(&shim,
-        "#!/bin/sh\nset -eu\ntest \"$1:$2:$3:$4\" = nextest:archive:--lib:--archive-file\nprintf 'fixture archive' > \"$5\"\nprintf x >> \"$5.calls\"\n"
+        "#!/bin/sh\nset -eu\ntest \"$1:$2:$3:$4:$5\" = nextest:archive:--lib:--workspace:--archive-file\nprintf 'fixture archive' > \"$6\"\nprintf x >> \"$6.calls\"\n"
     ).unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
     let resources = AdkResources::new(&repo, &pipeline).unwrap();

@@ -21,13 +21,14 @@ import os
 import re
 from pathlib import Path, PurePosixPath
 
+from ci.rust_test_sources import workspace_lib_roots
+
 MOD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*;")
 INLINE_MOD = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*\{")
 PATH_ATTR = re.compile(r"#\[path[ \t]*=[ \t]*\"([^\"]+)\"\]")
 PLATFORM_CFG = re.compile(r"cfg(?:_attr)?!?[ \t]*\([^)]*\b(?:unix|windows|target_os|target_family)\b")
 NON_WINDOWS = re.compile(r"\bunix\b|not[ \t]*\([ \t]*windows")
 NOT_UNIX = re.compile(r"not[ \t]*\([ \t]*unix")
-CRATE_ROOTS = ("src/lib.rs", "src/main.rs")
 DEFAULT_SCOPE = "src/services/discord"
 
 
@@ -65,12 +66,15 @@ def _child(src: Path, name: str, attr: str | None, chain: tuple[str, ...], owned
 
 def scan(root: Path) -> tuple[dict[str, bool], set[str]]:
     """Return {rust file: compiled on Windows} plus the unix-gated module names."""
-    queue = [root / rel for rel in CRATE_ROOTS if (root / rel).exists()]
+    root = root.resolve()
+    queue = [lib for _, lib in workspace_lib_roots(root).values()]
+    if (root / "src/main.rs").is_file():
+        queue.append(root / "src/main.rs")
     windows: dict[Path, bool] = dict.fromkeys(queue, True)
     gated: set[str] = set()
     ungated: set[str] = set()
     seen: set[Path] = set()
-    owned: set[Path] = set()
+    owned = set(queue)
     while queue:
         src = queue.pop()
         if src in seen:

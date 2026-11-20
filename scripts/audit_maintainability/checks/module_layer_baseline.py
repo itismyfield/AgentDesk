@@ -12,6 +12,7 @@ import sys
 import tomllib
 
 MAPPING = "scripts/audit_maintainability/layers.toml"
+MEASUREMENT_INPUTS = ("src", "Cargo.toml", "crates")
 # The committed baseline was removed; the path stays only so the gate and this CLI refuse its resurrection.
 BASELINE = "scripts/audit_maintainability/baselines/generated/module_layers.json"
 GENERATOR = "python3 scripts/audit_maintainability/checks/module_layer_baseline.py"
@@ -268,10 +269,11 @@ def main():
     if revision.returncode:
         parser.error("input SHA must resolve to a commit")
     args.input_sha = revision.stdout.strip()
-    verified = subprocess.run(["git", "-C", str(args.repo), "diff", "--quiet", args.input_sha, "--", "src", "Cargo.toml"])
+    verified = subprocess.run(["git", "-C", str(args.repo), "diff", "--quiet", args.input_sha, "--", *MEASUREMENT_INPUTS])
     if verified.returncode:
-        parser.error("input SHA does not match the working source tree (src and Cargo.toml)")
-    untracked = subprocess.run(["git", "-C", str(args.repo), "ls-files", "--others", "--", "src"], capture_output=True, text=True, check=True)
+        parser.error(f"input SHA does not match the working source tree ({', '.join(MEASUREMENT_INPUTS)})")
+    untracked = subprocess.run(["git", "-C", str(args.repo), "ls-files", "--others", "--", *MEASUREMENT_INPUTS],
+                               capture_output=True, text=True, check=True)
     if untracked.stdout:
         parser.error("untracked source files are outside the recorded input SHA")
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

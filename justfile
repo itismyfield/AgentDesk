@@ -20,7 +20,7 @@ cargo-check:
 
 # The CI nextest run: every lib test, PostgreSQL ones included.
 test:
-    cargo nextest run --lib --profile ci
+    cargo nextest run --lib --workspace --profile ci
 
 # Active Claude usage compact-trigger contract.
 test-active-usage-4631:
@@ -44,6 +44,6 @@ test-non-pg:
 # PG* variables alone are not authorization.
 test-postgres:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
-    cargo nextest run --lib
+    cargo nextest run --lib --workspace
 
 check: fmt-check lint cargo-check test
