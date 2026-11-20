@@ -604,11 +604,12 @@ async fn settlement_boundary(
     .await
     .unwrap();
     let (empty, payload_started) = handle
-        .v2_request(|slot| {
+        .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("owner missing")?;
+            let after_deadline = deadline.saturating_add(1);
             let payload_started = owner.active_attempt().ok().is_some_and(|key| {
-                owner.approve_first_key(&key, &|| 50_000).is_ok()
-                    && owner.payload_started(&key, 50_000).is_ok()
+                owner.approve_first_key(&key, &|| after_deadline).is_ok()
+                    && owner.payload_started(&key, after_deadline).is_ok()
             });
             let snapshot = owner.json()?;
             let empty = snapshot["items"] == json!([])
