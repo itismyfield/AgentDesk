@@ -39,37 +39,30 @@ pub(in crate::services::discord::recovery_engine) async fn attach(
     };
     let provider = &shared.provider;
     let logical = &record.owner.logical_key;
-    let Ok(mut inflight) =
-        inflight::load_inflight_state_read_only_result(provider, channel_id.get())
-    else {
-        return false;
+    let active = match inflight::load_inflight_state_read_only_result(provider, channel_id.get()) {
+        Ok(None) => None,
+        Ok(Some(state)) if running_here(&state, record) => {
+            let id = row.session_id();
+            if state.output_path.is_none() {
+                let record = record.clone();
+                let Ok(Some(saved)) =
+                    tokio::task::spawn_blocking(move || recover_pathless(id, &record, &state))
+                        .await
+                else {
+                    return false;
+                };
+                Some(saved)
+            } else if state.hosted_record_id == Some(id)
+                && state.hosted_execution_nonce.as_ref() == Some(&record.execution_nonce)
+            {
+                Some(state)
+            } else {
+                return false;
+            }
+        }
+        _ => return false,
     };
-    if let Some(state) = inflight.as_mut()
-        && state.output_path.is_none()
-    {
-        let expected = state.clone();
-        let record = record.clone();
-        let id = row.session_id();
-        let Ok(Some(saved)) =
-            tokio::task::spawn_blocking(move || recover_pathless(id, &record, &expected)).await
-        else {
-            return false;
-        };
-        *state = saved;
-    }
-    let active = inflight.as_ref().filter(|state| {
-        state.provider == record.owner.provider
-            && state.tmux_session_name.as_deref() == Some(logical)
-            && state.hosted_record_id == Some(row.session_id())
-            && state.hosted_execution_nonce.as_deref() == Some(&record.execution_nonce)
-            && state.tui_terminal_kind.is_none()
-            && state.terminal_receipt.is_none()
-            && state.herdr_before_start_stop.is_none()
-            && !state.rebind_origin
-    });
-    if inflight.is_some() && active.is_none() {
-        return false;
-    }
+    let active = active.as_ref();
     let Some(binding) = runtime_binding_for_tmux_session(logical) else {
         // An own Pending clear installs its source on the first prompt.
         return active.is_none();
@@ -103,6 +96,16 @@ pub(in crate::services::discord::recovery_engine) async fn attach(
     .await
 }
 
+fn running_here(state: &inflight::InflightTurnState, record: &HostedExecution) -> bool {
+    state.provider == record.owner.provider
+        && state.tmux_session_name.as_ref() == Some(&record.owner.logical_key)
+        && state.tui_terminal_kind.is_none()
+        && state.terminal_receipt.is_none()
+        && !state.terminal_delivery_committed
+        && state.herdr_before_start_stop.is_none()
+        && !state.rebind_origin
+}
+
 /// Recover the exact first prompt boundary of a Claude prelaunch episode before taking its lease.
 fn recover_pathless(
     id: i64,
@@ -119,18 +122,12 @@ fn recover_pathless(
     let nonce = &record.execution_nonce;
     if state.provider != "claude"
         || state.runtime_kind != Some(ClaudeTui)
-        || state.tmux_session_name.as_ref() != Some(logical)
         || state.hosted_record_id.is_some_and(|other| other != id)
         || state
             .hosted_execution_nonce
             .as_ref()
             .is_some_and(|other| other != nonce)
         || state.turn_nonce.as_deref().is_none_or(str::is_empty)
-        || state.tui_terminal_kind.is_some()
-        || state.terminal_receipt.is_some()
-        || state.terminal_delivery_committed
-        || state.herdr_before_start_stop.is_some()
-        || state.rebind_origin
     {
         return None;
     }
