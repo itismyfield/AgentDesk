@@ -1,7 +1,7 @@
 # HerdrRetiredRow
 
-TLC reached 42 states and 106 steps. The chart draws 42 states and 84 arrows.
-The chart does not draw 22 steps that stay in one chart state.
+TLC reached 42 states and 148 steps. The chart draws 42 states and 84 arrows.
+The chart does not draw 64 steps that stay in one chart state.
 
 ## LostReaderNeverWrites breaks
 The shortest path has 2 steps:

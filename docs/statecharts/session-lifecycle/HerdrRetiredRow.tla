@@ -7,20 +7,23 @@
 \* token uncancelled), so it keeps posting "working" every 30 s (stream_tick.rs:663).
 \* lost: the inflight row the reader owned is gone or a successor's; ReaderStops TRUE is the r5 fix
 \* (turn_bridge/session_row_writer.rs) that ends the reader's active writes from then on.
+\* seen: a guarded save of the reader read its owned row as gone. FlushObserves TRUE (r5 fix 1) makes
+\* the tick's dirty flush release the writer too; ToolGuard TRUE (r5 fix 1) makes a released reader's
+\* tool frame record no tool mark or background child (stream_loop/tool_arms/session_activity.rs).
 EXTENDS Naturals
-CONSTANTS Path, Fence, FenceNonce, Cleanup, NewTurns, Restarts, ReaderStops
+CONSTANTS Path, Fence, FenceNonce, Cleanup, NewTurns, Restarts, ReaderStops, FlushObserves, ToolGuard
 VARIABLES exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-          lost, lostWrite, oldOverNew
+          lost, seen, lostWrite, oldOverNew
 
 vars == <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-          lost, lostWrite, oldOverNew>>
-readerVars == <<lost, lostWrite, oldOverNew>>
+          lost, seen, lostWrite, oldOverNew>>
+readerVars == <<lost, seen, lostWrite, oldOverNew>>
 Ended == {"disconnected", "idle"}
 
 Init ==
     /\ exec = "bound" /\ row = "turn_active" /\ nonce = 1 /\ fresh = TRUE /\ bridge = "alive"
     /\ ended = FALSE /\ refused = FALSE /\ turns = 0 /\ restarts = 0 /\ pres = "busy"
-    /\ phase = "run" /\ lost = FALSE /\ lostWrite = FALSE /\ oldOverNew = FALSE
+    /\ phase = "run" /\ lost = FALSE /\ seen = FALSE /\ lostWrite = FALSE /\ oldOverNew = FALSE
 
 \* update_target WHERE (canonical_identity.rs:927) plus retired_revival_fence when Fence.
 Blocked(s, n) ==
@@ -40,15 +43,39 @@ ReaderWrite(s) ==
     IF ReaderStops /\ lost
     THEN UNCHANGED <<row, nonce, fresh, ended, lostWrite, oldOverNew>>
     ELSE /\ Write(s, 0)
-         /\ lostWrite' = (lostWrite \/ (lost /\ ~Blocked(s, 0)))
+         /\ lostWrite' = (lostWrite \/ (seen /\ ~Blocked(s, 0)))
          /\ oldOverNew' = (oldOverNew \/ (nonce = 2 /\ ~Blocked(s, 0)))
 
-\* herdr_terminate.rs:607 retire_confirmed; queue.rs:464 force or herdr_row_end_live.rs:67.
+\* herdr_terminate.rs:607 retire_confirmed; queue.rs:464 force or herdr_row_end_live.rs:67. A force
+\* cancel removes the reader's inflight row; the reader's first guarded save to read that is either
+\* its tick preflight (stream_tick/runtime.rs) or its dirty flush (stream_tick.rs dirty_flush).
 Retire ==
     /\ phase = "run" /\ exec' = "retired"
     /\ phase' = IF Path = "force" THEN "postlude" ELSE "liveend"
-    /\ lost' = (Path = "force")
+    /\ seen' = (Path = "force")
+    /\ \/ lost' = (Path = "force")
+       \/ Path = "force" /\ lost' = FlushObserves
     /\ UNCHANGED <<row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, lostWrite, oldOverNew>>
+
+\* The next tick's preflight reads the row as gone and releases the writer.
+NextPreflight ==
+    /\ seen /\ ~lost /\ bridge = "alive" /\ lost' = TRUE
+    /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
+                   seen, lostWrite, oldOverNew>>
+
+\* tool_arms.rs: a late tool frame marks tool use (session_observability.rs mark_session_tool_use_pg,
+\* refused on disconnected/aborted and retired inactive rows) and registers a background child,
+\* which always writes the parent's active_children.
+ToolUse ==
+    /\ bridge = "alive"
+    /\ IF ToolGuard /\ lost
+       THEN UNCHANGED <<row, lostWrite, oldOverNew>>
+       ELSE /\ row' = IF row \in {"disconnected", "aborted"}
+                         \/ (exec = "retired" /\ row # "turn_active")
+                      THEN row ELSE "turn_active"
+            /\ lostWrite' = (lostWrite \/ seen)
+            /\ oldOverNew' = (oldOverNew \/ nonce = 2)
+    /\ UNCHANGED <<exec, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase, lost, seen>>
 
 \* cancel_effects.rs:383 -> http_force.rs:34 disconnect_retired_pg; the reader is not cancelled.
 ForcePostlude ==
@@ -62,18 +89,18 @@ LiveEnd ==
     /\ row' = IF Cleanup THEN "disconnected" ELSE row
     /\ ended' = (ended \/ Cleanup)
     /\ bridge' = IF bridge = "alive" THEN "exiting" ELSE bridge
-    /\ lost' = TRUE
+    /\ lost' = TRUE /\ seen' = TRUE
     /\ UNCHANGED <<exec, nonce, fresh, refused, turns, restarts, pres, lostWrite, oldOverNew>>
 
 \* stream_tick.rs:663: the reader's 30 s "working" hook (normalized to turn_active).
 Heartbeat ==
     /\ bridge = "alive" /\ ~(ReaderStops /\ lost) /\ ReaderWrite("turn_active")
-    /\ UNCHANGED <<exec, bridge, refused, turns, restarts, pres, phase, lost>>
+    /\ UNCHANGED <<exec, bridge, refused, turns, restarts, pres, phase, lost, seen>>
 
 \* post_loop_finalize.rs:450 TURN_ACTIVE once the reader's loop ends.
 BridgeExit ==
     /\ bridge = "exiting" /\ bridge' = "final" /\ ReaderWrite("turn_active")
-    /\ UNCHANGED <<exec, refused, turns, restarts, pres, phase, lost>>
+    /\ UNCHANGED <<exec, refused, turns, restarts, pres, phase, lost, seen>>
 
 \* completion_postlude.rs:211 terminal IDLE under the turn's nonce, or skipped when its
 \* channel-effect/status-panel conditions fail.
@@ -129,11 +156,12 @@ PresenceStale ==
 Next ==
     \/ Retire \/ ForcePostlude \/ LiveEnd \/ Heartbeat \/ BridgeExit \/ BridgeFinal
     \/ StaleTick \/ Sweep \/ Install \/ NewTurn \/ NewTurnEnd \/ Restart \/ PresenceStale
+    \/ NextPreflight \/ ToolUse
 
 Fair ==
     /\ WF_vars(Retire) /\ WF_vars(ForcePostlude) /\ WF_vars(LiveEnd) /\ WF_vars(Heartbeat)
     /\ WF_vars(BridgeExit) /\ WF_vars(BridgeFinal) /\ WF_vars(StaleTick) /\ WF_vars(Sweep)
-    /\ WF_vars(NewTurnEnd) /\ WF_vars(PresenceStale) /\ WF_vars(Restart)
+    /\ WF_vars(NewTurnEnd) /\ WF_vars(PresenceStale) /\ WF_vars(Restart) /\ WF_vars(NextPreflight)
 
 Spec == Init /\ [][Next]_vars /\ Fair
 
@@ -144,7 +172,7 @@ NoRevival == ~(ended /\ row = "turn_active" /\ nonce = 1)
 EndedTurnNotSelectable == (phase = "done" /\ nonce = 1) => row # "turn_active"
 \* A turn start under a new nonce is never refused.
 NewTurnNotRefused == ~refused
-\* The reader that lost its inflight row never writes the session row again.
+\* The reader whose guarded save read its inflight row as gone never writes the session row again.
 LostReaderNeverWrites == ~lostWrite
 \* The retired turn's reader never overwrites the new incarnation turn's row.
 NewTurnRowNotOverwritten == ~oldOverNew
