@@ -183,8 +183,12 @@ pub(super) fn classify_tui_interrupt_phase(
 ) -> ClaudeTuiInterruptPhase {
     match structured_state {
         Some(TuiTurnState::Idle) => ClaudeTuiInterruptPhase::PromptReady,
+        // The tail stays a user record until the first reply and while a tool that returned at
+        // once still runs, so a pane showing the turn live decides for a submitted turn too.
+        Some(TuiTurnState::UserSubmitted | TuiTurnState::Streaming) if pane_active => {
+            ClaudeTuiInterruptPhase::ActiveGeneration
+        }
         Some(TuiTurnState::UserSubmitted) => ClaudeTuiInterruptPhase::UserSubmitted,
-        Some(TuiTurnState::Streaming) if pane_active => ClaudeTuiInterruptPhase::ActiveGeneration,
         Some(TuiTurnState::Streaming | TuiTurnState::Unknown) => ClaudeTuiInterruptPhase::Ambiguous,
         None if pane_ready => ClaudeTuiInterruptPhase::PromptReady,
         None => ClaudeTuiInterruptPhase::Ambiguous,
@@ -231,8 +235,8 @@ pub(super) fn decide_claimed_claude_stop_delivery(
 /// Delivery uses Escape for the interactive TUI or a stream-json interrupt
 /// control request for the wrapper FIFO. A token-local CAS reserves one attempt
 /// and commits only after successful provider I/O; skipped or failed attempts
-/// roll back. Escape requires streaming and current active-pane evidence,
-/// rechecked under the composer lock before writing.
+/// roll back. Escape requires an open transcript turn (submitted or streaming) and current
+/// active-pane evidence, rechecked under the composer lock before writing.
 pub(super) async fn interrupt_claude_turn_session_preserving(
     token: &Arc<CancelToken>,
     tmux_session: Option<String>,

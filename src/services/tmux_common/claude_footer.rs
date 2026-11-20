@@ -18,6 +18,19 @@ pub(crate) fn bypass_interrupt(row: &str) -> Option<bool> {
     }
 }
 
+/// Whether the capture's recent rows carry Claude's own `esc to interrupt` chrome: the footer
+/// under the composer or a spinner's status group. Prose quoting the phrase does not count.
+pub(crate) fn interrupt_offered(capture: &str) -> bool {
+    let rows: Vec<&str> = capture
+        .lines()
+        .filter(|row| !row.trim().is_empty())
+        .collect();
+    let recent = rows
+        .len()
+        .saturating_sub(super::CLAUDE_TUI_ACTIVE_SCAN_LINES);
+    super::tmux_recent_lines_show_claude_tui_interrupt_chrome(&rows[recent..])
+}
+
 /// The status text after the bypass prefix, mode hint and update notice; None is unrecognised.
 fn status_rest(row: &str) -> Option<&str> {
     let rest = row.trim_end().strip_prefix(BYPASS_FOOTER)?;
