@@ -279,7 +279,8 @@ fn run(
         .unwrap_or_else(|error| error.into_inner());
     let log_root = BindingLogRoot(binding_events::test_root());
     binding_events::set_test_root(Some(test_root.path()));
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
