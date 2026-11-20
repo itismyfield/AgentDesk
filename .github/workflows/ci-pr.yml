@@ -1096,7 +1096,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 57a7754fa23640c527c5ee93bbc2de5005e6dde76f266cd35ca846156590cd45
+          pin scripts/check-ci-runner-hardening.sh dc62fa5b50c85c85e2d55a08e2b0ab93725df06ac9315cd98cb658d1546622f0
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1528,7 +1528,7 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/landing-regen-head" "$PR_HEAD_SHA"
-          python3 scripts/landing/regen_after_merge.py --check \
+          python3 scripts/landing/regen_after_merge.py --check --pr-head \
             --worktree "$RUNNER_TEMP/landing-regen-head" --artifact-dir target/landing-regen
       - name: Upload landing regeneration diff
         if: always()
@@ -1700,8 +1700,25 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: contracts
+          GENERATED_ARTIFACT_REPORT_DIR: target/generated-contracts
           SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
           SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
+
+      - name: Upload statechart index
+        uses: actions/upload-artifact@v4
+        with:
+          name: statechart-index-pr-${{ github.run_attempt }}
+          path: target/generated-contracts/statechart-index/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload user feature map
+        uses: actions/upload-artifact@v4
+        with:
+          name: user-feature-map-pr-${{ github.run_attempt }}
+          path: target/generated-contracts/user-feature-map/
+          if-no-files-found: error
+          retention-days: 14
 
   relay_authority_mutations:
     name: Relay authority mutations (${{ matrix.shard }})
