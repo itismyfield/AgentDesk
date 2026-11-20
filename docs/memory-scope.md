@@ -45,6 +45,27 @@ existing git common-directory workspace and session cache behavior.
 Anchor cache keys include the group so changing groups within a session fetches
 that group’s own shared anchors instead of reusing the previous group’s snapshot.
 
+## Identifier spelling
+
+Memento workspace names are case-sensitive. `AgentDesk` and `agentdesk` are
+different stores, so a PascalCase write splits AgentDesk memory off the
+canonical workspace.
+
+The AgentDesk workspace id is the lowercase string `agentdesk`. The product
+name, the repository name, and an `AgentDesk` path segment are not workspace
+ids. On every AgentDesk-scoped `context`, `recall`, `remember`,
+`batch_remember`, `reflect`, `amend`, `forget`, and `memory_consolidate` call,
+pass `workspace` as `agentdesk`. Do not pass `AgentDesk`. Do not omit
+`workspace` for AgentDesk-scoped memory. Omitting `workspace` is only the
+global audience, and that audience still uses `agentId` `default`.
+
+Do not pass `AgentDesk` as `agentId`. `agentId` is the agent's role id, or
+`default` when the write is group-shared or global. The product display name
+is not an agent id.
+
+Other configured groups keep their own workspace names (for example
+`cookingheart`). Do not retarget those calls to `agentdesk`.
+
 ## Choosing an audience
 
 - **Private (default):** confirmed preferences or facts relevant to this agent,

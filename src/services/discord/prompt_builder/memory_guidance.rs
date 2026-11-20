@@ -114,7 +114,7 @@ pub(super) fn proactive_memory_guidance_with(
                 current_path,
                 &exists,
             ) {
-                "\n- full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes."
+                "\n- full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes. AgentDesk-scoped `context`, `recall`, `remember`, `batch_remember`, `reflect`, `amend`, `forget`, and `memory_consolidate` must pass lowercase `workspace` `agentdesk` and must not omit `workspace`; never pass `AgentDesk` as `workspace` or `agentId` (use the role id or `default`). Other groups keep their configured workspace."
             } else {
                 ""
             };
@@ -295,6 +295,10 @@ mod tests {
             !guidance.contains("docs/memory-scope.md"),
             "foreign workspace must not reference docs/memory-scope.md, got: {guidance}"
         );
+        assert!(
+            !guidance.contains("lowercase `workspace` `agentdesk`"),
+            "foreign workspace must not be told to use the AgentDesk workspace id, got: {guidance}"
+        );
     }
 
     #[test]
@@ -320,6 +324,12 @@ mod tests {
         assert!(
             guidance.contains("full memory policy: `docs/memory-scope.md`"),
             "AgentDesk workspace must keep docs/memory-scope.md, got: {guidance}"
+        );
+        assert!(
+            guidance.contains(
+                "AgentDesk-scoped `context`, `recall`, `remember`, `batch_remember`, `reflect`, `amend`, `forget`, and `memory_consolidate` must pass lowercase `workspace` `agentdesk` and must not omit `workspace`; never pass `AgentDesk` as `workspace` or `agentId` (use the role id or `default`). Other groups keep their configured workspace."
+            ),
+            "AgentDesk workspace must require the lowercase workspace id, got: {guidance}"
         );
         assert!(guidance.contains("mcp__memento__tool_feedback"));
     }
