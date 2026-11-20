@@ -1929,10 +1929,10 @@ async fn a_headless_claim_returns_the_token_it_registered() {
             UserId::new(100),
             &reservation,
             identity,
-            None,
+            (None, None),
         )
         .await;
-        let Ok((_transition, token)) = claimed else {
+        let Ok((_transition, token, false)) = claimed else {
             panic!("an idle channel claims");
         };
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;

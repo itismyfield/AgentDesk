@@ -13,6 +13,24 @@ pub(in crate::services::discord) struct Restore<'a> {
     pub tmux: Option<&'a str>,
 }
 
+pub(in crate::services::discord) const CONTINUED_HERDR: &str = "continued_herdr_execution";
+
+pub(in crate::services::discord) async fn continued_session_id(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    logical: Option<&str>,
+) -> Option<String> {
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical?)?;
+    let live = binding.session_id?;
+    let mut data = shared.core.lock().await;
+    if let Some(session) = data.sessions.get_mut(&channel)
+        && session.session_id.as_deref() != Some(live.as_str())
+    {
+        session.restore_provider_session(Some(live.clone()));
+    }
+    Some(live)
+}
+
 pub(in crate::services::discord) async fn restore(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -146,7 +164,22 @@ pub(super) async fn prepare_intake_owner(
         return Ok((owner, false));
     }
     let (provider, channel, logical, key) = route;
-    OwnerTurn::early(shared, provider, channel, logical, key, owner, force_fresh).await
+    let owner = match owner {
+        Some(owner) => Some(
+            owner
+                .submit_restarted_busy(shared, provider, channel)
+                .await?,
+        ),
+        None => None,
+    };
+    OwnerTurn::early(
+        shared,
+        (provider, channel, logical, key),
+        owner,
+        force_fresh,
+        lease,
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -199,6 +232,7 @@ pub(in crate::services::discord) async fn selected_reply(
     crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext,
     Option<String>,
 ) {
-    let prepared = super::retry_prompt::prepare(shared, provider, channel, context).await;
+    let prepared =
+        super::retry_prompt::prepare_for_owner(shared, provider, channel, context, false).await;
     (prepared.context, prepared.rendered)
 }

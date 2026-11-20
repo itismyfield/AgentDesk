@@ -965,32 +965,42 @@ pub(super) async fn handle_text_message(
         } else {
             sanitized_input
         };
-        super::input_payload::restore_session(
-            shared, &provider, channel_id,
-            super::input_payload::SessionRestore {
-                session_id: &mut session_id,
-                memento_context_loaded: &mut memento_context_loaded,
-                reason: &mut session_strategy_reason,
-                force_fresh: force_fresh_provider_session,
-                cleared: session_was_cleared,
-                reset: dispatch_reset_provider_state,
-                recreate: dispatch_recreate_tmux,
-                session_key: adk_session_key.as_deref(),
-                tmux: tmux_session_name.as_deref(),
-            },
-        ).await;
         #[cfg(unix)]
         let (owner, legacy_busy_diagnostic) = match session_preparation::prepare_intake_owner(
             shared, (&provider, channel_id, tmux_session_name.as_deref(), adk_session_key.as_deref()),
             owner,
             (force_fresh_provider_session, session_was_cleared || dispatch_reset_provider_state || dispatch_recreate_tmux),
-            None,
+            intake_runtime_transition.lease(shared, channel_id).as_ref(),
         ).await {
             Ok(owner) => owner,
             Err(()) => {
                 return Ok(IntakeExecution::deferred(channel_id));
             }
         };
+
+        #[cfg(unix)]
+        let continued_herdr = owner.as_ref().is_some_and(super::OwnerTurn::continues_herdr);
+        #[cfg(not(unix))]
+        let continued_herdr = false;
+        if continued_herdr {
+            session_strategy_reason = session_preparation::CONTINUED_HERDR;
+            session_id = session_preparation::continued_session_id(shared, channel_id, tmux_session_name.as_deref()).await;
+        } else {
+            super::input_payload::restore_session(
+                shared, &provider, channel_id,
+                super::input_payload::SessionRestore {
+                    session_id: &mut session_id,
+                    memento_context_loaded: &mut memento_context_loaded,
+                    reason: &mut session_strategy_reason,
+                    force_fresh: force_fresh_provider_session,
+                    cleared: session_was_cleared,
+                    reset: dispatch_reset_provider_state,
+                    recreate: dispatch_recreate_tmux,
+                    session_key: adk_session_key.as_deref(),
+                    tmux: tmux_session_name.as_deref(),
+                },
+            ).await;
+        }
 
         let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
 
@@ -1323,7 +1333,7 @@ pub(super) async fn handle_text_message(
             message_id: placeholder_msg_id,
             fresh: reusable_busy_notice.is_none(),
         };
-        let prepared_prompt = retry_prompt::prepare(shared, &provider, channel_id, retry_prompt_context).await;
+        let prepared_prompt = retry_prompt::prepare_for_owner(shared, &provider, channel_id, retry_prompt_context, continued_herdr).await;
         let session_retry_context = prepared_prompt.recovery.clone();
         let feedback_reminder: Option<String> = None;
         let wip_warning: Option<String> = None;
@@ -1372,7 +1382,7 @@ pub(super) async fn handle_text_message(
         // Prepend pending file uploads
         let memory_injection_plan =
             build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
-        let channel_recent_context = load_channel_recent_context(
+        let channel_recent_context = if continued_herdr { None } else { load_channel_recent_context(
             shared.pg_pool.as_ref(),
             channel_id,
             session_id.as_deref(),
@@ -1384,7 +1394,7 @@ pub(super) async fn handle_text_message(
             active_dispatch_id_for_prompt.as_deref(),
             session_retry_context.as_ref(),
         )
-        .await;
+        .await };
         let materialized_uploads = super::input_payload::prepare_uploads(
             &pending_uploads,
             shared.pg_pool.as_ref(),

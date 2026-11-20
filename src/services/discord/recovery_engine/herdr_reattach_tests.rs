@@ -298,6 +298,28 @@ pub(in crate::services::discord) fn run(
     let admission = crate::services::herdr_admission::force_for_test(
         crate::services::herdr_admission::Admission::new(true, Some(stop.clone())),
     );
+    let rig = HerdrRig::start();
+    let mut config = crate::config::Config::default();
+    config.cluster.instance_id = Some(NODE.into());
+    config.agents.push(serde_json::from_value(serde_json::json!({
+        "id": "reattach", "name": "Reattach", "provider": provider.as_str(),
+        "channels": {(provider.as_str()): {"id": CHANNEL.to_string(), "name": "reattach", "runtime": "tui"}}
+    })).unwrap());
+    let herdr = &mut config.session_hosts.herdr;
+    herdr.endpoints.insert(
+        "fixture".to_owned(),
+        crate::config::session_hosts::EndpointConfig {
+            mode: crate::config::session_hosts::EndpointMode::LegacyDedicated,
+            execution_node: NODE.into(),
+            socket_path: rig.socket().to_owned(),
+            herdr_home: "/adk/herdr".into(),
+            herdr_session: "agentdesk".into(),
+        },
+    );
+    herdr
+        .channels
+        .insert(CHANNEL.to_string(), "fixture".to_owned());
+    let thread_config = config.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -305,22 +327,22 @@ pub(in crate::services::discord) fn run(
             std::mem::forget(crate::services::herdr_admission::force_for_test(
                 crate::services::herdr_admission::Admission::new(true, Some(stop.clone())),
             ));
-            std::mem::forget(crate::config::session_hosts::force_for_test(
-                Some(NODE),
-                &[(CHANNEL, NODE)],
+            std::mem::forget(crate::config::session_hosts::force_config_for_test(
+                &thread_config,
             ));
         })
         .build()
         .unwrap();
-    let hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
+    let hosts = crate::config::session_hosts::force_config_for_test(&config);
     let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-    let rig = HerdrRig::start();
-    let registry = rig.registry_as_on_this_thread(
+    let endpoint = crate::services::session_host::HerdrEndpoint::new(
         NODE,
         &endpoint.key,
-        &endpoint.socket_path,
+        rig.socket(),
         &endpoint.herdr_session,
-    );
+    )
+    .unwrap();
+    let registry = rig.policy_registry_on_this_thread(endpoint, |host| host);
     let codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
     let fixture = runtime.block_on(Fixture::new(rig, provider, tag, busy));
     verify(fixture, &runtime);
@@ -338,8 +360,8 @@ fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
             fx.legacy_boot(rt);
             assert_eq!(
                 fx.owner(),
-                None,
-                "the landed boot path keeps the old registry behavior"
+                Some(ChannelId::new(CHANNEL)),
+                "boot publishes the same owner before the first input"
             );
         }
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
@@ -640,4 +662,94 @@ fn conflicting_registry_refuses_publication_pg() {
             rt.block_on(fx.close());
         },
     );
+}
+
+fn snapshot_labels(fx: &Fixture, labels: &[String]) {
+    let workspaces: Vec<_> = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            serde_json::json!({"workspace_id": format!("w{}", index + 1), "label": label,
+            "pane_count": u32::from(index == 0), "tab_count": 1})
+        })
+        .collect();
+    fx.rig.answer(
+        "session.snapshot",
+        serde_json::json!({"type":"session_snapshot","snapshot":{
+            "version":"0.9.3", "protocol":22, "workspaces":workspaces,
+            "panes":[{"pane_id":PANE,"terminal_id":"t1","workspace_id":"w1","tab_id":"w1:1",
+                      "focused":true,"agent_status":"idle","revision":7}]
+        }}),
+    );
+}
+
+#[test]
+fn restarted_unique_name_updates_bound_pane_once_pg() {
+    run(ProviderKind::Claude, "s2-name-unique", false, |fx, rt| {
+        snapshot_labels(&fx, &[format!("{}#{NONCE}", fx.logical())]);
+        let mut stale = fx.record.clone();
+        stale.location.as_mut().unwrap().pane_id = "w0:p1".into();
+        rt.block_on(fx.save(&stale));
+        fx.legacy_boot(rt);
+        rt.block_on(async {
+            let saved = read_row(&fx.pool, fx.logical()).await;
+            assert_eq!(saved.record, HostedRecord::Known(fx.record.clone()));
+            assert_eq!(fx.owner(), Some(ChannelId::new(CHANNEL)));
+            assert!(fx.rig.sends().is_empty(), "boot only reattaches");
+        });
+        fx.legacy_boot(rt);
+        rt.block_on(async {
+            assert_eq!(
+                read_row(&fx.pool, fx.logical()).await.record,
+                HostedRecord::Known(fx.record.clone())
+            );
+            fx.close().await;
+        });
+    });
+}
+
+fn assert_name_conflict_uses_exact_path(duplicate: bool) {
+    run(
+        ProviderKind::Claude,
+        if duplicate {
+            "s2-name-duplicate"
+        } else {
+            "s2-name-other"
+        },
+        false,
+        |fx, rt| {
+            let other = format!("{}#{SUCCESSOR}", fx.logical());
+            let labels = if duplicate {
+                vec![format!("{}#{NONCE}", fx.logical()), other]
+            } else {
+                vec![other]
+            };
+            snapshot_labels(&fx, &labels);
+            rt.block_on(async {
+                let mut stored = fx.record.clone();
+                stored.expected.as_mut().unwrap().provider_process.start =
+                    "old-process-start".into();
+                let row = fx.save(&stored).await;
+                let lease =
+                    SessionTransitionLease::try_acquire(&fx.shared, ChannelId::new(CHANNEL))
+                        .unwrap();
+                let (result, observed) = continue_owner(&fx.shared, &fx.pool, &lease, &row).await;
+                assert_eq!(result, VerifiedReattach::Held);
+                assert_eq!(observed, row);
+                fx.assert_unpublished();
+                drop(lease);
+                fx.close().await;
+            });
+        },
+    );
+}
+
+#[test]
+fn restarted_duplicate_workspace_names_use_exact_pane_evidence_pg() {
+    assert_name_conflict_uses_exact_path(true);
+}
+
+#[test]
+fn restarted_workspace_nonce_mismatch_uses_exact_pane_evidence_pg() {
+    assert_name_conflict_uses_exact_path(false);
 }

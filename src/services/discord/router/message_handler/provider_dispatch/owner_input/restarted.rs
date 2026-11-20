@@ -4,9 +4,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedObservation, HostedRecord, HostedState,
 };
 use crate::services::discord::herdr_terminate::root_replaced;
-use crate::services::discord::recovery_engine::herdr_reattach::{VerifiedReattach, verify_owner};
+use crate::services::discord::recovery_engine::herdr_reattach::{VerifiedReattach, continue_owner};
 use crate::services::discord::session_transition::SessionTransitionLease;
-use crate::services::discord::turn_presence::activity::{Activity, activity_now};
 use crate::services::herdr_launch::clear_epoch::{self, Epoch};
 use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
 
@@ -48,6 +47,10 @@ type Route<'a> = (
 );
 
 impl OwnerTurn {
+    pub(in crate::services::discord) fn continues_herdr(&self) -> bool {
+        self.late.restarted.is_some()
+    }
+
     pub(in crate::services::discord) fn awaiting_restarted_clear(&self) -> bool {
         self.late.awaiting_clear()
     }
@@ -60,6 +63,16 @@ impl OwnerTurn {
         (provider, channel, logical, key): Route<'_>,
         transition: &SessionTransitionLease<'_>,
     ) -> Result<Self, ()> {
+        if self.mailbox.has_active_turn().await == Ok(true)
+            && crate::services::discord::inflight::load_inflight_state_read_only(
+                provider,
+                channel.get(),
+            )
+            .is_none_or(|row| row.hosted_execution_nonce.is_none())
+        {
+            // The regular Busy path already owns this turn.
+            return Ok(self);
+        }
         let host = crate::services::turn_host::for_observation(
             shared.pg_pool.as_ref(),
             provider,
@@ -72,7 +85,7 @@ impl OwnerTurn {
             TurnHost::Herdr(plan) => match plan.row {
                 None => return Ok(self),
                 Some(row) if matches!(&row.record, HostedRecord::Legacy) => return Ok(self),
-                Some(row) if matches!(&row.record, HostedRecord::Known(record) if record.state == HostedState::Retired) =>
+                Some(row) if matches!(&row.record, HostedRecord::Known(record) if record.state != HostedState::Bound) =>
                 {
                     return Ok(self);
                 }
@@ -91,7 +104,11 @@ impl OwnerTurn {
                 if crate::services::herdr_admission::check().is_ok() =>
             {
                 let epoch = epoch_for(record, channel);
-                match verify_owner(shared, pool, transition, row).await {
+                let (result, refreshed) = continue_owner(shared, pool, transition, row).await;
+                let HostedRecord::Known(record) = &refreshed.record else {
+                    unreachable!()
+                };
+                match result {
                     // The normal provider path still has to adjudicate recovery.
                     VerifiedReattach::Ended => return Ok(self),
                     result @ (VerifiedReattach::Live | VerifiedReattach::AwaitingClear) => {
@@ -99,7 +116,7 @@ impl OwnerTurn {
                         herdr_endpoints().view(record).map(|pane| {
                             ExistingFront(Box::new(Existing {
                                 pool: pool.clone(),
-                                row: row.clone(),
+                                row: refreshed.clone(),
                                 pane,
                                 epoch,
                                 awaiting_clear: result == VerifiedReattach::AwaitingClear,
@@ -113,14 +130,7 @@ impl OwnerTurn {
             _ => None,
         };
 
-        // Claude's early path takes a current Busy grant for a person. The other starts wait for
-        // Idle with the same front, while the drive's existing Busy path can take its own grant.
-        let wait_for_idle = candidate.is_some();
-        if let Some(candidate) = candidate
-            && (candidate.0.awaiting_clear
-                || person_claude(&self, provider)
-                || activity_now(shared, provider, channel).await.activity == Activity::Idle)
-        {
+        if let Some(candidate) = candidate {
             self.late.restarted = Some(candidate);
             return Ok(self);
         }
@@ -130,7 +140,7 @@ impl OwnerTurn {
             provider.clone(),
             channel,
             key.map(str::to_owned),
-            (row, wait_for_idle),
+            row,
         );
         hold_start(&self.mailbox, channel, self.front()).await;
         held_watch::arm(channel.get(), probe);
@@ -138,10 +148,6 @@ impl OwnerTurn {
         self.defer_before_submit("herdr_restart_held");
         Err(())
     }
-}
-
-fn person_claude(owner: &OwnerTurn, provider: &ProviderKind) -> bool {
-    *provider == ProviderKind::Claude && owner.origin.is_person()
 }
 
 fn exact_execution(record: &HostedExecution, reading: &PaneReading) -> bool {
@@ -165,7 +171,7 @@ fn probe(
     provider: ProviderKind,
     channel: ChannelId,
     key: Option<String>,
-    (previous, wait_for_idle): (Option<HostedObservation>, bool),
+    previous: Option<HostedObservation>,
 ) -> held_watch::ScreenProbe {
     let view = previous.as_ref().and_then(|row| match &row.record {
         HostedRecord::Known(record) => herdr_endpoints().view(record),
@@ -207,22 +213,12 @@ fn probe(
         if !exact_execution(record, &reading) {
             return Screen::Unknown;
         }
-        if !wait_for_idle {
-            let logical = &record.owner.logical_key;
-            let owner = shared.tmux_watchers.owner_channel_for_tmux_session(logical);
-            return if owner.is_none_or(|owner| owner == channel) {
-                Screen::Ready
-            } else {
-                Screen::Blocked
-            };
-        }
-        match handle
-            .block_on(activity_now(&shared, &provider, channel))
-            .activity
-        {
-            Activity::Idle => Screen::Ready,
-            Activity::Busy => Screen::Blocked,
-            Activity::Unknown => Screen::Unknown,
+        let logical = &record.owner.logical_key;
+        let owner = shared.tmux_watchers.owner_channel_for_tmux_session(logical);
+        if owner.is_none_or(|owner| owner == channel) {
+            Screen::Ready
+        } else {
+            Screen::Blocked
         }
     })
 }

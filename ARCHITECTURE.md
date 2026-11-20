@@ -2289,6 +2289,7 @@ src/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
+│   │   │   │   ├── live_reattach.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
@@ -2488,7 +2489,8 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── owned_busy/
-│   │   │   │   │   │   └── missing_watch.rs
+│   │   │   │   │   │   ├── missing_watch.rs
+│   │   │   │   │   │   └── reconnect.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
@@ -2532,6 +2534,7 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   ├── restart_busy.rs
 │   │   │   │   │   │   ├── restarted.rs
 │   │   │   │   │   │   └── restarted_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests/

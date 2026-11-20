@@ -228,6 +228,8 @@ pub(in crate::services::discord) fn owner_drive(
                 Some(context) if synthetic => claude_handoff::Start::Kept(context),
                 _ => claude_handoff::Start::Person,
             };
+            restart_busy::recover_active(runtime.as_ref(), &provider, ChannelId::new(channel))
+                .await;
             let shared = runtime.as_ref();
             // A handoff's own hold and the first start after it settle below like any other result.
             let handoff = match origin {
@@ -401,66 +403,16 @@ pub(in crate::services::discord) async fn hand_busy(
     (channel, front): (u64, Front),
     runtime: Option<Shared>,
 ) -> Result<(), String> {
-    let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel)
-        .ok_or_else(unobserved)?;
-    let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
-    let key = row.session_key.as_deref();
-    let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
-    let origin = front_origin(&mailbox, &front).await?;
-    let observed = owned_busy::running(
-        runtime.as_ref(),
-        &mailbox,
-        (&provider, origin),
-        (channel, &session, &host),
+    let (row, session, host, owner) = restart_busy::registration(
+        (&mailbox, pool.as_ref(), runtime.as_ref()),
+        &provider,
+        channel,
         &front,
     )
     .await?;
-    // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
-    // already has the binding that the idle observer used before submitting the first input.
-    let binding = (provider == ProviderKind::Claude
-        && matches!(&host, TurnHost::Tmux)
-        && row.output_path.is_none())
-    .then(|| crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session))
-    .flatten()
-    .filter(|binding| {
-        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-    });
-    let output = row
-        .output_path
-        .as_deref()
-        .or_else(|| binding.as_ref().map(|binding| binding.output_path.as_str()));
-    let native = binding
-        .as_ref()
-        .and_then(|binding| binding.session_id.as_deref())
-        .or(row.session_id.as_deref());
-    let live = output.map(|path| (path, native));
-    let at = (&host, session.as_str(), live);
-    let kind = (provider.as_str(), origin, true);
-    let owner = observed
-        .map(Ok)
-        .unwrap_or_else(|| Registration::observed(mailbox.clone(), kind, at, &front.1, None))
-        .map_err(|error| {
-            if effect::surely_unsent(&error) {
-                error
-            } else {
-                effect::unsent(format!("busy_source_unavailable: {error}"))
-            }
-        })?;
-    if owner.phase != target::Phase::Busy {
-        return Err(unobserved());
-    }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
-    // The running turn's token learns the attempt before its paste can land a row.
-    let active = mailbox.cancel_token().await.ok().flatten();
-    if let (Some(active), Some(attempt)) = (active, owner.attempt["nonce"].as_str())
-        && active
-            .turn_nonce()
-            .is_some_and(|nonce| row.turn_nonce.as_deref() == Some(nonce))
-        && !active.native_stop.is_completed()
-    {
-        crate::services::discord::inflight::record_native_busy_child(&row, &active, attempt);
-    }
+    restart_busy::link_attempt(&mailbox, &row, owner.attempt["nonce"].as_str()).await;
     let (settled, answer) = tokio::sync::oneshot::channel();
     let thread = paste_busy(
         (pool, provider, runtime),
@@ -776,6 +728,9 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
     }
 }
+
+#[path = "owner_input/restart_busy.rs"]
+mod restart_busy;
 
 #[path = "owner_input_start_wait.rs"]
 mod start_wait;

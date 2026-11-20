@@ -151,8 +151,8 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!(
             after.0 - before.0,
-            1,
-            "the actual idle intake made the early decision"
+            usize::from(missing),
+            "the actual idle intake makes an early decision after the identity check"
         );
         let row: Value =
             sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
@@ -170,17 +170,20 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
             .v2_request(|slot| slot.as_ref().unwrap().json())
             .await
             .unwrap();
-        assert!(
-            state["items"].as_array().unwrap().is_empty(),
-            "idle input stayed queued"
-        );
+        let items = state["items"].as_array().unwrap();
+        assert_eq!(items.len(), usize::from(!missing));
+        if !missing {
+            assert_eq!(items[0]["message_id"], MESSAGE);
+            assert_eq!(items[0]["text"], INPUT);
+        }
         assert!(
             state["retained_inputs"].as_array().unwrap().is_empty(),
             "refused input was retained"
         );
-        assert!(!discord::queue_io::input_owner::held_watch::has_watch(
-            CHANNEL
-        ));
+        assert_eq!(
+            discord::queue_io::input_owner::held_watch::has_watch(CHANNEL),
+            !missing,
+        );
         assert!(
             !intake
                 .shared
@@ -195,8 +198,8 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
                 .iter()
                 .filter(|call| call.contains("이 입력을 폐기했습니다"))
                 .count(),
-            1,
-            "one channel reason"
+            usize::from(missing),
+            "only proven terminal failure may discard the original"
         );
         assert_eq!(fx.rig.sends().len(), 2, "no input reached the old pane");
     });
@@ -209,6 +212,7 @@ fn a_missing_idle_bound_pane_retires_and_a_failed_restart_discards_the_front_pg(
     idle_case(true, false);
 }
 
+// Keep the existing test ID in the PG lane. Its custody assertion now requires the original.
 #[test]
 fn an_unreadable_idle_bound_pane_is_not_retired_and_its_front_is_discarded_pg() {
     idle_case(false, false);
@@ -224,3 +228,215 @@ mod success;
 
 #[path = "provider_dispatch_herdr_missing_race_tests.rs"]
 mod capture_race;
+
+fn restarted_front(busy: bool) {
+    use crate::services::discord::inflight;
+    use crate::services::tui_prompt_dedupe;
+
+    let fx = Fixture::new(
+        if busy {
+            "restart-busy-front"
+        } else {
+            "restart-idle-front"
+        },
+        None,
+    );
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let mut intake = Intake::new(&fx, &started);
+    let old_runtime = recording_runtime(&mut intake, &fx, true);
+    let _rest = test_rest::install(intake._api.http.clone());
+    tui_prompt_dedupe::reset_state_for_tests();
+    tui_prompt_dedupe::binding_events::forget_channel_for_tests(CHANNEL);
+    fx.rig.answer("session.snapshot", json!({"type":"session_snapshot","snapshot":{
+        "version":"0.9.3", "protocol":22,
+        "workspaces":[{"workspace_id":"w1","label":format!("{}#{nonce}", fx.logical()),"pane_count":1,"tab_count":1}],
+        "panes":[{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":7}]
+    }}));
+    let screen = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
+    ));
+    let screen = if busy {
+        screen.replace("Baked", "Thinking")
+    } else {
+        screen.to_owned()
+    };
+    fx.rig.answer(
+        "pane.read",
+        json!({"type":"pane_read","read":{
+            "pane_id":PANE,"source":"recent_unwrapped","text":screen,"revision":2,"truncated":false
+        }}),
+    );
+    let before = fx.rig.sends().len();
+    let reply = "answer after Herdr reattach";
+    let answer_path = started.path.clone();
+    let session = started.session.clone();
+    let mut answered = false;
+    fx.rig.on_send(move |params| {
+        if !answered && params["keys"] == json!(["enter"]) {
+            answered = true;
+            append(&answer_path, &[
+                json!({"type":"user","uuid":uuid(),"sessionId":session,"timestamp":chrono::Utc::now().to_rfc3339(),"message":{"role":"user","content":INPUT}}),
+                json!({"type":"assistant","uuid":uuid(),"sessionId":session,"message":{
+                    "id":"restart-reply","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":reply}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
+            ]);
+        }
+    });
+    intake.runtime.block_on(async {
+        let channel = ChannelId::new(CHANNEL);
+        let mut record = match fx.record() {
+            HostedRecord::Known(record) => record,
+            other => panic!("expected a Bound execution, got {other:?}"),
+        };
+        record.location.as_mut().unwrap().pane_id = "w0:p1".into();
+        let row_id: i64 = sqlx::query_scalar(
+            "UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2 RETURNING id",
+        )
+        .bind(serde_json::to_value(&record).unwrap())
+        .bind(CHANNEL.to_string())
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        intake
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = None;
+        if busy {
+            let offset = std::fs::metadata(&started.path).unwrap().len();
+            append(
+                &started.path,
+                &[
+                    json!({"type":"user","uuid":uuid(),"sessionId":started.session,
+                "message":{"role":"user","content":"already running before restart"}}),
+                ],
+            );
+            let mut row = inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                CHANNEL,
+                None,
+                7,
+                MESSAGE - 1,
+                MESSAGE - 2,
+                "already running before restart".into(),
+                Some(started.session.clone()),
+                Some(fx.logical().to_owned()),
+                Some(started.path.display().to_string()),
+                None,
+                offset,
+            );
+            row.session_key = discord::adk_session::turn_session_key(
+                &intake.shared,
+                channel,
+                &ProviderKind::Claude,
+            )
+            .await;
+            row.turn_nonce = Some("old-active-episode".into());
+            row.turn_start_offset = Some(offset);
+            row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            row.hosted_record_id = Some(row_id);
+            row.hosted_execution_nonce = Some(nonce.clone());
+            row.born_generation = 1;
+            row.restart_generation = Some(1);
+            inflight::save_inflight_state(&row).unwrap();
+        }
+        let front = intake.front().await;
+        let start = dispatch::start_idle_for_test(intake.shared.clone(), channel, front);
+        let claimant = async {
+            if !busy {
+                return;
+            }
+            use crate::services::discord::router::{
+                claim_reserved_headless_turn, reserve_headless_turn,
+            };
+            let reserved = reserve_headless_turn();
+            let race = claim_reserved_headless_turn(
+                &intake.shared,
+                channel,
+                UserId::new(7),
+                &reserved,
+                (ProviderKind::Claude, None),
+                (None, Some(&intake.shared)),
+            )
+            .await;
+            assert!(matches!(
+                race,
+                Err(crate::services::discord::router::HeadlessTurnStartError::Conflict(_))
+            ));
+            let held = discord::mailbox_snapshot(&intake.shared, channel).await;
+            assert_eq!(
+                held.active_turn_nonce.as_deref(),
+                Some("old-active-episode")
+            );
+        };
+        let (result, ()) = tokio::join!(tokio::time::timeout(LIMIT, start), claimant);
+        assert_eq!(result.expect("first input resolves"), Ok(()));
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len(), before + 2, "{sends:?}");
+        assert_eq!(sends[before]["pane_id"], PANE);
+        assert_eq!(sends[before + 1]["pane_id"], PANE);
+        let payload = sends[before]["text"].as_str().unwrap();
+        assert_eq!(payload.matches(INPUT).count(), 1);
+        assert!(!payload.contains("already running before restart"));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        let busy_marks = intake
+            .shared
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .filter(|op| op.target.message_id.get() == MESSAGE && op.emoji == '➕' && op.add)
+            .count();
+        assert_eq!(busy_marks, usize::from(busy));
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        let saved: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE id=$1")
+            .bind(row_id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(saved["location"]["pane_id"], PANE);
+        assert_eq!(saved["state"], "bound");
+        assert_eq!(saved["execution_nonce"], nonce);
+        tokio::time::timeout(LIMIT, async {
+            loop {
+                let sent = intake.posts.to(CHANNEL);
+                if sent.iter().any(|message| message.contains(reply)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the same pane's reply reached the channel");
+        assert!(
+            !intake
+                ._api
+                .take()
+                .iter()
+                .any(|call| call.contains("이 입력을 폐기했습니다")
+                    || call.contains("세션 복구 중")
+                    || call.contains("세션 복원"))
+        );
+    });
+    drop(intake);
+    drop(old_runtime);
+}
+
+#[test]
+fn first_idle_input_after_restart_reuses_named_herdr_and_posts_once_pg() {
+    restarted_front(false);
+}
+
+#[test]
+fn first_busy_input_after_restart_reuses_named_herdr_while_headless_claim_waits_pg() {
+    restarted_front(true);
+}

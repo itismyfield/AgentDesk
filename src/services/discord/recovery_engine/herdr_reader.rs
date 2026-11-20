@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
-use super::herdr_reattach::{RestartAttachment, VerifiedReattach, reconnect_source};
+use super::herdr_reattach::{
+    RestartAttachment, VerifiedReattach, continue_owner, reconnect_source,
+};
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
     reconcile_hosted,
@@ -498,6 +500,16 @@ fn reconnect_unless_pending(
         }
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
+        let (continued, refreshed) = continue_owner(shared, pool, &transition, row).await;
+        if matches!(
+            continued,
+            VerifiedReattach::Live | VerifiedReattach::AwaitingClear
+        ) {
+            return (Reconnect::Published, None);
+        }
+        if refreshed != *row {
+            return (Reconnect::Withheld, None);
+        }
         let attached = match reconnect_source(pool, row, None).await {
             RestartAttachment::Legacy(attached) => attached,
             RestartAttachment::Verified(
@@ -511,6 +523,15 @@ fn reconnect_unless_pending(
         };
         if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
             use crate::services::herdr_launch::retire::{self, Scope};
+            if let Some(host) = herdr_endpoints().launch_host() {
+                let record = record.clone();
+                if !matches!(
+                    tokio::task::spawn_blocking(move || host.named_panes(&record)).await,
+                    Ok(Ok(None))
+                ) {
+                    return (Reconnect::Withheld, None);
+                }
+            }
             return match retire::observed(pool, row, Scope::Missing).await {
                 Ok(_) => (Reconnect::Retired, None),
                 Err(error) => {

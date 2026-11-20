@@ -224,6 +224,35 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
     }
 }
 
+async fn before_headless_claim(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> Result<bool, HeadlessTurnStartError> {
+    #[cfg(unix)]
+    {
+        use crate::services::discord::recovery_engine::herdr_reattach::{
+            VerifiedReattach, continue_channel,
+        };
+        use HeadlessTurnStartError::Conflict;
+        let lease = crate::services::discord::session_transition::SessionTransitionLease::borrow(
+            shared, channel, guard,
+        )
+        .map_err(|_| Conflict("channel transition changed".into()))?;
+        match continue_channel(shared, provider, channel, &lease).await {
+            Some(VerifiedReattach::Held) => {
+                return Err(Conflict("Herdr continuation pending".into()));
+            }
+            Some(VerifiedReattach::Live | VerifiedReattach::AwaitingClear) => return Ok(true),
+            _ => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (shared, provider, channel, guard);
+    Ok(false)
+}
+
 /// Waits out the channel's session transition, then claims the mailbox slot for a reserved
 /// headless turn in the reservation's admission order, or as the owner's granted `front`; the
 /// guard is held until the start ends.
@@ -233,8 +262,11 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     request_owner: UserId,
     reservation: &HeadlessTurnReservation,
     (provider, role_id): (ProviderKind, Option<String>),
-    front: Option<crate::services::turn_orchestrator::OwnerFront>,
-) -> Result<(tokio::sync::OwnedMutexGuard<()>, Arc<CancelToken>), HeadlessTurnStartError> {
+    (front, shared_pane): (
+        Option<crate::services::turn_orchestrator::OwnerFront>,
+        Option<&Arc<SharedData>>,
+    ),
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, Arc<CancelToken>, bool), HeadlessTurnStartError> {
     let channel = channel_id.get();
     let transition = shared.acquire_session_transition(channel_id).await;
     let transition = transition.map_err(|_| {
@@ -243,6 +275,10 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
             format!("session transition stayed busy for {wait} seconds on channel {channel}");
         HeadlessTurnStartError::Conflict(error)
     })?;
+    let continued = match shared_pane {
+        Some(owner) => before_headless_claim(owner, &provider, channel_id, &transition).await?,
+        None => false,
+    };
     let cancel_token = Arc::new(CancelToken::new());
     cancel_token.native_stop.receipt_sink().arm_first_key();
     let (token, message) = (cancel_token.clone(), reservation.user_msg_id);
@@ -263,7 +299,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
         let error = format!("agent mailbox is busy for channel {channel}");
         return Err(HeadlessTurnStartError::Conflict(error));
     }
-    Ok((transition, cancel_token))
+    Ok((transition, cancel_token, continued))
 }
 
 // idle/턴수와 무관하게 resume id를 보존한다. 명시적 초기화는 !clear 또는 /clear로 한다.
@@ -669,6 +705,20 @@ pub(crate) struct IntakeRuntimeTransition {
 }
 
 impl IntakeRuntimeTransition {
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn lease<'a>(
+        &'a self,
+        shared: &'a SharedData,
+        channel: ChannelId,
+    ) -> Option<crate::services::discord::session_transition::SessionTransitionLease<'a>> {
+        crate::services::discord::session_transition::SessionTransitionLease::borrow(
+            shared,
+            channel,
+            &self._guard,
+        )
+        .ok()
+    }
+
     pub(in crate::services::discord) fn session_was_cleared(&self, taken_cleared: bool) -> bool {
         taken_cleared || self.recovered_fresh
     }

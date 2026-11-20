@@ -7,17 +7,19 @@ use super::host_reconcile::{
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
+    refresh_bound_pane_pg,
 };
-use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_restarted_herdr_source, awaits_own_clear, nonce_baseline,
     prepare_restarted_binding, publish_restarted_binding,
 };
+use crate::services::discord::{ChannelId, SharedData};
 use crate::services::herdr_launch::clear_epoch;
+use crate::services::provider::ProviderKind;
 use crate::services::session_host::{
-    HerdrPaneView, HostKind, PaneReading, restore_execution_fence,
+    HerdrPaneView, HostKind, PaneReading, ServerWitness, herdr_endpoints, restore_execution_fence,
 };
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 use crate::services::tmux_common::with_tmux_source_authority;
@@ -46,6 +48,26 @@ pub(in crate::services::discord) enum VerifiedReattach {
     Held,
 }
 
+pub(in crate::services::discord) async fn continue_channel(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    transition: &SessionTransitionLease<'_>,
+) -> Option<VerifiedReattach> {
+    use super::herdr_server_replaced::canonical_row;
+    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get())?;
+    if crate::config::session_hosts::local_node().as_deref()
+        != Some(endpoint.execution_node.as_str())
+    {
+        return None;
+    }
+    let pool = shared.pg_pool.as_ref()?;
+    let row = canonical_row(pool, &shared.token_hash, provider, channel).await?;
+    matches!(&row.record, HostedRecord::Known(record) if record.state == HostedState::Bound)
+        .then_some(())?;
+    Some(continue_owner(shared, pool, transition, &row).await.0)
+}
+
 /// The owner's channel lease is the same authority the boot path uses.
 pub(in crate::services::discord) async fn verify_owner(
     shared: &SharedData,
@@ -54,6 +76,114 @@ pub(in crate::services::discord) async fn verify_owner(
     observed: &HostedObservation,
 ) -> VerifiedReattach {
     verify_with(shared, pool, transition, observed, Verification::default()).await
+}
+
+/// Resolve the usual name before consulting the previous placement. All paths still publish
+/// under the channel transition and the current clear epoch.
+pub(in crate::services::discord) async fn continue_owner(
+    shared: &std::sync::Arc<SharedData>,
+    pool: &PgPool,
+    transition: &SessionTransitionLease<'_>,
+    observed: &HostedObservation,
+) -> (VerifiedReattach, HostedObservation) {
+    let held = || (VerifiedReattach::Held, observed.clone());
+    let HostedRecord::Known(record) = &observed.record else {
+        return held();
+    };
+    let Ok((provider, channel)) = root_replaced::local(shared, record) else {
+        return held();
+    };
+    if record.state != HostedState::Bound
+        || provider != shared.provider
+        || !transition.matches(shared, channel)
+    {
+        return held();
+    }
+    let registry = herdr_endpoints();
+    let Some(host) = registry.launch_host() else {
+        let result = verify_owner(shared, pool, transition, observed).await;
+        return finish_continuation(shared, observed.clone(), result).await;
+    };
+    let stored = record.clone();
+    let Ok(Ok(named)) = tokio::task::spawn_blocking(move || {
+        let Some((witness, panes)) = host.named_panes(&stored)? else {
+            return Ok(None);
+        };
+        let mut live = panes.iter().filter(|pane| {
+            let mut candidate = stored.clone();
+            if let Some(at) = candidate.location.as_mut() {
+                at.pane_id.clone_from(pane);
+            }
+            registry
+                .view(&candidate)
+                .and_then(|view| view.observe_execution())
+                .is_some_and(|(server, reading)| {
+                    server == witness
+                        && matches!(
+                            reading,
+                            PaneReading::Present {
+                                provider: crate::services::session_host::PaneProvider::Execution(_),
+                                ..
+                            }
+                        )
+                })
+        });
+        let selected = live.next();
+        if live.next().is_some() {
+            return Err("multiple live agent panes in the named workspace".to_string());
+        }
+        match selected {
+            Some(pane) => Ok(Some((witness, pane.clone()))),
+            None if panes
+                .iter()
+                .any(|pane| Some(pane) == stored.location.as_ref().map(|at| &at.pane_id)) =>
+            {
+                Ok(None)
+            }
+            None => Err("named workspace is present without a confirmed live pane".into()),
+        }
+    })
+    .await
+    else {
+        return held();
+    };
+    let Some((witness, pane)) = named else {
+        let result = verify_owner(shared, pool, transition, observed).await;
+        return finish_continuation(shared, observed.clone(), result).await;
+    };
+    if root_replaced::current(pool, observed).await.is_err() {
+        return held();
+    }
+    let Ok(Some(row)) = refresh_bound_pane_pg(pool, observed, pane).await else {
+        return held();
+    };
+    let result = verify_selected(
+        shared,
+        pool,
+        transition,
+        &row,
+        Verification::default(),
+        Some(witness),
+    )
+    .await;
+    finish_continuation(shared, row, result).await
+}
+
+async fn finish_continuation(
+    shared: &std::sync::Arc<SharedData>,
+    row: HostedObservation,
+    result: VerifiedReattach,
+) -> (VerifiedReattach, HostedObservation) {
+    let live = matches!(
+        result,
+        VerifiedReattach::Live | VerifiedReattach::AwaitingClear
+    );
+    let result = if live && !super::restore_inflight::reattach_live_herdr(shared, &row).await {
+        VerifiedReattach::Held
+    } else {
+        result
+    };
+    (result, row)
 }
 
 struct CapturedPane {
@@ -133,6 +263,17 @@ async fn verify_with(
     observed: &HostedObservation,
     checks: Verification,
 ) -> VerifiedReattach {
+    verify_selected(shared, pool, transition, observed, checks, None).await
+}
+
+async fn verify_selected(
+    shared: &SharedData,
+    pool: &PgPool,
+    transition: &SessionTransitionLease<'_>,
+    observed: &HostedObservation,
+    checks: Verification,
+    named: Option<ServerWitness>,
+) -> VerifiedReattach {
     use VerifiedReattach::{Ended, Held};
     let HostedRecord::Known(record) = &observed.record else {
         return Held;
@@ -164,7 +305,9 @@ async fn verify_with(
         reading: reading.clone(),
     };
     let verdict = reconcile_hosted(&HostedLookup::Found(observed.clone()), &captured);
-    if !(exited || (checks.live)(&verdict)) {
+    let named_live = named.as_ref() == Some(&witness)
+        && matches!(&reading, HerdrPaneReading::Present(evidence) if evidence.provider_process.is_some());
+    if !(exited || named_live || (checks.live)(&verdict)) || (named.is_some() && !named_live) {
         return Held;
     }
 
@@ -191,7 +334,17 @@ async fn verify_with(
         return Held;
     };
     let stored = record.clone();
+    let launch = herdr_endpoints().launch_host();
     let unchanged = tokio::task::spawn_blocking(move || {
+        if named_live
+            && !launch
+                .and_then(|host| host.named_panes(&stored).ok().flatten())
+                .is_some_and(|(current, panes)| {
+                    current == witness && panes.contains(&captured.pane_id)
+                })
+        {
+            return false;
+        }
         reader.observe(&stored, ended) == Some((witness, reading, exited))
     })
     .await;
