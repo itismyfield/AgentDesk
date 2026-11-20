@@ -112,7 +112,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         return;
     }
 
-    Box::pin(restore_inflight_states(http, shared, provider, states)).await;
+    Box::pin(super::restore_serially(http, shared, provider, states)).await;
     boot.settle_cleared(shared, provider).await;
     replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
 }

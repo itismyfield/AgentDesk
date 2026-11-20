@@ -435,7 +435,7 @@ async fn maybe_recover_completed_stale_leak(
     if chunks.is_empty() {
         return false;
     }
-    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
+    // O posts this channel's TUI body; Legacy resends nothing and settles only a row O owes.
     // A held identity also resends nothing; only a resending pass may end a pending adoption.
     let kind = (state.channel_id == channel_id.get())
         .then_some(state.runtime_kind)
@@ -448,12 +448,12 @@ async fn maybe_recover_completed_stale_leak(
                 "stale-leak recovery skipped: O owns or holds this channel's TUI body"
             );
         }
-        held
+        held.then_some(owned == Ok(true))
     };
-    if o_holds(
+    if let Some(owned) = o_holds(
         crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id.get(), kind),
     ) {
-        return false;
+        return owned && discord::recovery_paths::o_duty::settle_owed_leak(provider, &state, end);
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
     let mut confirmed_chunks =
@@ -608,7 +608,7 @@ async fn maybe_recover_completed_stale_leak(
                 crate::services::tui_o::channel_policy::ClaimReason::IdentityHeld,
             ),
         };
-        if o_holds(owned) {
+        if o_holds(owned).is_some() {
             return false;
         }
         (send, reason)
@@ -5160,6 +5160,8 @@ mod legacy_channel_backfill_tests {
     }
 }
 
+#[cfg(test)]
+mod o_owed_leak_tests;
 #[cfg(test)]
 mod retirement_await_tests;
 

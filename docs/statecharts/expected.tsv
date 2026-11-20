@@ -1421,9 +1421,13 @@ tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
 tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
+tui-o-writer/WriterAdoptionLateExemptIntake.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
+tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
+tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
 tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
+tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-

@@ -263,7 +263,7 @@ pub(super) async fn run_standby_relay(
                 BodyClaim::new(channel_id.get(), turn_binding.runtime_kind)
                     .for_turn(turn_binding.turn_nonce.as_deref())
             });
-            let Ok(BodySend::Sent(delivered)) = turn_binding
+            let sent = turn_binding
                 .census_source
                 .clone()
                 .observe(
@@ -273,8 +273,8 @@ pub(super) async fn run_standby_relay(
                         claim_then_send_at(BodySite::StandbyRelay, claim, send).await
                     }),
                 )
-                .await
-            else {
+                .await;
+            let Some(delivered) = scheduled_settle::delivered(sent, &provider, channel_id) else {
                 return;
             };
             if delivered {

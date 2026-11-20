@@ -240,4 +240,21 @@ async fn an_unobserved_held_context_leaves_later_ambient_metadata_intact() {
     let tag = Some(serde_json::json!({"site":"W30", "reason":"RELEASED"}));
     let actual = census_scope(tag.clone(), context.run(async { current_census() })).await;
     assert_eq!(actual, tag);
+
+    let candidate = channel_policy::Candidate::new(channel_policy::Adoption::Pending);
+    let claimed = candidate.claim_body(9_765_104);
+    let context = BodyTransport::inherited(BodySite::StandbyRelay, claimed.send, claimed.reason);
+    assert_eq!(candidate.sends(), (1, 0));
+    let actual = census_scope(
+        tag.clone(),
+        context.run(async {
+            tokio::task::yield_now().await;
+            current_census()
+        }),
+    )
+    .await;
+    assert_eq!(actual, tag);
+    assert_eq!(candidate.sends(), (1, 0));
+    drop(context);
+    assert_eq!(candidate.sends(), (1, 1));
 }

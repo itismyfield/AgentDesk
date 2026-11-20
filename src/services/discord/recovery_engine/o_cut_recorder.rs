@@ -55,6 +55,65 @@ pub(in crate::services::discord) async fn start(channel_id: u64) -> DiscordRecor
     start_with(channel_id, false).await
 }
 
+/// What the first POST does: wait for `release` after firing `arrived`, or answer 500.
+pub(in crate::services::discord) struct FirstPost {
+    pub(in crate::services::discord) arrived: tokio::sync::Notify,
+    pub(in crate::services::discord) release: tokio::sync::Semaphore,
+    hold: bool,
+    fail: bool,
+    fail_all: bool,
+    posts: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for FirstPost {
+    fn default() -> Self {
+        Self {
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            hold: false,
+            fail: false,
+            fail_all: false,
+            posts: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl FirstPost {
+    pub(in crate::services::discord) fn holding() -> Arc<Self> {
+        Arc::new(Self {
+            hold: true,
+            ..Self::default()
+        })
+    }
+
+    pub(in crate::services::discord) fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            fail: true,
+            ..Self::default()
+        })
+    }
+
+    /// Every POST, not only the first, answers 500.
+    pub(in crate::services::discord) fn failing_always() -> Arc<Self> {
+        Arc::new(Self {
+            fail_all: true,
+            ..Self::default()
+        })
+    }
+
+    pub(in crate::services::discord) fn posts(&self) -> usize {
+        self.posts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// `start`, with the first POST shaped by `first`.
+pub(in crate::services::discord) async fn start_first_post(
+    channel_id: u64,
+    first: Arc<FirstPost>,
+) -> DiscordRecorder {
+    serve_with(channel_id, false, None, Some(first)).await
+}
+
 /// Also hands each request's content to `check` as it arrives.
 pub(in crate::services::discord) async fn start_watching(
     channel_id: u64,
@@ -77,12 +136,21 @@ async fn serve(
     gone_messages: bool,
     watched: Option<BodyCheck>,
 ) -> DiscordRecorder {
+    serve_with(channel_id, gone_messages, watched, None).await
+}
+
+async fn serve_with(
+    channel_id: u64,
+    gone_messages: bool,
+    watched: Option<BodyCheck>,
+    first: Option<Arc<FirstPost>>,
+) -> DiscordRecorder {
     let calls: Arc<Mutex<Vec<Call>>> = Arc::default();
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(900_001));
     let recorded = calls.clone();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
         let (recorded, next_id) = (recorded.clone(), next_id.clone());
-        let check = watched.clone();
+        let (check, first) = (watched.clone(), first.clone());
         async move {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             let content = payload["content"].as_str().map(str::to_owned);
@@ -98,6 +166,17 @@ async fn serve(
             });
             if method == Method::DELETE {
                 return (StatusCode::NO_CONTENT, String::new()).into_response();
+            }
+            let order = std::sync::atomic::Ordering::SeqCst;
+            if let Some(first) = first.filter(|_| method == Method::POST) {
+                let earlier = first.posts.fetch_add(1, order);
+                if earlier == 0 && first.hold {
+                    first.arrived.notify_one();
+                    first.release.acquire().await.unwrap().forget();
+                }
+                if (earlier == 0 && first.fail) || first.fail_all {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "{}").into_response();
+                }
             }
             if gone_messages && method == Method::GET {
                 let body = r#"{"message":"Unknown Message","code":10008}"#;

@@ -470,6 +470,41 @@ async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_on
     assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료", "next"]);
 }
 
+/// The held turn's own row never blocks adoption while another turn's open intake does: once the
+/// intake clears, the row still there, O takes the channel from the frontier and posts once.
+#[tokio::test(start_paused = true)]
+async fn the_held_turns_own_row_passes_while_another_turns_open_intake_blocks() {
+    let open = Open::new();
+    *open.io.custody.lock().unwrap() = Ok(Custody::Row);
+    open.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 1;
+    let _tasks = open.start().await;
+    let frontier = open.len();
+    append(&open.path, &[row("m1", "owed"), closed()].concat());
+    open.legacy.caught_up(&open.path);
+    open.legacy.frontier.store(frontier, Ordering::SeqCst);
+    retried().await;
+    open.assert_waiting("another turn's open intake blocks");
+    assert!(open.harness.port.posts().is_empty());
+
+    open.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 0;
+    // A transient refusal over an unchanged transcript is read again on its reread period.
+    retried().await;
+    retried().await;
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Committed,
+        "{:?}",
+        open.alarms()
+    );
+    assert_eq!(
+        open.start_of_o(),
+        Some(frontier),
+        "the row did not move the start"
+    );
+    polls(3).await;
+    assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료"]);
+}
+
 /// A binding log that binds each of `sources` in turn, from seq 1.
 fn binds(sources: &[&SourceId]) -> Vec<u8> {
     let event = |(at, source): (usize, &&SourceId)| {
@@ -482,8 +517,10 @@ fn binds(sources: &[&SourceId]) -> Vec<u8> {
     sources.iter().enumerate().flat_map(event).collect()
 }
 
+/// A source bound while a non-late adoption waited refuses the channel: the body stays held with
+/// a refusal alarm, nothing retries it here, and only a restart seeds the adoption again.
 #[tokio::test(start_paused = true)]
-async fn a_source_bound_while_waiting_leaves_the_channel_to_legacy() {
+async fn a_source_bound_while_waiting_refuses_the_channel_until_a_restart() {
     for resumed in [false, true] {
         let open = Open::new();
         let runtime = open.harness._runtime.path().to_path_buf();

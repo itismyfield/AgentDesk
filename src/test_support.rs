@@ -523,6 +523,7 @@ pub(crate) mod o_store {
         let init = |channel| {
             let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "test".into());
             Ok(Initialized {
+                policy_parent: None,
                 channel,
                 sources,
                 initial_anchor,
@@ -530,15 +531,19 @@ pub(crate) mod o_store {
                 at,
             })
         };
-        store.begin_era(channels, at, init).expect("an O store era");
+        store
+            .begin_fixture_era(channels, at, init)
+            .expect("an O store era");
     }
 
     /// Commits the installed adoption of `channel` as O's writer would, for a rig admitted
-    /// unadopted: the store's init must read back before the candidate is confirmed.
+    /// unadopted: the store's era and init must read back before the candidate is confirmed.
     pub(crate) fn adopt_installed(channel: u64) {
         let root = crate::config::runtime_root().expect("the test runtime root");
         commit_o_store(&root, &[channel]);
         let store = crate::services::tui_o::store::OStore::existing(&root).expect("the O store");
+        let era = store.read_era().expect("a readable era");
+        assert!(era.is_some(), "the adoption has its era on disk");
         let init = store.read_init(channel).expect("a readable init");
         assert!(init.is_some(), "the adoption has its init on disk");
         let boot = crate::services::tui_o::channel_policy::boot().expect("the boot policy");
