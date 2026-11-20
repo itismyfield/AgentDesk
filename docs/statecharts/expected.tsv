@@ -1244,7 +1244,9 @@ session-lifecycle/HerdrMissingBoundOwnerReset.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundOwnerStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityAfter.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityBeforeBusy.cfg	HerdrMissingBound	NoIdleOnly	ParityResolves
+session-lifecycle/HerdrMissingBoundParityBeforeClaimRace.cfg	HerdrMissingBound	NoCompetingClaim	ParityResolves
 session-lifecycle/HerdrMissingBoundParityBeforeUnproven.cfg	HerdrMissingBound	NoLiveDiscard	ParityResolves
+session-lifecycle/HerdrMissingBoundParityClaimRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityDuplicate.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityOtherNonce.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityResendUnknown.cfg	HerdrMissingBound	OwnerExactlyOnce	ParityResolves

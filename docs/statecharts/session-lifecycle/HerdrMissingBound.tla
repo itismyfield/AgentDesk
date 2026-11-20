@@ -414,13 +414,13 @@ OwnerDelivers ==
 
 \* The revised parity projection keeps the first input under the original owner.
 ParityTargets ==
-    IF Control \in {"busy", "unproven", "duplicate", "other-nonce"} THEN {"busy"}
+    IF Control \in {"busy", "unproven", "duplicate", "other-nonce", "headless-race"} THEN {"busy"}
     ELSE {"idle", "busy", "dead", "unknown"}
 
 ParityNames ==
     CASE Control = "duplicate" -> {"duplicate"}
       [] Control = "other-nonce" -> {"other"}
-      [] Control \in {"busy", "unproven"} -> {"unique"}
+      [] Control \in {"busy", "unproven", "headless-race"} -> {"unique"}
       [] OTHER -> {"unique", "duplicate", "other"}
 
 ParityInit ==
@@ -432,7 +432,7 @@ ParityInit ==
                      composer |-> composer, unproven |-> unproven, reconciled |-> FALSE,
                      front |-> 1, claimed |-> 0, route |-> "none", reattached |-> 0,
                      locationFresh |-> FALSE, lease |-> FALSE, grant |-> "none",
-                     provedEnd |-> FALSE, submits |-> 0]
+                     provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none"]
 
 ParityAssess ==
     /\ attach.phase = "queued" /\ attach.reconciled
@@ -456,10 +456,22 @@ ParityObserve ==
 
 ParityAttach ==
     /\ attach.phase \in {"named", "exact"} /\ attach.reattached = 0
+    /\ attach.headlessClaim # "new"
     /\ attach' = [attach EXCEPT !.phase = "attached", !.route = attach.phase,
                   !.locationFresh = attach.phase = "named", !.reattached = @ + 1,
                   !.lease = attach.target = "busy",
                   !.grant = IF attach.target = "busy" THEN "busy" ELSE "idle"]
+    /\ UNCHANGED vars
+
+\* The headless claim uses the same channel transition as reattach. The previous Busy
+\* execution takes its existing lease before the new claimant can mint a mailbox turn.
+ParityHeadlessClaim ==
+    /\ Control = "headless-race" /\ attach.target = "busy"
+    /\ attach.phase \in {"named", "exact", "attached", "reserved"}
+    /\ attach.headlessClaim = "none"
+    /\ attach' = [attach EXCEPT !.headlessClaim =
+                     IF Policy = "parity-headless-first" /\ ~attach.lease
+                     THEN "new" ELSE "refused"]
     /\ UNCHANGED vars
 
 ParityInputRule ==
@@ -505,7 +517,7 @@ ParityReject ==
 
 ParityNext ==
     Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
-    \/ ParityInputRule \/ ParityComposerClears \/ ParitySubmit \/ ParityObserveReceipt
+    \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParitySubmit \/ ParityObserveReceipt
     \/ ParityResendUnknown \/ ParityPublishReply \/ ParityReject \/ AttachDone
 
 ParitySpec ==
@@ -519,6 +531,7 @@ NoLiveDiscard == attach.target \in {"idle", "busy"} => attach.phase # "discarded
 NoIdleOnly == attach.phase # "idleOnly"
 NamedOnlyCurrent == attach.route = "named" => attach.name = "unique" /\ attach.locationFresh
 BusyAuthority == attach.grant = "busy" => attach.lease /\ attach.reattached = 1
+NoCompetingClaim == attach.headlessClaim # "new"
 ProvenRejection == attach.phase = "rejected" => attach.provedEnd /\ attach.target = "dead"
 ParityResolves ==
     [](attach.phase = "queued" => <> ((attach.phase = "done" /\ attach.submits = 1)

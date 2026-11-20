@@ -99,13 +99,15 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 
 `ParitySpec`은 이름으로 바뀐 pane 위치를 선택하는 경우와 기존 정밀 판정으로 내려가는 경우를 나눈다. 유일한 이름의 nonce가 DB와 같고 agent pane이 살아 있는 경우에만 이름 경로가 위치를 갱신한다. 재부착은 watcher와 registry를 연결하고, 작업 중이면 진행 턴 lease와 Busy grant를 인수한다. 이어 같은 원본을 평소 Busy 주입 또는 유휴 제출로 보낸다. 살아 있지만 Missing을 증명하지 못한 실행도 같은 경로를 사용한다. 평소 composer가 입력을 막으면 그 경계가 풀릴 때까지 같은 claim을 보존한다.
 
-`NoLiveDiscard`는 살아 있는 pane에 보낸 원본의 폐기를 막고, `OwnerExactlyOnce`는 응답 불명까지 제출 횟수에 포함한다. `NamedOnlyCurrent`는 복수 이름과 nonce 불일치가 이름 경로를 통과하는지, `BusyAuthority`는 Busy grant에 진행 턴 lease가 있는지 검사한다. `ParityResolves`는 결국 1회 제출과 답 게시 또는 종료 증명을 거친 거절에 도달하는지 확인한다. 영구 관찰 장애나 영구 composer 차단, 영구적으로 찾을 수 없는 receipt는 이 fairness 범위 밖이다. 중단·reset은 기존 Owner cfg에서 검증한다.
+`NoLiveDiscard`는 살아 있는 pane에 보낸 원본의 폐기를 막고, `OwnerExactlyOnce`는 응답 불명까지 제출 횟수에 포함한다. `NamedOnlyCurrent`는 복수 이름과 nonce 불일치가 이름 경로를 통과하는지, `BusyAuthority`는 Busy grant에 진행 턴 lease가 있는지 검사한다. `NoCompetingClaim`은 같은 채널의 새 headless claim이 기존 Busy lease를 앞지르는 경우를 검출한다. `ParityResolves`는 결국 1회 제출과 답 게시 또는 종료 증명을 거친 거절에 도달하는지 확인한다. 영구 관찰 장애나 영구 composer 차단, 영구적으로 찾을 수 없는 receipt는 이 fairness 범위 밖이다. 중단·reset은 기존 Owner cfg에서 검증한다.
 
 | cfg (HerdrMissingBoundParity 접두사) | 결과 | 상태 / 전이 | 산출 |
 |---|---|---:|---|
 | After | GREEN | 348 / 393 | [차트](herdr-reattach-parity-After.chart.mmd) · [결과](herdr-reattach-parity-After.report.md) |
 | BeforeBusy | RED `NoIdleOnly`, `ParityResolves` | 17 / 18 | [차트](herdr-reattach-parity-BeforeBusy.chart.mmd) · [반례](herdr-reattach-parity-BeforeBusy.report.md) |
+| BeforeClaimRace | RED `NoCompetingClaim`, `ParityResolves` | 30 / 38 | [차트](herdr-reattach-parity-BeforeClaimRace.chart.mmd) · [반례](herdr-reattach-parity-BeforeClaimRace.report.md) |
 | BeforeUnproven | RED `NoLiveDiscard`, `ParityResolves` | 12 / 12 | [차트](herdr-reattach-parity-BeforeUnproven.chart.mmd) · [반례](herdr-reattach-parity-BeforeUnproven.report.md) |
+| ClaimRace | GREEN | 30 / 40 | [차트](herdr-reattach-parity-ClaimRace.chart.mmd) · [결과](herdr-reattach-parity-ClaimRace.report.md) |
 | Duplicate | GREEN. 정밀 경로 | 20 / 23 | [차트](herdr-reattach-parity-Duplicate.chart.mmd) · [결과](herdr-reattach-parity-Duplicate.report.md) |
 | OtherNonce | GREEN. 정밀 경로 | 20 / 23 | [차트](herdr-reattach-parity-OtherNonce.chart.mmd) · [결과](herdr-reattach-parity-OtherNonce.report.md) |
 | TrustName | RED `NamedOnlyCurrent` | 20 / 23 | [차트](herdr-reattach-parity-TrustName.chart.mmd) · [반례](herdr-reattach-parity-TrustName.report.md) |
@@ -117,8 +119,9 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | E06–E08, E40 | `ParityAssess`, `ParityObserve`. local canonical 행, 이름과 현재 pane 관찰. |
 | E09–E18 | `ParityAttach`. 정확한 source·registry, watcher claim, 진행 턴 인수의 성공 경계. E11–E14의 별도 mirror 수리와 E18의 운영자 수동 선택 세부는 투영 밖. |
 | E19–E20, E47 | `FirstInput`, `ReconcileIntake`. 원본·ticket 재사용. catch-up 중복 세부는 기존 `OwnerCatchUp`. |
-| E21–E22, E25–E26 | `ParityAssess`, `ParityObserve`, `ParityInputRule`, `ParityComposerClears`. Idle/Busy 진입과 Unproven 보존. |
-| E23–E24, E30–E33, E52 | 기존 `ChooseRoute`·`ResumeEnded`의 selector와 복원 표시 투영. 이번 projection은 이어 쓰기에서 선택한 원본·pane만 관찰. |
+| E21–E22, E26 | `ParityAssess`, `ParityObserve`, `ParityInputRule`, `ParityComposerClears`. owner의 평소 Idle/Busy 진입, Unproven 보존. |
+| E25 | `ParityHeadlessClaim`, `ParityAttach`. 채널 transition 안에서 진행 턴 lease를 먼저 인수하고 같은 채널의 새 headless claim을 거절한다. |
+| E23–E24, E30–E33, E52 | 기존 `ChooseRoute`·`ResumeEnded`의 selector와 복원 표시 투영. 살아 있는 경로에서는 `ParityAttach` 직후 복원 문맥·표시를 고르지 않는다. 실제 resume의 후속 효과는 기존 모델에서 검증한다. |
 | E27–E29, E44, E51 | `ParityInputRule`, `ParitySubmit`, `ParityObserveReceipt`, `ParityPublishReply`. first-key 중단은 기존 `OwnerInterrupt`·`OwnerRejectBeforeKey`. |
 | E34–E38, E46, E48 | 기존 `OwnerInterrupt`·`OwnerRejectBeforeKey`, 이번 `ParityReject`의 증명 경계. 명시적 취소·clear의 운영 세부는 투영 밖. |
 | E39, E45, E50 | 기존 `ResumeEnded`. 새 프로세스 resume·표시는 조각 3 경계. |

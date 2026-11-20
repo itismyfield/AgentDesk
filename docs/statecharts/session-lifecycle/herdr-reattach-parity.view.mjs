@@ -31,7 +31,9 @@ export function state({ attach }) {
     rejected: "증명된 거절",
     discarded: "살아 있는 pane의 원본 폐기",
   };
-  const suffix = attach.submits > 1 ? " (중복 제출)" : "";
+  const claim = attach.headlessClaim === "new" ? " (새 headless claim이 기존 턴을 막음)"
+    : attach.headlessClaim === "refused" ? " (기존 lease에 headless claim 거절)" : "";
+  const suffix = attach.submits > 1 ? " (중복 제출)" : claim;
   return [targets[attach.initial], names[attach.name], labels[attach.phase] + suffix];
 }
 
@@ -42,6 +44,7 @@ const actions = {
   ParityAssess: "현재 pane과 이름을 확인",
   ParityObserve: "달라진 pane 증거로 같은 원본 재판정",
   ParityAttach: "위치·registry·watcher와 owner 인수",
+  ParityHeadlessClaim: "같은 채널의 새 headless claim",
   ParityInputRule: "평소 입력 규칙 적용",
   ParityComposerClears: "composer가 입력 가능한 상태로 전환",
   ParitySubmit: "원본 한 번 전달",
