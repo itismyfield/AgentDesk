@@ -1319,6 +1319,13 @@ session-lifecycle/HerdrRestartSkipClose.cfg	HerdrRestart	AAfterConfirmedEnd,Sing
 session-lifecycle/HerdrRestartUnknownRow.cfg	HerdrRestart	-	-
 session-lifecycle/HerdrRetiredMarkerBefore.cfg	HerdrRootRecovery	-	RetiredInputProgress
 session-lifecycle/HerdrRetiredMarkerFixed.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrRetiredRowAfter.cfg	HerdrRetiredRow	-	-
+session-lifecycle/HerdrRetiredRowBefore.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowLiveEndAfter.cfg	HerdrRetiredRow	-	-
+session-lifecycle/HerdrRetiredRowLiveEndBefore.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	-
+session-lifecycle/HerdrRetiredRowNewTurn.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowNoNonce.cfg	HerdrRetiredRow	NewTurnNotRefused,NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowRestart.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrRootWakeBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress

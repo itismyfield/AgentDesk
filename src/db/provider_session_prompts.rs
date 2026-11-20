@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 
 #[derive(Clone, FromRow)]
-pub(crate) struct SessionPrompt {
+pub struct SessionPrompt {
     pub provider: String,
     pub channel_id: String,
     pub provider_session_id: String,
@@ -12,7 +12,7 @@ pub(crate) struct SessionPrompt {
     pub anchor_count: i64,
 }
 
-pub(crate) async fn fetch(
+pub async fn fetch(
     pool: &PgPool,
     provider: &str,
     channel: &str,
@@ -22,7 +22,7 @@ pub(crate) async fn fetch(
         .bind(provider).bind(channel).bind(session).fetch_optional(pool).await
 }
 
-pub(crate) async fn fetch_latest_session_id(
+pub async fn fetch_latest_session_id(
     pool: &PgPool,
     provider: &str,
     channel: &str,
@@ -31,7 +31,7 @@ pub(crate) async fn fetch_latest_session_id(
         .bind(provider).bind(channel).fetch_optional(pool).await
 }
 
-pub(crate) async fn save(pool: &PgPool, prompt: &SessionPrompt) -> Result<(), sqlx::Error> {
+pub async fn save(pool: &PgPool, prompt: &SessionPrompt) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     // Serialize insert/prune for one channel so concurrent starts cannot exceed the bound.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")

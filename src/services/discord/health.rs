@@ -106,7 +106,6 @@ pub(crate) use super::turn_presence::supervisor::status as turn_presence_status;
 pub(crate) use super::turn_presence::supervisor::tests::seed_long_unknown_for_tests;
 #[cfg(test)]
 pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
-pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{
