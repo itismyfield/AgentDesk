@@ -2,7 +2,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
+pub fn redact_sensitive_for_placeholder(input: &str) -> String {
     static OPENAI_KEY_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}").expect("valid key regex"));
     static BEARER_RE: LazyLock<Regex> =
@@ -22,7 +22,7 @@ pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
 }
 
 /// All available tools with (name, description, is_destructive)
-pub(crate) const ALL_TOOLS: &[(&str, &str, bool)] = &[
+pub const ALL_TOOLS: &[(&str, &str, bool)] = &[
     ("Bash", "Execute shell commands", true),
     ("Read", "Read file contents from the filesystem", false),
     ("Edit", "Perform find-and-replace edits in files", true),
@@ -74,7 +74,7 @@ pub(crate) const ALL_TOOLS: &[(&str, &str, bool)] = &[
 ];
 
 /// Map a user-provided tool name onto its canonical Claude Code tool name.
-pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
+pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return None;
@@ -87,7 +87,7 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
 }
 
 /// Canonicalize, dedupe, and discard unknown tool names while preserving input order.
-pub(crate) fn normalize_allowed_tools<I, S>(tools: I) -> Vec<String>
+pub fn normalize_allowed_tools<I, S>(tools: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,

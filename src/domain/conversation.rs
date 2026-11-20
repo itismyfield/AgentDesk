@@ -4,22 +4,22 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct ConversationId(pub(crate) u64);
+pub struct ConversationId(pub u64);
 
 impl ConversationId {
-    pub(crate) const fn new(raw: u64) -> Self {
+    pub const fn new(raw: u64) -> Self {
         Self(raw)
     }
 
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct MessageRef {
-    pub(crate) conversation: ConversationId,
-    pub(crate) raw: String,
+pub struct MessageRef {
+    pub conversation: ConversationId,
+    pub raw: String,
 }
 
 #[cfg(test)]
