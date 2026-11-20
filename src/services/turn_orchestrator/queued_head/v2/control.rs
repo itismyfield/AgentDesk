@@ -223,19 +223,7 @@ fn cancel(
             if first == 0 && at <= owner.followers().len() {
                 owner.revoke_front();
             }
-            next.owe_queued(
-                [at + first],
-                TerminalOutcome::Cancelled,
-                super::origin::now_ms(),
-            );
-            let item = next.items.remove(at + first);
-            let dropped = std::slice::from_ref(&item);
-            super::effort_continue::close_dropped(
-                &mut next,
-                super::effort_continue::Dropped::Only(dropped),
-            );
-            next.handoff_input_left(&sources::identity(&item));
-            next.unbind_item(at + first);
+            let item = next.take_cancelled(at + first, super::origin::now_ms());
             match owner.commit(next) {
                 Ok(()) => {
                     let (now, instant) = (SystemTime::now(), Instant::now());
@@ -261,6 +249,20 @@ fn cancel(
             .collect(),
         removed,
         persistence_error,
+    }
+}
+
+impl SnapshotV2 {
+    pub(super) fn take_cancelled(&mut self, index: usize, now: u64) -> PendingQueueItem {
+        self.owe_queued([index], TerminalOutcome::Cancelled, now);
+        let item = self.items.remove(index);
+        super::effort_continue::close_dropped(
+            self,
+            super::effort_continue::Dropped::Only(std::slice::from_ref(&item)),
+        );
+        self.handoff_input_left(&sources::identity(&item));
+        self.unbind_item(index);
+        item
     }
 }
 

@@ -164,17 +164,18 @@ impl Owner {
         key: &AttemptRef,
         now: &dyn Fn() -> u64,
     ) -> Result<(), String> {
-        let Some(hold) = self.attempt_readiness_hold(key) else {
-            return Ok(());
-        };
         if self.first_key_approved.as_ref() == Some(key) {
             return Ok(());
         }
-        if now() >= hold.due_at_ms {
+        let readiness_due = self.attempt_readiness_hold(key).map(|hold| hold.due_at_ms);
+        if readiness_due.is_some_and(|due| now() >= due) {
             self.due_refused = Some(key.clone());
             return Err("readiness_deadline".into());
         }
-        self.first_key_approved = Some(key.clone());
+        self.approve_routine_first_key(key, now)?;
+        if readiness_due.is_some() {
+            self.first_key_approved = Some(key.clone());
+        }
         Ok(())
     }
 

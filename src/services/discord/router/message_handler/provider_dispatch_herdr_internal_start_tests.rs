@@ -129,3 +129,124 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
     drop(admission_guard);
     drop(registry_guard);
 }
+
+#[test]
+fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
+    use crate::services::claude_tui::busy_inject::Screen;
+    use crate::services::discord::queue_io::input_owner::held_watch;
+    use crate::services::routines::{NewRoutine, RoutineAgentExecutor, RoutineStore};
+    use discord::router::message_handler::provider_dispatch::OwnerTurn;
+
+    let fx = Fixture::new("routine-settlement-herdr-idle", None);
+    let launcher = Arc::new(Launcher::default());
+    let (_, started) = reconnect::launch_pinless(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    let registry_guard = fx.rig.registry_on_this_thread();
+    let admission_guard = open_admission();
+    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
+    native_busy(&started);
+    intake.runtime.block_on(async {
+        let _router = app(&fx, &intake).await;
+        let channel = ChannelId::new(CHANNEL);
+        let registry = Arc::new(HealthRegistry::new());
+        registry
+            .register("claude".into(), intake.shared.clone())
+            .await;
+        let http = intake.shared.serenity_http_or_token_fallback().unwrap();
+        registry.register_http("claude".into(), http).await;
+
+        let pool = Arc::new(fx.pool.clone());
+        let store =
+            RoutineStore::new_with_timezone_and_checkpoint_limit(pool.clone(), "UTC", 262144);
+        let now = chrono::Utc::now();
+        store
+            .attach_routine(NewRoutine {
+                agent_id: Some("busy-entry".into()),
+                fallback_agent_id: None,
+                max_retries: Some(0),
+                script_ref: "settlement.js".into(),
+                name: "Herdr idle settlement".into(),
+                status: None,
+                execution_strategy: "persistent".into(),
+                schedule: None,
+                next_due_at: Some(now - chrono::Duration::minutes(1)),
+                checkpoint: None,
+                discord_thread_id: None,
+                timeout_secs: Some(60),
+            })
+            .await
+            .unwrap();
+        let run = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+        let turn = discord::router::reserve_headless_turn().turn_id(channel);
+        let context = json!({
+            "status":"input_pending", "origin":"routine","provider":"claude","turn_id":turn,
+            "run_id":run.run_id,"routine_id":run.routine_id,"agent_id":"busy-entry",
+            "execution_strategy":"persistent","execution_mode":"tmux",
+            "channel_id":CHANNEL.to_string(),"synthetic_label":null,"is_dm":false,
+            "channel_name_hint":fx.logical().strip_prefix("AgentDesk-claude-"),
+            (ChannelMailboxHandle::ROUTINE_DELIVERY_DEADLINE):now.timestamp_millis()
+        });
+        let execution = ChannelMailboxHandle::owner_input_execution("claude", CHANNEL, false);
+        let owned = intake
+            .mailbox
+            .owned_start(execution, (&turn, CHANNEL, INPUT));
+        let (original, namespace) = discord::OWNER_ADOPTS_FOR_TEST
+            .scope(true, owned)
+            .await
+            .unwrap()
+            .unwrap();
+        let input =
+            ChannelMailboxHandle::new_owner_input(&original, &namespace, "claude", context.clone());
+        let mut intent = context.clone();
+        intent["owner_input"] = json!(input);
+        assert!(
+            store
+                .record_agent_input_intent(&run.run_id, None, &turn, &intent)
+                .await
+                .unwrap()
+        );
+        assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
+        let drives = OwnerTurn::drive_results(CHANNEL).len();
+        ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
+        await_within(
+            async {
+                while OwnerTurn::drive_results(CHANNEL).len() == drives {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        assert!(matches!(
+            OwnerTurn::start_wait_screen_for_test(&intake.shared, channel, &context).await,
+            Some(Screen::Blocked | Screen::Unknown)
+        ));
+        let (_, looked) =
+            held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
+        assert_eq!(
+            await_within(looked, WAIT_CAP).await.unwrap().verdict,
+            held_watch::Verdict::Keep
+        );
+
+        let executor = RoutineAgentExecutor::new(pool, Some(registry), 60);
+        let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, "failed");
+        assert_eq!(
+            outcomes[0].result_json.as_ref().unwrap()["status"],
+            "channel_input_unavailable"
+        );
+        let owner = intake
+            .mailbox
+            .v2_request(|slot| slot.as_ref().ok_or("owner missing")?.json())
+            .await
+            .unwrap();
+        assert_eq!(owner["items"], json!([]));
+        assert!(owner["head_injection"].is_null());
+        assert_eq!(owner["retained_inputs"], json!([]));
+        assert_eq!(fx.rig.sends().len(), before);
+    });
+    drop(intake);
+    drop(admission_guard);
+    drop(registry_guard);
+}

@@ -148,6 +148,7 @@ pub(super) fn migrate_parked(
             confirmation_deadline_ms: None,
             resolved_source: None,
             payload_window: None,
+            routine_delivery: None,
             resolved_target: None,
             preparation_hold: None,
             legacy_attempt: None,
