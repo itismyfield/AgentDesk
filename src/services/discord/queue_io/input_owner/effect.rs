@@ -21,6 +21,8 @@ pub(crate) enum Completion {
     /// No key reached the pane for a reason a later look may clear; the original waits at the
     /// front. Only the leaf answers this: `run` reports it as a NotSent once the owner holds it.
     Held(String),
+    /// A tmux idle preparation held before any key; its original gets the owner's fixed due.
+    ReadinessHeld(String),
     /// No key reached the pane and the owner holds the proof; the original stays in custody.
     NotSent(String),
     /// No key reached the pane and no later look can supply its evidence: the owner drops the
@@ -107,7 +109,8 @@ pub(crate) async fn run(
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(mut proof) = outcome.not_sent {
-        let held = matches!(&completion, Completion::Held(_));
+        let readiness_held = matches!(&completion, Completion::ReadinessHeld(_));
+        let held = readiness_held || matches!(&completion, Completion::Held(_));
         let refused = matches!(&completion, Completion::Refused(_));
         if !held {
             crate::logging::intake_timing::not_sent(&format!("{completion:?}"));
@@ -121,6 +124,7 @@ pub(crate) async fn run(
                 // Past its original's readiness due the leaf's own proof ends the input for good.
                 let ended = owner.leaf_outlived_due(&key, &*at);
                 match (held && !ended, refused || ended) {
+                    (true, _) if readiness_held => owner.hold_readiness_not_sent(&key, proof, at()),
                     (true, _) => owner.hold_not_sent(&key, proof),
                     (_, true) => owner.refuse_not_sent(&key, proof),
                     _ => owner.retain_not_sent(&key, proof),
@@ -134,6 +138,7 @@ pub(crate) async fn run(
         }
         return Ok(match completion {
             Completion::Held(reason)
+            | Completion::ReadinessHeld(reason)
             | Completion::NotSent(reason)
             | Completion::Refused(reason) => Completion::NotSent(reason),
             other => Completion::NotSent(format!("{other:?}")),
@@ -153,9 +158,10 @@ pub(crate) async fn run(
         _ => Some(crate::logging::intake_timing::Outcome::Uncertain),
     });
     Ok(match completion {
-        Completion::Held(reason) | Completion::NotSent(reason) | Completion::Refused(reason) => {
-            Completion::WriteUncertain(format!("unproven: {reason}"))
-        }
+        Completion::Held(reason)
+        | Completion::ReadinessHeld(reason)
+        | Completion::NotSent(reason)
+        | Completion::Refused(reason) => Completion::WriteUncertain(format!("unproven: {reason}")),
         other => other,
     })
 }
@@ -211,7 +217,9 @@ pub(crate) fn idle_claude(
     channel: u64,
     receipt: Arc<crate::services::provider::CancelToken>,
 ) -> Leaf {
-    use crate::services::claude_tui::guarded_outcome::SubmissionError;
+    use crate::services::claude_tui::{
+        guarded_outcome::SubmissionError, host_input, input::PreparationHold, readiness,
+    };
     Box::new(move |frame| {
         crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
             let sent = crate::services::claude_tui::input::send_warm_followup_owned(
@@ -227,6 +235,22 @@ pub(crate) fn idle_claude(
                 Err(SubmissionError::Held(hold)) if hold.modal => {
                     arm_screen(channel, pane.clone());
                     Ok(Completion::Held(MODAL.into()))
+                }
+                Err(SubmissionError::Held(hold))
+                    if hold.reason == PreparationHold::OWNER_READINESS_DEADLINE =>
+                {
+                    Ok(Completion::Refused(format!("unproven: {hold:?}")))
+                }
+                Err(SubmissionError::Held(hold))
+                    if hold.waits_for_idle_evidence()
+                        && host_input::observe_draft(&session).as_deref().is_some_and(
+                            |capture| {
+                                !readiness::idle::focus_modal(capture)
+                                    && readiness::empty_draft(capture)
+                            },
+                        ) =>
+                {
+                    Ok(Completion::ReadinessHeld(format!("held: {hold:?}")))
                 }
                 Err(SubmissionError::Held(hold)) => Ok(held(&hold)),
                 Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),

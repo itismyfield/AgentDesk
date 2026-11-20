@@ -10,7 +10,7 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
     use discord::router::message_handler::provider_dispatch::OwnerTurn;
     let fx = Fixture::new("http-internal-channel", None);
     let launcher = Arc::new(Launcher::default());
-    let (_, started) = reconnect::launch(&fx, &launcher);
+    let (_, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     let registry_guard = fx.rig.registry_on_this_thread();
     let admission_guard = open_admission();

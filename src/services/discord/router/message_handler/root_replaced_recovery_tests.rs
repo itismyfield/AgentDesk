@@ -150,7 +150,7 @@ impl Case {
         fx.owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let launcher = Arc::new(Launcher::default());
-        let (nonce, started) = launch(&fx, &launcher);
+        let (nonce, started) = launch_pinless(&fx, &launcher);
         assert!(started.path.exists());
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
         assert_eq!(

@@ -77,3 +77,38 @@ The pro design review found that deadline and first key never met in one state (
 | crash between outbox enqueue and ack | not modeled | reached (`RHNoCrashReplay`); per-epoch key mutant RED `RHOneNoticeRecord` |
 
 Result: 75 HerdrBusyReobserve cfg, 336 TLC rule runs, 0 unexpected (log `s2-tlc-2.log` in the lane log directory).
+
+## tmux metadata-only recurrence
+
+The idle owner reserves a tmux attempt before it waits for readiness. The idle screen is readable,
+but the metadata-only tail has no completed reply. It reaches the actual preparation wait with
+proof absent. The leaf finishes with exact NotSent, the same original keeps its queue slot, and
+the owner commits its first readiness due in that transition. The existing drive arms its timer.
+A retry preserves the due. Reboot retains the due and restores the timer, or settles an expired
+original during boot. None of these observations grants a key.
+
+Before, the tmux watch returns Keep with no stored due. Both `RHNoInfiniteKeep` and
+`RHEndExactlyOnce` fail. After, the same fixture reaches one explained refusal. Reboot's expected
+`RHNoRebootMidHold` witness demonstrates a pre-existing hold and an independent liveness check
+covers resolution. `NoWiring` removes the new due assignment and restores the liveness failures.
+
+## tmux review repairs
+
+The existing RHSpec follows the original's due into the reserved retry. When the first owner
+turn after expiry observes a reserved retry, the leaf returns NotSent and closes its own gate.
+An attemptless expiry and a reserved-leaf expiry compare the same original member boundary.
+Admission of B after A's hold leaves B queued in either ordering. Modal and manual draft
+hold their own disposition while the screen is blocked. Releasing the screen and publishing
+valid readiness let the existing watch wake the delivery route.
+
+| cfg pair | Before | After |
+|---|---|---|
+| `TmuxRetryDue` | `RHNoRetryPastDue`, `RHEndExactlyOnce` RED | GREEN |
+| `TmuxModalHold` | `RHOtherHoldPreserved`, `RHHealthyDelivers` RED | GREEN |
+| `TmuxDraftHold` | `RHOtherHoldPreserved`, `RHHealthyDelivers` RED | GREEN |
+| `TmuxLateFollower` | `RHNoLateLoss` RED | GREEN |
+
+The official WSL checker ran 102 cfg and 424 rule runs with zero unexpected outcomes.
+The four Before configs select the corresponding model defect and the After configs use the
+same scenario without it. The model's due rule concerns the next eligible actor transition.
+The regression tests cover preparation latency and the ingress barrier in the implementation.

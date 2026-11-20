@@ -210,7 +210,7 @@ pub(crate) struct RefusedInput {
 }
 
 /// One original a refused unit carried: its sources and the digest of its canonical body.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RefusedMember {
     pub(crate) identity: QueueIdentity,
     pub(crate) fingerprint: String,
@@ -271,6 +271,9 @@ pub(crate) struct ReadinessHold {
     pub(crate) cause: String,
     pub(crate) started_at_ms: u64,
     pub(crate) due_at_ms: u64,
+    /// The first held unit in queue order, including the front. Legacy holds cover the front only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) members: Option<Vec<RefusedMember>>,
 }
 
 impl ReadinessHold {

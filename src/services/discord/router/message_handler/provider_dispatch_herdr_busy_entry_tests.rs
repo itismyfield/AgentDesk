@@ -1228,7 +1228,7 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();
@@ -1524,7 +1524,7 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();
@@ -1625,7 +1625,7 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();

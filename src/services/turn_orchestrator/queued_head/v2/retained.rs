@@ -153,10 +153,36 @@ impl Owner {
         key: &AttemptRef,
         proof: crate::services::claude_tui::owner_input::NotSentProof,
     ) -> Result<(), String> {
+        self.hold_not_sent_with_due(key, proof, None)
+    }
+
+    /// The exact leaf proved no key; leave its original and first readiness due in one commit.
+    pub(crate) fn hold_readiness_not_sent(
+        &mut self,
+        key: &AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+        now: u64,
+    ) -> Result<(), String> {
+        self.hold_not_sent_with_due(key, proof, Some(now))
+    }
+
+    fn hold_not_sent_with_due(
+        &mut self,
+        key: &AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+        now: Option<u64>,
+    ) -> Result<(), String> {
         proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
         let mut next = self.snapshot.clone();
-        let head = next.head_injection.take_if(|head| key.matches(head));
-        let message = head.ok_or("stale held attempt")?.original.message_id;
+        let head = next
+            .head_injection
+            .take_if(|head| key.matches(head))
+            .ok_or("stale held attempt")?;
+        let message = head.original.message_id;
+        if let Some(now) = now {
+            let cause = crate::services::claude_tui::input::PreparationHold::IDLE_EVIDENCE_PENDING;
+            next.remember_readiness_hold(head.members(), cause, now);
+        }
         let attempt = &key.attempt;
         (next.admission_binds)
             .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));

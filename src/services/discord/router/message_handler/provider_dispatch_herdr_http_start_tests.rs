@@ -1259,7 +1259,7 @@ fn external_herdr_http_machine_unknown_keeps_custody_and_wakes_on_idle_pg() {
     use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
     let fx = Fixture::new("http-machine-unknown", None);
     let launcher = Arc::new(Launcher::default());
-    let (_, started) = reconnect::launch(&fx, &launcher);
+    let (_, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     let registry = fx.rig.registry_on_this_thread();
     let admission = open_admission();
