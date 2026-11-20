@@ -5,6 +5,7 @@ use super::settings::{
 use super::*;
 use crate::db::prompt_manifests::{PromptContentVisibility, PromptManifest};
 
+pub(crate) mod audit;
 mod channel_recent_context;
 mod dispatch_contract;
 mod layer_rendering;
@@ -36,6 +37,7 @@ pub(super) struct BuiltSystemPrompt {
     pub(super) system_prompt: String,
     pub(super) manifest: Option<PromptManifest>,
     pub(super) anchor_count: usize,
+    anchors: Vec<crate::domain::memory::AnchorRecord>,
     inspection: bool,
 }
 
@@ -699,6 +701,7 @@ pub(super) fn build_system_prompt_with_manifest(
         system_prompt: system_prompt_owned,
         manifest,
         anchor_count: 0,
+        anchors: Vec::new(),
         inspection,
     }
 }

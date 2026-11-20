@@ -151,7 +151,7 @@ fn resolve_bot_token(bot_name: &str, bot: &crate::config::BotConfig) -> Option<S
         .or_else(|| crate::credential::read_bot_token(bot_name))
 }
 
-fn shared_prompt_fallback_path() -> Option<String> {
+pub(super) fn shared_prompt_fallback_path() -> Option<String> {
     let root = crate::config::runtime_root()?;
     let canonical = crate::runtime_layout::shared_prompt_path(&root);
     canonical

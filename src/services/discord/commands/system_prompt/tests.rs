@@ -5,7 +5,14 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 async fn system_prompt_active_native_binding_precedes_persisted_session() {
     use crate::services::provider::{CancelToken, session_prompt};
     let token = CancelToken::new();
-    session_prompt::arm(&token, None, &ProviderKind::Codex, 42, "first-turn", 0);
+    session_prompt::arm(
+        &token,
+        None,
+        &ProviderKind::Codex,
+        42,
+        "first-turn",
+        Vec::new(),
+    );
     session_prompt::observe(&token, "new-native");
     assert_eq!(
         inspection_binding(
@@ -88,6 +95,7 @@ async fn system_prompt_saved_snapshot_and_pg_absence_choose_correct_source_pg() 
         started_at: chrono::Utc::now(),
         system_prompt: "actual developer_instructions\n[ANCHOR MEMORY]\n- original".into(),
         anchor_count: 1,
+        anchors: None,
     };
     provider_session_prompts::save(&pool, &saved).await.unwrap();
     let inspection = load_or_reconstruct(Some(&pool), "codex", "42", "native", || async {
@@ -121,6 +129,7 @@ async fn system_prompt_idle_channel_uses_latest_scoped_snapshot_read_only_pg() {
         started_at: chrono::Utc::now() - chrono::Duration::days(1),
         system_prompt: "saved before restart".into(),
         anchor_count: 0,
+        anchors: None,
     };
     provider_session_prompts::save(&pool, &saved).await.unwrap();
     for (provider, channel, session, offset) in [

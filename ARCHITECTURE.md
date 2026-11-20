@@ -678,6 +678,7 @@ src/
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
+│   │   │   │       ├── prompt_audit.rs
 │   │   │   │       ├── public_surfaces.rs
 │   │   │   │       ├── server_campaigns.rs
 │   │   │   │       └── session_evidence.rs
@@ -736,6 +737,10 @@ src/
 │   │   │   └── writer_readiness.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
+│   │   ├── prompt_audit/
+│   │   │   ├── anchors.rs
+│   │   │   ├── projection.rs
+│   │   │   └── tests.rs
 │   │   ├── receipt/
 │   │   │   └── single_flight.rs
 │   │   ├── review_verdict/
@@ -830,6 +835,7 @@ src/
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_stage_save_tests.rs
 │   │   ├── pr_summary.rs
+│   │   ├── prompt_audit.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_auth_profiles_identity_tests.rs
@@ -2177,6 +2183,8 @@ src/
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/
+│   │   │   ├── audit/
+│   │   │   │   └── mod.rs
 │   │   │   ├── system_prompt_audit/
 │   │   │   │   └── tests.rs
 │   │   │   ├── channel_recent_context.rs
@@ -3953,6 +3961,8 @@ src/
 │   │   ├── antigravity.rs
 │   │   └── antigravity_tests.rs
 │   ├── memory/
+│   │   ├── memento_anchor/
+│   │   │   └── audit.rs
 │   │   ├── local.rs
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
