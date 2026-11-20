@@ -3,14 +3,6 @@ use super::{source_admission as admission, *};
 use crate::db::turns::TerminalOutcome;
 use serde_json::Value;
 
-pub(crate) const DELIVERY_DEADLINE: &str = "routine_delivery_deadline_ms";
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Withdrawal {
-    context_digest: String,
-    unconfirmed: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Disposition {
     Withdrawn,
@@ -48,7 +40,7 @@ impl Owner {
         }
         if self
             .routine_context(key)
-            .and_then(|context| context[DELIVERY_DEADLINE].as_u64())
+            .and_then(|context| context[ROUTINE_DELIVERY_DEADLINE_FIELD].as_u64())
             .is_some_and(|deadline| now() >= deadline)
         {
             return Err("routine_delivery_deadline".into());
@@ -260,7 +252,7 @@ impl Owner {
         }
         next.routine_withdrawals.insert(
             receipt,
-            Withdrawal {
+            RoutineWithdrawal {
                 context_digest,
                 unconfirmed,
             },
@@ -275,7 +267,7 @@ impl Owner {
 }
 
 impl ChannelMailboxHandle {
-    pub(crate) const ROUTINE_DELIVERY_DEADLINE: &str = DELIVERY_DEADLINE;
+    pub(crate) const ROUTINE_DELIVERY_DEADLINE: &str = ROUTINE_DELIVERY_DEADLINE_FIELD;
 
     pub(crate) async fn settle_routine_input(
         &self,

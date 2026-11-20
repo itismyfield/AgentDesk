@@ -108,9 +108,7 @@ impl Owner {
         head.payload_window = bootstrap.then_some(PayloadWindow::Bootstrap);
         head.routine_delivery = (bootstrap
             && self.routine_context(key).is_some_and(|context| {
-                context[super::routine_settlement::DELIVERY_DEADLINE]
-                    .as_u64()
-                    .is_some()
+                context[ROUTINE_DELIVERY_DEADLINE_FIELD].as_u64().is_some()
             }))
         .then_some(RoutineDelivery::AwaitingKey);
         self.commit(next)?;

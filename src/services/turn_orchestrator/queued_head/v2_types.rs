@@ -47,8 +47,7 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) admission_binds: Vec<AdmissionBind>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub(crate) routine_withdrawals:
-        std::collections::BTreeMap<String, super::v2::routine_settlement::Withdrawal>,
+    pub(crate) routine_withdrawals: std::collections::BTreeMap<String, RoutineWithdrawal>,
     /// Terminal receipts owed for removed inputs that carried an origin, committed with the removal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) owed_drop_receipts: Vec<OwedDrop>,
@@ -56,6 +55,14 @@ pub(crate) struct SnapshotV2 {
     pub(crate) unfinished_handoff: Option<ClaudeHandoffJournal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) effort_restart: Option<effort_restart::EffortRestart<PendingQueueItem>>,
+}
+
+pub(crate) const ROUTINE_DELIVERY_DEADLINE_FIELD: &str = "routine_delivery_deadline_ms";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RoutineWithdrawal {
+    pub(crate) context_digest: String,
+    pub(crate) unconfirmed: bool,
 }
 
 /// A removed input's terminal receipt not yet in the database; acked once it is.
