@@ -15,6 +15,7 @@ use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::tui_o::store::{clear_end, codex_end};
 
 const OLD_SESSION: &str = "provider-session-before-clear";
 const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
@@ -118,7 +119,7 @@ impl Drop for Managed {
 // process end, and neither memory nor PostgreSQL keeps the session a next launch would resume.
 #[tokio::test]
 async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::TestRuntimeRootGuard::new();
     let (db, pool) = postgres().await;
     let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
@@ -135,6 +136,11 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
         crate::services::discord::increment_global_active(&shared, "cleared turn");
         seed_backlog(&shared, &provider, channel).await;
         managed.fake.take_calls();
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&managed.tmux)
+                .is_none(),
+            "{provider:?}: no native source is available to record"
+        );
 
         let reply = clear(&shared, &provider, channel).await;
 
@@ -155,6 +161,16 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
             "{provider:?}: nothing to resume"
         );
         assert!(managed.ended(), "{provider:?}: the process and tmux end");
+        assert!(
+            clear_end::read(root.path(), channel.get())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            codex_end::read(root.path(), channel.get())
+                .unwrap()
+                .is_empty()
+        );
     }
     pool.close().await;
     db.drop().await;

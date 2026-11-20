@@ -3051,7 +3051,8 @@ src/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests/
-│   │   │   │   │   └── late_clear_tests.rs
+│   │   │   │   │   ├── late_clear_tests.rs
+│   │   │   │   │   └── record_boundary_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
