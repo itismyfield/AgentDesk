@@ -58,9 +58,12 @@ pub(super) fn veto(pane: &str) -> bool {
 /// Claude's own `esc to interrupt` offer on a pane that is not ready: what an unread turn stops
 /// on. Spinner chrome over the painted composer is not enough without the turn's identity.
 pub(super) fn interrupt_offered(pane: &str) -> bool {
+    let recent = pane.lines().rev().filter(|row| !row.trim().is_empty());
     !veto(pane)
         && screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
-        && pane.to_ascii_lowercase().contains("esc to interrupt")
+        && recent
+            .take(screen::CLAUDE_TUI_READINESS_SCAN_LINES)
+            .any(|row| row.to_ascii_lowercase().contains("esc to interrupt"))
 }
 
 pub(super) fn legacy_evidence(pane: &str) -> (bool, bool, bool) {
