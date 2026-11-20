@@ -288,13 +288,9 @@ pub(super) async fn start_restart_handoff_from_state(
     };
     // O posts this channel's TUI body, so the handoff notice keeps only its marker.
     // A held destination identity keeps the inflight for retry, like a failed notice.
-    let kind = (state.channel_id == channel_id.get())
-        .then_some(state.runtime_kind)
-        .flatten();
+    let body = state.tui_body_claim(channel_id.get());
     let target = restart_handoff_notice_target(&state);
-    let Ok(o_owns_body) =
-        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id.get(), kind)
-    else {
+    let Ok(o_owns_body) = body.peek_o_owns_tui_output_for_channel() else {
         return false;
     };
     let stale_text =
@@ -304,8 +300,7 @@ pub(super) async fn start_restart_handoff_from_state(
             let current_msg_id = serenity::MessageId::new(current_msg_id);
             forget_completion_footer_for_restart_handoff(channel_id, current_msg_id);
             // Only a notice carrying the saved body claims the channel, as it is sent.
-            let claim = (!o_owns_body && !best_response.trim().is_empty())
-                .then(|| crate::services::tui_o::cutover::BodyClaim::new(channel_id.get(), kind));
+            let claim = (!o_owns_body && !best_response.trim().is_empty()).then_some(body);
             let replace = || {
                 let text = &stale_text;
                 crate::services::discord::outbound::body_census::BodySource::inherited().observe(

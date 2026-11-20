@@ -13,6 +13,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.statecharts_empty_selection_cases import (
+    assert_documentation_coverage_skip,
+    assert_documentation_skip,
+    assert_empty_full_fallback,
+    assert_model_change_failures,
+    assert_non_model_paths_skip,
+)
+
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ci" / "statecharts_tlc.py"
 SPEC = importlib.util.spec_from_file_location("statecharts_tlc", SCRIPT_PATH)
 assert SPEC and SPEC.loader
@@ -593,11 +601,7 @@ class SelectionCliTest(unittest.TestCase):
         self.diverge_main()
         (self.root / "README.md").write_text("PR documentation only\n", encoding="utf-8")
         self.commit()
-        rc, out, err, checked = self.run_main()
-        self.assertEqual((rc, err), (1, ""))
-        self.assertIn("Selected 0 configs", out)
-        self.assertIn("NO_TARGETS", out)
-        checked.assert_not_called()
+        assert_documentation_coverage_skip(self)
 
     def test_pr_cfg_change_excludes_main_only_checker_and_model_changes(self) -> None:
         self.diverge_main()
@@ -657,13 +661,11 @@ class SelectionCliTest(unittest.TestCase):
     def test_no_targets_is_explicit_and_never_claims_a_check_passed(self) -> None:
         (self.repo / "README.md").write_text("docs only\n", encoding="utf-8")
         self.commit()
-        rc, out, err, checked = self.run_main()
-        self.assertEqual((rc, err), (1, ""))
-        checked.assert_not_called()
-        self.assertIn("Selected 0 configs (changed):", out)
-        self.assertIn("NO_TARGETS", out)
-        self.assertNotIn("broken=", out)
-        self.assertNotIn("| cfg |", out)
+        assert_documentation_skip(self)
+        assert_non_model_paths_skip(self)
+
+    def test_model_changes_with_empty_selection_fail_in_check_and_coverage(self) -> None:
+        assert_model_change_failures(self, tlc)
 
     def test_deleted_config_with_stale_expected_row_fails_even_without_targets(self) -> None:
         (self.root / "M.cfg").unlink()
@@ -671,7 +673,8 @@ class SelectionCliTest(unittest.TestCase):
         rc, out, err, checked = self.run_main()
         self.assertEqual(rc, 1)
         self.assertIn("M.cfg: listed in expected.tsv but the file is gone", err)
-        self.assertIn("NO_TARGETS", out)
+        self.assertIn("FAIL NO_TARGETS:", err)
+        self.assertNotRegex(out + err, r"(?m)^NO_TARGETS")
         checked.assert_not_called()
 
     def test_git_rename_checks_new_config_and_clean_deletion_has_no_targets(self) -> None:
@@ -686,8 +689,9 @@ class SelectionCliTest(unittest.TestCase):
         self.expected.write_text("N.cfg\tN\t-\n", encoding="utf-8")
         self.commit()
         rc, out, err, checked = self.run_main()
-        self.assertEqual((rc, err), (1, ""))
-        self.assertIn("NO_TARGETS", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL NO_TARGETS:", err)
+        self.assertNotRegex(out + err, r"(?m)^NO_TARGETS")
         checked.assert_not_called()
 
     def test_unavailable_base_checks_all_with_an_explicit_fallback(self) -> None:
@@ -698,6 +702,7 @@ class SelectionCliTest(unittest.TestCase):
         self.assertIn("merge-base", err)
         self.assertNotIn("NO_TARGETS", out)
         self.assertCountEqual([call.args[1] for call in checked.call_args_list], ["M.cfg", "N.cfg"])
+        assert_empty_full_fallback(self)
 
 
 class ShardReportTest(unittest.TestCase):

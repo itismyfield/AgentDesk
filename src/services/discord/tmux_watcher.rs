@@ -945,11 +945,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
-        // O posts this body: consume the range without a lease, journal or transport; read only.
-        let o_ownership = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-            channel_id.get(),
-            Some(&tmux_session_name),
+        let watcher_body = o_delegated_arm::watcher_body(
+            channel_id,
+            &tmux_session_name,
+            &output_path,
+            inflight_before_relay.as_ref(),
         );
+        let o_ownership = watcher_body.peek_o_owns_tui_output_for_channel();
         let o_delegated_session = o_ownership.unwrap_or(true);
         // A denied frame O proved posted for the row's own input ends that row the same way.
         let o_delegated_terminal =
@@ -1165,7 +1167,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
             let claims = watcher_will_direct_send && task_notification_kind.is_none();
-            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name).map(|claim| claim.for_turn(inflight_before_relay.as_ref().and_then(|row| row.turn_nonce.as_deref())));
+            let body_claim = claims.then_some(watcher_body);
             let sent = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,
@@ -1223,9 +1225,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 },
             ))
             .await;
-            // O took the channel since the peek: retry, and the next pass consumes it for O.
-            retry_terminal_delivery_from_offset |=
-                !sent && o_delegated_arm::o_took_channel(channel_id, &tmux_session_name);
+            retry_terminal_delivery_from_offset |= !sent && o_delegated_arm::o_took_channel(watcher_body);
             sent
         } else if watcher_direct_fallback_requested {
             false

@@ -123,9 +123,16 @@ class CompletionTests(unittest.TestCase):
                     identity.wait_health(self.manifest, self.nonce, 123, 'b'*64, [], time.monotonic()+1)
 
     def test_unavailable_health_never_publishes_ready(self):
-        with mock.patch.object(identity, 'request_json', side_effect=ConnectionError()):
+        elapsed = 0
+        def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+        clock = mock.Mock(monotonic=lambda: elapsed, sleep=sleep)
+        with mock.patch.object(identity, 'time', clock), \
+                mock.patch.object(identity, 'request_json', side_effect=ConnectionError()) as request:
             with self.assertRaises(InstanceError):
-                identity.wait_health(self.manifest, self.nonce, 123, 'b'*64, [], time.monotonic()+.03)
+                identity.wait_health(self.manifest, self.nonce, 123, 'b'*64, [], .03)
+        self.assertEqual(request.call_count, 2)
 
     @contextmanager
     def recorded_busy_fixture(self, *, previous=None, manifest=None, record=None):

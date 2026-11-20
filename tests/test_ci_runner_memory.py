@@ -3,9 +3,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
-import time
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci/runner-memory.sh"
 MIB = 1048576
@@ -55,7 +57,7 @@ class RunnerMemoryTests(unittest.TestCase):
 
     def run_probe(self, *arguments, check=True):
         result = subprocess.run(["bash", str(SCRIPT), *arguments], env=self.env,
-                                text=True, capture_output=True, timeout=5)
+                                text=True, capture_output=True, timeout=30)
         if check:
             self.assertEqual(result.returncode, 0, result.stderr)
         return result
@@ -115,12 +117,10 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertNotIn(self.env["MEMORY_TEST_SECRET"], "".join(p.read_text() for p in checkpoint.iterdir()))
 
     def test_detached_sampler_does_not_hold_capture_pipes_and_stops_before_interval(self):
-        before = time.monotonic()
+        self.env["RUNNER_MEMORY_INTERVAL_SECONDS"] = "60"
+        # Captured pipes must close under the subprocess watchdog, before a full sample interval.
         self.run_probe("start")
-        self.assertLess(time.monotonic() - before, 2)
-        before = time.monotonic()
         self.run_probe("finish")
-        self.assertLess(time.monotonic() - before, 2)
         self.assertEqual(self.summary()["sampler_status"], "stopped")
         done = json.loads((self.root / "runner-memory/done.json").read_text())
         self.assertEqual(done["status"], "stopped")
@@ -189,16 +189,32 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(self.summary(), expected)
 
     def test_periodic_sampler_sees_peak_between_boundaries(self):
-        self.env["RUNNER_MEMORY_INTERVAL_SECONDS"] = "0.05"
-        self.run_probe("start")
+        state = self.root / "runner-memory"
+        self.write(state / "metadata.json", json.dumps({"interval_seconds": 1}))
         self.run_probe("begin", "build")
-        self.memory(available=8)
-        time.sleep(0.2)
-        self.memory(available=60)
+
+        elapsed = 0.0
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+            if elapsed == seconds:
+                self.memory(available=8)
+            elif elapsed >= 1.5:
+                self.memory(available=60)
+                (state / "stop").touch()
+
+        clock = SimpleNamespace(monotonic=lambda: elapsed, sleep=advance)
+        body = SCRIPT.read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+             mock.patch.object(sys, "argv", ["-", str(SCRIPT), "_sample"]), \
+             mock.patch.dict(sys.modules, {"time": clock}):
+            exec(compile(body, str(SCRIPT), "exec"), {})
+
         self.run_probe("end")
         self.run_probe("finish")
         phase = self.summary()["phases"]["build"]
-        self.assertGreaterEqual(phase["samples"], 4)
+        self.assertEqual(phase["samples"], 4)
         self.assertEqual(phase["max"]["host_used_bytes"], 56 * MIB)
 
     def test_finish_without_start_still_reports_unavailable(self):

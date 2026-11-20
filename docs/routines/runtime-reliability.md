@@ -42,6 +42,8 @@ Cancellation or timeout without confirmed delivery also retains this observabili
 Before enabling it, check that routine prompts do not require an interactive provider TUI
 or a persistent tmux pane. Shell/JS routines do not use the agent executor.
 
+For persistent routines, model changes take effect when the next new conversation starts.
+
 ## Agent start deferral
 
 Before an agent-backed routine run touches its thread, reservation or run row, the executor

@@ -294,7 +294,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
             root = Path(directory)
             tools = root / "bin"
             tools.mkdir()
-            for name in ("cat", "mktemp", "rm"):
+            for name in ("awk", "cat", "mktemp", "rm", "tee"):
                 target = shutil.which(name)
                 self.assertIsNotNone(target)
                 (tools / name).symlink_to(target)

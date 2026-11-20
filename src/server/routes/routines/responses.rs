@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::execution_mode::is_definition_constraint_violation;
+use crate::services::routines::provider_choice;
 use crate::services::routines::store::RoutineRecord;
 use crate::services::routines::{
     DeleteRoutineResult, RoutineStore, is_resume_routine_requires_next_due_at,
@@ -80,10 +81,29 @@ pub(super) async fn routine_view(store: &RoutineStore, routine: RoutineRecord) -
         .map_err(store_error)?
         .remove(&routine.id)
         .map(|row| row.projection());
+    let choice = store
+        .load_provider_choices(std::slice::from_ref(&routine.id))
+        .await
+        .map_err(store_error)?
+        .remove(&routine.id)
+        .unwrap_or_default();
+    let inherited = match routine.agent_id.as_deref() {
+        Some(agent_id) => crate::db::agents::load_agent_channel_bindings_pg(store.pool(), agent_id)
+            .await
+            .map_err(|error| store_error(error.into()))?
+            .and_then(|bindings| bindings.resolved_primary_provider_kind()),
+        None => None,
+    };
     let mut view = json!(routine);
     if let (Some(object), Some(execution)) = (view.as_object_mut(), execution)
         && let Value::Object(fields) = json!(execution)
     {
+        object.extend(fields);
+    }
+    if let (Some(object), Value::Object(fields)) = (
+        view.as_object_mut(),
+        provider_choice::projection(&choice, inherited.as_ref()),
+    ) {
         object.extend(fields);
     }
     Ok(view)
