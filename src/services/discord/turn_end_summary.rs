@@ -78,6 +78,8 @@ pub(in crate::services::discord) struct LiveSummary {
     ended: Option<DateTime<Utc>>,
     session_id: Option<String>,
     codex_rollout: Option<CodexRollout>,
+    logical_session: Option<String>,
+    show_quota: bool,
 }
 
 #[derive(Clone)]
@@ -130,6 +132,8 @@ impl LiveSummary {
             ended: (started.is_some() || elapsed_ms.is_some()).then(Utc::now),
             session_id: state.session_id.clone(),
             codex_rollout: CodexRollout::capture(state),
+            logical_session: state.tmux_session_name.clone(),
+            show_quota: true,
         }
     }
 
@@ -145,6 +149,18 @@ impl LiveSummary {
                 .min(100) as u8
             });
         self
+    }
+
+    pub(in crate::services::discord) async fn load_usage_footer(
+        &mut self,
+        provider: &ProviderKind,
+        pool: Option<&sqlx::PgPool>,
+    ) {
+        if self.outcome == Outcome::Completed
+            && matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        {
+            self.show_quota = usage_footer::enabled(pool, self.key.channel_id.get()).await;
+        }
     }
 
     pub(in crate::services::discord) fn watcher(
@@ -182,6 +198,8 @@ impl LiveSummary {
                 ended,
                 session_id: state.session_id.clone(),
                 codex_rollout: CodexRollout::capture(state),
+                logical_session: state.tmux_session_name.clone(),
+                show_quota: true,
             }
             .with_context(shared),
         )
@@ -266,7 +284,8 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
         channel,
         summary.started.map(quota::Selected::Within),
         summary.session_id.as_deref(),
-        summary.outcome == Outcome::Completed && usage_footer::enabled(channel),
+        summary.logical_session.as_deref(),
+        summary.outcome == Outcome::Completed && summary.show_quota,
     );
     let codex = if *provider == ProviderKind::Codex {
         summary
@@ -362,7 +381,11 @@ pub(in crate::services::discord) async fn post_watcher(
     provider: &ProviderKind,
     summary: Option<WatcherSummary>,
 ) {
-    let Some(summary) = summary else { return };
+    let Some(mut summary) = summary else { return };
+    summary
+        .summary
+        .load_usage_footer(provider, shared.pg_pool.as_ref())
+        .await;
     if !summary.permits_send(shared).await {
         return;
     }

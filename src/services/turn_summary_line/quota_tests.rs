@@ -30,10 +30,13 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
     use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
     use sha2::{Digest, Sha256};
 
-    if isolated_cswap_429_fixture(concat!(
-        module_path!(),
-        "::statusline_quota_reaches_o_summary_when_cswap_usage_is_429"
-    )) {
+    if isolated_cswap_fixture(
+        concat!(
+            module_path!(),
+            "::statusline_quota_reaches_o_summary_when_cswap_usage_is_429"
+        ),
+        true,
+    ) {
         return;
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -128,7 +131,112 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
 }
 
 #[cfg(unix)]
-fn isolated_cswap_429_fixture(name: &str) -> bool {
+#[test]
+fn restarted_named_claude_does_not_borrow_default_fable() {
+    use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider};
+    use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
+
+    if isolated_cswap_fixture(
+        concat!(
+            module_path!(),
+            "::restarted_named_claude_does_not_borrow_default_fable"
+        ),
+        false,
+    ) {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(CswapService::global().list_accounts("fixture".into(), None))
+        .unwrap();
+    let now = Utc::now();
+    let account = CswapService::global()
+        .cached_accounts_for_summary()
+        .unwrap();
+    assert_eq!(
+        claude(&account, now)
+            .unwrap()
+            .fable_seven_day
+            .unwrap()
+            .percent,
+        87
+    );
+    publish(
+        "claude",
+        "named-a",
+        &json!({"buckets":[
+            {"name":"7d Fable","used":22,"limit":100,"reset":now.timestamp()+604800}
+        ]})
+        .to_string(),
+        now.timestamp(),
+    );
+
+    let session = uuid::Uuid::new_v4().to_string();
+    let root = crate::services::claude_tui::hook_bundle::statusline::record_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    let path = crate::services::claude_tui::hook_bundle::statusline::record_path(&root, &session);
+    std::fs::write(
+        path,
+        json!({
+            "session_id":session, "rate_limits":{
+                "five_hour":{"used_percentage":24,"resets_at":now.timestamp()+18000},
+                "seven_day":{"used_percentage":61,"resets_at":now.timestamp()+604800}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let logical = format!("footer-{}", uuid::Uuid::new_v4());
+    let summarize = |id: &str| {
+        let mut deriver =
+            UnitDeriver::new(7_319_004, ShadowProvider::Claude).with_turn_summary(SummaryInputs {
+                turn_marks: Default::default(),
+                disposed: Default::default(),
+                context_window: None,
+            });
+        let mut derive = |value: Value| {
+            deriver.derive_with_session(
+                &CapturedRecord {
+                    start: 0,
+                    end: 1,
+                    line: serde_json::to_vec(&value).unwrap(),
+                },
+                crate::services::tui_o::shadow::IDENTITY_VERSION,
+                || Some(logical.clone()),
+            )
+        };
+        derive(json!({"type":"user","sessionId":session,
+            "timestamp":now.to_rfc3339(),"message":{"content":"request"}}));
+        derive(json!({"type":"assistant","sessionId":session,
+            "timestamp":now.to_rfc3339(),"uuid":id,"apiBlockIndex":0,
+            "message":{"id":id,"content":[{"type":"text","text":"answer"}]}}));
+        let terminal = derive(json!({"type":"system","subtype":"stop_hook_summary",
+            "sessionId":session,"timestamp":(now+chrono::Duration::seconds(2)).to_rfc3339()}));
+        let [Derived::Piece(footer)] = terminal.as_slice() else {
+            panic!("{terminal:?}")
+        };
+        assert!(
+            footer.payload.contains("\n-# 5h 24% ("),
+            "{}",
+            footer.payload
+        );
+        assert!(footer.payload.contains(" · 7d 61% ("), "{}", footer.payload);
+        footer.payload.clone()
+    };
+    let unknown = summarize("unknown-owner");
+    assert!(!unknown.contains("Fable"), "{unknown}");
+    use crate::services::tmux_common::write_claude_session_auth;
+    write_claude_session_auth(&logical, "successor-session", "named-a").unwrap();
+    assert!(!summarize("different-session").contains("Fable"));
+    write_claude_session_auth(&logical, &session, "named-a").unwrap();
+    let restored = summarize("restored-owner");
+    assert!(restored.contains(" · Fable 7d 22% ("), "{restored}");
+}
+
+#[cfg(unix)]
+fn isolated_cswap_fixture(name: &str, rate_limited: bool) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let name = name
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
@@ -145,12 +253,18 @@ fn isolated_cswap_429_fixture(name: &str) -> bool {
     std::fs::write(&executable, "#!/bin/sh\ncat \"$0.json\"\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let at = Utc::now();
+    let fetched = if rate_limited {
+        at - chrono::Duration::minutes(51)
+    } else {
+        at
+    };
     std::fs::write(executable.with_extension("json"), json!({
         "activeAccountNumber":2,"accounts":[{
             "number":2,"active":true,"usageStatus":"ok",
-            "usageFetchedAt":(at-chrono::Duration::minutes(51)).to_rfc3339(),
+            "usageFetchedAt":fetched.to_rfc3339(),
             "usageError":"429 usage-endpoint budget reached; backing off",
-            "usage":{"fiveHour":{"pct":15,"resetsAt":(at+chrono::Duration::hours(5)).to_rfc3339()}}
+            "usage":{"fiveHour":{"pct":15,"resetsAt":(at+chrono::Duration::hours(5)).to_rfc3339()},
+                "scoped":[{"name":"Fable","pct":87,"resetsAt":(at+chrono::Duration::days(7)).to_rfc3339()}]}
         }]
     }).to_string()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -358,6 +472,7 @@ fn cache() -> RwLock<Cache> {
             Selection {
                 at: now(),
                 profile: "named".into(),
+                default_claude_account: None,
             },
         )]),
     })
@@ -433,7 +548,15 @@ fn codex_requires_the_selected_profile_and_a_fresh_cache() {
         None
     );
     assert_eq!(
-        snapshot("unsupported", 42, Some(Selected::Before(now())), None, true).quota,
+        snapshot(
+            "unsupported",
+            42,
+            Some(Selected::Before(now())),
+            None,
+            None,
+            true
+        )
+        .quota,
         None
     );
 }
@@ -564,6 +687,7 @@ fn recorded_profile_and_collected_quota_reach_the_o_summary_boundary() {
             "codex",
             channel,
             Some(Selected::Before(started)),
+            None,
             None,
             true
         )

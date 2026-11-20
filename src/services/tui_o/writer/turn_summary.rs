@@ -9,11 +9,11 @@ use serde_json::Value;
 
 use super::pieces::{Derived, PieceWork};
 use crate::services::codex_tui::rollout_index::summary_context;
-use crate::services::discord::runtime_store::usage_footer;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::turn_summary_line::{Footer, Model, Outcome, quota, render};
 
 pub const TURN_SUMMARY_OPEN: &str = "turn_summary_open";
+pub(super) const TURN_SUMMARY_SUFFIX: &str = "#turn_end";
 
 pub struct SummaryInputs {
     pub turn_marks: BTreeSet<String>,
@@ -258,7 +258,12 @@ impl TurnSummaryRun {
         }]
     }
 
-    pub(super) fn close(&mut self, value: &Value, id: Option<&str>) -> Vec<Derived> {
+    pub(super) fn close(
+        &mut self,
+        value: &Value,
+        id: Option<&str>,
+        logical_session: impl Fn() -> Option<String>,
+    ) -> Vec<Derived> {
         if self.provider == ShadowProvider::Codex
             && self.open.as_ref().is_some_and(|turn| {
                 turn.id
@@ -308,19 +313,27 @@ impl TurnSummaryRun {
                 ((used.min(u128::from(window)) * 100) / u128::from(window)) as u8
             });
         key.kind = UnitKind::Tool;
-        key.native_key.push_str("#turn_end");
+        key.native_key.push_str(TURN_SUMMARY_SUFFIX);
         let provider = match self.provider {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
         };
+        let session_id = turn
+            .session_id
+            .as_deref()
+            .or_else(|| value.get("sessionId").and_then(Value::as_str));
+        let logical_session = (self.provider == ShadowProvider::Claude
+            && outcome == Outcome::Completed
+            && session_id.is_some())
+        .then(logical_session)
+        .flatten();
         let snapshot = quota::snapshot(
             provider,
             key.channel_id,
             turn.started.map(quota::Selected::Before),
-            turn.session_id
-                .as_deref()
-                .or_else(|| value.get("sessionId").and_then(Value::as_str)),
-            outcome == Outcome::Completed && usage_footer::enabled(key.channel_id),
+            session_id,
+            logical_session.as_deref(),
+            outcome == Outcome::Completed,
         );
         let model = if let Some(codex) = &turn.codex_model {
             Model {
@@ -329,7 +342,7 @@ impl TurnSummaryRun {
                 fast: false,
             }
         } else {
-            snapshot.model()
+            snapshot.model_between(turn.started.zip(ended))
         };
         vec![Derived::Piece(PieceWork {
             output_origin: None,

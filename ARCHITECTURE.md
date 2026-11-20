@@ -2675,7 +2675,8 @@ src/
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
 │   │   │   │   ├── slash_command_tests/
-│   │   │   │   │   └── cancel_queued_tests.rs
+│   │   │   │   │   ├── cancel_queued_tests.rs
+│   │   │   │   │   └── usage_footer_tests.rs
 │   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
@@ -4556,6 +4557,8 @@ src/
 │   │   │   │   ├── probe.rs
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
+│   │   │   ├── deliver/
+│   │   │   │   └── usage_footer.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── child_retirement.rs

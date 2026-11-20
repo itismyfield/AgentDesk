@@ -4,14 +4,21 @@ use std::path::Path;
 use super::{DateTime, Quota, Utc, Value, Window, fresh};
 use crate::services::claude_tui::hook_bundle::statusline::record_path;
 
-pub(super) struct Record(Value);
+pub(super) struct Record {
+    value: Value,
+    observed_at: DateTime<Utc>,
+}
 
 impl Record {
+    pub(super) fn observed_at(&self) -> DateTime<Utc> {
+        self.observed_at
+    }
+
     pub(super) fn model(&self) -> Option<&str> {
         ["/model/display_name", "/model/id"]
             .into_iter()
             .find_map(|pointer| {
-                self.0
+                self.value
                     .pointer(pointer)?
                     .as_str()
                     .and_then(super::super::model_name)
@@ -19,7 +26,7 @@ impl Record {
     }
 
     pub(super) fn effort(&self) -> Option<&str> {
-        match self.0.pointer("/effort/level")?.as_str()?.trim() {
+        match self.value.pointer("/effort/level")?.as_str()?.trim() {
             "" => None,
             "ultracode" => Some("ultra"),
             effort => Some(effort),
@@ -27,11 +34,11 @@ impl Record {
     }
 
     pub(super) fn fast(&self) -> bool {
-        self.0["fast_mode"].as_bool() == Some(true)
+        self.value["fast_mode"].as_bool() == Some(true)
     }
 
     pub(super) fn quota(&self, now: DateTime<Utc>) -> Option<Quota> {
-        let limits = self.0.get("rate_limits")?;
+        let limits = self.value.get("rate_limits")?;
         let window = |name: &str| {
             let limit = limits.get(name)?;
             Window::new(
@@ -55,14 +62,15 @@ pub(super) fn read(root: &Path, session: &str, now: DateTime<Utc>) -> Option<Rec
     }
     let file = File::open(record_path(root, session)).ok()?;
     let metadata = file.metadata().ok()?;
-    if metadata.len() > 32 * 1024 || !fresh(metadata.modified().ok()?.into(), now) {
+    let observed_at = metadata.modified().ok()?.into();
+    if metadata.len() > 32 * 1024 || !fresh(observed_at, now) {
         return None;
     }
     let value: Value = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
     if value.get("session_id").and_then(Value::as_str) != Some(session) {
         return None;
     }
-    Some(Record(value))
+    Some(Record { value, observed_at })
 }
 
 #[cfg(test)]

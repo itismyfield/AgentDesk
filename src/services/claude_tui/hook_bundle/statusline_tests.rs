@@ -245,6 +245,7 @@ fn generated_session_settings_install_the_executable_wrapper() {
         7_319_003,
         None,
         Some(config.session_id.as_str()),
+        None,
         true,
     );
     let line = render(

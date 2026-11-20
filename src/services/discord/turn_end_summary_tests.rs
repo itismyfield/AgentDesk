@@ -180,22 +180,9 @@ async fn captured_claude_session_quota_reaches_the_legacy_summary() {
     assert_eq!(snapshot.session_id.as_deref(), Some(session.as_str()));
     let gateway = Gateway::default();
     post_live(&gateway, &ProviderKind::Claude, snapshot).await;
-    usage_footer::update(channel, Some(false)).unwrap();
-    let mut hidden_state = row(channel, 2, "usage-footer-off");
-    hidden_state.session_id = Some(session);
-    let hidden = LiveSummary::bridge(
-        ChannelId::new(channel),
-        &hidden_state,
-        0,
-        Outcome::Completed,
-        Some(1000),
-    );
-    post_live(&gateway, &ProviderKind::Claude, hidden).await;
     let posts = gateway.posts();
     let _ = std::fs::remove_file(path);
-    assert_eq!(posts.len(), 2);
-    assert_eq!(posts[1].lines().count(), 1);
-    assert!(posts[1].ends_with(" · Opus 4.6 (high, fast)"));
+    assert_eq!(posts.len(), 1);
     assert!(posts[0].starts_with("-# ⏱️ 1초 ("), "{posts:?}");
     assert!(
         posts[0].contains(" · Opus 4.6 (high, fast)\n-# 5h 24% ("),

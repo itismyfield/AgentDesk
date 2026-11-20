@@ -177,6 +177,7 @@ struct Cache {
 struct Selection {
     at: DateTime<Utc>,
     profile: String,
+    default_claude_account: Option<u64>,
 }
 
 static CACHE: LazyLock<RwLock<Cache>> = LazyLock::new(RwLock::default);
@@ -185,14 +186,22 @@ pub(crate) fn record_launch(
     channel: Option<u64>,
     overlay: ProviderAuthOverlay,
 ) -> Result<ProviderAuthOverlay, String> {
+    let now = Utc::now();
+    let default_claude_account = (overlay.provider.as_str() == "claude"
+        && overlay.profile_id == "default")
+        .then(|| CswapService::global().cached_accounts_for_summary())
+        .flatten()
+        .filter(|response| claude(response, now).is_some())
+        .and_then(|response| response.active_account_number);
     if let Some(channel) = channel
         && let Ok(mut cache) = CACHE.write()
     {
         cache.profiles.insert(
             (overlay.provider.as_str().to_string(), channel),
             Selection {
-                at: Utc::now(),
+                at: now,
                 profile: overlay.profile_id.clone(),
+                default_claude_account,
             },
         );
     }
@@ -217,21 +226,22 @@ pub(crate) fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64
     }
 }
 
-fn selected_quota(
+impl Selection {
+    fn allows(&self, selection: Selected, now: DateTime<Utc>) -> bool {
+        match selection {
+            Selected::Before(started) => self.at <= started,
+            Selected::Within(started) => (started..=now).contains(&self.at),
+        }
+    }
+}
+
+fn profile_quota(
     cache: &Cache,
     provider: &str,
-    selected: &Selection,
-    selection: Selected,
+    profile: &str,
     now: DateTime<Utc>,
 ) -> Option<Quota> {
-    let allowed = match selection {
-        Selected::Before(started) => selected.at <= started,
-        Selected::Within(started) => (started..=now).contains(&selected.at),
-    };
-    if !allowed {
-        return None;
-    }
-    let key = (provider.to_string(), selected.profile.clone());
+    let key = (provider.to_string(), profile.to_string());
     let (fetched, quota) = cache.quotas.get(&key)?;
     fresh(*fetched, now).then_some(*quota)?.current(now)
 }
@@ -244,19 +254,34 @@ fn cached_codex(
 ) -> Option<Quota> {
     let cache = cache.try_read().ok()?;
     let selected = cache.profiles.get(&("codex".to_string(), channel))?;
-    selected_quota(&cache, "codex", selected, selection, now)
+    if !selected.allows(selection, now) {
+        return None;
+    }
+    profile_quota(&cache, "codex", &selected.profile, now)
 }
 
-fn cached_claude(channel: u64, selection: Option<Selected>, now: DateTime<Utc>) -> Option<Quota> {
-    {
-        let cache = CACHE.try_read().ok()?;
-        if let Some(selected) = cache.profiles.get(&("claude".to_string(), channel))
-            && selected.profile != "default"
-        {
-            return selected_quota(&cache, "claude", selected, selection?, now);
-        }
+fn cached_claude(
+    channel: u64,
+    selection: Option<Selected>,
+    session_id: &str,
+    logical_session: &str,
+    now: DateTime<Utc>,
+) -> Option<Quota> {
+    // The binding names the wrapper, and its auth marker must name this native session.
+    let profile =
+        crate::services::tmux_common::claude_session_auth(logical_session, session_id).ok()??;
+    let cache = CACHE.try_read().ok()?;
+    if profile != "default" {
+        return profile_quota(&cache, "claude", &profile, now);
     }
-    claude(&CswapService::global().cached_accounts_for_summary()?, now)
+    let selected = cache.profiles.get(&("claude".to_string(), channel))?;
+    if selected.profile != profile || !selected.allows(selection?, now) {
+        return None;
+    }
+    let account = selected.default_claude_account?;
+    drop(cache);
+    let response = CswapService::global().cached_accounts_for_summary()?;
+    (response.active_account_number == Some(account)).then(|| claude(&response, now))?
 }
 
 fn merge_claude(session: Option<Quota>, account: Option<Quota>) -> Option<Quota> {
@@ -283,6 +308,19 @@ impl Snapshot {
                 fast: record.fast(),
             })
     }
+
+    pub(crate) fn model_between(&self, turn: Option<(DateTime<Utc>, DateTime<Utc>)>) -> Model<'_> {
+        if self
+            .statusline
+            .as_ref()
+            .zip(turn)
+            .is_some_and(|(record, (start, end))| (start..=end).contains(&record.observed_at()))
+        {
+            self.model()
+        } else {
+            Model::default()
+        }
+    }
 }
 
 pub(crate) fn snapshot(
@@ -290,6 +328,7 @@ pub(crate) fn snapshot(
     channel: u64,
     selection: Option<Selected>,
     session_id: Option<&str>,
+    logical_session: Option<&str>,
     show_quota: bool,
 ) -> Snapshot {
     let now = Utc::now();
@@ -308,7 +347,11 @@ pub(crate) fn snapshot(
         match provider {
             "claude" => merge_claude(
                 statusline.as_ref().and_then(|record| record.quota(now)),
-                cached_claude(channel, selection, now),
+                session_id
+                    .zip(logical_session)
+                    .and_then(|(session, logical)| {
+                        cached_claude(channel, selection, session, logical, now)
+                    }),
             ),
             "codex" => {
                 selection.and_then(|selection| cached_codex(&CACHE, channel, selection, now))

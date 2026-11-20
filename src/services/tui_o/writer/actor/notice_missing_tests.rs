@@ -290,6 +290,7 @@ async fn floored_evidence_does_not_exclude_a_piece_with_another_origin() {
         &evidence.record.source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(*evidence.origin.clone().unwrap()),
+        || None,
     );
     actor.owed = derived.into();
     assert_eq!(actor.owed.len(), 1);
@@ -375,6 +376,7 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
                 &evidence.record.source,
                 crate::services::tui_o::shadow::IDENTITY_VERSION,
                 Ok(*evidence.origin.clone().unwrap()),
+                || None,
             )
             .into();
         assert_eq!(actor.owed.len(), 1);

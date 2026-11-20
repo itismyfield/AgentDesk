@@ -42,6 +42,7 @@ fn failed_notice_identity_is_retained_without_blocking_the_body_deriver() {
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin),
+        || None,
     );
     assert!(
         !output
@@ -71,6 +72,7 @@ fn notice_projection_retains_canonical_record_before_raw_can_be_released() {
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin.clone()),
+        || None,
     );
     assert!(
         output
@@ -141,12 +143,14 @@ fn notice_does_not_change_body_tool_card_or_turn_summary_identity() {
             &source,
             crate::services::tui_o::shadow::IDENTITY_VERSION,
             Ok(origin.clone()),
+            || None,
         ));
         projected.extend(enabled.derive_scoped(
             &record,
             &source,
             crate::services::tui_o::shadow::IDENTITY_VERSION,
             Ok(origin),
+            || None,
         ));
         start = record.end;
     }

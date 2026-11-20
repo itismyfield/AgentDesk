@@ -109,8 +109,13 @@ impl<B: BindingEvents> Sources<B> {
     ) -> Vec<Derived> {
         deriver.enter_source(source);
         let mut ended = deriver.restart_before(source, record);
+        let logical_session = || {
+            self.notice_origin(source, record)
+                .ok()
+                .map(|origin| origin.logical_session)
+        };
         if !deriver.input_notices_enabled() {
-            ended.extend(deriver.derive_with_version(record, version));
+            ended.extend(deriver.derive_with_session(record, version, logical_session));
             return ended;
         }
         let origin = if super::super::input_notices::needs_origin(record) {
@@ -118,7 +123,7 @@ impl<B: BindingEvents> Sources<B> {
         } else {
             Err("input notice candidate absent".into())
         };
-        ended.extend(deriver.derive_scoped(record, source, version, origin));
+        ended.extend(deriver.derive_scoped(record, source, version, origin, logical_session));
         ended
     }
 

@@ -25,14 +25,13 @@ pub(in crate::services::discord) async fn cmd_usage_footer(
     log_command_received!(channel, &user.name, "/usage-footer");
     ctx.defer_ephemeral().await?;
     let requested = action.map(|action| matches!(action, UsageFooterAction::On));
-    let saved =
-        tokio::task::spawn_blocking(move || usage_footer::update(channel, requested)).await?;
+    let saved = usage_footer::update(ctx.data().shared.pg_pool.as_ref(), channel, requested).await;
     let notice = match saved {
         Ok(true) => "이 채널의 턴 푸터 쿼터 표시를 켰어요.",
         Ok(false) => "이 채널의 턴 푸터 쿼터 표시를 껐어요.",
         Err(error) => {
             tracing::warn!(channel, %error, "usage footer preference write failed");
-            "이 채널의 턴 푸터 쿼터 표시 설정을 저장하지 못했어요."
+            "공유 저장소에 설정을 저장하지 못했어요. 턴 푸터에 적용됐는지 확인할 수 없어요."
         }
     };
     ctx.send(CreateReply::default().content(notice).ephemeral(true))

@@ -58,6 +58,7 @@ type PostHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
 #[derive(Default)]
 struct FakePort {
+    usage_footer_pool: std::sync::OnceLock<sqlx::PgPool>,
     history: Mutex<Vec<SeenMessage>>,
     replies: Mutex<VecDeque<Reply>>,
     posts: Mutex<Vec<String>>,
@@ -97,6 +98,10 @@ impl FakePort {
 }
 
 impl DiscordPort for FakePort {
+    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
+        self.usage_footer_pool.get()
+    }
+
     fn bot_id(&self) -> u64 {
         BOT
     }
@@ -1040,6 +1045,7 @@ mod operator_resume;
 mod tool_result_tests;
 #[path = "turn_summary_replay_tests.rs"]
 mod turn_summary_replay;
+pub(crate) use turn_summary_replay::FooterWriter;
 
 #[path = "boundary_pending_health_tests.rs"]
 mod boundary_pending_health_tests;

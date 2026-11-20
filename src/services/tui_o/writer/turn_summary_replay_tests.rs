@@ -458,3 +458,148 @@ async fn prepared_old_footer_reconciles_using_its_saved_bytes_after_format_chang
     assert_eq!(saved.payload, prepared.payload);
     assert!(matches!(saved.outcome, Some(PieceOutcome::Posted(_))));
 }
+
+pub(crate) struct FooterWriter {
+    harness: Harness,
+    writer: Writer,
+}
+
+impl FooterWriter {
+    pub(crate) fn new(channel: u64, pool: sqlx::PgPool) -> Self {
+        let harness = Harness::build_channel(channel, |_| Vec::new());
+        harness.gate.acquired();
+        harness.port.usage_footer_pool.set(pool).unwrap();
+        let writer = harness.writer();
+        Self { harness, writer }
+    }
+
+    pub(crate) fn root(&self) -> &std::path::Path {
+        self.harness._runtime.path()
+    }
+
+    pub(crate) fn restart(&mut self) {
+        self.writer = self.harness.writer();
+    }
+
+    pub(crate) async fn turn(&mut self, id: &str) -> String {
+        use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
+
+        let session = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let root = record_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let path = record_path(&root, &session);
+        std::fs::write(
+            &path,
+            serde_json::json!({"session_id":session, "rate_limits":{
+                "five_hour":{"used_percentage":24,"resets_at": now.timestamp()+18000}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let ledger = self.writer.store().ledger();
+        let mut derive = UnitDeriver::new(self.harness.channel_id, ShadowProvider::Claude)
+            .with_turn_summary(pieces::SummaryInputs {
+                turn_marks: ledger.summary_turn_marks(),
+                disposed: ledger.disposed_unit_hashes(),
+                context_window: None,
+            });
+        let [prompt, body, terminal] = records(id, 0).map(|record| {
+            let mut value: serde_json::Value = serde_json::from_slice(&record.line).unwrap();
+            value["sessionId"] = serde_json::json!(session);
+            captured(value)
+        });
+        let before = self.harness.port.posts().len();
+        for record in [prompt, body, terminal] {
+            deliver_all(&mut self.writer, &derive.derive(&record)).await;
+        }
+        let posts = self.harness.port.posts();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(posts.len(), before + 2, "{posts:?}");
+        assert_eq!(posts[before], format!("answer {id}"));
+        posts[before + 1].clone()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unprepared_replay_uses_model_only_from_its_own_turn_interval() {
+    use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
+
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let root = record_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    let now = Utc::now();
+    let started = now - chrono::Duration::seconds(8);
+    let ended = now - chrono::Duration::seconds(4);
+    for (id, observed_at) in [
+        ("later-statusline", now - chrono::Duration::seconds(2)),
+        ("in-turn-statusline", now - chrono::Duration::seconds(6)),
+    ] {
+        let session = uuid::Uuid::new_v4().to_string();
+        let rows = records(id, 0);
+        let rows = std::array::from_fn::<_, 3, _>(|i| {
+            let mut value: serde_json::Value = serde_json::from_slice(&rows[i].line).unwrap();
+            value["sessionId"] = serde_json::json!(session);
+            value["timestamp"] = serde_json::json!(if i < 2 { started } else { ended });
+            captured(value)
+        });
+        let mut writer = harness.writer();
+        let mut live = deriver(&mut writer);
+        for row in &rows[..2] {
+            deliver_all(&mut writer, &live.derive(row)).await;
+        }
+        assert_eq!(
+            writer.store().ledger().excluded(&mark_key(id)),
+            Some(SUMMARY_MARK)
+        );
+        assert!(
+            writer
+                .store()
+                .ledger()
+                .latest_piece(&summary_key(id), 0)
+                .is_none()
+        );
+        drop((live, writer));
+
+        let path = record_path(&root, &session);
+        std::fs::write(&path, serde_json::json!({
+            "session_id":session, "model":{"display_name":"Opus 4.6"},
+            "effort":{"level":"high"}, "fast_mode":true,
+            "rate_limits":{"five_hour":{"used_percentage":24,"resets_at": now.timestamp()+18000}}
+        }).to_string()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_millis(observed_at.timestamp_millis() as u64),
+            )
+            .unwrap();
+        let mut reopened = harness.writer();
+        let footer = summary(&replay(&mut reopened, &rows).await);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            footer.payload.contains("Opus 4.6 (high, fast)"),
+            (started..=ended).contains(&observed_at),
+            "{}",
+            footer.payload
+        );
+        assert!(
+            footer.payload.contains("\n-# 5h 24% ("),
+            "{}",
+            footer.payload
+        );
+        let answer = format!("answer {id}");
+        assert_eq!(
+            harness
+                .port
+                .posts()
+                .iter()
+                .filter(|body| **body == answer)
+                .count(),
+            1
+        );
+    }
+}
