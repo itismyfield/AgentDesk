@@ -246,21 +246,20 @@ async fn start_reserved_headless_turn_admitted(
     );
     let claim = super::super::turn_start::claim_reserved_headless_turn;
     let front = owner.as_ref().map(|owner| owner.front().clone());
-    let transition_completion = shared.session_transition_completion(channel_id);
+    let shared_pane = isolated_run.is_none()
+        && tmux_session_label.is_none()
+        && !fresh_routine_turn(metadata.as_ref())
+        && !matches!(early_goal_kind, GoalCommandKind::FreshStart)
+        && crate::services::turn_host::has_effective_herdr_endpoint(channel_id.get());
+    let transition_completion =
+        shared_pane.then(|| shared.session_transition_completion(channel_id));
     let (session_transition_guard, cancel_token, continued_herdr) = claim(
         shared,
         channel_id,
         request_owner,
         &reservation,
         identity,
-        (
-            front,
-            (isolated_run.is_none()
-                && tmux_session_label.is_none()
-                && !fresh_routine_turn(metadata.as_ref())
-                && !matches!(early_goal_kind, GoalCommandKind::FreshStart))
-            .then_some(shared),
-        ),
+        (front, shared_pane.then_some(shared)),
     )
     .await?;
     let mailbox_scope = process_mailbox::ProcessMailboxScope::of(

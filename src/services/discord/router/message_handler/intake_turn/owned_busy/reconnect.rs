@@ -104,7 +104,7 @@ impl OwnerTurn {
                     Some(owner.front()),
                 );
                 hold(
-                    (shared, observation.state() == BusyState::Held),
+                    (shared, false),
                     &owner.mailbox,
                     channel,
                     owner.front(),

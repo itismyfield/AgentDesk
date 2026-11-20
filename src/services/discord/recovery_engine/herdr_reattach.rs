@@ -55,7 +55,7 @@ pub(in crate::services::discord) async fn continue_channel(
     transition: &SessionTransitionLease<'_>,
 ) -> Option<VerifiedReattach> {
     use super::herdr_server_replaced::canonical_row;
-    if !crate::config::session_hosts::has_herdr_endpoint(channel.get()) {
+    if !crate::services::turn_host::has_effective_herdr_endpoint(channel.get()) {
         return None;
     }
     let pool = shared.pg_pool.as_ref()?;
@@ -63,7 +63,9 @@ pub(in crate::services::discord) async fn continue_channel(
     let HostedRecord::Known(record) = &row.record else {
         return None;
     };
-    if record.state != HostedState::Bound || root_replaced::local(shared, record).is_err() {
+    if record.state != HostedState::Bound
+        || root_replaced::local_for_continuation(shared, record).is_err()
+    {
         return None;
     }
     if already_admitted(shared, record, channel) {
@@ -79,7 +81,7 @@ pub(in crate::services::discord) fn already_admitted(
 ) -> bool {
     use crate::services::tui_prompt_dedupe::{herdr_listing, runtime_binding_for_tmux_session};
     let key = &record.owner.logical_key;
-    root_replaced::local(shared, record)
+    root_replaced::local_for_continuation(shared, record)
         .is_ok_and(|(provider, owner)| provider == shared.provider && owner == channel)
         && herdr_listing(key)
             .is_some_and(|(nonce, admitted)| admitted && nonce == record.execution_nonce)
@@ -113,7 +115,7 @@ pub(in crate::services::discord) async fn continue_owner(
     let HostedRecord::Known(record) = &observed.record else {
         return held();
     };
-    let Ok((provider, channel)) = root_replaced::local(shared, record) else {
+    let Ok((provider, channel)) = root_replaced::local_for_continuation(shared, record) else {
         return held();
     };
     if record.state != HostedState::Bound
@@ -301,7 +303,7 @@ async fn verify_selected(
     let HostedRecord::Known(record) = &observed.record else {
         return Held;
     };
-    let Ok((provider, channel)) = root_replaced::local(shared, record) else {
+    let Ok((provider, channel)) = root_replaced::local_for_continuation(shared, record) else {
         return Held;
     };
     if record.state != HostedState::Bound

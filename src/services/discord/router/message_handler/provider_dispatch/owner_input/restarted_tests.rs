@@ -132,14 +132,61 @@ fn early_held_wakes_the_original_grant_pg() {
                     Err("NotSent(\"herdr_restart_held\")".into())
                 );
                 assert!(held_watch::armed(CHANNEL));
+                let after_deadline =
+                    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap() + 20_000;
+                let retained = mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().unwrap();
+                        owner.tick(after_deadline)?;
+                        owner.json()
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    retained["items"],
+                    json!([item(ORIGINAL, "original"), item(FOLLOWER, "follower")]),
+                    "identity wait must preserve both inputs past the composer deadline"
+                );
+                assert!(retained["refused_fronts"].is_null(), "{retained}");
+                assert!(retained["head_injection"].is_null(), "{retained}");
+                assert!(matches!(
+                    exact_turn(&mailbox, &ticket, &item(ORIGINAL, "original")).await,
+                    Ok(TurnBind::NotArmed)
+                ));
+
                 let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+                let prepared = payload(&fixture);
+                let leaf_runs = Arc::new(AtomicUsize::new(0));
+                let counted = leaf_runs.clone();
+                let holder = mailbox.clone();
                 let handoff: Handoff = Arc::new(move |front| {
-                    let send = send.clone();
+                    let (send, holder, counted) = (send.clone(), holder.clone(), counted.clone());
+                    let prepared = PreparedPayload {
+                        frame: prepared.frame.clone(),
+                        sources: prepared.sources.clone(),
+                        attempt: prepared.attempt.clone(),
+                    };
                     Box::pin(async move {
-                        send.send(front).map_err(|error| error.to_string())?;
-                        Err("test leaves the granted front in custody".into())
+                        let claim = claim_turn(&holder, ORIGINAL, &front)
+                            .await?
+                            .ok_or("no original claim")?;
+                        let result = pump::submit_front(
+                            &holder,
+                            Some(claim),
+                            prepared,
+                            clock(),
+                            Box::new(move |frame| {
+                                assert_eq!(frame, "original\nfollower");
+                                counted.fetch_add(1, Ordering::SeqCst);
+                                Ok(Completion::Submitted)
+                            }),
+                        )
+                        .await?;
+                        assert_eq!(result, Completion::Submitted);
+                        send.send(front).map_err(|error| error.to_string())
                     })
                 });
+                let drive_mailbox = mailbox.clone();
                 let drive = Arc::new(Drive {
                     mailbox,
                     channel: CHANNEL,
@@ -164,6 +211,11 @@ fn early_held_wakes_the_original_grant_pg() {
                     (front.1.message_id, front.1.queued_generation),
                     (ORIGINAL, 1)
                 );
+                assert_eq!(leaf_runs.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    exact_turn(&drive_mailbox, &ticket, &item(ORIGINAL, "original")).await,
+                    Ok(TurnBind::Settled(_))
+                ));
                 assert!(fixture.rig.sends().is_empty());
             });
             runtime.block_on(fixture.close());

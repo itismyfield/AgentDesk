@@ -325,7 +325,7 @@ pub(super) fn invalidate_stale_generation_in_root(
             continue;
         }
         // The Herdr recovery owner adjudicates its hosted episode before taking the lease.
-        if state.hosted_execution_nonce.is_some() {
+        if boot_reaper::hosted_restart_candidate(&state) {
             continue;
         }
         // Codex review HIGH on PR #2460: normal rows are constructed with
@@ -354,7 +354,7 @@ pub(super) fn invalidate_stale_generation_in_root(
         if receipt_protected_path(&path) {
             continue;
         }
-        if state.restart_mode.is_some() || state.hosted_execution_nonce.is_some() {
+        if state.restart_mode.is_some() || boot_reaper::hosted_restart_candidate(&state) {
             continue;
         }
         if state.rebind_origin {

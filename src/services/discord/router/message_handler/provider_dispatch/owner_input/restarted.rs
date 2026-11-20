@@ -151,7 +151,6 @@ impl OwnerTurn {
         );
         hold_start(&self.mailbox, channel, self.front()).await;
         held_watch::arm(channel.get(), probe);
-        held_watch::readiness::hold(drive(shared, channel), self.front()).await;
         self.defer_before_submit("herdr_restart_held");
         Err(())
     }
@@ -180,10 +179,6 @@ fn probe(
     key: Option<String>,
     previous: Option<HostedObservation>,
 ) -> held_watch::ScreenProbe {
-    let view = previous.as_ref().and_then(|row| match &row.record {
-        HostedRecord::Known(record) => herdr_endpoints().view(record),
-        _ => None,
-    });
     let handle = tokio::runtime::Handle::current();
     Box::new(move || {
         if crate::services::herdr_admission::check().is_err() {
@@ -204,7 +199,7 @@ fn probe(
         if plan.row != previous {
             return Screen::Ready;
         }
-        let (Some(view), Some(row)) = (&view, &plan.row) else {
+        let Some(row) = &plan.row else {
             return Screen::Unknown;
         };
         let HostedRecord::Known(record) = &row.record else {
@@ -213,6 +208,9 @@ fn probe(
         if record.state != HostedState::Bound {
             return Screen::Unknown;
         }
+        let Some(view) = herdr_endpoints().view(record) else {
+            return Screen::Unknown;
+        };
         let reading = view.read_execution();
         if view.restart_ended(record, &reading) {
             return Screen::Ready;

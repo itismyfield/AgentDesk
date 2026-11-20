@@ -1,6 +1,8 @@
 //! Reuse the inflight watcher claim for a verified live Herdr execution.
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::{HostedObservation, HostedRecord};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedExecution, HostedObservation, HostedRecord,
+};
 use crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
 
 pub(super) async fn restore_channel(
@@ -13,10 +15,15 @@ pub(super) async fn restore_channel(
     let Ok(transition) = SessionTransitionLease::try_acquire(shared, channel) else {
         return false;
     };
-    matches!(
+    let restored = matches!(
         continue_channel(shared, provider, channel, &transition).await,
         Some(VerifiedReattach::Live | VerifiedReattach::AwaitingClear)
-    )
+    );
+    drop(transition);
+    if restored {
+        drop(shared.session_transition_completion(channel));
+    }
+    restored
 }
 
 pub(in crate::services::discord::recovery_engine) async fn attach(
@@ -37,10 +44,24 @@ pub(in crate::services::discord::recovery_engine) async fn attach(
     };
     let provider = &shared.provider;
     let logical = &record.owner.logical_key;
-    let Ok(inflight) = inflight::load_inflight_state_read_only_result(provider, channel_id.get())
+    let Ok(mut inflight) =
+        inflight::load_inflight_state_read_only_result(provider, channel_id.get())
     else {
         return false;
     };
+    if let Some(state) = inflight.as_mut()
+        && state.output_path.is_none()
+    {
+        let expected = state.clone();
+        let record = record.clone();
+        let id = row.session_id();
+        let Ok(Some(saved)) =
+            tokio::task::spawn_blocking(move || recover_pathless(id, &record, &expected)).await
+        else {
+            return false;
+        };
+        *state = saved;
+    }
     let active = inflight.as_ref().filter(|state| {
         state.provider == record.owner.provider
             && state.tmux_session_name.as_deref() == Some(logical)
@@ -85,6 +106,128 @@ pub(in crate::services::discord::recovery_engine) async fn attach(
         (active, finish_mailbox, binding.relay_last_offset()),
     )
     .await
+}
+
+/// Recover the exact first prompt boundary of a Claude prelaunch episode before taking its lease.
+fn recover_pathless(
+    id: i64,
+    record: &HostedExecution,
+    state: &inflight::InflightTurnState,
+) -> Option<inflight::InflightTurnState> {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::discord::tui_prompt_relay::herdr_source::nonce_baseline;
+    use crate::services::session_host::{HostKind, HostedRuntimeLocator};
+    use crate::services::tui_input::human_frame::history::v2::carried::{self, Consumed};
+    use std::os::unix::fs::MetadataExt;
+
+    let logical = &record.owner.logical_key;
+    let nonce = &record.execution_nonce;
+    if record.owner.provider != "claude"
+        || state.provider != "claude"
+        || state.runtime_kind != Some(ClaudeTui)
+        || state.tmux_session_name.as_ref() != Some(logical)
+        || state.hosted_record_id.is_some_and(|other| other != id)
+        || state
+            .hosted_execution_nonce
+            .as_ref()
+            .is_some_and(|other| other != nonce)
+        || state.turn_nonce.as_deref().is_none_or(str::is_empty)
+        || state.tui_terminal_kind.is_some()
+        || state.terminal_receipt.is_some()
+        || state.terminal_delivery_committed
+        || state.herdr_before_start_stop.is_some()
+        || state.rebind_origin
+    {
+        return None;
+    }
+    let at = record.location.as_ref()?;
+    let epoch = crate::services::herdr_launch::clear_epoch::snapshot(
+        &record.owner.provider,
+        &record.owner.discord_token_hash,
+        state.channel_id,
+    );
+    let source = nonce_baseline(state.channel_id, logical, nonce)?;
+    let binding = runtime_binding_for_tmux_session(logical)?;
+    let metadata = source.path.symlink_metadata().ok()?;
+    if binding.runtime_kind != ClaudeTui
+        || binding.session_id.as_ref() != Some(&source.session_id)
+        || std::path::Path::new(binding.relay_output_path()) != source.path
+        || state
+            .session_id
+            .as_ref()
+            .is_some_and(|previous| previous != &source.session_id)
+        || !metadata.is_file()
+        || (metadata.dev(), metadata.ino()) != (source.dev, source.ino)
+    {
+        return None;
+    }
+    let target = serde_json::json!({"host":"herdr","owner":logical,"root":at.socket_addr,
+        "execution_nonce":nonce});
+    let receipt = carried::lookup_herdr(
+        (
+            state.user_msg_id,
+            &format!("claude/{}", record.owner.discord_token_hash),
+        ),
+        &target,
+        &source.session_id,
+        &source.path,
+        metadata.len(),
+    )?;
+    let Consumed::User { row } = &receipt else {
+        return None;
+    };
+    if row.file != [source.dev, source.ino] {
+        return None;
+    }
+    let mut guard = inflight::lock_inflight_episode(
+        &ProviderKind::Claude,
+        state.channel_id,
+        &inflight::InflightEpisodePin::from_state(state),
+    )
+    .ok()?;
+    let mut updated = guard.state().clone();
+    if updated.save_generation != state.save_generation {
+        return None;
+    }
+    updated.session_id = Some(source.session_id.clone());
+    updated.output_path = Some(binding.relay_output_path().to_owned());
+    updated.turn_start_offset = Some(row.range.0);
+    updated.last_offset = updated.last_offset.max(row.range.0);
+    updated.hosted_record_id = Some(id);
+    updated.hosted_execution_nonce = Some(nonce.clone());
+    match &updated.host_locator {
+        Some(inflight::PersistedHostLocator::Known(locator))
+            if locator.host_kind == HostKind::Herdr
+                && locator.host_session_id == at.named_session
+                && locator
+                    .execution_node
+                    .as_ref()
+                    .is_none_or(|node| node == &at.execution_node)
+                && (state.hosted_execution_nonce.is_some()
+                    || locator.pane.as_ref() == Some(&at.pane_id)) => {}
+        Some(_) => return None,
+        None => {
+            updated.host_locator = Some(inflight::PersistedHostLocator::Known(
+                HostedRuntimeLocator {
+                    execution_node: Some(at.execution_node.clone()),
+                    host_kind: HostKind::Herdr,
+                    host_session_id: at.named_session.clone(),
+                    pane: Some(at.pane_id.clone()),
+                },
+            ));
+        }
+    }
+    if nonce_baseline(state.channel_id, logical, nonce).as_ref() != Some(&source) {
+        return None;
+    }
+    let permit = epoch.begin_effect()?;
+    let saved = receipt.confirm(|| {
+        (guard.persist_verified_under_guard(&updated, "herdr_pathless_continue")
+            == inflight::GuardedSaveOutcome::Saved)
+            .then(|| guard.state().clone())
+    });
+    drop(permit);
+    saved
 }
 
 pub(super) async fn spawn(

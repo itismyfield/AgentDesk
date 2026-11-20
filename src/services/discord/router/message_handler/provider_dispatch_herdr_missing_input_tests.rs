@@ -227,7 +227,7 @@ mod success;
 #[path = "provider_dispatch_herdr_missing_race_tests.rs"]
 mod capture_race;
 
-fn restarted_front(busy: bool) {
+fn restarted_front(busy: bool, pathless: bool, thread_parent: Option<u64>) {
     use crate::services::discord::inflight;
     use crate::services::tui_prompt_dedupe;
 
@@ -245,7 +245,18 @@ fn restarted_front(busy: bool) {
     let _admission = open_admission();
     let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
     let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
-    let mut intake = Intake::new(&fx, &started);
+    let mut intake = match thread_parent {
+        Some(parent) => Intake::new_thread(&fx, &started, parent),
+        None => Intake::new(&fx, &started),
+    };
+    if let Some(parent) = thread_parent {
+        assert!(!crate::config::session_hosts::has_herdr_endpoint(CHANNEL));
+        assert!(crate::config::session_hosts::has_herdr_endpoint(parent));
+        assert_eq!(
+            crate::services::session_host::surface_policy::policy_channel(CHANNEL),
+            parent
+        );
+    }
     let old_runtime = recording_runtime(&mut intake, &fx, true);
     let _rest = test_rest::install(intake._api.http.clone());
     let endpoint =
@@ -316,13 +327,38 @@ fn restarted_front(busy: bool) {
             .get_mut(&channel)
             .unwrap()
             .session_id = None;
+        let historical_reply = "reply produced before the pathless turn";
+        if pathless {
+            append(&started.path, &[json!({"type":"assistant","uuid":uuid(),"sessionId":started.session,
+                "timestamp":chrono::Utc::now().to_rfc3339(),"apiBlockIndex":0,
+                "message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":historical_reply}]}})]);
+        }
+        let offset = std::fs::metadata(&started.path).unwrap().len();
         if busy {
-            let offset = std::fs::metadata(&started.path).unwrap().len();
+            let old_prompt = "already running before restart";
+            if pathless {
+                use crate::services::tui_input::human_frame::history::v2::Registry;
+                use std::os::unix::fs::MetadataExt;
+                let file = std::fs::metadata(&started.path).unwrap();
+                let original = MESSAGE - 1;
+                let target = json!({"host":"herdr","owner":fx.logical(),
+                    "root":record.location.as_ref().unwrap().socket_addr,"execution_nonce":nonce});
+                Registry::runtime().unwrap().prepare(&format!("claude/{TOKEN}"), &json!({
+                    "identity":{"primary":original,"queued_generation":1,"sources":[{"message_id":original,"queued_generation":1}]},
+                    "attempt":{"nonce":"original-herdr-attempt","provider":"claude","target":target,
+                        "source":{"kind":"pre_source","expected_session_id":started.session,
+                            "expected_transcript":started.path,"binding_watermark":null}},
+                    "resolved_source":{"target":target,"provider":"claude","session_id":started.session,
+                        "transcript":started.path,"file":[file.dev(),file.ino()],"offset":offset,"binding_watermark":null},
+                    "original":{"author_id":7},"payload":{"frame":old_prompt}
+                })).unwrap();
+            }
             append(
                 &started.path,
                 &[
                     json!({"type":"user","uuid":uuid(),"sessionId":started.session,
-                "message":{"role":"user","content":"already running before restart"}}),
+                "message":{"role":"user","content":old_prompt}}),
                 ],
             );
             let mut row = inflight::InflightTurnState::new(
@@ -335,9 +371,9 @@ fn restarted_front(busy: bool) {
                 "already running before restart".into(),
                 Some(started.session.clone()),
                 Some(fx.logical().to_owned()),
-                Some(started.path.display().to_string()),
+                (!pathless).then(|| started.path.display().to_string()),
                 None,
-                offset,
+                if pathless { 0 } else { offset },
             );
             row.session_key = discord::adk_session::turn_session_key(
                 &intake.shared,
@@ -346,13 +382,20 @@ fn restarted_front(busy: bool) {
             )
             .await;
             row.turn_nonce = Some("old-active-episode".into());
-            row.turn_start_offset = Some(offset);
+            row.turn_start_offset = Some(if pathless { 0 } else { offset });
             row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
-            row.hosted_record_id = Some(row_id);
-            row.hosted_execution_nonce = Some(nonce.clone());
+            if !pathless {
+                row.hosted_record_id = Some(row_id);
+                row.hosted_execution_nonce = Some(nonce.clone());
+            }
             row.born_generation = intake.shared.restart.current_generation.saturating_sub(1);
             row.restart_generation = Some(row.born_generation);
             inflight::save_inflight_state(&row).unwrap();
+            if pathless {
+                let stored = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).unwrap();
+                assert!(stored.output_path.is_none() && stored.hosted_execution_nonce.is_none());
+                assert_eq!(stored.last_offset, 0);
+            }
         }
         let front = intake.front().await;
         let start = async {
@@ -397,6 +440,15 @@ fn restarted_front(busy: bool) {
                 held.active_turn_nonce.as_deref(),
                 Some("old-active-episode")
             );
+            if pathless {
+                let stored = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).unwrap();
+                assert_eq!(stored.hosted_execution_nonce.as_deref(), Some(nonce.as_str()));
+                assert_eq!(stored.hosted_record_id, Some(row_id));
+                assert_eq!(stored.output_path.as_deref(), started.path.to_str());
+                assert!(offset > 0);
+                assert_eq!(stored.turn_start_offset, Some(offset));
+                assert!(stored.last_offset >= offset);
+            }
         };
         let provider_reply = async {
             crate::test_support::wait::await_within(receive.recv(), LIMIT)
@@ -479,6 +531,10 @@ fn restarted_front(busy: bool) {
         calls.extend(intake._api.take());
         assert!(!calls.iter().any(|call|
             call.contains("이 입력을 폐기했습니다") || call.contains("세션 복구 중") || call.contains("세션 복원")));
+        if pathless {
+            assert!(!intake.posts.to(CHANNEL).iter().chain(&intake.mock.delivered_texts())
+                .chain(&calls).any(|post| post.contains(historical_reply)));
+        }
     });
     drop(intake);
     drop(old_runtime);
@@ -486,10 +542,25 @@ fn restarted_front(busy: bool) {
 
 #[test]
 fn first_idle_input_after_restart_reuses_named_herdr_and_posts_once_pg() {
-    restarted_front(false);
+    restarted_front(false, false, None);
 }
 
 #[test]
 fn first_busy_input_after_restart_reuses_named_herdr_while_headless_claim_waits_pg() {
-    restarted_front(true);
+    restarted_front(true, false, None);
+}
+
+#[test]
+fn first_pathless_busy_claude_input_uses_the_durable_prompt_boundary_pg() {
+    restarted_front(true, true, None);
+}
+
+#[test]
+fn first_named_live_thread_input_inherits_its_verified_parent_endpoint_pg() {
+    restarted_front(false, false, Some(CHANNEL + 1));
+}
+
+#[test]
+fn first_busy_thread_input_inherits_parent_and_keeps_the_child_lease_pg() {
+    restarted_front(true, false, Some(CHANNEL + 1));
 }

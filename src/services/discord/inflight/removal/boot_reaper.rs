@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// A configured Claude prelaunch may lack both output path and hosted identifiers until adoption.
+pub(super) fn hosted_restart_candidate(state: &InflightTurnState) -> bool {
+    state.hosted_execution_nonce.is_some()
+        || (state.runtime_kind
+            == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+            && state.output_path.is_none()
+            && crate::services::turn_host::has_effective_herdr_endpoint(state.channel_id))
+}
+
 /// Counts from one reaper pass; `already_ran` marks a caller that waited on
 /// another bot's pass for the same provider.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

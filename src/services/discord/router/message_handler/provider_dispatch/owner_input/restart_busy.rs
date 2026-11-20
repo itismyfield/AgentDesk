@@ -13,7 +13,10 @@ pub(super) async fn recover_active(
     let Some(row) = inflight::load_inflight_state_read_only(provider, channel.get()) else {
         return;
     };
-    if row.hosted_execution_nonce.is_some()
+    if (row.hosted_execution_nonce.is_some()
+        || (*provider == ProviderKind::Claude
+            && row.output_path.is_none()
+            && crate::services::turn_host::has_effective_herdr_endpoint(channel.get())))
         && !inflight::row_is_current_generation(&row, shared.restart.current_generation)
         && crate::services::discord::mailbox_snapshot(shared, channel)
             .await
