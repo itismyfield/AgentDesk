@@ -1048,7 +1048,7 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_resets_it_without_tm
     let shared = shared_on(&pool).await;
     let api = Recorder::start().await;
     crate::services::discord::internal_api::init(api.port, None);
-    let (provider, http) = (ProviderKind::Gemini, Arc::new(Http::new("")));
+    let (provider, http) = (ProviderKind::OpenCode, Arc::new(Http::new("")));
     assert!(!provider.uses_managed_tmux_backend());
     let channel = ChannelId::new(1_479_671_302_387_077_000);
     let _hosts = crate::config::session_hosts::force_for_test(

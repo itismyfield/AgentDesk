@@ -45,7 +45,6 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
             }
         }
         ProviderKind::Codex => Ok(format_local_skill_prompt("Codex", skill, args_str)),
-        ProviderKind::Gemini => Ok(format_local_skill_prompt("Gemini", skill, args_str)),
         ProviderKind::Qwen => {
             if args_str.is_empty() {
                 Ok(format!(

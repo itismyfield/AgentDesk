@@ -41,7 +41,7 @@ fn slash_registration_help_and_risk_table_name_the_same_commands() {
     for provider in [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
+        ProviderKind::OpenCode,
     ] {
         let messages = build_slash_help_messages(&provider, &commands);
         assert_eq!(

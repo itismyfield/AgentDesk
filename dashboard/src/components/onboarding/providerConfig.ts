@@ -1,6 +1,6 @@
 import type { CommandBotEntry } from "../onboardingDraft";
 
-export const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "opencode", "qwen"] as const;
+export const COMMAND_PROVIDERS = ["claude", "codex", "opencode", "qwen"] as const;
 
 const PROVIDER_CONFIG = {
   claude: {

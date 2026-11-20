@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Blocks a same-turn backward inflight write unless it is an empty-body `RetryBoundary` reset.
+/// Blocks a same-turn backward inflight write unless it is an empty-body full reset.
 pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
     response_sent_offset_monotonic: bool,
     last_offset_monotonic: bool,

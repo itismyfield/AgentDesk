@@ -66,9 +66,10 @@ describe("detectProviderSuffix", () => {
     expect(result.source).toBeNull();
   });
 
-  it("handles gemini suffix", () => {
-    expect(detectProviderSuffix("news-gm", null).provider).toBe("gemini");
-    expect(detectProviderSuffix("news-gem", null).provider).toBeNull();
+  it("handles qwen suffix and no longer routes the retired gemini suffix", () => {
+    expect(detectProviderSuffix("news-qw", null).provider).toBe("qwen");
+    expect(detectProviderSuffix("news-qwen", null).provider).toBeNull();
+    expect(detectProviderSuffix("news-gm", null).provider).toBeNull();
   });
 });
 

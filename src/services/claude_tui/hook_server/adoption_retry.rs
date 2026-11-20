@@ -252,12 +252,13 @@ pub(crate) fn observe_launch_hook(
     reclaim: bool,
 ) -> Result<(), NotDurableReason> {
     let tmux = observation_pane(session_id, envelope);
-    with_tmux_source_authority(&tmux, |_| {
+    with_tmux_source_authority(&tmux, |authority| {
         execution_current(&tmux, captured_nonce(envelope).as_deref())?;
-        let reclaimed = reclaim_with_current_prompt(session_id, hook).map_err(|error| {
-            tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
-            NotDurableReason::Append
-        })?;
+        let reclaimed =
+            reclaim_with_current_prompt(authority, session_id, hook).map_err(|error| {
+                tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
+                NotDurableReason::Append
+            })?;
         if reclaim
             && reclaimed
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != session_id)

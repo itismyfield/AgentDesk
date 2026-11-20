@@ -5,6 +5,22 @@ use crate::services::tui_prompt_dedupe::{
 };
 use std::path::{Path, PathBuf};
 
+/// The accepted startup of this launch and transcript, even after its input consumes readiness.
+#[cfg(unix)]
+pub(crate) fn launch_start_hook(
+    logical: &str,
+    nonce: &str,
+    native: &str,
+    path: &Path,
+) -> Option<super::HookSignal> {
+    let state = super::ledger();
+    let (_, source) = state.starts.get(&(logical.to_owned(), nonce.to_owned()))?;
+    if source.native != native || source.path != path {
+        return None;
+    }
+    state.entries.get(source)?.launch_start.clone()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Source {
     pub session: String,

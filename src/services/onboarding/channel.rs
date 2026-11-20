@@ -297,7 +297,7 @@ mod tests {
     }
 
     fn config() -> crate::config::Config {
-        serde_yaml::from_str("server: {}\ndiscord: {guild_id: '111'}\nonboarding:\n  guild_id: '222'\n  default_provider: gemini\n  default_categories: {dev: '333'}\n").unwrap()
+        serde_yaml::from_str("server: {}\ndiscord: {guild_id: '111'}\nonboarding:\n  guild_id: '222'\n  default_provider: qwen\n  default_categories: {dev: '333'}\n").unwrap()
     }
 
     #[test]
@@ -325,14 +325,14 @@ mod tests {
             assert_eq!(body.guild_id, explicit.unwrap_or("222"));
             let policy = onboarding::OnboardingRerunPolicy::ReuseExisting;
             let ctx = onboarding::CompleteErrorContext {
-                provider: "gemini",
+                provider: "qwen",
                 rerun_policy: policy,
                 explicit_rerun_policy: false,
             };
             let mut checkpoint = onboarding::build_onboarding_completion_state(
                 "test",
                 &body.guild_id,
-                "gemini",
+                "qwen",
                 policy,
                 onboarding::OnboardingCompletionStage::ChannelsResolved,
                 false,
@@ -344,7 +344,7 @@ mod tests {
                 &ctx,
                 root,
                 &body,
-                "gemini",
+                "qwen",
                 &[],
                 &mut checkpoint,
             );
@@ -365,20 +365,20 @@ mod tests {
         let config = config();
         let body = apply_config_defaults(&config, &request());
         assert_eq!(body.guild_id, "222");
-        assert_eq!(body.provider.as_deref(), Some("gemini"));
+        assert_eq!(body.provider.as_deref(), Some("qwen"));
         assert_eq!(body.channels[0].category.as_deref(), Some("333"));
-        let first = super::super::requested_channel_fingerprint(&body, "gemini").unwrap();
+        let first = super::super::requested_channel_fingerprint(&body, "qwen").unwrap();
         let mut whitespace = body.clone();
         whitespace.channels[0].role_id.push(' ');
         assert_eq!(
             first,
-            super::super::requested_channel_fingerprint(&whitespace, "gemini").unwrap()
+            super::super::requested_channel_fingerprint(&whitespace, "qwen").unwrap()
         );
         let mut other = body.clone();
         other.channels[0].category = Some("444".into());
         assert_ne!(
             first,
-            super::super::requested_channel_fingerprint(&other, "gemini").unwrap()
+            super::super::requested_channel_fingerprint(&other, "qwen").unwrap()
         );
         other.guild_id = "555".into();
         other.provider = Some("claude".into());

@@ -100,7 +100,6 @@ impl ProviderKind {
         match self {
             Self::Claude => LegacyDispatchKind::Claude,
             Self::Codex => LegacyDispatchKind::Codex,
-            Self::Gemini => LegacyDispatchKind::Gemini,
             Self::OpenCode => LegacyDispatchKind::OpenCode,
             Self::Grok => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Grok),
             Self::Qwen => LegacyDispatchKind::Qwen,
@@ -136,7 +135,6 @@ impl ProviderKind {
                 Vec::new()
             }
             ProviderCompactionAdapter::CodexCli
-            | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),
@@ -165,7 +163,6 @@ impl ProviderKind {
                 )]
             }
             ProviderCompactionAdapter::ClaudeEnvironment
-            | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),
