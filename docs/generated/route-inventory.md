@@ -16,7 +16,7 @@
 | `DELETE` | `/api/agents/{id}` | `agents_crud::delete_agent` | `src/server/routes/agents_crud.rs:918` | `src/server/routes/domains/agents.rs:22` |
 | `GET` | `/api/agents/{id}` | `agents_crud::get_agent` | `src/server/routes/agents_crud.rs:414` | `src/server/routes/domains/agents.rs:22` |
 | `PATCH` | `/api/agents/{id}` | `agents_crud::update_agent` | `src/server/routes/agents_crud.rs:503` | `src/server/routes/domains/agents.rs:22` |
-| `GET` | `/api/agents/{id}/anchors` | `prompt_audit::anchors` | `src/server/routes/prompt_audit.rs:128` | `src/server/routes/domains/runtime.rs:146` |
+| `GET` | `/api/agents/{id}/anchors` | `prompt_audit::anchors` | `src/server/routes/prompt_audit.rs:150` | `src/server/routes/domains/runtime.rs:146` |
 | `GET` | `/api/agents/{id}/cron` | `cron_api::agent_cron_jobs` | `src/server/routes/cron_api.rs:164` | `src/server/routes/domains/agents.rs:44` |
 | `GET` | `/api/agents/{id}/dispatched-sessions` | `agents::agent_dispatched_sessions` | `src/server/routes/agents.rs:619` | `src/server/routes/domains/runtime.rs:128` |
 | `POST` | `/api/agents/{id}/duplicate` | `agents_crud::duplicate_agent` | `src/server/routes/agents_crud.rs:764` | `src/server/routes/domains/agents.rs:40` |
@@ -27,7 +27,7 @@
 | `POST` | `/api/agents/{id}/handoff` | `agents::agent_handoff` | `src/server/routes/agents.rs:1067` | `src/server/routes/domains/agents.rs:43` |
 | `GET` | `/api/agents/{id}/input-result` | `agents_input_result::input_result` | `src/server/routes/agents_input_result.rs:35` | `src/server/routes/domains/runtime.rs:140` |
 | `POST` | `/api/agents/{id}/message` | `agents::agent_message` | `src/server/routes/agents.rs:1019` | `src/server/routes/domains/agents.rs:42` |
-| `GET` | `/api/agents/{id}/prompt-audit` | `prompt_audit::prompt` | `src/server/routes/prompt_audit.rs:99` | `src/server/routes/domains/runtime.rs:145` |
+| `GET` | `/api/agents/{id}/prompt-audit` | `prompt_audit::prompt` | `src/server/routes/prompt_audit.rs:120` | `src/server/routes/domains/runtime.rs:145` |
 | `GET` | `/api/agents/{id}/session-evidence` | `super::super::session_evidence::get` | `src/server/routes/session_evidence.rs:12` | `src/server/routes/domains/agents.rs:28` |
 | `POST` | `/api/agents/{id}/signal` | `agents::agent_signal` | `src/server/routes/agents.rs:978` | `src/server/routes/domains/agents.rs:41` |
 | `GET` | `/api/agents/{id}/skills` | `agents::agent_skills` | `src/server/routes/agents.rs:589` | `src/server/routes/domains/agents.rs:45` |
