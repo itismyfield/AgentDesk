@@ -2393,7 +2393,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
     for capture_only in [false, true] {
         let channel = ChannelId::new(81489850 + u64::from(capture_only));
         let shared = b2b_shared(None);
-        let provider = ProviderKind::Gemini;
+        let provider = ProviderKind::OpenCode;
         let finish_context = super::super::FinalizeContext {
             clear_inflight: true,
             ..super::super::FinalizeContext::bridge()
