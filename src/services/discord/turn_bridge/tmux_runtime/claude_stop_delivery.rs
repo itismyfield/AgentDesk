@@ -421,7 +421,8 @@ async fn interrupt_observed_claude_session(
                 if protected_delivery {
                     claude_tui_stop_pane_evidence(pane)
                 } else {
-                    super::claude_stop_pane::token_evidence(pane)
+                    let streaming = structured_state == Some(TuiTurnState::Streaming);
+                    super::claude_stop_pane::token_evidence(pane, streaming)
                 }
             });
         let phase = match delivery {
@@ -931,7 +932,7 @@ mod tests {
     fn ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry() {
         for phase in [
             classify_tui_interrupt_phase(Some(TuiTurnState::Streaming), false, false),
-            classify_tui_interrupt_phase(Some(TuiTurnState::Unknown), false, true),
+            classify_tui_interrupt_phase(Some(TuiTurnState::Unknown), false, false),
             classify_tui_interrupt_phase(None, false, true),
         ] {
             let token = CancelToken::new();

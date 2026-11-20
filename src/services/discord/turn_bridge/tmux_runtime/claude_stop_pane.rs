@@ -59,18 +59,14 @@ pub(super) fn veto(pane: &str) -> bool {
 /// rows under the composer's bottom border. Indented rows above it are prompt, draft or reply text.
 fn chrome_rows(pane: &str) -> Vec<&str> {
     let rows: Vec<&str> = pane.lines().filter(|row| !row.trim().is_empty()).collect();
-    let recent = &rows[rows
+    let skip = rows
         .len()
-        .saturating_sub(screen::CLAUDE_TUI_READINESS_SCAN_LINES)..];
+        .saturating_sub(screen::CLAUDE_TUI_READINESS_SCAN_LINES);
+    let recent = &rows[skip..];
     let edge = |row: &str| !row.starts_with(char::is_whitespace);
     let border = |row: &&str| edge(row) && row.trim_end().chars().all(|ch| ch == '─');
     let composer = recent.iter().rposition(|row| row.starts_with('❯'));
-    let below = |at: usize| {
-        recent[at..]
-            .iter()
-            .position(border)
-            .map(|border| at + border)
-    };
+    let below = |at: usize| Some(at + recent[at..].iter().position(border)?);
     let status = composer.and_then(below).unwrap_or(recent.len());
     let chrome = |(at, row): (usize, &&str)| (at > status || edge(row)).then_some(*row);
     recent.iter().enumerate().filter_map(chrome).collect()
@@ -82,16 +78,16 @@ pub(super) fn interrupt_offered(pane: &str) -> bool {
     !veto(pane) && screen::tmux_recent_lines_show_claude_tui_interrupt_chrome(&chrome_rows(pane))
 }
 
-/// A token stop's evidence: the shared draft and modal veto, without the foreground-tool reading.
-pub(super) fn token_evidence(pane: &str) -> (bool, bool, bool) {
+/// A token stop's evidence. A streaming tail keeps Escape over a draft or modal as it always
+/// has; a pane that decides alone shares the veto.
+pub(super) fn token_evidence(pane: &str, streaming: bool) -> (bool, bool, bool) {
     let (ready, active, draft) = legacy_evidence(pane);
-    (ready, active && !veto(pane), draft)
+    (ready, active && (streaming || !veto(pane)), draft)
 }
 
 pub(super) fn legacy_evidence(pane: &str) -> (bool, bool, bool) {
-    // Only chrome a running turn paints counts; the same words in a prompt or a reply do not.
-    // Claude keeps its empty composer painted through generation and foreground tools, so a
-    // spinner frame also counts above an exactly empty composer, never over composer text.
+    // Only chrome a running turn paints counts, never the same words in a prompt or a reply; a
+    // spinner frame also counts above the exactly empty composer Claude keeps painted meanwhile.
     let rows = chrome_rows(pane);
     let spinner = screen::tmux_capture_indicates_claude_tui_structured_spinner(&rows.join("\n"));
     let offered = screen::tmux_recent_lines_show_claude_tui_interrupt_chrome(&rows);

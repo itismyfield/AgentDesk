@@ -143,8 +143,8 @@ fn write_transcript(path: &std::path::Path, transcript: Transcript) {
 }
 
 // One Escape reaches a Claude turn whose pane shows spinner chrome over the painted empty
-// composer, before its first reply too; a submitted prompt without that chrome, idle, draft,
-// finished and already-interrupted panes receive none.
+// composer, before its first reply and over an ended tail too; a submitted prompt without that
+// chrome, idle, draft, finished and already-interrupted panes receive none.
 #[test]
 fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     let fx = Fixture::new();
@@ -161,7 +161,14 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     let old_tool_interrupted = format!(
         "{foreground}\n  ⎿ Interrupted · What should Claude do instead?\n❯\n{MANUAL_FOOTER}"
     );
-    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 14] = [
+    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 15] = [
+        (
+            "ended-tail",
+            capture!("thinking"),
+            Transcript::Idle,
+            ActiveGeneration,
+            1,
+        ),
         (
             "foreground-no-spinner",
             &foreground,
@@ -289,6 +296,26 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
                 assert_eq!(observed, phase, "{footer}/{name}: evidence={evidence:?}");
                 crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
             }
+        }
+    });
+}
+
+// A token stop whose pane alone decides shares the draft and modal veto of the other stops.
+#[test]
+fn claude_tui_token_stop_spares_a_draft_and_a_modal_before_the_first_reply() {
+    let fx = Fixture::new();
+    let draft = STREAMING_FOOTER.replace("❯", "❯ queued follow-up");
+    let modal = format!("  1. Allow once\n  2. Deny\n{STREAMING_FOOTER}");
+    run(async {
+        for (name, pane) in [("draft", &draft), ("modal", &modal)] {
+            let session = format!("AgentDesk-claude-token-veto-{name}");
+            let (token, path) = generating_turn(&fx, &session);
+            write_transcript(&path, Transcript::Submitted);
+            fx.pane(pane);
+            let stop =
+                interrupt_claude_turn_session_preserving(&token, Some(session.clone()), "!stop");
+            assert!(!stop.await.sent_keys, "{name}");
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
     });
 }
