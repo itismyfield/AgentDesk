@@ -1,8 +1,8 @@
 //! Delivery and terminal replay for a verified agy seal. The channel actor must opt in explicitly.
 
-pub(crate) mod plan;
 #[cfg(all(test, unix))]
-mod tests;
+mod agy_delivery_tests;
+pub(crate) mod plan;
 
 use std::future::{Future, poll_fn};
 use std::num::NonZeroU64;

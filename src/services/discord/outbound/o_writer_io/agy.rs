@@ -19,7 +19,7 @@ impl Transport for GatewayPort {
         let request = CreateMessage::new()
             .content(&piece.payload)
             .embed(CreateEmbed::new().footer(CreateEmbedFooter::new(&piece.correlation)))
-            .nonce(Nonce::String(piece.correlation[..25].to_owned()))
+            .nonce(Nonce::String(piece.correlation.chars().take(25).collect()))
             .enforce_nonce(true)
             .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
         match ChannelId::new(channel)
@@ -49,7 +49,7 @@ impl Transport for GatewayPort {
     ) -> Result<Vec<Evidence>, String> {
         let mut page = GetMessages::new().limit(confirm::HISTORY_PAGE as u8);
         if let Some(before) = before {
-            page = page.before(before.into());
+            page = page.before(before);
         }
         let messages = ChannelId::new(channel)
             .messages(&*self.http, page)
@@ -145,5 +145,54 @@ impl Projection for Arc<SharedData> {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root;
+    use crate::services::provider::CancelToken;
+    use crate::services::tui_o::writer::agy_delivery::TurnKey;
+    use serenity::{MessageId, UserId};
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn agy_delivery_projects_one_release_and_preserves_the_next_episode() {
+        with_isolated_runtime_root(|| async {
+            let shared = discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(827_403_001);
+            let token_a = Arc::new(CancelToken::new());
+            let token_b = Arc::new(CancelToken::new());
+            let msg_a = MessageId::new(827_403_002);
+            let msg_b = MessageId::new(827_403_003);
+            let user = UserId::new(827_403_004);
+            assert!(
+                discord::mailbox_try_start_turn(&shared, channel, token_a.clone(), user, msg_a)
+                    .await
+            );
+            discord::increment_global_active(&shared, "agy fixture a");
+            let lease = TurnLease {
+                revision: NonZeroU64::MIN,
+                key: TurnKey {
+                    destination: channel.into(),
+                    id: msg_a.into(),
+                    nonce: token_a.turn_nonce().unwrap().parse().unwrap(),
+                },
+            };
+            shared.apply(lease, Effect::ReleaseLease).await.unwrap();
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+            assert!(
+                discord::mailbox_try_start_turn(&shared, channel, token_b.clone(), user, msg_b)
+                    .await
+            );
+            discord::increment_global_active(&shared, "agy fixture b");
+            shared.apply(lease, Effect::ReleaseLease).await.unwrap();
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            let live = shared.mailbox_peek(channel).unwrap().snapshot().await;
+            assert_eq!(live.active_user_message_id, Some(msg_b));
+            assert!(Arc::ptr_eq(&live.cancel_token.unwrap(), &token_b));
+        })
+        .await;
     }
 }

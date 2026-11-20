@@ -4557,9 +4557,9 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── child_debt.rs
 │   │   │   ├── agy_delivery/
+│   │   │   │   ├── agy_delivery_tests.rs
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── plan.rs
-│   │   │   │   └── tests.rs
+│   │   │   │   └── plan.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/

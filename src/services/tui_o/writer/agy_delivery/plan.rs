@@ -114,11 +114,12 @@ impl Plan {
 
 impl Piece {
     fn new(key: Sha256, source: Range<usize>, payload: String) -> Self {
+        let key = format!("{:x}", key.finalize());
         Self {
             source,
             payload_hash: hash(&payload),
             payload,
-            correlation: format!("agy:{:x}", key.finalize()),
+            correlation: format!("agy:{}", &key[..32]),
         }
     }
 }
