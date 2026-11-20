@@ -430,7 +430,7 @@ async fn pipeline_template_migration_preserves_stages_pins_and_scheduler_pg() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         original["execution"]["state_ids"],
-        json!({"a":"implementation"})
+        json!({"a":"implementation","b":"requirements","c":"requirements"})
     );
     assert_eq!(original["source"], "legacy_projection");
     let migrate = Some(json!({"idempotency_key":"migrate","expected_definition_revision":1}));
