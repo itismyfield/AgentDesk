@@ -639,14 +639,299 @@ fn verify_fixture_launch(f: &Reserved, source: &SourceId, nonce: &str) {
 async fn resumed_thread_keeps_old_history_and_posts_only_its_new_turn_pg() {
     const CH: u64 = 8_118_136;
     const PARENT: u64 = 8_118_137;
-    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     for (channel, warm) in [(CH, false), (CH + 20, true)] {
         exercise_resume(&pool, channel, PARENT, warm).await;
     }
+    use EffortEnd::*;
+    for (index, end) in [
+        Missing, Nonce, Sequence, Source, Hash, Partial, Exact, Rewritten,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        exercise_effort_restart(&pool, CH + 100 + index as u64, PARENT, end).await;
+    }
     pool.close().await;
     db.drop().await;
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EffortEnd {
+    Missing,
+    Nonce,
+    Sequence,
+    Source,
+    Hash,
+    Partial,
+    Rewritten,
+    Exact,
+}
+
+#[cfg(unix)]
+fn interrupted_tool_turn() -> Vec<u8> {
+    let mut bytes = prompt_in(SESSION, "effort-old-user");
+    bytes.extend(answer("effort-old-text", "old answer"));
+    bytes.extend(record(serde_json::json!({
+        "type": "assistant", "sessionId": SESSION, "uuid": "effort-old-tool",
+        "message": {"id": "effort-old-tool", "role": "assistant",
+        "content": [{"type": "tool_use", "id": "call", "name": "Read",
+        "input": {"file_path": "/fixture"}}]}
+    })));
+    bytes
+}
+
+#[cfg(unix)]
+fn rewrite_effort_prefix(path: &Path) {
+    let source = source_id_for(SESSION, path).unwrap();
+    let old = std::fs::read_to_string(path).unwrap();
+    let rewritten = old.replace("old answer", "bad answer");
+    assert_eq!(old.len(), rewritten.len());
+    assert_ne!(old, rewritten);
+    std::fs::write(path, rewritten).unwrap();
+    assert_eq!(source_id_for(SESSION, path).unwrap(), source);
+}
+
+#[cfg(unix)]
+fn publish_effort_end(f: &Reserved, path: &Path, end: EffortEnd) -> u64 {
+    use crate::services::tui_o::shadow::SourceBinding;
+    use crate::services::tui_o::store::restart_end::{self, Appended, RestartEnd};
+    use crate::services::tui_o::writer::binding::{BindingEvents, BindingLog};
+    use crate::services::tui_o::writer::input_facts::InputFacts;
+    use sha2::{Digest, Sha256};
+
+    let channel = f.binds.channel;
+    let mut facts = InputFacts::open(SourceBinding {
+        channel_id: channel,
+        provider: ShadowProvider::Claude,
+        source: source_id_for(SESSION, path).unwrap(),
+    })
+    .unwrap();
+    let cutoff = facts.poll(1 << 20).unwrap().through;
+    assert!(facts.caught_up().unwrap());
+    let (open_after, native_turn_id) = facts.open_window().expect("tool turn still open");
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(cutoff, bytes.len() as u64);
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    let event = BindingLog.binding_history(channel).unwrap().pop().unwrap();
+    let mut witness = RestartEnd {
+        end_id: format!("effort-fixture-{channel}"),
+        channel,
+        provider: ShadowProvider::Claude,
+        tmux_session: f.binds.tmux.clone(),
+        execution_nonce: event.execution_nonce,
+        binding_seq: event.seq,
+        source: source_id_for(SESSION, path).unwrap(),
+        cutoff,
+        prefix_hash: hex::encode(Sha256::digest(&bytes)),
+        open_after,
+        native_turn_id,
+    };
+    match end {
+        EffortEnd::Missing => return cutoff,
+        EffortEnd::Nonce => witness.execution_nonce = "b".repeat(32),
+        EffortEnd::Sequence => witness.binding_seq -= 1,
+        EffortEnd::Source => {
+            let other = f.file("different-effort-source.jsonl", &bytes);
+            witness.source = source_id_for(SESSION, &other).unwrap();
+        }
+        EffortEnd::Hash | EffortEnd::Partial | EffortEnd::Rewritten | EffortEnd::Exact => {}
+    }
+    let root = crate::config::runtime_root().unwrap();
+    assert_eq!(
+        restart_end::append(&root, &witness).unwrap(),
+        Appended::Durable
+    );
+    match end {
+        EffortEnd::Hash => rewrite_effort_prefix(path),
+        EffortEnd::Partial => append(path, b"{\"type\":"),
+        _ => {}
+    }
+    cutoff
+}
+
+#[cfg(unix)]
+async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end: EffortEnd) {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::claude_tui::{
+        hook_server::HookEventKind,
+        input::submission::tests::{ScriptedTmux, view},
+        owner_input::{self, Lineage},
+        readiness,
+        session::expect_owner_first_submit,
+        transcript_tail::claude_transcript_path,
+    };
+    use crate::services::provider::CancelToken;
+    use crate::services::provider_teardown::tests::test_support::cleared;
+    use crate::services::tui_o::cutover::{
+        BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
+    };
+    use crate::services::tui_prompt_dedupe::binding_context::execution_context;
+    use crate::services::turn_orchestrator::effort_intent::PROMPT;
+    use std::os::unix::fs::PermissionsExt;
+
+    const OLD_NONCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let dirs = tempfile::tempdir().unwrap();
+    let cwd = dirs.path().canonicalize().unwrap();
+    let home = cwd.join("claude-home");
+    let _home = Guard::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", &home);
+    let transcript = claude_transcript_path(&cwd, SESSION, Some(&home)).unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let session = Binds::new(ch).tmux;
+    seed_resume_row(pool, ch, &session).await;
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("test-node"), &[(parent, "test-node")]);
+    tokio::time::pause();
+    let mut f = reserved_for(ch, Some(parent), |h, binds| {
+        std::fs::write(&transcript, interrupted_tool_turn()).unwrap();
+        let source = binds.source(h._runtime.path(), OLD_NONCE, &transcript);
+        binds.append(
+            h._runtime.path(),
+            OLD_NONCE,
+            Some(source.clone()),
+            p5::BindingTarget::Source(source),
+            p5::BindingCause::SameSessionVerified,
+        );
+        transcript.clone()
+    })
+    .await;
+    assert!(cutover::record_thread_child(&thread_for(ch, parent), false));
+    let cutoff = publish_effort_end(&f, &transcript, end);
+
+    let pane = ScriptedTmux::new(&view("", false));
+    pane.enable_cold_launch();
+    let provider = cwd.join("claude");
+    std::fs::write(
+        &provider,
+        "#!/bin/sh\n[ \"$1\" != --version ] || { echo '2.1.0 (Claude Code)'; exit 0; }\nprintf '%s\\n' \"${CLAUDE_CODE_RESUME_INTERRUPTED_TURN-unset}\" \"$@\" >> \"$ADK_EFFORT_TEST_PROVIDER_ARGS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let args = cwd.join("provider-args");
+    let _provider = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &provider);
+    let _args = Guard::set_path_after_shared_test_env_lock("ADK_EFFORT_TEST_PROVIDER_ARGS", &args);
+    let _auto_resume =
+        Guard::remove_after_shared_test_env_lock("CLAUDE_CODE_RESUME_INTERRUPTED_TURN");
+    let reply = [
+        record(
+            serde_json::json!({"type": "user", "uuid": "effort-new-user", "sessionId": SESSION,
+            "message": {"role": "user", "content": PROMPT}}),
+        ),
+        answer("effort-new-text", "new answer"),
+        turn_end(),
+        record(serde_json::json!({"type": "system", "sessionId": SESSION,
+            "subtype": "stop_hook_summary"})),
+    ]
+    .concat();
+    pane.on_enter(
+        &transcript,
+        std::str::from_utf8(reply.trim_ascii_end()).unwrap(),
+    );
+
+    readiness::initialize();
+    let path = transcript.clone();
+    let tmux = session.clone();
+    let _launch = owner_input::install_launch(Box::new(move |lineage, target, _, _, submit| {
+        assert!(matches!(lineage, Lineage::Created));
+        let nonce = target["execution_nonce"].as_str().unwrap();
+        assert_ne!(nonce, OLD_NONCE);
+        let context = execution_context("claude", nonce).unwrap();
+        if end == EffortEnd::Rewritten {
+            rewrite_effort_prefix(&path);
+        }
+        readiness::note_hook(
+            "claude",
+            &HookEventKind::SessionStart,
+            SESSION,
+            &serde_json::json!({"source":"resume", "session_id":SESSION, "transcript_path":path}),
+            Some(&context),
+            Some(Utc::now()),
+            false,
+        );
+        assert!(
+            readiness::observe(&tmux, Some(&path)).is_some(),
+            "resumed SessionStart proves readiness independently of the old hash"
+        );
+        submit(PROMPT.into()).map_err(|error| format!("{error:?}"))
+    }));
+    let token = Arc::new(CancelToken::new());
+    expect_owner_first_submit(SESSION);
+    let result = crate::services::claude::tmux_tui_turn_for_tests(
+        cwd.to_str().unwrap(),
+        Some(SESSION),
+        token,
+        &session,
+        &cleared(&session),
+        ch,
+    );
+    let resumes = p5::claude_fold::read_thread_resumes(ch).unwrap();
+    if end != EffortEnd::Exact {
+        let refused = result.expect_err("invalid effort evidence cannot prove the first key");
+        if end == EffortEnd::Rewritten {
+            assert!(
+                args.is_file(),
+                "the original prefix admitted the cold launch"
+            );
+            assert_eq!(resumes.len(), 1);
+            assert_eq!(resumes[0].offset, cutoff);
+        } else {
+            assert_eq!(
+                refused,
+                "Claude transcript is not at a closed turn boundary"
+            );
+            assert!(!args.exists(), "{end:?} launched the provider");
+            assert!(resumes.is_empty(), "{end:?} published a boundary");
+        }
+        assert!(pane.sends().is_empty(), "{end:?} submitted a key");
+        assert!(f.body_posts().is_empty());
+        tokio::time::resume();
+        f.stop_host().await;
+        return;
+    }
+    result.expect("the exact durable effort end permits cold launch and first key");
+    let args = std::fs::read_to_string(args).unwrap();
+    let args = args.lines().collect::<Vec<_>>();
+    assert_eq!(args.first(), Some(&"0"), "the owner submits the only turn");
+    assert_eq!(
+        args.windows(2)
+            .filter(|pair| *pair == ["--resume", SESSION])
+            .count(),
+        1,
+        "{args:?}"
+    );
+    assert_eq!(pane.sends(), ["load", "paste", "Enter"]);
+    assert_eq!(pane.body(), PROMPT);
+
+    let body = BodyClaim::tmux(ch, Some(&session));
+    let legacy_posts = std::cell::Cell::new(0);
+    let send = || async { legacy_posts.set(legacy_posts.get() + 1) };
+    assert_eq!(
+        claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+        Err(IdentityError::ChildDeliveryHeld)
+    );
+    *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
+    tokio::time::resume();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while f.body_posts().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the writer must post the first answer after the effort end");
+    assert_eq!(
+        f.init(),
+        [(source_id_for(SESSION, &transcript).unwrap(), cutoff)]
+    );
+    assert_eq!(f.body_posts(), ["new answer"]);
+    assert_eq!(
+        claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+        Ok(BodySend::OwnedByO)
+    );
+    assert_eq!(legacy_posts.get(), 0);
+    f.stop_host().await;
 }
 
 #[cfg(unix)]
@@ -848,6 +1133,121 @@ async fn exercise_protected_thread_restart(
         BodyClaim::tmux(channel, Some(&f.binds.tmux)).peek(),
         Ok(true)
     );
+    f.stop_host().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_pending_replaced_by_a_verified_launch_releases_only_an_absent_source_pg() {
+    const CHANNEL: u64 = 8_118_260;
+    const PARENT: u64 = 8_118_261;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    exercise_replaced_pending(&pool, CHANNEL, PARENT, false).await;
+    exercise_replaced_pending(&pool, CHANNEL + 2, PARENT, true).await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[cfg(unix)]
+async fn exercise_replaced_pending(pool: &sqlx::PgPool, channel: u64, parent: u64, old_body: bool) {
+    use crate::services::tui_o::cutover::{
+        BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
+        intake_route::{IntakeRoute, route_for_placement},
+    };
+    use crate::services::tui_o::writer::{binding::BindingEvents, late_adopt::claude::thread};
+
+    const NEXT: &str = "c1a0de00-0000-4000-8000-000000007621";
+    seed_resume_row(pool, channel, &Binds::new(channel).tmux).await;
+    tokio::time::pause();
+    let mut f = reserved_for(channel, Some(parent), |h, binds| {
+        let root = h._runtime.path();
+        let path = root.join("legacy.jsonl");
+        std::fs::write(&path, closed_reply(SESSION, "legacy", "already handled")).unwrap();
+        binds.source(root, "legacy", &path);
+        path
+    })
+    .await;
+    f.stop_host().await;
+    let project = f.root().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let abandoned = project.join(format!("{SESSION}.jsonl"));
+    let old_nonce = mark_fixture_launch(&f, SESSION, false);
+    let pending = |native: &str, path: &Path| p5::BindingTarget::Pending {
+        payload_session_id: native.into(),
+        payload_transcript_path: Some(path.to_str().unwrap().into()),
+    };
+    f.binds
+        .bind(f.root(), &old_nonce, pending(SESSION, &abandoned));
+    if old_body {
+        std::fs::write(&abandoned, closed_reply(SESSION, "C", "still owed")).unwrap();
+    }
+
+    let next_nonce = mark_fixture_launch(&f, NEXT, false);
+    let next = project.join(format!("{NEXT}.jsonl"));
+    let next_seq = f.binds.bind(f.root(), &next_nonce, pending(NEXT, &next));
+    std::fs::write(
+        &next,
+        record(serde_json::json!({"type": "mode", "mode": "normal", "sessionId": NEXT})),
+    )
+    .unwrap();
+    let source = source_id_for(NEXT, &next).unwrap();
+    f.binds.append(
+        f.root(),
+        &next_nonce,
+        None,
+        p5::BindingTarget::Resolved {
+            pending_seq: next_seq,
+            source: source.clone(),
+        },
+        p5::BindingCause::SameSessionVerified,
+    );
+
+    assert_eq!(
+        route_for_placement("claude", channel),
+        IntakeRoute::Unselected
+    );
+    let tmux = f.binds.tmux.clone();
+    let body = BodyClaim::tmux(channel, Some(&tmux));
+    let legacy_posts = std::cell::Cell::new(0);
+    let send = || async { legacy_posts.set(legacy_posts.get() + 1) };
+    assert_eq!(
+        claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+        Err(IdentityError::ChildDeliveryHeld)
+    );
+    append(&next, &closed_reply(NEXT, "D", "only D"));
+    if old_body {
+        let log = f.io.bindings(channel, ShadowProvider::Claude);
+        let events = log.binding_events_since(channel, 0).unwrap();
+        assert!(thread::plan(&events, parent).is_none());
+    }
+    *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
+    f.start_host();
+    tokio::time::resume();
+    let posted = tokio::time::timeout(
+        std::time::Duration::from_secs(if old_body { 3 } else { 12 }),
+        async {
+            while f.body_posts().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        },
+    )
+    .await;
+    if old_body {
+        assert!(posted.is_err(), "an existing unverified C must still hold");
+        assert!(f.harness.store.read_init(channel).unwrap().is_none());
+        assert_eq!(body.peek(), Err(IdentityError::ChildDeliveryHeld));
+    } else {
+        posted.expect("the verified next input must outlive the replaced source-less launch");
+        assert_eq!(f.init(), [(source, 0)]);
+        assert_eq!(f.body_posts(), ["only D"]);
+        assert_eq!(
+            claim_then_send_at(BodySite::WatcherStreaming, Some(body), send).await,
+            Ok(BodySend::OwnedByO)
+        );
+    }
+    assert_eq!(legacy_posts.get(), 0);
     f.stop_host().await;
 }
 

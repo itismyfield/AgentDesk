@@ -63,6 +63,18 @@ if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
   while [ ! -f "$d/go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n + 1)); done
 fi
 case "$2" in
+has-session)
+  if [ -f "$d/cold_launch" ] && [ ! -f "$d/launched" ]; then
+    echo "can't find session" >&2
+    exit 1
+  fi ;;
+new-session)
+  if [ -f "$d/cold_launch" ]; then
+    for last do :; done
+    /bin/bash -c "$last" || exit $?
+    : > "$d/launched"
+  fi ;;
+-V) [ ! -f "$d/cold_launch" ] || echo "tmux 3.5a" ;;
 display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) [ ! -f "$d/capture_fail" ] || exit 1; cat "$d/screen"; if [ -f "$d/next_screen" ]; then mv "$d/next_screen" "$d/screen"; fi ;;
 list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
@@ -96,6 +108,11 @@ exit 0
 
     pub(crate) fn directory(&self) -> &Path {
         self.dir.path()
+    }
+
+    pub(crate) fn enable_cold_launch(&self) {
+        self.set_dead(false);
+        fs::write(self.dir.path().join("cold_launch"), "").unwrap();
     }
 
     pub(crate) fn show(&self, screen: &str) {

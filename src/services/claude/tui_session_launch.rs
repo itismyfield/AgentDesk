@@ -9,7 +9,11 @@ use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 type ThreadLaunchPolicy = fn(u64) -> Option<String>;
 pub(crate) enum ResumePane<'a> {
     Cold,
-    BeforeKey { nonce: Option<&'a str>, warm: bool },
+    BeforeKey {
+        nonce: Option<&'a str>,
+        warm: bool,
+        selected: bool,
+    },
 }
 
 type ReserveThreadResume =
@@ -173,15 +177,23 @@ pub(crate) fn reserve_thread_body_before_key(
 ) -> Result<(), String> {
     let channel = channel
         .or_else(|| crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(session));
-    let Some((channel, reserve)) = thread_resume_for(channel) else {
+    let (Some(channel), Some((launch, reserve))) = (channel, THREAD_WRITER_POLICY.get()) else {
         return Ok(());
     };
+    let selected = launch(channel).is_some();
+    if warm && !selected {
+        return Ok(());
+    }
     reserve(
         channel,
         session,
         native,
         path,
-        ResumePane::BeforeKey { nonce, warm },
+        ResumePane::BeforeKey {
+            nonce,
+            warm,
+            selected,
+        },
     )
 }
 

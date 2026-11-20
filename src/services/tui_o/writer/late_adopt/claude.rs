@@ -30,7 +30,10 @@ pub(in crate::services::tui_o::writer) mod thread {
         historical_hops,
         rotation::bound_source,
     };
-    use crate::services::tui_prompt_dedupe::binding_events::claude_fold;
+    use crate::services::tui_prompt_dedupe::{
+        binding_context::BindingContext,
+        binding_events::{self as p5, claude_fold},
+    };
 
     use super::super::codex::prefix::{Prefix, PrefixClass, Verdict};
 
@@ -62,14 +65,15 @@ pub(in crate::services::tui_o::writer) mod thread {
             let scope = protected_launch(event)
                 .filter(|ctx| ctx.claude_thread_writer_parent() == Some(parent));
             if let Some(scope) = scope.as_ref()
-                && matches!(&event.record, BindingRecord::Bound { new: BindingTarget::Pending { .. }, .. })
-                && !verified.iter().any(|proof| {
-                    proof.tmux_session == event.tmux_session
-                        && proof.execution_nonce.as_deref() == Some(&event.execution_nonce)
-                        && matches!(&proof.new, crate::services::tui_prompt_dedupe::binding_events::BindingTarget::Source(source)
-                            | crate::services::tui_prompt_dedupe::binding_events::BindingTarget::Resolved { source, .. }
-                            if scope.expected_native_session_id.as_deref() == Some(source.session_id.as_str()))
-                })
+                && matches!(
+                    &event.record,
+                    BindingRecord::Bound {
+                        new: BindingTarget::Pending { .. },
+                        ..
+                    }
+                )
+                && !verified_launch(&verified, event, scope)
+                && !replaced_without_source(event, scope, events, &verified)
             {
                 return None;
             }
@@ -144,6 +148,49 @@ pub(in crate::services::tui_o::writer) mod thread {
                     .is_some_and(|(_, hop)| same_file(&hop.source, &pair[1].source_id))
             })
             .then_some(((current, latest.seq), sources))
+    }
+
+    fn verified_launch(
+        proofs: &[p5::BindingEvent],
+        event: &BindingEvent,
+        context: &BindingContext,
+    ) -> bool {
+        proofs.iter().any(|proof| {
+            proof.tmux_session == event.tmux_session
+                && proof.execution_nonce.as_deref() == Some(&event.execution_nonce)
+                && matches!(&proof.new, p5::BindingTarget::Source(source)
+                    | p5::BindingTarget::Resolved { source, .. }
+                    if context.expected_native_session_id.as_deref() == Some(source.session_id.as_str()))
+        })
+    }
+
+    fn replaced_without_source(
+        pending: &BindingEvent,
+        previous: &BindingContext,
+        events: &[BindingEvent],
+        verified: &[p5::BindingEvent],
+    ) -> bool {
+        let BindingRecord::Bound {
+            new:
+                BindingTarget::Pending {
+                    payload_session_id,
+                    payload_transcript_path,
+                },
+            ..
+        } = &pending.record
+        else {
+            return false;
+        };
+        events.iter().any(|next| {
+            next.execution_nonce != pending.execution_nonce
+                && adoption::supersedes(pending, next)
+                && protected_launch(next).is_some_and(|current| {
+                    current.claude_thread_writer_parent() == previous.claude_thread_writer_parent()
+                        && current.provider_root == previous.provider_root
+                        && current.expected_native_session_id != previous.expected_native_session_id
+                        && verified_launch(verified, next, &current)
+                })
+        }) && previous.missing_claude_transcript(payload_session_id, payload_transcript_path)
     }
 
     pub(super) fn source(source: &SourceId) -> Verdict {

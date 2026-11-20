@@ -32,16 +32,36 @@ pub(crate) fn reserve_resume(
 ) -> Result<(), String> {
     use crate::services::claude::tui_session_launch::ResumePane;
     use crate::services::tmux_common::with_tmux_source_authority;
+    let selected = !matches!(
+        pane,
+        ResumePane::BeforeKey {
+            selected: false,
+            ..
+        }
+    );
     let child = super::test_override::with_channels(|snapshot| snapshot?.child(channel)?.ok())
-        .filter(|child| child.kind == RuntimeHandoffKind::ClaudeTui)
-        .ok_or("the Claude thread policy changed before reservation")?;
+        .filter(|child| child.kind == RuntimeHandoffKind::ClaudeTui);
+    let Some(child) = child else {
+        return if selected {
+            Err("the Claude thread policy changed before reservation".into())
+        } else {
+            Ok(())
+        };
+    };
     let _body_fence = child.candidate.lock_thread_body();
     let adoption = child.candidate.lock();
     if adoption.owned() {
+        if matches!(pane, ResumePane::BeforeKey { warm: false, .. }) {
+            return claude_fold::check_thread_resume(channel, child.parent, session, native, path)
+                .map_err(|error| error.to_string());
+        }
+        return Ok(());
+    }
+    if !selected {
         return Ok(());
     }
     with_tmux_source_authority(session, |authority| {
-        if let ResumePane::BeforeKey { nonce, warm } = pane {
+        if let ResumePane::BeforeKey { nonce, warm, .. } = pane {
             let current = observe_spawn_nonce_marker(session);
             match (nonce, current) {
                 (None, SpawnNonceMarker::Absent) if warm => {}
@@ -57,23 +77,31 @@ pub(crate) fn reserve_resume(
                 _ => return Err("the Claude pane changed before writer reservation".into()),
             }
         }
-        claude_fold::reserve_thread_resume(channel, child.parent, authority, native, path, || {
-            if matches!(pane, ResumePane::BeforeKey { warm: false, .. }) {
-                return Err(std::io::Error::other(
-                    "the Claude resume source changed before its first key",
-                ));
-            }
-            let (started, finished) = child.candidate.sends();
-            if started != finished
-                || crate::services::discord::terminal_delivery_custody::retains_channel(channel)
-                    .map_err(std::io::Error::other)?
-            {
-                return Err(std::io::Error::other(
-                    "the earlier turn still owns delivery",
-                ));
-            }
-            Ok(())
-        })
+        let transcript = (path, matches!(pane, ResumePane::Cold));
+        claude_fold::reserve_thread_resume(
+            channel,
+            child.parent,
+            authority,
+            native,
+            transcript,
+            || {
+                if matches!(pane, ResumePane::BeforeKey { warm: false, .. }) {
+                    return Err(std::io::Error::other(
+                        "the Claude resume source changed before its first key",
+                    ));
+                }
+                let (started, finished) = child.candidate.sends();
+                if started != finished
+                    || crate::services::discord::terminal_delivery_custody::retains_channel(channel)
+                        .map_err(std::io::Error::other)?
+                {
+                    return Err(std::io::Error::other(
+                        "the earlier turn still owns delivery",
+                    ));
+                }
+                Ok(())
+            },
+        )
         .map_err(|error| error.to_string())
     })
 }
