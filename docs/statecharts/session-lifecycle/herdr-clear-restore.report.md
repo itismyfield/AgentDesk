@@ -1,37 +1,37 @@
-# Herdr clear 종료 기록과 서버 재시작 뒤 빈 워크스페이스
+# Herdr clear 종료와 복원된 빈 워크스페이스
 
-코드 기준 `cd9951d3cac6a4f0b81d02789facabbc6ed2a55d`. 기존 `HerdrRestartOwner`의 clear 종료·postlude, `HerdrClearLaunch`의 selector, `HerdrRootRecovery`의 교체된 서버에서 이전 실행 종료 판정을 이어서 모델링했다. 기존 세 모델의 계약과 설정은 유지하고, 동일한 세션 수명 영역에 종료 기록과 workspace 효과를 비교하는 작은 모델을 추가했다. 두 설정군이 공통 모듈의 서로 다른 전이 집합을 실행한다.
+코드 좌표 기준 `cd9951d3cac6a4f0b81d02789facabbc6ed2a55d`. [이전 설계](https://github.com/itismyfield/AgentDesk/commit/86b268dd523d54e0ebad47b0f2f03301c991a542)의 종료 기록 선행 조건과 복원 셸 자격을 개정했다. 기존 `HerdrRestartOwner`, `HerdrClearLaunch`, `HerdrRootRecovery`의 실행 식별·selector·교체 서버 판정을 재사용하는 설계다.
 
 [Clear 상태도](herdr-clear-restore.clear.chart.mmd) · [복원 상태도](herdr-clear-restore.restore.chart.mmd) · [행 2·3 전수표](../../herdr-parity-next-lifecycle.design.md)
 
 ## 값과 행동의 근거
 
-현행 흐름과 제안한 효과를 분리했다. 행 2·3 전수표에 전체 호출자와 인접 Cancel·Terminate·clear·stop·재시작·부팅의 좌표를 적었다.
-
 | 모델 값·행동 | 진입점과 상태 생산·소비 |
 | --- | --- |
-| `RequestClear`, Bound/Retired | `src/services/discord/commands/control/clear_teardown.rs:73–77,161–191,197–221`의 channel clear, `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:92–136`의 owner/target clear, `src/services/discord/commands/control.rs:582–594`의 restored/retired 선행 경로. `refused`는 정확한 이전 실행을 읽을 수 없을 때의 결과다. |
-| `StageEndRecord`, 이전 source 확인·불명 | tmux 기준 `src/services/discord/commands/control/clear_teardown/{clear_end_record.rs:37–59,73–99,166–191,codex_end_record.rs:8–35}`의 종료 전 identity/source capture와 종료 뒤 commit. 제안은 Herdr nonce와 원본 source를 close 전 내구성 있게 기록한다. 기존 미확인 Retired는 확증 없이 소급 기록하지 않는다. |
-| `CloseExactOrObserveEnded → RetireExact` | `src/services/discord/herdr_terminate.rs:517–624`의 fence, row/dispatch 재검증, 확인된 close 또는 이미 종료, Retired CAS, 정산; `src/services/discord/commands/control/herdr_recovery.rs:47–122`의 교체된 root 경로. Stop/Cancel에는 clear 목적을 부여하지 않는다. |
-| `RestartDuringClear → CommitEndRecord → ReportClear` | `src/services/discord/commands/control/clear_teardown.rs:197–221`와 `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:108–136`의 RetiredExclusion 후처리, `src/services/discord/herdr_terminate.rs:532–554,599–624`의 이미 Retired 재진입. 내구 staging 및 재개는 제안 전이이며 종결된 nonce에만 commit한다. |
-| `RestartServer`와 Missing/셸/실행 중, 이전·현재 witness | `src/services/discord/recovery_engine/herdr_server_replaced.rs:143–210`과 `src/services/discord/recovery_engine/herdr_reader.rs:235–351`의 old/new server 판정과 관측, `src/services/session_host/herdr_gate/root_replaced.rs:20–90`의 이전 root/provider 소멸 및 현재 셸 증거. 최초 세대와 두 번의 세대 교체는 오래된 관측 재사용을 판별하는 추상화다. |
-| `SurveyEmpty`, 소유 증명 있음·불명, 정리 승인·보류 | `src/services/discord/tui_prompt_relay/rehydration.rs:270,668`의 부팅 pass, runtime wake `src/services/discord/recovery_engine/herdr_row_end/owner.rs:67–70`, 동일 세대의 등록 중 유실 residue 검증 `src/services/session_host/herdr_gate.rs:1119–1221`. 복원 세대 출처를 증명할 지속 레코드와 사용자 승인 및 capability 조건은 제안의 전제다. |
-| `WorkspaceChanges → CompareAndClose` | `src/services/session_host/herdr/model.rs:204–258,269–294`에서 snapshot과 pane ID close는 별개. 켜진 provider, pane shell stamp·서버 witness 변경은 이전 snapshot의 권한을 없앤다. 새 원자 compare-and-close는 서버가 동일 세대·귀속·pristine 증거를 효과 시점에 다시 검증할 수 있을 때만 허용한다. |
+| `RequestClear`, 기존 Bound/Pending/Retired/Unknown | `src/services/discord/commands/control/clear_teardown.rs:73–77,161–221`의 채널 clear, `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:92–136`의 owner clear, `src/services/discord/commands/control.rs:582–594`의 restored/retired 선행 경로. Unknown/Conflict는 새 종료 권한을 얻지 않는다. |
+| `LoseSource`, `RecordAfterEnd` | tmux는 `src/services/discord/commands/control/clear_teardown.rs:104–122`에서 선택적 증거를 모은 뒤 그 결과와 무관하게 종료를 요청한다. 기존 provider 캡처와 종료 확인의 경계는 같은 디렉터리의 `clear_end_record.rs:37–59,73–99,166–191` 및 `codex_end_record.rs:8–35`다. Herdr도 증거를 기존 nonce에서 선택적으로 붙인다. |
+| `CloseExactOrObserveEnded → RetireExact → ReportClear` | `src/services/discord/herdr_terminate.rs:517–624`의 fence·exact row·종료 확인·Retired CAS, `src/services/discord/commands/control/clear_teardown.rs:197–221`의 postlude. `InterruptPostlude`는 이전 실행을 종료한 뒤 프로세스가 중단된 구간을 나타낸다. 새 저널을 두지 않으므로 해당 구간의 기록 재생은 보장하지 않는다. |
+| `RestartServer`, 현재 증거와 낡은 관측 | `src/services/discord/recovery_engine/herdr_server_replaced.rs:143–210`, `src/services/discord/recovery_engine/herdr_reader.rs:235–351`, `src/services/session_host/herdr_gate/root_replaced.rs:20–90`이 서버 교체와 이전 실행 종료를 관측한다. 두 번째 서버 세대는 첫 관측이 낡을 수 있다는 유한 추상화다. 같은 불변 복원 계보의 활동 상태는 두 번째 재시작에도 유지된다. |
+| `UseRestoredShell → ReturnToShell`, `LoseNoWorkProof` | 현재 `LoneShell`의 foreground 관측은 `src/services/session_host/herdr/pane_probe.rs:206,221–244`다. 현재 셸 화면이 과거 활동 없음과 백그라운드 작업 없음을 보장하지 않는다. 서버 측 활동 증거는 미사용·사용·불명, 작업 증거는 없음·있음·불명으로 분리했다. |
+| `LoseLineageEvidence`, `SurveyEmpty → CompareAndClose` | `src/services/herdr_launch.rs:462–475`의 successor 저장이 이전 row를 덮을 수 있다. 독립 계보 증거가 남지 않으면 당시 후보의 자격을 종료한다. 현 관측/닫기 API는 `src/services/session_host/herdr/model.rs:204–258,269–294`의 별도 동작이다. 결정 A의 세 조건을 서버가 닫기와 함께 원자적으로 확인하는 능력은 W2 선행 의존이다. |
 
-## TLC 결과
+## 검증 규칙과 설정
 
-| cfg 접미사 | 기대와 관측 | 규칙과 대표 경로 |
+| cfg 접미사 | 결과 | 규칙과 경로 |
 | --- | --- | --- |
-| ClearFixed | GREEN | `NoMissingClearEndRecord`, `PendingRecordDrains` 통과. 종료가 일어난 뒤에는 재시작이 끼어도 staged 기록이 남고, clear 완료 전에 정확한 종료 기록을 확정한다. |
-| ClearMain | 예상 RED | `NoMissingClearEndRecord`. clear 요청 → 현재 Herdr 종료 경로 → 종료 전 증거 보관이 없고 종료 이후 capture/commit도 거치지 않는다. 기존 Retired 우회도 selector 후처리만 한다. |
-| ClearSkipStage | 예상 RED | `NoMissingClearEndRecord`. 이전 source/nonce 보관을 걷어내고 close를 허용하면 같은 반례가 생긴다. |
-| ClearVolatile | 예상 RED | `NoMissingClearEndRecord`, `PendingRecordDrains`. 보관 → 실행 종료 → 재시작 시 임시 보관이 사라진다. 후자는 종료·Retired 이후 재시작 → 확인 실패에서 멈춘다. |
-| RestoreFixed | GREEN | `NoLiveWorkspaceRemoved`, `EmptyWorkspaceEventuallyCleared` 통과. 정리 자격이 계속 유지되는 복원 셸은 사라진다. 세대·프로세스·소유 증거가 바뀌면 해당 관측의 닫기는 허용되지 않는다. |
-| RestoreMain | 예상 RED | `EmptyWorkspaceEventuallyCleared`. 재시작 → 빈 셸 복원 → 기록상 이전 실행 은퇴 가능 → 셸은 남을 수 있다. Main은 workspace 정리 효과가 없다. |
-| RestoreNoWake | 예상 RED | `EmptyWorkspaceEventuallyCleared`. 적격 빈 셸도 관측 재개가 연결되지 않으면 계속 남는다. |
-| RestoreReadThenClose | 예상 RED | `NoLiveWorkspaceRemoved`. 셸 확인 → 새 서버 또는 다른 프로세스 부착 → 이전 ticket으로 닫기. 현행 RPC 서명에서 본 설계의 조건부 효과와 차이를 확인했다. 현재 코드가 이 잘못된 닫기를 호출한다는 뜻은 아니다. |
+| ClearFixed | GREEN | `NoRecordRefusesAuthorizedClear`, `NoUnprovenEndRecord`, `NoMissingClearEndRecord`, `AuthorizedClearEnds`. `RequestClear → LoseSource` 뒤 exact 종료·은퇴가 가능하고 응답까지 이어지면 기록 경고가 남는다. 저장 실패도 같은 방식으로 처리한다. |
+| ClearMain, ClearSkipRecord | 예상 RED | `NoMissingClearEndRecord`. 정상 종료·기록 가능한 실행에서 종료 기록 없이 응답한다. |
+| ClearRecordGate | 예상 RED | `NoRecordRefusesAuthorizedClear`, `AuthorizedClearEnds`. 리뷰 경로 `RequestClear → LoseSource → RefuseUnknownRecord`에서 승인된 실행의 종료가 거절된다. 개정 설계는 원인을 제거했다. |
+| RestoreFixed | GREEN | `NoUnprovenWorkspaceRemoved`, `EmptyWorkspaceEventuallyCleared`. 복원 창을 사용한 뒤 셸로 돌아와도 정리 자격을 회복하지 않는다. 세 증거가 계속 만족되고 원자 닫기 기능이 있을 때에만 적격 후보다. |
+| RestoreMain, RestoreNoWake | 예상 RED | `EmptyWorkspaceEventuallyCleared`. 계속 적격인 복원 셸을 다시 관측하거나 닫는 단계가 없으면 잔류한다. |
+| RestoreNoActivityGate | 예상 RED | `NoUnprovenWorkspaceRemoved`. 리뷰 경로 `RestartServer → UseRestoredShell → ReturnToShell → SurveyEmpty → CompareAndClose`에서 과거 사용을 무시하면 닫힌다. |
+| RestoreNoWorkGate | 예상 RED | `NoUnprovenWorkspaceRemoved`. 남은 작업을 배제할 수 없는 상태에서도 닫힌다. |
+| RestoreNoLineageGate | 예상 RED | `NoUnprovenWorkspaceRemoved`. 불변 복원 계보 증명이 없어도 닫힌다. |
+| RestoreReadThenClose | 예상 RED | `NoUnprovenWorkspaceRemoved`. 오래된 관측 뒤 활동·서버·증거가 바뀌었는데 닫힌다. |
 
-Main 두 cfg의 경로는 위 소스와 11-13 이슈의 복원 관측으로 대조했다. 원인 제거 cfg는 제안을 구현한 다음 대응 진입점 시험으로 재현할 계획이다. 모델은 새 세션이 정리의 대상이 될 수 없음을 ticket으로 검사한다. 채널·thread/dispatch마다 실제 nonce와 source가 한 번만 소비되는지, DB/파일 durable checkpoint의 원자성, close 요청·응답 유실 및 지속적인 endpoint 장애, 양 provider 기록의 저장 형식은 진입점 시험이 맡는다. `PendingRecordDrains`는 Retired 증명과 durable 저장이 결국 진행할 수 있는 환경을 가정한다. `EmptyWorkspaceEventuallyCleared`는 승인, 조건부 RPC, 출처 증거 및 시점상 참인 빈 셸 조건을 가진 후보에 적용한다. 조건이 일시적으로 빠지면 이후 재검증하기 전까지 그대로 둔다. 이력 없는 옛 셸에 liveness나 삭제 권한을 전이하지 않는다. 상태도는 한 라벨에 머무르는 자기 전이를 생략한다.
+Clear 규칙의 범위는 정확한 기존 종료 권한과 종료 확인이 결국 가능하다는 가정이다. 정상 응답에서는 기록할 수 있는 Bound의 종료 기록을 남기며 원본이나 저장이 불명인 Bound는 기록 경고를 남긴다. 기존 Retired, native 시작 증거가 없는 Pending, Unknown/Conflict는 새로운 종료 기록을 만들 권한을 갖지 않는다. 실행이 끝난 뒤 프로세스가 끊긴 경우, 기존 종료와 새 입력 경계는 보존하며 기록 재생의 liveness는 요구하지 않는다. 저장의 멱등성, Codex 첫 시도 소비와 이전/후속 nonce 귀속은 E의 두 실행 fixture가 검증한다.
+
+복원 규칙은 결정 A에 따른다. 세 증거로 계속 적격인 경우에만 기존 recovery 재평가와 원자 close에 약한 공정성을 가정한다. legacy의 소급 소유 판정, 장기간 endpoint 장애, 사용·작업 이력을 얻지 못한 창은 정리 보장 범위 밖이다. 같은 복원 계보에서 활동 또는 증거 상실을 재관측이 되돌릴 수 없다. 상태도의 같은 라벨에 남는 전이는 생략한다.
 
 ## 다시 실행
 
@@ -44,4 +44,4 @@ cd docs/statecharts/session-lifecycle
   --out "$(mktemp -d)"
 ```
 
-위 cfg 이름을 결과표의 접미사로 바꾸면 각 상태도와 원시 반례를 다시 얻는다. 저장소 `scripts/ci/statecharts_tlc.py`는 명시된 기대 위반까지 포함해 통과 여부를 판단한다.
+cfg 이름의 접미사를 결과표 값으로 바꾼다. 저장소 `scripts/ci/statecharts_tlc.py`는 설정별 기대 위반과 liveness를 대조한다.
