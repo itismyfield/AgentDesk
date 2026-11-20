@@ -430,6 +430,8 @@ ParityInit ==
     /\ \E t \in ParityTargets, n \in ParityNames, composer \in {"open", "modal"} :
        \E unproven \in (IF Control = "unproven" THEN {TRUE}
                        ELSE IF Control = "all" /\ t = "busy" THEN BOOLEAN ELSE {FALSE}) :
+       \E recovery \in (IF Control = "restored-composer-deadline" /\ composer = "modal"
+                        THEN {"foreground", "background", "lateAdopt"} ELSE {"foreground"}) :
            attach = [phase |-> IF Control = "restored-composer-deadline" THEN "beforeRestart" ELSE "down",
                      initial |-> t, target |-> t, name |-> n,
                      composer |-> composer, unproven |-> unproven, reconciled |-> FALSE,
@@ -437,7 +439,11 @@ ParityInit ==
                      locationFresh |-> FALSE, lease |-> FALSE, grant |-> "none",
                      provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none",
                      elapsed |-> FALSE, sourcePinned |-> FALSE, childEndpoint |-> FALSE,
-                     readiness |-> "none", unitKept |-> TRUE, heldReadopted |-> FALSE]
+                     readiness |-> "none", unitKept |-> TRUE, heldReadopted |-> FALSE,
+                     recovery |-> recovery, stopped |-> FALSE]
+
+ParityIdentityConfirmed(hold) ==
+    IF hold = "suspended" THEN "none" ELSE hold
 
 ParitySaveComposerHold ==
     /\ attach.phase = "beforeRestart"
@@ -450,7 +456,8 @@ ParityAssess ==
                attach' = [attach EXCEPT !.phase = "discarded"]
          [] attach.target = "unknown" ->
                attach' = [attach EXCEPT !.phase = "identityHeld",
-                           !.readiness = IF @ = "active" /\ Policy # "parity-keep-old-due"
+                           !.readiness = IF @ = "active" /\
+                                            (Policy # "parity-keep-old-due" \/ attach.recovery # "foreground")
                                         THEN "suspended" ELSE @]
          [] attach.target = "dead" ->
                attach' = [attach EXCEPT !.phase = "endProved", !.provedEnd = TRUE]
@@ -477,9 +484,35 @@ ParityIdentityDeadline ==
 
 ParityObserve ==
     /\ attach.phase = "identityHeld"
+    /\ attach.recovery = "foreground"
     /\ (Control \notin {"identity-deadline", "restored-composer-deadline"} \/ attach.elapsed)
     /\ \E observed \in {"idle", "busy", "dead"} :
-       attach' = [attach EXCEPT !.target = observed, !.phase = "queued", !.readiness = "none"]
+       attach' = [attach EXCEPT !.target = observed, !.phase = "queued"]
+    /\ UNCHANGED vars
+
+ParityBackgroundAttach ==
+    /\ attach.phase = "identityHeld" /\ attach.elapsed /\ attach.recovery # "foreground"
+    /\ attach' = [attach EXCEPT !.target = "idle", !.phase = "backgroundAttached",
+                  !.reattached = 1, !.route = "named", !.locationFresh = TRUE,
+                  !.readiness = IF Policy = "parity-keep-old-due" \/ attach.recovery = "lateAdopt"
+                                THEN @ ELSE ParityIdentityConfirmed(@)]
+    /\ UNCHANGED vars
+
+ParityNativeClaim ==
+    /\ attach.phase = "backgroundAttached"
+    /\ attach' = [attach EXCEPT !.target = "busy", !.phase = "nativeBusy", !.lease = TRUE]
+    /\ UNCHANGED vars
+
+ParityNativeWake ==
+    /\ attach.phase = "nativeBusy"
+    /\ attach' = [attach EXCEPT !.phase = "nativeWake", !.grant = "busy",
+                  !.readiness = IF Policy = "parity-keep-old-due" THEN @ ELSE ParityIdentityConfirmed(@)]
+    /\ UNCHANGED vars
+
+ParityUserControl ==
+    /\ Control = "restored-composer-deadline" /\ attach.phase = "identityHeld" /\ ~attach.stopped
+    /\ \/ attach' = [attach EXCEPT !.stopped = TRUE]
+       \/ attach' = [attach EXCEPT !.phase = "cancelled", !.readiness = "none"]
     /\ UNCHANGED vars
 
 ParityPinPathless ==
@@ -499,6 +532,7 @@ ParityAttach ==
     /\ attach.headlessClaim # "new"
     /\ attach' = [attach EXCEPT !.phase = "attached", !.route = attach.phase,
                   !.locationFresh = attach.phase = "named", !.reattached = @ + 1,
+                  !.readiness = ParityIdentityConfirmed(@),
                   !.lease = attach.target = "busy",
                   !.grant = IF attach.target = "busy" THEN "busy" ELSE "idle"]
     /\ UNCHANGED vars
@@ -515,17 +549,25 @@ ParityHeadlessClaim ==
     /\ UNCHANGED vars
 
 ParityInputRule ==
-    /\ attach.phase = "attached"
+    /\ attach.phase \in {"attached", "nativeWake"}
     /\ attach' = [attach EXCEPT !.phase =
-                     IF attach.composer = "modal" THEN "composerHeld"
+                     IF attach.composer = "modal" THEN
+                         IF attach.readiness = "suspended" THEN "composerWithoutDue" ELSE "composerHeld"
                      ELSE IF attach.target = "busy" /\ Policy = "parity-before" THEN "idleOnly"
                      ELSE "reserved",
+                  !.readiness = IF attach.phase = "nativeWake" /\ attach.readiness = "none"
+                                THEN "active" ELSE @,
                   !.claimed = attach.front]
     /\ UNCHANGED vars
 
 ParityComposerClears ==
     /\ attach.phase = "composerHeld"
     /\ attach' = [attach EXCEPT !.phase = "attached", !.composer = "open"]
+    /\ UNCHANGED vars
+
+ParityComposerDeadline ==
+    /\ attach.phase = "composerHeld" /\ attach.readiness = "active"
+    /\ attach' = [attach EXCEPT !.phase = "composerRefused"]
     /\ UNCHANGED vars
 
 ParitySubmit ==
@@ -552,13 +594,15 @@ ParityPublishReply ==
 
 ParityReject ==
     /\ attach.phase = "endProved" /\ attach.provedEnd
-    /\ attach' = [attach EXCEPT !.phase = "rejected"]
+    /\ attach' = [attach EXCEPT !.phase = "rejected", !.readiness = ParityIdentityConfirmed(@)]
     /\ UNCHANGED vars
 
 ParityNext ==
     ParitySaveComposerHold \/ Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
     \/ ParityReadoptIdentity \/ ParityIdentityDeadline \/ ParityPinPathless \/ ParityResolveChild
-    \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParitySubmit \/ ParityObserveReceipt
+    \/ ParityBackgroundAttach \/ ParityNativeClaim \/ ParityNativeWake \/ ParityUserControl
+    \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParityComposerDeadline
+    \/ ParitySubmit \/ ParityObserveReceipt
     \/ ParityResendUnknown \/ ParityPublishReply \/ ParityReject \/ AttachDone
 
 ParitySpec ==
@@ -567,6 +611,7 @@ ParitySpec ==
     /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
     /\ WF_attach(ParityAssess) /\ WF_attach(ParityObserve) /\ WF_attach(ParityAttach)
     /\ WF_attach(ParityIdentityDeadline) /\ WF_attach(ParityPinPathless) /\ WF_attach(ParityResolveChild)
+    /\ WF_attach(ParityBackgroundAttach) /\ WF_attach(ParityNativeClaim) /\ WF_attach(ParityNativeWake)
     /\ WF_attach(ParityInputRule) /\ WF_attach(ParityComposerClears) /\ WF_attach(ParitySubmit)
     /\ WF_attach(ParityObserveReceipt) /\ WF_attach(ParityPublishReply) /\ WF_attach(ParityReject)
 
@@ -578,8 +623,11 @@ NamedOnlyCurrent == attach.route = "named" => attach.name = "unique" /\ attach.l
 BusyAuthority == attach.grant = "busy" => attach.lease /\ attach.reattached = 1
 NoCompetingClaim == attach.headlessClaim # "new"
 ProvenRejection == attach.phase = "rejected" => attach.provedEnd /\ attach.target = "dead"
+NewComposerEventuallyTimed ==
+    [](attach.phase = "nativeWake" => <>(attach.phase = "composerHeld" /\ attach.readiness = "active"))
 ParityResolves ==
     [](attach.phase = "queued" => <> ((attach.phase = "done" /\ attach.submits = 1)
-                                  \/ (attach.phase = "rejected" /\ attach.provedEnd)))
+                                  \/ (attach.phase = "rejected" /\ attach.provedEnd)
+                                  \/ attach.phase \in {"cancelled", "composerRefused"}))
 
 ====

@@ -114,8 +114,8 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | ResendUnknown | RED `OwnerExactlyOnce`, `ParityResolves` | 24 / 29 | [차트](herdr-reattach-parity-ResendUnknown.chart.mmd) · [반례](herdr-reattach-parity-ResendUnknown.report.md) |
 | BeforeIdentityDeadline | RED `NoIdentityLoss`, `ParityResolves` | 14 / 14 | [차트](herdr-reattach-parity-BeforeIdentityDeadline.chart.mmd) · [결과](herdr-reattach-parity-BeforeIdentityDeadline.report.md) |
 | IdentityDeadline | GREEN | 44 / 50 | [차트](herdr-reattach-parity-IdentityDeadline.chart.mmd) · [결과](herdr-reattach-parity-IdentityDeadline.report.md) |
-| BeforeRestoredComposerDeadline | RED `NoIdentityLoss`, `RestoredComposerUnit`, `ParityResolves` | 24 / 26 | [차트](herdr-reattach-parity-BeforeRestoredComposerDeadline.chart.mmd) · [반례](herdr-reattach-parity-BeforeRestoredComposerDeadline.report.md) |
-| RestoredComposerDeadline | GREEN | 84 / 100 | [차트](herdr-reattach-parity-RestoredComposerDeadline.chart.mmd) · [결과](herdr-reattach-parity-RestoredComposerDeadline.report.md) |
+| BeforeRestoredComposerDeadline | RED `NoIdentityLoss`, `RestoredComposerUnit`, `ParityResolves`, `NewComposerEventuallyTimed` | 108 / 124 | [차트](herdr-reattach-parity-BeforeRestoredComposerDeadline.chart.mmd) · [반례](herdr-reattach-parity-BeforeRestoredComposerDeadline.report.md) |
+| RestoredComposerDeadline | GREEN | 280 / 344 | [차트](herdr-reattach-parity-RestoredComposerDeadline.chart.mmd) · [결과](herdr-reattach-parity-RestoredComposerDeadline.report.md) |
 | PathlessBusy | GREEN | 22 / 25 | [차트](herdr-reattach-parity-PathlessBusy.chart.mmd) · [결과](herdr-reattach-parity-PathlessBusy.report.md) |
 | ParentEndpoint | GREEN | 44 / 50 | [차트](herdr-reattach-parity-ParentEndpoint.chart.mmd) · [결과](herdr-reattach-parity-ParentEndpoint.report.md) |
 
@@ -137,10 +137,11 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | E54 | `ParityPinPathless` 뒤 `ParityAttach`. 같은 실행의 첫 프롬프트 경계를 읽기 시작점으로 채택한다. 파일 잠금과 receipt의 바이트 대조는 코드를 시험한다. |
 | E55 | `ParityResolveChild` 뒤 `ParityAttach`. 검증된 부모의 endpoint가 같을 때 실제 child의 owner를 인수한다. |
 | E56 | `ParitySaveComposerHold`, `ParityAssess`, `ParityReadoptIdentity`, `ParityIdentityDeadline`. 이전 composer 기한을 가진 큐를 재인수하고, identity 보류에 들어간 동일 원본에 옛 tick이 미치는 영향을 확인한다. |
+| E57 | `ParityBackgroundAttach`, `ParityNativeClaim`, `ParityNativeWake`, `ParityInputRule`, `ParityComposerDeadline`. 별도 재부착 또는 큐 재인수 뒤, 직접 CLI 입력 B가 먼저 턴을 시작해도 A에 새 composer 기한을 주고 정산한다. |
 
 `BeforeIdentityDeadline`의 `NoIdentityLoss` 반례는 같은 원본 수락, 정체 보류, 기한 경과, 원본 폐기로 이어진다. 수정안은 보류 기준 시각을 넘어 유휴·작업 중·종료 관찰을 각각 수용한다. `ParityResolves`는 관찰과 composer가 결국 진행한다는 가정에서 검사한다.
 
-`BeforeRestoredComposerDeadline`에서는 부팅 전에 저장한 composer 기한이 identity 보류 뒤에도 결산을 소유한다. 6번째 전이에서 원본과 followers가 사라진다. 수정 상태에서 같은 옛 tick은 원본을 유지하고, 후속 관찰이 제출이나 증명된 거절로 이어진다. 차트는 결과가 같은 큐 재인수 전이를 생략한다. 저장소 I/O 실패와 실제 취소 명령은 이 모델의 범위 밖이다.
+`BeforeRestoredComposerDeadline`의 기존 반례에서는 저장된 기한이 6번째 전이에서 원본과 followers를 삭제한다. 새 반례에서는 원본은 살아남지만 별도 복구와 직접 입력 B 뒤 A의 composer에 기한이 생기지 않는다. 수정 상태에서는 실행 확정이 중지를 끝내고, 모달이 계속 막으면 새 기한에서 결산한다. 사용자 cancel과 clear는 명시적 처분, stop은 대기 큐 보존으로 투영했다. 차트는 같은 상태로 표시되는 일부 전이를 생략한다. 저장 I/O 오류와 실제 제어 명령의 세부 절차는 모델 범위 밖이다.
 
 ## 재현
 

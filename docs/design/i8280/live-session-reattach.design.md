@@ -64,6 +64,7 @@
 | E54 | `src/services/discord/recovery_engine/restore_inflight/live_reattach.rs:110` | 출력 경로가 없는 Claude Busy 행은 같은 nonce의 입력 receipt와 transcript 시작점을 확인하고 기존 진행 lease를 인수한다. |
 | E55 | `src/services/turn_host.rs:274`, `src/services/discord/herdr_terminate/root_replaced.rs:238` | 실제 스레드의 child 행과 검증된 부모 endpoint를 대조한다. 전환·owner·입력은 child에 남는다. |
 | E56 | `src/services/turn_orchestrator/queued_head/v2/readiness_hold.rs:47`, `src/services/turn_orchestrator/queued_head/v2/retained.rs:45`, `src/services/discord/router/message_handler/intake_turn/owned_busy/reconnect.rs:106` | 같은 원본의 유효한 composer 기한을 identity 보류에 넘긴다. 같은 큐를 재인수해도 옛 tick은 원본을 지울 수 없다. 관찰이 해결된 뒤 composer가 차단되면 별도 기한을 기록한다. |
+| E57 | `src/services/discord/recovery_engine/herdr_reattach.rs:104`, `src/services/discord/recovery_engine/herdr_reattach.rs:259`, `src/services/discord/router/message_handler/provider_dispatch/owner_input/restart_busy.rs:53` | 별도 재부착의 성공과 일반 Busy 진입의 같은 실행 증거가 같은 mailbox 해제를 사용한다. 나중에 큐를 재인수해도 확인된 실행에서는 새 composer 기한을 기록할 수 있다. |
 
 ## 부팅과 첫 메시지가 만나는 경계
 
