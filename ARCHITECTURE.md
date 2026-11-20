@@ -3156,6 +3156,7 @@ src/
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
+│   │   │   ├── herdr_cold_first_turn_tests.rs
 │   │   │   ├── herdr_source.rs
 │   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── hook_observer.rs
