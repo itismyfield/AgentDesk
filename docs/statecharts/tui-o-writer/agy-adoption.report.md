@@ -15,7 +15,7 @@
 | `AgyEndOnce` | durable 종료 CAS 최대 1, CAS 뒤에만 종료 효과 적용, 완료 전 모든 효과 확인. |
 | `AgyNoPrematureBody`, `AgyInputIdentity` | 최초 본문은 Done 후, 이전 child의 시도가 다음 원본에 적용되지 않음. |
 | PROPERTY `AgyAcceptedEnds` | 인수한 각 원본이 답, 명시적 실패 또는 사용자 폐기와 함께 결국 1회 종료되고 effect들이 적용된다. 후속 턴의 입장은 이전 턴의 종료를 증명한다. |
-| PROPERTY `AgySecondTurnEnds`, `AgyFailedEnds`, `AgyHeadlessKept` | 두 번째 입력도 종료, Done 없는 실패가 표시되고 종료, opt-out 루틴이 기존 답을 완료. |
+| PROPERTY `AgySecondTurnEnds`, `AgyFailedEnds`, `AgyHeadlessKept` | 두 번째 입력도 종료, Done 없는 실패가 표시되고 종료, opt-out 루틴과 인증된 HTTP가 기존 답을 완료. |
 
 모델의 분할 길이는 1·3개다. `AgyReceipt` 두 번 뒤 `AgyRepeatDone`이 가능하고 세 번째 조각만 남는다. `AgyPost`와 receipt 사이에 권한이 사라질 수 있으며, 재시작한 writer는 Prepared를 유지한다. `AgyFinish`는 CAS, `AgyApplyEnd`의 세 단계는 footer 처리, inflight·lease 정리, 큐 알림을 뜻한다. `AgyRejectFinish`는 CAS 앞과 projection 사이에 한 번 실패할 수 있다. child 종료·실패 관측, authority 회복과 재시도, 검증 가능한 송신 결과, 열린 이전 Legacy receipt에 약한 공정성을 둔다. 정상 Long에서도 spawn 실패와 실행 중 child 소실, 그 전후의 권한 회복을 선택할 수 있다. Clear의 처분은 기존 생성 및 receipt 증거를 보존하고 Prepared를 조사 상태에 남긴다. 후속 입력은 TTL이나 스풀 삭제에 의존하지 않는다.
 
@@ -30,7 +30,7 @@
 | `Short.cfg` | 없음 | 없음 | 1개 조각 및 종료. |
 | `TwoTurns.cfg` | 없음 | 없음 | 같은 논리 채널의 연속 입력 두 건과 각각의 종료. |
 | `Failed.cfg` | 없음 | 없음 | Done 없는 child 실패의 가시적 종료. |
-| `Headless.cfg` | 없음 | 없음 | 루틴의 기존 답 완료. |
+| `Headless.cfg` | 없음 | 없음 | 같은 Ready 경계에서 루틴과 인증된 HTTP는 예약 없이 기존 답 완료. |
 | `Abandon.cfg` | `AgyAcceptedEnds` | `AgyAcceptedEnds` | Done → 권한 회수 → 복원 없이 정지. |
 | `BorrowOld.cfg` | `AgyNoSilentLoss` | `AgyNoSilentLoss` | 이전 Legacy 영수증보다 먼저 채택. |
 | `DoubleEnd.cfg` | `AgyEndOnce` | `AgyEndOnce` | 종료 CAS와 효과 적용 뒤 같은 Done으로 종료 재확정. |

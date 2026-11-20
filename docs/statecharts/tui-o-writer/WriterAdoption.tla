@@ -391,14 +391,18 @@ AgyTurnLimit == IF Fix = "two" THEN 2 ELSE 1
 AgyZero == [i \in 1..AgyPages |-> 0]
 AgyTurn(id, phase) ==
     [id |-> id, phase |-> phase, oldDebt |-> phase = "waiting" /\ Fix # "short",
-     accepted |-> FALSE, deltas |-> 0, terminal |-> "none", spool |-> TRUE,
+     ingress |-> "discordForeground", accepted |-> FALSE,
+     deltas |-> 0, terminal |-> "none", spool |-> FALSE,
      prepared |-> FALSE, discarded |-> FALSE, unresolved |-> FALSE,
      remote |-> AgyZero, offset |-> 0, frontier |-> 0, ends |-> 0, effects |-> 0, answers |-> 0,
      authority |-> TRUE, interrupted |-> FALSE, reconcile |-> FALSE,
      rejected |-> FALSE, retried |-> FALSE,
      legacy |-> 0, alarm |-> FALSE, stale |-> FALSE]
 AgyInit == /\ LegacyIdle /\ QuietLate
-           /\ agy = AgyTurn(1, IF Fix = "headless" THEN "headless" ELSE "waiting")
+           /\ IF Fix = "headless"
+              THEN \E ingress \in {"routine", "authenticatedHttp"} :
+                  agy = [AgyTurn(1, "ready") EXCEPT !.ingress = ingress]
+              ELSE agy = AgyTurn(1, "waiting")
 
 AgyLegacyReceipt ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -410,8 +414,8 @@ AgyAdopt ==
     /\ agy' = [agy EXCEPT !.phase = "ready"]
 AgyReserve ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "ready"
-    /\ agy' = [agy EXCEPT !.phase = "reserved", !.accepted = TRUE]
+    /\ agy.phase = "ready" /\ agy.ingress = "discordForeground"
+    /\ agy' = [agy EXCEPT !.phase = "reserved", !.accepted = TRUE, !.spool = TRUE]
 AgySpawn ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "reserved"
@@ -510,7 +514,7 @@ AgyNextInput ==
     /\ agy' = AgyTurn(agy.id + 1, "ready")
 AgyHeadlessAnswer ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "headless"
+    /\ agy.phase = "ready" /\ agy.ingress # "discordForeground"
     /\ agy' = [agy EXCEPT !.phase = "headlessDone", !.legacy = @ + 1]
 AgyLegacyRace ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -553,7 +557,8 @@ AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
     /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
 
-AgyOPath == Fix # "headless"
+AgyOPath == agy.ingress = "discordForeground"
+AgyOnlyDiscordAdmission == (agy.accepted \/ agy.spool) => AgyOPath
 AgyNoDuplicate ==
     AgyOPath => /\ agy.legacy = 0
                 /\ \A i \in 1..AgyPages : agy.remote[i] <= 1

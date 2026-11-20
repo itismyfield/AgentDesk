@@ -12,7 +12,7 @@
 |---:|---|---|
 | 1 | `src/services/discord/router/message_handler/intake_turn.rs:1009,1898,1926`; `src/services/discord/router/message_handler/intake_turn/worker_entry.rs:49,160` | foreground mailbox claim, 실제 목적지·논리 채널과 nonce를 보존해 `AgyReserve`. |
 | 2 | `src/services/discord/router/message_handler/intake_turn.rs:2136,2174,2193` | 프로듀서·panic·기존 bridge 입구. owner 토큰을 확보한 경우에만 `AgySpawn`; 한 종료 경로로 합친다. |
-| 3 | `src/services/discord/health/turn_deliver.rs:330,432,510,518` | 인증된 채널 사용자 입력은 headless starter를 경유할 수 있다. 원본의 ingress를 보존해 `AgyReserve`, 같은 원본의 큐 재입장은 `AgyNextInput`과 구분. |
+| 3 | `src/services/discord/health/turn_deliver.rs:330,432,510,518` | iMessage 등 인증된 HTTP 사용자 입력은 기존 headless starter를 사용한다. 조각 1의 입장은 Discord foreground로 한정하며 인증된 HTTP는 조각 1b 설계 보강이 필요하다. |
 | 4 | `src/services/discord/router/message_handler/provider_dispatch.rs:277,340,510,849` | StreamJson 분기와 요청 구성. 타입이 지정된 agy 채널 프로듀서만 `AgySpawn`; 루틴은 `AgyHeadlessAnswer`. |
 | 5 | `src/services/stream_json_cli/request.rs:15,31,54`; `src/services/stream_json_cli/mod.rs:18,28`; `src/services/stream_json_cli/dialects/mod.rs:20,25` | 요청·인증·dialect 라우팅. spool handle은 채널 턴 호출자만 전달한다. `AgySpawn`, `AgyHeadlessAnswer`. |
 | 6 | `src/services/stream_json_cli/dialects/agy.rs:15,27,65`; `src/services/stream_json_cli/runner.rs:47,76,79` | 정책 검증, 한 턴 argv, spawn과 취소 토큰 등록. spawn 전 실패도 `AgyChildFailed`로 전달한다. |
@@ -39,16 +39,17 @@
 | 27 | `src/services/discord/inflight/store.rs:497,502,516`; `src/services/discord/turn_bridge/stream_tick/guarded_persist.rs:57,77`; `src/services/discord/turn_bridge/stream_tick/runtime.rs:194,221` | #8160의 역행·저장 거부·권한 상실 중단. 새 경로는 `AgyRejectFinish` 또는 `AgyLoseAuthority` 뒤 `AgyRestore`. |
 | 28 | `src/services/discord/turn_bridge/mod.rs:771,890`; `src/services/discord/turn_bridge/completion_postlude.rs:16,1057`; `src/services/discord/turn_bridge/finalize_epilogue.rs:44`; `src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs:20,52,63` | 기존 본문·정리·다음 입력 개시의 경계. 채널 agy는 단일 종료 의무로 `AgyFinish`, `AgyApplyEnd`, `AgyNextInput`; 실패는 `AgyNotifyFailure`. |
 | 29 | `src/services/routines/agent_executor.rs:112,549,1550,1702`; `src/services/routines/agent_executor/launch.rs:5,213`; `src/services/routines/agent_executor/reliability.rs:76,147` | 가족 프로필을 포함한 루틴 실행·재시도·완료·체크포인트. `AgyHeadlessAnswer`. |
-| 30 | `src/services/discord/health/headless_turn.rs:100,246,295,351`; `src/services/discord/router/message_handler/headless_turn/entrypoints.rs:4,200,227`; `src/services/discord/router/message_handler/headless_turn.rs:35,1135,1198` | 이름·DM·owner별 explicit headless 입구와 종료. ingress가 루틴이면 `AgyHeadlessAnswer`, 3행에서 넘긴 채널 턴이면 `AgyReserve`. |
+| 30 | `src/services/discord/health/headless_turn.rs:100,246,295,351`; `src/services/discord/router/message_handler/headless_turn/entrypoints.rs:4,200,227`; `src/services/discord/router/message_handler/headless_turn.rs:35,1135,1198` | 이름·DM·owner별 explicit headless 입구와 종료. 루틴과 인증된 HTTP 모두 기존 경로(`AgyHeadlessAnswer`)를 사용하며 조각 1의 foreground 입장과 분리한다. |
 | 31 | `src/services/provider_exec.rs:35,81,102,130` | 별도 simple/headless 실행은 스풀 인자 없이 Text/Done/Error를 수집한다. `AgyHeadlessAnswer`. |
-| 32 | `src/services/discord/turn_bridge/headless_delivery.rs:315,503,588`; `src/services/discord/turn_bridge/terminal_outcome_delivery.rs:909,914` | W17 outbox/direct 및 복구. 기존 루틴은 `AgyHeadlessAnswer`; 채널의 새 원본은 W17 offer에 들어가기 전에 `AgyReserve` 소유권을 읽는다. |
+| 32 | `src/services/discord/turn_bridge/headless_delivery.rs:315,503,588`; `src/services/discord/turn_bridge/terminal_outcome_delivery.rs:909,914` | W17 outbox/direct 및 복구. 기존 루틴과 인증된 HTTP는 `AgyHeadlessAnswer`. 인증된 HTTP의 W17 경계는 조각 1b 설계 보강이 필요하다. |
 | 33 | `src/services/discord/outbound/body_census.rs:133,175,176,201,213`; `src/services/discord/turn_bridge/stream_tick/output.rs:193,305,462` | provider·origin·W14/W14a-c·W17 원본 분류. 관측은 `AgyLegacyRace`와 `AgyHeadlessAnswer`를 구별한다. |
 | 34 | `src/services/legacy_body_census/transport.rs:10,32`; `src/services/legacy_body_census/collector.rs:28`; `src/services/legacy_body_census/evaluation.rs:5,279,444,459`; `src/services/routines/legacy_body_census.rs:30` | Legacy 시도·결과와 O 수신증 수집 및 24시간 평가. `AgyLegacyRace`, `AgyReceipt`, `AgyHeadlessAnswer`. |
 | 35 | `src/services/discord/commands/control.rs:544,594,616`, `src/services/turn_orchestrator/clear_channel.rs:146,150`, `src/services/discord/catch_up/retry_state.rs:533,543` | clear·stop·cancel의 정확한 턴 처분을 기존 anchor 해제와 catch-up 전진보다 먼저 내구 기록한다. `AgyDiscard`. |
 
 ## 2. 스풀 형식과 기록 경계
 
-- 입장 키는 `(destination, provider, original_input_key)`다. 원본 키는 Discord 메시지와 그 메시지에 대응하는 기존 durable dispatch/owner 레코드를 사용한다. 턴 키는 이 입장 레코드에 지정된 `effective_finalizer_turn_id + turn_nonce`이고, 실제 목적지와 논리 부모를 함께 검증한다. 루틴의 합성 message ID나 채널명으로 입력 출처를 추정하지 않는다.
+- 입장 키는 `(destination, provider, original_input_key)`다. 조각 1의 원본 키는 Discord foreground 메시지 ID와 그 메시지에 대응하는 기존 mailbox 인수·inflight nonce다. 턴 키는 이 입장 레코드에 지정된 `effective_finalizer_turn_id + turn_nonce`이고, 실제 목적지와 논리 부모를 함께 검증한다. 루틴의 합성 message ID나 채널명으로 입력 출처를 추정하지 않는다.
+- 인증된 HTTP는 조각 1b 설계 보강이 필요하다. `(destination, provider, iMessage GUID)`를 내구 원본으로 인정하는 조건, 보호 증거, 활성 경계, 원본 없는 HTTP 입력의 처분을 조각 1b에서 설계한다. API headless와 헤드리스 루틴은 기존 제외 범위를 유지한다.
 - 세션 ID는 AgentDesk의 논리 세션 키다. agy `conversation_id`는 별도로 Init 및 Done에서 검증해 provider resume 토큰으로 저장한다. 최초 init 이전에도 턴은 식별된다. launch attempt와 writer generation을 각각 둔다. PID는 취소와 진단에만 쓴다. 늦은 A 프로세스가 B 턴의 파일·권한·종료 키를 얻을 수 없다.
 - 경로 제안은 `<runtime_root>/o_store/<destination>/agy/v1/<turn_key>/<segment>.jsonl`이다. 목적지 및 키는 검증된 숫자·고정 인코딩 ID만 허용한다. 대화 토큰, prompt, 사용자 제공 경로를 파일명에 넣지 않는다. 전용 디렉터리/파일을 소유 계정만 읽고 쓰며, 생성·reopen 시 symlink와 세대 불일치를 거부한다. provider 저장소를 읽을 필요가 없다.
 - 모든 레코드의 공통 필드는 `v`, `provider`, `destination`, `session_key`, `turn_key`, `attempt`, `seq`, `kind`, `data`다. `seq`는 턴의 정상 append 경계에서 0부터 증가한다. `open`에 입력 키·부모·writer 세대·resume 기대값을 둔다. `init`에는 확인한 conversation ID, `delta`에는 UTF-8 텍스트, `body_part`에는 확정 본문의 연속 바이트 범위와 UTF-8 텍스트를 둔다. `done`에는 `conversation_id`, 확정 본문의 레코드 범위, UTF-8 바이트 길이와 SHA-256, 성공 exit 및 split 정책 버전을 둔다. `failed`에는 유형화한 사유와 진단 분류만 남긴다. stderr 원문·인증 환경·전체 도구 입출력은 스풀에 저장하지 않는다. 새 버전·상충한 seq·파손된 완전한 줄은 이유를 표시하고 보류한다.
@@ -67,7 +68,7 @@
 ## 4. tui_o 선택·채택·소유
 
 - `tui_kind` 계열의 출력 대상 판정에 정규 `antigravity`와 등록 별칭 `agy`를 추가한다. agy 선택에는 별도의 출력 kind(가칭 `AntigravitySpool`)를 두고 실제 실행은 `ProcessBackend`로 계측한다. 계정·권한·runtime, 명령·취소, Claude/Codex pane 판단의 공통 enum에서는 새 출력 kind가 TUI pane 분기로 들어가지 않게 한다. default/allowlist/off/host 및 기존 store 보호 규칙을 준수한다.
-- 새 spool 경로 자격은 검증된 목적지와 원본 foreground ingress, provider kind, writer 준비 세대, 권위 있는 mailbox claim 전체로 결정한다. `health/turn_deliver`에서 같이 쓰는 headless router는 호출 자체로 자격을 판단하지 않는다. 인증된 사용자 채널 라우트는 typed origin을 전달하며, API/routine/scheduled 등 headless 출처와 simple 호출에는 채널 자격이 없다. headless가 같은 Discord 목적지를 공유해도 이전 경로가 같은 결과를 낸다. 원본 유형을 모르거나 재기동 때 선택이 달라지면 durable route를 우선하고 충돌 사유를 표시한다.
+- 새 spool 경로 자격은 검증된 목적지와 원본 foreground ingress, provider kind, writer 준비 세대, 권위 있는 mailbox claim 전체로 결정한다. `health/turn_deliver`에서 같이 쓰는 headless router는 호출 자체로 자격을 판단하지 않는다. 조각 1에서는 Discord foreground만 typed origin을 전달한다. 인증된 HTTP는 조각 1b 설계 보강이 필요하며, API/routine/scheduled 등 headless 출처와 simple 호출에는 채널 자격이 없다. headless가 같은 Discord 목적지를 공유해도 이전 경로가 같은 결과를 낸다. 원본 유형을 모르거나 재기동 때 선택이 달라지면 durable route를 우선하고 충돌 사유를 표시한다.
 - #8118의 checked parent→child 판정, 부모 선정/자식 목적지, 한 adoption snapshot, 기존 body claim을 막는 최종 fence 및 이전 실행에 묶인 receipt 판정을 계승한다. 기존 실행의 원본·send counter·terminal evidence를 잠금 아래 다시 읽는다. 이전 Legacy 턴은 원래 owner가 마무리하고, 새 턴은 채택과 durable reservation 뒤에 시작한다. 턴 A의 정확한 영수증을 받을 때까지 B의 온전한 스풀·종료로 A를 정리할 수 없다. 모호한 부모·기록 충돌·소스 오류에는 intake를 표시된 hold로 둔다.
 - `ShadowProvider::Antigravity` parser를 명시적으로 연결해 turn 키와 seal/seq를 검증한 뒤 한 reply unit과 footer unit을 derive한다. 기존 provider-specific branch의 기본 arm을 확인한다. Claude native binding, Codex rollout, tmux/Herdr pane 생존 판정을 agy readiness에 적용하지 않는다. spool가 없는 정상 idle은 Ready 가능, 시작 후 spool가 사라지면 debt, 종료된 child+seal은 전달 가능이다. 클러스터 owner가 이동하면 stale writer fence를 닫고 정확한 store custody를 재검증한 뒤 새 writer가 이어서 읽는다.
 - 선택된 원본의 reservation이 있으면 legacy stream edit·rollover·terminal send·recovery/outbox에서 같은 durable decision으로 suppression한다. O가 수신 확인하기 전 bridge가 inflight/dispatch를 완료로 넘기지 않는다. 채택 전 Legacy 원본은 기존 경로가 책임진다. 미선택 원본과 routine/scheduled headless는 기존 body gate 결과를 쓰도록 typed bypass/명시 가드를 둔다. 설정 변경은 신규 원본의 자격만 바꾼다. 이미 잡힌 원본은 같은 경로로 끝내고, reader 또는 durable floor가 없는 바이너리로 롤백할 때 unresolved spool/Prepared가 있으면 부팅 거부 또는 운영 보류로 표시한다.
@@ -101,11 +102,12 @@
 
 | 조각 | 변경 면 | prod 추정 | 착지 경계 |
 |---|---|---:|---|
-| 1. 명시적 채널 입력과 스풀 sink | typed dispatch/회복 origin, agy codec/runner, spool encoder·writer·durability | 10파일 / +340 | 전용 sink와 synthetic fixtures, 기본은 전달 비활성. |
+| 1. 명시적 채널 입력과 스풀 sink | Discord foreground typed dispatch, agy codec/runner, spool encoder·writer·durability | 10파일 / +340 | 전용 sink와 synthetic fixtures, 기본은 전달 비활성. |
+| 1b. 인증된 HTTP 원본 | 내구 원본 인정 조건·보호 증거·활성 경계·원본 없는 입력의 처분 | 설계 보강 필요 | 조각 4의 선행. agy 비서 채널의 iMessage 입력을 포함해야 provider 전체 LegacyBody 0건을 판정할 수 있다. |
 | 2. agy reader와 ownership | 선택·검증된 child, source resolver/parser, host boot/adoption/retirement | 13파일 / +465 | 병행 shadow/replay 검증. 새 body owner 전환은 다음 조각 뒤. |
 | 3. 분할·영수증·Done | derive/split, Prepared transport 보강, terminal CAS와 projection, recovery/queue | 13파일 / +560 | fault injection에서 중복과 종료 검증. 활성화는 기본 차단. |
-| 4. 실제 cutover와 관측 | foreground 및 복구 claim 스위치, route별 census, 루틴 회귀와 운영 진단 | 7파일 / +240 | 전수표 재대조 뒤 opt-in 검증, 단계별 배포와 24시간 관측. |
-| 합계 | 조각 사이의 파일 중복 포함 | 43파일 / +1605 | 각 조각은 30파일 / +1500 미만이며 +1200 정지선 아래다. |
+| 4. 실제 cutover와 관측 | foreground 및 복구 claim 스위치, route별 census, 루틴 회귀와 운영 진단 | 7파일 / +240 | 조각 1b 완료 및 전수표 재대조 뒤 opt-in 검증, 단계별 배포와 24시간 관측. |
+| 합계 | 조각 1b 추정 제외, 조각 사이의 파일 중복 포함 | 43파일 / +1605 | 각 조각은 30파일 / +1500 미만이며 +1200 정지선 아래다. |
 
 `pr_cap_prod.py` 실측에서 #8118의 child record·store 활성화 `bf629b6640`은 17파일/+358, shared-view host `ed19fbbb54`는 9파일/+270, child retirement `185e90cfbb`는 20파일/+545, resume·Legacy claim fence `08e0a3f299`는 3파일/+0이다. 이 사례를 기준으로 agy owner 조각에 parser와 boot/retirement 비용을 더했고 종료 조각에는 송신 증거와 복원 비용을 잡았다. 구현 후 각 조각의 실제 base/HEAD를 같은 스크립트로 잰다.
 
@@ -113,6 +115,6 @@
 
 - #8118 착지 후 검증된 child/policy 상속, cold reservation, prior Legacy debt, adoption lock 순서 및 retirement ticket의 델타.
 - 첫 본문이 Done까지 지연되는 사용자 경험과 #8160의 재읽기 fixture. 최종 body의 누적 delta fallback과 실패 분류가 기존 headless 계약을 유지하는지 확인.
-- 사용자 채널 입력이 headless starter를 경유하는 분기, 같은 destination의 routine/비선택 origin, 재시작 후 원본 타입의 내구성. 24시간 DoD의 provider 전체 분모 해석.
+- 조각 1b의 인증된 HTTP headless starter 분기, 같은 destination의 routine/비선택 origin, 재시작 후 원본 타입의 내구성. 24시간 DoD의 provider 전체 분모 해석.
 - 정확한 POST 수신증 및 영구적으로 결과를 증명할 수 없을 때의 보류. footer correlation token 노출, 본문 byte 일치, 외부 Discord 확인 포트와 기존 ledger의 차이.
 - 새 writer가 부팅·권한 전환 뒤 종료 의무를 이어받는지, 오래된 child/lease가 후속 턴을 종료할 수 없는지, 스풀·ledger tombstone이 같은 정리 경계에 들어가는지.
