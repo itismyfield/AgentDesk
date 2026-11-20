@@ -27,11 +27,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from audit_maintainability.checks.module_layer_baseline import (  # noqa: E402
-    BASELINE, MAPPING, _edges, _id, _json, _matches_prefix, baseline, load_mapping, project, uncertainty_sources)
+    BASELINE, MAPPING, MEASUREMENT_INPUTS, _edges, _id, _json, _matches_prefix, baseline, load_mapping, project,
+    uncertainty_sources)
 from audit_maintainability.checks.module_layer_ratchet import SECTIONS, _path_targets, compare  # noqa: E402
 
 APPROVALS = "scripts/audit_maintainability/layer_approvals"
 BASE_ENV = "MODULE_LAYER_BASE_REF"
+BASE_SNAPSHOT_VERSION = 2
 EDGE_SECTIONS = ("reverse_dependencies", "indeterminate_dependencies")
 # The measurement (analyze/baseline/project) and its local imports. A test pins that this covers them.
 MEASURING_CODE = (
@@ -153,7 +155,7 @@ def resolve_base(repo, env):
 
 def _dirty(repo):
     return bool(_git(repo, "status", "--porcelain", "--untracked-files=all", "--",
-                     "src", "Cargo.toml", MAPPING, APPROVALS))
+                     *MEASUREMENT_INPUTS, MAPPING, APPROVALS))
 
 
 def _materialize(repo, sha, destination, paths):
@@ -212,7 +214,8 @@ def _base_measurement(repo, base, code_root, workdir, local, label="base"):
         repo, "cat-file", "-t", f"{base}:{MAPPING}", check=False) == "blob" else None
     cache = None
     if local:
-        key = sha256(_json([base, code_hash(repo, None) if code_root == "head" else code_root, sys.version]).encode()).hexdigest()
+        code_key = code_hash(repo, None) if code_root == "head" else code_root
+        key = sha256(_json([BASE_SNAPSHOT_VERSION, base, code_key, sys.version]).encode()).hexdigest()
         cache = _cache_path(repo, key)
         if cache.is_file():
             try:
@@ -221,7 +224,7 @@ def _base_measurement(repo, base, code_root, workdir, local, label="base"):
                 pass
     tree = workdir / f"{label}-src"
     tree.mkdir()
-    _materialize(repo, base, tree, ("src", "Cargo.toml"))
+    _materialize(repo, base, tree, MEASUREMENT_INPUTS)
     code = Path(__file__).resolve().parents[2] if code_root == "head" else Path(code_root)
     process, out = _start_measurement(code, tree, mapping + "\n" if mapping is not None else None, base, workdir, label)
     return (process, out), None, cache
