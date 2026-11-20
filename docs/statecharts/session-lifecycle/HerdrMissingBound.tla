@@ -414,13 +414,15 @@ OwnerDelivers ==
 
 \* The revised parity projection keeps the first input under the original owner.
 ParityTargets ==
-    IF Control \in {"busy", "unproven", "duplicate", "other-nonce", "headless-race"} THEN {"busy"}
-    ELSE {"idle", "busy", "dead", "unknown"}
+    CASE Control = "identity-deadline" -> {"unknown"}
+      [] Control \in {"busy", "unproven", "duplicate", "other-nonce", "headless-race", "pathless-busy"} -> {"busy"}
+      [] Control = "parent-endpoint" -> {"idle", "busy"}
+      [] OTHER -> {"idle", "busy", "dead", "unknown"}
 
 ParityNames ==
     CASE Control = "duplicate" -> {"duplicate"}
       [] Control = "other-nonce" -> {"other"}
-      [] Control \in {"busy", "unproven", "headless-race"} -> {"unique"}
+      [] Control \in {"busy", "unproven", "headless-race", "identity-deadline", "pathless-busy", "parent-endpoint"} -> {"unique"}
       [] OTHER -> {"unique", "duplicate", "other"}
 
 ParityInit ==
@@ -432,7 +434,8 @@ ParityInit ==
                      composer |-> composer, unproven |-> unproven, reconciled |-> FALSE,
                      front |-> 1, claimed |-> 0, route |-> "none", reattached |-> 0,
                      locationFresh |-> FALSE, lease |-> FALSE, grant |-> "none",
-                     provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none"]
+                     provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none",
+                     elapsed |-> FALSE, sourcePinned |-> FALSE, childEndpoint |-> FALSE]
 
 ParityAssess ==
     /\ attach.phase = "queued" /\ attach.reconciled
@@ -448,14 +451,34 @@ ParityAssess ==
                                                 THEN "named" ELSE "exact"]
     /\ UNCHANGED vars
 
+\* An elapsed identity wait keeps the original, including its unattempted ticket.
+ParityIdentityDeadline ==
+    /\ Control = "identity-deadline" /\ attach.phase = "identityHeld" /\ ~attach.elapsed
+    /\ attach' = [attach EXCEPT !.elapsed = TRUE,
+                 !.phase = IF Policy = "parity-discard-identity" THEN "discarded" ELSE @]
+    /\ UNCHANGED vars
+
 ParityObserve ==
     /\ attach.phase = "identityHeld"
+    /\ (Control # "identity-deadline" \/ attach.elapsed)
     /\ \E observed \in {"idle", "busy", "dead"} :
        attach' = [attach EXCEPT !.target = observed, !.phase = "queued"]
     /\ UNCHANGED vars
 
+ParityPinPathless ==
+    /\ Control = "pathless-busy" /\ attach.phase \in {"named", "exact"} /\ ~attach.sourcePinned
+    /\ attach' = [attach EXCEPT !.sourcePinned = TRUE]
+    /\ UNCHANGED vars
+
+ParityResolveChild ==
+    /\ Control = "parent-endpoint" /\ attach.phase \in {"named", "exact"} /\ ~attach.childEndpoint
+    /\ attach' = [attach EXCEPT !.childEndpoint = TRUE]
+    /\ UNCHANGED vars
+
 ParityAttach ==
     /\ attach.phase \in {"named", "exact"} /\ attach.reattached = 0
+    /\ (Control # "pathless-busy" \/ attach.sourcePinned)
+    /\ (Control # "parent-endpoint" \/ attach.childEndpoint)
     /\ attach.headlessClaim # "new"
     /\ attach' = [attach EXCEPT !.phase = "attached", !.route = attach.phase,
                   !.locationFresh = attach.phase = "named", !.reattached = @ + 1,
@@ -517,6 +540,7 @@ ParityReject ==
 
 ParityNext ==
     Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
+    \/ ParityIdentityDeadline \/ ParityPinPathless \/ ParityResolveChild
     \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParitySubmit \/ ParityObserveReceipt
     \/ ParityResendUnknown \/ ParityPublishReply \/ ParityReject \/ AttachDone
 
@@ -524,10 +548,12 @@ ParitySpec ==
     /\ ParityInit /\ [][ParityNext]_allVars
     /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
     /\ WF_attach(ParityAssess) /\ WF_attach(ParityObserve) /\ WF_attach(ParityAttach)
+    /\ WF_attach(ParityIdentityDeadline) /\ WF_attach(ParityPinPathless) /\ WF_attach(ParityResolveChild)
     /\ WF_attach(ParityInputRule) /\ WF_attach(ParityComposerClears) /\ WF_attach(ParitySubmit)
     /\ WF_attach(ParityObserveReceipt) /\ WF_attach(ParityPublishReply) /\ WF_attach(ParityReject)
 
 NoLiveDiscard == attach.target \in {"idle", "busy"} => attach.phase # "discarded"
+NoIdentityLoss == attach.phase # "discarded"
 NoIdleOnly == attach.phase # "idleOnly"
 NamedOnlyCurrent == attach.route = "named" => attach.name = "unique" /\ attach.locationFresh
 BusyAuthority == attach.grant = "busy" => attach.lease /\ attach.reattached = 1

@@ -112,6 +112,10 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | OtherNonce | GREEN. 정밀 경로 | 20 / 23 | [차트](herdr-reattach-parity-OtherNonce.chart.mmd) · [결과](herdr-reattach-parity-OtherNonce.report.md) |
 | TrustName | RED `NamedOnlyCurrent` | 20 / 23 | [차트](herdr-reattach-parity-TrustName.chart.mmd) · [반례](herdr-reattach-parity-TrustName.report.md) |
 | ResendUnknown | RED `OwnerExactlyOnce`, `ParityResolves` | 24 / 29 | [차트](herdr-reattach-parity-ResendUnknown.chart.mmd) · [반례](herdr-reattach-parity-ResendUnknown.report.md) |
+| BeforeIdentityDeadline | RED `NoIdentityLoss`, `ParityResolves` | 14 / 14 | [차트](herdr-reattach-parity-BeforeIdentityDeadline.chart.mmd) · [결과](herdr-reattach-parity-BeforeIdentityDeadline.report.md) |
+| IdentityDeadline | GREEN | 44 / 50 | [차트](herdr-reattach-parity-IdentityDeadline.chart.mmd) · [결과](herdr-reattach-parity-IdentityDeadline.report.md) |
+| PathlessBusy | GREEN | 22 / 25 | [차트](herdr-reattach-parity-PathlessBusy.chart.mmd) · [결과](herdr-reattach-parity-PathlessBusy.report.md) |
+| ParentEndpoint | GREEN | 44 / 50 | [차트](herdr-reattach-parity-ParentEndpoint.chart.mmd) · [결과](herdr-reattach-parity-ParentEndpoint.report.md) |
 
 | 설계 진입점 | 모델 행동과 경계 |
 |---|---|
@@ -127,6 +131,11 @@ Mermaid view는 같은 라벨 안에서의 reconcile/reader scan, 중복되지 �
 | E39, E45, E50 | 기존 `ResumeEnded`. 새 프로세스 resume·표시는 조각 3 경계. |
 | E41, E49 | `ParityAssess`의 `endProved`, `ParityReject`. `Unproven`은 `ParityAttach` 또는 `ParityObserve`로 합류. |
 | E42–E43 | `FirstInput`, `ParityAttach`의 owner·source 전제. TUI 직접 입력과 consent/O-writer 이관 세부는 투영 밖. |
+| E53 | `ParityIdentityDeadline` 뒤 `ParityObserve`. 관찰이 바뀔 때까지 원본이 큐에 남는다. |
+| E54 | `ParityPinPathless` 뒤 `ParityAttach`. 같은 실행의 첫 프롬프트 경계를 읽기 시작점으로 채택한다. 파일 잠금과 receipt의 바이트 대조는 코드를 시험한다. |
+| E55 | `ParityResolveChild` 뒤 `ParityAttach`. 검증된 부모의 endpoint가 같을 때 실제 child의 owner를 인수한다. |
+
+`BeforeIdentityDeadline`의 `NoIdentityLoss` 반례는 같은 원본 수락, 정체 보류, 기한 경과, 원본 폐기로 이어진다. 수정안은 보류 기준 시각을 넘어 유휴·작업 중·종료 관찰을 각각 수용한다. `ParityResolves`는 관찰과 composer가 결국 진행한다는 가정에서 검사한다.
 
 ## 재현
 

@@ -17,7 +17,7 @@ export function state({ attach }) {
     down: "dcserver 종료",
     await: "첫 원본 대기",
     queued: "같은 원본이 큐에 있음",
-    identityHeld: "pane identity 재관찰 대기",
+    identityHeld: attach.elapsed ? "기한이 지나도 같은 원본 보존" : "pane identity 재관찰 대기",
     endProved: "종료 증명",
     named: "이름으로 pane 선택",
     exact: "정밀 판정으로 pane 선택",
@@ -33,7 +33,9 @@ export function state({ attach }) {
   };
   const claim = attach.headlessClaim === "new" ? " (새 headless claim이 기존 턴을 막음)"
     : attach.headlessClaim === "refused" ? " (기존 lease에 headless claim 거절)" : "";
-  const suffix = attach.submits > 1 ? " (중복 제출)" : claim;
+  const proof = attach.sourcePinned ? " (첫 프롬프트 경계 확인)" :
+    attach.childEndpoint ? " (부모 endpoint와 child 실행 확인)" : "";
+  const suffix = attach.submits > 1 ? " (중복 제출)" : claim + proof;
   return [targets[attach.initial], names[attach.name], labels[attach.phase] + suffix];
 }
 
@@ -42,6 +44,9 @@ const actions = {
   FirstInput: "같은 원본 수락",
   ReconcileIntake: "intake reconcile 완료",
   ParityAssess: "현재 pane과 이름을 확인",
+  ParityIdentityDeadline: "보류 기준 시각 경과",
+  ParityPinPathless: "기존 턴의 정확한 시작 위치를 확인",
+  ParityResolveChild: "검증된 부모 설정과 child 행을 대조",
   ParityObserve: "달라진 pane 증거로 같은 원본 재판정",
   ParityAttach: "위치·registry·watcher와 owner 인수",
   ParityHeadlessClaim: "같은 채널의 새 headless claim",
