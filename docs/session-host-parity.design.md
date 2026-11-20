@@ -434,7 +434,7 @@ src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs:2
 src/services/discord/router/message_handler/intake_turn/worker_entry/dispatch_guard_pg_tests.rs:6:use crate::services::discord::admin_host_guard::tests::api_child;
 src/services/discord/router/message_handler/intake_turn/worker_entry/goal_fresh_pg_tests.rs:21:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
 src/services/discord/router/message_handler/intake_turn/worker_entry/preserve_cancel_tests.rs:5:use crate::services::discord::admin_host_guard::tests::api_child;
-src/services/discord/router/message_handler/provider_dispatch.rs:1074:            "herdr turn refused: executor_not_wired"
+src/services/discord/router/message_handler/provider_dispatch.rs:1070:            "herdr turn refused: executor_not_wired"
 src/services/discord/router/message_handler/provider_dispatch/owner_input_codex_tests.rs:629:    crate::services::discord::admin_host_guard::tests::api_child(test)
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:54:    _api: discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:183:        let api = discord::admin_host_guard::tests::Recorder::start().await;

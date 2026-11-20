@@ -431,11 +431,18 @@ impl Request<'_> {
             super::admission::Standing,
         ),
     ) -> Arc<dyn TurnGateway> {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::turn_host::TurnHost;
+
+        // The legacy host also runs process turns when no managed runtime was selected.
+        inflight.headless_process_start = matches!(host, TurnHost::Tmux)
+            && matches!(
+                inflight.runtime_kind,
+                None | Some(RuntimeHandoffKind::ProcessBackend)
+            );
         // The channel's Herdr execution runs the start as its own turn.
         let channel_turn = standing == super::admission::Standing::Channel;
-        let presentation = (channel_turn
-            && matches!(host, crate::services::turn_host::TurnHost::Herdr(_)))
-        .then(|| {
+        let presentation = (channel_turn && matches!(host, TurnHost::Herdr(_))).then(|| {
             Arc::new(DiscordGateway::new(
                 self.ctx.http.clone(),
                 self.shared.clone(),
@@ -452,7 +459,6 @@ impl Request<'_> {
                 inflight.current_msg_len = 0;
             }
             if inflight.runtime_kind.is_none() {
-                use crate::services::agent_protocol::RuntimeHandoffKind;
                 let kind = match self.provider {
                     ProviderKind::Claude => Some(RuntimeHandoffKind::ClaudeTui),
                     ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
@@ -461,7 +467,7 @@ impl Request<'_> {
                 apply_prelaunch_runtime_kind(inflight, kind);
             }
             if inflight.tmux_session_name.is_none()
-                && let crate::services::turn_host::TurnHost::Herdr(plan) = host
+                && let TurnHost::Herdr(plan) = host
                 && let Some(row) = &plan.row
                 && let crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(record) =
                     &row.record

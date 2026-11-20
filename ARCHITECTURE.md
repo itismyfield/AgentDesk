@@ -170,6 +170,8 @@ src/
 │   ├── poll_watcher_tests.rs
 │   ├── readers_live_reload_tests.rs
 │   ├── reload_classes.rs
+│   ├── retired_providers.rs
+│   ├── retired_providers_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_root_guard.rs
@@ -4248,6 +4250,7 @@ src/
 │   │   │   ├── fifo.rs
 │   │   │   └── input.rs
 │   │   ├── consumer_guard.rs
+│   │   ├── create.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
@@ -5033,7 +5036,6 @@ src/
 │   ├── dispatches_followup.rs
 │   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
-│   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
 │   ├── health_diagnostics.rs

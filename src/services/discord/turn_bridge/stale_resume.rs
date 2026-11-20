@@ -139,9 +139,6 @@ pub(super) fn stream_error_requires_terminal_session_reset(message: &str, stderr
     // Its persisted selector is the only repeatable input across attempts, so
     // retain neither it nor the in-memory provider session for the next turn.
     lower.contains(crate::services::stream_json_cli::runner::NO_OUTPUT_ERROR_MARKER)
-        || lower.contains("gemini session could not be recovered after retry")
-        || lower.contains("gemini stream ended without a terminal result")
-        || lower.contains("invalidargument: gemini resume selector must be")
         || lower.contains("qwen session could not be recovered after retry")
         || lower.contains("qwen stream ended without a terminal result")
 }
@@ -294,7 +291,7 @@ mod tests {
             ""
         ));
         assert!(stream_error_requires_terminal_session_reset(
-            "Gemini session could not be recovered after retry",
+            "Qwen session could not be recovered after retry",
             ""
         ));
         assert!(stream_error_requires_terminal_session_reset(

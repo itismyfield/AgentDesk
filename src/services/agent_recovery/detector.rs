@@ -14,7 +14,6 @@ pub enum MailboxStallKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetectorSignal {
     StreamIdleTimeout,
-    GeminiIdleTimeout,
     Mailbox {
         kind: MailboxStallKind,
         elapsed_secs: u32,
@@ -31,9 +30,7 @@ pub fn classify_trigger(
 ) -> Option<TriggerKind> {
     let policy = policy.filter(|policy| policy.enabled)?;
     let trigger = match signal {
-        DetectorSignal::StreamIdleTimeout | DetectorSignal::GeminiIdleTimeout => {
-            TriggerKind::IdleTimeout
-        }
+        DetectorSignal::StreamIdleTimeout => TriggerKind::IdleTimeout,
         DetectorSignal::Mailbox {
             kind,
             elapsed_secs,
@@ -63,9 +60,6 @@ pub fn classify_trigger(
 pub fn trigger_from_error_message(message: &str) -> Option<DetectorSignal> {
     let lower = message.to_ascii_lowercase();
     if lower.contains("produced no output for") {
-        if lower.contains("gemini") {
-            return Some(DetectorSignal::GeminiIdleTimeout);
-        }
         return Some(DetectorSignal::StreamIdleTimeout);
     }
     if lower

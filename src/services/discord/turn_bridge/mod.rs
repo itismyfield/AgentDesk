@@ -190,9 +190,8 @@ pub(super) use retry_state::spawn_retry_with_history_with_release;
 use retry_state::{
     AutoRetry, bridge_confirmed_response_sent_offset_seed,
     bridge_should_reclaim_relay_from_missing_watcher, clear_local_session_state,
-    handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
-    sync_terminal_error_delivery_state_for_bridge_owner,
+    reset_session_for_auto_retry, rewind_and_persist_delivery_on_reclaim,
+    sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use sqlx::Row;

@@ -168,7 +168,14 @@ impl HerdrLaunchHost for PolicyHost {
 
     fn create_user_default(&self, _: &UserDefaultCreateRequest) -> HerdrCreateOutcome {
         self.user_creates.fetch_add(1, Ordering::SeqCst);
-        self.events.lock().unwrap().push("user_create");
+        // Named apart when the create did not arrive through the session host's create port.
+        let through_port = crate::services::session_host::create_in_effect();
+        let event = if through_port {
+            "user_create"
+        } else {
+            "user_create_outside_port"
+        };
+        self.events.lock().unwrap().push(event);
         self.inner.reply.clone()
     }
 

@@ -42,7 +42,7 @@ pub struct ProviderChannels {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCliRegistry {
     pub schema_version: u32,
-    /// Key is provider id: "codex", "claude", "gemini", "qwen".
+    /// Key is provider id: "codex", "claude", "qwen".
     #[serde(default)]
     pub providers: HashMap<String, ProviderChannels>,
     pub updated_at: DateTime<Utc>,
@@ -212,14 +212,6 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
         install_source: "npm-global",
         command_argv: &["npm", "install", "-g", "@anthropic-ai/claude-code"],
         expected_binary_name: "claude",
-        mutates_in_place: true,
-        allow_candidate_path_change: false,
-    },
-    ProviderCliUpdateStrategy {
-        provider: "gemini",
-        install_source: "npm-global",
-        command_argv: &["npm", "install", "-g", "@google/gemini-cli"],
-        expected_binary_name: "gemini",
         mutates_in_place: true,
         allow_candidate_path_change: false,
     },

@@ -11,6 +11,7 @@ use serenity::{ChannelId, CreateMessage};
 use sqlx::PgPool;
 
 use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
+pub(super) use crate::domain::outbound::key::ManualOutboundDeliveryId;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
 use crate::services::discord::http::dispatch_channel_message;
@@ -145,12 +146,6 @@ async fn record_manual_message_transcript(
             "manual Discord message delivered but transcript persistence failed"
         );
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ManualOutboundDeliveryId<'a> {
-    pub(crate) correlation_id: &'a str,
-    pub(crate) semantic_event_id: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]

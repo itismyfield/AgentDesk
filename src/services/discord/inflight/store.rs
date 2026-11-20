@@ -483,11 +483,8 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
 
     // #3552: enforce-skip or a legitimate rewind selects WARN below; anything
-    // else selects ERROR. #3933: a legitimate RetryBoundary reset (see
-    // turn_bridge/retry_state.rs::clear_response_delivery_state) clears
-    // full_response and resets response_sent_offset to 0 to re-stream the
-    // answer; a genuine regression always carries a non-empty body, so it
-    // never matches this signature.
+    // else selects ERROR. A same-turn full reset (empty body, offset 0) is
+    // allowed by signature; a genuine regression always carries a non-empty body.
     let is_legitimate_full_reset =
         same_turn_identity && state.full_response.is_empty() && state.response_sent_offset == 0;
     // #4110: terminal-error reset / dead-watcher reclaim intentionally lower a

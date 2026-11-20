@@ -58,8 +58,7 @@ pub(super) fn provider_turn_interrupt_plan(
         ProviderKind::Claude => Some(ProviderTurnInterruptPlan { keys: &[] }),
         ProviderKind::Codex => Some(ProviderTurnInterruptPlan { keys: &["Escape"] }),
         ProviderKind::Qwen => Some(ProviderTurnInterruptPlan { keys: &["C-c"] }),
-        ProviderKind::Gemini
-        | ProviderKind::Grok
+        ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => None,
@@ -129,8 +128,7 @@ pub(super) fn fallback_sigint_pid_for_provider(
         // Claude they get no confirmation re-probe, so never gate on
         // `ready_for_input` — always deliver when the PID is known (#1260).
         ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
-        ProviderKind::Gemini
-        | ProviderKind::Grok
+        ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => None,

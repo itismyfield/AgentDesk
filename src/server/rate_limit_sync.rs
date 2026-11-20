@@ -4,7 +4,6 @@
 //! dispatch gate still defers on Claude's cached telemetry.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use sqlx::PgPool;
 
@@ -12,10 +11,10 @@ use crate::services::dispatch_gate;
 
 pub(crate) mod backoff;
 use super::{
-    CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT, GEMINI_CREDS_MISSING_WARNED,
-    claude_rate_limit_refresh_lock, fetch_codex_oauth_usage, fetch_gemini_rate_limits,
-    fetch_openai_rate_limits, parse_claude_oauth_usage_buckets, parse_header_i64,
-    parse_header_reset, refresh_dispatch_gate_snapshots, upsert_rate_limit_cache_entry,
+    CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT, claude_rate_limit_refresh_lock,
+    fetch_codex_oauth_usage, fetch_openai_rate_limits, parse_claude_oauth_usage_buckets,
+    parse_header_i64, parse_header_reset, refresh_dispatch_gate_snapshots,
+    upsert_rate_limit_cache_entry,
 };
 
 type Buckets = Vec<serde_json::Value>;
@@ -127,42 +126,6 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             }
             Err(e) => {
                 tracing::warn!("[rate-limit-sync] Codex rate_limit fetch failed: {e}");
-            }
-        }
-
-        // --- Gemini rate limits (OAuth2 creds from ~/.gemini/oauth_creds.json;
-        // RPM/RPD buckets with known quota limits, usage fields -1) ---
-        match fetch_gemini_rate_limits().await {
-            Ok(buckets) => {
-                let n = buckets.len();
-                let data = serde_json::json!({ "buckets": buckets }).to_string();
-                let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "gemini", "default", &data, now)
-                    .await;
-                tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                // Only the genuine "not configured / file missing" case is suppressed, classified
-                // at the source by `io::ErrorKind`; matching on "oauth_creds.json" here would
-                // also swallow permission, I/O and corrupt creds (#3566 over-suppress fix).
-                let creds_missing =
-                    crate::services::provider_auth::is_gemini_unconfigured_error(&e);
-                if creds_missing {
-                    // Log once, then DEBUG so the loop doesn't spam it (#3566).
-                    if !GEMINI_CREDS_MISSING_WARNED.swap(true, Ordering::AcqRel) {
-                        tracing::warn!(
-                            "[rate-limit-sync] Gemini credentials not configured ({msg}); suppressing further repeats"
-                        );
-                    } else {
-                        tracing::debug!(
-                            "[rate-limit-sync] Gemini credentials absent; skipping (suppressed)"
-                        );
-                    }
-                } else {
-                    // Transient (network/API/token refresh) and corrupt creds.
-                    tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
-                }
             }
         }
 

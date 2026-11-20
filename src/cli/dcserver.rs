@@ -537,7 +537,7 @@ pub fn parse_restart_dcserver_report_context(
                 let raw = args
                     .get(i + 1)
                     .ok_or_else(|| {
-                        "--report-provider requires one of: claude, codex, gemini, opencode, qwen"
+                        "--report-provider requires one of: claude, codex, opencode, qwen"
                             .to_string()
                     })?
                     .clone();
@@ -570,7 +570,7 @@ pub fn parse_restart_dcserver_report_context(
         (Some(provider_raw), Some(channel_id), current_msg_id) => {
             let provider = ProviderKind::from_str(&provider_raw).ok_or_else(|| {
                 format!(
-                    "invalid value for --report-provider: {} (expected claude, codex, gemini, opencode, or qwen)",
+                    "invalid value for --report-provider: {} (expected claude, codex, opencode, or qwen)",
                     provider_raw
                 )
             })?;
