@@ -411,10 +411,12 @@ fn restarted_front(busy: bool) {
             })]);
             let payload = json!({"session_id": session, "prompt": prompt, "transcript_path": started.path});
             assert_eq!(tokio::task::block_in_place(|| started.hook(&fx, "UserPromptSubmit", &payload)), 202);
+            let now = chrono::Utc::now().to_rfc3339();
             append(&started.path, &[
-                json!({"type":"assistant","uuid":uuid(),"sessionId":session,"message":{
-                    "id":"restart-reply","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":reply}]}}),
-                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
+                json!({"type":"assistant","uuid":uuid(),"sessionId":session,"timestamp":now,
+                    "apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":reply}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}),
             ]);
             let payload = json!({"session_id": session, "transcript_path": started.path});
             assert_eq!(tokio::task::block_in_place(|| started.hook(&fx, "Stop", &payload)), 202);
@@ -436,14 +438,11 @@ fn restarted_front(busy: bool) {
         assert!(!payload.contains("already running before restart"));
         assert!(!payload.contains(old_context));
         assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
-        let busy_marks = intake
-            .shared
-            .turn_view_reconciler
-            .ops()
-            .iter()
-            .filter(|op| op.target.message_id.get() == MESSAGE && op.emoji == '➕' && op.add)
-            .count();
-        assert_eq!(busy_marks, usize::from(busy));
+        let busy_marks = || {
+            intake.shared.turn_view_reconciler.ops().iter()
+                .filter(|op| op.target.message_id.get() == MESSAGE && op.emoji == '➕' && op.add)
+                .count()
+        };
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
         assert!(
             !fx.rig.requests()[before_requests..]
@@ -463,15 +462,19 @@ fn restarted_front(busy: bool) {
             loop {
                 calls.extend(intake._api.take());
                 let reached = |message: &String| message.contains(reply);
-                if intake.posts.to(CHANNEL).iter().any(reached)
+                let delivered = intake.posts.to(CHANNEL).iter().any(reached)
                     || intake.mock.delivered_texts().iter().any(reached)
-                    || calls.iter().any(|call| call.contains(&format!("/channels/{CHANNEL}/messages")) && reached(call))
-                {
+                    || calls.iter().any(|call| call.contains(&format!("/channels/{CHANNEL}/messages")) && reached(call));
+                if delivered && busy_marks() == usize::from(busy) {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("the same pane's reply reached the channel");
+        }).await.unwrap_or_else(|error| panic!(
+            "same-pane reply and input view did not settle: {error}; busy marks={} O posts={} mock replies={} REST calls={}",
+            busy_marks(), intake.posts.to(CHANNEL).len(), intake.mock.delivered_texts().len(), calls.len(),
+        ));
+        assert_eq!(busy_marks(), usize::from(busy));
         calls.extend(intake._api.take());
         assert!(!calls.iter().any(|call|
             call.contains("이 입력을 폐기했습니다") || call.contains("세션 복구 중") || call.contains("세션 복원")));
