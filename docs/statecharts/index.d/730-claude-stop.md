@@ -1,0 +1,2 @@
+key: 730-claude-stop
+| `claude-stop` Claude `/stop` Esc 전달 판정 (#8081) | `881cc5c5d5933cdffc7db87eeb35075d846064a9` + stop 수리 | Before: 꼬리가 user 행인 실행 중 턴(Code Mode 즉시 반환 도구·첫 응답 전)과 식별 미판독 턴에 Esc를 보내지 않음(ActiveScreenStops, UnreadFooterStops). 분기 제거 2종·blind·스피너만 전송 변형은 기대 RED | Fixed GREEN: 화면 active면 제출 상태도 전송, 미판독은 `esc to interrupt`일 때만, 유휴 화면·종료된 꼬리는 0회. 6 cfg. [보고서](claude-stop/claude-stop.report.md) |

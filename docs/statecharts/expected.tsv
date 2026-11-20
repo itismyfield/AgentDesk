@@ -121,6 +121,12 @@ campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
 catch-up-frontier/CatchUpFrontier.cfg	CatchUpFrontier	-	-
 catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvanceCursor
 catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
+claude-stop/ClaudeStopBefore.cfg	ClaudeStop	ActiveScreenStops,UnreadFooterStops	-
+claude-stop/ClaudeStopBlind.cfg	ClaudeStop	NoEscapeOnIdleScreen	-
+claude-stop/ClaudeStopFixed.cfg	ClaudeStop	-	-
+claude-stop/ClaudeStopNoScreenFirst.cfg	ClaudeStop	ActiveScreenStops	-
+claude-stop/ClaudeStopNoUnreadFooter.cfg	ClaudeStop	UnreadFooterStops	-
+claude-stop/ClaudeStopUnreadSpinner.cfg	ClaudeStop	UnreadNeedsFooter	-
 decision-request/Auth.cfg	DecisionRequest	OperatorOnly	-
 decision-request/BusyForever.cfg	DecisionRequest	-	EventuallySettled
 decision-request/DiscussionClassify.cfg	DecisionDiscussion	ClassMatches	-
