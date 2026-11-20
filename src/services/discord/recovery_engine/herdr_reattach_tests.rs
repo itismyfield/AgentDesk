@@ -335,14 +335,12 @@ pub(in crate::services::discord) fn run(
         .unwrap();
     let hosts = crate::config::session_hosts::force_config_for_test(&config);
     let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-    let endpoint = crate::services::session_host::HerdrEndpoint::new(
+    let registry = rig.registry_as_on_this_thread(
         NODE,
         &endpoint.key,
-        rig.socket(),
+        &endpoint.socket_path,
         &endpoint.herdr_session,
-    )
-    .unwrap();
-    let registry = rig.policy_registry_on_this_thread(endpoint, |host| host);
+    );
     let codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
     let fixture = runtime.block_on(Fixture::new(rig, provider, tag, busy));
     verify(fixture, &runtime);
@@ -683,9 +681,22 @@ fn snapshot_labels(fx: &Fixture, labels: &[String]) {
     );
 }
 
+fn named_registry(fx: &Fixture) -> impl Drop + use<> {
+    let at = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+    let endpoint = crate::services::session_host::HerdrEndpoint::new(
+        NODE,
+        &at.key,
+        fx.rig.socket(),
+        &at.herdr_session,
+    )
+    .unwrap();
+    fx.rig.policy_registry_on_this_thread(endpoint, |host| host)
+}
+
 #[test]
 fn restarted_unique_name_updates_bound_pane_once_pg() {
     run(ProviderKind::Claude, "s2-name-unique", false, |fx, rt| {
+        let _named = named_registry(&fx);
         snapshot_labels(&fx, &[format!("{}#{NONCE}", fx.logical())]);
         let mut stale = fx.record.clone();
         stale.location.as_mut().unwrap().pane_id = "w0:p1".into();
@@ -718,6 +729,7 @@ fn assert_name_conflict_uses_exact_path(duplicate: bool) {
         },
         false,
         |fx, rt| {
+            let _named = named_registry(&fx);
             let other = format!("{}#{SUCCESSOR}", fx.logical());
             let labels = if duplicate {
                 vec![format!("{}#{NONCE}", fx.logical()), other]
