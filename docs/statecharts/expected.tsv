@@ -1038,6 +1038,16 @@ session-activity/ActivityRestart.cfg	SessionActivity	-	-
 session-activity/ActivityStopWitness.cfg	SessionActivity	NeverEscape	-
 session-activity/ActivitySubmitted.cfg	SessionActivity	-	-
 session-activity/ActivityToolPair.cfg	SessionActivity	-	-
+routine-run/RoutineSettlementApprovedBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementApprovedFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementClaimedBefore.cfg	RoutineSettlement	WithdrawsBeforeKey	EveryRunCloses
+routine-run/RoutineSettlementClaimedFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementHerdrIdleBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementHerdrIdleFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementRecoveryBefore.cfg	RoutineSettlement	CloseAfterOwner,WithdrawsBeforeKey	-
+routine-run/RoutineSettlementRecoveryFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementUntriedBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementUntriedFixed.cfg	RoutineSettlement	-	-
 session-lifecycle/ClaudeColdLaunchBindingAfter.cfg	ClaudeColdLaunchBinding	-	-
 session-lifecycle/ClaudeColdLaunchBindingBefore.cfg	ClaudeColdLaunchBinding	FirstTurnQueueEligible	-
 session-lifecycle/ClaudeColdLaunchBindingNoBind.cfg	ClaudeColdLaunchBinding	FirstTurnBound,FirstTurnQueueEligible	LaunchSettles
