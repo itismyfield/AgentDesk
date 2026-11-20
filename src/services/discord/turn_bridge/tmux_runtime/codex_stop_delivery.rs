@@ -701,6 +701,8 @@ fn deliver(
     use HerdrNotSent::*;
     // A Claude idle refusal's evidence, logged only once the composer lock is released.
     let idle = std::cell::Cell::new(None);
+    // The read that failed, named on the line an unobserved refusal logs.
+    let unread = std::cell::Cell::new("");
     let attempt = || -> Result<HerdrDelivery, HerdrNotSent> {
         let held = || holder(channel);
         let state = token.herdr_interrupt_state().ok_or(Pending)?;
@@ -714,14 +716,24 @@ fn deliver(
         if !source_current() {
             return Err(Identity);
         }
-        let identity = TurnIdentity::capture(provider, &binding.output_path)
-            .map_err(|()| unobserved())?
-            .ok_or(Idle)?;
+        let identity = match TurnIdentity::capture(provider, &binding.output_path) {
+            Ok(identity) => Some(identity.ok_or(Idle)?),
+            Err(()) => {
+                unread.set("turn_identity");
+                // A Claude turn that could not be read may still stop on its screen's own footer.
+                if !matches!(provider, ProviderKind::Claude) {
+                    return Err(unobserved());
+                }
+                None
+            }
+        };
         // A Codex stop targets the turn its token began, never a later native turn of the pane.
-        if let TurnIdentity::Codex(turn) = &identity {
+        if let Some(TurnIdentity::Codex(turn)) = &identity {
             let seen = state.seen_turn_id();
-            turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref())?;
+            let own = turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref());
+            own.inspect_err(|_| unread.set("own_turn"))?;
         }
+        let identity_current = || identity.as_ref().is_none_or(TurnIdentity::current);
         #[cfg(all(test, unix))]
         if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {
             action();
@@ -745,7 +757,7 @@ fn deliver(
             let current =
                 crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
                     .ok_or(Pending)?;
-            if current.output_path != binding.output_path || !identity.current() {
+            if current.output_path != binding.output_path || !identity_current() {
                 return Err(Identity);
             }
             // One read decides: Codex's dim placeholder survives only in the styled read.
@@ -753,7 +765,13 @@ fn deliver(
                 ProviderKind::Codex => target.capture_ansi(-160),
                 _ => target.capture(-160),
             }
-            .ok_or_else(unobserved)?;
+            .ok_or_else(|| {
+                unread.set(match identity {
+                    Some(_) => "screen",
+                    None => "turn_identity+screen",
+                });
+                unobserved()
+            })?;
             let mut judged = None;
             let running = match provider {
                 ProviderKind::Claude => {
@@ -764,10 +782,17 @@ fn deliver(
                     // The tmux stop's pane evidence and phase, plus modal and draft vetoes.
                     let (ready, active, draft) = claude_tui_stop_pane_evidence(&screen);
                     judged = Some((structured, ready, active, draft));
+                    let live = match identity {
+                        Some(_) => {
+                            classify_tui_interrupt_phase(structured, ready || draft, active)
+                                == ClaudeTuiInterruptPhase::ActiveGeneration
+                        }
+                        // Unread, the turn is live only on Claude's own interrupt offer.
+                        None => super::claude_stop_pane::interrupt_offered(&screen),
+                    };
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
                         && !draft
-                        && classify_tui_interrupt_phase(structured, ready || draft, active)
-                            == ClaudeTuiInterruptPhase::ActiveGeneration
+                        && live
                 }
                 ProviderKind::Codex => {
                     crate::services::codex_tui::input::herdr_turn_in_progress(&screen)
@@ -775,6 +800,9 @@ fn deliver(
                 _ => false,
             };
             if !running {
+                if identity.is_none() {
+                    return Err(unobserved());
+                }
                 if let Some(judged) = judged {
                     let at = (channel, logical.as_str(), nonce);
                     let sources = (&binding, &current);
@@ -785,7 +813,7 @@ fn deliver(
                 return Err(Idle);
             }
             target.pin(HerdrMutation::Cancel).map_err(|_| Gate)?;
-            if !identity.current() || !source_current() {
+            if !identity_current() || !source_current() {
                 target.discard_pin();
                 return Err(Identity);
             }
@@ -833,6 +861,15 @@ fn deliver(
         && let Some(evidence) = idle.take()
     {
         evidence.emit();
+    }
+    if result == Err(Unobserved) {
+        tracing::info!(
+            event = "herdr_stop_unobserved",
+            channel_id = channel,
+            provider = provider.as_str(),
+            unread = unread.get(),
+            "herdr user stop left unobserved"
+        );
     }
     result.unwrap_or_else(HerdrDelivery::NotSent)
 }
