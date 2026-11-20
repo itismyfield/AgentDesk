@@ -61,6 +61,32 @@ impl Request<'_> {
             .is_some_and(|session| session.channel_name.as_deref() != Some(hint))
     }
 
+    pub(super) async fn save_inflight_claim(
+        &self,
+        state: &mut InflightTurnState,
+        cancel: &Arc<CancelToken>,
+        parent: Option<u64>,
+    ) -> Result<Option<super::super::provider_dispatch::AgyForeground>, HeadlessTurnStartError>
+    {
+        use super::super::provider_dispatch::AgyForeground;
+        AgyForeground::stamp_http(state);
+        let created = crate::services::discord::inflight::save_inflight_state_create_new(state);
+        let saved = super::super::foreign_row::admit_headless(
+            self.shared,
+            self.provider,
+            state,
+            cancel,
+            created,
+        )
+        .await?;
+        Ok(AgyForeground::from_http_claim(
+            saved,
+            state,
+            cancel,
+            Some(parent.unwrap_or(self.channel.get())),
+        ))
+    }
+
     pub(super) async fn bind_inflight(
         &self,
         state: &mut InflightTurnState,
@@ -515,6 +541,7 @@ impl Request<'_> {
             reply: inflight.followup_reply_context.clone(),
             uploads: uploads.clone(),
             sources: inflight.source_message_ids.clone(),
+            agy_input: crate::services::imsg_reply::agy_input::claimed(),
         });
         Some(HeadlessExactGateway::new(move |channel, retry| {
             let owned = Arc::clone(&owned);
@@ -545,6 +572,7 @@ struct OwnedRequest {
     reply: Option<String>,
     uploads: PendingUploads,
     sources: Vec<u64>,
+    agy_input: Option<crate::services::imsg_reply::agy_input::ClaimedInput>,
 }
 
 impl OwnedRequest {
@@ -593,6 +621,10 @@ impl OwnedRequest {
                     self.tmux_label.clone(),
                     self.dm_hint,
                     self.reservation,
+                );
+                let start = crate::services::imsg_reply::agy_input::with_claim(
+                    self.agy_input.clone(),
+                    start,
                 );
                 let (result, handoff) = replay_policy::hand_over(retry.permit, start).await;
                 if let Err(error) = result {

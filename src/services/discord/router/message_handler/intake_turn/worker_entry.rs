@@ -53,6 +53,23 @@ pub(crate) async fn execute_intake_turn_core(
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
+    if !matches!(
+        crate::services::imsg_reply::agy_input::bound_row(
+            shared.pg_pool.as_ref(),
+            &shared.provider,
+            request.channel_id.get(),
+            request.user_msg_id.get(),
+            true,
+        )
+        .await,
+        Ok(None)
+    ) {
+        tracing::warn!(
+            channel_id = request.channel_id.get(),
+            "agy queue worker input held for local custody"
+        );
+        return Ok(IntakeExecution::Deferred);
+    }
     #[cfg(unix)]
     {
         let proof = crate::services::cluster::intake_worker::take_before_effects(&request);

@@ -149,6 +149,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Omitted while empty, so a row without one keeps its earlier bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_origin_ids: Vec<String>,
+    /// Durable evidence that recovery must retain this row for the agy reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agy_imessage_source_sha256: Option<String>,
     /// A terminal this execution confirmed but could not commit; the row stays until boot or
     /// the next admission on its channel records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1089,6 +1092,7 @@ impl InflightTurnState {
             user_msg_id,
             source_message_ids: Vec::new(),
             input_origin_ids: Vec::new(),
+            agy_imessage_source_sha256: None,
             terminal_receipt: None,
             intake_outbox_id: None,
             managed_submission: None,

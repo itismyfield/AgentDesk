@@ -61,7 +61,12 @@ impl HealthRegistry {
             prepared_herdr,
         };
         if let Err(error) = &ports.runtime {
-            let can_inject = ports.inject_mode() != InjectMode::Off
+            let can_inject = crate::services::imsg_reply::agy_input::selected(
+                &ports.request.provider,
+                ports.request.channel_id.get(),
+            )
+            .is_none()
+                && ports.inject_mode() != InjectMode::Off
                 && inject::external_ready(&ports.shared, &ports.request).await;
             if !can_inject && ports.external_hold().await.is_none() {
                 return Err(HumanInputError::RuntimeUnavailable(error.clone()));

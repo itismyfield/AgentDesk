@@ -133,7 +133,7 @@ pub(in crate::services::discord) use turn_deliver::CodexLedger;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
-    send_meanwhile, start_without_gateway,
+    register_inject_runtime_for_provider, send_meanwhile, start_without_gateway,
 };
 #[cfg(test)]
 pub use turn_deliver::{ExternalHold, HumanInputDelivery, HumanInputError};

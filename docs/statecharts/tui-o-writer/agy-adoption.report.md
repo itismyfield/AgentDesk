@@ -59,3 +59,17 @@ cd docs/statecharts/tui-o-writer
 ~/.claude/skills/statechart/scripts/statechart WriterAdoption.tla \
   --config WriterAgyLong.cfg --view agy-adoption.view.mjs --out "$(mktemp -d)/agy-long"
 ```
+
+## HTTP iMessage 원본
+
+조각 1 기준 `91151eb3b8`의 `AgySpec`에 활성 HTTP 입력의 입장과 재생을 추가했다. 기존 Discord의 예약, 자식 시작, 종료 및 권한 복원 행동을 재사용한다. 요청은 고정 tuple의 두 실행 시도, 바쁜 대기열 분기, 한 번의 재기동, 원본 증거 유무를 선택한다. 선점 뒤 큐 기록 이전의 결과 불명은 보류하고, 내구 큐에서 복원된 입력은 같은 원본으로 입장한다.
+
+| 검사 | 결과 |
+|---|---|
+| 수정 전 `AgyHttpBecomesSpooled` | RED. `WriterAgyHeadless`의 인증 HTTP 입력이 `AgyHeadlessAnswer`로 끝났고 스풀이 생기지 않았다. |
+| `WriterAgyHttpOn.cfg` | GREEN. 원본을 스풀에서 인수하거나 보류한다. 원본이 없거나 writer를 준비할 수 없으면 효과가 0이며 명시적으로 거절된다. |
+| `WriterAgyHttpOff.cfg` | GREEN. 비활성 HTTP 입력이 기존 경로에서 완료된다. |
+| `WriterAgyHttpDuplicate.cfg` | 예상 RED. 같은 원본의 후착 요청을 새 실행으로 세면 `AgyHttpOnce` 위반이다. |
+| `WriterAgyHttpMissing.cfg` | 예상 RED. 원본 없는 활성 요청에 거절 응답을 내지 않으면 `AgyHttpDisposition` 위반이다. |
+
+TLC 1.7.4에서 기존 및 신규 `WriterAdoption` cfg 44개가 기대와 일치했다. 바이트·SQL 일치, 운영 watcher의 현재 wire 형식 및 writer 세대 배선은 구현·활성화 증거로 별도 확인한다. [조각 1b 설계](../../design/i8274/slice-1b.md)

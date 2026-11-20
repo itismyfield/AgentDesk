@@ -389,6 +389,11 @@ LateRestartRestores == [](lateLife = "restarted" => <>lateRestored)
 AgyPages == IF Fix = "short" THEN 1 ELSE 3
 AgyTurnLimit == IF Fix = "two" THEN 2 ELSE 1
 AgyZero == [i \in 1..AgyPages |-> 0]
+AgyHttpOn == Fix = "httpOn"
+AgyHttpFixture == Fix \in {"httpOn", "httpOff"}
+AgyHttpOrigin == agy.ingress = "authenticatedHttp"
+AgyHttpCustody == AgyHttpOn /\ AgyHttpOrigin /\ agy.http.valid /\ agy.http.writer
+AgyOPath == agy.ingress = "discordForeground" \/ AgyHttpCustody
 AgyTurn(id, phase) ==
     [id |-> id, phase |-> phase, oldDebt |-> phase = "waiting" /\ Fix # "short",
      ingress |-> "discordForeground", accepted |-> FALSE,
@@ -397,9 +402,17 @@ AgyTurn(id, phase) ==
      remote |-> AgyZero, offset |-> 0, frontier |-> 0, ends |-> 0, effects |-> 0, answers |-> 0,
      authority |-> TRUE, interrupted |-> FALSE, reconcile |-> FALSE,
      rejected |-> FALSE, retried |-> FALSE,
-     legacy |-> 0, alarm |-> FALSE, stale |-> FALSE]
+     legacy |-> 0, alarm |-> FALSE, stale |-> FALSE,
+     http |-> [valid |-> FALSE, key |-> 0, busy |-> FALSE, writer |-> FALSE,
+               disposition |-> "pending", restarted |-> FALSE,
+               replayed |-> FALSE, turns |-> 0]]
 AgyInit == /\ LegacyIdle /\ QuietLate
-           /\ IF Fix = "headless"
+           /\ IF AgyHttpFixture
+              THEN \E key \in 1..2, valid \in BOOLEAN, busy \in BOOLEAN, writer \in BOOLEAN :
+                  agy = [AgyTurn(1, "ready") EXCEPT !.ingress = "authenticatedHttp",
+                           !.http.key = key, !.http.valid = valid, !.http.busy = busy,
+                           !.http.writer = writer]
+              ELSE IF Fix = "headless"
               THEN \E ingress \in {"routine", "authenticatedHttp"} :
                   agy = [AgyTurn(1, "ready") EXCEPT !.ingress = ingress]
               ELSE agy = AgyTurn(1, "waiting")
@@ -414,12 +427,44 @@ AgyAdopt ==
     /\ agy' = [agy EXCEPT !.phase = "ready"]
 AgyReserve ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "ready" /\ agy.ingress = "discordForeground"
+    /\ agy.phase = "ready"
+    /\ agy.ingress = "discordForeground"
+       \/ (AgyHttpCustody /\ agy.http.disposition \in {"claimed", "queued"}
+            /\ (~agy.http.busy \/ agy.http.disposition = "queued"))
     /\ agy' = [agy EXCEPT !.phase = "reserved", !.accepted = TRUE, !.spool = TRUE]
 AgySpawn ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "reserved"
-    /\ agy' = [agy EXCEPT !.phase = "running"]
+    /\ agy' = [agy EXCEPT !.phase = "running",
+                  !.http.turns = IF AgyHttpCustody THEN @ + 1 ELSE @]
+AgyHttpClaim ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ AgyHttpCustody /\ agy.http.disposition = "pending"
+    /\ agy' = [agy EXCEPT !.http.disposition = "claimed"]
+AgyHttpQueue ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ AgyHttpCustody /\ agy.http.disposition = "claimed"
+    /\ agy.http.busy
+    /\ agy' = [agy EXCEPT !.http.disposition = "queued"]
+AgyHttpRestart ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ AgyHttpCustody /\ ~agy.http.restarted
+    /\ agy.http.disposition \in {"claimed", "queued"}
+    /\ agy' = [agy EXCEPT !.http.restarted = TRUE,
+         !.http.disposition = IF @ = "claimed" THEN "held" ELSE @,
+         !.phase = IF agy.http.disposition = "claimed" THEN "held" ELSE @]
+AgyHttpReplay ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ AgyHttpCustody /\ agy.http.disposition # "pending" /\ ~agy.http.replayed
+    /\ (Mut # "httpDuplicate" \/ agy.http.turns = 1)
+    /\ agy' = [agy EXCEPT !.http.replayed = TRUE,
+         !.http.turns = IF Mut = "httpDuplicate" THEN @ + 1 ELSE @]
+AgyHttpRefuse ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ AgyHttpOn /\ AgyHttpOrigin
+    /\ ~agy.http.valid \/ ~agy.http.writer
+    /\ Mut # "httpDrop" \/ agy.http.valid
+    /\ agy' = [agy EXCEPT !.phase = "refused", !.http.disposition = "refused"]
 AgyAppendDelta ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "running" /\ agy.deltas < AgyPages - 1
@@ -515,6 +560,7 @@ AgyNextInput ==
 AgyHeadlessAnswer ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "ready" /\ agy.ingress # "discordForeground"
+    /\ ~AgyHttpOn
     /\ agy' = [agy EXCEPT !.phase = "headlessDone", !.legacy = @ + 1]
 AgyLegacyRace ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -549,6 +595,7 @@ AgyNext ==
        \/ AgyNotifyFailure \/ AgyLoseAuthority \/ AgyRestore \/ AgyRejectFinish \/ AgyFinish \/ AgyApplyEnd
        \/ AgyArchive \/ AgyNextInput \/ AgyHeadlessAnswer \/ AgyLegacyRace \/ AgyBlindRepost
        \/ AgyRepeatDone \/ AgyStaleChild \/ AgyPrematurePost \/ AgyRest
+       \/ AgyHttpClaim \/ AgyHttpQueue \/ AgyHttpRestart \/ AgyHttpReplay \/ AgyHttpRefuse
 AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyLegacyReceipt) /\ WF_agy(AgyAdopt) /\ WF_agy(AgyReserve) /\ WF_agy(AgySpawn)
     /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyObserveSuccess \/ AgyObserveFailure)
@@ -556,9 +603,16 @@ AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyPrepare) /\ WF_agy(AgyPost) /\ WF_agy(AgyReceipt) /\ WF_agy(AgyRestore)
     /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
     /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
+    /\ WF_agy(AgyHttpClaim) /\ WF_agy(AgyHttpQueue) /\ WF_agy(AgyHttpRefuse) /\ WF_agy(AgyHttpReplay)
 
-AgyOPath == agy.ingress = "discordForeground"
-AgyOnlyDiscordAdmission == (agy.accepted \/ agy.spool) => AgyOPath
+AgyOnlyDiscordAdmission == (agy.accepted \/ agy.spool) => agy.ingress = "discordForeground"
+AgyHttpOnce == agy.http.turns <= 1
+AgyHttpNoMissingEffects == (AgyHttpOn /\ ~agy.http.valid) =>
+    ~agy.accepted /\ ~agy.spool /\ agy.legacy = 0 /\ agy.http.turns = 0
+AgyHttpDisposition ==
+    (AgyHttpOn /\ AgyHttpOrigin) ~>
+        (IF AgyHttpCustody THEN agy.accepted \/ agy.phase = "held" ELSE agy.phase = "refused")
+AgyHttpOffKept == (Fix = "httpOff") => <>(agy.phase = "headlessDone" /\ agy.legacy = 1)
 AgyNoDuplicate ==
     AgyOPath => /\ agy.legacy = 0
                 /\ \A i \in 1..AgyPages : agy.remote[i] <= 1
