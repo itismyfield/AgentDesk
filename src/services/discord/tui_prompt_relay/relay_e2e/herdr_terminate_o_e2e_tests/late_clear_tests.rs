@@ -59,7 +59,10 @@ async fn clear_exact(run: &Terminating, rig: &herdr::P11TerminationRig) -> Clear
     );
     assert_eq!(
         rig.writes(),
-        [("pane.close".to_owned(), run.location.pane_id.clone())],
+        [(
+            herdr::SINGLE_PANE_TERMINATION.to_owned(),
+            run.location.pane_id.clone(),
+        )],
         "clear must close exactly the old pane"
     );
     assert_eq!(selectors(run).await, (None, None), "{cleared:?}");
