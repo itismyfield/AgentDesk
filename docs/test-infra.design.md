@@ -348,7 +348,7 @@ usage를 얻을 수 없는 provider는 `unknown`으로 두고 턴·시간 상한
 ### 3.1 표와 정본
 
 수기 정본은 신규 `docs/user-feature-map.rows.yaml`, 시나리오 정본은 기존 YAML이다.
-신규 generator가 `docs/user-feature-map.md`와 `docs/generated/user-feature-coverage.json`을 함께 만든다.
+생성기가 착지용 `docs/user-feature-map.md`를 만들고, PR/main contracts에서 비교 요약과 coverage JSON을 산출물로 제공한다.
 수기 문서의 '덮는 칸'을 따로 편집하지 않는다. source-of-truth 및 runbook에는 이 지도 링크만 추가한다.
 
 | 열 | 관리 주체·의미 |
@@ -405,13 +405,13 @@ human-only 필수 계약과 allowed_bot claim을 연결하면 coverage0이며, �
 coverage 조건은 live class + 지원되는 실행 lane + 해당 claim의 필수 단언 연결이며,
 fixture/known-gap/retired는 별도 수치다. 선언 coverage는 실행 PASS와 구분한다.
 
-신규 `scripts/generate_user_feature_map.py --check`는 읽기/생성 결과를 비교해 drift가 있으면 실패한다.
-공식 `--write` 모드만 생성물을 갱신한다. CI contracts와 prepush static 배선에서 이 검사를 반드시 선택한다.
+`scripts/generate_user_feature_map.py --validate`는 입력 계약을 검사한다.
+착지에서 `--write`로 Markdown을 갱신하고, `--check`로 게시할 바이트를 비교한다.
 수기 행의 계약/적용 조합과 시나리오 claim이 어긋나면 문서 검사 실패다. feature·축·필수 단언 감축은 위 base-diff 사유 검사와 리뷰를 함께 거친다.
 CI 진입점은 `scripts/ci-script-checks.sh` contracts와 `scripts/ci/script_check_inputs.py:23`의 입력 선택이다.
 외부 prepush는 guards의 한 줄 Python audit/unittest만 추출하므로 contracts 등록만으로 static에 걸렸다고 하지 않는다.
-guards에 한 줄 `"$PYTHON" -m unittest tests.test_user_feature_map_static`를 등록하고, 이 시험이 실제 저장소 generator `--check --base-ref <base>`를 subprocess로 실행한다.
-contracts에는 본 검사와 RED 세트를 둔다. 입력 선택은 rows/생성물/scenario/registry/generator/tests를 포함하고 docs-only·선택 정보 부재에도 빠지지 않아야 한다.
+guards의 `"$PYTHON" -m unittest tests.test_user_feature_map_static`는 실제 생성기의 `--output-dir`로 별도 JSON을 만들고 검사한다.
+contracts는 매번 입력을 검증하고 CI에서는 변화량을 기록한다. 관련 입력이 바뀌거나 변경 목록을 확보하지 못하면 회귀 시험도 실행한다.
 base는 CI의 `TEST_LANE_BASELINE_REF`/`GFP_BASE_SHA`로 명시 전달하고, 로컬 static은 검증 가능한 origin/main base를 사용한다. base 부재·조회 실패를 초기 지도0/PASS로 축약하지 않는다.
 base commit이 유효하나 rows가 아직 없는 **최초 도입**은 명시 bootstrap으로 처리한다. 이때도 §3.1 전체 기능 행이 존재하고 비어 있지 않아야 하며, commit 조회 오류와 구별한다.
 감축 사유는 제거된 feature/tuple/qualifier/assertion의 안정 key에 대응시켜 base의 옛 사유로 새 감축을 허용하지 않는다.

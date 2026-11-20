@@ -15,12 +15,12 @@ COMMON_INPUTS = (
     "scripts/ci/script_check_inputs.py",
     "tests/test_script_check_inputs.py",
     ".github/workflows/**",
+    "scripts/ci/generated_artifact_report.py",
 )
 SCRIPT_TEST_INPUTS = ("scripts/**", "tests/**")
 USER_FEATURE_MAP_INPUTS = (
     "docs/user-feature-map.rows.yaml",
     "docs/user-feature-map.md",
-    "docs/generated/user-feature-coverage.json",
     "docs/source-of-truth.md",
     "docs/test-infra.design.md",
     "docs/e2e/multi-provider-e2e.md",
@@ -28,6 +28,7 @@ USER_FEATURE_MAP_INPUTS = (
     "scripts/e2e/tui_relay/assertion_registry.py",
     "scripts/e2e/run_tui_relay.py",
     "scripts/generate_user_feature_map.py",
+    "scripts/ci/user_feature_map_report.py",
     "tests/test_generate_user_feature_map.py",
     "tests/test_user_feature_map_static.py",
     "*.py",
@@ -76,6 +77,7 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     ),
     "Statechart index generator tests": (
         "scripts/ci/statechart_index.py",
+        "scripts/ci/statechart_index_report.py",
         "tests/test_statechart_index.py",
         "docs/statecharts/**",
     ),

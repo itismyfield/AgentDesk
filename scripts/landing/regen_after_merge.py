@@ -17,9 +17,12 @@ BLOCKS = {
     "ARCHITECTURE.md": ("SRC TREE", "TOP LEVEL MODULE MAP"),
     "docs/agent-maintenance/change-surfaces.md": ("GIANT PATHS",),
 }
+FEATURE_MAP = "docs/user-feature-map.md"
+FEATURE_MAP_COMMAND = ("scripts/generate_user_feature_map.py", "--write", "--base-ref", "HEAD")
 WHOLE_FILES = (
     "docs/generated/route-inventory.md", "docs/generated/worker-inventory.md",
     "docs/generated/env-reference.md", "docs/generated/cli-reference.md",
+    FEATURE_MAP,
 )
 MIXED_JSON = {"docs/e2e-continuous/bundles.schema1.json": ("scenario_catalog",)}
 OUTPUTS = (*BLOCKS, *WHOLE_FILES, *MIXED_JSON)
@@ -28,6 +31,7 @@ COMMANDS = (
     ("scripts/generate_env_reference.py",),
     ("scripts/generate_cli_reference.py",),
     ("scripts/e2e/generate_continuous_catalog.py", "--write"),
+    FEATURE_MAP_COMMAND,
 )
 CONFLICT = re.compile(rb"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?: |\r?$)", re.MULTILINE)
 
@@ -86,20 +90,20 @@ def json_manual_bytes(data: bytes, generated: tuple[str, ...]) -> bytes:
                       sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
 
 
-def snapshot(root: Path) -> dict[str, bytes]:
+def snapshot(root: Path, outputs=OUTPUTS) -> dict[str, bytes]:
     return {path: (root / path).read_bytes() if (root / path).exists() else b""
-            for path in OUTPUTS}
+            for path in outputs}
 
 
-def outside_hashes(root: Path) -> dict[str, str]:
+def outside_hashes(root: Path, outputs) -> dict[str, str]:
     paths = git(root, "ls-files", "-z").decode().split("\0")
     return {path: digest((root / path).read_bytes()) for path in paths
-            if path and path not in OUTPUTS and (root / path).is_file()}
+            if path and path not in outputs and (root / path).is_file()}
 
 
 def write_diff(path: Path, before: dict[str, bytes | None], after: dict[str, bytes]) -> None:
     with path.open("w", encoding="utf-8") as stream:
-        for name in OUTPUTS:
+        for name in after:
             stream.writelines(difflib.unified_diff(
                 (before[name] or b"").decode().splitlines(keepends=True),
                 after[name].decode().splitlines(keepends=True),
@@ -107,13 +111,18 @@ def write_diff(path: Path, before: dict[str, bytes | None], after: dict[str, byt
                 tofile=f"b/{name}"))
 
 
-def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = False) -> int:
+def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = False, *, pr_head: bool = False) -> int:
+    outputs = tuple(path for path in OUTPUTS if not pr_head or path != FEATURE_MAP)
+    feature_map_output = artifact / "landing-feature-map.md"
+    feature_map_command = (*FEATURE_MAP_COMMAND, "--markdown-output", str(feature_map_output))
+    commands = tuple(feature_map_command if command == FEATURE_MAP_COMMAND else command
+                     for command in COMMANDS if not pr_head or command != FEATURE_MAP_COMMAND)
     artifact.mkdir(parents=True, exist_ok=True)
     if any(artifact.iterdir()):
         raise ValueError("artifact directory must be empty (one directory per attempt)")
     before: dict[str, bytes] = {}
-    report: dict[str, object] = {"status": "CHECK_FAIL", "commands": COMMANDS, "check": check,
-                                 "check_merge": check_merge}
+    report: dict[str, object] = {"status": "CHECK_FAIL", "commands": commands, "check": check,
+                                 "check_merge": check_merge, "pr_head": pr_head}
     result = 2
     try:
         if Path(git(root, "rev-parse", "--show-toplevel").decode().strip()).resolve() != root:
@@ -124,12 +133,12 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
         unresolved = git(root, "diff", "--name-only", "--diff-filter=U", "-z").decode().split("\0")
         unresolved = [path for path in unresolved if path]
         report["raw_conflicts"] = unresolved
-        if set(unresolved) - set(OUTPUTS):
-            raise ValueError(f"manual/unowned conflict: {sorted(set(unresolved) - set(OUTPUTS))}")
-        for name in OUTPUTS:
+        if set(unresolved) - set(outputs):
+            raise ValueError(f"manual/unowned conflict: {sorted(set(unresolved) - set(outputs))}")
+        for name in outputs:
             if (root / name).resolve() != root / name:
                 raise ValueError(f"generated output is a symlink: {name}")
-        before = snapshot(root)
+        before = snapshot(root, outputs)
         manual = {name: manual_bytes(before[name], names) for name, names in BLOCKS.items()}
         json_manual = {name: json_manual_bytes(before[name], keys) for name, keys in MIXED_JSON.items()}
         resolved = {}
@@ -144,31 +153,36 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
         changed = git(root, "diff", "--name-only", "HEAD", "-z").decode().split("\0")
         for name in changed:
             path = root / name
-            if name and name not in OUTPUTS and path.is_file() and CONFLICT.search(path.read_bytes()):
+            if name and name not in outputs and path.is_file() and CONFLICT.search(path.read_bytes()):
                 raise ValueError(f"manual conflict markers: {name}")
-        outside = outside_hashes(root)
+        outside = outside_hashes(root, outputs)
         for name, data in resolved.items():
             (root / name).write_bytes(data)
         with (artifact / "generator.log").open("w", encoding="utf-8") as log:
-            for command in COMMANDS:
+            for command in commands:
                 log.write(f"$ {sys.executable} {' '.join(command)}\n")
                 log.flush()
                 subprocess.run([sys.executable, *command], cwd=root, stdout=log,
                                stderr=subprocess.STDOUT, check=True)
-        after = snapshot(root)
+                if command == feature_map_command:
+                    data = feature_map_output.read_bytes()
+                    if not data:
+                        raise ValueError(f"{feature_map_output}: empty feature map output")
+                    (root / FEATURE_MAP).write_bytes(data)
+        after = snapshot(root, outputs)
         if any(manual_bytes(after[name], names) != manual[name] for name, names in BLOCKS.items()):
             raise ValueError("generator changed manual regions")
         if any(json_manual_bytes(after[name], keys) != json_manual[name] for name, keys in MIXED_JSON.items()):
             raise ValueError("generator changed manual JSON fields")
-        if outside_hashes(root) != outside:
+        if outside_hashes(root, outputs) != outside:
             raise ValueError("generator changed an unowned tracked path")
         if any(CONFLICT.search(data) for data in after.values()):
             raise ValueError("conflict markers remain after regeneration")
-        tracked = set(git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *OUTPUTS).decode().split("\0"))
-        head_before = {name: git(root, "show", f"HEAD:{name}") if name in tracked else None for name in OUTPUTS}
-        report["head_missing_outputs"] = [name for name in OUTPUTS if head_before[name] is None]
+        tracked = set(git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", *outputs).decode().split("\0"))
+        head_before = {name: git(root, "show", f"HEAD:{name}") if name in tracked else None for name in outputs}
+        report["head_missing_outputs"] = [name for name in outputs if head_before[name] is None]
         write_diff(artifact / "head.diff", head_before, after)
-        if check and any(head_before[name] != after[name] for name in OUTPUTS):
+        if check and any(head_before[name] != after[name] for name in outputs):
             report["status"] = "DRIFT"
             result = 1
         else:
@@ -183,7 +197,7 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
     finally:
         try:
             if before:
-                after = snapshot(root)
+                after = snapshot(root, outputs)
                 report["files"] = {
                     name: {"before_sha256": digest(before[name]), "after_sha256": digest(after[name]),
                            "added": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
@@ -192,7 +206,7 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
                            "removed": sum(1 for line in difflib.ndiff(before[name].decode().splitlines(),
                                                                      after[name].decode().splitlines())
                                           if line.startswith("- "))}
-                    for name in OUTPUTS}
+                    for name in outputs}
                 write_diff(artifact / "regeneration.diff", before, after)
         except (OSError, ValueError) as error:
             report["evidence_errors"] = [str(error)]
@@ -222,9 +236,14 @@ def main() -> int:
     mode.add_argument("--check", action="store_true", help="exit 1 on generated diff against HEAD; do not stage")
     mode.add_argument("--check-merge", action="store_true",
                       help="validate an isolated merged worktree; preserve the index and record all regeneration diff")
+    parser.add_argument("--pr-head", action="store_true",
+                        help="run the preliminary PR-head check without feature-map freshness")
     args = parser.parse_args()
+    if args.pr_head and not args.check:
+        parser.error("--pr-head requires --check")
     try:
-        return regenerate(args.worktree.resolve(), args.artifact_dir.resolve(), args.check, args.check_merge)
+        return regenerate(args.worktree.resolve(), args.artifact_dir.resolve(), args.check, args.check_merge,
+                          pr_head=args.pr_head)
     except (OSError, ValueError) as error:
         print(f"regeneration failed: {error}", file=sys.stderr)
         return 2
