@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use poise::serenity_prelude::ChannelId;
 
 use crate::config::Config;
@@ -39,7 +38,6 @@ pub(crate) struct CanonPrompt {
     pub name: &'static str,
     pub path: &'static str,
     pub content: String,
-    pub modified_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) fn canon(config: &Config, agent_id: &str, provider: &ProviderKind) -> Vec<CanonPrompt> {
@@ -69,12 +67,11 @@ pub(crate) fn canon(config: &Config, agent_id: &str, provider: &ProviderKind) ->
     .into_iter()
     .filter_map(|(name, path, filename)| {
         let filename = expand_tilde_path(&filename?);
-        let (content, modified) = read_canon_prompt(&filename, name, "full")?;
+        let (content, _) = read_canon_prompt(&filename, name, "full")?;
         Some(CanonPrompt {
             name,
             path,
             content,
-            modified_at: modified.map(DateTime::from),
         })
     })
     .collect()

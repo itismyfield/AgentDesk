@@ -81,7 +81,6 @@ fn prompt_audit_disconnected_memento_keeps_structured_session_copy() {
         name: "shared_agent_rules",
         path: "agents/_shared.prompt.md",
         content: "Summary\nReuse canon guidance.".into(),
-        modified_at: None,
     };
     let health = ExternalMemoryBackendState {
         configured: true,
