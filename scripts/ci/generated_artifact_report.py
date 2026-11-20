@@ -15,6 +15,11 @@ class ReportError(ValueError):
     """The requested comparison or evidence could not be produced."""
 
 
+def repository_url(env) -> str:
+    repository = env.get("GITHUB_REPOSITORY") or env.get("GFP_REPOSITORY") or "itismyfield/AgentDesk"
+    return f"{env.get('GITHUB_SERVER_URL', 'https://github.com')}/{repository}"
+
+
 def git(root: Path, *args: str) -> bytes:
     result = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
     if result.returncode:

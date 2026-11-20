@@ -8,11 +8,13 @@ import ast
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
+from urllib.parse import quote
 
 import yaml
 
@@ -22,6 +24,7 @@ except ModuleNotFoundError:
     from e2e.tui_relay.assertion_registry import ASSERTION_OPTIONS
 
 ROWS = Path("docs/user-feature-map.rows.yaml")
+ROWS_LINK = f"[{ROWS.name}]({ROWS.name})"
 MARKDOWN = Path("docs/user-feature-map.md")
 REPORT_NAME = "user-feature-coverage.json"
 RETIRED_REPORT = Path("docs/generated") / REPORT_NAME
@@ -391,7 +394,7 @@ def cell(value):
 
 def render(index, report):
     lines = ["# 사용자 기능 지도", "", "생성: `python3 scripts/generate_user_feature_map.py --write --base-ref origin/main`", "",
-             "수기 정본: [user-feature-map.rows.yaml](user-feature-map.rows.yaml). 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
+             f"수기 정본: {ROWS_LINK}. 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
              "fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않는다. `unspecified` output은 실제 출력 경로를 증명하지 않는다.", "",
              "기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.", "",
              f"적용 {report['applicable']} · covered {report['covered']} · 빈 칸 {report['missing']} · 미지원 단언 칸 {report['unsupported']}",
@@ -418,6 +421,10 @@ def render(index, report):
         for pending in summary["pending_assertions"]:
             lines.append(f"- `{pending['assertion_id']}` ({pending['issue']}; {', '.join(pending['input_sources'])}): {pending['reason']}")
     return "\n".join(lines) + "\n"
+
+
+def with_rows_link(markdown: str, destination: str) -> str:
+    return markdown.replace(ROWS_LINK, f"[{ROWS.name}]({destination})", 1)
 
 
 def report_bytes(report):
@@ -453,7 +460,13 @@ def main(argv=None):
                     and json_out.resolve() != (args.root / RETIRED_REPORT).resolve(),
                     "output directory must be separate from the repository's generated documentation")
             args.output_dir.mkdir(parents=True, exist_ok=True)
-            md_out.write_bytes(markdown.encode())
+            rows_path = args.root.resolve() / ROWS
+            try:
+                relative = Path(os.path.relpath(rows_path, args.output_dir.resolve())).as_posix()
+                rows_link = quote(relative)
+            except ValueError:
+                rows_link = rows_path.as_uri()
+            md_out.write_bytes(with_rows_link(markdown, rows_link).encode())
             json_out.write_bytes(report_bytes(report))
         elif args.write:
             (args.markdown_output or target).write_bytes(markdown.encode())

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -9,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.ci import script_check_inputs, statechart_index as index, statechart_index_report
 from scripts.ci.generated_artifact_report import ReportError, resolve_comparison
@@ -247,6 +251,10 @@ class StatechartIndexReportTest(unittest.TestCase):
         manifest = json.loads((output / "manifest.json").read_text())
         self.assertEqual((manifest["base"], manifest["head"]), (self.base, head))
         self.assertNotEqual(manifest["base"], self.first)
+        self.assertEqual(manifest["sha256"], {
+            name: hashlib.sha256((output / name).read_bytes()).hexdigest()
+            for name in ("base.md", "head.md", "summary.md")
+        })
         summary = (output / "summary.md").read_text()
         self.assertIn("Added (2)", summary)
         self.assertIn("Changed (1)", summary)
@@ -255,6 +263,39 @@ class StatechartIndexReportTest(unittest.TestCase):
         self.assertIn(f"/blob/{self.base}/docs/statecharts/area/report.md", (output / "base.md").read_text())
         self.assertEqual((self.charts / "README.md").read_bytes(), introduction + SUFFIX)
         self.assertEqual(self.git("status", "--porcelain", "--", "docs").stdout, "")
+
+    def test_publish_rejects_changed_head_bytes(self):
+        output = self.root / "modified"
+        head = output / "head.md"
+        original_write = Path.write_bytes
+
+        def write(path, data):
+            return original_write(path, b"stale table\n" if path == head else data)
+
+        with mock.patch.object(Path, "write_bytes", write):
+            with self.assertRaises(ReportError) as error:
+                statechart_index_report.report(self.root, output, {})
+        self.assertEqual(str(error.exception), f"{head}: artifact bytes differ from generated output")
+        self.assertFalse((output / "manifest.json").exists())
+
+    def test_report_cli_rejects_missing_published_head(self):
+        output = self.root / "missing"
+        head = output / "head.md"
+        original_write = Path.write_bytes
+
+        def write(path, data):
+            return len(data) if path == head else original_write(path, data)
+
+        stderr = StringIO()
+        with (mock.patch.object(Path, "write_bytes", write),
+              mock.patch.object(Path, "cwd", return_value=self.root),
+              mock.patch.object(sys, "argv", ["statechart_index_report", str(output)]),
+              mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": self.base}),
+              redirect_stderr(stderr)):
+            self.assertEqual(statechart_index_report.main(), 1)
+        self.assertIn(str(head), stderr.getvalue())
+        self.assertIn(index.RECOVERY, stderr.getvalue())
+        self.assertFalse((output / "manifest.json").exists())
 
     def test_main_reports_changes_with_self_baseline_and_manual_is_explicit(self):
         (self.fragments / "alpha.md").unlink()

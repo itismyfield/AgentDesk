@@ -4,14 +4,16 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from urllib.parse import unquote
 
 import yaml
 
-from scripts import generate_user_feature_map as gen
+from scripts import check_doc_path_refs, generate_user_feature_map as gen
 from scripts.ci import user_feature_map_report
 
 
@@ -524,7 +526,7 @@ class FeatureMapTests(unittest.TestCase):
         self.assertNotEqual(original["source_hash"], report["source_hash"])
 
     def test_validation_and_separate_output_do_not_need_committed_coverage(self):
-        directory = self.root / "artifacts"
+        directory = self.root / "review artifacts" / "feature-map"
         valid = self.cli("--validate")
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
         rendered = self.cli("--output-dir", str(directory))
@@ -533,6 +535,15 @@ class FeatureMapTests(unittest.TestCase):
         self.assertEqual(report["covered"], 1)
         self.assertFalse((self.root / OUTPUTS[1]).exists())
         self.assertFalse((self.root / OUTPUTS[0]).exists())
+        markdown = directory / "user-feature-map.md"
+        line = next(line for line in markdown.read_text().splitlines() if line.startswith("수기 정본:"))
+        link = re.search(r"\[user-feature-map\.rows\.yaml\]\(([^)]+)\)", line)
+        self.assertIsNotNone(link)
+        self.assertEqual((directory / unquote(link[1])).resolve(strict=True), self.root / ROWS)
+        self.assertEqual(check_doc_path_refs.scan_doc(
+            markdown.relative_to(self.root).as_posix(), line,
+            check_doc_path_refs.RepoIndex([ROWS], self.root),
+        ), [])
 
     def commit_snapshot(self, message):
         registry = self.root / gen.REGISTRY
@@ -570,11 +581,24 @@ class FeatureMapTests(unittest.TestCase):
         rows.write_text(rows.read_text() + "\n# commentary only\n")
         head = self.commit_snapshot("comment")
         output = self.root / "push"
-        user_feature_map_report.report(self.root, output, head, self.push_event(base))
+        server, repository = "https://git.example.invalid", "owner/repo"
+        env = {**self.push_event(base), "GITHUB_SERVER_URL": server, "GITHUB_REPOSITORY": repository}
+        user_feature_map_report.report(self.root, output, head, env)
         self.assertEqual((output / "base.md").read_bytes(), (output / "head.md").read_bytes())
         self.assertNotEqual((output / "base.json").read_bytes(), (output / "head.json").read_bytes())
-        self.assertIn("Markdown unchanged.", (output / "summary.md").read_text())
-        self.assertIn("Source hash changed:", (output / "summary.md").read_text())
+        summary = (output / "summary.md").read_text()
+        self.assertIn("Markdown unchanged.", summary)
+        self.assertIn("Source hash changed:", summary)
+        evidence = summary.split("### Source inputs\n", 1)
+        self.assertEqual(len(evidence), 2)
+        for role, sha in (("Head", head), ("Base", base)):
+            self.assertIn(f"[{role} rows YAML]({server}/{repository}/blob/{sha}/{ROWS})", evidence[1])
+        docs = check_doc_path_refs.RepoIndex(["summary.md"], output)
+        for name in ("base.md", "head.md"):
+            line = next(line for line in (output / name).read_text().splitlines() if line.startswith("수기 정본:"))
+            self.assertIn("](summary.md#source-inputs)", line)
+            self.assertEqual(check_doc_path_refs.scan_doc(name, line, docs), [])
+        self.assertFalse((output / "feature-map.diff").exists())
 
     def test_report_validates_both_snapshots_and_rejects_hidden_contract_changes(self):
         extra = applicable()

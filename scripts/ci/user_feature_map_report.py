@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 import yaml
 
 from scripts import generate_user_feature_map as gen
-from scripts.ci.generated_artifact_report import ReportError, git, publish, resolve_comparison
+from scripts.ci.generated_artifact_report import ReportError, git, publish, repository_url, resolve_comparison
 
 
 @contextmanager
@@ -68,7 +68,12 @@ def tuple_changes(old, new):
 def report(repo, directory, baseline_sha, env):
     comparison = resolve_comparison(repo, env)
     markdown, coverage, removals = render_revision(repo, comparison.head, baseline_sha, candidate=True)
-    files = {"head.md": markdown.encode(), "head.json": gen.report_bytes(coverage)}
+    source_link = "summary.md#source-inputs"
+    files = {"head.md": gen.with_rows_link(markdown, source_link).encode(),
+             "head.json": gen.report_bytes(coverage)}
+    repository = repository_url(env)
+    inputs = ["", "### Source inputs", "",
+              f"- [Head rows YAML]({repository}/blob/{comparison.head}/{gen.ROWS.as_posix()})"]
     lines = ["## User feature map", "", comparison.describe(),
              f"Source validation baseline: `{baseline_sha}`.", "",
              f"Applicable {coverage['applicable']} · covered {coverage['covered']} · missing {coverage['missing']}."]
@@ -81,7 +86,9 @@ def report(repo, directory, baseline_sha, env):
             lines.append(f"Comparison unavailable. `{comparison.base}` predates the handwritten feature rows.")
         else:
             old_markdown, old_coverage, old_removals = base
-            files.update({"base.md": old_markdown.encode(), "base.json": gen.report_bytes(old_coverage)})
+            files.update({"base.md": gen.with_rows_link(old_markdown, source_link).encode(),
+                          "base.json": gen.report_bytes(old_coverage)})
+            inputs.append(f"- [Base rows YAML]({repository}/blob/{comparison.base}/{gen.ROWS.as_posix()})")
             patch = "".join(unified_diff(old_markdown.splitlines(keepends=True), markdown.splitlines(keepends=True),
                                          fromfile=f"{comparison.base}:{gen.MARKDOWN}",
                                          tofile=f"{comparison.head}:{gen.MARKDOWN}"))
@@ -99,7 +106,7 @@ def report(repo, directory, baseline_sha, env):
             for key, reason in sorted(removals.items()):
                 if old_removals.get(key) != reason:
                     lines.append(f"- Removal reason for `{key}`: {reason}")
-    publish(directory, comparison, "\n".join(lines) + "\n", files, env)
+    publish(directory, comparison, "\n".join(lines + inputs) + "\n", files, env)
 
 
 def main():

@@ -10,7 +10,7 @@ import sys
 from urllib.parse import quote, urlunsplit
 
 from scripts.ci import statechart_index as index
-from scripts.ci.generated_artifact_report import git, publish, resolve_comparison
+from scripts.ci.generated_artifact_report import git, publish, repository_url, resolve_comparison
 
 
 CHARTS = Path("docs/statecharts")
@@ -70,8 +70,7 @@ class Snapshot:
 
 def report(root: Path, directory: Path, env) -> None:
     comparison = resolve_comparison(root, env)
-    repository = env.get("GITHUB_REPOSITORY") or env.get("GFP_REPOSITORY") or "itismyfield/AgentDesk"
-    repository = f"{env.get('GITHUB_SERVER_URL', 'https://github.com')}/{repository}"
+    repository = repository_url(env)
     head = Snapshot(root, comparison.head, repository)
     index.validate_readme(head.read(README), README)
     after = head.rows()
