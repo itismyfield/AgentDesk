@@ -281,7 +281,7 @@ pub(super) async fn run_stream_loop(
                     //
                     // Scoped to done-setting variants so non-terminal frames
                     // (`RuntimeReady`, `TmuxReady`, `ProcessReady`,
-                    // `OutputOffset`, `Text`, `RetryBoundary`, …) are still
+                    // `OutputOffset`, `Text`, …) are still
                     // processed (they carry handoff paths, offsets, watcher
                     // debt, session-reset that the cancel path needs); none
                     // flip `done`, so the next pre-recv cancel guard finalizes
@@ -319,8 +319,7 @@ pub(super) async fn run_stream_loop(
                     let herdr_aborted = herdr_terminal == Some(crate::services::agent_protocol::NativeTerminalKind::Aborted);
                     terminal_control_ready_observed |= was_codex_terminal;
                     match msg {
-                        content_message @ (StreamMessage::RetryBoundary
-                        | StreamMessage::ActiveUsageSnapshot { .. }
+                        content_message @ (StreamMessage::ActiveUsageSnapshot { .. }
                         | StreamMessage::Init { .. }
                         | StreamMessage::Text { .. }
                         | StreamMessage::Thinking { .. }

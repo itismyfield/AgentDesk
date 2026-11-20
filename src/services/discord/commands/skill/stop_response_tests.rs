@@ -17,7 +17,7 @@ async fn stop_alias_matches_the_stop_owner_failure_reply() {
     let data = Data {
         shared,
         token: "stop-alias-test".into(),
-        provider: ProviderKind::Gemini,
+        provider: ProviderKind::OpenCode,
     };
     let mut replies = Vec::new();
     for alias in [false, true] {

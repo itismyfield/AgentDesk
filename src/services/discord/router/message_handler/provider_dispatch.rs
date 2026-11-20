@@ -15,7 +15,7 @@ use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
-use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
+use crate::services::{claude, claude_tui, codex, opencode, qwen};
 
 #[cfg(unix)]
 mod owner_input;
@@ -477,20 +477,6 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                 force_fresh_provider_session: turn.force_fresh,
             },
             turn.codex_observation,
-        ),
-        LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
-            turn.prompt,
-            turn.session_id,
-            turn.working_dir,
-            sender,
-            turn.system_prompt,
-            Some(turn.allowed_tools),
-            Some(turn.cancel),
-            turn.tmux_session_name,
-            Some(turn.channel_id),
-            Some(turn.provider.clone()),
-            turn.model,
-            None,
         ),
         LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
             turn.prompt,

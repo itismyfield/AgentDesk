@@ -1135,9 +1135,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         debug_log(&format!("  >>> Init: session_id={}", session_id));
                         last_session_id = Some(session_id.clone());
                     }
-                    StreamMessage::RetryBoundary => {
-                        debug_log("  >>> RetryBoundary (ignored in Claude direct execution)");
-                    }
                     StreamMessage::Text { content } => {
                         let preview: String = content.chars().take(100).collect();
                         debug_log(&format!(

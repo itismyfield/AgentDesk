@@ -68,7 +68,9 @@ change PostgreSQL filters, profiles, timeouts or repair those other failing lane
 set both `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `"0"` at job level.
 This aligns their debug-information settings with Main/PR, reducing build/link
 work at the cost of native backtrace detail. Panic/assertion text remains.
-The native macOS and Windows lib tests run through `scripts/ci/nextest-native.sh`.
+The native Windows lib tests run through `scripts/ci/nextest-native.sh`.
+The macOS job runs non-PG, non-lib targets while its lib build is paused for
+hosted-runner memory pressure (#6082).
 macOS installs tmux and prints `tmux -V`; three historical failures directly
 reported missing tmux, two were inferred. Inspect all five, not a promised 55→50.
 

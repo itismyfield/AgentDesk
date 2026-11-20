@@ -136,8 +136,8 @@ export function Step1BotConnection({
             {tr("실행 봇", "Command Bot")}
           </span>
           <Tip text={tr(
-            "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, Gemini CLI, OpenCode, 또는 Qwen Code를 실행하여\n에이전트가 작업합니다.",
-            "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, Gemini CLI, OpenCode, or Qwen Code.",
+            "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, OpenCode, 또는 Qwen Code를 실행하여\n에이전트가 작업합니다.",
+            "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, OpenCode, or Qwen Code.",
           )} />
         </div>
 
