@@ -63,7 +63,6 @@ src/services/claude_tui/input.rs
 src/services/codex.rs
 src/services/codex_tmux_wrapper.rs
 src/services/codex_tui/input.rs
-src/services/gemini.rs
 src/services/onboarding/mod.rs
 src/services/opencode.rs
 src/services/platform/binary_resolver.rs

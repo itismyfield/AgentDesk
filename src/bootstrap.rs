@@ -110,6 +110,7 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
         .await;
     let result = async {
         crate::config::validate_config(config)?;
+        crate::config::retired_providers::warn_retired_provider_refs(config);
         let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
         let selection = prepare_session_hosts_boot(candidate, pool).await;
         crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;

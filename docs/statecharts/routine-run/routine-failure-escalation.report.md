@@ -148,7 +148,7 @@ H1 의 `PostOutbox` 한 걸음을 같은 outbox row 의 전송 단계로 나눴�
 
 | 진입점 | 좌표 | 사건 row 에 대한 동작 |
 |---|---|---|
-| outbox drain | `src/server/mod.rs:2522` `is_incident` 분기 → `server/outbox_actionable_delivery/routine_incident.rs:50` `deliver` | circuit fence 뒤 posting CAS, post, ACK/unknown/NotSent 정산. 일반 settle(`mark_message_outbox_sent_pg`·retry) 을 타지 않는다 |
+| outbox drain | `src/server/mod.rs:2238` `is_incident` 분기 → `server/outbox_actionable_delivery/routine_incident.rs:50` `deliver` | circuit fence 뒤 posting CAS, post, ACK/unknown/NotSent 정산. 일반 settle(`mark_message_outbox_sent_pg`·retry) 을 타지 않는다 |
 | Discord nonce | `outbound/manual_delivery/routine_incident_nonce.rs`, `headless_nonce.rs:15`, `resolved.rs:161`, `manual_delivery.rs:613` `with_create_nonce` | trusted outbox + `routine-runtime` + incident correlation 일 때만 row id 로 고정 nonce. headless_turn 제한은 그대로 |
 | staging activation·activate_or_confirm·cancel | `src/services/message_outbox.rs:707,723,740` | 0192 트리거가 transport_state 가 있는 row 의 status 변경·삭제를 건너뛴다(rows_affected 0) |
 | circuit activation·revoke | `src/services/message_outbox_circuit_authority.rs:416,533,573` | circuit 좌표가 NULL 이라 대상이 아니고, 트리거가 한 번 더 막는다 |

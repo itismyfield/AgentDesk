@@ -235,9 +235,6 @@ pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// `bridge_entry_persist::reconcile_runtime_locals_from_inflight_state` —
     /// the whole-body assignment from the durable inflight row.
     ReconcileFromInflightState,
-    /// `retry_state::clear_response_delivery_state` — the empty-sink rewind that
-    /// blanks the local body and the durable row body together.
-    ClearResponseDeliveryState,
     /// `stream_loop::tool_arms::authority::reconcile_tool_arm_locals_after_guarded_save`
     /// — the TOOL-ARM mirror of [`Self::ReconcileFromInflightState`]: the same
     /// whole-body adoption from the durable row, run from the two tool-arm
@@ -255,10 +252,8 @@ pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// of the two fences carried the watcher's bytes in.
     ReconcileToolArmLocalsFromInflightState,
     /// `terminal_outcome_delivery::queue_retry_silence::apply` — the requeue
-    /// silencer, which blanks the local body and the durable row body together
-    /// exactly as [`Self::ClearResponseDeliveryState`] does. Same class, same
-    /// reason: an unrecorded `N` → `0` on the shared channel is indistinguishable
-    /// from loss.
+    /// silencer, which blanks the local body and the durable row body together.
+    /// An unrecorded `N` → `0` on the shared channel is indistinguishable from loss.
     SilenceRequeuedResponse,
     /// `terminal_outcome_delivery::empty_response_recovery::handler::adopt_recovered_output_file_body`
     /// — the empty-response recovery path re-reading the tmux output file and
@@ -336,7 +331,6 @@ impl BodyMutationSite {
             Self::ReconcileFromInflightState => {
                 "bridge_entry_persist::reconcile_runtime_locals_from_inflight_state"
             }
-            Self::ClearResponseDeliveryState => "retry_state::clear_response_delivery_state",
             Self::ReconcileToolArmLocalsFromInflightState => {
                 "tool_arms::authority::reconcile_tool_arm_locals_after_guarded_save"
             }
@@ -359,9 +353,6 @@ impl BodyMutationSite {
             }
             Self::ReconcileFromInflightState => {
                 "src/services/discord/turn_bridge/bridge_entry_persist.rs:reconcile_runtime_locals_from_inflight_state"
-            }
-            Self::ClearResponseDeliveryState => {
-                "src/services/discord/turn_bridge/retry_state.rs:clear_response_delivery_state"
             }
             Self::ReconcileToolArmLocalsFromInflightState => {
                 "src/services/discord/turn_bridge/stream_loop/tool_arms/authority.rs:reconcile_tool_arm_locals_after_guarded_save"

@@ -100,7 +100,6 @@ fn invariant_4371_markdown_code_is_excluded_from_detection() {
 fn invariant_4371_claude_fingerprints_do_not_apply_to_other_providers() {
     for provider in [
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::Qwen,
         ProviderKind::OpenCode,
     ] {

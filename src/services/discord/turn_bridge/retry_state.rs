@@ -1,7 +1,7 @@
 /// Retry-state management for turn_bridge.
 ///
 /// Provides helpers to clear, reset, and manage the in-flight retry state
-/// during Gemini/Qwen auto-retry boundaries and session recovery.
+/// during auto-retry and session recovery.
 use super::super::*;
 use super::recovery_text::release_retry_pending;
 #[cfg(unix)]
@@ -112,18 +112,6 @@ pub(super) fn clear_local_session_state(
     inflight_state.session_id = None;
 }
 
-pub(super) fn should_reset_gemini_retry_attempt_state(
-    full_response: &str,
-    current_tool_line: Option<&str>,
-    any_tool_used: bool,
-    has_post_tool_text: bool,
-) -> bool {
-    !full_response.trim().is_empty()
-        || current_tool_line.is_some()
-        || any_tool_used
-        || has_post_tool_text
-}
-
 #[path = "retry_state/delivery_rewind.rs"]
 mod delivery_rewind;
 #[cfg(test)]
@@ -139,103 +127,6 @@ pub(super) use delivery_rewind::{
     bridge_should_reclaim_relay_from_missing_watcher, rewind_and_persist_delivery_on_reclaim,
     sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
 };
-
-/// #5938: this is a body mutation like any other — it blanks the bridge-local
-/// body AND the durable row body in the same breath — so it has to appear in the
-/// record stream. Without it the stream shows `after_len=N` followed by a later
-/// `before_len=0` with nothing in between to explain where N bytes went, which
-/// is indistinguishable from the loss class the instrumentation is hunting.
-/// Both correlation keys are on the row this function already holds.
-pub(super) fn clear_response_delivery_state(
-    full_response: &mut String,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-) {
-    use super::chunk_compose::body_mutation_telemetry::{
-        BodyMutationCorrelation, BodyMutationSite, observe_body_mutation,
-    };
-
-    observe_body_mutation(
-        BodyMutationSite::ClearResponseDeliveryState,
-        BodyMutationCorrelation::from_inflight_row(inflight_state),
-        full_response.as_str(),
-        "",
-    );
-    full_response.clear();
-    *response_sent_offset = 0;
-    inflight_state.full_response.clear();
-    inflight_state.response_sent_offset = 0;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn reset_gemini_retry_attempt_state(
-    full_response: &mut String,
-    current_tool_line: &mut Option<String>,
-    prev_tool_status: &mut Option<String>,
-    last_tool_name: &mut Option<String>,
-    last_tool_summary: &mut Option<String>,
-    any_tool_used: &mut bool,
-    has_post_tool_text: &mut bool,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-) {
-    clear_response_delivery_state(full_response, response_sent_offset, inflight_state);
-    *current_tool_line = None;
-    *prev_tool_status = None;
-    *last_tool_name = None;
-    *last_tool_summary = None;
-    *any_tool_used = false;
-    *has_post_tool_text = false;
-    inflight_state.current_tool_line = None;
-    inflight_state.prev_tool_status = None;
-    inflight_state.any_tool_used = false;
-    inflight_state.has_post_tool_text = false;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn handle_gemini_retry_boundary(
-    full_response: &mut String,
-    current_tool_line: &mut Option<String>,
-    prev_tool_status: &mut Option<String>,
-    last_tool_name: &mut Option<String>,
-    last_tool_summary: &mut Option<String>,
-    any_tool_used: &mut bool,
-    has_post_tool_text: &mut bool,
-    response_sent_offset: &mut usize,
-    last_edit_text: &mut String,
-    new_session_id: &mut Option<String>,
-    new_raw_provider_session_id: &mut Option<String>,
-    inflight_state: &mut InflightTurnState,
-) -> bool {
-    let had_local_session = new_session_id.is_some() || inflight_state.session_id.is_some();
-    let should_reset = should_reset_gemini_retry_attempt_state(
-        full_response,
-        current_tool_line.as_deref(),
-        *any_tool_used,
-        *has_post_tool_text,
-    );
-
-    if had_local_session {
-        clear_local_session_state(new_session_id, new_raw_provider_session_id, inflight_state);
-    }
-
-    if should_reset {
-        reset_gemini_retry_attempt_state(
-            full_response,
-            current_tool_line,
-            prev_tool_status,
-            last_tool_name,
-            last_tool_summary,
-            any_tool_used,
-            has_post_tool_text,
-            response_sent_offset,
-            inflight_state,
-        );
-        last_edit_text.clear();
-    }
-
-    had_local_session || should_reset
-}
 
 /// Whether an auto-retry reset ran; the host guard can keep the session untouched.
 #[must_use]
