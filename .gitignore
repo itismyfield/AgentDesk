@@ -18,6 +18,7 @@ agentdesk.db
 data.db
 out/e2e/
 report.*.json
+/docs/statecharts/index.generated.md
 docs/generated/module-inventory.md
 docs/generated/giant-file-registry.md
 .playwright-cli/

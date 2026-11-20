@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
-"""Generate only the marked table in docs/statecharts/README.md.
+"""Validate or render the index from docs/statecharts/index.d.
 
-Each index.d/<key>.md is exactly two LF-terminated lines: `key: <key>` and
-one four-column Markdown row. Keys are lowercase hyphenated slugs; existing
-numeric prefixes are permanent so migration preserves the original row order.
-Links use inline [label](destination) syntax, relative to README.md, never to
-index.d. Reference-style links are refused; local checks verify path existence,
-not anchors or report contents. No network, TLC, Git or build is needed.
-Exit 1 means invalid fragments, unresolved conflicts or drift; exit 2 means
-missing, duplicate or damaged README markers.
+Fragments are two LF-terminated lines, a key and a four-column Markdown row.
+Local links are relative to docs/statecharts and checked for path existence.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable, Iterable
 import html
 from pathlib import Path
 import re
@@ -21,8 +16,10 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 
-BEGIN = b"<!-- STATECHART INDEX:BEGIN -->\n"
-END = b"<!-- STATECHART INDEX:END -->\n"
+MARKER = b"<!-- STATECHART INDEX:"
+BEGIN = MARKER + b"BEGIN -->\n"
+END = MARKER + b"END -->\n"
+RECOVERY = "python3 scripts/ci/statechart_index.py --output docs/statecharts/index.generated.md"
 HEADER = b"| Area | Code SHA | Rules that break | Disposition |\n|---|---|---|---|\n"
 KEY = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 CODE = re.compile(r"(`+).*?\1")
@@ -38,7 +35,22 @@ class MarkerError(ValueError):
     """The generated region cannot be identified unambiguously."""
 
 
-def validate_row(row: str, source: Path, readme: Path) -> None:
+def link_target(raw: str):
+    if raw.startswith("<"):
+        raw = raw[1:-1]
+    elif any(char.isspace() for char in raw):
+        raise ValueError("use <destination> for links containing spaces")
+    decoded = re.sub(r"\\([!\"#$%&'()*+,./:;<=>?@\[\\\]^_`{|}~-])", r"\1", html.unescape(raw))
+    url = urlsplit(decoded)
+    if url.scheme in {"https", "http", "mailto"} or (url.netloc and not url.scheme):
+        return None
+    path = unquote(url.path)
+    if url.scheme or path.startswith("/") or "\\" in path or "\x00" in path:
+        raise ValueError("expected a statechart-relative path or web URL")
+    return path, url.query, url.fragment
+
+
+def validate_row(row: str, source: Path, exists: Callable[[str], bool]) -> None:
     if not row.startswith("|") or not row.endswith("|"):
         raise IndexError(f"{source}: expected a four-column table row")
     # Escaped pipes are cell text even inside code spans; all other pipes delimit cells.
@@ -48,37 +60,22 @@ def validate_row(row: str, source: Path, readme: Path) -> None:
         raise IndexError(f"{source}: expected four nonempty columns")
     text = CODE.sub("", row)
     for match in LINK.finditer(text):
-        target = match[1]
-        if target.startswith("<"):
-            target = target[1:-1]
-        elif any(char.isspace() for char in target):
-            raise IndexError(f"{source}: use <destination> for links containing spaces")
         try:
-            target = re.sub(r"\\([!\"#$%&'()*+,./:;<=>?@\[\\\]^_`{|}~-])", r"\1", html.unescape(target))
-            url = urlsplit(target)
-            if url.scheme in {"https", "http", "mailto"} or (url.netloc and not url.scheme):
-                continue
-            path = unquote(url.path)
-            if url.scheme or path.startswith("/") or "\\" in path or "\x00" in path:
-                raise ValueError("expected a README-relative path or web URL")
-            if not (readme.parent / path).exists():
-                raise ValueError("local path does not exist relative to README.md")
+            target = link_target(match[1])
+            if target is not None and not exists(target[0]):
+                raise ValueError("local path does not exist relative to docs/statecharts")
         except ValueError as error:
-            raise IndexError(f"{source}: broken/unsupported link {target!r}: {error}") from error
+            raise IndexError(f"{source}: broken/unsupported link {match[1]!r}: {error}") from error
     # Refuse unsupported link syntax instead of silently skipping a local destination.
     if re.search(r"(?<!\\)[\[\]]", LINK.sub("", text)):
         raise IndexError(f"{source}: malformed or reference-style link; use inline [label](destination)")
 
 
-def render_table(root: Path) -> bytes:
-    readme, directory = root / "README.md", root / "index.d"
-    paths = sorted(directory.glob("*.md"))
-    if not paths:
-        raise IndexError(f"{directory}: no fragments")
+def read_rows(directory: Path, fragments: Iterable[tuple[Path, bytes]],
+              exists: Callable[[str], bool]) -> dict[str, bytes]:
     rows: dict[str, bytes] = {}
     sources: dict[str, Path] = {}
-    for path in paths:
-        data = path.read_bytes()
+    for path, data in fragments:
         lines = data.split(b"\n")
         if len(lines) != 3 or lines[-1] or b"\r" in data or not lines[1].strip():
             raise IndexError(f"{path}: expected key line and one nonempty row, both LF-terminated")
@@ -93,46 +90,70 @@ def render_table(root: Path) -> bytes:
             raise IndexError(f"{path}: duplicate key {key!r}, already in {sources[key]}")
         if path.stem != key:
             raise IndexError(f"{path}: filename key {path.stem!r} differs from body key {key!r}")
-        validate_row(row, path, readme)
+        validate_row(row, path, exists)
         rows[key], sources[key] = lines[1] + b"\n", path
+    if not rows:
+        raise IndexError(f"{directory}: no fragments")
+    return rows
+
+
+def render_table(rows: dict[str, bytes]) -> bytes:
     return HEADER + b"".join(rows[key] for key in sorted(rows))
 
 
-def replace_index(original: bytes, table: bytes, source: Path) -> bytes:
-    if (original.count(b"<!-- STATECHART INDEX:") != 2
+def validate_readme(original: bytes, source: Path) -> None:
+    if CONFLICT.search(original):
+        raise IndexError(f"{source}: unresolved merge conflict")
+    if MARKER in original:
+        raise MarkerError(f"{source}: remove the retired STATECHART INDEX markers and table")
+
+
+def legacy_table(original: bytes, source: Path, exists: Callable[[str], bool]) -> bytes:
+    if CONFLICT.search(original):
+        raise IndexError(f"{source}: unresolved merge conflict")
+    if (original.count(MARKER) != 2
             or original.count(BEGIN) != 1 or original.count(END) != 1):
         raise MarkerError(f"{source}: missing, duplicate or damaged STATECHART INDEX markers")
     begin, end = original.index(BEGIN), original.index(END)
-    if begin >= end or (begin and original[begin - 1:begin] != b"\n") or original[end - 1:end] != b"\n":
+    left = begin + len(BEGIN)
+    if left > end or (begin and original[begin - 1:begin] != b"\n") or original[end - 1:end] != b"\n":
         raise MarkerError(f"{source}: markers must be ordered standalone LF-terminated lines")
-    if CONFLICT.search(original):
-        raise IndexError(f"{source}: unresolved merge conflict (including manual regions)")
-    return original[:begin + len(BEGIN)] + table + original[end:]
+    table = original[left:end]
+    if not table.startswith(HEADER) or not table[len(HEADER):].strip():
+        raise IndexError(f"{source}: invalid legacy statechart table")
+    for row in table[len(HEADER):].decode("utf-8").splitlines():
+        validate_row(row, source, exists)
+    return table
+
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2] / "docs/statecharts",
-                        help="directory containing README.md and index.d")
-    parser.add_argument("--check", action="store_true", help="reject drift without writing any file")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2] / "docs/statecharts")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="validate source and README without writing")
+    mode.add_argument("--output", type=Path, help="write index.generated.md alongside README.md")
+    mode.add_argument("--check-output", type=Path, help="validate already rendered index.generated.md")
     args = parser.parse_args(argv)
-    readme = args.root / "README.md"
+    readme, directory = args.root / "README.md", args.root / "index.d"
     try:
-        original = readme.read_bytes()
-        # Validate markers before fragments so marker damage always has exit status 2.
-        replace_index(original, b"", readme)
-        generated = replace_index(original, render_table(args.root), readme)
-        if args.check and original != generated:
-            raise IndexError(f"{readme}: index drift; run scripts/ci/statechart_index.py")
-        if not args.check and original != generated:
-            readme.write_bytes(generated)
-    except MarkerError as error:
-        print(error, file=sys.stderr)
-        return 2
-    except (IndexError, OSError) as error:
-        print(error, file=sys.stderr)
-        return 1
-    print(f"{readme}: statechart index {'clean' if args.check else 'generated'}")
+        validate_readme(readme.read_bytes(), readme)
+        rows = read_rows(directory, ((path, path.read_bytes()) for path in sorted(directory.glob("*.md"))),
+                         lambda path: (args.root / path).exists())
+        output = args.output or args.check_output
+        if output and output.resolve() != args.root.resolve() / "index.generated.md":
+            raise IndexError(f"{output}: expected index.generated.md alongside README.md")
+        table = render_table(rows)
+        if args.output:
+            output.write_bytes(table)
+        elif args.check_output:
+            if not output.is_file() or output.read_bytes() != table:
+                raise IndexError(f"{output}: missing or stale index output (drift)")
+        elif not args.check:
+            sys.stdout.buffer.write(table)
+    except (MarkerError, IndexError, OSError) as error:
+        print(f"{error}\nReproduce: {RECOVERY}", file=sys.stderr)
+        return 2 if isinstance(error, MarkerError) else 1
     return 0
 
 
