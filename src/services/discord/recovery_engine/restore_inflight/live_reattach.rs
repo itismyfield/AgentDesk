@@ -51,14 +51,8 @@ pub(in crate::services::discord::recovery_engine) async fn attach(
             && state.herdr_before_start_stop.is_none()
             && !state.rebind_origin
     });
-    if let Some(state) = inflight.as_ref().filter(|_| active.is_none()) {
-        let mailbox = super::mailbox_snapshot(shared, channel_id).await;
-        return state.hosted_execution_nonce.is_none()
-            && state.tmux_session_name.as_deref() == Some(logical)
-            && mailbox.active_turn_nonce.is_some()
-            && mailbox.active_turn_nonce == state.turn_nonce
-            && mailbox.active_user_message_id.map(|id| id.get())
-                == Some(state.effective_finalizer_turn_id());
+    if inflight.is_some() && active.is_none() {
+        return false;
     }
     let Some(binding) = runtime_binding_for_tmux_session(logical) else {
         // An own Pending clear installs its source on the first prompt.

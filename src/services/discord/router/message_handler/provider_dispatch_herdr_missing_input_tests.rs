@@ -255,6 +255,7 @@ fn restarted_front(busy: bool) {
             .unwrap();
     let _named = fx.rig.policy_registry_on_this_thread(endpoint, |host| host);
     tui_prompt_dedupe::reset_state_for_tests();
+    tui_prompt_dedupe::release_herdr_execution(fx.logical(), &nonce);
     tui_prompt_dedupe::binding_events::forget_channel_for_tests(CHANNEL);
     fx.rig.answer("session.snapshot", json!({"type":"session_snapshot","snapshot":{
         "version":"0.9.3", "protocol":22,
@@ -351,8 +352,8 @@ fn restarted_front(busy: bool) {
             row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
             row.hosted_record_id = Some(row_id);
             row.hosted_execution_nonce = Some(nonce.clone());
-            row.born_generation = 1;
-            row.restart_generation = Some(1);
+            row.born_generation = intake.shared.restart.current_generation.saturating_sub(1);
+            row.restart_generation = Some(row.born_generation);
             inflight::save_inflight_state(&row).unwrap();
         }
         let front = intake.front().await;

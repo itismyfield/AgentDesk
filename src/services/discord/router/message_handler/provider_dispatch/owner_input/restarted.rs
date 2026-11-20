@@ -4,7 +4,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedObservation, HostedRecord, HostedState,
 };
 use crate::services::discord::herdr_terminate::root_replaced;
-use crate::services::discord::recovery_engine::herdr_reattach::{VerifiedReattach, continue_owner};
+use crate::services::discord::recovery_engine::herdr_reattach::{
+    VerifiedReattach, already_admitted, continue_owner,
+};
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::herdr_launch::clear_epoch::{self, Epoch};
 use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
@@ -13,6 +15,7 @@ use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, he
 pub(super) struct LateRead {
     pub(super) own_pane: bool,
     pub(super) clear_binding: bool,
+    continued: bool,
     pub(super) restarted: Option<ExistingFront>,
 }
 
@@ -48,7 +51,7 @@ type Route<'a> = (
 
 impl OwnerTurn {
     pub(in crate::services::discord) fn continues_herdr(&self) -> bool {
-        self.late.restarted.is_some()
+        self.late.continued || self.late.restarted.is_some()
     }
 
     pub(in crate::services::discord) fn awaiting_restarted_clear(&self) -> bool {
@@ -103,6 +106,10 @@ impl OwnerTurn {
             (Some(pool), Some((row, record)))
                 if crate::services::herdr_admission::check().is_ok() =>
             {
+                if already_admitted(shared, record, channel) {
+                    self.late.continued = true;
+                    return Ok(self);
+                }
                 let epoch = epoch_for(record, channel);
                 let (result, refreshed) = continue_owner(shared, pool, transition, row).await;
                 let HostedRecord::Known(record) = &refreshed.record else {

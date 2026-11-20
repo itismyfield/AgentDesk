@@ -66,7 +66,29 @@ pub(in crate::services::discord) async fn continue_channel(
     if record.state != HostedState::Bound || root_replaced::local(shared, record).is_err() {
         return None;
     }
+    if already_admitted(shared, record, channel) {
+        return Some(VerifiedReattach::Live);
+    }
     Some(continue_owner(shared, pool, transition, &row).await.0)
+}
+
+pub(in crate::services::discord) fn already_admitted(
+    shared: &SharedData,
+    record: &HostedExecution,
+    channel: ChannelId,
+) -> bool {
+    use crate::services::tui_prompt_dedupe::{herdr_listing, runtime_binding_for_tmux_session};
+    let key = &record.owner.logical_key;
+    root_replaced::local(shared, record)
+        .is_ok_and(|(provider, owner)| provider == shared.provider && owner == channel)
+        && herdr_listing(key)
+            .is_some_and(|(nonce, admitted)| admitted && nonce == record.execution_nonce)
+        && runtime_binding_for_tmux_session(key).is_some()
+        && !awaits_own_clear(channel.get(), key, &record.execution_nonce)
+        && super::inflight::load_inflight_state_read_only(&shared.provider, channel.get())
+            .is_none_or(|row| {
+                super::inflight::row_is_current_generation(&row, shared.restart.current_generation)
+            })
 }
 
 /// The owner's channel lease is the same authority the boot path uses.
