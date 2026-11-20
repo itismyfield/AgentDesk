@@ -289,6 +289,8 @@ src/
 │   ├── o_piece_delivery/
 │   │   └── input_notice_tests.rs
 │   ├── postgres/
+│   │   ├── tests/
+│   │   │   └── mod.rs
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
@@ -710,6 +712,8 @@ src/
 │   │   │   ├── runtime_profile/
 │   │   │   │   ├── managed_herdr.rs
 │   │   │   │   └── managed_herdr_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── mod.rs
 │   │   │   ├── boot_incarnation_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
@@ -4112,6 +4116,8 @@ src/
 │   │   ├── execution_mode/
 │   │   │   └── provider_choice.rs
 │   │   ├── loader/
+│   │   │   ├── tests/
+│   │   │   │   └── mod.rs
 │   │   │   └── discovery.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
