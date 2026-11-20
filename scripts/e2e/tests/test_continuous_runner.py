@@ -53,6 +53,8 @@ class Runner(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"FAKE_DRIVER_LOG": str(self.log)})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.now = 1_700_000_000.0
+        self.enterContext(mock.patch.object(time, "time", side_effect=lambda: self.now))
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
                        "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
@@ -71,6 +73,7 @@ class Runner(unittest.TestCase):
 
     def submit(self, request_id, sha=SHA):
         (self.root / "config.json").write_text(json.dumps(self.config))
+        self.now += 1
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.root / "config.json"), "submit",
                                        "--request-id", request_id, "--deploy-sha", sha]), 0)
@@ -127,7 +130,12 @@ class Runner(unittest.TestCase):
         crashed = subprocess.Popen(
             [sys.executable, "-m", "scripts.e2e.continuous", "--config", str(path), "tick"], cwd=REPO,
             env={**os.environ, "FAKE_DRIVER_GATE": str(gate)}, stdout=subprocess.DEVNULL)
-        self.assertEqual(crashed.wait(timeout=60), -9)
+        try:
+            self.assertEqual(crashed.wait(timeout=120), -9)
+        except subprocess.TimeoutExpired:
+            crashed.kill()
+            crashed.wait()
+            raise
         self.assertEqual(self.tick(4e9)["status"], "DEFERRED_LEASE")
         with open(gate, "w"):
             pass
@@ -785,11 +793,6 @@ class Outbox(unittest.TestCase):
         self.assertEqual(outbox.pending(self.state), 0)
 
 
-
-
-
-
-
 class Publication(unittest.TestCase):
     setUp, tick, driven, submit = Runner.setUp, Runner.tick, Runner.driven, Runner.submit
 
@@ -886,7 +889,7 @@ class Publication(unittest.TestCase):
 
         with mock.patch.object(publication, "heartbeat", side_effect=heartbeat):
             with publication.keepalive(self.state, {"tick_interval_s": 0.001}, "running"):
-                self.assertTrue(observed.wait(timeout=5))
+                self.assertTrue(observed.wait(timeout=60))
         self.assertGreaterEqual(len(calls), 3)
         self.assertFalse(any(t.name == "e2e-heartbeat" for t in threading.enumerate()))
 

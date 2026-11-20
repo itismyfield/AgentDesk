@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -30,6 +31,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
@@ -38,11 +40,9 @@ CANONICAL = "/tmp/adk-build-token.lock"
 sys.path.insert(0, str(SCRIPTS))
 import build_token as bt  # noqa: E402
 
-# argv: token label ready results hold [gate]. `ready` is written before any
-# waiting starts, so the parent can tell "about to queue" from "still importing";
-# `gate` (the latecomer only) then holds it until the parent opens the window.
+# The latecomer waits on stdin; queued workers announce their position on stderr.
 _WAITER = f"""
-import os, sys, time
+import os, sys
 sys.path.insert(0, {str(SCRIPTS)!r})
 _real_open = os.open
 def _guard(path, *a, **k):
@@ -51,22 +51,17 @@ def _guard(path, *a, **k):
     return _real_open(path, *a, **k)
 os.open = _guard
 import build_token as bt
-token, label, ready, results, hold = sys.argv[1:6]
-gate = sys.argv[6] if len(sys.argv) > 6 else ""
-open(ready, "w").write(label)
-while gate and not os.path.exists(gate):
-    time.sleep(0.002)
+token, label, results, gated = sys.argv[1:]
+if gated == "True":
+    print("ready", flush=True)
+    sys.stdin.read()
 fd = os.open(token, os.O_RDWR)
 bt.acquire(fd, token, 120.0)
 seen = os.open(results, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 os.write(seen, (label + chr(10)).encode())   # one short append, so it is atomic
 os.close(seen)
-time.sleep(float(hold))
 os.close(fd)
 """
-
-SETTLE = 0.3   # 300x the gap between a waiter's marker and its place in line
-HOLD = 0.2     # how long each waiter keeps the token once it wins it
 
 
 class FairnessTestCase(unittest.TestCase):
@@ -90,21 +85,22 @@ class FairnessTestCase(unittest.TestCase):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return fd
 
-    def waiter(self, label: str, results: Path, gate: Path | None = None) -> subprocess.Popen:
-        ready = self.tmp / f"ready-{label}"
-        args = [str(self.token), label, str(ready), str(results), str(HOLD)]
-        proc = subprocess.Popen([sys.executable, "-c", _WAITER, *args, *([str(gate)] if gate else [])],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    def waiter(self, label: str, results: Path, *, gated: bool = False) -> subprocess.Popen:
+        env = {**os.environ, bt.DIAG_FD_ENV: ""}
+        proc = subprocess.Popen([sys.executable, "-c", _WAITER, str(self.token), label, str(results), str(gated)],
+                                stdin=subprocess.PIPE if gated else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.addCleanup(proc.wait)
         self.addCleanup(self._kill, proc)
         for pipe in (proc.stdout, proc.stderr):
             self.addCleanup(pipe.close)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not ready.exists():
-            self.assertIsNone(proc.poll(), f"{label} exited before it waited")
-            time.sleep(0.01)
-        self.assertTrue(ready.exists(), f"{label} never reached the wait")
-        time.sleep(SETTLE)
+        if gated:
+            self.addCleanup(proc.stdin.close)
+        notification = proc.stdout if gated else proc.stderr
+        with selectors.DefaultSelector() as ready:
+            ready.register(notification, selectors.EVENT_READ)
+            self.assertTrue(ready.select(timeout=30), f"{label} never reached the wait")
+        self.assertIn("ready" if gated else "waiting for", notification.readline())
         return proc
 
     @staticmethod
@@ -134,12 +130,12 @@ class ArrivalOrderTests(FairnessTestCase):
         # the sub-poll-interval window the old loop could not defend. Order of
         # acquisition is the whole assertion.
         results = self.tmp / "order.txt"
-        gate = self.tmp / "gate"
         holder = self.hold_token()
         waiters = [self.waiter(label, results) for label in ("w1", "w2", "w3")]
-        latecomer = self.waiter("late", results, gate=gate)
+        latecomer = self.waiter("late", results, gated=True)
         fcntl.flock(holder, fcntl.LOCK_UN)
-        gate.touch()  # released first, so the latecomer's first try finds it free
+        latecomer.stdin.close()
+        latecomer.stdin = None
         for proc in (*waiters, latecomer):
             _, err = proc.communicate(timeout=120)
             self.assertEqual(proc.returncode, 0, err)
@@ -181,23 +177,30 @@ class WaitNoticeTests(FairnessTestCase):
 
 
 class DeadlineTests(FairnessTestCase):
+    def assert_one_second_deadline(self) -> bt.BuildTokenTimeout:
+        elapsed = 0.0
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+            self.assertLessEqual(elapsed, 1.0, "token wait exceeded the requested deadline")
+
+        clock = mock.Mock(wraps=time, monotonic=lambda: elapsed, sleep=sleep)
+        with mock.patch.object(bt, "time", clock), self.assertRaises(bt.BuildTokenTimeout) as caught:
+            bt.acquire(self.open_token(), str(self.token), 1.0)
+        self.assertEqual(elapsed, 1.0)
+        return caught.exception
+
     def test_the_deadline_still_expires_for_the_oldest_waiter(self) -> None:
         self.hold_token()
-        started = time.monotonic()
-        with self.assertRaises(bt.BuildTokenTimeout) as caught:
-            bt.acquire(self.open_token(), str(self.token), 1.0)
-        self.assertLess(time.monotonic() - started, 30)
-        self.assertIn("ancestor", str(caught.exception))
+        self.assertIn("ancestor", str(self.assert_one_second_deadline()))
 
     def test_the_deadline_still_expires_for_a_waiter_that_never_gets_a_turn(self) -> None:
         # New shape: queued behind someone else, this caller never reaches the
         # flock at all, so the deadline is the only thing that can free it.
         self.hold_token()
         self.waiter("elder", self.tmp / "order.txt")
-        started = time.monotonic()
-        with self.assertRaises(bt.BuildTokenTimeout):
-            bt.acquire(self.open_token(), str(self.token), 1.0)
-        self.assertLess(time.monotonic() - started, 30)
+        self.assert_one_second_deadline()
 
     def test_the_default_deadline_and_poll_interval_are_unchanged(self) -> None:
         # Raising either would hide starvation rather than fix it (#5968).

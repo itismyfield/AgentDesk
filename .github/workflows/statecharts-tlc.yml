@@ -9,6 +9,7 @@ on:
       - "scripts/ci/statecharts_tlc.py"
       - "scripts/ci/StatechartFairness.java"
       - "tests/test_statecharts_tlc.py"
+      - "tests/statecharts_empty_selection_cases.py"
       - ".github/workflows/statecharts-tlc.yml"
   schedule:
     # 19:17 UTC (04:17 KST), clear of CI Nightly at 18:00 UTC.
