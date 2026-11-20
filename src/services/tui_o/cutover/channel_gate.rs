@@ -24,6 +24,12 @@ pub(crate) enum IdentityError {
     },
     #[error("TUI-bound channel is outside the O writer selection")]
     UnselectedTui,
+    /// O has not adopted the channel yet; the body is held until it does.
+    #[error("the channel awaits O adoption")]
+    AwaitingAdoption,
+    /// O refused the channel's adoption; the body stays held for an operator or a restart.
+    #[error("the channel's O adoption was refused")]
+    AdoptionRefused,
     #[error("thread child has no resolved parent policy or decided adoption")]
     ChildHeld,
 }
@@ -31,9 +37,9 @@ pub(crate) enum IdentityError {
 /// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Use {
-    /// A pending adoption is released: Legacy takes the channel for this process.
+    /// A body Legacy would send: the answer is claimed under the adoption lock.
     Body,
-    /// A pending adoption reads as Legacy and stays pending.
+    /// Only reads ownership; nothing is claimed.
     Peek,
 }
 
@@ -417,8 +423,18 @@ fn decide_from(
 
 impl IdentityError {
     pub(crate) fn hold(self, channel_id: u64) -> Self {
-        let alarm = WriterAlarm::Halted {
-            detail: self.to_string(),
+        // An adoption wait is no identity fault; a refusal asks for an operator, not a halt.
+        let alarm = match &self {
+            Self::AwaitingAdoption => {
+                tracing::info!(channel_id, error = %self, "tui_o output held for adoption");
+                return self;
+            }
+            Self::AdoptionRefused => WriterAlarm::Released {
+                detail: format!("adoption refused: {self}"),
+            },
+            _ => WriterAlarm::Halted {
+                detail: self.to_string(),
+            },
         };
         AlarmRouter::for_process(None, None).raise_at(channel_id, &alarm, Instant::now());
         tracing::error!(channel_id, reason = ?ClaimReason::IdentityHeld, error = %self, "tui_o output identity held");
@@ -437,6 +453,16 @@ fn outside_selection(
         return Err(IdentityError::UnselectedTui);
     }
     Ok(legacy(reason))
+}
+
+/// A selected TUI channel's body is O's once adopted and held until then; Legacy never sends it.
+fn adopted(state: channel_policy::Adoption) -> Result<(), IdentityError> {
+    use channel_policy::Adoption;
+    match state {
+        Adoption::Committed | Adoption::Held => Ok(()),
+        Adoption::Pending | Adoption::Deferred => Err(IdentityError::AwaitingAdoption),
+        Adoption::Refused | Adoption::Released => Err(IdentityError::AdoptionRefused),
+    }
 }
 
 /// Legacy's answer for a channel with no adoption to count its send against.
@@ -521,6 +547,7 @@ fn decide_with_snapshot(
     if let Some(execution) = snapshot.execution(channel_id)
         && (execution.permit.is_err() || !late_child)
     {
+        adopted(execution.candidate.peek())?;
         return Ok(BodyClaimed {
             owned: true,
             send: None,
@@ -537,8 +564,9 @@ fn decide_with_snapshot(
         return Ok(judged(&child.candidate));
     }
     let Some(candidate) = snapshot.candidate(channel_id) else {
-        return Ok(legacy(ClaimReason::NoCandidate));
+        return Err(IdentityError::AwaitingAdoption);
     };
+    adopted(candidate.peek())?;
     Ok(judged(candidate))
 }
 

@@ -77,7 +77,7 @@ where
 mod first_admission_tests {
     use super::*;
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
-    use crate::services::tui_o::cutover::{BodySend, claim_then_send, test_override};
+    use crate::services::tui_o::cutover::{IdentityError, claim_then_send, test_override};
     use crate::test_support::wait::{WAIT_CAP, await_within};
 
     #[tokio::test]
@@ -117,14 +117,13 @@ mod first_admission_tests {
         );
         row.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
         row.turn_nonce = Some("older-turn".into());
+        // An unadopted TUI channel's body is held; the admission does not hold another turn's.
         let old = claim_then_send(
             Some(bridge_body_claim(ChannelId::new(channel), &row, true)),
             || async { 1 },
         );
-        assert!(matches!(
-            await_within(old, WAIT_CAP).await.unwrap(),
-            BodySend::Sent(1)
-        ));
+        let old = await_within(old, WAIT_CAP).await;
+        assert_eq!(old.unwrap_err(), IdentityError::AwaitingAdoption);
         row.turn_nonce = token.turn_nonce().map(str::to_owned);
         let mut own = Box::pin(claim_then_send(
             Some(bridge_body_claim(ChannelId::new(channel), &row, true)),
@@ -132,13 +131,15 @@ mod first_admission_tests {
         ));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(own.as_mut(), &mut context).is_pending());
-        assert_eq!(candidate.sends(), (1, 1));
+        assert_eq!(candidate.sends(), (0, 0));
         candidate.invalidate_first(token.turn_nonce(), None);
-        assert!(matches!(
-            await_within(own, WAIT_CAP).await.unwrap(),
-            BodySend::Sent(2)
-        ));
-        assert_eq!(candidate.sends(), (2, 2));
+        let own = await_within(own, WAIT_CAP).await;
+        assert_eq!(own.unwrap_err(), IdentityError::AwaitingAdoption);
+        assert_eq!(
+            candidate.sends(),
+            (0, 0),
+            "Legacy sends no unadopted TUI body"
+        );
         drop(admission);
         drop(boot_guard);
     }

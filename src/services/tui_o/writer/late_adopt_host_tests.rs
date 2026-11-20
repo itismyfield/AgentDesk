@@ -3,7 +3,8 @@
 use super::*;
 use crate::config::Config;
 use crate::services::tui_o::channel_policy;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, intake_route};
+use crate::services::tui_o::channel_policy::racing_legacy_body;
+use crate::services::tui_o::cutover::{BodySend, intake_route};
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, start_managed};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -206,12 +207,9 @@ async fn late_adopt_first_placement_before_spawn_then_late_binding_posts_only_ne
     let old = Arc::new(Mutex::new(Vec::<String>::new()));
     let sent = old.clone();
     assert_eq!(
-        claim_then_send(
-            Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-            || async move {
-                sent.lock().unwrap().push("old delivered payload".into());
-            }
-        )
+        racing_legacy_body(CHANNEL, || async move {
+            sent.lock().unwrap().push("old delivered payload".into());
+        })
         .await
         .unwrap(),
         BodySend::Sent(())
@@ -245,7 +243,7 @@ async fn late_adopt_open_intake_and_custody_clear_without_restarting_host() {
     assert!(!init_path(&f.harness, CHANNEL).exists());
     assert!(!matches!(
         adoption(CHANNEL),
-        Adoption::Released | Adoption::Held
+        Adoption::Refused | Adoption::Held
     ));
     f.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 0;
     *f.io.custody.lock().unwrap() = Ok(Custody::Row);
@@ -270,7 +268,7 @@ async fn late_adopt_final_blocker_wins_over_transient_and_corruption_does_not_wa
         });
         let handle = f.start();
         polls(3).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released);
+        assert_eq!(adoption(CHANNEL), Adoption::Refused);
         assert!(!init_path(&f.harness, CHANNEL).exists());
         handle.stop_and_join().await.unwrap();
     }
@@ -280,7 +278,7 @@ async fn late_adopt_final_blocker_wins_over_transient_and_corruption_does_not_wa
     polls(3).await;
     assert_eq!(
         adoption(CHANNEL),
-        Adoption::Released,
+        Adoption::Refused,
         "corrupt log is not no-source"
     );
     assert!(!init_path(&f.harness, CHANNEL).exists());
@@ -592,7 +590,7 @@ async fn late_adopt_inflight_row_at_the_boundary_keeps_the_whole_history_as_base
     *f.io.custody.lock().unwrap() = Ok(Custody::Row);
     let handle = f.start();
     tokio::time::sleep(Duration::from_secs(30)).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let (rotated, first) = (sources[1].path.display(), sources[0].path.display());
     let expected = format!(
         "source {rotated} was bound while the adoption waited (seq 2; baseline {first}@1; boundary 0;"

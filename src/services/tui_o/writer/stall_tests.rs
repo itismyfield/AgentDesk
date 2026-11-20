@@ -219,7 +219,7 @@ async fn a_cursor_that_cannot_be_waited_out_leaves_the_channel_to_legacy_at_boot
     async fn released(stalled: Stalled, why: &str) {
         let _tasks = stalled.start();
         polls(3).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         assert_eq!(stalled.io.alarms.released().len(), 1, "{why}");
         assert!(!stalled.harness.store.has_channel_dir(CHANNEL), "{why}");
     }
@@ -247,7 +247,7 @@ async fn an_open_turn_at_the_cursor_waits_only_on_a_sound_frontier() {
         let stalled = Stalled::new(&open, end, Some(frontier), Custody::Row);
         let _tasks = stalled.start();
         polls(3).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         assert!(!stalled.harness.store.has_channel_dir(CHANNEL), "{why}");
     }
     let stalled = Stalled::new(&open, end, Some(0), Custody::Row);
@@ -406,7 +406,7 @@ async fn a_custody_that_appears_after_its_first_read_releases_the_channel() {
     let _tasks = stalled.start();
     polls(3).await;
     assert!(reached.load(Ordering::SeqCst));
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let released = stalled.io.alarms.released();
     assert!(
         matches!(released.as_slice(), [(CHANNEL, detail)] if detail.contains("custody")),

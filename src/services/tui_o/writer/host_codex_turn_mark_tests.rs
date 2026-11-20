@@ -389,21 +389,14 @@ async fn body_claim_logs_distinguish_previous_and_current_turns_without_body_con
         .finish();
     let _tracing = tracing::subscriber::set_default(subscriber);
 
-    let previous = cutover::claim_then_send(
-        Some(cutover::BodyClaim::new(CODEX, Some(CodexTui))),
-        || async { Ok::<_, String>(PRIVATE_BODY) },
-    )
-    .await
-    .unwrap();
-    assert_eq!(previous, cutover::BodySend::Sent(Ok(PRIVATE_BODY)));
+    // The gate starts no Legacy send on a selected channel, so the racing sends claim directly.
+    let previous = candidate.claim_body(CODEX);
+    assert!(!previous.owned);
+    drop(previous);
     assert!(candidate.mark_turn_admitted(CODEX, || Ok(3)));
-    let current = cutover::claim_then_send(
-        Some(cutover::BodyClaim::new(CODEX, Some(CodexTui))),
-        || async { Err::<(), _>(PRIVATE_BODY) },
-    )
-    .await
-    .unwrap();
-    assert_eq!(current, cutover::BodySend::Sent(Err(PRIVATE_BODY)));
+    let current = candidate.claim_body(CODEX);
+    assert!(!current.owned);
+    drop(current);
     let status = cutover::claim_then_send(None, || async { "status only" })
         .await
         .unwrap();

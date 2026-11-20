@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::services::tui_o::cutover::test_override::ChannelsGuard;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 
 /// Legacy's relay as it moves: cursor and delivered frontier on `path`, and how often a pin read them.
@@ -180,8 +180,8 @@ async fn an_open_turn_defers_the_adoption_and_its_close_adopts_it_without_a_rest
     let sent = claim_then_send(body, || async { "legacy" }).await;
     assert_eq!(
         sent,
-        Ok(BodySend::Sent("legacy")),
-        "Legacy sends while it waits"
+        Err(IdentityError::AwaitingAdoption),
+        "the body is held while it waits"
     );
     retried().await;
     open.assert_waiting("the turn is still open");
@@ -350,7 +350,7 @@ async fn a_final_reason_ends_the_adoption_even_behind_an_open_turn() {
         let open = Open::new();
         edit(open.io.facts.lock().unwrap().as_mut().unwrap());
         let _tasks = open.start().await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         let released = open.io.alarms.released();
         assert!(
             matches!(released.as_slice(), [(CHANNEL, d)] if d.contains(why)),
@@ -376,7 +376,7 @@ async fn a_final_reason_ends_the_adoption_even_behind_an_open_turn() {
         .node_override = Some("runner".into());
     open.close();
     retried().await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let released = open.io.alarms.released();
     assert!(
         matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("node override")),
@@ -470,35 +470,6 @@ async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_on
     assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료", "next"]);
 }
 
-#[tokio::test(start_paused = true)]
-async fn legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry() {
-    if !isolated(concat!(
-        module_path!(),
-        "::legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry"
-    )) {
-        return;
-    }
-    let open = Open::new();
-    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned());
-    let candidate = candidate.unwrap();
-    let reached = hook_reached(Step::Snapshot, move || {
-        assert!(!candidate.claim(CHANNEL));
-    });
-    let _tasks = open.start().await;
-    assert!(reached.load(Ordering::SeqCst));
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
-    let released = open.io.alarms.released();
-    assert!(
-        matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("still open")),
-        "{released:?}"
-    );
-    open.close();
-    retried().await;
-    assert_eq!((open.facts(), open.legacy.reads()), (1, 1), "no retry runs");
-    assert_eq!(open.io.alarms.released().len(), 1);
-    assert!(!open.harness.store.has_channel_dir(CHANNEL));
-}
-
 /// A binding log that binds each of `sources` in turn, from seq 1.
 fn binds(sources: &[&SourceId]) -> Vec<u8> {
     let event = |(at, source): (usize, &&SourceId)| {
@@ -536,7 +507,7 @@ async fn a_source_bound_while_waiting_leaves_the_channel_to_legacy() {
         p5_log(&runtime, CHANNEL, &log);
         open.legacy.caught_up(current);
         retried().await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "resumed {resumed}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "resumed {resumed}");
         let released = open.io.alarms.released();
         assert!(
             matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("bound while the adoption waited")),

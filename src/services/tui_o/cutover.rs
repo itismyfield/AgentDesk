@@ -240,17 +240,31 @@ fn held_children() -> Vec<u64> {
     })
 }
 
-/// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
+/// The boot turn selection while a selected Codex channel O adopted has not confirmed turn mode.
 pub(crate) fn codex_turn_awaited(
     channel: u64,
 ) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
     if owned_kind(channel) != Some(RuntimeHandoffKind::CodexTui)
+        || !adopted(channel)
         || super::turn_mode::transcript_turns(channel)
     {
         return None;
     }
     let turn = test_override::with_channels(|snapshot| snapshot.map(|s| s.turn().clone()));
     turn.filter(|turn| turn.selects(policy_channel(channel)))
+}
+
+/// Whether the channel's adoption, an execution view's included, is store-backed.
+fn adopted(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| {
+        let snapshot = snapshot?;
+        let candidate = (snapshot
+            .execution(channel)
+            .map(|view| view.candidate.clone()))
+        .or_else(|| snapshot.output_candidate(channel))?;
+        Some(candidate.peek().owned())
+    })
+    .unwrap_or(false)
 }
 
 /// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
@@ -384,8 +398,8 @@ async fn wait_codex_first_id(channel: u64, nonce: Option<[u8; 32]>) {
     }
 }
 
-/// Before a new placement: a non-home node holds a selected channel, and the home releases a
-/// pending adoption so the placed Legacy turn never shares the channel with O.
+/// Before a new placement: a non-home node holds a selected channel. A placement changes no
+/// adoption; the placed turn's body is held until O adopts the channel.
 fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
@@ -411,12 +425,6 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
             return Err(format!(
                 "O channel {channel} is served only on O home {home}"
             ));
-        }
-        // A placement never releases a child's adoption to Legacy.
-        if let Some(channel) = channel.filter(|_| child.is_none())
-            && let Some(candidate) = snapshot.candidate(channel)
-        {
-            candidate.claim(channel);
         }
         Ok(())
     })

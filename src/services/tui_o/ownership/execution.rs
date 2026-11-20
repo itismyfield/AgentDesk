@@ -70,10 +70,11 @@ pub(crate) struct View {
 }
 
 impl View {
-    pub(crate) fn held(reason: String) -> Self {
+    /// A view whose permit is unverified, over the candidate its channel's store gives.
+    pub(crate) fn held(reason: String, candidate: Candidate) -> Self {
         Self {
             permit: Err(reason),
-            candidate: Candidate::new(crate::services::tui_o::channel_policy::Adoption::Held),
+            candidate,
             retained: None,
         }
     }

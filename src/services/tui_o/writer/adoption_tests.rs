@@ -178,7 +178,7 @@ impl Channel {
             detail.contains(reason),
             "refused for {reason}, not: {detail}"
         );
-        assert_eq!(self.candidate.peek(), Adoption::Released);
+        assert_eq!(self.candidate.peek(), Adoption::Refused);
         assert_eq!(store.read_init(self.channel).unwrap(), None, "no init");
     }
 }

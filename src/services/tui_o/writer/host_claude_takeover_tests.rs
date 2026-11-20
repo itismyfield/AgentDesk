@@ -181,9 +181,10 @@ async fn settle() {
     }
 }
 
+/// A racing Legacy send counted by a direct claim, as the gate no longer starts one.
 fn legacy_sends(channel: u64) -> bool {
-    let claim = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_reserving;
-    !claim(channel, Some(ClaudeTui)).unwrap().owned
+    let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned());
+    !candidate.unwrap().claim_body(channel).owned
 }
 
 /// A fresh launch binds Pending until its transcript exists; once resolved with its first prompt

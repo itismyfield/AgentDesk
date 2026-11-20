@@ -1012,15 +1012,15 @@ mod tests {
         );
     }
 
-    // A response left to the watcher or already delivered sends no body, so preparing it only
-    // reads a pending adoption.
+    // A pending adoption holds a task response before its claim, whether it would be left to the
+    // watcher or owned for a range; nothing is claimed and the adoption stays.
     #[tokio::test]
-    async fn a_task_response_that_sends_no_body_leaves_a_pending_adoption() {
+    async fn a_task_response_on_a_pending_channel_is_held_before_its_claim() {
         use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
         use crate::services::tui_o::cutover::test_override;
         if !test_override::isolated_binding_case(concat!(
             module_path!(),
-            "::a_task_response_that_sends_no_body_leaves_a_pending_adoption"
+            "::a_task_response_on_a_pending_channel_is_held_before_its_claim"
         )) {
             return;
         }
@@ -1054,31 +1054,17 @@ mod tests {
         let check = BodyCheck::watch(delivery.channel_id, "answer");
         let card = Some(MessageId::new(4_055_921));
 
-        let wait = task_response_claim_for_card(&shared, &delivery, card).await;
-        assert!(
-            matches!(wait, Ok(Some(ResponseDeliveryClaimOutcome::Wait))),
-            "{wait:?}"
-        );
-        assert_eq!(check.adoption(), Adoption::Pending);
-
-        (
-            delivery.frame_turn_start_offset,
-            delivery.terminal_consumed_end,
-        ) = (Some(4_055), Some(4_300));
-        let Ok(Some(ResponseDeliveryClaimOutcome::Owned(claim))) =
-            task_response_claim_for_card(&shared, &delivery, card).await
-        else {
-            panic!("the first claimant owns the response");
-        };
-        mark_task_response_delivered(None, &claim).await.unwrap();
-        let delivered = task_response_claim_for_card(&shared, &delivery, card).await;
-        assert!(
-            matches!(
-                delivered,
-                Ok(Some(ResponseDeliveryClaimOutcome::Delivered { .. }))
-            ),
-            "{delivered:?}"
-        );
+        for range in [None, Some((4_055, 4_300))] {
+            (
+                delivery.frame_turn_start_offset,
+                delivery.terminal_consumed_end,
+            ) = range.map_or((None, None), |(start, end)| (Some(start), Some(end)));
+            let held = task_response_claim_for_card(&shared, &delivery, card).await;
+            assert!(
+                matches!(&held, Err(error) if format!("{error:?}").contains("awaits O adoption")),
+                "{held:?}"
+            );
+        }
         check.assert_settled();
         assert_eq!(check.adoption(), Adoption::Pending);
     }

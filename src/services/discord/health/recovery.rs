@@ -5043,6 +5043,8 @@ mod o_stale_leak_cut_tests {
         let pending = case.starts_with("pending");
         let _owned = if pending {
             test_override::force_candidates(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)])
+        } else if case == "foreign" {
+            test_override::force_foreign(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)], "gw")
         } else {
             test_override::force_channels(&owned)
         };
@@ -5050,23 +5052,17 @@ mod o_stale_leak_cut_tests {
         let channel = ChannelId::new(CHANNEL);
         let recovered =
             maybe_recover_completed_stale_leak(&registry, &ProviderKind::Claude, &shared, channel);
-        // Only the confirm-only pass succeeds here: it sends nothing and persists the offset.
-        assert_eq!(recovered.await, case == "pending-confirmed", "{case}");
+        // A pending adoption holds every pass, the confirm-only one too: nothing is sent or settled.
+        assert_eq!(recovered.await, false, "{case}");
         let Some(check) = check else {
             return;
         };
-        if case == "pending-resend" {
-            // Its continuation POST reached only the parent's counting proxy, no content sink.
-            assert_eq!(check.adoption(), Adoption::Released);
-            return;
-        }
         check.assert_settled();
         assert_eq!(check.adoption(), Adoption::Pending, "{case}");
-        // A confirm-only pass settles the turn as a delivery would; the others leave the row alone.
+        // The held row is left for O as it was.
         let row =
             crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, CHANNEL);
-        let kept = (case != "pending-confirmed").then_some(0);
-        assert_eq!(row.map(|row| row.response_sent_offset), kept, "{case}");
+        assert_eq!(row.map(|row| row.response_sent_offset), Some(0), "{case}");
     }
 
     #[tokio::test]
@@ -5079,20 +5075,16 @@ mod o_stale_leak_cut_tests {
             discord_connections("legacy") > 0,
             "an unselected channel still tries its Legacy resend"
         );
-        assert_eq!(discord_connections("pending-silent"), 0);
-        assert!(
-            discord_connections("pending") > 0,
-            "a failed live-message read resends nothing and keeps the adoption pending"
-        );
-        assert_eq!(
-            discord_connections("pending-confirmed"),
-            0,
-            "confirm-only pass"
-        );
-        assert!(
-            discord_connections("pending-resend") > 0,
-            "a pending adoption ends before Legacy tries its continuation resend"
-        );
+        let held = [
+            "foreign",
+            "pending-silent",
+            "pending",
+            "pending-confirmed",
+            "pending-resend",
+        ];
+        for case in held {
+            assert_eq!(discord_connections(case), 0, "{case}: held before any read");
+        }
     }
 }
 
@@ -5170,9 +5162,6 @@ mod legacy_channel_backfill_tests {
 
 #[cfg(test)]
 mod retirement_await_tests;
-
-#[cfg(test)]
-mod legacy_send_tests;
 
 #[cfg(all(test, unix))]
 pub(crate) use carried_turn_close::before_carried_archive_for_tests;

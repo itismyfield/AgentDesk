@@ -13,7 +13,7 @@ One TUI-bound channel carries one turn; one non-TUI channel in the same config c
 | `root` | runtime root present or not | `channel_policy/adoption.rs:419-421` reads every channel as `Held` without a root |
 | `exec` | none, permit, unverifiedHeld | `channel_policy.rs:446-513`, `ownership/execution.rs:72-78`, gate `cutover/channel_gate.rs:461-471` |
 | `bound` | none, fresh, withOutput | `writer/late_adopt/codex.rs:205-207` (no new bind, Retry), `late_adopt/codex/prefix.rs:205-213` with `codex.rs:229-230` (bound rollout already has output, Skip) |
-| `store` | none, init, damaged | `channel_policy/adoption.rs:414-439` |
+| `store` | none, init, damaged | `channel_policy/adoption.rs:409-434` |
 | `adopt` | None, Pending, Deferred, Committed, Held, Released, Refused | `channel_policy/adoption.rs:16-28`; `Refused` is the stage-1 refusal (plan r2 G5) |
 | custody | another turn's row, pending start or open intake; the held turn's own row | `runtime_bootstrap/o_writer_host.rs:306-339`, `writer/deferred.rs:89-92`; the kinds block alike, so the model keeps whose custody it is |
 | `nativeEnded` | the TUI turn's own end record written before anyone delivered the turn | `writer/late_adopt/codex/prefix.rs` `frontier` (a `task_complete` ends its turn and never moves where delivery stands) |

@@ -917,8 +917,8 @@ fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
     opened.set_binding_checkpoint(0).unwrap();
     assert_eq!(
         cutover::peek_o_owns_tui_output_for_channel(LATE, Some(RuntimeHandoffKind::ClaudeTui)),
-        Ok(false),
-        "a late reservation leaves the output Legacy's"
+        Err(cutover::IdentityError::AwaitingAdoption),
+        "a late reservation's output is held, not O's, until its adoption"
     );
     assert!(!o_ready_at(
         Some(root.path()),
