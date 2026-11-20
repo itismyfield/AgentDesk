@@ -390,13 +390,12 @@ class DeployPreflightTokenTests(unittest.TestCase):
         build = build_start + deploy.split(build_start, 1)[1].split("# Rebuild dashboard", 1)[0]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            token, marker = root / "token", root / "built"
+            token = root / "token"
             driver = root / "driver.py"
             driver.write_text(_SEAL + """
 assert os.path.isabs(sys.argv[2]) and sys.argv[2].endswith("/build_token.py")
 assert sys.argv[3] == "--release-source" and sys.argv[7] == "--"
 assert sys.argv[8:10] == ["bash", "-c"]
-open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))
 command = sys.argv[8:-1]
 idx = command.index("cargo")
 assert command[idx:idx + 2] == ["cargo", "build"]
@@ -440,29 +439,50 @@ ps() {
  esac
 }
 """)
-            env = dict(os.environ, TEST_PYTHON=sys.executable,
-                       ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="2")
+            watchdog = 120
+            env = {**os.environ, "TEST_PYTHON": sys.executable,
+                   bt.WAIT_TIMEOUT_ENV: str(watchdog), bt.DIAG_FD_ENV: ""}
             for key in list(env):
                 if key.startswith("AGENTDESK_DEPLOY_") or key == bt.LEASE_ENV:
                     env.pop(key)
-            command = ["/bin/bash", str(script), str(SCRIPTS), str(driver), str(token), str(marker)]
+            command = ["/bin/bash", str(script), str(SCRIPTS), str(driver), str(token)]
+
+            @contextlib.contextmanager
+            def scenario(profile, environment):
+                with tempfile.TemporaryDirectory(dir=root) as attempt:
+                    marker = Path(attempt) / "built"
+                    with subprocess.Popen(command + [str(marker), profile, str(root)], env=environment,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                          start_new_session=True) as child:
+                        try:
+                            yield child, marker
+                        finally:
+                            if child.returncode is None:
+                                with contextlib.suppress(ProcessLookupError):
+                                    os.killpg(child.pid, signal.SIGKILL)
+                                child.communicate()
+
+            def wait_notice(child):
+                ready, _, _ = select.select([child.stderr], [], [], watchdog)
+                self.assertTrue(ready, "build token never reported a wait")
+                notice = child.stderr.readline()
+                self.assertIn("build token: waiting for", notice)
+                return notice
+
             for profile in ("release", "dev"):
                 with self.subTest(profile=profile), token.open("a+") as holder:
                     fcntl.flock(holder, fcntl.LOCK_EX)
-                    with subprocess.Popen(command + [profile, str(root)], env=env, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True) as child:
+                    with scenario(profile, env) as (child, marker):
                         try:
-                            notice = child.stderr.readline()
-                            self.assertIn("build token: waiting for", notice)
+                            wait_notice(child)
                             self.assertFalse(marker.exists(), "build started before token release")
                             self.assertIsNone(child.poll(), "busy token must queue, not reject")
                         finally:
                             fcntl.flock(holder, fcntl.LOCK_UN)
-                        out, err = child.communicate(timeout=10)
+                        out, err = child.communicate(timeout=watchdog)
                         self.assertEqual(child.returncode, 0, out + err)
                         self.assertNotIn("command not found", err)
                         self.assertTrue(marker.exists())
-                        marker.unlink()
             for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
                                   ({"TEST_PRESSURE": "4"}, "memory pressure"),
                                   ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool"),
@@ -472,35 +492,24 @@ ps() {
                                   ({"AFTER_BUILDER": "UnrealEditor"}, "concurrent build tool"),
                                   ({"AFTER_LOAD": "99"}, "load average"),
                                   ({"AFTER_PRESSURE": "4"}, "memory pressure")):
-                with self.subTest(extra=extra):
-                    result = subprocess.run(command + ["release", str(root)], env=dict(env, **extra),
-                                            capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(reason, result.stderr)
-                    self.assertNotIn("build token: waiting", result.stderr)
+                with self.subTest(extra=extra), scenario("release", dict(env, **extra)) as (child, marker):
+                    out, err = child.communicate(timeout=watchdog)
+                    self.assertEqual(child.returncode, 1, out + err)
+                    self.assertIn(reason, err)
+                    self.assertNotIn("build token: waiting", err)
                     self.assertFalse(marker.exists())
 
-            # Inspect the first notice so a missing bound fails before a long wait.
-            # Stop the waiter while the token is held; its shell reaps it before unlock.
+            # Inspect the first notice so a missing bound fails before the default wait.
             bounded = dict(env, TEST_LOCK_TIMEOUT="1")
             bounded.pop(bt.WAIT_TIMEOUT_ENV, None)
             with self.subTest(bound="token wait duration"), token.open("a+") as holder:
                 fcntl.flock(holder, fcntl.LOCK_EX)
-                with subprocess.Popen(command + ["release", str(root)], env=bounded,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as child:
-                    try:
-                        notice = child.stderr.readline()
-                        self.assertIn("build token: waiting for", notice)
-                        self.assertIn("of 1s;", notice)
-                        out, err = child.communicate(timeout=5)
-                        self.assertEqual(child.returncode, bt.EXIT_TOKEN_TIMEOUT, out + err)
-                        self.assertIn("still held after 1s", err)
-                    finally:
-                        if child.poll() is None:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.kill(int(Path(str(marker) + ".waiter").read_text()), signal.SIGTERM)
-                        child.communicate(timeout=5)
-                self.assertFalse(marker.exists(), "the build must not start without the token")
+                with scenario("release", bounded) as (child, marker):
+                    self.assertIn("of 1s;", wait_notice(child))
+                    out, err = child.communicate(timeout=watchdog)
+                    self.assertEqual(child.returncode, bt.EXIT_TOKEN_TIMEOUT, out + err)
+                    self.assertIn("still held after 1s", err)
+                    self.assertFalse(marker.exists(), "the build must not start without the token")
 
 
 class WaitTimeoutTests(TokenTestCase):
