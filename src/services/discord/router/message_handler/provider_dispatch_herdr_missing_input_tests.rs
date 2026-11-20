@@ -183,13 +183,12 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
             discord::queue_io::input_owner::held_watch::has_watch(CHANNEL),
             !missing,
         );
-        assert!(
-            !intake
-                .shared
-                .turn_view_reconciler
-                .ops()
-                .iter()
-                .any(|op| op.add && op.emoji == '📬')
+        assert_eq!(
+            intake.shared.turn_view_reconciler.ops().iter().any(|op| {
+                op.target.message_id.get() == MESSAGE && op.add && op.emoji == '📬'
+            }),
+            !missing,
+            "only an unresolved pane identity keeps this input visibly queued"
         );
         let calls = intake._api.take();
         assert_eq!(
