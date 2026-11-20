@@ -27,6 +27,15 @@ PYTHON_TEST_REFERENCE = "tests/ref_cases.py::ReferenceCase.test_existing"
 RUST_TEST_REFERENCE = "src/ref_tests.rs::existing_test"
 
 
+def host_row(feature_id, **fields):
+    return {
+        "feature_id": feature_id, "scope": f"scope for {feature_id}",
+        "tmux": "tmux effect", "herdr": "Herdr effect",
+        "verdict": "같음", "owner": "#8120", "evidence": "fixture evidence",
+        **fields,
+    }
+
+
 def applicable():
     return {
         "host": "tmux", "provider": "claude", "surface": "channel", "state": "idle",
@@ -61,6 +70,10 @@ class FeatureMapTests(unittest.TestCase):
                 for feature_id in FEATURES
             ],
             "removal_reasons": [],
+            "host_parity": {
+                "base": self.git("rev-parse", "HEAD"),
+                "rows": [host_row(fid) for fid in FEATURES] + [host_row(None)],
+            },
         }
         app = applicable()
         app.pop("required_assertion_ids")
@@ -138,6 +151,59 @@ class FeatureMapTests(unittest.TestCase):
                          (11, 1, 10))
         self.assertTrue(report["source_hash"])
         self.assertIn("E-900", markdown)
+
+    def test_host_comparison_joins_feature_rows_and_additional_observations(self):
+        parity = self.rows["host_parity"]
+        parity["rows"][0]["coverage_tuples"] = [applicable()]
+        parity["rows"].append(host_row("message-delivery", scope="second entry", verdict="다름"))
+        parity["rows"][-2].update(verdict="불가피", reason="native UI", approval="unrecorded")
+        markdown, report = self.generate()
+        table = markdown.split("\n## ", 1)[0]
+        self.assertIn("| tmux 동작 | Herdr 동작 | 판정 / 담당 | 근거 |", table)
+        self.assertIn("message-delivery / second entry |", table)
+        self.assertIn("tmux effect | Herdr effect | 다름 · #8120 | fixture evidence", table)
+        self.assertIn("추가 관찰 항목 / scope for None |", table)
+        self.assertIn("불가피(native UI) · 사용자 확인 미기록 · #8120", table)
+        self.assertIn('"input_source":"legacy_automation"', table)
+        self.assertEqual((report["applicable"], report["covered"], report["missing"]), (11, 1, 10))
+
+    def test_host_comparison_rejects_invalid_inventory_and_missing_fields(self):
+        cases = (
+            ({"feature_id": "unknown"}, "unknown feature"),
+            ({"tmux": ""}, "tmux required"),
+            ({"herdr": None}, "herdr required"),
+            ({"scope": None}, "scope required"),
+            ({"owner": ""}, "owner required"),
+            ({"evidence": ""}, "evidence required"),
+            ({"verdict": "?"}, "invalid verdict"),
+            ({"verdict": "다름", "owner": "팀"}, "issue"),
+            ({"verdict": "불가피", "approval": "unrecorded"}, "reason"),
+            ({"verdict": "불가피", "reason": "UI"}, "approval"),
+            ({"verdict": "불가피", "reason": "UI", "approval": "approved"}, "approval_evidence"),
+            ({"coverage_tuples": [{**applicable(), "provider": "codex"}]}, "applicable tuple"),
+        )
+        original = deepcopy(self.rows)
+        for fields, pattern in cases:
+            with self.subTest(fields=fields):
+                self.rows = deepcopy(original)
+                self.rows["host_parity"]["rows"][0].update(fields)
+                self.rejected(pattern)
+        self.rows = deepcopy(original)
+        self.rows["host_parity"]["rows"].append(host_row(FEATURES[0]))
+        self.rejected("duplicate")
+        self.rows["host_parity"]["rows"] = original["host_parity"]["rows"][1:]
+        self.rejected("missing feature")
+        self.rows["host_parity"]["rows"] = original["host_parity"]["rows"][:-1]
+        self.rejected("missing additional observations")
+        self.rows.pop("host_parity")
+        self.rejected("host_parity")
+
+    def test_host_comparison_accepts_base_without_host_columns(self):
+        parity = self.rows.pop("host_parity")
+        self.baseline()
+        self.rows["host_parity"] = parity
+        _, report = self.generate()
+        self.assertEqual(report["covered"], 1)
 
     def test_schema_rejects_empty_or_duplicate_feature_inventory(self):
         original = deepcopy(self.rows)
@@ -308,6 +374,7 @@ class FeatureMapTests(unittest.TestCase):
         extra = deepcopy(self.rows["features"][0])
         extra["feature_id"] = "additional-feature"
         self.rows["features"].append(extra)
+        self.rows["host_parity"]["rows"].append(host_row(extra["feature_id"]))
         second = deepcopy(self.rows["features"][0]["applicable"][0])
         second["qualifiers"]["turn_origin"] = "native"
         self.rows["features"][0]["applicable"].append(second)
@@ -323,6 +390,7 @@ class FeatureMapTests(unittest.TestCase):
                 self.rows = deepcopy(original)
                 if kind == "feature":
                     self.rows["features"].pop()
+                    self.rows["host_parity"]["rows"].pop()
                 elif kind == "applicable":
                     self.rows["features"][0]["applicable"].pop()
                 else:

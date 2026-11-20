@@ -93,7 +93,51 @@ def validate_tuple(app):
                 f"schema: invalid qualifier/source {name}")
 
 
-def validate_rows(rows):
+def validate_host_parity(parity, index):
+    require(isinstance(parity, dict), "schema: host_parity mapping required")
+    base = parity.get("base")
+    require(isinstance(base, str) and re.fullmatch(r"[0-9a-f]{40}", base),
+            "schema: host_parity.base must be a full commit SHA")
+    rows = parity.get("rows")
+    require(isinstance(rows, list), "schema: host_parity.rows list required")
+    groups, seen = {}, set()
+    for row in rows:
+        require(isinstance(row, dict) and "feature_id" in row,
+                "schema: host_parity row needs a feature_id (null for additional observations)")
+        fid = row["feature_id"]
+        require(fid is None or (isinstance(fid, str) and fid in index),
+                "schema: unknown feature ID in host_parity")
+        for field in ("scope", "tmux", "herdr", "verdict", "owner", "evidence"):
+            require(nonempty(row.get(field)), f"schema: host_parity {fid}.{field} required")
+        key = (fid, row["scope"].strip())
+        require(key not in seen, f"schema: duplicate host_parity scope {key}")
+        seen.add(key)
+        verdict = row["verdict"]
+        require(verdict in {"같음", "다름", "불가피"}, f"schema: invalid verdict for {key}")
+        if verdict == "다름":
+            require(re.search(r"(?<!\w)#[1-9][0-9]*", row["owner"]),
+                    f"schema: host_parity {key} needs an owner issue")
+        if verdict == "불가피":
+            require(nonempty(row.get("reason")), f"schema: host_parity {key} needs a reason")
+            approval = row.get("approval")
+            require(approval in ("approved", "unrecorded"), f"schema: host_parity {key} needs approval status")
+            if approval == "approved":
+                require(nonempty(row.get("approval_evidence")),
+                        f"schema: host_parity {key} needs approval_evidence")
+        tuples = row.get("coverage_tuples", [])
+        require(isinstance(tuples, list), f"schema: host_parity {key} coverage_tuples list required")
+        applicable = {tuple_key(app) for app in index[fid]["applicable"]} if fid is not None else set()
+        for app in tuples:
+            validate_tuple(app)
+            require(tuple_key(app) in applicable, f"schema: host_parity {key} needs a registered applicable tuple")
+        groups.setdefault(fid, []).append(row)
+    require(index.keys() <= groups.keys(),
+            f"schema: host_parity missing feature IDs: {sorted(index.keys() - groups.keys())}")
+    require(None in groups, "schema: host_parity missing additional observations")
+    return groups
+
+
+def validate_rows(rows, *, baseline=False):
     require(isinstance(rows, dict) and type(rows.get("schema")) is int and rows["schema"] == 1,
             "schema: rows.schema must be 1")
     features = rows.get("features")
@@ -135,7 +179,10 @@ def validate_rows(rows):
             require(missing <= pending_ids, f"schema: unsupported required assertion needs pending reason: {sorted(missing - pending_ids)}")
         index[fid] = feature
     require(set(FEATURE_IDS) <= index.keys(), "schema: required initial feature inventory incomplete")
-    return index
+    comparisons = {}
+    if not baseline or "host_parity" in rows:
+        comparisons = validate_host_parity(rows.get("host_parity"), index)
+    return index, comparisons
 
 
 def load_yaml(path):
@@ -213,7 +260,8 @@ def check_ratchet(rows, index, baseline):
         by_key[entry["key"]] = entry["reason"]
     if baseline is None:
         return
-    removed = inventory_keys(validate_rows(baseline)) - inventory_keys(index)
+    previous, _ = validate_rows(baseline, baseline=True)
+    removed = inventory_keys(previous) - inventory_keys(index)
     old = baseline.get("removal_reasons", [])
     old_keys = {entry["key"] for entry in old}
     old_reasons = {entry["reason"] for entry in old}
@@ -338,7 +386,7 @@ def generate(root: Path, base_ref: str):
     root = Path(root).resolve()
     baseline = base_rows(root, base_ref)
     rows = load_yaml(root / ROWS)
-    index = validate_rows(rows)
+    index, comparisons = validate_rows(rows)
     check_ratchet(rows, index, baseline)
     tests = test_sources(root, index)
     claims, counts, paths, references = scenario_claims(root, index)
@@ -365,27 +413,46 @@ def generate(root: Path, base_ref: str):
         report["by_feature"][fid] = summary
         for field in ("applicable", "covered", "missing", "unsupported"):
             report[field] += summary[field]
-    return render(index, report), report
+    return render(index, report, comparisons, rows["host_parity"]["base"]), report
 
 
 def cell(value):
     return str(value).replace("|", "\\|").replace("\n", "<br>")
 
 
-def render(index, report):
+def render_host_rows(index, report, comparisons):
+    for fid in [*sorted(index), None]:
+        for position, row in enumerate(comparisons.get(fid, ())):
+            scope = f"{fid or '추가 관찰 항목'} / {row['scope']}"
+            details = ("", "", "", "")
+            if fid is not None and position == 0:
+                feature, summary = index[fid], report["by_feature"][fid]
+                scope = f"{fid} / {feature['title']}\n{row['scope']}"
+                coverage = " / ".join(str(summary[field]) for field in ("applicable", "covered", "missing"))
+                details = (feature["visible_contract"], feature["verification"], coverage,
+                           f"{feature['owner']} / {feature['chart']}")
+            verdict = row["verdict"]
+            if verdict == "불가피":
+                approval = "사용자 확인 미기록"
+                if row["approval"] == "approved":
+                    approval = f"사용자 승인 완료 ({row['approval_evidence']})"
+                verdict = f"{verdict}({row['reason']}) · {approval}"
+            evidence = "\n".join([row["evidence"], *(f"`{tuple_key(app)}`" for app in row.get("coverage_tuples", []))])
+            values = (scope, *details, row["tmux"], row["herdr"], f"{verdict} · {row['owner']}", evidence)
+            yield "| " + " | ".join(cell(v) for v in values) + " |"
+
+
+def render(index, report, comparisons, comparison_base):
     lines = ["# 사용자 기능 지도", "", "생성: `python3 scripts/generate_user_feature_map.py --write --base-ref origin/main`", "",
              "수기 정본: [user-feature-map.rows.yaml](user-feature-map.rows.yaml). 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
              "fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않는다. `unspecified` output은 실제 출력 경로를 증명하지 않는다.", "",
              "기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.", "",
              f"적용 {report['applicable']} · covered {report['covered']} · 빈 칸 {report['missing']} · 미지원 단언 칸 {report['unsupported']}",
              f"시나리오 분류: {json.dumps(report['scenario_counts'], ensure_ascii=False, sort_keys=True)}", "",
-             "| ID / 기능 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 |",
-             "| --- | --- | --- | --- | --- |"]
-    for fid, feature in sorted(index.items()):
-        summary = report["by_feature"][fid]
-        lines.append("| " + " | ".join(cell(v) for v in (
-            f"{fid} / {feature['title']}", feature["visible_contract"], feature["verification"],
-            f"{summary['applicable']} / {summary['covered']} / {summary['missing']}", f"{feature['owner']} / {feature['chart']}")) + " |")
+             f"호스트 동작은 [`{comparison_base[:10]}`](https://github.com/itismyfield/AgentDesk/tree/{comparison_base})에서 확인한 코드 기준이다.", "",
+             "| ID / 기능·범위 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 | tmux 동작 | Herdr 동작 | 판정 / 담당 | 근거 |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    lines.extend(render_host_rows(index, report, comparisons))
     for fid, summary in report["by_feature"].items():
         lines += ["", f"## {fid}", "", f"needs_live: `{str(summary['needs_live']).lower()}`", ""]
         for name in summary["test_names"]:
