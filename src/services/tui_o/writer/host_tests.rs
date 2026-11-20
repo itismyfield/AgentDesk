@@ -286,6 +286,7 @@ impl HostIo for TestIo {
                         &pool,
                         &channel.to_string(),
                         "first-fixture",
+                        None,
                     )
                     .await
                     .map_err(|error| error.to_string())?

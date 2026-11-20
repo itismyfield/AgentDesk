@@ -4,6 +4,14 @@ Code baseline: `13f9acdd9a0f5e3aa500d20cd1b9a31a91e7ced4`; line numbers below ar
 
 One TUI-bound channel carries one turn; one non-TUI channel in the same config carries a headless turn. The model checks who posts the TUI turn's body, when its row and the watcher dispatch may be settled, and whether a held turn is eventually answered.
 
+## Current disposition contract (2026-11-17)
+
+The current decision first normalizes the same execution, then adopts it or emits one body-free rejection reason and discards that episode. The old Refused-body retention and owner-return replay decision below is historical. `confirm_store` restores channel readiness only; it cannot revive a rejected output. New input receives a different output identity. Normal late-child handoff remains valid for an episode that has not been finally rejected.
+
+D1a covers the fresh policy, notice receipts and atomic adoption/rejection foundation; it installs no production policy: the single installation boundary is the `#[cfg(test)] mod output_disposition` declaration in `channel_policy/adoption.rs`. Its normalization, trust and receipt helpers are compiled for direct policy fixtures. D2 connects every live consumer and body store before enabling that child. D1a validates only the explicit fresh-policy fixtures; pass/fail evidence belongs to its implementation report. Existing production fresh, warm and resume behavior remains unchanged. Continuation disposition/proof/turn-window normalization is an unverified D1b follow-up and is excluded from D1a completion. It must bind a genuinely new native input window to the current input admission; renaming a rejected old window with another input/nonce is not a new episode. Production activation and zero rejected retention across all stores remain D2 work.
+
+`NormSpec` checks one total deadline, old-episode non-revival, a new-input episode, and body/reason effect exclusion. Its abstract episodes do not establish that continuation Rust is implemented or verified. Existing stage-1/Herdr retention tables below remain versioned controls; they do not prove the new discard policy. Rejection notice reservations do not become body Posted/input-success receipts, and an uncertain reservation is metadata-only pending rather than a blind repeat POST.
+
 ## Values and where they come from
 
 | Variable | Values | Code |

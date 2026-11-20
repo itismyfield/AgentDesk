@@ -1,4 +1,7 @@
 //! Startup-only menu detection; pane text is diagnostic evidence, never source authority.
+#[cfg(test)]
+pub(crate) mod normalize;
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 

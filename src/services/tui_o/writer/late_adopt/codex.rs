@@ -18,6 +18,9 @@ use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_o
 use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
+#[cfg(test)]
+pub(crate) mod normalization;
+
 mod delivered;
 pub(super) mod prefix;
 use delivered::Records;
@@ -302,7 +305,8 @@ impl<I: HostIo> Takeover<'_, I> {
             })?;
             return match prefix::buffered(&bound.0) {
                 Verdict::Eligible(prefix) if prefix.prompt_end.is_some() => {
-                    self.commit(at, &bound, &prefix).await
+                    let taken = self.commit(at, &bound, &prefix).await;
+                    self.soon(at, taken)
                 }
                 Verdict::Eligible(_) => Err(Taken::Retry(
                     "the takeover rollout has no first user prompt yet".into(),
@@ -332,20 +336,8 @@ impl<I: HostIo> Takeover<'_, I> {
                     Ok(owed) => owed,
                     Err(taken) => return Err(taken),
                 };
-                self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
-                    .await
-                    .map_err(|taken| match taken {
-                        Taken::Retry(detail)
-                            if at.turn_mark
-                                && self
-                                    .candidate
-                                    .turn_mark()
-                                    .is_some_and(|mark| mark.order == at.order) =>
-                        {
-                            Taken::Soon(detail)
-                        }
-                        other => other,
-                    })
+                let taken = self.fenced(at, &bound, Plan::Fresh(&prefix, &owed)).await;
+                self.soon(at, taken)
             }
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
@@ -359,6 +351,22 @@ impl<I: HostIo> Takeover<'_, I> {
             sent_from.push(bound.0.clone());
         }
         result
+    }
+
+    /// A retry while the turn the baseline marked is still current is taken again after a short wait.
+    fn soon(&self, at: Baseline, taken: Result<(), Taken>) -> Result<(), Taken> {
+        taken.map_err(|taken| match taken {
+            Taken::Retry(detail)
+                if at.turn_mark
+                    && self
+                        .candidate
+                        .turn_mark()
+                        .is_some_and(|mark| mark.order == at.order) =>
+            {
+                Taken::Soon(detail)
+            }
+            other => other,
+        })
     }
 
     /// Whether a Legacy body send started since `at` read the sends.

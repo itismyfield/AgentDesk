@@ -714,3 +714,6 @@ mod tests;
 
 #[cfg(test)]
 mod late_reservation_tests;
+
+#[cfg(test)]
+pub(crate) use adoption::output_disposition;

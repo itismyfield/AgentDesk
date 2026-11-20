@@ -13,10 +13,23 @@ pub(crate) struct FirstTurn {
     nonce: String,
     digest: String,
     context: Option<BindingContext>,
+    #[cfg(test)]
+    blocked_source_digest: Option<String>,
     valid: bool,
     pending: bool,
     ended: bool,
     ready: bool,
+}
+
+#[cfg(test)]
+impl FirstTurn {
+    fn names(&self, proof: &FirstProof) -> bool {
+        self.channel == proof.channel
+            && self.mark == proof.mark
+            && self.nonce == proof.nonce
+            && self.digest == proof.digest
+            && self.context.as_ref() == Some(&proof.context)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +198,8 @@ impl Candidate {
                 nonce: nonce.into(),
                 digest: digest(prompt),
                 context: None,
+                #[cfg(test)]
+                blocked_source_digest: None,
                 valid: true,
                 pending: true,
                 ended: false,
@@ -224,6 +239,62 @@ impl Candidate {
             nonce: nonce.into(),
             completed: false,
             order,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admit_after_rejection(
+        &self,
+        previous: &super::output_disposition::Output,
+        next: (u64, &str, &str, &BindingContext),
+        read_seq: impl FnOnce() -> Result<u64, String>,
+    ) -> Option<FirstAdmission> {
+        use super::output_disposition::Phase;
+        let (input, nonce, prompt, context) = next;
+        let tmux = context.tmux_session.as_str();
+        if !matches!(
+            previous.phase(),
+            Phase::RejectPendingNotice(_) | Phase::Rejected(_)
+        ) || input == previous.id().input
+            || nonce.is_empty()
+            || digest(nonce) == previous.id().nonce
+            || context.execution_nonce.is_empty()
+            || digest(&context.execution_nonce) == previous.id().execution
+            || context.provider != "codex"
+            || context.launch_mode != "fresh"
+            || context.channel_id != Some(previous.id().channel)
+        {
+            return None;
+        }
+        {
+            let mut guard = self.lock();
+            let first = self.first_turn.borrow();
+            let old = first.as_ref()?;
+            if old.channel != previous.id().channel
+                || digest(&old.nonce) != previous.id().nonce
+                || old.tmux != tmux
+                || !matches!(*guard, Adoption::Deferred | Adoption::Refused)
+            {
+                return None;
+            }
+            if *guard == Adoption::Refused {
+                *guard = Adoption::Deferred;
+            }
+        }
+        self.admit_first(previous.id().channel, nonce, prompt, tmux, || {
+            self.attach_first_execution(context, prompt, Some(nonce));
+            {
+                let guard = self.lock();
+                self.first_turn.send_modify(|first| {
+                    if let Some(first) = first.as_mut().filter(|first| {
+                        first.nonce == nonce && first.context.as_ref() == Some(context)
+                    }) {
+                        first.blocked_source_digest = Some(previous.id().source.clone());
+                    }
+                });
+                drop(guard);
+            }
+            read_seq()
         })
     }
 
@@ -304,6 +375,12 @@ impl Candidate {
         if !first.valid || !first.ready {
             return Err("first admission was invalidated".into());
         }
+        #[cfg(test)]
+        if first.blocked_source_digest.as_ref().is_some_and(|blocked| {
+            blocked == &super::output_disposition::Identity::source_digest(source)
+        }) {
+            return Err("a fresh admission cannot reuse the rejected source".into());
+        }
         let context = first
             .context
             .clone()
@@ -333,6 +410,30 @@ impl Candidate {
             false
         });
         drop(guard);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_names(&self, proof: &FirstProof) -> bool {
+        self.first_turn
+            .borrow()
+            .as_ref()
+            .is_some_and(|first| first.names(proof))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_first_proved(&self, proof: &FirstProof) -> bool {
+        let mut matched = false;
+        self.first_turn.send_if_modified(|first| {
+            let Some(first) = first.as_mut().filter(|first| first.names(proof)) else {
+                return false;
+            };
+            matched = true;
+            let changed = first.valid || first.pending;
+            first.valid = false;
+            first.pending = false;
+            changed
+        });
+        matched
     }
 
     pub(crate) fn first_ended(&self) -> bool {

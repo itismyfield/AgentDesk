@@ -498,9 +498,6 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "watcher_backstop_turn_is_terminal:peek",
     ),
     "src/services/herdr_launch.rs": ("o_owns_seeded:peek",),
-    "src/services/tui_o/cutover.rs": (
-        "claim_for_placement:claim",
-    ),
     "src/services/tui_o/cutover/channel_gate.rs": (
         "claim_then_send:claim",
         "claim_then_send_at:claim",

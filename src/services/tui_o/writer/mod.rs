@@ -276,3 +276,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod source_read_tests;
+
+#[cfg(test)]
+pub(crate) use late_adopt::codex::normalization;

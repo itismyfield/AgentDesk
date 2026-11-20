@@ -49,3 +49,6 @@ pub mod session_transcripts;
 pub(crate) mod status_check_migration_tests;
 pub(crate) mod timestamps;
 pub mod turns;
+
+#[cfg(test)]
+pub(crate) mod tui_output_disposition;
