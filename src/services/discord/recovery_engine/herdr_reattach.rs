@@ -55,16 +55,17 @@ pub(in crate::services::discord) async fn continue_channel(
     transition: &SessionTransitionLease<'_>,
 ) -> Option<VerifiedReattach> {
     use super::herdr_server_replaced::canonical_row;
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get())?;
-    if crate::config::session_hosts::local_node().as_deref()
-        != Some(endpoint.execution_node.as_str())
-    {
+    if !crate::config::session_hosts::has_herdr_endpoint(channel.get()) {
         return None;
     }
     let pool = shared.pg_pool.as_ref()?;
     let row = canonical_row(pool, &shared.token_hash, provider, channel).await?;
-    matches!(&row.record, HostedRecord::Known(record) if record.state == HostedState::Bound)
-        .then_some(())?;
+    let HostedRecord::Known(record) = &row.record else {
+        return None;
+    };
+    if record.state != HostedState::Bound || root_replaced::local(shared, record).is_err() {
+        return None;
+    }
     Some(continue_owner(shared, pool, transition, &row).await.0)
 }
 

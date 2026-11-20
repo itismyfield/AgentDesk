@@ -279,20 +279,13 @@ fn restarted_front(busy: bool) {
     let before = fx.rig.sends().len();
     let before_requests = fx.rig.requests().len();
     let reply = "answer after Herdr reattach";
-    let answer_path = started.path.clone();
-    let session = started.session.clone();
-    let mut answered = false;
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
     fx.rig.on_send(move |params| {
-        if !answered && params["keys"] == json!(["enter"]) {
-            answered = true;
-            append(&answer_path, &[
-                json!({"type":"user","uuid":uuid(),"sessionId":session,"timestamp":chrono::Utc::now().to_rfc3339(),"message":{"role":"user","content":INPUT}}),
-                json!({"type":"assistant","uuid":uuid(),"sessionId":session,"message":{
-                    "id":"restart-reply","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":reply}]}}),
-                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
-            ]);
+        if params["keys"] == json!(["enter"]) {
+            let _ = send.send(());
         }
     });
+    let mut hooks = fx.ingress.state.subscribe();
     let HostedRecord::Known(mut record) = fx.record() else {
         panic!("expected a Bound execution");
     };
@@ -363,7 +356,21 @@ fn restarted_front(busy: bool) {
             inflight::save_inflight_state(&row).unwrap();
         }
         let front = intake.front().await;
-        let start = dispatch::start_idle_for_test(intake.shared.clone(), channel, front);
+        let start = async {
+            if !busy {
+                return dispatch::start_idle_for_test(intake.shared.clone(), channel, front).await;
+            }
+            discord::queue_io::input_owner::drive::wake(source_retry_drive(&intake));
+            loop {
+                let empty = intake.mailbox.v2_request(|slot| {
+                    Ok(slot.as_ref().unwrap().json()?["items"].as_array().unwrap().is_empty())
+                }).await.map_err(|error| error.to_string())?;
+                if empty {
+                    return Ok(());
+                }
+                tokio::task::yield_now().await;
+            }
+        };
         let claimant = async {
             if !busy {
                 return;
@@ -372,6 +379,7 @@ fn restarted_front(busy: bool) {
                 claim_reserved_headless_turn, reserve_headless_turn,
             };
             let reserved = reserve_headless_turn();
+            let _completion = intake.shared.session_transition_completion(channel);
             let race = claim_reserved_headless_turn(
                 &intake.shared,
                 channel,
@@ -391,7 +399,33 @@ fn restarted_front(busy: bool) {
                 Some("old-active-episode")
             );
         };
-        let (result, ()) = tokio::join!(tokio::time::timeout(LIMIT, start), claimant);
+        let provider_reply = async {
+            receive.recv().await.expect("provider receives Enter");
+            let sends = fx.rig.sends();
+            let paste = sends[before]["text"].as_str().unwrap();
+            let prompt = paste.trim_start_matches("\u{1b}[200~").trim_end_matches("\u{1b}[201~");
+            let session = &started.session;
+            append(&started.path, &[json!({
+                "type":"user", "uuid":uuid(), "sessionId":session, "timestamp":chrono::Utc::now().to_rfc3339(),
+                "message":{"role":"user","content":prompt}
+            })]);
+            let payload = json!({"session_id": session, "prompt": prompt, "transcript_path": started.path});
+            assert_eq!(tokio::task::block_in_place(|| started.hook(&fx, "UserPromptSubmit", &payload)), 202);
+            append(&started.path, &[
+                json!({"type":"assistant","uuid":uuid(),"sessionId":session,"message":{
+                    "id":"restart-reply","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":reply}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":session}),
+            ]);
+            let payload = json!({"session_id": session, "transcript_path": started.path});
+            assert_eq!(tokio::task::block_in_place(|| started.hook(&fx, "Stop", &payload)), 202);
+            while let Ok(event) = hooks.try_recv() {
+                crate::services::claude_tui::hook_server::publish_hook_event_for_tests(event);
+            }
+        };
+        let (result, (), replay) = tokio::join!(
+            tokio::time::timeout(LIMIT, start), claimant, tokio::time::timeout(LIMIT, provider_reply),
+        );
+        replay.expect("provider replied to the original");
         assert_eq!(result.expect("first input resolves"), Ok(()));
         let sends = fx.rig.sends();
         assert_eq!(sends.len(), before + 2, "{sends:?}");
@@ -424,26 +458,23 @@ fn restarted_front(busy: bool) {
         assert_eq!(saved["location"]["pane_id"], PANE);
         assert_eq!(saved["state"], "bound");
         assert_eq!(saved["execution_nonce"], nonce);
+        let mut calls = Vec::new();
         tokio::time::timeout(LIMIT, async {
             loop {
-                let sent = intake.posts.to(CHANNEL);
-                if sent.iter().any(|message| message.contains(reply)) {
+                calls.extend(intake._api.take());
+                let reached = |message: &String| message.contains(reply);
+                if intake.posts.to(CHANNEL).iter().any(reached)
+                    || intake.mock.delivered_texts().iter().any(reached)
+                    || calls.iter().any(|call| call.contains(&format!("/channels/{CHANNEL}/messages")) && reached(call))
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
-        })
-        .await
-        .expect("the same pane's reply reached the channel");
-        assert!(
-            !intake
-                ._api
-                .take()
-                .iter()
-                .any(|call| call.contains("이 입력을 폐기했습니다")
-                    || call.contains("세션 복구 중")
-                    || call.contains("세션 복원"))
-        );
+        }).await.expect("the same pane's reply reached the channel");
+        calls.extend(intake._api.take());
+        assert!(!calls.iter().any(|call|
+            call.contains("이 입력을 폐기했습니다") || call.contains("세션 복구 중") || call.contains("세션 복원")));
     });
     drop(intake);
     drop(old_runtime);

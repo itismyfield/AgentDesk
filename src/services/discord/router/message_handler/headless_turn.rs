@@ -246,6 +246,7 @@ async fn start_reserved_headless_turn_admitted(
     );
     let claim = super::super::turn_start::claim_reserved_headless_turn;
     let front = owner.as_ref().map(|owner| owner.front().clone());
+    let transition_completion = shared.session_transition_completion(channel_id);
     let (session_transition_guard, cancel_token, continued_herdr) = claim(
         shared,
         channel_id,
@@ -764,6 +765,7 @@ async fn start_reserved_headless_turn_admitted(
     .await;
 
     drop(session_transition_guard);
+    drop(transition_completion);
 
     // General recall stays model-owned; session anchors use the native instruction layer.
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
