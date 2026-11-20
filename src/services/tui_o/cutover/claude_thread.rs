@@ -35,6 +35,7 @@ pub(crate) fn reserve_resume(
     let child = super::test_override::with_channels(|snapshot| snapshot?.child(channel)?.ok())
         .filter(|child| child.kind == RuntimeHandoffKind::ClaudeTui)
         .ok_or("the Claude thread policy changed before reservation")?;
+    let _body_fence = child.candidate.lock_thread_body();
     let adoption = child.candidate.lock();
     if adoption.owned() {
         return Ok(());
@@ -189,7 +190,7 @@ pub(super) fn holds_body(snapshot: &BootChannels, channel: u64, session: Option<
         })
 }
 
-/// The transport rechecks the durable reservation under the same lock as the first key.
+/// The transport rechecks the durable reservation under the same fence as publication.
 pub(super) fn resume_fenced(channel: u64, session: Option<&str>, parent: Option<u64>) -> bool {
     !claude_fold::read_thread_resumes(channel).is_ok_and(|resumes| {
         !resumes.iter().any(|entry| {

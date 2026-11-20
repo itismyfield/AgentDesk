@@ -537,35 +537,14 @@ fn decide_with_snapshot(
         return Err(IdentityError::UnknownChannel);
     }
     // The body and its host share both state and sends.
-    // The inner None is a boot child whose parent has yet to resolve.
-    let judged = |candidate: &channel_policy::Candidate, thread: Option<Option<u64>>| match usage {
-        Use::Body => candidate.claim_body_from(
-            channel_id,
-            origin.unwrap_or_else(std::panic::Location::caller),
-            |state| {
-                if !state.owned()
-                    && (thread.is_some() || evidence.reserved)
-                    && (evidence.reserved
-                        || super::claude_thread::resume_fenced(
-                            channel_id,
-                            evidence.session,
-                            thread.flatten(),
-                        ))
-                    && !super::claude_thread::names_legacy_turn(
-                        channel_id,
-                        candidate,
-                        evidence.nonce,
-                        evidence.source,
-                    )
-                {
-                    return Err(IdentityError::ChildDeliveryHeld);
-                }
-                Ok(())
-            },
-        ),
+    let judged = |candidate: &channel_policy::Candidate| match usage {
+        Use::Body => match origin {
+            Some(origin) => candidate.claim_body_from(channel_id, origin),
+            None => candidate.claim_body(channel_id),
+        },
         Use::Peek => {
             let state = candidate.peek();
-            Ok(BodyClaimed {
+            BodyClaimed {
                 owned: state.owned(),
                 send: None,
                 reason: if state == channel_policy::Adoption::Pending {
@@ -573,8 +552,31 @@ fn decide_with_snapshot(
                 } else {
                     state.claim_reason()
                 },
-            })
+            }
         }
+    };
+    // The inner None is a boot child whose parent has yet to resolve.
+    let fenced = |candidate: &channel_policy::Candidate, thread: Option<Option<u64>>| {
+        let fence = (matches!(usage, Use::Body) && (thread.is_some() || evidence.reserved))
+            .then(|| candidate.lock_thread_body());
+        if fence.is_some()
+            && !candidate.peek().owned()
+            && (evidence.reserved
+                || super::claude_thread::resume_fenced(
+                    channel_id,
+                    evidence.session,
+                    thread.flatten(),
+                ))
+            && !super::claude_thread::names_legacy_turn(
+                channel_id,
+                candidate,
+                evidence.nonce,
+                evidence.source,
+            )
+        {
+            return Err(IdentityError::ChildDeliveryHeld);
+        }
+        Ok(judged(candidate))
     };
     // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
     if let Some(reserved) = snapshot.unresolved_child(channel_id) {
@@ -583,7 +585,7 @@ fn decide_with_snapshot(
         {
             return Err(IdentityError::ChildDeliveryHeld);
         }
-        return judged(&reserved, Some(None));
+        return fenced(&reserved, Some(None));
     }
     // The parent selects the policy. A known thread offers the kind of its own execution.
     let child = match snapshot.child(channel_id) {
@@ -659,12 +661,12 @@ fn decide_with_snapshot(
     if let Some(child) = child {
         child.body_owner().ok_or(IdentityError::ChildHeld)?;
         let parent = (child.kind == RuntimeHandoffKind::ClaudeTui).then_some(Some(child.parent));
-        return judged(&child.candidate, parent);
+        return fenced(&child.candidate, parent);
     }
     let Some(candidate) = snapshot.candidate(channel_id) else {
         return Ok(legacy(ClaimReason::NoCandidate));
     };
-    judged(candidate, None)
+    fenced(candidate, None)
 }
 
 #[cfg(test)]
