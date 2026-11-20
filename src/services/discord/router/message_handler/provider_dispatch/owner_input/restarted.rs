@@ -315,4 +315,4 @@ pub(super) fn guard(
 
 #[cfg(test)]
 #[path = "restarted_tests.rs"]
-mod tests;
+pub(super) mod tests;

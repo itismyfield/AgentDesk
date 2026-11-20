@@ -662,7 +662,7 @@ fn conflicting_registry_refuses_publication_pg() {
     );
 }
 
-fn snapshot_labels(fx: &Fixture, labels: &[String]) {
+pub(in crate::services::discord) fn snapshot_labels(fx: &Fixture, labels: &[String]) {
     let workspaces: Vec<_> = labels
         .iter()
         .enumerate()
@@ -681,7 +681,7 @@ fn snapshot_labels(fx: &Fixture, labels: &[String]) {
     );
 }
 
-fn named_registry(fx: &Fixture) -> impl Drop + use<> {
+pub(in crate::services::discord) fn named_registry(fx: &Fixture) -> impl Drop + use<> {
     let at = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
     let endpoint = crate::services::session_host::HerdrEndpoint::new(
         NODE,

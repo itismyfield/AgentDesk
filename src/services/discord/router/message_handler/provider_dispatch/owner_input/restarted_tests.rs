@@ -24,7 +24,7 @@ fn item(message: u64, text: &str) -> PendingQueueItem {
     .unwrap()
 }
 
-async fn claimed(
+pub(in super::super) async fn claimed(
     fixture: &Fixture,
 ) -> (
     OwnerTurn,

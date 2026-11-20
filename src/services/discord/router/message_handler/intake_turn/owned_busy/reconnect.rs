@@ -117,3 +117,82 @@ impl OwnerTurn {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::recovery_engine::herdr_reattach::tests::{
+        CHANNEL, named_registry, run, snapshot_labels,
+    };
+    use crate::services::herdr_launch::retire::{self, RetireRefusal, Scope};
+
+    #[test]
+    fn live_named_pane_survives_unproven_retirement_after_registration_failed_pg() {
+        run(
+            ProviderKind::Claude,
+            "s2-unproven",
+            false,
+            |fixture, runtime| {
+                let _named = named_registry(&fixture);
+                snapshot_labels(
+                    &fixture,
+                    &[format!(
+                        "{}#{}",
+                        fixture.logical(),
+                        fixture.record.execution_nonce
+                    )],
+                );
+                runtime.block_on(async {
+                    let shared = &fixture.shared;
+                    let pool = shared.pg_pool.as_ref();
+                    let channel = ChannelId::new(CHANNEL);
+                    let key = Some(fixture.logical());
+                    let host = crate::services::turn_host::for_observation(
+                        pool,
+                        &shared.provider,
+                        CHANNEL,
+                        key,
+                    )
+                    .await;
+                    let TurnHost::Herdr(plan) = &host else {
+                        panic!("expected the observed local host")
+                    };
+                    let row = plan.row.as_ref().unwrap();
+                    assert!(matches!(
+                        retire::observed(pool.unwrap(), row, Scope::Missing).await,
+                        Err(RetireRefusal::Unproven(_))
+                    ));
+                    let (owner, _, _) =
+                        super::super::super::restarted::tests::claimed(&fixture).await;
+                    assert_eq!(owner.mailbox.has_active_turn().await, Ok(false));
+                    let original = owner.front().clone();
+                    let (owner, _) = owner
+                        .recover_or_hold(
+                            shared,
+                            (&shared.provider, channel, key, fixture.logical()),
+                            &host,
+                            None,
+                        )
+                        .await
+                        .expect("the live pane keeps the front in the ordinary input path");
+                    let owner = owner.expect("an idle pane returns the original to its submitter");
+                    assert!(owner.continues_herdr());
+                    assert_eq!(owner.front().0, original.0);
+                    assert_eq!(owner.front().1.message_id, original.1.message_id);
+                    assert_eq!(owner.front().1.text, original.1.text);
+                    assert_eq!(
+                        shared
+                            .tmux_watchers
+                            .owner_channel_for_tmux_session(fixture.logical()),
+                        Some(channel)
+                    );
+                    assert!(
+                        fixture.rig.sends().is_empty(),
+                        "the observation does not send the input"
+                    );
+                });
+                runtime.block_on(fixture.close());
+            },
+        );
+    }
+}
