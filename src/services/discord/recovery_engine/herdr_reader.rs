@@ -21,7 +21,9 @@ use crate::services::discord::herdr_terminate::root_replaced::{
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::discord::tui_prompt_relay::herdr_source::HerdrSourceAttach;
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
+use crate::services::session_host::{
+    HerdrPaneView, PaneProvider, PaneReading, ServerWitness, herdr_endpoints,
+};
 use crate::services::tui_prompt_dedupe::herdr_execution_listed;
 
 /// Reads the stored pane on the endpoint this node registered for it; it never lists, searches,
@@ -43,10 +45,14 @@ impl SocketHerdrReader {
         })
     }
 
-    pub(super) fn observe(&self, stored: &HostedExecution) -> (HerdrPaneReading, bool) {
-        let reading = self.view.read_execution();
-        let ended = self.view.ended(stored, &reading);
-        (self.evidence(reading), ended)
+    pub(super) fn observe(
+        &self,
+        stored: &HostedExecution,
+        ended: fn(&HerdrPaneView, &HostedExecution, &PaneReading) -> bool,
+    ) -> Option<(ServerWitness, HerdrPaneReading, bool)> {
+        let (witness, reading) = self.view.observe_execution()?;
+        let ended = ended(&self.view, stored, &reading);
+        Some((witness, self.evidence(reading), ended))
     }
 
     fn evidence(&self, reading: PaneReading) -> HerdrPaneReading {
@@ -494,7 +500,9 @@ fn reconnect_unless_pending(
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
         let attached = match reconnect_source(pool, row, None).await {
             RestartAttachment::Legacy(attached) => attached,
-            RestartAttachment::Verified(VerifiedReattach::Live) => {
+            RestartAttachment::Verified(
+                VerifiedReattach::Live | VerifiedReattach::AwaitingClear,
+            ) => {
                 return (Reconnect::Published, None);
             }
             RestartAttachment::Verified(VerifiedReattach::Ended | VerifiedReattach::Held) => {

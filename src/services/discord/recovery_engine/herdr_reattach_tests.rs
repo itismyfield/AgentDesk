@@ -1,6 +1,10 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
@@ -12,10 +16,14 @@ use crate::services::discord::{
     recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, NODE, PANE, SHELL};
+use crate::services::session_host::herdr_socket_rig_tests::{
+    HerdrRequest, HerdrRig, NODE, PANE, PROVIDER, SHELL,
+};
 use crate::services::tmux_common::session_temp_path;
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
-use crate::services::tui_prompt_dedupe::binding_events::{self, CauseSource, Proposal, SourceId};
+use crate::services::tui_prompt_dedupe::binding_events::{
+    self, CauseSource, HookSignal, Proposal, SourceId,
+};
 use crate::services::tui_prompt_dedupe::{self as dedupe, runtime_binding_for_tmux_session};
 
 const CHANNEL: u64 = 82801;
@@ -185,53 +193,61 @@ impl Fixture {
     async fn verify(&self, row: &HostedObservation) -> VerifiedReattach {
         let lease =
             SessionTransitionLease::try_acquire(&self.shared, ChannelId::new(CHANNEL)).unwrap();
+        let mut checks = Verification::default();
         match std::env::var("ADK_HERDR_REATTACH_TEST_MODE").as_deref() {
-            Ok("before") => match reconnect_source(&self.pool, row, None).await {
-                RestartAttachment::Legacy(HerdrSourceAttach::Published { .. }) => {
-                    VerifiedReattach::Live
-                }
-                _ => VerifiedReattach::Held,
-            },
-            Ok("always-live") => {
-                verify_with(&self.shared, &self.pool, &lease, row, |_| true, stale_nonce).await
+            Ok("before") => {
+                return match reconnect_source(&self.pool, row, None).await {
+                    RestartAttachment::Legacy(HerdrSourceAttach::Published { .. }) => {
+                        VerifiedReattach::Live
+                    }
+                    _ => VerifiedReattach::Held,
+                };
             }
-            Ok("never-live") => {
-                verify_with(
-                    &self.shared,
-                    &self.pool,
-                    &lease,
-                    row,
-                    |_| false,
-                    stale_nonce,
-                )
-                .await
-            }
+            Ok("always-live") => checks.live = |_| true,
+            Ok("never-live") => checks.live = |_| false,
             Ok("ignore-nonce") => {
-                verify_with(
-                    &self.shared,
+                checks.stale = |_, marker| matches!(marker, SpawnNonceMarker::Unreadable)
+            }
+            Ok("shell-is-ended") => checks.ended = HerdrPaneView::ended,
+            Ok("omit-row") => checks.omit = Some("row"),
+            Ok("omit-epoch") => checks.omit = Some("epoch"),
+            Ok("omit-last-pane") => checks.omit = Some("last-pane"),
+            Err(std::env::VarError::NotPresent) => {
+                let RestartAttachment::Verified(result) = reconnect_source(
                     &self.pool,
-                    &lease,
                     row,
-                    HostReconcile::admits_reconnect,
-                    |_, marker| matches!(marker, SpawnNonceMarker::Unreadable),
+                    Some(VerifiedTarget {
+                        shared: &self.shared,
+                        transition: &lease,
+                    }),
                 )
                 .await
+                else {
+                    panic!("verified target did not select its path")
+                };
+                return result;
             }
-            Err(std::env::VarError::NotPresent) => match reconnect_source(
-                &self.pool,
-                row,
-                Some(VerifiedTarget {
-                    shared: &self.shared,
-                    transition: &lease,
-                }),
-            )
-            .await
-            {
-                RestartAttachment::Verified(result) => result,
-                RestartAttachment::Legacy(_) => panic!("verified target did not select its path"),
-            },
             mode => panic!("unknown reattach test mode: {mode:?}"),
         }
+        verify_with(&self.shared, &self.pool, &lease, row, checks).await
+    }
+
+    fn assert_unpublished(&self) {
+        assert_eq!(self.owner(), None);
+        assert!(dedupe::owner_channel_for_tmux_session(self.logical()).is_none());
+        assert!(runtime_binding_for_tmux_session(self.logical()).is_none());
+        assert!(self.rig.sends().is_empty());
+    }
+
+    fn on_first_process_read(&self, action: impl Fn() + Send + Sync + 'static) {
+        let done = AtomicBool::new(false);
+        self.rig.on_reply(move |call| {
+            if matches!(call.request, HerdrRequest::PaneProcessInfo { .. })
+                && !done.swap(true, Ordering::SeqCst)
+            {
+                action();
+            }
+        });
     }
 
     async fn save(&self, record: &HostedExecution) -> HostedObservation {
@@ -300,6 +316,8 @@ fn run(
 
 fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
     run(provider, tag, busy, |fx, rt| {
+        use crate::services::discord::recovery_engine::herdr_reader::ATTACHES;
+        ATTACHES.set(0);
         if boot_first {
             fx.legacy_boot(rt);
             assert_eq!(
@@ -309,9 +327,6 @@ fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
             );
         }
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
-        if !boot_first {
-            fx.legacy_boot(rt);
-        }
         assert_eq!(fx.owner(), Some(ChannelId::new(CHANNEL)));
         let binding = runtime_binding_for_tmux_session(fx.logical()).unwrap();
         assert_eq!(
@@ -319,10 +334,27 @@ fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
             Some(fx.source.session_id.as_str())
         );
         assert_eq!(binding.output_path, fx.source.path.to_str().unwrap());
+        use std::io::Write;
+        let mut transcript = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fx.source.path)
+            .unwrap();
+        writeln!(transcript, "{{}}").unwrap();
+        let advanced = transcript.metadata().unwrap().len();
+        assert!(advanced > binding.last_offset);
+        assert!(dedupe::advance_tmux_runtime_binding_offset(
+            fx.logical(),
+            &binding.output_path,
+            advanced
+        ));
         let logs_before = binding_events::binding_events_since(CHANNEL, 0).unwrap();
+        if !boot_first {
+            fx.legacy_boot(rt);
+        }
+        assert_eq!(ATTACHES.get(), usize::from(boot_first));
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
         let after = runtime_binding_for_tmux_session(fx.logical()).unwrap();
-        assert_eq!(after.last_offset, binding.last_offset);
+        assert_eq!(after.last_offset, advanced);
         assert_eq!(
             binding_events::binding_events_since(CHANNEL, 0).unwrap(),
             logs_before
@@ -360,6 +392,9 @@ fn missing_and_exited_are_ended_without_retirement_pg() {
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Ended);
         fx.rig.show_panes(&[PANE]);
         fx.rig.foreground(&[SHELL]);
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
+        fx.assert_unpublished();
+        fx.rig.exists(PROVIDER, false);
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Ended);
         assert_eq!(rt.block_on(read_row(&fx.pool, fx.logical())), fx.row);
         assert_eq!(fx.owner(), None);
@@ -387,11 +422,25 @@ fn unknown_unplaced_and_replaced_execution_do_not_publish_pg() {
             .push_str("-other");
         let row = rt.block_on(fx.save(&wrong));
         assert_eq!(rt.block_on(fx.verify(&row)), VerifiedReattach::Held);
+        wrong = fx.record.clone();
         wrong.state = HostedState::Pending;
+        let row = rt.block_on(fx.save(&wrong));
+        assert_eq!(rt.block_on(fx.verify(&row)), VerifiedReattach::Held);
         wrong.location = None;
         wrong.expected = None;
         let row = rt.block_on(fx.save(&wrong));
         assert_eq!(rt.block_on(fx.verify(&row)), VerifiedReattach::Held);
+        let unknown = rt.block_on(async {
+            sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE id = $2")
+                .bind(serde_json::json!({"pane_id":PANE, "launch_nonce":NONCE}))
+                .bind(fx.row.session_id())
+                .execute(&fx.pool)
+                .await
+                .unwrap();
+            read_row(&fx.pool, fx.logical()).await
+        });
+        assert!(matches!(unknown.record, HostedRecord::Unknown(_)));
+        assert_eq!(rt.block_on(fx.verify(&unknown)), VerifiedReattach::Held);
         assert_eq!(fx.owner(), None);
         assert!(runtime_binding_for_tmux_session(fx.logical()).is_none());
         assert!(fx.rig.sends().is_empty());
@@ -433,29 +482,134 @@ fn changed_nonce_after_probe_and_stale_row_do_not_publish_pg() {
 }
 
 #[test]
-fn clear_during_the_probe_and_conflicting_registry_each_refuse_publication_pg() {
+fn database_only_successor_during_probe_refuses_publication_pg() {
+    run(ProviderKind::Claude, "db-race", false, |fx, rt| {
+        let marker = session_temp_path(fx.logical(), "spawn_nonce");
+        let mut successor = fx.record.clone();
+        successor.execution_nonce = SUCCESSOR.into();
+        successor.source_ref.execution_nonce = SUCCESSOR.into();
+        successor.expected = Some(fx.rig.expected(SUCCESSOR));
+        let pool = fx.pool.clone();
+        let row_id = fx.row.session_id();
+        let handle = rt.handle().clone();
+        fx.on_first_process_read(move || {
+            handle
+                .block_on(
+                    sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE id = $2")
+                        .bind(serde_json::to_value(&successor).unwrap())
+                        .bind(row_id)
+                        .execute(&pool),
+                )
+                .unwrap();
+        });
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), NONCE);
+        assert_ne!(rt.block_on(read_row(&fx.pool, fx.logical())), fx.row);
+        fx.assert_unpublished();
+        rt.block_on(fx.close());
+    });
+}
+
+#[test]
+fn finished_clear_during_probe_refuses_publication_pg() {
+    run(ProviderKind::Claude, "epoch-race", false, |fx, rt| {
+        let token = fx.record.owner.discord_token_hash.clone();
+        fx.on_first_process_read(move || {
+            drop(clear_epoch::begin_clear("claude", &token, CHANNEL));
+        });
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
+        fx.assert_unpublished();
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
+        rt.block_on(fx.close());
+    });
+}
+
+#[test]
+fn pane_disappearing_after_first_observation_does_not_publish_pg() {
+    run(ProviderKind::Claude, "pane-race", false, |fx, rt| {
+        let present = serde_json::json!({"type":"session_snapshot", "snapshot":{
+            "version":"0.9.3", "protocol":22, "workspaces":[], "tabs":[], "layouts":[], "agents":[],
+            "panes":[{"pane_id":PANE, "terminal_id":"t1", "workspace_id":"w1",
+                "tab_id":"w1:1", "focused":false, "agent_status":"idle", "revision":7}]}});
+        let mut missing = present.clone();
+        missing["snapshot"]["panes"] = serde_json::json!([]);
+        fx.rig
+            .answer_sequence("session.snapshot", [present, missing]);
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
+        fx.assert_unpublished();
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Ended);
+        rt.block_on(fx.close());
+    });
+}
+
+#[test]
+fn same_nonce_clear_preserves_input_admission_without_old_binding_pg() {
+    run(ProviderKind::Claude, "awaited-clear", false, |fx, rt| {
+        let new_session = uuid::Uuid::new_v4().to_string();
+        let path = fx
+            .source
+            .path
+            .with_file_name(format!("{new_session}.jsonl"));
+        let hook =
+            HookSignal::from_payload("session_start", &serde_json::json!({"source":"clear"}));
+        let proposal = Proposal {
+            channel_id: CHANNEL,
+            provider: "claude",
+            tmux_session: fx.logical(),
+            session_id: Some(&new_session),
+            path: path.to_str().unwrap(),
+            replaced: None,
+            cause: CauseSource::Hook(hook.cause()),
+            hook: Some(&hook),
+        };
+        binding_events::record_pending(&proposal).unwrap();
+        assert_eq!(
+            rt.block_on(fx.verify(&fx.row)),
+            VerifiedReattach::AwaitingClear
+        );
+        assert_eq!(fx.owner(), Some(ChannelId::new(CHANNEL)));
+        assert!(runtime_binding_for_tmux_session(fx.logical()).is_none());
+        assert!(dedupe::herdr_claim_admission(fx.logical(), true).is_ok());
+        assert!(fx.rig.sends().is_empty());
+        rt.block_on(fx.close());
+    });
+}
+
+#[test]
+fn cold_codex_scan_leaves_other_registry_writers_unblocked_pg() {
+    use crate::services::discord::tui_prompt_relay::herdr_source::BEFORE_CODEX_RESTART_SCAN;
+    run(ProviderKind::Codex, "codex-scan", false, |fx, rt| {
+        let shared = fx.shared.clone();
+        let channel = ChannelId::new(CHANNEL + 1);
+        let (scanning, begin_write) = std::sync::mpsc::sync_channel(0);
+        let (wrote, write_done) = std::sync::mpsc::sync_channel(1);
+        let writer = std::thread::spawn(move || {
+            begin_write.recv_timeout(Duration::from_secs(5)).unwrap();
+            let published = shared
+                .tmux_watchers
+                .restore_owner_channel_for_tmux_session("codex-other-restart-scan", channel);
+            wrote.send(published).unwrap();
+        });
+        BEFORE_CODEX_RESTART_SCAN.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                scanning.send(()).unwrap();
+                assert!(write_done.recv_timeout(Duration::from_secs(5)).unwrap());
+            })))
+        });
+        assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Live);
+        writer.join().unwrap();
+        assert_eq!(fx.owner(), Some(ChannelId::new(CHANNEL)));
+        rt.block_on(fx.close());
+    });
+}
+
+#[test]
+fn conflicting_registry_refuses_publication_pg() {
     run(
         ProviderKind::Claude,
         "publication-fence",
         false,
         |fx, rt| {
-            let clear = Arc::new(std::sync::Mutex::new(None));
-            let during_probe = clear.clone();
-            let token = fx.record.owner.discord_token_hash.clone();
-            fx.rig.on_reply(move |call| {
-                use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
-                if matches!(call.request, HerdrRequest::PaneProcessInfo { .. }) {
-                    let mut guard = during_probe.lock().unwrap();
-                    guard
-                        .get_or_insert_with(|| clear_epoch::begin_clear("claude", &token, CHANNEL));
-                }
-            });
-            assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
-            assert_eq!(fx.owner(), None);
-            assert!(runtime_binding_for_tmux_session(fx.logical()).is_none());
-            fx.rig.on_reply(|_| {});
-            drop(clear.lock().unwrap().take());
-
             let foreign = ChannelId::new(CHANNEL + 1);
             assert!(
                 fx.shared

@@ -4254,6 +4254,7 @@ src/
 │   │   │   ├── missing_marker_rig_tests.rs
 │   │   │   ├── notice_fence_tests.rs
 │   │   │   ├── policy_tests.rs
+│   │   │   ├── restart_read.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
 │   │   ├── tmux_host/
