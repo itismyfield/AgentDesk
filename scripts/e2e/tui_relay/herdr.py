@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, channel_reset, clear_fresh_session, health_readiness, http_auth, known_gap, restart_guard
+from . import assertions, channel_reset, clear_fresh_session, health_readiness, http_auth, known_gap, preflight_evidence, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -222,10 +222,12 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                 "readiness": {"degraded_reason_waiver": ("unused" if waivable else "withheld") if operator else "none",
                               "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": [],
                               "ignored_degraded_reasons_unattributed": []}}
+    stage, status, payload = "health_read", None, None
     try:
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
         status, payload = driver._read_api_json(args.base_url, "/api/health/detail", timeout=5)
+        stage = "detail_readiness"
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
@@ -239,11 +241,13 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                          ignored_degraded_reasons_unattributed=unattributed(ignored))
             if any(health_readiness.unknown_family(r) for r in ignored):
                 evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
+        stage = "herdr_readiness"
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
         clean_turn(block)
         reconnect_counts(block)
+        stage = "herdr_status"
         proc = subprocess.run([getattr(args, "herdr_status_bin", "agentdesk"), "herdr", "status"],
                               capture_output=True, text=True, check=True, timeout=30)
         current = json.loads(proc.stdout)
@@ -257,6 +261,9 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     except Exception as error:
         evidence["readiness"]["error"] = str(error)
         error.herdr_observation = evidence
+        if getattr(args, "capture_preflight_failure", False):
+            error.herdr_preflight_failure = preflight_evidence.capture(stage, payload, channel=args.channel_id,
+                                                                      http_status=status)
         raise
 
 

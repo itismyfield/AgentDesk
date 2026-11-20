@@ -17,6 +17,7 @@ import sys
 
 from . import budget, channel_lock, plan, release_host, runner, summary, turn_gate, usage
 from .store import write_json
+from ..tui_relay import preflight_evidence
 
 REPO = Path(__file__).resolve().parents[3]
 SCENARIOS = REPO / "tests/e2e/tui_relay/scenarios"
@@ -152,12 +153,17 @@ def run(args, config, spawn=subprocess.run):
     if (not markers or type(limit) is not int or limit <= 0 or remaining["turns"] < len(markers)
             or remaining["tokens"] < len(markers) * limit or remaining["time_s"] < cell["deadline_s"]):
         return refuse("BUDGET_TOO_SMALL_FOR_SCENARIO")
-    relay = [sys.executable, str(REPO / "scripts/e2e/post_deploy_turn_smoke.py"), "preflight",
+    relay = [sys.executable, str(REPO / "scripts/e2e/post_deploy_turn_smoke.py"), "preflight", "--failure-json",
              "--base-url", host["base_url"], "--cell", harness_cell, "--channel-id", channel,
              "--queue-runtime-root", host["runtime_root"], *host_args]
     idle = spawn(relay, cwd=REPO, capture_output=True, text=True)
     if idle.returncode != 0:
-        return refuse("CELL_NOT_IDLE: " + (idle.stdout or "").strip()[:200])
+        try:
+            failure = preflight_evidence.bounded(json.loads(idle.stdout or ""))
+        except ValueError:
+            failure = None
+        report["preflight_failure"] = failure or {"stage": "preflight"}
+        return refuse("CELL_NOT_IDLE: " + report["preflight_failure"]["stage"])
     out = Path(config["state_dir"]) / "outputs" / "e2e" / args.run_id / f"{args.scenario}.{args.cell}"
     needs_log = seen != "herdr"
     try:

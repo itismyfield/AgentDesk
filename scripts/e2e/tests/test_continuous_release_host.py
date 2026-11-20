@@ -30,6 +30,11 @@ RUNNING = {"channel": "20", "provider": "claude", "state": "bound", "input_hold"
 RESOURCE = {"guild": "1", "parents": ["20", "30"], "bot_set": ["4"]}
 CONTRACT = {"busy_basis": None, "placement": None, "operation": "clear_and_turns", "occurrence": 1}
 SESSION = "AgentDesk-claude-adk-claude-tui-2-e2e"
+TARGET_RETENTION = "tui_o:reader_retention_stalled:20"
+
+
+def degraded_detail(*reasons):
+    return {"status": "degraded", "degraded_reasons": list(reasons)}
 
 
 def lines(path, *rows):
@@ -169,7 +174,7 @@ class Posted:
 
 class Driver(Fixture):
     def drive(self, budget_left=None, lease=True, harness=None, cell="claude-herdr", answers=(), prompts=3,
-              scenario="E-50", stray=None, host="herdr", herdr=None, cli=True):
+              scenario="E-50", stray=None, host="herdr", herdr=None, cli=True, detail_fields=None):
         """Run the driver with the real smoke preflight and a fake harness that keeps going after a refused input.
 
         `answers[i]` makes turn i 'silent' or 'huge'; `stray` is an extra prompt after the first turn; `!clear`
@@ -177,7 +182,8 @@ class Driver(Fixture):
         """
         calls, posted, smoke = [], Posted(), smoke_driver._smoke()[0]  # noqa: SLF001
         discord, driver, self.writer = smoke.cell_driver.discord, smoke.cell_driver, None
-        session, detail = [self.root / "transcript.jsonl"], {**DETAIL, "herdr": {**HERDR, **(herdr or {})}}
+        session = [self.root / "transcript.jsonl"]
+        detail = {**DETAIL, "herdr": {**HERDR, **(herdr or {})}, **(detail_fields or {})}
         self.config.pop("manifest", None)
         if host == "tmux":
             manifest = plan.load()
@@ -245,6 +251,20 @@ class Driver(Fixture):
             report = smoke_driver.run(args, self.config, spawn=spawn)
         held.close()
         return report, [text for text in posted.sent if not text.startswith("!")], calls
+
+    def test_preflight_refusal_furnishes_bounded_attributed_evidence(self):
+        report, prompts, _ = self.drive(detail_fields=degraded_detail(
+            TARGET_RETENTION, "relay_verdict_unknown_antigravity_30", "opaque:_private_fixture"))
+        self.assertEqual((report["status"], prompts, report["native_turns"]), ("UNEVALUABLE", [], 0))
+        witness = report.get("preflight_failure", {})
+        self.assertEqual({k: witness.get(k) for k in ("stage", "http_status", "status", "fully_recovered")},
+                         {"stage": "detail_readiness", "http_status": 200, "status": "degraded", "fully_recovered": True})
+        self.assertCountEqual(witness["reasons"], [
+            {"code": "tui_o:reader_retention_stalled", "scope": "target"},
+            {"code": "relay_verdict_unknown", "scope": "foreign"},
+            {"code": "unclassified", "scope": "unknown"},
+        ])
+        self.assertNotIn("_private_fixture", json.dumps(report))
 
     def test_passing_scenario_reports_turns_tokens_identity_and_the_host_the_server_admits(self):
         stdout = os.fstat(1)
