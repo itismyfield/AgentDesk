@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::db::{
     prompt_manifests, provider_session_prompts, provider_session_prompts::SessionPrompt,
 };
+use crate::domain::memory::AnchorRecord;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::{
     discord::prompt_builder::audit, memory::backend_state, provider::ProviderKind,
@@ -20,6 +21,23 @@ mod anchors;
 mod projection;
 #[cfg(test)]
 mod tests;
+
+/// A saved session copy whose structured anchors were decoded once.
+pub(super) struct Snapshot {
+    saved: SessionPrompt,
+    anchors: Option<Vec<AnchorRecord>>,
+}
+
+impl Snapshot {
+    fn decode(saved: SessionPrompt) -> Result<Self, serde_json::Error> {
+        let anchors = saved
+            .anchors
+            .as_ref()
+            .map(|json| Vec::<AnchorRecord>::deserialize(&json.0))
+            .transpose()?;
+        Ok(Self { saved, anchors })
+    }
+}
 
 #[derive(Deserialize)]
 pub(super) struct AuditQuery {
@@ -86,7 +104,7 @@ async fn load_snapshot(
     provider: &ProviderKind,
     channel: u64,
     current: Option<&str>,
-) -> AppResult<Option<SessionPrompt>> {
+) -> AppResult<Option<Snapshot>> {
     let channel = channel.to_string();
     match current {
         Some(session) => {
@@ -94,6 +112,9 @@ async fn load_snapshot(
         }
         None => provider_session_prompts::fetch_latest(pool, provider.as_str(), &channel).await,
     }
+    .map_err(|_| database_error())?
+    .map(Snapshot::decode)
+    .transpose()
     .map_err(|_| database_error())
 }
 
@@ -105,6 +126,7 @@ pub(super) async fn prompt(
     let (provider, channel, current) = binding(&state, &id, query).await?;
     let pool = pool(&state)?;
     let snapshot = load_snapshot(pool, &provider, channel, current.as_deref()).await?;
+    let snapshot = snapshot.map(|snapshot| snapshot.saved);
     let manifest = match &snapshot {
         Some(snapshot) => {
             prompt_manifests::fetch_prompt_manifest(Some(pool), &snapshot.source_turn_id)

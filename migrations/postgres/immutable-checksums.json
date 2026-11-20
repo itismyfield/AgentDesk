@@ -957,9 +957,9 @@
       "version": 197
     },
     {
-      "path": "migrations/postgres/0198_provider_session_prompt_anchors.sql",
+      "path": "migrations/postgres/0199_provider_session_prompt_anchors.sql",
       "sha256": "f84a7d469aa85da2d3a6cc2229f4d2d633838aa80fb9bf85fc11bf5e02a28a28",
-      "version": 198
+      "version": 199
     }
   ],
   "version": 1

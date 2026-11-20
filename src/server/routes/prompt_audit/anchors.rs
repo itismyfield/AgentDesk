@@ -6,7 +6,7 @@ use crate::domain::memory::{ANCHOR_CONTEXT_END, AnchorRecord};
 use crate::services::discord::prompt_builder::{audit::CanonPrompt, system_prompt_audit::redact};
 use crate::services::{memory::ExternalMemoryBackendState, provider::ProviderKind};
 
-use super::projection::anchor_context;
+use super::{Snapshot, projection::anchor_context};
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +91,7 @@ pub(super) fn response(
     id: &str,
     provider: &ProviderKind,
     current: Option<String>,
-    snapshot: Option<&SessionPrompt>,
+    snapshot: Option<&Snapshot>,
     health: Option<ExternalMemoryBackendState>,
     canon: &[CanonPrompt],
 ) -> AnchorResponse {
@@ -101,13 +101,14 @@ pub(super) fn response(
         (None, _) => SnapshotSource::Unavailable,
     };
     let records = snapshot
-        .map(|saved| {
-            saved
+        .map(|snapshot| {
+            snapshot
                 .anchors
-                .as_ref()
-                .map_or_else(|| legacy_anchors(saved), |records| records.0.clone())
+                .clone()
+                .unwrap_or_else(|| legacy_anchors(&snapshot.saved))
         })
         .unwrap_or_default();
+    let snapshot = snapshot.map(|snapshot| &snapshot.saved);
     let normalized: Vec<_> = records
         .iter()
         .map(|record| normalized(&record.content))

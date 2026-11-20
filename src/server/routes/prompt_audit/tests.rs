@@ -31,7 +31,7 @@ fn assert_same_redaction(body: &[u8], saved: &SessionPrompt) {
             assert!(expected.contains(section["text"].as_str().unwrap()));
         }
     } else {
-        let records = &saved.anchors.as_ref().unwrap().0;
+        let records = Snapshot::decode(saved.clone()).unwrap().anchors.unwrap();
         let anchors = response["anchors"].as_array().unwrap();
         assert_eq!(anchors.len(), records.len());
         for (anchor, record) in anchors.iter().zip(records) {
@@ -55,22 +55,25 @@ fn snapshot() -> SessionPrompt {
             "Role guidance.\n\n[Review Rules]\nTest the result.\n\n{CREDENTIALS}\n[Memento anchor context]\nPolicy\n\n[ANCHOR MEMORY]\n- Reuse canon guidance.\n- password=fixture-anchor-password\n\n[End Memento anchor context]",
         ),
         anchor_count: 2,
-        anchors: Some(sqlx::types::Json(vec![
-            AnchorRecord {
-                id: Some("frag-fixture".into()),
-                kind: Some("procedure".into()),
-                scope: Some("example-project".into()),
-                limit: Some(300),
-                content: "Reuse canon guidance.".into(),
-            },
-            AnchorRecord {
-                id: Some("frag-fixture-second".into()),
-                kind: Some("decision".into()),
-                scope: None,
-                limit: None,
-                content: "password=fixture-anchor-password".into(),
-            },
-        ])),
+        anchors: Some(sqlx::types::Json(
+            to_value(vec![
+                AnchorRecord {
+                    id: Some("frag-fixture".into()),
+                    kind: Some("procedure".into()),
+                    scope: Some("example-project".into()),
+                    limit: Some(300),
+                    content: "Reuse canon guidance.".into(),
+                },
+                AnchorRecord {
+                    id: Some("frag-fixture-second".into()),
+                    kind: Some("decision".into()),
+                    scope: None,
+                    limit: None,
+                    content: "password=fixture-anchor-password".into(),
+                },
+            ])
+            .unwrap(),
+        )),
     }
 }
 
@@ -94,7 +97,7 @@ fn prompt_audit_disconnected_memento_keeps_structured_session_copy() {
         "audit-fixture",
         &ProviderKind::Claude,
         Some("fixture-session".into()),
-        Some(&saved),
+        Some(&Snapshot::decode(saved.clone()).unwrap()),
         Some(health),
         &[canon],
     ))
@@ -130,7 +133,7 @@ fn prompt_audit_legacy_session_copy_preserves_multiline_anchor_without_guessing_
         "audit-fixture",
         &ProviderKind::Claude,
         None,
-        Some(&saved),
+        Some(&Snapshot::decode(saved.clone()).unwrap()),
         None,
         &[],
     ))
@@ -327,7 +330,7 @@ async fn prompt_audit_http_reuses_system_prompt_redaction_and_checks_binding_pg(
     latest.system_prompt = latest
         .system_prompt
         .replace("fixture-token-value", "fixture-latest-token");
-    latest.anchors.as_mut().unwrap()[1].content = "password=fixture-latest-password".into();
+    latest.anchors.as_mut().unwrap().0[1]["content"] = json!("password=fixture-latest-password");
     provider_session_prompts::save(&pool, &latest)
         .await
         .unwrap();
@@ -343,8 +346,10 @@ async fn prompt_audit_http_reuses_system_prompt_redaction_and_checks_binding_pg(
         .execute(&pool)
         .await
         .unwrap();
-    let (status, _) = get(&router, anchor_uri, true).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    for path in [uri, anchor_uri] {
+        let (status, _) = get(&router, path, true).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+    }
 
     drop(router);
     pool.close().await;

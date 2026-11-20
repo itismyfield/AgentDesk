@@ -43,7 +43,7 @@ fn system_prompt_capture_joins_success_and_native_id_in_either_order_once() {
         assert_eq!(saved.system_prompt, "actual launch text");
         assert_eq!(saved.provider_session_id, "native-session");
         assert_eq!(saved.anchor_count, 2);
-        assert_eq!(saved.anchors.unwrap()[0].content, "anchor text");
+        assert_eq!(saved.anchors.unwrap().0[0]["content"], "anchor text");
         assert!(capture.take_ready().is_none());
     }
 }
