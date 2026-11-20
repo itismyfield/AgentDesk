@@ -456,66 +456,57 @@ fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
     });
 }
 
-// A live screen decides when the transcript lags or cannot be read: a tool that returned at once
-// leaves a user record at the tail, and a turn longer than the tail read has no identity. An idle
-// screen, a spinner without the interrupt footer and an ended transcript still get no Escape.
+// A live screen decides when the transcript lags (a tool that returned at once) or names no turn;
+// an idle screen, a bare spinner on an unread turn and an ended transcript still get no Escape.
 #[test]
 fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript() {
-    let code_mode =
+    let live =
         include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.328-code-mode-tool.txt");
     let footer = include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.311-c2-busy.txt");
-    assert_eq!(
-        claude_tui_stop_pane_evidence(code_mode),
-        (true, true, false)
-    );
+    assert_eq!(claude_tui_stop_pane_evidence(live), (true, true, false));
     let unread = HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved)).reply();
+    let reply =
+        |blocks: serde_json::Value| json!({"type":"assistant","message":{"content":blocks}});
     let returned = [
-        json!({"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"REPL","input":{}}],"stop_reason":"tool_use"}}),
-        json!({"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"started"}]}}),
+        reply(json!([{"type":"tool_use","id":"t1","name":"REPL","input":{}}])),
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"started"}]}}),
     ];
-    let long = [
-        json!({"type":"assistant","message":{"content":[{"type":"text","text":"x".repeat(300 * 1024)}]}}),
-    ];
+    let long = [reply(
+        json!([{"type":"text","text":"x".repeat(300 * 1024)}]),
+    )];
     let ended = [
         long[0].clone(),
         json!({"type":"system","subtype":"turn_duration"}),
     ];
     with_pool(|pool, root, runtime| {
         let rows: [(&str, &str, &[serde_json::Value], &str, usize); 5] = [
+            ("returned tool, live", live, &returned, sent(), 1),
             (
-                "returned tool, live screen",
-                code_mode,
-                &returned,
-                sent(),
-                1,
-            ),
-            (
-                "returned tool, idle screen",
+                "returned tool, idle",
                 claude_capture!("idle"),
                 &returned,
                 idle(),
                 0,
             ),
-            ("unread turn, interrupt footer", footer, &long, sent(), 1),
+            ("unread, footer", footer, &long, sent(), 1),
             (
-                "unread turn, spinner only",
+                "unread, spinner",
                 claude_capture!("thinking"),
                 &long,
                 unread,
                 0,
             ),
-            ("unread turn, ended transcript", footer, &ended, unread, 0),
+            ("unread, ended", footer, &ended, unread, 0),
         ];
         let (mut observed, mut expected) = (Vec::new(), Vec::new());
         for (n, (name, screen, records, reply, escapes)) in rows.into_iter().enumerate() {
             let (logs, _capture) = capture_stop_events();
-            let n = 760 + n as u64;
-            let (text, sent_escapes, _) = stop_after(
+            let seen = stop_after(
                 pool,
                 root,
                 runtime,
                 ProviderKind::Claude,
-                n,
+                760 + n as u64,
                 screen,
                 records,
             );
@@ -523,7 +514,7 @@ fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript()
                 event.contains("herdr_stop_unobserved")
                     && event.contains(&format!("{:?}", "unread=\"turn_identity\""))
             });
-            observed.push((name, text, sent_escapes, named));
+            observed.push((name, seen.0, seen.1, named));
             expected.push((name, reply, escapes, reply == unread));
         }
         assert_eq!(observed, expected);

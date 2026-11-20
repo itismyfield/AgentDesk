@@ -791,9 +791,8 @@ fn deliver(
                         // Unread, the turn is live only on Claude's own interrupt footer, and
                         // never once the transcript's tail shows it ended.
                         None => {
-                            active
-                                && structured != Some(TuiTurnState::Idle)
-                                && screen_state::claude_footer::interrupt_offered(&screen)
+                            structured != Some(TuiTurnState::Idle)
+                                && super::claude_stop_pane::interrupt_offered(&screen)
                         }
                     };
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)

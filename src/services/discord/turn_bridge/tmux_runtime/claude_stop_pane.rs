@@ -55,6 +55,14 @@ pub(super) fn veto(pane: &str) -> bool {
         || screen::tmux_capture_indicates_claude_tui_interactive_modal(pane)
 }
 
+/// Claude's own `esc to interrupt` offer on a pane that is not ready: what an unread turn stops
+/// on. Spinner chrome over the painted composer is not enough without the turn's identity.
+pub(super) fn interrupt_offered(pane: &str) -> bool {
+    !veto(pane)
+        && screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
+        && pane.to_ascii_lowercase().contains("esc to interrupt")
+}
+
 pub(super) fn legacy_evidence(pane: &str) -> (bool, bool, bool) {
     use crate::services::tmux_common as screen;
     // Claude keeps its empty composer painted through generation and foreground tools, so spinner
