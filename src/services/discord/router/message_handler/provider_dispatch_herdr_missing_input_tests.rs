@@ -245,6 +245,23 @@ fn restarted_front(busy: bool, pathless: bool, thread_parent: Option<u64>) {
     let _admission = open_admission();
     let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
     let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let historical_reply = "reply produced before the pathless turn";
+    if pathless {
+        // The old response is already behind the fixture's delivered frontier when its writer starts.
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        append(
+            &started.path,
+            &[
+                json!({"type":"user","uuid":uuid(),"sessionId":started.session,"timestamp":timestamp,
+                "message":{"role":"user","content":"prompt preceding the pathless turn"}}),
+                json!({"type":"assistant","uuid":uuid(),"sessionId":started.session,
+                "timestamp":timestamp,"apiBlockIndex":0,
+                "message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":historical_reply}]}}),
+                json!({"type":"system","subtype":"turn_duration","sessionId":started.session,"timestamp":timestamp}),
+            ],
+        );
+    }
     let mut intake = match thread_parent {
         Some(parent) => Intake::new_thread(&fx, &started, parent),
         None => Intake::new(&fx, &started),
@@ -327,13 +344,6 @@ fn restarted_front(busy: bool, pathless: bool, thread_parent: Option<u64>) {
             .get_mut(&channel)
             .unwrap()
             .session_id = None;
-        let historical_reply = "reply produced before the pathless turn";
-        if pathless {
-            append(&started.path, &[json!({"type":"assistant","uuid":uuid(),"sessionId":started.session,
-                "timestamp":chrono::Utc::now().to_rfc3339(),"apiBlockIndex":0,
-                "message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
-                    "content":[{"type":"text","text":historical_reply}]}})]);
-        }
         let offset = std::fs::metadata(&started.path).unwrap().len();
         if busy {
             let old_prompt = "already running before restart";
