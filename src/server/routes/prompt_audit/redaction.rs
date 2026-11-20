@@ -159,7 +159,15 @@ pub(super) fn ranges(input: &str) -> Vec<Range<usize>> {
                     }
                 }
             } else {
-                if let Some(quote) = Quote::unclosed(value.as_bytes()) {
+                // A key opened inside quotes, as in 'X-Api-Key: ', lets the value close them.
+                let open = match Quote::unclosed(hit.get(0).unwrap().as_str().as_bytes()) {
+                    Some(quote) => match quote.close(value.as_bytes()) {
+                        Some(close) => Quote::unclosed(&value.as_bytes()[close..]),
+                        None => Some(quote),
+                    },
+                    None => Quote::unclosed(value.as_bytes()),
+                };
+                if let Some(quote) = open {
                     next.quotes[quote as usize] = Some(quote);
                 }
                 next.escaped |= value.ends_with('\\') && !value.contains(char::is_whitespace);

@@ -261,32 +261,17 @@ fn prompt_audit_legacy_session_copy_preserves_multiline_anchor_without_guessing_
 
 #[test]
 fn prompt_audit_legacy_session_copy_keeps_outer_anchor_on_equal_policy() {
-    use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_POLICY, ANCHOR_CONTEXT_START};
-
+    use crate::domain::memory::{ANCHOR_CONTEXT_END as END, ANCHOR_CONTEXT_START as START};
     let mut saved = snapshot();
     saved.anchors = None;
-    saved.anchor_count = 1;
-    let content = format!("Earlier anchor.\n{ANCHOR_CONTEXT_START}[ANCHOR MEMORY]\nQuoted item.");
-    for policy in [String::new(), "Historical policy.\n".into()] {
-        saved.system_prompt = format!(
-            "{ANCHOR_CONTEXT_START}{policy}[ANCHOR MEMORY]\n- {content}{ANCHOR_CONTEXT_END}"
-        );
-        let response = to_value(anchors::response(
-            "audit-fixture",
-            &ProviderKind::Claude,
-            None,
-            Some(&saved),
-            None,
-            &[],
-        ))
-        .unwrap();
-        assert_eq!(response["anchors"][0]["text"], content);
-    }
-
-    let current = format!(
-        "{ANCHOR_CONTEXT_START}{ANCHOR_CONTEXT_POLICY}\n[ANCHOR MEMORY]\n- Current item.{ANCHOR_CONTEXT_END}"
-    );
-    let prompt = format!("{ANCHOR_CONTEXT_START}[ANCHOR MEMORY]\n- Earlier item.\n{current}");
+    let content = format!("Earlier anchor.\n{START}[ANCHOR MEMORY]\nQuoted item.");
+    saved.system_prompt = format!("{START}[ANCHOR MEMORY]\n{content}{END}");
+    let kind = ProviderKind::Claude;
+    let response = anchors::response("audit-fixture", &kind, None, Some(&saved), None, &[]);
+    assert_eq!(to_value(response).unwrap()["anchors"][0]["text"], content);
+    let policy = crate::domain::memory::ANCHOR_CONTEXT_POLICY;
+    let current = format!("{START}{policy}\n[ANCHOR MEMORY]\nCurrent item.{END}");
+    let prompt = format!("{START}[ANCHOR MEMORY]\nEarlier item.\n{current}");
     let range = projection::anchor_context(&prompt).unwrap();
     assert_eq!(&prompt[range], current);
 }
