@@ -286,7 +286,7 @@ pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope,
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
-fn durable_directory(path: &Path) -> io::Result<()> {
+pub(super) fn durable_directory(path: &Path) -> io::Result<()> {
     if path.is_dir() {
         return Ok(());
     }
@@ -583,8 +583,8 @@ fn sweep(
         {
             continue;
         }
-        // Retirement cannot dispose verified delivery evidence before explicit disposition.
-        if ctx.provider == "codex" && ctx.source_policy.as_deref() == Some("verified") {
+        // Retired executions may still own delivery evidence.
+        if ctx.retains_delivery_context() {
             continue;
         }
         let presence = probe(&ctx.tmux_session);

@@ -6,6 +6,28 @@ pub(super) mod prepared;
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+type ThreadLaunchPolicy = fn(u64) -> Option<String>;
+pub(crate) enum ResumePane<'a> {
+    Cold,
+    BeforeKey {
+        nonce: Option<&'a str>,
+        warm: bool,
+        selected: bool,
+    },
+}
+
+type ReserveThreadResume =
+    fn(u64, &str, &str, &std::path::Path, ResumePane<'_>) -> Result<(), String>;
+static THREAD_WRITER_POLICY: std::sync::OnceLock<(ThreadLaunchPolicy, ReserveThreadResume)> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn install_thread_writer_policy(
+    launch: ThreadLaunchPolicy,
+    reserve: ReserveThreadResume,
+) {
+    let _ = THREAD_WRITER_POLICY.set((launch, reserve));
+}
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -13,7 +35,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
     working_dir: &str,
     working_dir_path: &std::path::Path,
-    resolved_session_id: &str,
+    (resolved_session_id, transcript): (&str, Option<&std::path::Path>),
     system_prompt: Option<&str>,
     launch: crate::services::claude_tui::session::ClaudeTuiLaunchSettings<'_>,
     hook_endpoint: String,
@@ -52,6 +74,16 @@ pub(super) fn prepare_and_create_claude_tui_session(
     fence.validate_tmux_publisher(tmux_session_name)?;
     if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
+    }
+    if resume && let Some((channel, reserve)) = thread_resume_for(channel_id) {
+        let path = transcript.ok_or("missing resolved Claude thread transcript")?;
+        reserve(
+            channel,
+            tmux_session_name,
+            resolved_session_id,
+            path,
+            ResumePane::Cold,
+        )?;
     }
     let auth = crate::services::tmux_common::AuthMarkers::read(tmux_session_name);
     crate::services::tmux_common::cleanup_session_temp_files_under_fence(
@@ -123,6 +155,46 @@ pub(super) fn prepare_and_create_claude_tui_session(
     }
     restore.0 = None;
     Ok((owner_path, incarnation, fence))
+}
+
+fn thread_resume_for(channel: Option<u64>) -> Option<(u64, ReserveThreadResume)> {
+    let channel = channel?;
+    let (launch, reserve) = THREAD_WRITER_POLICY.get()?;
+    launch(channel).map(|_| (channel, *reserve))
+}
+
+pub(super) fn record_locked_turn(tmux: &str) {
+    debug_log(&format!("Claude TUI session turn lock acquired: {tmux}"));
+}
+
+pub(crate) fn reserve_thread_body_before_key(
+    channel: Option<u64>,
+    session: &str,
+    nonce: Option<&str>,
+    native: &str,
+    path: &std::path::Path,
+    warm: bool,
+) -> Result<(), String> {
+    let channel = channel
+        .or_else(|| crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(session));
+    let (Some(channel), Some((launch, reserve))) = (channel, THREAD_WRITER_POLICY.get()) else {
+        return Ok(());
+    };
+    let selected = launch(channel).is_some();
+    if warm && !selected {
+        return Ok(());
+    }
+    reserve(
+        channel,
+        session,
+        native,
+        path,
+        ResumePane::BeforeKey {
+            nonce,
+            warm,
+            selected,
+        },
+    )
 }
 
 /// Restores the account markers read before a launch's cleanup unless the launch disarms it.
@@ -270,7 +342,7 @@ mod tests {
                     t,
                     dir,
                     cwd,
-                    id,
+                    (id, None),
                     None,
                     Default::default(),
                     "".into(),
@@ -331,7 +403,7 @@ mod host_marker_tests {
             tmux,
             dir,
             root.path(),
-            id,
+            (id, None),
             None,
             Default::default(),
             "".into(),
@@ -357,7 +429,7 @@ mod host_marker_tests {
             blocked,
             dir,
             root.path(),
-            id,
+            (id, None),
             None,
             Default::default(),
             "".into(),
@@ -422,7 +494,7 @@ mod herdr_off_tests {
             tmux,
             dir,
             root.path(),
-            id,
+            (id, None),
             None,
             Default::default(),
             "".into(),
@@ -496,7 +568,7 @@ mod herdr_off_tests {
                 tmux,
                 dir,
                 root.path(),
-                id,
+                (id, None),
                 None,
                 Default::default(),
                 "".into(),
@@ -665,7 +737,7 @@ mod herdr_env_tests {
             tmux,
             &dump.to_string(),
             root.path(),
-            id,
+            (id, None),
             None,
             Default::default(),
             "http://127.0.0.1:1".into(),

@@ -24,7 +24,7 @@ use crate::services::tui_o::shadow::capture::file_identity;
 use herdr_resume::resumes_under_new_execution;
 pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
-mod claude_fold;
+pub(crate) mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) use claude_fold::published_claude_history;

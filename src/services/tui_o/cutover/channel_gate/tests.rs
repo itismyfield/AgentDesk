@@ -109,7 +109,15 @@ fn claim_reason_follows_gate_returns_without_changing_ownership() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     let observed = |channel| {
         test_override::with_channels(|snapshot| {
-            decide_with_snapshot(snapshot, channel, Use::Body, None, || Some(ClaudeTui)).unwrap()
+            decide_with_snapshot(
+                snapshot,
+                channel,
+                Use::Body,
+                None,
+                Evidence::default(),
+                || Some(ClaudeTui),
+            )
+            .unwrap()
         })
     };
     {

@@ -47,6 +47,7 @@ impl Adoption {
 struct LegacySends {
     started: AtomicU64,
     finished: AtomicU64,
+    thread_body_fence: Mutex<()>,
 }
 
 /// A Legacy body send under way on its channel, held until its transport is done.
@@ -298,6 +299,13 @@ impl Candidate {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Adoption> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(in crate::services::tui_o) fn lock_thread_body(&self) -> MutexGuard<'_, ()> {
+        self.sends
+            .thread_body_fence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(test)]
