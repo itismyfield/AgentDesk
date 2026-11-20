@@ -147,11 +147,10 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
         };
         let (result, _rest) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
         let result = result.unwrap();
-        eprintln!("MISSING_IDLE_RESULT {result:?}");
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!(
             after.0 - before.0,
-            usize::from(missing),
+            1,
             "the actual idle intake makes an early decision after the identity check"
         );
         let row: Value =

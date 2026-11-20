@@ -30,7 +30,7 @@ impl OwnerTurn {
                     owner = owner
                         .prepare_restarted(shared, (provider, channel, Some(session), key), lease)
                         .await?;
-                    if result == VerifiedReattach::AwaitingClear {
+                    if result == VerifiedReattach::AwaitingClear || owner.late.restarted.is_none() {
                         return Ok((Some(owner), false));
                     }
                     return Box::pin(OwnerTurn::early(

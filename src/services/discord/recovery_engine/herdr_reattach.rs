@@ -83,8 +83,8 @@ pub(in crate::services::discord) fn already_admitted(
         .is_ok_and(|(provider, owner)| provider == shared.provider && owner == channel)
         && herdr_listing(key)
             .is_some_and(|(nonce, admitted)| admitted && nonce == record.execution_nonce)
-        && runtime_binding_for_tmux_session(key).is_some()
-        && !awaits_own_clear(channel.get(), key, &record.execution_nonce)
+        && (runtime_binding_for_tmux_session(key).is_some()
+            || awaits_own_clear(channel.get(), key, &record.execution_nonce))
         && super::inflight::load_inflight_state_read_only(&shared.provider, channel.get())
             .is_none_or(|row| {
                 super::inflight::row_is_current_generation(&row, shared.restart.current_generation)

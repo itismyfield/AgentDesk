@@ -273,8 +273,7 @@ fn a_restored_reply_with_no_active_turn_delivers_the_original_once_pg() {
     });
 }
 
-/// The same pane still showing a running turn is not restored: with no active turn the hold is
-/// settled at once with one reason notice, nothing is sent and no watch stays.
+/// An unreadable composer with no active turn keeps its original until the same pane is ready.
 #[test]
 fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() {
     let fx = Fixture::with_root(
@@ -295,6 +294,7 @@ fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() 
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
         let front = intake.front().await;
+        let original = front.1.clone();
         let (entered, resume) =
             discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
                 .await
@@ -308,20 +308,35 @@ fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() 
             guard
         };
         let (result, _record) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
-        assert_eq!(result.unwrap(), Ok(()), "the unsent input is settled");
+        assert!(
+            result
+                .expect("the ambiguous composer keeps the original")
+                .is_err_and(|error| error.starts_with("NotSent("))
+        );
         let state = intake
             .mailbox
-            .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
-        let state = state.await.unwrap();
-        assert_eq!(state["items"], json!([]), "{state}");
+            .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+            .await
+            .unwrap();
+        assert_eq!(state["items"], json!([original]), "{state}");
         assert_eq!(state["retained_inputs"], json!([]), "{state}");
-        assert!(!held_watch::has_watch(CHANNEL));
-        let notices = intake._api.take();
-        let reasons = notices
-            .iter()
-            .filter(|call| call.contains("이 입력을 폐기했습니다"));
-        assert_eq!(reasons.count(), 1, "{notices:?}");
+        assert!(state["head_injection"].is_null(), "{state}");
+        assert!(held_watch::has_watch(CHANNEL));
         assert_eq!(fx.rig.sends().len(), before, "no key reached the pane");
         assert!(heads.lock().unwrap().is_empty());
+
+        restored(&fx, &started, true);
+        let settled = source_input_settled(&intake, &original, &heads).await;
+        assert!(settled["refused_fronts"].is_null() && settled["refused_inputs"].is_null());
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2, "the same original is sent once");
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        let notices = intake._api.take();
+        assert!(
+            !notices
+                .iter()
+                .any(|call| call.contains("이 입력을 폐기했습니다"))
+        );
     });
 }
