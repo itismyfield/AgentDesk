@@ -118,7 +118,15 @@ impl RoutineAgentExecutor {
             tracing::warn!(%error, "routine late completion evidence remains pending");
         }
         let mut recovered = store.recover_stale_running_runs().await?;
-        for run in store.begin_owner_recovery().await? {
+        let pending = match store.begin_owner_recovery().await {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "routine owner recovery could not read the pending runs");
+                return Ok(recovered);
+            }
+        };
+        for run in pending {
+            let run_id = run.identity().0.to_owned();
             let (status, error) = match settle(
                 self,
                 run.identity(),
@@ -139,8 +147,12 @@ impl RoutineAgentExecutor {
                     continue;
                 }
             };
-            if let Some(run) = store.finish_owner_recovery(run, (status, error)).await? {
-                recovered.push(run);
+            match store.finish_owner_recovery(run, (status, error)).await {
+                Ok(Some(run)) => recovered.push(run),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "routine owner recovery awaits the database commit")
+                }
             }
         }
         Ok(recovered)
