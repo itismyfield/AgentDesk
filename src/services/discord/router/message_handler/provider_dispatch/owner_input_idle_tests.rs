@@ -3029,3 +3029,6 @@ mod busy_gate;
 
 #[path = "owner_input_idle_tests/restart_gate_tests.rs"]
 mod restart_gate;
+
+#[path = "owner_input_idle_tests/metadata_hold.rs"]
+mod metadata_hold;
