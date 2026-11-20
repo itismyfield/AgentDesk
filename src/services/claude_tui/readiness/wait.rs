@@ -1,4 +1,4 @@
-use super::super::input::PromptReadinessKind;
+use super::super::input::{PreparationHold, PromptReadinessKind};
 use super::{CHANGED, Expiry, Proof, Unproven, ledger, observe};
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::path::Path;
@@ -27,8 +27,12 @@ pub(crate) fn prepare(
     budget: Duration,
     readiness: PromptReadinessKind,
 ) -> Result<Proof, Stopped> {
+    let owner_deadline = (readiness == PromptReadinessKind::ProvenWarmFollowup)
+        .then(super::super::owner_input::readiness_deadline)
+        .flatten();
+    let bounded = |window| owner_deadline.map_or(window, |due| due.min(window));
     let mut watched = super::watched(session, path);
-    let mut deadline = Instant::now() + budget;
+    let mut deadline = bounded(Instant::now() + budget);
     let mut dialogs = super::dialog::DialogWait::new(readiness);
     loop {
         if cancel_requested(cancel) {
@@ -36,6 +40,9 @@ pub(crate) fn prepare(
         }
         if let Some(refused) = crate::services::claude_tui::submission_fence::refusal() {
             return Err(refused.to_string().into());
+        }
+        if owner_deadline.is_some_and(|due| Instant::now() >= due) {
+            return Err(PreparationHold::OWNER_READINESS_DEADLINE.to_string().into());
         }
         let revision = ledger().revision;
         let dialog_pending = dialogs.poll(session, cancel)?;
@@ -49,10 +56,13 @@ pub(crate) fn prepare(
             return Ok(proof);
         }
         if Instant::now() >= deadline {
+            if owner_deadline.is_some_and(|due| Instant::now() >= due) {
+                return Err(PreparationHold::OWNER_READINESS_DEADLINE.to_string().into());
+            }
             let unproven =
                 match watched.expired(|| super::super::host_input::observe_draft(session)) {
                     Expiry::Requiet => {
-                        deadline = Instant::now() + budget.min(super::WINDOW);
+                        deadline = bounded(Instant::now() + budget.min(super::WINDOW));
                         continue;
                     }
                     Expiry::Unproven(end) => Some(end),
