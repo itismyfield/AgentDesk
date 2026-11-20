@@ -46,6 +46,7 @@ fn context(root: &Path) -> BindingContext {
         provider_root: Some(root.join("sessions")),
         first_prompt_digest: Some(first_prompt_digest("original prompt")),
         source_policy: None,
+        resume_start: None,
     };
     let prepared = PreparedIncarnation::create(context.clone()).unwrap();
     crate::services::discord::stamp_spawn_markers(&context.tmux_session, Some(&prepared)).unwrap();
