@@ -51,7 +51,12 @@ impl Child {
                 callback();
             }
         });
-        match *state {
+        self.body_owner_in(*state)
+    }
+
+    /// [`Self::body_owner`] for a `state` the caller read under the adoption's lock.
+    pub(crate) fn body_owner_in(&self, state: Adoption) -> Option<bool> {
+        match state {
             state if state.owned() => Some(true),
             Adoption::Deferred if self.candidate.late_adopt_origin() => Some(false),
             Adoption::Released if self.candidate.legacy_run().is_some() => Some(false),

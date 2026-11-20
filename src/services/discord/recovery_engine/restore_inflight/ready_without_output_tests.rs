@@ -690,10 +690,8 @@ async fn captured_partial_eof_held_for_adoption_keeps_row_and_budget_then_settle
         .await
         .cancel_token
         .expect("captured actor");
-    for held in [
-        RecoveryRelayOutcome::AwaitingAdoption,
-        RecoveryRelayOutcome::AdoptionRefused,
-    ] {
+    // A refused outcome means its reason intent is durable, so only a wait holds the row.
+    for held in [RecoveryRelayOutcome::AwaitingAdoption] {
         let state = fixture.load().expect("held obligation");
         let settle = settle_ready_without_output_for_actor(
             &fixture.shared,
@@ -729,6 +727,28 @@ async fn captured_partial_eof_held_for_adoption_keeps_row_and_budget_then_settle
     assert!(fixture.load().is_none(), "a later delivery settles the row");
     let owner = mailbox_snapshot(&fixture.shared, channel).await;
     assert!(owner.cancel_token.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_partial_eof_refused_after_its_durable_reason_retires_the_row_and_actor() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let fixture = Fixture::new(5_071_819);
+    fixture.claim().await;
+    let channel = ChannelId::new(fixture.state.channel_id);
+    let owner = mailbox_snapshot(&fixture.shared, channel).await;
+    let actor = owner.cancel_token.expect("captured actor");
+    let state = fixture.load().expect("held obligation");
+    let settle = settle_ready_without_output_for_actor(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        &state,
+        Some(&actor),
+        |_| std::future::ready(RecoveryRelayOutcome::AdoptionRefused),
+    );
+    assert!(settle.await, "the captured actor settles");
+    assert!(fixture.load().is_none(), "the refused body's row goes");
+    let owner = mailbox_snapshot(&fixture.shared, channel).await;
+    assert!(owner.cancel_token.is_none(), "the actor goes with it");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -90,7 +90,7 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     super::test_override::with_channels(|snapshot| {
-        decide_with_snapshot(snapshot, channel_id, Use::Peek, None, || kind)
+        decide_with_snapshot(snapshot, channel_id, Use::Peek, None, || kind, &mut None)
     })
     .map(|peeked| peeked.owned)
 }
@@ -102,49 +102,83 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     decide(channel_id, Use::Peek, || session_kind(session)).map(|peeked| peeked.owned)
 }
 
-/// Runs `f` on the output observation while the adoption it was read from stays locked, so a
-/// Refused or Released transition of that adoption lands before the read or after `f` returns.
+/// The adoption an answer was read from, with how that adoption's state reads as the answer.
+enum Deciding {
+    /// A boot reservation with no parent read yet: Legacy's until it is owned.
+    Reserved(channel_policy::Candidate),
+    /// An execution's or a member's adoption: O's once adopted, held or refused until then.
+    Adopted(channel_policy::Candidate),
+    /// A resolved child's own adoption, judged as its body owner.
+    Child(channel_policy::Child),
+}
+
+impl Deciding {
+    fn candidate(&self) -> &channel_policy::Candidate {
+        match self {
+            Self::Reserved(candidate) | Self::Adopted(candidate) => candidate,
+            Self::Child(child) => &child.candidate,
+        }
+    }
+
+    /// The unclaimed answer `state` gives, as `decide_with_snapshot` reads it for this adoption.
+    fn observed(&self, state: channel_policy::Adoption) -> Result<bool, IdentityError> {
+        match self {
+            Self::Reserved(_) => Ok(state.owned()),
+            Self::Adopted(_) => adopted(state).map(|()| true),
+            Self::Child(child) => child.body_owner_in(state).ok_or(IdentityError::ChildHeld),
+        }
+    }
+}
+
+/// The peek's answer with the adoption it was read from; none when no adoption decided it.
+#[cfg(unix)]
+fn peek_o_owns_tui_output_with(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+) -> (Result<bool, IdentityError>, Option<Deciding>) {
+    let mut read = None;
+    let peeked = super::test_override::with_channels(|snapshot| {
+        decide_with_snapshot(snapshot, channel_id, Use::Peek, None, || kind, &mut read)
+    });
+    let observed = peeked.map(|peeked| peeked.owned);
+    (observed.map_err(|error| error.hold(channel_id)), read)
+}
+
+/// An output observation with the lock of the adoption that decided it: while this lives, no
+/// Refused or Released transition of that adoption lands.
+#[cfg(unix)]
+pub(crate) struct Observed<'a> {
+    answer: Result<bool, IdentityError>,
+    _held: Option<std::sync::MutexGuard<'a, channel_policy::Adoption>>,
+}
+
+#[cfg(unix)]
+impl Observed<'_> {
+    pub(crate) fn answer(&self) -> Result<bool, IdentityError> {
+        self.answer
+    }
+}
+
+/// Runs `f` on the output observation read under the lock of the adoption that decided it, which
+/// holds until `f` returns; a step that must not outlive the answer takes the observation itself.
 #[cfg(unix)]
 pub(crate) fn with_peeked_o_output<R>(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
-    f: impl FnOnce(Result<bool, IdentityError>) -> R,
+    f: impl FnOnce(&Observed<'_>) -> R,
 ) -> R {
-    let observed = peek_o_owns_tui_output_for_channel(channel_id, kind);
-    let deciding = super::test_override::with_channels(|snapshot| {
-        snapshot.and_then(|snapshot| deciding_candidate(snapshot, channel_id))
-    });
-    let Some(candidate) = deciding else {
-        return f(observed);
+    let (answer, read) = peek_o_owns_tui_output_with(channel_id, kind);
+    let Some(deciding) = read else {
+        let _held = None;
+        return f(&Observed { answer, _held });
     };
-    let state = candidate.lock();
-    // A refusal between the read and the lock wins; the guard then holds through `f`.
-    let observed = match adopted(*state) {
-        Err(IdentityError::AdoptionRefused) => Err(IdentityError::AdoptionRefused),
-        _ => observed,
-    };
-    f(observed)
-}
-
-/// The adoption `decide_with_snapshot` reads for `channel_id`, in the same order.
-#[cfg(unix)]
-fn deciding_candidate(
-    snapshot: &BootChannels,
-    channel_id: u64,
-) -> Option<channel_policy::Candidate> {
-    if let Some(reserved) = snapshot.unresolved_child(channel_id) {
-        return Some(reserved);
-    }
-    let child = snapshot.child(channel_id).and_then(Result::ok);
-    let late_child = child
-        .as_ref()
-        .is_some_and(|child| child.body_owner() == Some(false));
-    match snapshot.execution(channel_id) {
-        Some(execution) if execution.permit.is_err() || !late_child => Some(execution.candidate),
-        _ => child
-            .map(|child| child.candidate)
-            .or_else(|| snapshot.candidate(channel_id).cloned()),
-    }
+    let state = deciding.candidate().lock();
+    // The same adoption's state is read again under its lock, which then holds through `f`.
+    let answer = deciding.observed(*state);
+    f(&Observed {
+        answer,
+        _held: Some(state),
+    })
 }
 
 /// Where a Legacy body goes, with how the destination's runtime kind is found.
@@ -457,7 +491,7 @@ fn decide_from(
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(snapshot, channel_id, usage, origin, resolve_kind)
+        decide_with_snapshot(snapshot, channel_id, usage, origin, resolve_kind, &mut None)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -525,6 +559,7 @@ fn decide_with_snapshot(
     usage: Use,
     origin: Option<&'static std::panic::Location<'static>>,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
+    read: &mut Option<Deciding>,
 ) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
     // A verified empty list is O off: decided before any destination or kind is resolved.
@@ -555,6 +590,7 @@ fn decide_with_snapshot(
     };
     // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
     if let Some(reserved) = snapshot.unresolved_child(channel_id) {
+        *read = Some(Deciding::Reserved(reserved.clone()));
         return Ok(judged(&reserved));
     }
     // A known thread child is judged under its parent's kind, never as a plain non-member.
@@ -592,6 +628,7 @@ fn decide_with_snapshot(
     if let Some(execution) = snapshot.execution(channel_id)
         && (execution.permit.is_err() || !late_child)
     {
+        *read = Some(Deciding::Adopted(execution.candidate.clone()));
         adopted(execution.candidate.peek())?;
         return Ok(BodyClaimed {
             owned: true,
@@ -605,12 +642,14 @@ fn decide_with_snapshot(
     }
     // A child has its own adoption; an undecided one is held, as a claim would release it.
     if let Some(child) = child {
+        *read = Some(Deciding::Child(child.clone()));
         child.body_owner().ok_or(IdentityError::ChildHeld)?;
         return Ok(judged(&child.candidate));
     }
     let Some(candidate) = snapshot.candidate(channel_id) else {
         return Err(IdentityError::AwaitingAdoption);
     };
+    *read = Some(Deciding::Adopted(candidate.clone()));
     adopted(candidate.peek())?;
     Ok(judged(candidate))
 }

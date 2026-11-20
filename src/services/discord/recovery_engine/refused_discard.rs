@@ -38,6 +38,67 @@ pub(in crate::services::discord) async fn closed(
     Ok(stored.map(|(reason, _)| (id, reason)))
 }
 
+/// A row with no turn nonce has no canonical key: its own kind-tagged one, from its anchor
+/// message and start, is the one place a second reason remains possible.
+fn row_key(provider: &ProviderKind, row: &inflight::InflightTurnState) -> Option<Identity> {
+    let digest = crate::services::tui_o::channel_policy::first_prompt_digest;
+    (row.channel_id != 0 && !row.started_at.trim().is_empty()).then(|| Identity {
+        channel: row.channel_id,
+        input: row.user_msg_id,
+        nonce: digest(&row.started_at),
+        execution: provider.as_str().to_ascii_lowercase(),
+        source: "row:v1".into(),
+    })
+}
+
+/// Discards a held body with one reason: a refused adoption's, or a waiting one's whose episode
+/// already holds a reason. True once the intent is durable; only then may the caller release it.
+pub(in crate::services::discord) async fn discard_held(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    row: &inflight::InflightTurnState,
+    held: crate::services::tui_o::cutover::IdentityError,
+) -> bool {
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    let (true, Some(pool)) = (
+        matches!(held, AdoptionRefused | AwaitingAdoption),
+        shared.pg_pool.clone(),
+    ) else {
+        return false;
+    };
+    let channel_id = row.channel_id;
+    let intent = match (closed(&pool, provider, row).await, held) {
+        (Ok(Some(first)), _) => Ok(first),
+        (Ok(None), AdoptionRefused) => match identity(provider, row).or(row_key(provider, row)) {
+            Some(id) => {
+                // The fresh normalization's own reason when it rejected this turn's output.
+                let fresh = row.turn_nonce.as_deref().and_then(|nonce| {
+                    crate::services::tui_o::cutover::codex_first_rejection(channel_id, nonce)
+                });
+                let reason = fresh.unwrap_or(Reason::AdoptionRefused);
+                let persisted = disposition::persist_intent(&pool, &id, reason).await;
+                persisted.map(|()| (id, reason))
+            }
+            None => Err("the refused body has no key".into()),
+        },
+        (Ok(None), _) => return false,
+        (Err(error), _) => Err(error),
+    };
+    let intent = match intent {
+        Ok(intent) => intent,
+        Err(error) => {
+            tracing::warn!(channel_id, %error, "refused body stays: its reason is not durable");
+            return false;
+        }
+    };
+    // The durable intent drives the post on its own; one lost here is posted on the next start.
+    if let Some(http) = shared.serenity_http_or_token_fallback() {
+        let notice = async move { post(&http, &pool, &[intent]).await };
+        crate::services::discord::task_supervisor::spawn_observed("tui_rejection_notice", notice);
+    }
+    true
+}
+
 /// Boot: posts every intent no attempt holds; the row and body may be gone, so the intent
 /// alone drives its first post.
 pub(in crate::services::discord) fn resume(shared: &Arc<SharedData>) {

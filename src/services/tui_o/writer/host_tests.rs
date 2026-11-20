@@ -333,6 +333,10 @@ impl HostIo for TestIo {
         self.calls.lock().unwrap().push(("adopted", channel));
     }
 
+    fn refused(&self, channel: u64, _: ShadowProvider) {
+        self.calls.lock().unwrap().push(("refused", channel));
+    }
+
     fn repost(&self, _: u64, _: &Arc<FakePort>) -> Option<RepostTurn<Self>> {
         Some(Box::new(CountedTurn(Arc::clone(&self.repost_turns))))
     }

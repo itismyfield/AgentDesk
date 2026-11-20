@@ -206,6 +206,9 @@ async fn cleanup_stop_after_first_poll_finishes_before_host_claim_is_released() 
     assert_eq!(adoption(CHANNEL), Adoption::Refused);
     assert!(!f.ready.is_hosted(CHANNEL));
     f.assert_no_publication();
+    // The refusal made at this exit schedules the channel's kept-body sweep, once.
+    let refusals = f.io.calls().into_iter().filter(|call| call.0 == "refused");
+    assert_eq!(refusals.collect::<Vec<_>>(), [("refused", CHANNEL)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -267,6 +270,7 @@ async fn cleanup_after_published_write_error_keeps_committed_host_and_posts_new_
     handle.stop_and_join().await.unwrap();
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     assert_eq!(f.harness.port.posts(), ["cleanup unique new payload"]);
+    assert!(!f.io.calls().contains(&("refused", CHANNEL)));
 }
 
 #[tokio::test(start_paused = true)]

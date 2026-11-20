@@ -426,6 +426,21 @@ impl HostIo for GatewayHost {
         );
     }
 
+    fn refused(&self, channel: u64, provider: ShadowProvider) {
+        let provider = match provider {
+            ShadowProvider::Claude => ProviderKind::Claude,
+            ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        // The row kept for this adoption is judged again, as it is once an adoption commits.
+        #[cfg(test)]
+        let rest = self.rest.clone();
+        #[cfg(not(test))]
+        let rest = None;
+        adoption_wake::spawn(&self.shared, rest, provider.clone(), channel);
+        #[cfg(unix)]
+        super::super::recovery_engine::refused_discard::resume(&self.shared);
+    }
+
     fn adopted(&self, channel: u64, provider: ShadowProvider) {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,

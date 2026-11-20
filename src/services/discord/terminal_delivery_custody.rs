@@ -310,12 +310,35 @@ pub(in crate::services::discord) async fn persist(
     persist_at(&root()?, key, payload).await
 }
 
+/// [`persist`] whose record write `under` runs or skips once the record lock is held, so a
+/// caller's final check and the write share one synchronous section.
+pub(in crate::services::discord) async fn persist_under(
+    key: &str,
+    payload: &Value,
+    under: impl FnOnce(&mut dyn FnMut() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
+    persist_at_under(&root()?, key, payload, under).await
+}
+
 async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), String> {
+    persist_at_under(root, key, payload, |write| write()).await
+}
+
+async fn persist_at_under(
+    root: &Path,
+    key: &str,
+    payload: &Value,
+    under: impl FnOnce(&mut dyn FnMut() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
     if key.trim().is_empty() || !payload.is_object() {
         return Err("terminal custody requires episode identity and object payload".into());
     }
     let path = record_path(root, key);
     let _lock = lock(&path).await?;
+    under(&mut || write_record(root, &path, key, payload))
+}
+
+fn write_record(root: &Path, path: &Path, key: &str, payload: &Value) -> Result<(), String> {
     // lock_record_path creates the directory. Also persist its entry in the
     // runtime root before acknowledging the first record in that directory.
     runtime_store::fsync_parent_dir(root).map_err(|error| error.to_string())?;
@@ -327,7 +350,7 @@ async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), Strin
         payload_sha256: initial_digest,
         payload: payload.clone(),
     };
-    match fs::read_to_string(&path) {
+    match fs::read_to_string(path) {
         Ok(existing) => {
             let existing: Record =
                 serde_json::from_str(&existing).map_err(|error| error.to_string())?;
@@ -339,14 +362,14 @@ async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), Strin
                     "terminal custody episode payload conflicts with retained record".into(),
                 );
             }
-            return runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string());
+            return runtime_store::fsync_parent_dir(path).map_err(|error| error.to_string());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
     let encoded = serde_json::to_string(&record).map_err(|error| error.to_string())?;
-    runtime_store::atomic_write(&path, &encoded)?;
-    runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())
+    runtime_store::atomic_write(path, &encoded)?;
+    runtime_store::fsync_parent_dir(path).map_err(|error| error.to_string())
 }
 
 /// Called by message_outbox_loop, including after restart. A failed resume

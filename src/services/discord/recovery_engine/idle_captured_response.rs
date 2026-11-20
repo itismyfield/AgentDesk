@@ -354,6 +354,13 @@ async fn settle_captured_ready_delivery(
     snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
     delivery: CapturedRecoveryDelivery,
 ) {
+    // A refused body's reason intent is durable: the row goes with nothing marked delivered.
+    if delivery.outcome == RecoveryRelayOutcome::AdoptionRefused {
+        let finish = |snapshot| {
+            finish_recovered_turn_mailbox_for_captured_state(shared, provider, state, snapshot)
+        };
+        return retire_captured_ready_response(shared, provider, state, snapshot, finish).await;
+    }
     let Some(committed) = shared
         .mailbox(ChannelId::new(state.channel_id))
         .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {

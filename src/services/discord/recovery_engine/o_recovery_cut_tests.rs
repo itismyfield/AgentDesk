@@ -171,8 +171,8 @@ async fn a_pending_adoption_holds_every_recovery_notice_until_o_adopts() {
     .await;
 }
 
-/// A held body's captured recovery, tmux gone and one attempt left, keeps its row uncounted and
-/// posts nothing for a pending, refused or unverified channel; an identity fault still clears it.
+/// A held captured recovery (tmux gone, one attempt left) posts nothing, keeps its row uncounted:
+/// pending, or refused/unverified with no database for a durable reason; a fault still clears it.
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_recovery_body_spends_no_restart_budget_and_keeps_its_row() {
     use crate::services::tui_o::cutover::test_override;
@@ -186,11 +186,11 @@ async fn a_held_recovery_body_spends_no_restart_budget_and_keeps_its_row() {
                 9_425_051u64,
                 RecoveryRelayOutcome::AwaitingAdoption,
             ),
-            ("refused", 9_425_052, RecoveryRelayOutcome::AdoptionRefused),
+            ("refused", 9_425_052, RecoveryRelayOutcome::AwaitingAdoption),
             (
                 "unverified",
                 9_425_053,
-                RecoveryRelayOutcome::AdoptionRefused,
+                RecoveryRelayOutcome::AwaitingAdoption,
             ),
             (
                 "unknown kind",

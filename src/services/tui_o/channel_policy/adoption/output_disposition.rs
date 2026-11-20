@@ -1,4 +1,4 @@
-//! Output identity and terminal choice, kept behind the D1 installation boundary.
+//! The first output's identity and terminal choice: adopted, or rejected with one reason.
 use super::FirstProof;
 use std::sync::{Arc, Mutex};
 use tokio::time::{Duration, Instant};
@@ -27,7 +27,9 @@ pub(crate) enum Phase {
     RejectPendingNotice(Reason),
     Rejected(Reason),
 }
-#[derive(Clone)]
+/// One total budget from the admission covers every retry, wake and repair of a normalization.
+pub(crate) const BUDGET: Duration = Duration::from_secs(25);
+#[derive(Clone, Debug)]
 pub(crate) struct Output {
     id: Identity,
     deadline: Instant,
@@ -35,10 +37,10 @@ pub(crate) struct Output {
 }
 impl Output {
     pub(crate) fn new(id: Identity, admitted_at: Instant) -> Self {
-        // One total budget includes every retry and wake; notice delivery has a separate metadata-only timeout.
+        // Notice delivery has a separate metadata-only timeout.
         Self {
             id,
-            deadline: admitted_at + Duration::from_secs(25),
+            deadline: admitted_at + BUDGET,
             state: Arc::new(Mutex::new((Phase::Normalizing, false))),
         }
     }
@@ -209,5 +211,6 @@ impl Output {
     }
 }
 
+#[cfg(test)]
 #[path = "output_disposition_tests.rs"]
 pub(crate) mod tests;

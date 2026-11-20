@@ -12,8 +12,8 @@ pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
 
-// D2 installs this policy only after all body consumers can terminalize the same episode.
-#[cfg(test)]
+// The fresh first output's disposition; its consumers close a rejected episode with one reason.
+#[cfg(any(test, unix))]
 pub(crate) mod output_disposition;
 
 mod child_run;
@@ -21,6 +21,8 @@ mod child_run;
 pub(crate) mod episode_key;
 pub(crate) use child_run::LegacyRun;
 mod first_turn;
+#[cfg(any(test, unix))]
+pub(crate) use first_turn::FirstHold;
 pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,
@@ -386,7 +388,7 @@ impl Candidate {
     }
 
     /// Refuses a pending or deferred adoption for the rest of this process: no store is written
-    /// and the body stays held. A decided one is kept.
+    /// and a held body is discarded with one reason. A decided one is kept.
     pub(crate) fn release(&self, channel: u64) {
         let mut state = self.lock();
         if matches!(*state, Adoption::Pending | Adoption::Deferred) {
