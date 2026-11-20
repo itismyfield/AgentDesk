@@ -20,7 +20,9 @@ The 2026-11-17 decision (reconfirmed 2026-11-18) supersedes decision A (2026-11-
 
 ## Entry points
 
-`now` is the current stack head; `D1b` is the designed behavior. Which channels reach these paths
+`now` is the design baseline; `D1b` is the full design. This split defers the Herdr restart-debt
+work (E7–E11 and the debt wake in E12) and first-output normalization (E14–E15 and E17).
+It retains the boot sweep for durable rejection reasons. Which channels reach these paths
 depends on the operator configuration (`tui_o.writer` channels and late adoption); this design
 does not read it.
 
@@ -33,10 +35,10 @@ does not read it.
 | E5 | `src/services/discord/recovery_engine/completion_delivery.rs:88-89` | Awaiting and Refused keep the inflight row without spending retry budget | Awaiting keeps; Refused posts the reason once and clears the row |
 | E6 | `src/services/discord/recovery_paths/shared.rs:183-185`, `controller_cutover.rs:162` | both outcomes give `RowDisposition::Preserve` | Awaiting preserves; Refused gives a new discard disposition after the reason |
 | E7 | `src/services/discord/recovery_engine/herdr_row_end.rs:239-276` restarted herdr row | `held_body` for Awaiting **and Refused**: the body is archived as retained debt, then the row is released | Awaiting archives as now; Refused posts the reason once and releases the row with no archive |
-| E8 | `src/services/discord/inflight/clear_store/herdr_row_end.rs:89-96` snapshot of the exact row | `Ok(true) \| Err(AwaitingAdoption \| AdoptionRefused)` snapshots | `Ok(true) \| Err(AwaitingAdoption)` only |
-| E9 | `src/services/discord/inflight/herdr_body_debt.rs:58-85` retained snapshot (`disposition: "retained"`) | written for E7's Awaiting and Refused rows | written for Awaiting only; a discard API removes a snapshot by episode |
-| E10 | `src/services/discord/inflight/herdr_body_debt/reconcile.rs`, `src/services/tui_o/writer/herdr_body_debt.rs:253-337` read/wake | retained snapshots are restored and woken until delivered | a snapshot whose channel is now Refused is discarded with one reason instead of woken |
-| E11 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs:42-56` debt effect rows (0200); `debt_recovery.rs:208` `no_request` returns a reserved effect to `ready` but keeps its `attempt_id`, the `no_effect` attempt and the revoked grant | inserted `ready` under a debt session | a discarded episode's effect is deleted in one custody-locked transaction, in this order: check the effect is `ready` and every attempt of it is `no_effect`; clear `effects.attempt_id`; delete its `no_effect` attempts; delete its grants; delete the effect. `reserved`/`confirmed` effects and any unsettled attempt are never deleted. The 0201 reason row stays |
+| E8 | Exact restart-row snapshot | `Ok(true) \| Err(AwaitingAdoption \| AdoptionRefused)` snapshots | `Ok(true) \| Err(AwaitingAdoption)` only |
+| E9 | Retained restart-row snapshot (`disposition: "retained"`) | written for E7's Awaiting and Refused rows | written for Awaiting only; a discard API removes a snapshot by episode |
+| E10 | Retained-debt restore and wake | retained snapshots are restored and woken until delivered | a snapshot whose channel is now Refused is discarded with one reason instead of woken |
+| E11 | Debt effect rows (0200); `no_request` returns a reserved effect to `ready` but keeps its `attempt_id`, the `no_effect` attempt and the revoked grant | inserted `ready` under a debt session | a discarded episode's effect is deleted in one custody-locked transaction, in this order: check the effect is `ready` and every attempt of it is `no_effect`; clear `effects.attempt_id`; delete its `no_effect` attempts; delete its grants; delete the effect. `reserved`/`confirmed` effects and any unsettled attempt are never deleted. The 0201 reason row stays |
 | E12 | `src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs:23` boot debt wake | wakes retained debt channels | also settles Refused snapshots through E10, and resumes 0201 reason intents that no longer have a row (first post when no attempt exists; an intent holding an attempt keeps it and is not posted again) |
 | E13 | `src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs:271` `preserve_or_publish` | preserves a foreign terminal snapshot for later publish | stops preserving a Refused episode, posts the reason, scrubs the stored body fields (the D2 paragraph in `herdr-body-hold.design.md`) |
 | E14 | `src/services/tui_o/channel_policy/adoption.rs:15-17` `#[cfg(test)] mod output_disposition` | fresh disposition, normalization and reason receipts compiled for tests only | installed: first fresh output normalizes, then adopts or posts one reason and discards |

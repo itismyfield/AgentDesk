@@ -349,6 +349,9 @@ src/
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── tui_output_disposition/
+│   │   ├── closure.rs
+│   │   └── closure_tests.rs
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
@@ -398,6 +401,7 @@ src/
 │   ├── session_transcripts_retired_boundary_pg_tests.rs
 │   ├── status_check_migration_tests.rs
 │   ├── timestamps.rs
+│   ├── tui_output_disposition.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -1443,6 +1447,8 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── mod.rs
 │   │   │   └── producer.rs
+│   │   ├── host_input/
+│   │   │   └── trust.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
@@ -1476,6 +1482,9 @@ src/
 │   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── startup_dialog/
+│   │   │   ├── normalize.rs
+│   │   │   └── normalize_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
 │   │   ├── warm_followup/
@@ -1784,8 +1793,8 @@ src/
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── inflight_repair_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
-│   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
+│   │   │   │   ├── o_owed_leak_tests.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── runtime_lookup.rs
 │   │   │   │   ├── runtime_lookup_tests.rs
@@ -2104,6 +2113,8 @@ src/
 │   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_observation_tests.rs
+│   │   │   ├── tui_rejection_notice.rs
+│   │   │   ├── tui_rejection_notice_tests.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
@@ -2332,9 +2343,14 @@ src/
 │   │   │   ├── producer_resume.rs
 │   │   │   ├── rebind_runtime.rs
 │   │   │   ├── recovery_completion_outcome_tests.rs
+│   │   │   ├── refused_discard.rs
+│   │   │   ├── refused_discard_closure.rs
+│   │   │   ├── refused_discard_tests.rs
 │   │   │   ├── relay_output_replacements.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
+│   │   │   ├── restore_serial.rs
+│   │   │   ├── restore_serial_tests.rs
 │   │   │   ├── routing_orphan.rs
 │   │   │   ├── routing_orphan_tests.rs
 │   │   │   ├── runtime.rs
@@ -2350,6 +2366,7 @@ src/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_anchor_repost_tests.rs
+│   │   │   ├── o_duty.rs
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── relay_health/
@@ -2700,6 +2717,8 @@ src/
 │   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
+│   │   │   │   ├── adoption_wake.rs
+│   │   │   │   ├── adoption_wake_tests.rs
 │   │   │   │   ├── owner_port.rs
 │   │   │   │   └── thread_lookup_tests.rs
 │   │   │   ├── owner_execution/
@@ -2731,6 +2750,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
+│   │   │   ├── o_writer_host_intake_takeover_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
@@ -2802,6 +2822,7 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── standby_relay/
+│   │   │   ├── o_owed_settle_tests.rs
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
@@ -4383,11 +4404,15 @@ src/
 │   │   │   └── sink.rs
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
+│   │   │   │   ├── atomic_tests.rs
 │   │   │   │   ├── body_check.rs
 │   │   │   │   ├── child_run.rs
 │   │   │   │   ├── child_run_tests.rs
+│   │   │   │   ├── episode_key.rs
 │   │   │   │   ├── first_turn.rs
-│   │   │   │   └── first_turn_tests.rs
+│   │   │   │   ├── first_turn_tests.rs
+│   │   │   │   ├── output_disposition.rs
+│   │   │   │   └── output_disposition_tests.rs
 │   │   │   ├── children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
@@ -4574,6 +4599,7 @@ src/
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── buffered_tests.rs
 │   │   │   │   │   ├── delivered.rs
+│   │   │   │   │   ├── normalization.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── child_run.rs
@@ -4651,6 +4677,7 @@ src/
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_claude_takeover_tests.rs
+│   │   │   ├── host_codex_closure_tests.rs
 │   │   │   ├── host_codex_first_proof_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
