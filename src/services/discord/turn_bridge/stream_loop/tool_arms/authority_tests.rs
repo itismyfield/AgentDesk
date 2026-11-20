@@ -422,7 +422,8 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
     let mut long_running_placeholder_active = None;
-    let mut last_adk_heartbeat = std::time::Instant::now();
+    let mut session_row_writer =
+        crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter::new();
     let mut last_inflight_long_run_heartbeat = std::time::Instant::now();
 
     let actor_nonce = baseline.turn_nonce.clone();
@@ -493,7 +494,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             pending_long_running_retarget_after_state_save:
                 &mut pending_long_running_retarget_after_state_save,
             long_running_placeholder_active: &mut long_running_placeholder_active,
-            last_adk_heartbeat: &mut last_adk_heartbeat,
+            session_row_writer: &mut session_row_writer,
             last_inflight_long_run_heartbeat: &mut last_inflight_long_run_heartbeat,
         },
     )

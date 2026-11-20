@@ -92,7 +92,7 @@ pub(super) async fn run_stream_loop(
     let mut session_handshake_seen = *state.session_handshake_seen;
     let mut terminal_session_reset_required = *state.terminal_session_reset_required;
     let mut recovery_retry = *state.recovery_retry;
-    let mut last_adk_heartbeat = *state.last_adk_heartbeat;
+    let mut session_row_writer = *state.session_row_writer;
     let mut pending_stream_messages = std::mem::take(state.pending_stream_messages);
     let mut pending_status_tool_results = std::mem::take(state.pending_status_tool_results);
     let mut pending_status_tool_results_by_id =
@@ -439,6 +439,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -505,6 +506,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -578,6 +580,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -884,7 +887,7 @@ pub(super) async fn run_stream_loop(
                 pending_long_running_retarget_after_state_save:
                     &mut pending_long_running_retarget_after_state_save,
                 long_running_placeholder_active: &mut long_running_placeholder_active,
-                last_adk_heartbeat: &mut last_adk_heartbeat,
+                session_row_writer: &mut session_row_writer,
                 last_inflight_long_run_heartbeat: &mut last_inflight_long_run_heartbeat,
             },
         )
@@ -925,7 +928,7 @@ pub(super) async fn run_stream_loop(
     *state.session_handshake_seen = session_handshake_seen;
     *state.terminal_session_reset_required = terminal_session_reset_required;
     *state.recovery_retry = recovery_retry;
-    *state.last_adk_heartbeat = last_adk_heartbeat;
+    *state.session_row_writer = session_row_writer;
     *state.pending_stream_messages = pending_stream_messages;
     *state.pending_status_tool_results = pending_status_tool_results;
     *state.pending_status_tool_results_by_id = pending_status_tool_results_by_id;
