@@ -1,7 +1,9 @@
 //! Restore a running turn before the owner chooses its ordinary busy or idle path.
 use super::*;
 use crate::services::discord::inflight::{self, InflightTurnState};
-use crate::services::discord::recovery_engine::herdr_reattach::continue_channel;
+use crate::services::discord::recovery_engine::herdr_reattach::{
+    confirm_admitted_input_identity, continue_channel,
+};
 use crate::services::discord::session_transition::SessionTransitionLease;
 
 pub(super) async fn recover_active(
@@ -47,6 +49,16 @@ pub(super) async fn registration(
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool, provider, channel, key).await;
     let origin = front_origin(mailbox, front).await?;
+    if let Some(shared) = runtime {
+        confirm_admitted_input_identity(
+            shared,
+            mailbox,
+            ChannelId::new(channel),
+            (&host, &session, front),
+        )
+        .await
+        .map_err(effect::unsent)?;
+    }
     let observed = owned_busy::running(
         runtime,
         mailbox,

@@ -7,7 +7,8 @@ use sqlx::PgPool;
 use tokio::runtime::Handle;
 
 use super::herdr_reattach::{
-    RestartAttachment, VerifiedReattach, continue_owner, reconnect_source,
+    RestartAttachment, VerifiedReattach, already_admitted, confirm_queued_identity, continue_owner,
+    reconnect_source,
 };
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
@@ -521,6 +522,15 @@ fn reconnect_unless_pending(
                 return (Reconnect::Withheld, None);
             }
         };
+        let channel = crate::services::discord::ChannelId::new(channel);
+        if matches!(
+            attached,
+            HerdrSourceAttach::Published { bound: true, .. } | HerdrSourceAttach::AwaitingClear
+        ) && already_admitted(shared, record, channel)
+            && !confirm_queued_identity(shared, channel).await
+        {
+            return (Reconnect::Withheld, None);
+        }
         if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
             use crate::services::herdr_launch::retire::{self, Scope};
             if let Some(host) = herdr_endpoints().launch_host() {

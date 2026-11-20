@@ -5,7 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::discord::herdr_terminate::root_replaced;
 use crate::services::discord::recovery_engine::herdr_reattach::{
-    VerifiedReattach, already_admitted, continue_owner,
+    VerifiedReattach, already_admitted, confirm_input_identity, continue_owner,
 };
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::herdr_launch::clear_epoch::{self, Epoch};
@@ -169,16 +169,7 @@ impl OwnerTurn {
     }
 
     pub(in crate::services::discord) async fn finish_restart_identity(self) -> Result<Self, ()> {
-        let front = self.front().clone();
-        let result = self
-            .mailbox
-            .v2_request(move |slot| {
-                slot.as_mut()
-                    .ok_or("V2 not adopted")?
-                    .finish_identity_hold(&front)
-            })
-            .await;
-        match result {
+        match confirm_input_identity(&self.mailbox, Some(self.front())).await {
             Ok(()) => Ok(self),
             Err(error) => {
                 tracing::warn!(%error, "restart identity hold not settled");

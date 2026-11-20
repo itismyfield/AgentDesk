@@ -10,6 +10,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     refresh_bound_pane_pg,
 };
 use crate::services::discord::herdr_terminate::root_replaced;
+use crate::services::discord::queue_io::input_owner::drive::Front;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_restarted_herdr_source, awaits_own_clear, nonce_baseline,
@@ -29,6 +30,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 use crate::services::tui_prompt_dedupe::{
     Persisted, admit_herdr_execution, runtime_binding_for_tmux_session_under_source_authority,
 };
+use crate::services::turn_host::TurnHost;
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
 pub(super) struct VerifiedTarget<'a> {
     pub(super) shared: &'a SharedData,
@@ -69,7 +72,11 @@ pub(in crate::services::discord) async fn continue_channel(
         return None;
     }
     if already_admitted(shared, record, channel) {
-        return Some(VerifiedReattach::Live);
+        return Some(if confirm_queued_identity(shared, channel).await {
+            VerifiedReattach::Live
+        } else {
+            VerifiedReattach::Held
+        });
     }
     Some(continue_owner(shared, pool, transition, &row).await.0)
 }
@@ -91,6 +98,61 @@ pub(in crate::services::discord) fn already_admitted(
             .is_none_or(|row| {
                 super::inflight::row_is_current_generation(&row, shared.restart.current_generation)
             })
+}
+
+/// The actor retires only the suspended deadline of the exact unattempted original.
+pub(in crate::services::discord) async fn confirm_input_identity(
+    mailbox: &ChannelMailboxHandle,
+    front: Option<&Front>,
+) -> Result<(), String> {
+    let front = front.cloned();
+    mailbox
+        .v2_request(move |slot| {
+            let Some(owner) = slot.as_mut() else {
+                return if front.is_some() {
+                    Err("V2 not adopted".into())
+                } else {
+                    Ok(())
+                };
+            };
+            match front.or_else(|| owner.front()) {
+                Some(front) => owner.finish_identity_hold(&front),
+                None => Ok(()),
+            }
+        })
+        .await
+}
+
+pub(super) async fn confirm_queued_identity(shared: &SharedData, channel: ChannelId) -> bool {
+    let Some(mailbox) = shared.mailboxes.peek(channel) else {
+        return true;
+    };
+    match confirm_input_identity(&mailbox, None).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(channel_id = channel.get(), %error, "restart identity hold not settled");
+            false
+        }
+    }
+}
+
+/// A queue adopted after publication can use the same admitted execution's identity.
+pub(in crate::services::discord) async fn confirm_admitted_input_identity(
+    shared: &SharedData,
+    mailbox: &ChannelMailboxHandle,
+    channel: ChannelId,
+    (host, session, front): (&TurnHost, &str, &Front),
+) -> Result<(), String> {
+    if let TurnHost::Herdr(plan) = host
+        && let Some(row) = &plan.row
+        && let HostedRecord::Known(record) = &row.record
+        && record.state == HostedState::Bound
+        && record.owner.logical_key == session
+        && already_admitted(shared, record, channel)
+    {
+        confirm_input_identity(mailbox, Some(front)).await?;
+    }
+    Ok(())
 }
 
 /// The owner's channel lease is the same authority the boot path uses.
@@ -127,7 +189,7 @@ pub(in crate::services::discord) async fn continue_owner(
     let registry = herdr_endpoints();
     let Some(host) = registry.launch_host() else {
         let result = verify_owner(shared, pool, transition, observed).await;
-        return finish_continuation(shared, observed.clone(), result).await;
+        return finish_continuation(shared, channel, observed.clone(), result).await;
     };
     let stored = record.clone();
     let Ok(Ok(named)) = tokio::task::spawn_blocking(move || {
@@ -174,7 +236,7 @@ pub(in crate::services::discord) async fn continue_owner(
     };
     let Some((witness, pane)) = named else {
         let result = verify_owner(shared, pool, transition, observed).await;
-        return finish_continuation(shared, observed.clone(), result).await;
+        return finish_continuation(shared, channel, observed.clone(), result).await;
     };
     if root_replaced::current(pool, observed).await.is_err() {
         return held();
@@ -191,11 +253,12 @@ pub(in crate::services::discord) async fn continue_owner(
         Some(witness),
     )
     .await;
-    finish_continuation(shared, row, result).await
+    finish_continuation(shared, channel, row, result).await
 }
 
 async fn finish_continuation(
     shared: &std::sync::Arc<SharedData>,
+    channel: ChannelId,
     row: HostedObservation,
     result: VerifiedReattach,
 ) -> (VerifiedReattach, HostedObservation) {
@@ -203,7 +266,10 @@ async fn finish_continuation(
         result,
         VerifiedReattach::Live | VerifiedReattach::AwaitingClear
     );
-    let result = if live && !super::restore_inflight::reattach_live_herdr(shared, &row).await {
+    let result = if live
+        && (!confirm_queued_identity(shared, channel).await
+            || !super::restore_inflight::reattach_live_herdr(shared, &row).await)
+    {
         VerifiedReattach::Held
     } else {
         result

@@ -379,6 +379,288 @@ fn identity_hold_outlives_the_restored_composer_deadline_pg() {
     );
 }
 
+fn native_modal_after_identity_hold(adopt_after_attach: bool, tag: &str) {
+    use crate::services::discord::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared;
+    use crate::services::discord::tui_prompt_relay::synthetic_start::claim::claim_tui_direct_synthetic_turn_for_tests;
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, ExternalInputRelayLease, ExternalInputRelayOwner,
+    };
+    use poise::serenity_prelude::MessageId;
+    use std::io::Write;
+    use std::path::Path;
+
+    run(ProviderKind::Claude, tag, false, |fixture, runtime| {
+        fixture.rig.foreground(&[SHELL]);
+        let (mailbox, ticket, old_due) = runtime.block_on(async {
+            let (owner, ticket, _) = claimed(&fixture).await;
+            let mailbox = owner.mailbox.clone();
+            let front = owner.front().clone();
+            let old_due = mailbox
+                .v2_request(move |slot| {
+                    let owner = slot.as_mut().unwrap();
+                    let held = owner.hold_readiness(
+                        &front,
+                        "busy_readiness_unproven",
+                        chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    )?;
+                    Ok(held.due_at_ms)
+                })
+                .await
+                .unwrap();
+            drop(owner);
+            mailbox
+                .v2_adopt(queue_path(), "input-owner".into())
+                .await
+                .unwrap();
+            let (owner, answer) = claim_existing(&fixture, mailbox.clone()).await;
+            assert!(prepare(&fixture, owner).await.is_err());
+            assert_eq!(
+                answer.await.unwrap(),
+                Err("NotSent(\"herdr_restart_held\")".into())
+            );
+            assert_eq!(mailbox.has_active_turn().await, Ok(false));
+            assert!(held_watch::armed(CHANNEL));
+            if adopt_after_attach {
+                mailbox
+                    .v2_request(|slot| {
+                        slot.take();
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            (mailbox, ticket, old_due)
+        });
+        fixture
+            .rig
+            .foreground(&[crate::services::session_host::herdr_socket_rig_tests::PROVIDER]);
+        {
+            let entered = runtime.enter();
+            reconnect_restarted_herdr_with_shared(&fixture.shared, &ProviderKind::Claude);
+            drop(entered);
+        }
+        assert_eq!(
+            fixture
+                .shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(fixture.logical()),
+            Some(ChannelId::new(CHANNEL)),
+            "separate recovery published the original execution"
+        );
+
+        runtime.block_on(async {
+            if adopt_after_attach {
+                mailbox.v2_adopt(queue_path(), "input-owner".into()).await.unwrap();
+            }
+            let attached_snapshot = mailbox.v2_request(|slot| slot.as_ref().unwrap().json()).await.unwrap();
+            let channel = ChannelId::new(CHANNEL);
+            let binding = dedupe::runtime_binding_for_tmux_session(fixture.logical()).unwrap();
+            let path = Path::new(&binding.output_path);
+            let session = binding.session_id.as_deref();
+            let body = "native B after background attach";
+            let mut transcript = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(transcript, "{}", json!({"type":"user","sessionId":session,
+                "uuid":uuid::Uuid::new_v4(),"timestamp":chrono::Utc::now().to_rfc3339(),
+                "message":{"role":"user","content":body}})).unwrap();
+            let mut lease = ExternalInputRelayLease::unassigned(Some(CHANNEL));
+            lease.turn_id = Some("native-b-after-reattach".into());
+            lease.session_key = Some(fixture.logical().to_owned());
+            lease.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            lease.relay_owner = ExternalInputRelayOwner::TmuxWatcher;
+            lease.hosted_source = Some(dedupe::hosted_source::capture(
+                "claude", fixture.logical(), CHANNEL, path, session,
+            ).expect("native B carries the verified source"));
+            let lease = dedupe::record_external_input_turn_lease("claude", fixture.logical(), lease);
+            assert!(claim_tui_direct_synthetic_turn_for_tests(
+                &fixture.shared, &ProviderKind::Claude, channel, fixture.logical(), body,
+                MessageId::new(FOLLOWER + 1), &lease,
+            ).await, "the production synthetic claim starts native B");
+            assert_eq!(mailbox.has_active_turn().await, Ok(true));
+            let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
+            assert!(crate::services::claude_tui::busy_inject::modal(modal));
+            fixture.rig.answer("pane.read", json!({"type":"pane_read","read":{
+                "pane_id":fixture.record.location.as_ref().unwrap().pane_id, "source":"recent_unwrapped",
+                "text":modal,"revision":7,"truncated":false
+            }}));
+
+            let previous = OwnerTurn::drive_results(CHANNEL).len();
+            let idle: Handoff = Arc::new(|_| Box::pin(async { panic!("native B owns the turn") }));
+            let drive = owner_drive(
+                (mailbox.clone(), fixture.shared.pg_pool.clone()),
+                (ProviderKind::Claude, CHANNEL),
+                idle,
+                Some(fixture.shared.clone()),
+            );
+            let (_, observed) = held_watch::watch_observed(drive, ORIGINAL);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(8), observed).await.unwrap().unwrap().verdict,
+                held_watch::Verdict::Wake
+            );
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let results = OwnerTurn::drive_results(CHANNEL);
+                    if let Some(result) = results.get(previous) {
+                        break result.clone();
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert!(result.contains("busy_source_unavailable"), "{result}");
+            let (due, snapshot) = mailbox.v2_request(|slot| {
+                let owner = slot.as_ref().unwrap();
+                Ok((owner.settle_due(), owner.json()?))
+            }).await.unwrap();
+            let due = due.expect("the new composer refusal has an active due");
+            if adopt_after_attach {
+                assert!(attached_snapshot["readiness_holds"][0]["identity_held_at_ms"].is_u64());
+            } else {
+                assert!(attached_snapshot["readiness_holds"].is_null());
+            }
+            assert!(due > old_due);
+            assert!(snapshot["readiness_holds"][0]["identity_held_at_ms"].is_null());
+            assert!(snapshot["head_injection"].is_null());
+            mailbox.v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.tick(old_due + 1)?;
+                assert_eq!(
+                    owner.json()?["items"],
+                    json!([item(ORIGINAL, "original"), item(FOLLOWER, "follower")]),
+                );
+                Ok(())
+            }).await.unwrap();
+            assert!(matches!(exact_turn(&mailbox, &ticket, &item(ORIGINAL, "original")).await, Ok(TurnBind::NotArmed)));
+            mailbox.v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.tick(due)?;
+                owner.tick(due + 1)?;
+                let state = owner.json()?;
+                assert_eq!(state["items"], json!([]));
+                let refusals = state["refused_fronts"].as_array().unwrap();
+                assert_eq!(refusals.len(), 1);
+                assert_eq!(refusals[0]["members"].as_array().unwrap().len(), 2);
+                Ok(())
+            }).await.unwrap();
+            assert!(fixture.rig.sends().is_empty());
+        });
+        runtime.block_on(fixture.close());
+    });
+}
+
+#[test]
+fn native_busy_after_background_reattach_gets_a_new_composer_due_pg() {
+    native_modal_after_identity_hold(false, "native-modal-after-attach");
+}
+
+#[test]
+fn native_busy_after_queue_adoption_gets_a_new_composer_due_pg() {
+    native_modal_after_identity_hold(true, "native-modal-after-adopt");
+}
+
+#[test]
+fn stop_leaves_identity_held_inputs_and_proven_end_releases_their_pause_pg() {
+    use crate::services::discord::commands::stop::run_slash_stop;
+    use crate::services::session_host::herdr_socket_rig_tests::PROVIDER;
+    use poise::serenity_prelude::MessageId;
+
+    run(
+        ProviderKind::Claude,
+        "identity-stop-then-end",
+        false,
+        |fixture, runtime| {
+            fixture.rig.foreground(&[SHELL]);
+            runtime.block_on(async {
+                let (owner, _, _) = claimed(&fixture).await;
+                let mailbox = owner.mailbox.clone();
+                let front = owner.front().clone();
+                let due = mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().unwrap();
+                        Ok(owner
+                            .hold_readiness(
+                                &front,
+                                "busy_readiness_unproven",
+                                chrono::Utc::now().timestamp_millis().max(0) as u64,
+                            )?
+                            .due_at_ms)
+                    })
+                    .await
+                    .unwrap();
+                assert!(prepare(&fixture, owner).await.is_err());
+                let channel = ChannelId::new(CHANNEL);
+                let reply = run_slash_stop(&fixture.shared, &ProviderKind::Claude, channel).await;
+                reply
+                    .finish(&fixture.shared, &ProviderKind::Claude, channel)
+                    .await;
+                mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().unwrap();
+                        owner.tick(due + 1)?;
+                        let snapshot = owner.json()?;
+                        assert_eq!(
+                            snapshot["items"],
+                            json!([item(ORIGINAL, "original"), item(FOLLOWER, "follower")])
+                        );
+                        assert!(snapshot["readiness_holds"][0]["identity_held_at_ms"].is_u64());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                fixture.rig.exists(PROVIDER, false);
+                let (owner, _) = claim_existing(&fixture, mailbox.clone()).await;
+                let owner = prepare(&fixture, owner).await.ok().expect("proved ended");
+                assert!(!owner.continues_herdr());
+                let front = owner.front().clone();
+                mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().unwrap();
+                        assert!(owner.json()?["readiness_holds"].is_null());
+                        owner.hold_readiness(
+                            &front,
+                            "busy_readiness_unproven",
+                            chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        )?;
+                        owner.hold_identity(&front)
+                    })
+                    .await
+                    .unwrap();
+                drop(owner);
+                let persistence = crate::services::discord::queue_persistence_context(
+                    &fixture.shared,
+                    &ProviderKind::Claude,
+                    channel,
+                );
+                let removed = mailbox
+                    .cancel_queued_primary_message(MessageId::new(ORIGINAL), persistence)
+                    .await;
+                assert!(removed.removed.is_some());
+                mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().unwrap();
+                        let snapshot = owner.json()?;
+                        assert_eq!(snapshot["items"], json!([item(FOLLOWER, "follower")]));
+                        assert_eq!(owner.settle_due(), None);
+                        let next = owner.front().unwrap();
+                        owner.hold_readiness(
+                            &next,
+                            "busy_readiness_unproven",
+                            chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        )?;
+                        owner.hold_identity(&next)?;
+                        owner.clear_waiting()?;
+                        owner.tick(due + 2)?;
+                        let clear = owner.json()?;
+                        assert_eq!(clear["items"], json!([]));
+                        assert!(clear["readiness_holds"].is_null());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+            runtime.block_on(fixture.close());
+        },
+    );
+}
+
 fn pre_key_control_case(kind: &'static str) {
     run(ProviderKind::Claude, kind, false, |fixture, runtime| {
         runtime.block_on(async {

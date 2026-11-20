@@ -167,6 +167,21 @@ mod tests {
                         super::super::super::restarted::tests::claimed(&fixture).await;
                     assert_eq!(owner.mailbox.has_active_turn().await, Ok(false));
                     let original = owner.front().clone();
+                    let suspended = original.clone();
+                    owner
+                        .mailbox
+                        .v2_request(move |slot| {
+                            let owner = slot.as_mut().unwrap();
+                            let at = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                            owner.hold_readiness(&suspended, "busy_readiness_unproven", at)?;
+                            owner.hold_identity(&suspended)?;
+                            assert!(
+                                owner.json()?["readiness_holds"][0]["identity_held_at_ms"].is_u64()
+                            );
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
                     let (owner, _) = owner
                         .recover_or_hold(
                             shared,
@@ -178,6 +193,12 @@ mod tests {
                         .expect("the live pane keeps the front in the ordinary input path");
                     let owner = owner.expect("an idle pane returns the original to its submitter");
                     assert!(owner.continues_herdr());
+                    let snapshot = owner
+                        .mailbox
+                        .v2_request(|slot| slot.as_ref().unwrap().json())
+                        .await
+                        .unwrap();
+                    assert!(snapshot["readiness_holds"].is_null());
                     assert_eq!(owner.front().0, original.0);
                     assert_eq!(owner.front().1.message_id, original.1.message_id);
                     assert_eq!(owner.front().1.text, original.1.text);

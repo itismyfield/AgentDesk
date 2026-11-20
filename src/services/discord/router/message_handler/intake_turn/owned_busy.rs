@@ -2,6 +2,7 @@
 use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
 use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
+use crate::services::discord::recovery_engine::herdr_reattach::confirm_admitted_input_identity;
 
 #[path = "owned_busy/missing_watch.rs"]
 mod missing_watch;
@@ -107,14 +108,26 @@ impl OwnerTurn {
         {
             owner.recovery.mark();
         }
-        match observation.state() {
-            BusyState::Legacy => return Ok((owner, true)),
-            BusyState::Idle => return Ok((owner, false)),
-            _ => {}
-        }
         let Some(owner) = owner else {
             return Ok((None, true));
         };
+        if let Err(error) = confirm_admitted_input_identity(
+            shared,
+            &owner.mailbox,
+            channel,
+            (&host, session, owner.front()),
+        )
+        .await
+        {
+            tracing::warn!(channel_id = channel.get(), %error, "restart identity hold not settled");
+            owner.defer_before_submit("herdr_restart_hold_unsettled");
+            return Err(());
+        }
+        match observation.state() {
+            BusyState::Legacy => return Ok((Some(owner), true)),
+            BusyState::Idle => return Ok((Some(owner), false)),
+            _ => {}
+        }
         if observation.state() == BusyState::Held {
             if owner.late.restarted.is_none() && owner.mailbox.has_active_turn().await != Ok(true) {
                 return owner
