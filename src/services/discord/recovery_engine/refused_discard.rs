@@ -71,11 +71,7 @@ pub(in crate::services::discord) async fn discard_held(
         (Ok(Some(first)), _) => Ok(first),
         (Ok(None), AdoptionRefused) => match identity(provider, row).or(row_key(provider, row)) {
             Some(id) => {
-                // The fresh normalization's own reason when it rejected this turn's output.
-                let fresh = row.turn_nonce.as_deref().and_then(|nonce| {
-                    crate::services::tui_o::cutover::codex_first_rejection(channel_id, nonce)
-                });
-                let reason = fresh.unwrap_or(Reason::AdoptionRefused);
+                let reason = Reason::AdoptionRefused;
                 let persisted = disposition::persist_intent(&pool, &id, reason).await;
                 persisted.map(|()| (id, reason))
             }

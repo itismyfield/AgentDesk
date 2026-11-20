@@ -278,5 +278,5 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod source_read_tests;
 
-#[cfg(any(test, unix))]
+#[cfg(test)]
 pub(crate) use late_adopt::codex::normalization;
