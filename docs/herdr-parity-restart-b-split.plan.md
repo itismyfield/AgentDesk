@@ -12,7 +12,7 @@
 | queue admission·상태·철회·gate 및 claim followers | `src/services/turn_orchestrator/queued_head/v2/source_admission.rs:627`, `src/services/turn_orchestrator/queued_head/v2.rs:395`, `src/services/discord/queue_io/input_owner/start.rs:13` | +354~448 |
 | clear epoch·효과 허가·startup 추적·owner 폐기 보정 여유 | `src/services/herdr_launch/prepared.rs:43`, `src/services/claude/herdr_turn/first_input.rs:99`, `src/services/codex/herdr_turn/first_input.rs:162`, `src/services/discord/commands/control/clear_teardown.rs:137` | +320~465 |
 | 공개 명령·operation 응답·detached 종료/postlude | `src/services/discord/commands/restart.rs:259`, `src/services/discord/herdr_terminate/http_force.rs:30`, `src/services/discord/herdr_terminate/retired_exclusion.rs:100` | +250~300 |
-| idle close-crash 복구·seed permit·headless/Codex 배선 | `src/services/discord/herdr_terminate.rs:217`, `src/services/discord/router/message_handler/headless_turn.rs:147`, `src/services/discord/router/message_handler/provider_dispatch.rs:614` | +200~250 |
+| idle close-crash 복구·seed permit·headless/Codex 배선 | `src/services/discord/herdr_terminate.rs:217`, `src/services/discord/router/message_handler/headless_turn.rs:147`, `src/services/discord/router/message_handler/provider_dispatch.rs:610` | +200~250 |
 | 합계 | 독립 조사에서 API·소유·worker 경계를 대조한 추정 | **+1124~1463 (중심 +1294)** |
 
 초기 방향 비교의 +480~620 및 r3 합계 +715~980 추정에는 아래 비용이 충분히 들어 있지 않았다.

@@ -21,7 +21,6 @@ impl StreamJsonDialectId {
 pub enum ProviderExecutionAdapter {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
     Qwen,
     StreamJsonCli(StreamJsonDialectId),
@@ -32,7 +31,6 @@ impl ProviderExecutionAdapter {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::OpenCode => "opencode_http",
             Self::Qwen => "managed_tmux_wrapper",
             Self::StreamJsonCli(_) => "stream_json_cli",
@@ -44,7 +42,6 @@ impl ProviderExecutionAdapter {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
             Self::StreamJsonCli(dialect) => dialect.provider_id(),
@@ -61,12 +58,6 @@ impl ProviderExecutionAdapter {
             },
             Self::Codex => ProviderCapabilities {
                 binary_name: "codex",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-            Self::Gemini => ProviderCapabilities {
-                binary_name: "gemini",
                 supports_structured_output: true,
                 supports_resume: true,
                 supports_tool_stream: true,
@@ -103,7 +94,6 @@ impl ProviderExecutionAdapter {
 pub enum ProviderCompactionAdapter {
     ClaudeEnvironment,
     CodexCli,
-    GeminiDisabled,
     OpenCodeDisabled,
     QwenDisabled,
     StreamJsonDisabled(StreamJsonDialectId),
@@ -115,7 +105,6 @@ impl ProviderCompactionAdapter {
         match self {
             Self::ClaudeEnvironment => "claude",
             Self::CodexCli => "codex",
-            Self::GeminiDisabled => "gemini",
             Self::OpenCodeDisabled => "opencode",
             Self::QwenDisabled => "qwen",
             Self::StreamJsonDisabled(dialect) => dialect.provider_id(),
@@ -127,7 +116,6 @@ impl ProviderCompactionAdapter {
 pub enum ProviderReadinessAdapter {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
     Qwen,
     GenericBanner(StreamJsonDialectId),
@@ -139,7 +127,6 @@ impl ProviderReadinessAdapter {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
             Self::GenericBanner(dialect) => dialect.provider_id(),
@@ -151,7 +138,6 @@ impl ProviderReadinessAdapter {
 pub(crate) enum LegacyDispatchKind {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
     Qwen,
     StreamJsonCli(StreamJsonDialectId),

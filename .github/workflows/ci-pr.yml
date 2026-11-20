@@ -167,6 +167,7 @@ jobs:
               - 'src/services/session_activity.rs'
             rust_or_policy:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'justfile'
@@ -215,15 +216,16 @@ jobs:
             # require cross-OS verification on macOS/Windows). Pure JS policy,
             # shell script, most CI metadata, and Node package changes are
             # excluded — those are still verified by the ubuntu Rust lane plus
-            # Lint/Script checks, and the nightly workflow continues to run
-            # the full macOS/Windows matrix daily. ci-pr.yml itself is included
-            # so edits to this Rust CI lane exercise its own Windows job.
+            # Lint/Script checks. Nightly runs Windows tests and macOS non-PG,
+            # non-lib tests daily. ci-pr.yml is included so edits to this Rust
+            # CI lane exercise its own Windows job.
             #
             # Must include every compile-time Rust input. Audit before adding
             # new `include_str!`/`include_bytes!`/`sqlx::migrate!`/`build.rs`
             # tracked paths.
             rust_compile:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'Cargo.toml'
@@ -251,6 +253,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'crates/*/Cargo.toml'
               - 'src/services/engine_runtime/mod.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/engine_runtime/relay_state/coord.rs'
@@ -505,10 +508,9 @@ jobs:
         # macOS PR lane temporarily disabled to unblock issue throughput
         # (2026-05-17). Agents run on macOS locally and verify
         # `cargo build --bin agentdesk` before pushing, so PR-time macOS
-        # coverage is largely redundant. Nightly (`ci-nightly.yml`) still
-        # exercises macOS daily so cross-OS Rust drift cannot land
-        # silently for more than 24h. Restore by adding `macos-latest`
-        # back to this matrix once issue backlog stabilises.
+        # coverage is largely redundant. Nightly runs macOS non-PG, non-lib
+        # tests daily. Restore by adding `macos-latest` back to this matrix
+        # once issue backlog stabilises.
         os: [windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -639,7 +641,7 @@ jobs:
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
-          cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json
+          cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json
           python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json
 
       - name: sccache stats
@@ -716,7 +718,7 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"
       - name: Check Rust test source wiring
         shell: bash
         env:
@@ -739,8 +741,8 @@ jobs:
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
           mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
-          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
-          cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+          cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
           python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
@@ -748,7 +750,7 @@ jobs:
           mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)
           python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
-            --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
+            --rust-version 1.94.1 --nextest-version "$(${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
             --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
@@ -1094,7 +1096,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh c15b85a898f294e155cb3f6bfc764dcd3e71c8de030321b57bb2b74e613ec013
+          pin scripts/check-ci-runner-hardening.sh 57a7754fa23640c527c5ee93bbc2de5005e6dde76f266cd35ca846156590cd45
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

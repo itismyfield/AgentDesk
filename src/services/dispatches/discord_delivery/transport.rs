@@ -339,10 +339,10 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     minimal_message: &str,
     dispatch_id: Option<&str>,
 ) -> Result<DispatchMessagePostOutcome, DispatchMessagePostError> {
+    use crate::domain::outbound::policy::DiscordOutboundPolicy;
+    use crate::domain::outbound::result::{DeliveryResult, FallbackUsed};
     use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-    use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
     use crate::services::discord::outbound::{HttpOutboundClient, shared_outbound_deduper};
     use poise::serenity_prelude::ChannelId;
 

@@ -10,15 +10,19 @@ pub(crate) mod idle;
 mod restored_reply;
 mod resume_record;
 mod source;
+#[cfg(unix)]
+pub(crate) use source::launch_start_hook;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
 pub(crate) mod tests;
 mod wait;
 mod watched;
-pub(crate) use watched::{Expiry, Unproven, WINDOW, watched};
+pub(crate) use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+#[cfg(unix)]
+use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use chrono::{DateTime, Utc};
 use evidence::{End, Stamp};
 use serde_json::Value;
@@ -32,6 +36,8 @@ struct Entry {
     revision: u64,
     start: bool,
     clear_start: bool,
+    #[cfg(unix)]
+    launch_start: Option<HookSignal>,
     pending: Option<(u64, u64)>,
     submitted: bool,
     compact_ticket: Option<u64>,
@@ -145,10 +151,11 @@ fn idle_reading(path: &Path, tail: &evidence::Tail) -> bool {
 }
 /// The incarnation was launched before this daemon run, so it never sent this run a Start.
 fn launched_before_start(source: &Source) -> bool {
-    source.nonce.as_deref().is_some_and(|nonce| {
-        crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
-            .is_ok_and(|ctx| ctx.created_at < *STARTED)
-    })
+    source.nonce.as_deref().is_some_and(launched_before_run)
+}
+fn launched_before_run(nonce: &str) -> bool {
+    crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+        .is_ok_and(|ctx| ctx.created_at < *STARTED)
 }
 fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> Option<Proof> {
     let restart_ok = origin == Some(ProofOrigin::RestoredHard);
@@ -442,6 +449,22 @@ impl Reservation {
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
+    #[cfg(unix)]
+    pub(crate) fn reserve_thread_body(
+        &self,
+        channel: Option<u64>,
+        warm: bool,
+    ) -> Result<(), String> {
+        crate::services::claude::tui_session_launch::reserve_thread_body_before_key(
+            channel,
+            &self.source.session,
+            self.source.nonce.as_deref(),
+            &self.source.native,
+            &self.source.path,
+            warm,
+        )
+    }
+
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)
@@ -595,6 +618,14 @@ pub(crate) fn note_hook(
             entry.start = true;
             entry.resumed = resumed;
             entry.clear_start = payload["source"] == "clear";
+            #[cfg(unix)]
+            {
+                entry.launch_start = (payload["source"] == "startup" && ctx.launch_mode == "fresh")
+                    .then(|| HookSignal {
+                        published_at: Some(at),
+                        ..HookSignal::from_payload("session_start", payload)
+                    });
+            }
             entry.compact_done = None;
             entry.recovery = None;
             entry.revision += 1;

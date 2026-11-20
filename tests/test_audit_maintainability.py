@@ -1644,7 +1644,7 @@ class ModuleLayersCheck(unittest.TestCase):
         with _FakeSrcTree({"src/lib.rs": "mod unreadable; mod missing;",
                            "src/unreadable.rs": "pub fn invisible() {}"}) as root:
             def read(path, *args, **kwargs):
-                if path == root / "src/unreadable.rs":
+                if Path(path).resolve() == (root / "src/unreadable.rs").resolve():
                     raise OSError("synthetic permission denied")
                 return real_read(path, *args, **kwargs)
             with mock.patch.object(Path, "read_text", read):

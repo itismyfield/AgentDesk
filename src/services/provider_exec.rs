@@ -30,7 +30,7 @@ use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
-use crate::services::{claude, codex, gemini, opencode, qwen};
+use crate::services::{claude, codex, opencode, qwen};
 
 pub async fn execute_simple_with_timeout(
     provider: ProviderKind,
@@ -92,9 +92,6 @@ fn execute_simple_blocking_inner(
         }
         ProviderExecutionAdapter::Codex => {
             codex::execute_command_simple_cancellable(&prompt, cancel_token)
-        }
-        ProviderExecutionAdapter::Gemini => {
-            gemini::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
         ProviderExecutionAdapter::OpenCode => {
             opencode::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())

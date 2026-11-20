@@ -498,13 +498,8 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     };
     // O posts the anchor channel's TUI body; Legacy never reposts it. The row's kind counts only
     // when the anchor lives in the row's own channel, and a held identity preserves the row.
-    let kind = (anchor.panel_channel_id == state.channel_id)
-        .then_some(state.runtime_kind)
-        .flatten();
-    match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-        anchor.panel_channel_id,
-        kind,
-    ) {
+    let claim = state.tui_body_claim(anchor.panel_channel_id);
+    match claim.peek_o_owns_tui_output_for_channel() {
         Ok(false) => {}
         Ok(true) => return AnchorRepostOutcome::NotReposted,
         Err(_) => return AnchorRepostOutcome::RefusedPreserveRow,
@@ -600,7 +595,6 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         )
         .with_record_channel_id(record_channel_id);
     // Only the repost's POST claims the channel, after every refusal above and its fresh-send lease.
-    let claim = crate::services::tui_o::cutover::BodyClaim::new(anchor.panel_channel_id, kind);
     let repost = super::super::outbound::body_census::BodySource::from_state(state).observe(
         crate::services::tui_o::cutover::BodySite::RestartAnchor,
         super::super::outbound::body_census::BodyOffer::recovered(

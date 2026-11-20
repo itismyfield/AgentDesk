@@ -57,6 +57,7 @@ pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay
 mod relay_dead_reattach;
 mod relay_progress;
 mod routine_process;
+mod routine_reset;
 pub(crate) use super::queue_io::input_owner::closed::repair_cleared_row;
 pub(crate) use routine_process::cancel_routine_process_turn;
 mod channel_home_seed;
@@ -106,7 +107,6 @@ pub(crate) use super::turn_presence::supervisor::status as turn_presence_status;
 pub(crate) use super::turn_presence::supervisor::tests::seed_long_unknown_for_tests;
 #[cfg(test)]
 pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
-pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{

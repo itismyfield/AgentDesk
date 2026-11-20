@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::execution_mode::{ClaimDefinitionRow, StoredExecutionDefinition};
 
 impl RoutineStore {
@@ -14,7 +15,7 @@ impl RoutineStore {
         let row: ClaimDefinitionRow = sqlx::query_as(
             "SELECT id, execution_mode, runner, execution_strategy, script_ref,
                     headless_failure_notice_limit, agent_id, fallback_agent_id, max_retries,
-                    discord_thread_id, timeout_secs
+                    discord_thread_id, timeout_secs, provider, model
              FROM routines WHERE id = $1",
         )
         .bind(routine_id)
@@ -80,6 +81,35 @@ impl RoutineStore {
         .await
         .map_err(|e| anyhow!("read routine run {run_id} execution mode: {e}"))?;
         mode.ok_or_else(|| anyhow!("routine run {run_id} not found while reading its mode"))
+    }
+
+    /// The provider and model pinned at claim; a run claimed before the pin inherits the primary.
+    pub async fn run_provider_choice(&self, run_id: &str) -> Result<ProviderChoice> {
+        let choice: Option<ProviderChoice> = sqlx::query_as(
+            "SELECT run_spec ->> 'provider' AS provider, run_spec ->> 'model' AS model
+             FROM routine_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("read routine run {run_id} provider choice: {e}"))?;
+        choice.ok_or_else(|| anyhow!("routine run {run_id} not found while reading its provider"))
+    }
+
+    pub async fn load_provider_choices(
+        &self,
+        routine_ids: &[String],
+    ) -> Result<HashMap<String, ProviderChoice>> {
+        let rows: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT id, provider, model FROM routines WHERE id = ANY($1)")
+                .bind(routine_ids)
+                .fetch_all(&*self.pool)
+                .await
+                .map_err(|e| anyhow!("load routine provider choices: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, provider, model)| (id, ProviderChoice { provider, model }))
+            .collect())
     }
 
     /// Whether the claim pinned "no second turn after a submitted one"; a run claimed before the

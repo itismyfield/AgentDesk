@@ -6,6 +6,7 @@ use crate::services::routines::RoutinePatch;
 use crate::services::routines::execution_mode::{
     ExecutionDefinition, StoredExecutionDefinition, definition_for_patch, notice_limit_for_patch,
 };
+use crate::services::routines::provider_choice::{ProviderChoice, choice_for_patch};
 
 const PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF: &str = "migrated-launchd/queue-stability-batch.js";
 
@@ -51,6 +52,8 @@ pub struct AttachRoutineBody {
     pub execution_mode: Option<String>,
     pub runner: Option<Value>,
     pub headless_failure_notice_limit: Option<i32>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +79,12 @@ pub struct PatchRoutineBody {
     runner: PatchField<Option<Value>>,
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     headless_failure_notice_limit: PatchField<Option<i32>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    agent_id: PatchField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    provider: PatchField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    model: PatchField<Option<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +161,19 @@ impl PatchRoutineBody {
         Ok((definition, limit))
     }
 
+    /// `None` when the request leaves both provider and model alone.
+    fn provider_choice_patch(
+        &self,
+        current: &ProviderChoice,
+    ) -> Result<Option<ProviderChoice>, String> {
+        let provider = self.provider.as_present().map(Option::as_deref);
+        let model = self.model.as_present().map(Option::as_deref);
+        if provider.is_none() && model.is_none() {
+            return Ok(None);
+        }
+        choice_for_patch(provider, model, current).map(Some)
+    }
+
     fn into_patch(
         self,
         execution_definition: Option<ExecutionDefinition>,
@@ -160,6 +182,8 @@ impl PatchRoutineBody {
         RoutinePatch {
             execution_definition,
             headless_failure_notice_limit,
+            agent_id: self.agent_id.into_option().flatten(),
+            provider_choice: None,
             name: self.name,
             fallback_agent_id: self.fallback_agent_id.into_option(),
             max_retries: self.max_retries,

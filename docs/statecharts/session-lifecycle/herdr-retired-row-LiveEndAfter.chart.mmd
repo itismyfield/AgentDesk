@@ -1,0 +1,56 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s1: row end 정리 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; 한때 끝남
+  s3: row end 정리 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; 한때 끝남
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; 한때 끝남
+  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s8: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남
+  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; 한때 끝남
+  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s14: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남
+  s16: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남
+  s17: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s18: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  [*] --> s0
+  s0 --> s1: terminate#183;row end 퇴역
+  s1 --> s2: live row end 정리
+  s1 --> s3: 600초 정체 #8594; unknown
+  s2 --> s4: 300초 경과
+  s2 --> s5: 루프 끝 TURN_ACTIVE
+  s2 --> s6: 600초 정체 #8594; unknown
+  s3 --> s6: live row end 정리
+  s4 --> s7: 루프 끝 TURN_ACTIVE
+  s4 --> s8: 600초 정체 #8594; unknown
+  s5 --> s7: 300초 경과
+  s5 --> s9: terminal IDLE(또는 생략)
+  s5 --> s10: terminal IDLE(또는 생략)
+  s5 --> s11: 600초 정체 #8594; unknown
+  s6 --> s8: 300초 경과
+  s6 --> s11: 루프 끝 TURN_ACTIVE
+  s7 --> s10: terminal IDLE(또는 생략)
+  s7 --> s12: terminal IDLE(또는 생략)
+  s7 --> s14: 600초 정체 #8594; unknown
+  s8 --> s14: 루프 끝 TURN_ACTIVE
+  s9 --> s12: 300초 경과
+  s9 --> s15: 600초 정체 #8594; unknown
+  s10 --> s13: 300초 경과
+  s10 --> s16: 600초 정체 #8594; unknown
+  s11 --> s14: 300초 경과
+  s11 --> s15: terminal IDLE(또는 생략)
+  s11 --> s16: terminal IDLE(또는 생략)
+  s12 --> s17: 600초 정체 #8594; unknown
+  s13 --> s18: 600초 정체 #8594; unknown
+  s14 --> s16: terminal IDLE(또는 생략)
+  s14 --> s17: terminal IDLE(또는 생략)
+  s15 --> s17: 300초 경과
+  s16 --> s18: 300초 경과

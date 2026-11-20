@@ -32,7 +32,7 @@ admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤
 
 ### A guard의 운반 경로와 history pin
 
-실제 운반은 `owner_input::start_front`의 A controller → `OwnerTurn`(`owner_input.rs:472`) → `StreamingTurn`(`provider_dispatch.rs:52`) → **CodexHerdrTurn 생성(`provider_dispatch.rs:613`)** → `CodexHerdrTurn`(`codex/herdr_turn.rs:65`) → fresh launch → Pending/host/spawn 게시다. `StreamingTurn`은 Clone이므로 물리 guard 자체를 Clone하지 않는다. 내부 carrier의 `Arc<Mutex<Option<AStartGuard>>>`만 운반하고, Codex 생성 경계에서 **take 한 번**으로 guard를 이동한다. 두 번째 take·owner/path/epoch 불일치는 거절한다. A carrier가 있는데 take 결과가 None이면 새 guard 재탐색으로 보충하지 않는다. A와 무관한 기존 일반 입력은 carrier=None인 정상 경로를 유지한다. 일반 StreamingTurn 생성자 `headless_turn.rs:1068`·`intake_turn.rs:2179`에도 None 연결을 포함하고, owner_input.rs:439/1025와 provider_dispatch.rs의 `..turn` 복사/Clone은 같은 carrier를 보존한다. 같은 guard를 기존 launch/clear_fresh에 전달해 중첩 flock을 열지 않는다. 공개 요청 payload나 persisted provenance JSON에는 권한 토큰을 직렬화하지 않는다.
+실제 운반은 `owner_input::start_front`의 A controller → `OwnerTurn`(`owner_input.rs:472`) → `StreamingTurn`(`provider_dispatch.rs:52`) → **CodexHerdrTurn 생성(`provider_dispatch.rs:609`)** → `CodexHerdrTurn`(`codex/herdr_turn.rs:65`) → fresh launch → Pending/host/spawn 게시다. `StreamingTurn`은 Clone이므로 물리 guard 자체를 Clone하지 않는다. 내부 carrier의 `Arc<Mutex<Option<AStartGuard>>>`만 운반하고, Codex 생성 경계에서 **take 한 번**으로 guard를 이동한다. 두 번째 take·owner/path/epoch 불일치는 거절한다. A carrier가 있는데 take 결과가 None이면 새 guard 재탐색으로 보충하지 않는다. A와 무관한 기존 일반 입력은 carrier=None인 정상 경로를 유지한다. 일반 StreamingTurn 생성자 `headless_turn.rs:1068`·`intake_turn.rs:2179`에도 None 연결을 포함하고, owner_input.rs:439/1025와 provider_dispatch.rs의 `..turn` 복사/Clone은 같은 carrier를 보존한다. 같은 guard를 기존 launch/clear_fresh에 전달해 중첩 flock을 열지 않는다. 공개 요청 payload나 persisted provenance JSON에는 권한 토큰을 직렬화하지 않는다.
 
 Claude도 같은 물리 marker writer다. direct `claude/tui_session_launch.rs:34` cleanup 앞에서 outer fence를 취득해 owner/runtime→prepared host/nonce 게시→create/respawn(`:67`)까지 유지한다. wrapper `claude.rs:2594` cleanup 앞에서 취득해 marker→create(`:2677`)→spawn stamp(`:2707`)까지 운반하고 output tail 전에 놓는다. 중앙 writer 각각을 잠그는 것으로 이 전체 구간을 대체하지 않는다. 실패 복구도 같은 guard의 under-fence API를 사용하며, 기존 종료/재생성 권한은 바꾸지 않는다. giant에는 이 guard 연결만 둔다.
 
@@ -254,7 +254,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `input_owner/drive.rs:88`, `queued_head/v2.rs:398,411` | 중복 wake는 직렬 drive/front claim에 합류 | ARedeliver/ANoDuplicateEffects |
 | `input_owner/ingress.rs:445,458`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
 | `claude/tui_session_launch.rs:34,67`, `claude.rs:2594,2677,2707` | cleanup 앞에서 outer guard, 실제 create/respawn·spawn stamp까지 운반 | AFenceContender의 실제 구현 의무 |
-| `provider_dispatch.rs:52,613`, `owner_input.rs:439,1025`, `headless_turn.rs:1068`, `intake_turn.rs:2179`, `codex/herdr_turn.rs:65` | Clone carrier와 한번 take, 실제 생성 경계 누락 없이 전달 | AGrant/ACreate 연결·구현 시험 |
+| `provider_dispatch.rs:52,609`, `owner_input.rs:439,1025`, `headless_turn.rs:1068`, `intake_turn.rs:2179`, `codex/herdr_turn.rs:65` | Clone carrier와 한번 take, 실제 생성 경계 누락 없이 전달 | AGrant/ACreate 연결·구현 시험 |
 | `queued_head/v2/retained.rs:78`, `source_admission.rs:618` | 직접 terminal/bind TTL에서 A debt pin | 모델 범위 밖 실제 TTL 회귀 |
 | `queue_io/input_owner/drive.rs:101,117`, `owner_input.rs:664,681` | 기존 awaited callback/boot future를 놓지 않고 bounded continuation | APartialUnlink/ARetryContinue/ARecover |
 | `held_watch.rs:64,88`, `retained.rs:46` | 이번 retry 원천으로 사용하지 않음, 기존 동작 유지 | 모델에 가짜 arm/deadline 없음 |

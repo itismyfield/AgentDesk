@@ -769,18 +769,18 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
-    "job_timeout_minutes" => 100, "job_sha256" => "2c905a4135beeab0087a85e86e9d37ea4d704b72b1f59c1593ddd6798d017cec",
+    "job_timeout_minutes" => 100, "job_sha256" => "61a778cc7baaa8f73daf531613ffa819267031cc51b766f091dda9bf91c30fa3",
     "cargo_steps" => {
       "Disable remote compiler cache" => {
-        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
+        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
         "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
       },
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
         "commands" => [
           "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"',
-          'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
-          'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
+          'cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
+          %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\},
           '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
           'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
           'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
@@ -788,7 +788,7 @@ targets = {
           'mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)',
           'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
           '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
-          "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
+          %q{--rust-version 1.94.1 --nextest-version "$(${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest --version | awk 'NR==1 {print $2}')" \\},
           "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
           '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"',
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
@@ -872,7 +872,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "fc080a14aa7bffb9b6e155f6982a8973c78cf726e8794f429ef5b6ed6a3f8300",
+    "job_sha256" => "4d9ff695c9d13d016955896b145475ffb668a8f55568c54809eb2ee0f062bf1c",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -882,7 +882,7 @@ targets = {
       "Compare Windows Rust test sources with the nextest list" => {
         "commands" => [
           "set -euo pipefail",
-          "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json",
+          "cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json",
           "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json",
         ],
         "timeout_minutes" => 30,
@@ -1225,11 +1225,16 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   if job_id == "rust_build"
     hosted_actions = %w[./.github/actions/sccache-or-nothing Swatinem/rust-cache@v2 ./.github/actions/ensure-swap]
     expected_nightly["runs-on"] = "ubuntu-latest"
-    expected_nightly["steps"] = expected_nightly["steps"].filter_map do |step|
+    expected_nightly["steps"] = expected_nightly["steps"].map do |step|
       next if step.is_a?(Hash) && step["name"] == "Disable remote compiler cache"
+      if step.is_a?(Hash) && step["name"] == "Archive, list, compare and plan"
+        prefix = %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}}
+        queries = /cargo nextest (?:list --archive-file|--version) /
+        next step.merge("run" => step.fetch("run").gsub(/#{Regexp.escape(prefix)}(?=#{queries})/, ""))
+      end
 
       step.is_a?(Hash) && hosted_actions.include?(step["uses"]) ? step.reject { |key, _| key == "if" } : step
-    end
+    end.compact
   end
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
   expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))

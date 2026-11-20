@@ -53,6 +53,7 @@ pub(super) enum Retried {
     Left,
     /// A late reservation's current source moved while it waited.
     Rebase(Rebased),
+    ReservedClaude,
 }
 
 /// The next source bound after the old one and the takeover floor its predecessors' proofs give.
@@ -299,6 +300,19 @@ pub(super) async fn retry<I: HostIo>(
             }
             Err(_) => continue,
         };
+        if waiting.late
+            && candidate.child_surface().is_some()
+            && claude::thread::is_protected(&observed)
+        {
+            return Retried::ReservedClaude;
+        }
+        if waiting.late
+            && candidate.child_surface().is_some()
+            && previous_rotation(&waiting, &observed)
+            && super::late_adopt::child_run::preserve_inflight(&waiting, &observed)
+        {
+            return Retried::Left;
+        }
         if waiting.late {
             if let Some(rebased) =
                 adoption::ChildDebt::refresh(&mut waiting, &mut sample, &observed).await
@@ -672,8 +686,15 @@ fn rebased<I: HostIo>(
     Some(Rebased { new, floor, owed })
 }
 
-/// The first earlier source neither settled nor taken from where Legacy last delivered it, which
-/// a commit of the current one would orphan.
+fn previous_rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> bool {
+    let Some(boundary) = waiting.candidate.late_boundary() else {
+        return false;
+    };
+    adoption::rotated(events, waiting.bound.1, &waiting.bound.0)
+        .is_some_and(|(_, seq)| seq <= boundary.takeover_after)
+}
+
+/// The first earlier source a commit of the current one would orphan.
 fn owing<I: HostIo>(
     waiting: &Waiting<'_, I>,
     events: &[BindingEvent],

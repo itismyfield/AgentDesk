@@ -36,14 +36,14 @@ The goal is therefore usability parity, not identical implementation.
 
 At the start of PR #95, OpenCode was present in the provider registry:
 
-- `src/services/provider.rs:133` registers `id: "opencode"`.
-- `src/services/provider.rs:139-143` advertised structured output, resume, and
+- `src/services/provider.rs:108` registers `id: "opencode"`.
+- `src/services/provider.rs:114-118` advertised structured output, resume, and
   tool-stream support, even though real HTTP session resume was not implemented.
-- `src/services/provider.rs:150-151` sets a 128k default context window and
+- `src/services/provider.rs:125-126` sets a 128k default context window and
   `managed_tmux_backend: false`.
 
 That last point is the core architectural difference. Claude and Codex use the
-managed tmux backend (`src/services/provider.rs:88`, `:109`); OpenCode does
+managed tmux backend (`src/services/provider.rs:63`, `:109`); OpenCode does
 not. The provider dispatch still routes OpenCode through the same high-level
 execution switch:
 
@@ -193,7 +193,7 @@ resulting OpenCode skill roots.
 The 2026-04-28 code audit found several gaps beyond prompt/output cleanup:
 
 - OpenCode advertised `supports_resume: true` and `resume_without_reset: true`
-  (`src/services/provider.rs:139-147`), but
+  (`src/services/provider.rs:114-122`), but
   `src/services/opencode.rs:94-107` ignores `_session_id`, always creates a new
   OpenCode session (`src/services/opencode.rs:197-199`), then disposes and
   kills the OpenCode server after the turn (`src/services/opencode.rs:138-139`).

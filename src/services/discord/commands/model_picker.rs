@@ -135,9 +135,7 @@ async fn run_model_command(ctx: Context<'_>) -> Result<(), Error> {
             provider = ctx.data().provider.as_str(),
             status = "unsupported",
         );
-        ctx.say(
-            "Model override is only supported for Claude, Codex, Gemini, OpenCode, and Qwen channels.",
-        )
+        ctx.say("Model override is only supported for Claude, Codex, OpenCode, and Qwen channels.")
             .await?;
         return Ok(());
     }

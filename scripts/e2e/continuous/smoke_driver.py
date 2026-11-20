@@ -17,6 +17,7 @@ import sys
 
 from . import budget, channel_lock, plan, release_host, runner, summary, turn_gate, usage
 from .store import write_json
+from ..tui_relay import preflight_evidence
 
 REPO = Path(__file__).resolve().parents[3]
 SCENARIOS = REPO / "tests/e2e/tui_relay/scenarios"
@@ -26,6 +27,9 @@ FINGERPRINT_BYTES = 65536
 # Every input of these steps is a channel post that passes the turn gate; nothing else is driven here.
 GATED_STEPS = {"send_discord_prompt", "wait_for_discord_text", "wait_for_raw_discord_text", "wait_idle_s",
                "relay_author", "timeout_s"}
+# Only the shared release's two core Herdr cells opt in to proven foreign reasons.
+RELEASE_HERDR_CELLS = {("default", "E-50", "claude-herdr"), ("default", "E-51", "codex-herdr")}
+RELEASE_HERDR_REASONS = ("turn_presence_unknown:*", "tui_o:reader_retention_stalled:*", "relay_verdict_unknown_*")
 
 
 def _smoke():
@@ -145,6 +149,10 @@ def run(args, config, spawn=subprocess.run):
         if not isinstance(endpoints, dict) or len(endpoints) != 1:
             return refuse("HERDR_ENDPOINT_AMBIGUOUS")
         host_args = ["--herdr-endpoint", next(iter(endpoints)), "--herdr-status-bin", host["binary"]]
+        if (args.profile, args.scenario, args.cell) in RELEASE_HERDR_CELLS:
+            host_args += ["--herdr-foreign-degraded-only"]
+            for pattern in RELEASE_HERDR_REASONS:
+                host_args += ["--herdr-allowed-degraded-reason", pattern]
     run_id = f"{args.run_id}-{args.scenario}-{harness_cell}"
     markers = smoke.expected_markers(SCENARIOS, args.scenario, run_id)
     remaining, limit = json.loads(args.budget), cell["turn_tokens"]
@@ -152,12 +160,17 @@ def run(args, config, spawn=subprocess.run):
     if (not markers or type(limit) is not int or limit <= 0 or remaining["turns"] < len(markers)
             or remaining["tokens"] < len(markers) * limit or remaining["time_s"] < cell["deadline_s"]):
         return refuse("BUDGET_TOO_SMALL_FOR_SCENARIO")
-    relay = [sys.executable, str(REPO / "scripts/e2e/post_deploy_turn_smoke.py"), "preflight",
+    relay = [sys.executable, str(REPO / "scripts/e2e/post_deploy_turn_smoke.py"), "preflight", "--failure-json",
              "--base-url", host["base_url"], "--cell", harness_cell, "--channel-id", channel,
              "--queue-runtime-root", host["runtime_root"], *host_args]
     idle = spawn(relay, cwd=REPO, capture_output=True, text=True)
     if idle.returncode != 0:
-        return refuse("CELL_NOT_IDLE: " + (idle.stdout or "").strip()[:200])
+        try:
+            failure = preflight_evidence.bounded(json.loads(idle.stdout or ""))
+        except ValueError:
+            failure = None
+        report["preflight_failure"] = failure or {"stage": "preflight"}
+        return refuse("CELL_NOT_IDLE: " + report["preflight_failure"]["stage"])
     out = Path(config["state_dir"]) / "outputs" / "e2e" / args.run_id / f"{args.scenario}.{args.cell}"
     needs_log = seen != "herdr"
     try:

@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -34,7 +33,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(503, "DO_NOT_LEAK_SECRET")
             return
         if self.server.mode == "timeout":
-            time.sleep(4.2)
+            release_response = self.server.release_response
+            wait_finished = self.server.timeout_wait_finished
+            self.server.timeout_wait_started.set()
+            release_response.wait(30)
+            wait_finished.set()
+            return
         if request["method"] == "initialize":
             result = {"protocolVersion": "2025-11-25", "capabilities": {}}
         else:
@@ -89,6 +93,9 @@ class AnchorTests(unittest.TestCase):
         self.codex_home.mkdir()
         self.server.calls = []
         self.server.mode = "ok"
+        self.server.release_response = threading.Event()
+        self.server.timeout_wait_started = threading.Event()
+        self.server.timeout_wait_finished = threading.Event()
         inherited = {k: v for k, v in os.environ.items() if k not in COMPACT_ENV}
         self.env = dict(inherited, HOME=str(self.root), CODEX_HOME=str(self.codex_home),
                         PATH=str(self.bin) + ":" + os.environ["PATH"],
@@ -113,11 +120,12 @@ class AnchorTests(unittest.TestCase):
         tmux.chmod(0o755)
 
     def tearDown(self):
+        self.server.release_response.set()
         self.temp.cleanup()
 
     def run_wrapper(self, name, args=()):
         result = subprocess.run(["/bin/zsh", "-f", "-c", self.wrappers + '\n' + name + ' "$@"', "test", *args],
-                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=8)
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("DO_NOT_LEAK_SECRET", result.stdout + result.stderr)
         self.assertNotIn("Global 'quoted'", result.stdout + result.stderr)
@@ -192,11 +200,22 @@ class AnchorTests(unittest.TestCase):
     def test_failures_and_empty_preserve_original_launch(self):
         for mode in ("http_error", "malformed", "empty", "timeout"):
             with self.subTest(mode=mode):
+                self.server.calls = []
                 self.server.mode = mode
-                data, result = self.run_wrapper("cc", ["hello"])
+                self.server.release_response = threading.Event()
+                try:
+                    data, result = self.run_wrapper("cc", ["hello"])
+                    if mode == "timeout":
+                        self.assertTrue(self.server.timeout_wait_started.is_set())
+                        self.assertFalse(self.server.release_response.is_set())
+                        self.assertFalse(self.server.timeout_wait_finished.is_set())
+                finally:
+                    self.server.release_response.set()
                 self.assertEqual(data["args"], ["--dangerously-skip-permissions", "hello"])
                 if mode != "empty":
                     self.assertIn("continuing with original instructions", result.stderr)
+                if mode == "timeout":
+                    self.assertEqual([request["method"] for request in self.server.calls], ["initialize"])
 
     def test_background_session_commands_reach_claude_unprefixed(self):
         for name in ("cc", "claude"):

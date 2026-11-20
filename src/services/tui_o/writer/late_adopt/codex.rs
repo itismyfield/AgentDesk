@@ -82,6 +82,8 @@ pub(super) enum Plan<'p> {
     Fresh(&'p Prefix, &'p [InitSource]),
     /// Sources started at their frontiers; the bytes before each must still hash the same.
     Warm(&'p [InitSource]),
+    /// A protected thread uses the frontiers proved by its verified launch or resume.
+    Protected(u64, &'p [InitSource]),
 }
 
 /// Where O starts on a rollout that holds output.
@@ -114,6 +116,7 @@ pub(super) struct Takeover<'a, I: HostIo> {
     pub(super) provider: ShadowProvider,
     pub(super) judge: fn(&SourceId) -> Verdict,
     pub(super) origin: InitOrigin,
+    pub(super) protected_parent: Option<u64>,
 }
 
 /// Waits for a rollout bound after the baseline that holds no output yet and commits it; false
@@ -138,6 +141,7 @@ pub(super) async fn activate<I: HostIo>(
         provider: ShadowProvider::Codex,
         judge: prefix::judge,
         origin: InitOrigin::LateCodexTakeover,
+        protected_parent: None,
     };
     let mut admission_changes = candidate.first_changes();
     let (mut baseline, mut logged) = (None, None);
@@ -488,18 +492,24 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
-        let debts = adoption::ChildDebt::pin(
-            self.candidate,
-            self.io.legacy(),
-            self.io.bindings(self.channel, self.provider),
-            self.channel,
-        )
-        .await
-        .map_err(Taken::Retry)?;
-        if matches!(prefix.class, prefix::PrefixClass::OutputFree) {
-            if let Some(sends) = debts.sends() {
-                at.sends = sends;
-            }
+        let debts = if self.protected_parent.is_none() {
+            Some(
+                adoption::ChildDebt::pin(
+                    self.candidate,
+                    self.io.legacy(),
+                    self.io.bindings(self.channel, self.provider),
+                    self.channel,
+                )
+                .await
+                .map_err(Taken::Retry)?,
+            )
+        } else {
+            None
+        };
+        if matches!(prefix.class, prefix::PrefixClass::OutputFree)
+            && let Some(sends) = debts.as_ref().and_then(adoption::ChildDebt::sends)
+        {
+            at.sends = sends;
         }
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
@@ -532,8 +542,25 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        let plan = Plan::Fresh(prefix, &[]);
-        self.fenced_proved(at, bound, plan, admission.as_ref(), &debts)
+        let protected = if let Some(parent) = self.protected_parent {
+            let events = self.events()?;
+            let (again, sources) =
+                super::claude::thread::plan(&events, parent).ok_or_else(|| {
+                    Taken::Retry("protected Claude binding has no durable frontier".into())
+                })?;
+            if &again != bound {
+                return Err(Taken::Retry("protected Claude binding changed".into()));
+            }
+            Some((parent, sources))
+        } else {
+            None
+        };
+        let plan = protected
+            .as_ref()
+            .map_or(Plan::Fresh(prefix, &[]), |(parent, sources)| {
+                Plan::Protected(*parent, sources)
+            });
+        self.fenced_proved(at, bound, plan, admission.as_ref(), debts.as_ref())
             .await
     }
 
@@ -552,7 +579,8 @@ impl<I: HostIo> Takeover<'_, I> {
         let debts = adoption::ChildDebt::pin(self.candidate, legacy, bindings, self.channel)
             .await
             .map_err(Taken::Retry)?;
-        self.fenced_proved(at, bound, plan, None, &debts).await
+        self.fenced_proved(at, bound, plan, None, Some(&debts))
+            .await
     }
 
     async fn fenced_proved(
@@ -561,7 +589,7 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         plan: Plan<'_>,
         admission: Option<&FirstProof>,
-        debts: &adoption::ChildDebt,
+        debts: Option<&adoption::ChildDebt>,
     ) -> Result<(), Taken> {
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
@@ -605,7 +633,18 @@ impl<I: HostIo> Takeover<'_, I> {
             // Custody reads are not atomic; the fence, the sends and the relay are judged too.
             let local = || {
                 let custody = io.local_custody(channel, self.provider)?;
-                Ok(custody.blocks_takeover() || io.relaying(channel))
+                if custody.blocks_takeover() || io.relaying(channel) {
+                    return Ok(true);
+                }
+                if let Plan::Protected(_, sources) = plan
+                    && custody == super::super::host::Custody::PendingStart
+                {
+                    return io
+                        .legacy()
+                        .late_epoch(channel)
+                        .map(|epoch| !super::claude::thread::owns_row(epoch, sources));
+                }
+                Ok(false)
             };
             let result = self.gate.admit(|epoch| {
                 (epoch == expected).then(|| {
@@ -643,7 +682,7 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         plan: Plan<'_>,
         admission: Option<&FirstProof>,
-        debts: &adoption::ChildDebt,
+        debts: Option<&adoption::ChildDebt>,
     ) -> Result<Vec<InitSource>, Taken> {
         if self.provider == ShadowProvider::Codex
             && self
@@ -677,9 +716,11 @@ impl<I: HostIo> Takeover<'_, I> {
         } else {
             self.events()?
         };
-        debts
-            .recheck(&events, self.candidate)
-            .map_err(Taken::Retry)?;
+        if let Some(debts) = debts {
+            debts
+                .recheck(&events, self.candidate)
+                .map_err(Taken::Retry)?;
+        }
         if admission.is_some_and(|proof| {
             !events
                 .iter()
@@ -689,14 +730,32 @@ impl<I: HostIo> Takeover<'_, I> {
                 "binding execution changed during the intake fence".into(),
             ));
         }
-        if bound_after(&events, 0).as_ref() != Some(bound) {
+        if let Plan::Protected(parent, checked) = plan {
+            let (again, sources) = super::claude::thread::plan(&events, parent)
+                .ok_or_else(|| Taken::Retry("protected Claude binding disappeared".into()))?;
+            if &again != bound || sources != checked {
+                return Err(Taken::Retry(
+                    "protected Claude source frontier changed".into(),
+                ));
+            }
+            super::claude::thread::verify(&sources).map_err(Taken::Retry)?;
+            return Ok(sources);
+        }
+        let now = if self.provider == ShadowProvider::Claude {
+            super::claude::takeover_binding(&events, at.seq)
+        } else if matches!(plan, Plan::Fresh(..)) {
+            bound_after(&events, at.seq)
+        } else {
+            bound_after(&events, 0)
+        };
+        if now.as_ref() != Some(bound) {
             return Err(Taken::Retry(
                 "the binding moved while O fenced the takeover".into(),
             ));
         }
         let (checked, fresh) = match plan {
             Plan::Fresh(prefix, owed) => (owed, Some(prefix)),
-            Plan::Warm(sources) => (sources, None),
+            Plan::Warm(sources) | Plan::Protected(_, sources) => (sources, None),
         };
         if let Some(prefix) = fresh {
             if admission.is_some() {

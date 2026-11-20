@@ -6,13 +6,13 @@ import copy
 import json
 import os
 import re
+import select
 import shlex
 import signal
 import stat
 import subprocess
 import tempfile
 import textwrap
-import time
 import unittest
 from pathlib import Path
 
@@ -169,9 +169,37 @@ class SwapStepWiring(unittest.TestCase):
                     for step in hosted_steps:
                         self.assertEqual(eval_step_if(step.get("if"), context), hosted, step["name"])
                     self.assertEqual(eval_step_if(uncached.get("if"), context), not hosted)
+                    if not hosted:
+                        self.assertIn('ADK_CARGO_PRIORITY=1\\n\' >> "$GITHUB_ENV"', uncached["run"])
             self.assertLess(job["steps"].index(uncached),
                             next(i for i, step in enumerate(job["steps"]) if needs_swap(step, job)))
             self.assertIn("RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\n", uncached["run"])
+
+    def test_rust_build_bypasses_cargo_slot_only_for_self_hosted_nextest_queries(self):
+        slot = "ADK_CARGO_SLOT_HELD"
+        query = re.compile(
+            r"(?P<prefix>\$\{\{ [^{}\n]+ \}\})?"
+            r"(?P<command>cargo nextest (?:--version\b|(?:list|run) [^|)\n]*?--archive-file\b))"
+        )
+        for workflow in DUAL_RUNNER_WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                document = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))
+                job = document["jobs"]["rust_build"]
+                steps = job["steps"]
+                for scope in (document, job, *steps):
+                    self.assertNotIn(slot, scope.get("env", {}))
+                run = "\n".join(step.get("run", "") for step in steps)
+                self.assertIn("cargo nextest archive ", run)
+                calls = list(query.finditer(run.replace("\\\n", "")))
+                commands = {call["command"] for call in calls}
+                self.assertIn("cargo nextest list --archive-file", commands)
+                self.assertIn("cargo nextest --version", commands)
+                for call in calls:
+                    prefix = call["prefix"]
+                    self.assertIsNotNone(prefix, call["command"])
+                    for environment, expected in (("self-hosted", f"{slot}=1 "), ("github-hosted", "")):
+                        self.assertEqual(eval_expression(prefix, {"runner.environment": environment}), expected)
+                self.assertEqual(run.count(slot), len(calls))
 
     def test_every_ubuntu_lib_build_job_adds_swap_before_its_first_cargo_step(self) -> None:
         for relative, expected in EXPECTED_SWAP_JOBS.items():
@@ -375,12 +403,12 @@ class MemMeasureBehavior(unittest.TestCase):
         return runner_temp, env
 
     def run_measure(self, command: str, *, gnu_time: bool, proc_root: Path | None = None,
-                    tools: dict[str, str] | None = None):
+                    tools: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()):
         self.runner_temp, env = self.measure_env(gnu_time=gnu_time, proc_root=proc_root, tools=tools)
         # Observe completion, with a generous watchdog and cleanup of this fixture's group.
         with subprocess.Popen(
             ["bash", str(MEM_MEASURE), "probe", "--", "bash", "-c", command],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, pass_fds=pass_fds,
         ) as wrapper:
             try:
                 stdout, stderr = wrapper.communicate(timeout=120)
@@ -446,14 +474,22 @@ class MemMeasureBehavior(unittest.TestCase):
     def test_names_keep_spaces_and_a_later_crate_read_replaces_an_unknown_rustc(self) -> None:
         proc = self.fake_proc(((101, "rustc", 2097152), (102, "worker with spc", 3000)))
         cmdline = shlex.quote(str(proc / "101" / "cmdline"))
+        ready = proc.parent / "sample-recorded"
+        os.mkfifo(ready)
+        ready_path = shlex.quote(str(ready))
+        announced = shlex.quote(str(proc.parent / "announced"))
         # Supplies the cmdline only after a sample has recorded the rustc as unresolved.
+        move = (
+            '/bin/mv "$@" || exit $?\n'
+            'case "$2" in */mem-measure-peaks.*) '
+            f'if [ ! -e {announced} ] && grep -qF "rustc/?" "$2"; then '
+            f': > {announced}; printf "seen\\n" > {ready_path}; fi ;; esac\n'
+        )
         command = (
-            "for _ in $(seq 100); do "
-            "grep -qF 'rustc/?' \"$RUNNER_TEMP\"/mem-measure-peaks.?????? 2>/dev/null && "
-            "{ echo seen; break; }; sleep 0.1; done; "
+            f"read -r line < {ready_path} && printf '%s\\n' \"$line\" && "
             f"printf 'rustc\\0--crate-name\\0agentdesk\\0--test\\0' > {cmdline}"
         )
-        result = self.run_measure(command, gnu_time=True, proc_root=proc)
+        result = self.run_measure(command, gnu_time=True, proc_root=proc, tools={"mv": move})
         self.assertEqual(result.stdout, b"seen\n")
         self.assertIn(b"peak_procs=rustc/agentdesk+test=2097152,worker with spc=3000\n",
                       result.stderr)
@@ -478,50 +514,58 @@ class MemMeasureBehavior(unittest.TestCase):
 
     def test_a_sampler_that_will_not_stop_is_killed_with_its_children_in_bounded_time(self) -> None:
         proc = self.fake_proc(((101, "cargo", 500),))
-        pids = proc.parent / "stuck.pids"
+        ready = proc.parent / "stuck-ready"
+        os.mkfifo(ready)
+        ready_path = shlex.quote(str(ready))
         delays = proc.parent / "stop-delays"
-        stuck_cat = (
-            f'case "$*" in */status*) echo $$ >> {shlex.quote(str(pids))}; exec python3 -c "import threading; threading.Event().wait()" ;; esac\n'
-            'exec /bin/cat "$@"\n'
-        )
-        command = f'while [ ! -s {shlex.quote(str(pids))} ]; do sleep 0.05; done; exit 0'
         sleep = (
             f'case "$1" in 0.1) printf "%s\\n" "$1" >> {shlex.quote(str(delays))} ;; esac\n'
             'exec /bin/sleep "$@"\n'
         )
-        result = self.run_measure(command, gnu_time=True, proc_root=proc, tools={"cat": stuck_cat, "sleep": sleep})
-        self.assertEqual(result.returncode, 0)
-        self.assertIn(b" peak_sampler=killed ", result.stderr)
-        # Count requested shutdown delays; scheduler stalls belong to the watchdog.
-        self.assertLessEqual(sum(float(delay) for delay in delays.read_text().split()), SAMPLER_KILL_GRACE_SECONDS)
-        stuck = [int(line) for line in pids.read_text("utf-8").split()]
-        self.assertTrue(stuck)
-        deadline = time.monotonic() + 30
-        for pid in stuck:
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail(f"sampler child {pid} outlived the wrapper")
+        reader, writer = os.pipe()
+        try:
+            # The blocked child holds the inherited writer until it exits.
+            child = (
+                f"import os, threading; os.fstat({writer}); "
+                f"open({str(ready)!r}, 'w').close(); threading.Event().wait()"
+            )
+            stuck_cat = (
+                f'case "$*" in */status*) exec python3 -c {shlex.quote(child)} ;; esac\n'
+                'exec /bin/cat "$@"\n'
+            )
+            try:
+                result = self.run_measure(
+                    f'read -r _ < {ready_path}; exit 0', gnu_time=True, proc_root=proc,
+                    tools={"cat": stuck_cat, "sleep": sleep}, pass_fds=(writer,),
+                )
+            finally:
+                os.close(writer)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b" peak_sampler=killed ", result.stderr)
+            # Count requested shutdown delays; scheduler stalls belong to the watchdog.
+            self.assertLessEqual(sum(float(delay) for delay in delays.read_text().split()), SAMPLER_KILL_GRACE_SECONDS)
+            self.assertTrue(select.select([reader], [], [], 30)[0], "sampler child outlived the wrapper")
+            self.assertEqual(os.read(reader, 1), b"")
+        finally:
+            os.close(reader)
 
     def test_a_signal_to_the_wrapper_is_passed_on_after_the_command_and_cleanup(self) -> None:
         proc = self.fake_proc(((101, "cargo", 500),))
         runner_temp, env = self.measure_env(gnu_time=True, proc_root=proc)
-        ready = runner_temp.parent / "ready"
-        command = f": > {shlex.quote(str(ready))}; sleep 1; printf 'done\\n'"
-        wrapper = subprocess.Popen(
+        command = "printf 'ready\\n'; read -r release; printf 'done\\n'"
+        with subprocess.Popen(
             ["bash", str(MEM_MEASURE), "probe", "--", "bash", "-c", command],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        deadline = time.monotonic() + 10
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        wrapper.send_signal(signal.SIGTERM)
-        stdout, stderr = wrapper.communicate(timeout=30)
-        self.assertEqual(wrapper.returncode, -signal.SIGTERM)
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        ) as wrapper:
+            try:
+                self.assertTrue(select.select([wrapper.stdout], [], [], 30)[0], "wrapped command did not start")
+                self.assertEqual(wrapper.stdout.readline(), b"ready\n")
+                wrapper.send_signal(signal.SIGTERM)
+                stdout, stderr = wrapper.communicate(input=b"release\n", timeout=30)
+                self.assertEqual(wrapper.returncode, -signal.SIGTERM)
+            finally:
+                if wrapper.poll() is None:
+                    os.killpg(wrapper.pid, signal.SIGKILL)
         self.assertEqual(stdout, b"done\n")
         self.assertIn(b"mem-measure probe: rc=0 ", stderr)
         self.assertEqual(sorted(os.listdir(runner_temp)), [])

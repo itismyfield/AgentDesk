@@ -9,7 +9,7 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    // A same-turn RetryBoundary reset is permitted; observe the typed decision,
+    // A same-turn full reset is permitted; observe the typed decision,
     // not formatted tracing output.
     {
         let temp = TempDir::new().unwrap();
