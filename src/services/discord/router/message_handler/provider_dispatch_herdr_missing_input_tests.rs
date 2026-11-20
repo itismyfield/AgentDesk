@@ -400,7 +400,9 @@ fn restarted_front(busy: bool) {
             );
         };
         let provider_reply = async {
-            receive.recv().await.expect("provider receives Enter");
+            crate::test_support::wait::await_within(receive.recv(), LIMIT)
+                .await
+                .expect("provider receives Enter");
             let sends = fx.rig.sends();
             let paste = sends[before]["text"].as_str().unwrap();
             let prompt = paste.trim_start_matches("\u{1b}[200~").trim_end_matches("\u{1b}[201~");
