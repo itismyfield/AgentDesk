@@ -75,7 +75,7 @@ echo "::warning title=nextest baseline fallback::$reason; building the base plan
 echo "nextest baseline fallback: $reason; the base plan was built in this job" >>"$summary"
 printf 'version = 1\n' >"$work/no-retries.toml"
 set +e
-(cd "$work/src" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo nextest archive --lib \
+(cd "$work/src" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo nextest archive --lib --workspace \
   --archive-file "$work/base-tests.tar.zst") 2>&1 | tee "$work/base-build.log"
 codes=("${PIPESTATUS[@]}")
 set -e
