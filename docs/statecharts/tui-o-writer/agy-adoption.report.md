@@ -2,7 +2,7 @@
 
 코드 기준 `881cc5c5d5933cdffc7db87eeb35075d846064a9`. 스레드 계약 기준 `78353d7d49e94b088f5e2ee344739bdeeb0dffb8` (#8118 리뷰 head). [설계와 코드 진입점 34행](../../design/i8274/tui-o-agy.design.md#1-진입점-전수표)
 
-기존 `WriterAdoption.tla`에 `AgySpec`을 추가했다. 기존 `Spec`과 `LateSpec`의 agy 상태는 상수다. 새 시나리오는 이전 Legacy 실행의 자체 영수증으로 채택을 해제하고, 한 채널의 durable reservation이 매 턴의 프로세스에 독립적으로 살아남게 한다. #8118에서 가져온 조건은 정확한 이전 실행의 의무, 검증된 부모의 정책, 채택과 body claim의 관찰 경계다. 이 모델은 검증된 채널부터 시작하며 Discord 부모 조회 자체는 별도 수용 시험에 있다.
+기존 `WriterAdoption.tla`에 `AgySpec`을 추가했다. 기존 `Spec`, `LateSpec`, 이를 확장하는 `WriterThreadPrep/ChildSpec`의 agy 상태는 상수다. 새 시나리오는 이전 Legacy 실행의 자체 영수증으로 채택을 해제하고, 한 채널의 durable reservation이 매 턴의 프로세스에 독립적으로 살아남게 한다. #8118에서 가져온 조건은 정확한 이전 실행의 의무, 검증된 부모의 정책, 채택과 body claim의 관찰 경계다. 이 모델은 검증된 채널부터 시작하며 Discord 부모 조회 자체는 별도 수용 시험에 있다.
 
 ## 규칙과 관찰 값
 

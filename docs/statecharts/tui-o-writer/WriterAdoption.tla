@@ -78,7 +78,8 @@ QuietLate ==
     /\ lateKind = "clean" /\ lateCheckedOutput = FALSE /\ lateLife = "live"
     /\ lateSends = 0 /\ lateBadCommit = FALSE /\ lateRestored = FALSE
     /\ lateRevision = 0 /\ lateCheckedRevision = 0
-Init == /\ QuietLate /\ agy = 0
+Init ==
+    /\ QuietLate /\ agy = 0
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
     /\ site \in IF sel = "default" THEN {"home", "foreign"} ELSE {"home"}
     /\ root \in IF sel = "default" THEN BOOLEAN ELSE {TRUE}
@@ -250,11 +251,12 @@ RowEventuallySettled == [](op = 1 => <>rowCleared)
 
 \* Cold-launch domain: codex-late-launch.report.md entry census. Native records and Discord
 \* sends are distinct. lateBuffered changes prefix acceptance, not the argv/input protocol.
-LegacyIdle == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
-            /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
-            /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
-            /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
-            /\ rejected = 0 /\ commitWithOther = 0 /\ hturn = 0 /\ hp = 0
+LegacyIdle ==
+    /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
+    /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
+    /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
+    /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
+    /\ rejected = 0 /\ commitWithOther = 0 /\ hturn = 0 /\ hp = 0
 LateInit == /\ LegacyIdle /\ agy = 0
             /\ lateModal \in BOOLEAN
             /\ lateBound = FALSE /\ lateOutput = FALSE /\ lateBoundFirst = FALSE
