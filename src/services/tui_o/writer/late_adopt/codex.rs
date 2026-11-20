@@ -616,7 +616,7 @@ impl<I: HostIo> Takeover<'_, I> {
                         local,
                         self.candidate,
                         sources,
-                        (self.origin, checked.admission.as_ref()),
+                        (self.origin, admission),
                     )
                 })
             });
@@ -652,14 +652,6 @@ impl<I: HostIo> Takeover<'_, I> {
                 .map_err(Taken::Skip)?
                 .as_ref()
                 != admission
-        {
-            return Err(Taken::Skip(
-                "first admission changed during the intake fence".into(),
-            ));
-        }
-        let prefix = &checked.prefix;
-        if self.provider == ShadowProvider::Codex
-            && self.candidate.first_proof(source).map_err(Taken::Skip)? != checked.admission
         {
             return Err(Taken::Skip(
                 "first admission changed during the intake fence".into(),
