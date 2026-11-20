@@ -4217,6 +4217,7 @@ src/
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_restore_evidence_tests.rs
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
