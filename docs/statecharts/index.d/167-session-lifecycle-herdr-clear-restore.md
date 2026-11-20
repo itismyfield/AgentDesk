@@ -1,0 +1,2 @@
+key: 167-session-lifecycle-herdr-clear-restore
+| `session-lifecycle` (Herdr clear records and restored workspaces, #8128) | `cd9951d3ca` | Main: no clear end record and no restored-shell cleanup. Controls: unstaged/volatile record, omitted wake, stale close. | Design models the exact clear postlude and replaced-root recovery with two GREEN configs and six expected RED configs. [Report](session-lifecycle/herdr-clear-restore.report.md). |
