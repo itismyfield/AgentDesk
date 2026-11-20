@@ -70,15 +70,15 @@
 ## 생존 증거와 첫 메시지 판정
 
 1. **실행 행 조회.** provider와 채널이 맞는 canonical `Bound` observation을 선택한다(E06–E08, E27, E40). 별칭은 exact session key와 canonical owner가 합의할 때 쓴다. `Pending`은 기존 startup/unplaced resolver로 넘긴다. `Retired`는 종료 출처와 clear 경계 확인을 거친다.
-2. **pane, 이후 프로세스.** 해당 로컬 endpoint의 같은 server witness에서 snapshot과 process list를 읽는다. pane ID의 root PID/시작 stamp 및 provider PID/시작 stamp와 launch nonce가 모두 맞아야 생존을 확인한다. 완전한 snapshot에서 exact pane이 Missing이거나 남은 shell과 기록 프로세스의 종료가 `HerdrPaneView::ended`로 증명되면 종료 판정이다. RootReplaced와 missing marker는 각 기존 회복 포트에 위임한다(E38–E41, E48–E49).
-3. **transcript/rollout과 readiness.** 해당 nonce의 세션 ID와 파일 dev/inode, binding generation, current cursor를 대조한다(E09–E10, E28, E33, E44). mtime, 오래된 tail, DB selector는 생존을 증명하지 못한다. 현재 transcript와 화면으로 Idle/Busy/Unknown을 분류한다. Claude 자체 clear의 `AwaitingClear`는 #8261의 현재 selector와 #8260의 source 준비를 따른다. #8222의 압축 metadata 뒤 Idle 복원과 기존 composer guard를 사용한다. Codex는 현재 rollout과 native read boundary를 보존한다.
+2. **workspace 이름과 pane.** 같은 로컬 endpoint의 snapshot에서 `logical_key#*` 이름이 정확히 하나이고 이름 nonce와 DB nonce가 일치하며 agent pane이 살아 있으면 현재 pane ID를 같은 실행 행에 기록하고 재부착한다(E06–E09). 이름이 복수이거나 nonce가 다르면 기존 endpoint·pane, PID/시작 stamp, transcript inode 및 binding log의 정밀 판정으로 내려간다. 행만 읽히거나 socket 관찰이 실패하면 같은 원본을 보관한다. 실행 정리에는 기존 Missing/Ended 증명과 nonce CAS를 사용한다. RootReplaced와 missing marker는 기존 회복 포트에 위임한다(E38–E41, E48–E49).
+3. **transcript/rollout과 readiness.** 정밀 경로에서는 해당 nonce의 세션 ID와 파일 dev/inode, binding generation, current cursor를 대조한다. 재부착은 같은 실행의 현재 source와 cursor를 이어받는다(E09–E10, E28, E33, E44). mtime, 오래된 tail, DB selector는 생존을 증명하지 못한다. 현재 transcript와 화면으로 Idle/Busy/Unknown을 분류한다. Claude 자체 clear의 `AwaitingClear`는 #8261의 현재 selector와 #8260의 source 준비를 따른다. #8222의 압축 metadata 뒤 Idle 복원과 기존 composer guard를 사용한다. Codex는 현재 rollout과 native read boundary를 보존한다.
 4. **이어 쓰기(사용자 11-20 20:1x 기준 개정).** 판정 기준은 'tmux와 같은 결과'다. 생존을 확인하면 곧바로 재부착(watcher claim·registry·진행 턴 lease 인수)하고, 진행 중 턴의 Busy owner grant도 새 세대가 다시 세운다. 그 뒤 첫 입력은 평소 herdr 채널과 같은 입력 규칙을 탄다(작업 중이면 평소 busy 주입, 유휴면 바로 제출). 'Idle 전용' 조건은 두지 않는다. 대기는 재부착이 끝나기 전과, 평소 경로도 막는 composer 상태(권한 모달 등)에서만 허용한다. 사용자에게 '보류 중'을 표시하는 것은 pane identity를 끝내 확인할 수 없는 경우(행만 있음·socket 오류)로 한정하고, 그 경우도 관찰이 바뀌면 재부착이나 복원으로 끝나야 한다. 증명 요구는 '죽었다고 판정해 정리할 때'에만 둔다. 이번 입력을 보내려고 살아 있는 실행의 종료나 교체를 시작하지 않는다.
 5. **종료와 모호함.** Exact 종료 확인과 nonce CAS로 정산하고 현재 clear/reset/stop 및 queue custody를 다시 확인한다. boot가 동일 종료를 먼저 정산했으면 그 결과를 재사용한다. 행만 있고 위치·identity를 확인할 수 없는 경우, socket 오류, 부분 관찰, 충돌은 같은 원본의 Held를 유지한다. 관찰 변화 또는 기존 backstop으로 재평가하며 기한을 넘기면 사용자에게 보류 상태를 표시한다. 불확실한 pane에 키를 보내거나 타임아웃만으로 후계를 열면 유실 또는 중복 실행이 가능하다.
 
 | 시작 상태 | 첫 입력 결과 | 복원 배너 / 복구 안내 / 지난 대화 재주입 |
 |---|---|---|
 | 살아 있는 유휴 pane | 같은 nonce 및 현재 source에 owner가 한 번 제출 | 0 / 0 / 0 |
-| 살아 있는 작업 중 pane | 같은 pane의 허가된 Busy 경로로 제출하거나 Idle 경계까지 원본을 Held | 0 / 0 / 0 |
+| 살아 있는 작업 중 pane | 같은 pane에 즉시 재부착하고 평소 Busy 주입으로 제출. 평소 composer 차단을 적용 | 0 / 0 / 0 |
 | 죽은 pane | 종료를 확인한 뒤 검증한 native source로 새 프로세스 resume, 새 nonce에 한 번 제출 | 1 / 1 / 1. 재주입은 보존된 이전 대화가 있는 수용 시험 기준 |
 | 실행 행만 확인됨 | 키 전송 없이 Pending resolver 또는 exact 재관측. 생존이나 종료 확인을 거쳐 위 경로로 합류 | 판정 전 0 / 0 / 0 |
 

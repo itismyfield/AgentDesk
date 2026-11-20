@@ -1242,6 +1242,13 @@ session-lifecycle/HerdrMissingBoundOwnerNoWake.cfg	HerdrMissingBound	-	OwnerDeli
 session-lifecycle/HerdrMissingBoundOwnerResendUnknown.cfg	HerdrMissingBound	OwnerExactlyOnce	OwnerDelivers
 session-lifecycle/HerdrMissingBoundOwnerReset.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundOwnerStop.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundParityAfter.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundParityBeforeBusy.cfg	HerdrMissingBound	NoIdleOnly	ParityResolves
+session-lifecycle/HerdrMissingBoundParityBeforeUnproven.cfg	HerdrMissingBound	NoLiveDiscard	ParityResolves
+session-lifecycle/HerdrMissingBoundParityDuplicate.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundParityOtherNonce.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundParityResendUnknown.cfg	HerdrMissingBound	OwnerExactlyOnce	ParityResolves
+session-lifecycle/HerdrMissingBoundParityTrustName.cfg	HerdrMissingBound	NamedOnlyCurrent	-
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
