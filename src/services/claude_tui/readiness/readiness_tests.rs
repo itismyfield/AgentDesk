@@ -115,6 +115,7 @@ pub(crate) mod clear_tests;
 mod idle_compaction_tests;
 #[path = "restart_tests.rs"]
 mod restart_tests;
+#[cfg(unix)]
 #[path = "wait_cause_tests.rs"]
 mod wait_cause_tests;
 impl Drop for Rig {
