@@ -18,7 +18,7 @@ use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_o
 use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
-#[cfg(any(test, unix))]
+#[cfg(test)]
 pub(crate) mod normalization;
 
 mod delivered;
@@ -303,9 +303,6 @@ impl<I: HostIo> Takeover<'_, I> {
             let bound = fresh.ok_or_else(|| {
                 Taken::Retry("no admitted rollout bound since the baseline".into())
             })?;
-            // The admitted output's one normalization starts with the rollout that proves it.
-            #[cfg(any(test, unix))]
-            self.candidate.normalize_first(&bound.0);
             return match prefix::buffered(&bound.0) {
                 Verdict::Eligible(prefix) if prefix.prompt_end.is_some() => {
                     let taken = self.commit(at, &bound, &prefix).await;

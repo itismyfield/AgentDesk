@@ -5,11 +5,6 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
 use sha2::{Digest, Sha256};
 
-#[cfg(any(test, unix))]
-mod output;
-#[cfg(any(test, unix))]
-pub(crate) use output::FirstHold;
-
 #[derive(Clone, Debug)]
 pub(crate) struct FirstTurn {
     channel: u64,
@@ -20,15 +15,13 @@ pub(crate) struct FirstTurn {
     context: Option<BindingContext>,
     #[cfg(test)]
     blocked_source_digest: Option<String>,
-    #[cfg(any(test, unix))]
-    normalizing: output::Normalizing,
     valid: bool,
     pending: bool,
     ended: bool,
     ready: bool,
 }
 
-#[cfg(any(test, unix))]
+#[cfg(test)]
 impl FirstTurn {
     fn names(&self, proof: &FirstProof) -> bool {
         self.channel == proof.channel
@@ -207,8 +200,6 @@ impl Candidate {
                 context: None,
                 #[cfg(test)]
                 blocked_source_digest: None,
-                #[cfg(any(test, unix))]
-                normalizing: output::Normalizing::admitted(),
                 valid: true,
                 pending: true,
                 ended: false,
@@ -421,7 +412,7 @@ impl Candidate {
         drop(guard);
     }
 
-    #[cfg(any(test, unix))]
+    #[cfg(test)]
     pub(crate) fn first_names(&self, proof: &FirstProof) -> bool {
         self.first_turn
             .borrow()
@@ -429,7 +420,7 @@ impl Candidate {
             .is_some_and(|first| first.names(proof))
     }
 
-    #[cfg(any(test, unix))]
+    #[cfg(test)]
     pub(crate) fn invalidate_first_proved(&self, proof: &FirstProof) -> bool {
         let mut matched = false;
         self.first_turn.send_if_modified(|first| {

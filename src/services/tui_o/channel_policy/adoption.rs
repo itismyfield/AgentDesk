@@ -12,8 +12,8 @@ pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
 
-// The fresh first output's disposition; its consumers close a rejected episode with one reason.
-#[cfg(any(test, unix))]
+// D2 installs this policy only after all body consumers can terminalize the same episode.
+#[cfg(test)]
 pub(crate) mod output_disposition;
 
 mod child_run;
@@ -21,8 +21,6 @@ mod child_run;
 pub(crate) mod episode_key;
 pub(crate) use child_run::LegacyRun;
 mod first_turn;
-#[cfg(any(test, unix))]
-pub(crate) use first_turn::FirstHold;
 pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,

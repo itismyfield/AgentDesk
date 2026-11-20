@@ -393,25 +393,11 @@ pub(crate) async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
     wait_codex_first_id(channel, nonce.map(channel_policy::first_nonce_id)).await;
 }
 
-/// A body claim of the admitted first turn waits for its output's one normalization to end.
 async fn wait_codex_first_id(channel: u64, nonce: Option<[u8; 32]>) {
     let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel));
     if let Some(candidate) = candidate {
-        #[cfg(any(test, unix))]
-        super::writer::normalization::hold(&candidate, nonce).await;
-        #[cfg(not(any(test, unix)))]
         candidate.wait_first(nonce).await;
     }
-}
-
-/// The reason the fresh normalization rejected `turn_nonce`'s first output with, if it did.
-#[cfg(unix)]
-pub(crate) fn codex_first_rejection(
-    channel: u64,
-    turn_nonce: &str,
-) -> Option<crate::db::tui_output_disposition::Reason> {
-    let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel))?;
-    candidate.first_rejection(channel_policy::first_nonce_id(turn_nonce))
 }
 
 /// Before a new placement: a non-home node holds a selected channel. A placement changes no
