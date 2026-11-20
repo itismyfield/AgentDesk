@@ -1,5 +1,5 @@
 //! Session control targets the execution the routine actually started.
-use super::*;
+use super::{RuntimeResetOutcome, *};
 use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::provider_choice::AgentProviderChannels;
 use crate::services::routines::store::RoutineStore;
