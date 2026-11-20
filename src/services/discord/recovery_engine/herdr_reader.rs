@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
+use super::herdr_reattach::{self, VerifiedReattach};
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
     NoHerdrEndpoint, reconcile_hosted,
@@ -43,18 +44,15 @@ impl SocketHerdrReader {
             nonce: stored.execution_nonce.clone(),
         })
     }
-}
 
-impl HerdrExecutionReader for SocketHerdrReader {
-    fn endpoint(&self) -> Option<&HerdrEndpointId> {
-        Some(&self.endpoint)
+    pub(super) fn observe(&self, stored: &HostedExecution) -> (HerdrPaneReading, bool) {
+        let reading = self.view.read_execution();
+        let ended = self.view.ended(stored, &reading);
+        (self.evidence(reading), ended)
     }
 
-    fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
-        if pane_id != self.view.pane_id() {
-            return HerdrPaneReading::Unreadable("not the target's pane".into());
-        }
-        let (root, provider) = match self.view.read_execution() {
+    fn evidence(&self, reading: PaneReading) -> HerdrPaneReading {
+        let (root, provider) = match reading {
             PaneReading::Missing => return HerdrPaneReading::Missing,
             PaneReading::Unreadable(why) => return HerdrPaneReading::Unreadable(why),
             PaneReading::Present { root, provider } => (root, provider),
@@ -70,6 +68,19 @@ impl HerdrExecutionReader for SocketHerdrReader {
             provider_process,
             agent_session_id: None,
         })
+    }
+}
+
+impl HerdrExecutionReader for SocketHerdrReader {
+    fn endpoint(&self) -> Option<&HerdrEndpointId> {
+        Some(&self.endpoint)
+    }
+
+    fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
+        if pane_id != self.view.pane_id() {
+            return HerdrPaneReading::Unreadable("not the target's pane".into());
+        }
+        self.evidence(self.view.read_execution())
     }
 }
 
@@ -470,7 +481,7 @@ fn reconnect_unless_pending(
         if channel == 0 {
             return (Reconnect::Unknown, None);
         }
-        let Ok(_transition) =
+        let Ok(transition) =
             crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
                 shared,
                 crate::services::discord::ChannelId::new(channel),
@@ -483,6 +494,12 @@ fn reconnect_unless_pending(
         }
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
+        if herdr_reattach::ENABLED {
+            return match herdr_reattach::verify_and_publish(shared, pool, &transition, row).await {
+                VerifiedReattach::Live => (Reconnect::Published, None),
+                VerifiedReattach::Ended | VerifiedReattach::Held => (Reconnect::Withheld, None),
+            };
+        }
         let attached = reconnect(pool, record).await;
         if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
             use crate::services::herdr_launch::retire::{self, Scope};
@@ -496,7 +513,7 @@ fn reconnect_unless_pending(
         }
         if let Some(candidate) =
             missing_marker::MissingMarkerCandidate::from_refusal(row, &attached)
-            && missing_marker::recover(shared, pool, &candidate, &_transition).await
+            && missing_marker::recover(shared, pool, &candidate, &transition).await
                 == Recovery::Retired
         {
             return (Reconnect::Retired, None);

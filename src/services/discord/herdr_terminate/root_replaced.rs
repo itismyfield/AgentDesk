@@ -228,7 +228,7 @@ pub(crate) fn result_for_test(row: &HostedObservation) -> Option<Recovery> {
             .map(|entry| entry.result.clone())
     })
 }
-fn local(
+pub(in crate::services::discord) fn local(
     shared: &SharedData,
     record: &HostedExecution,
 ) -> Result<(ProviderKind, ChannelId), String> {
