@@ -65,6 +65,8 @@ campaign-execution/CampaignPipelineDeleteRace.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineDeleteRaceBug.cfg	CampaignPipeline	NoOrphanState	InstanceTerminates
 campaign-execution/CampaignPipelineDuplicateEvent.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineDuplicateEventBug.cfg	CampaignPipeline	OneCommittedExitPerVisit,PriorityRespected,TerminalNeedsEvidence	-
+campaign-execution/CampaignPipelineEditor.cfg	CampaignPipeline	-	-
+campaign-execution/CampaignPipelineEditorBefore.cfg	CampaignPipeline	MigrationKeepsResult,OccupiedStateKept,RevisionMatchesExpected,RevisionOnlyWhenEditable,ValidatedDefinitionOnly	-
 campaign-execution/CampaignPipelineFinishAllowsAllBug.cfg	CampaignPipeline	NoLaunchAfterFence,NoNewIntentAfterStop	-
 campaign-execution/CampaignPipelineFinishBlockedBug.cfg	CampaignPipeline	FinishStageKeepsGrant	-
 campaign-execution/CampaignPipelineLateEventBug.cfg	CampaignPipeline	ConditionFromCurrentVisit	-
