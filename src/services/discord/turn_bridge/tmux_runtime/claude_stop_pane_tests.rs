@@ -143,7 +143,8 @@ fn write_transcript(path: &std::path::Path, transcript: Transcript) {
 }
 
 // One Escape reaches a Claude turn whose pane shows spinner chrome over the painted empty
-// composer; submitted, idle, draft, finished and already-interrupted panes receive none.
+// composer, before its first reply too; a submitted prompt without that chrome, idle, draft,
+// finished and already-interrupted panes receive none.
 #[test]
 fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     let fx = Fixture::new();
@@ -200,8 +201,8 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
             "pre-generation",
             capture!("pre-generation"),
             Transcript::Submitted,
-            UserSubmitted,
-            0,
+            ActiveGeneration,
+            1,
         ),
         (
             "submitted",
@@ -329,4 +330,19 @@ fn claude_tui_session_stop_keeps_cacheless_foreground_prompt_ready() {
                 .any(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
         );
     });
+}
+
+// A transcript whose 256 KiB tail read starts inside a multi-byte character still yields its turn.
+#[test]
+fn claude_stop_identity_reads_a_tail_cut_inside_a_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let user = serde_json::json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": "go"}});
+    // Three-byte characters fill the cut point, so two of the three paddings cut one in half.
+    for pad in 0..3 {
+        let body = format!("{}{}\n{user}\n", "x".repeat(pad), "가".repeat(100_000));
+        std::fs::write(&path, body).unwrap();
+        let identity = ClaudeStopTurnIdentity::capture(path.to_str().unwrap());
+        assert!(identity.is_some(), "pad={pad}");
+    }
 }
