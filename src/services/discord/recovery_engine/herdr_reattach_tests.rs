@@ -320,10 +320,12 @@ pub(in crate::services::discord) fn run(
         .channels
         .insert(CHANNEL.to_string(), "fixture".to_owned());
     let thread_config = config.clone();
+    let install_registry = rig.thread_installer(NODE, "fixture", rig.socket(), "agentdesk");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .on_thread_start(move || {
+            install_registry();
             std::mem::forget(crate::services::herdr_admission::force_for_test(
                 crate::services::herdr_admission::Admission::new(true, Some(stop.clone())),
             ));
