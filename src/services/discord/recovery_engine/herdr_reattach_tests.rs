@@ -186,23 +186,12 @@ impl Fixture {
         let lease =
             SessionTransitionLease::try_acquire(&self.shared, ChannelId::new(CHANNEL)).unwrap();
         match std::env::var("ADK_HERDR_REATTACH_TEST_MODE").as_deref() {
-            Ok("before") => {
-                use crate::services::discord::tui_prompt_relay::herdr_source::{
-                    HerdrSourceAttach, attach_restarted_herdr_source,
-                };
-                let reader = SocketHerdrReader::of(&self.record).unwrap();
-                match attach_restarted_herdr_source(
-                    &self.pool,
-                    &self.record.owner,
-                    CHANNEL,
-                    &reader,
-                )
-                .await
-                {
-                    HerdrSourceAttach::Published { .. } => VerifiedReattach::Live,
-                    _ => VerifiedReattach::Held,
+            Ok("before") => match reconnect_source(&self.pool, row, None).await {
+                RestartAttachment::Legacy(HerdrSourceAttach::Published { .. }) => {
+                    VerifiedReattach::Live
                 }
-            }
+                _ => VerifiedReattach::Held,
+            },
             Ok("always-live") => {
                 verify_with(&self.shared, &self.pool, &lease, row, |_| true, stale_nonce).await
             }
@@ -228,9 +217,19 @@ impl Fixture {
                 )
                 .await
             }
-            Err(std::env::VarError::NotPresent) => {
-                verify_and_publish(&self.shared, &self.pool, &lease, row).await
-            }
+            Err(std::env::VarError::NotPresent) => match reconnect_source(
+                &self.pool,
+                row,
+                Some(VerifiedTarget {
+                    shared: &self.shared,
+                    transition: &lease,
+                }),
+            )
+            .await
+            {
+                RestartAttachment::Verified(result) => result,
+                RestartAttachment::Legacy(_) => panic!("verified target did not select its path"),
+            },
             mode => panic!("unknown reattach test mode: {mode:?}"),
         }
     }

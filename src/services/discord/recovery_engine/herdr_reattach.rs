@@ -2,7 +2,8 @@ use sqlx::PgPool;
 
 use super::herdr_reader::SocketHerdrReader;
 use super::host_reconcile::{
-    HerdrEndpointId, HerdrExecutionReader, HerdrPaneReading, HostReconcile, reconcile_hosted,
+    HerdrEndpointId, HerdrExecutionReader, HerdrPaneReading, HostReconcile, NoHerdrEndpoint,
+    reconcile_hosted,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
@@ -11,7 +12,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
-    nonce_baseline, publish_restarted_binding,
+    HerdrSourceAttach, attach_restarted_herdr_source, nonce_baseline, publish_restarted_binding,
 };
 use crate::services::herdr_launch::clear_epoch;
 use crate::services::session_host::{HostKind, restore_execution_fence};
@@ -22,8 +23,15 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::{Persisted, admit_herdr_execution};
 
-// Intake and resume presentation must be wired together before this can take over at boot.
-pub(super) const ENABLED: bool = false;
+pub(super) struct VerifiedTarget<'a> {
+    pub(super) shared: &'a SharedData,
+    pub(super) transition: &'a SessionTransitionLease<'a>,
+}
+
+pub(super) enum RestartAttachment {
+    Legacy(HerdrSourceAttach),
+    Verified(VerifiedReattach),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VerifiedReattach {
@@ -52,21 +60,42 @@ impl HerdrExecutionReader for CapturedPane {
     }
 }
 
-pub(super) async fn verify_and_publish(
-    shared: &SharedData,
+pub(super) async fn reconnect_source(
     pool: &PgPool,
-    transition: &SessionTransitionLease<'_>,
     observed: &HostedObservation,
-) -> VerifiedReattach {
-    verify_with(
-        shared,
-        pool,
-        transition,
-        observed,
-        HostReconcile::admits_reconnect,
-        stale_nonce,
-    )
-    .await
+    verified: Option<VerifiedTarget<'_>>,
+) -> RestartAttachment {
+    // The current boot caller only restores the existing source. The new path needs a target
+    // handed over by the caller that coordinates input and resume presentation.
+    if let Some(target) = verified {
+        return RestartAttachment::Verified(
+            verify_with(
+                target.shared,
+                pool,
+                target.transition,
+                observed,
+                HostReconcile::admits_reconnect,
+                stale_nonce,
+            )
+            .await,
+        );
+    }
+    let HostedRecord::Known(record) = &observed.record else {
+        return RestartAttachment::Legacy(HerdrSourceAttach::Refused(HostReconcile::Unresolved(
+            "no hosted execution".into(),
+        )));
+    };
+    let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
+        return RestartAttachment::Legacy(HerdrSourceAttach::Refused(HostReconcile::Unresolved(
+            "channel id".into(),
+        )));
+    };
+    let attached = match SocketHerdrReader::of(record) {
+        Some(reader) => attach_restarted_herdr_source(pool, &record.owner, channel, &reader).await,
+        None => attach_restarted_herdr_source(pool, &record.owner, channel, &NoHerdrEndpoint).await,
+    };
+    tracing::info!(channel, ?attached, "herdr reconnect after restart");
+    RestartAttachment::Legacy(attached)
 }
 
 async fn verify_with(

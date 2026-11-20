@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
-use super::herdr_reattach::{self, VerifiedReattach};
+use super::herdr_reattach::{RestartAttachment, VerifiedReattach, reconnect_source};
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
-    NoHerdrEndpoint, reconcile_hosted,
+    reconcile_hosted,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
@@ -19,9 +19,7 @@ use crate::services::discord::herdr_terminate::root_replaced::{
     self, Recovery, RootReplacedCandidate, missing_marker,
 };
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
-use crate::services::discord::tui_prompt_relay::herdr_source::{
-    HerdrSourceAttach, attach_restarted_herdr_source,
-};
+use crate::services::discord::tui_prompt_relay::herdr_source::HerdrSourceAttach;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
 use crate::services::tui_prompt_dedupe::herdr_execution_listed;
@@ -494,13 +492,15 @@ fn reconnect_unless_pending(
         }
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
-        if herdr_reattach::ENABLED {
-            return match herdr_reattach::verify_and_publish(shared, pool, &transition, row).await {
-                VerifiedReattach::Live => (Reconnect::Published, None),
-                VerifiedReattach::Ended | VerifiedReattach::Held => (Reconnect::Withheld, None),
-            };
-        }
-        let attached = reconnect(pool, record).await;
+        let attached = match reconnect_source(pool, row, None).await {
+            RestartAttachment::Legacy(attached) => attached,
+            RestartAttachment::Verified(VerifiedReattach::Live) => {
+                return (Reconnect::Published, None);
+            }
+            RestartAttachment::Verified(VerifiedReattach::Ended | VerifiedReattach::Held) => {
+                return (Reconnect::Withheld, None);
+            }
+        };
         if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
             use crate::services::herdr_launch::retire::{self, Scope};
             return match retire::observed(pool, row, Scope::Missing).await {
@@ -523,18 +523,6 @@ fn reconnect_unless_pending(
             RootReplacedCandidate::from_refusal(row, &attached),
         )
     })
-}
-
-async fn reconnect(pool: &PgPool, record: &HostedExecution) -> HerdrSourceAttach {
-    let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
-        return HerdrSourceAttach::Refused(HostReconcile::Unresolved("channel id".into()));
-    };
-    let attached = match SocketHerdrReader::of(record) {
-        Some(reader) => attach_restarted_herdr_source(pool, &record.owner, channel, &reader).await,
-        None => attach_restarted_herdr_source(pool, &record.owner, channel, &NoHerdrEndpoint).await,
-    };
-    tracing::info!(channel, ?attached, "herdr reconnect after restart");
-    attached
 }
 
 /// The latest pass's counts: rows read, then published, refused or withheld, unknown and pending.
