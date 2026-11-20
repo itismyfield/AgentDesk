@@ -36,7 +36,9 @@ def render_revision(repo, sha, baseline, *, candidate=False):
             return None
         with gen.input_context(sha):
             options = runpy.run_path(str(root / gen.REGISTRY))["ASSERTION_OPTIONS"]
-            markdown, coverage = gen.generate(root, baseline, assertion_options=options)
+            markdown, coverage = gen.generate(
+                root, baseline, assertion_options=options, allow_legacy_host_parity=not candidate,
+            )
             rows = gen.load_yaml(root / gen.ROWS)
         removed = {entry["key"]: entry["reason"] for entry in rows.get("removal_reasons", [])}
         return markdown, coverage, removed

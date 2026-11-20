@@ -3060,7 +3060,8 @@ src/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests/
-│   │   │   │   │   └── late_clear_tests.rs
+│   │   │   │   │   ├── late_clear_tests.rs
+│   │   │   │   │   └── record_boundary_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
@@ -4230,6 +4231,7 @@ src/
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_restore_evidence_tests.rs
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
