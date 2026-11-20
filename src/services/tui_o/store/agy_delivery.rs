@@ -54,9 +54,11 @@ impl<'a> Journal<'a> {
     pub(crate) fn open(
         store: &'a mut ChannelStore,
         plan: &Plan,
-        lease: TurnLease,
+        lease: Option<TurnLease>,
     ) -> Result<Self, StoreError> {
-        if plan.key != lease.key || plan.key.destination.get() != store.init().channel {
+        if lease.is_some_and(|lease| lease.key != plan.key)
+            || plan.key.destination.get() != store.init().channel
+        {
             return Err(damage("agy delivery identity differs from custody"));
         }
         let dir = store.dir.join("agy-delivery");
@@ -81,7 +83,7 @@ impl<'a> Journal<'a> {
             Some(state) => {
                 if state.version != 1
                     || state.key != plan.key
-                    || state.revision != lease.revision
+                    || lease.is_some_and(|lease| state.revision != lease.revision)
                     || state.fingerprint != plan.fingerprint
                     || state.last_seq != plan.last_seq
                     || state.receipts.len() > plan.body.len()
@@ -102,7 +104,9 @@ impl<'a> Journal<'a> {
             None => State {
                 version: 1,
                 key: plan.key,
-                revision: lease.revision,
+                revision: lease
+                    .ok_or_else(|| StoreError::Rejected("agy recovery requires a journal".into()))?
+                    .revision,
                 fingerprint: plan.fingerprint,
                 last_seq: plan.last_seq,
                 receipts: Vec::new(),
@@ -121,6 +125,13 @@ impl<'a> Journal<'a> {
 
     pub(crate) fn state(&self) -> &State {
         &self.state
+    }
+
+    pub(crate) fn lease(&self) -> TurnLease {
+        TurnLease {
+            key: self.state.key,
+            revision: self.state.revision,
+        }
     }
 
     pub(crate) fn commit(&mut self, f: impl FnOnce(&mut State)) -> Result<(), StoreError> {

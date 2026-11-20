@@ -462,14 +462,7 @@ async fn end_cas_and_projection_resume_across_both_write_boundaries() {
     fixture.gate.acquired();
 
     let mut store = fixture.open_store();
-    let mut replay = Replay::open(
-        &mut store,
-        &fixture.gate,
-        fixture.epoch(),
-        fixture.lease,
-        &plan,
-    )
-    .unwrap();
+    let mut replay = Replay::recover(&mut store, &fixture.gate, fixture.epoch(), &plan).unwrap();
     finish(&mut replay, &wire, &effects).await;
     assert_eq!(effects.releases.get(), 1);
     assert_eq!(effects.claims.get(), 1);

@@ -90,6 +90,26 @@ impl<'a> Replay<'a> {
         lease: TurnLease,
         plan: &'a Plan,
     ) -> Result<Self, Error> {
+        Self::open_journal(store, gate, epoch, plan, Some(lease))
+    }
+
+    /// Reopens a durable obligation after its original mailbox row or lease has been cleared.
+    pub(crate) fn recover(
+        store: &'a mut ChannelStore,
+        gate: &'a OwnershipGate,
+        epoch: u64,
+        plan: &'a Plan,
+    ) -> Result<Self, Error> {
+        Self::open_journal(store, gate, epoch, plan, None)
+    }
+
+    fn open_journal(
+        store: &'a mut ChannelStore,
+        gate: &'a OwnershipGate,
+        epoch: u64,
+        plan: &'a Plan,
+        lease: Option<TurnLease>,
+    ) -> Result<Self, Error> {
         let journal = gate
             .admit(|current| (current == epoch).then(|| Journal::open(store, plan, lease)))
             .flatten()
@@ -98,7 +118,7 @@ impl<'a> Replay<'a> {
         Ok(Self {
             gate,
             epoch,
-            lease,
+            lease: journal.lease(),
             plan,
             journal,
         })
