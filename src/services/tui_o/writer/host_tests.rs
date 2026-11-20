@@ -1,3 +1,4 @@
+use crate::db::o_channel_activation::fenced_activation_rows;
 use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{self, test_override};
@@ -282,14 +283,10 @@ impl HostIo for TestIo {
             let facts = self.activation_facts(channel, provider).await?;
             let hold = match pool {
                 Some(pool) => {
-                    crate::db::o_channel_activation::fenced_activation_rows(
-                        &pool,
-                        &channel.to_string(),
-                        "first-fixture",
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .0
+                    fenced_activation_rows(&pool, &channel.to_string(), "first-fixture", None)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .0
                 }
                 None => crate::db::o_channel_activation::IntakeFence::empty_for_test(),
             };
