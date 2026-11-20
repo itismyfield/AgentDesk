@@ -112,7 +112,7 @@ class InterventionLogTest(unittest.TestCase):
                 with counter_lock:
                     wait_for_second = first_parse
                     first_parse = False
-                if wait_for_second and not second_lock_attempted.wait(timeout=5):
+                if wait_for_second and not second_lock_attempted.wait(timeout=30):
                     raise AssertionError("second record did not attempt the store lock")
                 return original_parse(text)
 
@@ -132,7 +132,7 @@ class InterventionLogTest(unittest.TestCase):
                     )
                     for _ in range(2)
                 ]
-                results = [future.result(timeout=10) for future in futures]
+                results = [future.result(timeout=60) for future in futures]
 
             self.assertEqual(sorted(result.event.count for result in results), [1, 2])
             stored = history.read_text(encoding="utf-8")

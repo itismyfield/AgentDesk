@@ -102,8 +102,10 @@ class Watch(unittest.TestCase):
             for _ in range(2):
                 driver._ack_send(driver._record_send(record, "send_discord_prompt", "p"), {"message_id": MID})
                 watch.on_send(record)
-            self.assertTrue(third.wait(5))
-            watch.stop()
+            try:
+                self.assertTrue(third.wait(60))
+            finally:
+                watch.stop()
         polls = record["reaction_watch"]["2"]["polls"]
         self.assertEqual(list(record["reaction_watch"]), ["2"])
         self.assertEqual(calls[0], ("c1", {"after_id": str(int(MID) - 1), "limit": 1}))

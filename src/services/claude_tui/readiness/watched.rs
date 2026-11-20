@@ -15,6 +15,8 @@ pub(crate) struct Watched {
     seen: Option<(Source, Option<Stamp>)>,
     /// Windows this wait opened after its transcript moved.
     windows: u8,
+    /// Whether an older execution's missing source settles; only the Herdr first input opts in.
+    settle_lost: bool,
 }
 pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
     let seen = Source::current(session, path).map(|source| {
@@ -26,6 +28,7 @@ pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
         path: path.map(Path::to_path_buf),
         seen,
         windows: 0,
+        settle_lost: false,
     }
 }
 
@@ -45,27 +48,69 @@ pub(crate) enum Expiry {
     Unproven(Unproven),
     /// The same, but its transcript moved: the same wait runs one more short window.
     Requiet,
-    /// A turn, a fence, a clear or another source may still supply the evidence.
-    Waits,
+    /// A turn, a fence, a clear or another source may still supply the evidence; the cause says
+    /// which, so a hold that never clears names its branch.
+    Waits(WaitCause),
+}
+
+/// The open cause of a `Waits`, in `expired`'s branch order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaitCause {
+    /// The wait's first look found no source and nothing settles it: a launch may still
+    /// publish one.
+    NoSource,
+    /// The source proves readiness; the caller's screen or reservation refused it.
+    Observed,
+    /// Another source, clear evidence or file replaced the one this wait watched.
+    SourceMoved,
+    /// The transcript changed under this look.
+    StampRace,
+    /// The transcript shows a running turn or another native session.
+    Running,
+    /// A Stop continuation, unread or not, still fences the file.
+    Fenced,
+    /// Our reservation or a submitted prompt awaits its turn.
+    Pending,
+    /// Our compact control is open or awaits its completion.
+    Compact,
+    /// The moved transcript's windows ended on a screen that may show a turn.
+    Screen,
+    /// A dialog, such as a permission prompt, covers the composer until it is dismissed.
+    Modal,
 }
 
 impl Watched {
+    /// An older execution's missing source ends retained instead of held.
+    pub(crate) fn settling_lost_source(mut self) -> Self {
+        self.settle_lost = true;
+        self
+    }
+
     /// `pane` is read only to settle a wait whose transcript moved: its screen must show no turn.
     pub(crate) fn expired(&mut self, pane: impl FnOnce() -> Option<String>) -> Expiry {
         let Some((source, stamp)) = &self.seen else {
-            return Expiry::Waits;
+            // For an opted-in caller, an execution older than this run has nothing in flight to
+            // publish a source: retained with its resend ask instead of held for good.
+            return match super::source::nonce(&self.session) {
+                Some(Some(nonce)) if self.settle_lost && super::launched_before_run(&nonce) => {
+                    Expiry::Unproven(Unproven::Retained)
+                }
+                _ => Expiry::Waits(WaitCause::NoSource),
+            };
         };
         let path = self.path.as_deref();
-        if observe(&self.session, path).is_some()
-            || Source::current(&self.session, path).as_ref() != Some(source)
+        if observe(&self.session, path).is_some() {
+            return Expiry::Waits(WaitCause::Observed);
+        }
+        if Source::current(&self.session, path).as_ref() != Some(source)
             || clear::current(source).is_none()
         {
-            return Expiry::Waits;
+            return Expiry::Waits(WaitCause::SourceMoved);
         }
         let tail = evidence::read(&source.path);
         let now = tail.as_ref().map(|tail| tail.stamp.clone());
         if Stamp::read(&source.path) != now {
-            return Expiry::Waits;
+            return Expiry::Waits(WaitCause::StampRace);
         }
         let moved = now != *stamp;
         // A replaced or shortened file is another history, not metadata after this one.
@@ -75,7 +120,7 @@ impl Watched {
                     .is_none_or(|now| now.file != seen.file || now.len < seen.len)
             })
         {
-            return Expiry::Waits;
+            return Expiry::Waits(WaitCause::SourceMoved);
         }
         let running = tail.as_ref().is_some_and(|tail| {
             tail.native
@@ -86,7 +131,7 @@ impl Watched {
                 ) != crate::services::tui_turn_state::TuiTurnState::Idle
         });
         if running {
-            return Expiry::Waits;
+            return Expiry::Waits(WaitCause::Running);
         }
         let state = ledger();
         let fenced = [source.nonce.clone(), None].into_iter().any(|nonce| {
@@ -101,15 +146,10 @@ impl Watched {
                     ))
                 })
         });
-        let open = fenced
-            || state.entries.get(source).is_none_or(|entry| {
-                entry.pending.is_some()
-                    || entry.compact_ticket.is_some()
-                    || entry.compact_done.is_some()
-            });
+        let open = open_cause(state.entries.get(source));
         drop(state);
-        if open {
-            return Expiry::Waits;
+        if let Some(cause) = fenced.then_some(WaitCause::Fenced).or(open) {
+            return Expiry::Waits(cause);
         }
         if !moved && self.windows == 0 {
             return Expiry::Unproven(Unproven::Retained);
@@ -124,7 +164,19 @@ impl Watched {
         // A quiet window, or every window spent: the transcript shows no turn, so the screen decides.
         match pane().is_some_and(|capture| super::idle::shows_no_turn(&capture)) {
             true => Expiry::Unproven(Unproven::Refused),
-            false => Expiry::Waits,
+            false => Expiry::Waits(WaitCause::Screen),
         }
+    }
+}
+
+/// What of ours is still open on a source. No entry after a look's own observation is nothing.
+pub(super) fn open_cause(entry: Option<&super::Entry>) -> Option<WaitCause> {
+    let entry = entry?;
+    if entry.pending.is_some() {
+        Some(WaitCause::Pending)
+    } else if entry.compact_ticket.is_some() || entry.compact_done.is_some() {
+        Some(WaitCause::Compact)
+    } else {
+        None
     }
 }

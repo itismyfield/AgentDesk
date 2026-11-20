@@ -260,8 +260,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_ingress::{
-    ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
-    installed as input_owner_installed_for_test,
+    ADOPTS as OWNER_ADOPTS_FOR_TEST, Hold as OwnerHoldForTest,
+    execution as owner_execution_for_test, installed as input_owner_installed_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;

@@ -252,22 +252,29 @@ fn write(
                         && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
                             crate::services::claude_tui::readiness::empty_draft(capture)
                             && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+                            && !composer::dialog_open(capture)
                             && (restart != Some(Some(true)) || composer::restored_screen_idle(capture))) {
                         Screen::Ready
                     } else { Screen::Unknown }
                 },
             ));
+            use crate::services::claude_tui::host_input::InputRefusal;
             let unproven = match stopped {
-                InputRun::Refused(
-                    crate::services::claude_tui::host_input::InputRefusal::Unproven(end),
-                ) => Some(end),
+                InputRun::Refused(InputRefusal::Unproven(end)) => Some(end),
                 _ => None,
             };
-            return Err(before_payload(
-                logical,
-                &format!("Claude composer held before first key: {stopped:?}"),
-                unproven,
-            ));
+            let modal = matches!(
+                stopped,
+                InputRun::Refused(InputRefusal::Waits(
+                    crate::services::claude_tui::readiness::WaitCause::Modal
+                ))
+            );
+            let detail = format!("Claude composer held before first key: {stopped:?}");
+            let mut held = before_payload(logical, &detail, unproven);
+            if let SubmissionError::Held(hold) = &mut held {
+                hold.modal = modal;
+            }
+            return Err(held);
         }
         stopped => return Err(SubmissionError::Guarded(stopped)),
     }

@@ -8,7 +8,6 @@ import sys
 import tarfile
 import tempfile
 import textwrap
-import time
 import unittest
 from pathlib import Path
 
@@ -605,12 +604,17 @@ else:
                             ("install_runtime_assets.py", "runtime-assets.txt")) else info)
         script = Path(env["TMPDIR"]) / "installer-snapshot.sh"
         script_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-        if env.get("FIXTURE_READINESS_TIMEOUT"):
-            script_text = re.sub(r"(?m)^(READINESS_TIMEOUT_SECONDS=)[0-9]+$",
-                                 r"\g<1>" + env["FIXTURE_READINESS_TIMEOUT"], script_text)
+        if timeout := env.get("FIXTURE_READINESS_TIMEOUT"):
+            script_text, overridden = re.subn(
+                r"(?m)^READINESS_TIMEOUT_SECONDS=[0-9]+$",
+                f"READINESS_TIMEOUT_SECONDS={timeout}\n"
+                'unset SECONDS\nSECONDS=0\nsleep() { : "$((SECONDS += $1))"; }',
+                script_text,
+            )
+            self.assertEqual(overridden, 1)
         script.write_text(script_text, encoding="utf-8")
         return subprocess.run(["/bin/bash", str(script)], cwd=ROOT, env=env, text=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=90)
 
     def assert_installed_fixture(self, runtime, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -756,13 +760,10 @@ else:
         for mode in ("source", "release"):
             with self.subTest(mode=mode):
                 _, runtime, fixture, env = self.installer_sandbox(mode)
-                started = time.monotonic()
                 result = self.install_fixture(fixture, {**env, "FIXTURE_HEALTH_503": "1",
                     "FIXTURE_BOOT_DELAY": "2", "FIXTURE_POLICIES_DELAY": "3",
                     "FIXTURE_READINESS_TIMEOUT": "8"})
                 self.assert_installed_fixture(runtime, result)
-                # Covers fixture setup as well as the 2s/3s readiness delays, so leave room for a loaded host.
-                self.assertLess(time.monotonic() - started, 30)
                 for kind, required in (("boot", 3), ("policies", 4)):
                     count = int((Path(env["TMPDIR"]) / ("readiness-" + kind)).read_text())
                     self.assertGreaterEqual(count, required, kind)
@@ -784,12 +785,12 @@ else:
             with self.subTest(mode=mode):
                 _, runtime, fixture, env = self.installer_sandbox(mode)
                 timeout_env = {**env, "MISSING_INSTALL_POLICY": "timeouts", "FIXTURE_READINESS_TIMEOUT": "1"}
-                started = time.monotonic()
                 failed = self.install_fixture(fixture, timeout_env)
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertNotIn("Installation Complete", failed.stdout)
-                # The 1s override must apply instead of the 60s default; the timing also covers fixture setup, which takes several seconds on a loaded host.
-                self.assertLess(time.monotonic() - started, 30)
+                self.assertIn("required policies within 1s", failed.stdout + failed.stderr)
+                policy_attempts = Path(env["TMPDIR"]) / "readiness-policies"
+                self.assertEqual(policy_attempts.read_text(), "1")
                 binary = runtime / "bin/agentdesk"
                 self.assertTrue(binary.is_file(), failed.stdout + failed.stderr)
                 self.assertEqual(binary.read_bytes(), (fixture / "agentdesk").read_bytes())
@@ -798,6 +799,7 @@ else:
                 failed_again = self.install_fixture(fixture, timeout_env, "two")
                 self.assertNotEqual(failed_again.returncode, 0, failed_again.stdout + failed_again.stderr)
                 self.assertNotIn("Installation Complete", failed_again.stdout)
+                self.assertEqual(policy_attempts.read_text(), "2")
                 self.assertEqual(binary.read_bytes(), previous)
                 self.assertTrue(binary.stat().st_flags & 2)
                 print("READINESS_TIMEOUT", mode, "first_retained=true previous_restored=true flags=2")
