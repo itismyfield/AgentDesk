@@ -826,6 +826,10 @@ pub(crate) async fn finish_admitted_local(
     local_turn::run(deps, submission, preserve_on_cancel).await
 }
 
+type BoxedIntake<'a, T = ()> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, super::super::Error>> + Send + 'a>,
+>;
+
 /// Queues a deferred input with every absorbed source; an Err leaves its checkpoint unread.
 async fn hold_in_custody(
     deps: &IntakeDeps<'_>,

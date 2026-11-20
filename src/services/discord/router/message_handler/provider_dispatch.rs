@@ -869,6 +869,7 @@ pub(super) mod producer_error_test_support;
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::services::stream_json_cli::ConfiguredToolPolicy;
 
     static INPUT_RESULT: std::sync::Mutex<Option<(u64, String)>> = std::sync::Mutex::new(None);
 

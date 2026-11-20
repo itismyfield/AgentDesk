@@ -1,9 +1,5 @@
 use super::*;
 
-type BoxedIntake<'a, T = ()> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<T, super::super::super::Error>> + Send + 'a>,
->;
-
 /// Boxed inside a plain function so the turn's large future never sits in the intake frames above it.
 pub(super) fn run<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
