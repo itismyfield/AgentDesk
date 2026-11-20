@@ -32,8 +32,7 @@ const CREDENTIALS: &str = concat!(
 const FAIL_CLOSED_SECRET: &str = "opaque-fixture-credential";
 const UNCERTAIN_PREFIX: &str = "Public malformed fixture prefix. ";
 
-// Each case has a label before |, with § marking fragments that must be absent
-// and ¶ marking text that must stay visible.
+// Each case has a label before |, with § marking fragments that must be absent.
 const PEM_CASES: &[&str] = &[
     "assigned PEM|GITHUB_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n§FAKE_PRIVATE_MATERIAL_X7Z8§\n§fixture-last-pem-row§\n-----§END RSA PRIVATE KEY§-----",
     "truncated PEM|private_key=-----BEGIN OPENSSH PRIVATE KEY-----\n§fixture-truncated-pem§\n§fixture-truncated-tail§",
@@ -64,7 +63,7 @@ fn review_cases(cases: &[&'static str]) -> impl Iterator<Item = (&'static str, &
 }
 
 fn review_input(case: &str) -> String {
-    case.replace(['§', '¶'], "")
+    case.replace('§', "")
 }
 
 fn review_fragments(case: &str) -> impl Iterator<Item = &str> {
@@ -168,11 +167,16 @@ fn snapshot() -> SessionPrompt {
 
 #[test]
 fn prompt_audit_credential_patterns_are_masked_and_counted() {
+    for (index, item) in CREDENTIALS.split("\n\n").enumerate() {
+        let (text, count) = redaction::mask(item);
+        assert_masked(&text);
+        let stars = text.matches("***").count();
+        assert_eq!((count, stars), (1, 1), "credential {index}");
+    }
     let (text, count) = redaction::mask(CREDENTIALS);
     assert_masked(&text);
-    assert!(text.starts_with("Ordinary instructions."));
-    assert_eq!(count, 7);
-    assert_eq!(text.matches("***").count(), 7);
+    assert_eq!(text, "Ordinary instructions.\n--key ***");
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -418,7 +422,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     let response: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(response["origin"], "latest_saved");
     assert_eq!(response["session_id"], "fixture-session");
-    assert_eq!(response["masked_count"], 9 + SYNTAX_CASES.len());
+    assert_eq!(response["masked_count"], 1);
     let sources: Vec<_> = response["sections"]
         .as_array()
         .unwrap()
@@ -445,10 +449,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     assert_eq!(response["source"], "latest_saved");
     assert_eq!(response["memento"]["status"], "unconfigured");
     assert_eq!(response["anchors"][0]["id"], "frag-fixture");
-    assert_eq!(
-        response["anchors"][1]["masked_count"],
-        3 + SYNTAX_CASES.len()
-    );
+    assert_eq!(response["anchors"][1]["masked_count"], 1);
     assert_eq!(response["anchors"][0]["overlap_candidates"], json!([]));
 
     let (status, bytes) = get(&router, "/api/agents/canon-fixture/prompt-audit", true).await;
@@ -548,7 +549,17 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
         "double-quoted joined assignment|export API_TOKEN=\"@@ part\"\\\n§fixture-double-joined-tail§",
         "escaped-space joined assignment|export API_TOKEN=@@\\ part\\\n§fixture-escaped-space-tail§",
         "blank line inside quoted value|PASSWORD=\"@@\n\n§fixture-blank-quoted-tail§\"",
-        "paragraph after balanced value|SERVICE_PASSWORD=\"@@\"\n\n¶Public paragraph after a masked line.¶",
+        "paragraph after balanced value|SERVICE_PASSWORD=\"@@\"\n\n§Public paragraph after a masked line.§",
+        "yaml block blank line|password: |\n  @@\n\n  §fixture-yaml-lf-tail§",
+        "yaml folded blank line CRLF|password: >-\r\n  @@\r\n\r\n  §fixture-yaml-crlf-tail§",
+        "yaml block whitespace line|password: |\n  @@\n \t \n  §fixture-yaml-space-tail§",
+        "quote before key blank line|export \"API_TOKEN=@@\n\n§fixture-open-key-lf-tail§\"",
+        "quote before key CRLF|export \"API_TOKEN=@@\r\n\r\n§fixture-open-key-crlf-tail§\"",
+        "quote before key whitespace line|export \"API_TOKEN=@@\n  \n§fixture-open-key-space-tail§\"",
+        "even mixed quotes blank line|export API_TOKEN='@@\"'\"suffix\n\n§fixture-mixed-lf-tail§\"",
+        "even mixed quotes CRLF|export API_TOKEN='@@\"'\"suffix\r\n\r\n§fixture-mixed-crlf-tail§\"",
+        "even mixed quotes whitespace line|export API_TOKEN='@@\"'\"suffix\n\t\n§fixture-mixed-space-tail§\"",
+        "heredoc blank line|API_TOKEN=$(cat <<'EOF'\n@@\n\n§fixture-heredoc-tail§\nEOF\n)",
     ];
     let mut failed = Vec::new();
     for (index, (name, input)) in cases
@@ -570,6 +581,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
         fixture.started_at += chrono::Duration::seconds(index as i64 + 1);
         fixture.system_prompt = fixture
             .system_prompt
+            .replace(CREDENTIALS, "")
             .replace("password=fixture-anchor-password", &content);
         fixture.anchors.as_mut().unwrap()[1].content = content;
         provider_session_prompts::save(&pool, &fixture)
@@ -589,11 +601,6 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
                 .chain(review_fragments(truncated_pem))
                 .chain(review_fragments(input))
                 .any(|fragment| body.contains(fragment))
-                || input
-                    .split('¶')
-                    .skip(1)
-                    .step_by(2)
-                    .any(|text| !body.contains(text))
             {
                 failed.push((name, path));
             }

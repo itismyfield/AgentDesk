@@ -34,24 +34,6 @@ static SECRET: LazyLock<Regex> = LazyLock::new(|| {
     )).expect("valid standalone credential patterns")
 });
 
-/// A backslash never escapes a single quote in plain shell text, but it does in `$'...'` and
-/// before a double quote, so either single-quote count being odd leaves a quote open.
-fn unbalanced(span: &str) -> bool {
-    let (mut single, mut unescaped, mut double, mut escaped) = (0, 0, 0, false);
-    for byte in span.bytes() {
-        match byte {
-            b'\'' => {
-                single += 1;
-                unescaped += usize::from(!escaped);
-            }
-            b'"' if !escaped => double += 1,
-            _ => {}
-        }
-        escaped = byte == b'\\' && !escaped;
-    }
-    (single | unescaped | double) % 2 == 1
-}
-
 fn value_start(line: &str) -> Option<usize> {
     let keyed = KEY.captures_iter(line).filter_map(|hit| {
         if let Some(query) = hit.name("query") {
@@ -72,27 +54,14 @@ fn value_start(line: &str) -> Option<usize> {
 pub(super) fn ranges(input: &str) -> Vec<Range<usize>> {
     let mut matches: Vec<_> = with_registered_secret_ranges(input, |ranges| ranges.collect());
     matches.extend(PEM.find_iter(input).map(|hit| hit.range()));
-    // A sensitive value is masked through the end of its paragraph; a quote still open at the
-    // blank line keeps masking to the end of the input.
-    let (mut open, mut offset, mut end) = (None, 0, 0);
-    for raw in input.split_inclusive('\n') {
+    // Neither a blank line nor a quote count proves that a value ended, so masking runs to the end.
+    let mut offset = 0;
+    let start = input.split_inclusive('\n').find_map(|raw| {
         let base = offset;
         offset += raw.len();
-        let line = raw.trim_end_matches(['\r', '\n']);
-        match open {
-            Some(start) if line.trim().is_empty() => {
-                if unbalanced(&input[start..base]) {
-                    break;
-                }
-                matches.push(start..end);
-                open = None;
-            }
-            Some(_) => {}
-            None => open = value_start(line).map(|start| base + start),
-        }
-        end = base + line.len();
-    }
-    matches.extend(open.map(|start| start..input.len()));
+        value_start(raw.trim_end_matches(['\r', '\n'])).map(|start| base + start)
+    });
+    matches.extend(start.map(|start| start..input.len()));
     matches.retain(|span| !span.is_empty());
     matches.sort_unstable_by_key(|range| range.start);
     let mut ranges: Vec<Range<usize>> = Vec::new();
