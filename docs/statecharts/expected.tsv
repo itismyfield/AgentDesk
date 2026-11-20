@@ -1113,6 +1113,17 @@ session-lifecycle/HerdrClearLaunchFixedRetired.cfg	HerdrClearLaunch	-	-
 session-lifecycle/HerdrClearLaunchNoRelease.cfg	HerdrClearLaunch	FreshRestartKeepsSession	-
 session-lifecycle/HerdrClearLaunchReleaseWithoutToken.cfg	HerdrClearLaunch	ClearNeverResumesPrior,WrongTokenReleaseNoEffect	-
 session-lifecycle/HerdrClearLaunchUnclearedRestart.cfg	HerdrClearLaunch	-	-
+session-lifecycle/HerdrClearRestoreClearFixed.cfg	HerdrClearRestore	-	-
+session-lifecycle/HerdrClearRestoreClearMain.cfg	HerdrClearRestore	NoMissingClearEndRecord	-
+session-lifecycle/HerdrClearRestoreClearRecordGate.cfg	HerdrClearRestore	NoRecordRefusesAuthorizedClear	AuthorizedClearEnds
+session-lifecycle/HerdrClearRestoreClearSkipRecord.cfg	HerdrClearRestore	NoMissingClearEndRecord	-
+session-lifecycle/HerdrClearRestoreRestoreFixed.cfg	HerdrClearRestore	-	-
+session-lifecycle/HerdrClearRestoreRestoreMain.cfg	HerdrClearRestore	-	EmptyWorkspaceEventuallyCleared
+session-lifecycle/HerdrClearRestoreRestoreNoActivityGate.cfg	HerdrClearRestore	NoUnprovenWorkspaceRemoved	-
+session-lifecycle/HerdrClearRestoreRestoreNoLineageGate.cfg	HerdrClearRestore	NoUnprovenWorkspaceRemoved	-
+session-lifecycle/HerdrClearRestoreRestoreNoWake.cfg	HerdrClearRestore	-	EmptyWorkspaceEventuallyCleared
+session-lifecycle/HerdrClearRestoreRestoreNoWorkGate.cfg	HerdrClearRestore	NoUnprovenWorkspaceRemoved	-
+session-lifecycle/HerdrClearRestoreRestoreReadThenClose.cfg	HerdrClearRestore	NoUnprovenWorkspaceRemoved	-
 session-lifecycle/HerdrHandoffFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffHeldAlwaysLeft.cfg	HerdrHandoffHeld	OnlyEndedLeftReleased	-
 session-lifecycle/HerdrHandoffHeldBefore.cfg	HerdrHandoffHeld	BoundedHolds	FrontProgress

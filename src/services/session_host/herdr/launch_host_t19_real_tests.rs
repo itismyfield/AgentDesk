@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::services::herdr_launch::{HERDR_PANE_ENV, unset_herdr_env_before_exec};
+
+#[path = "launch_host_restore_evidence_tests.rs"]
+mod restore_evidence;
 use crate::services::session_host::herdr::model::{HerdrProcessInfo, HerdrResult};
 use crate::services::session_host::herdr::{pane_probe::start_text, provenance};
 
@@ -461,6 +464,12 @@ impl T19Server {
     }
 
     fn raw_rpc(&self, id: &str, method: &str, params: Value) -> Value {
+        let result = self.raw_call(&json!({"id":id,"method":method,"params":params}));
+        self.confirm_write(id, method);
+        result
+    }
+
+    fn raw_call(&self, call: &Value) -> Value {
         let mut stream = UnixStream::connect(self.socket()).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -472,21 +481,20 @@ impl T19Server {
         let witness = self.witness();
         assert_eq!(
             pid, witness.pid,
-            "T19 raw mutation peer is the owned scratch child"
+            "T19 raw RPC peer is the owned scratch child"
         );
         assert_eq!(start.identity, witness.start);
-        serde_json::to_writer(
-            &mut stream,
-            &json!({"id":id,"method":method,"params":params}),
-        )
-        .unwrap();
+        serde_json::to_writer(&mut stream, call).unwrap();
         stream.write_all(b"\n").unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         let reply: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(reply["id"], id);
+        assert_eq!(reply["id"], call["id"]);
         assert!(reply["error"].is_null(), "T19 control API error: {reply}");
-        self.confirm_write(id, method);
+        assert!(
+            reply["result"].is_object(),
+            "T19 raw result missing: {reply}"
+        );
         reply["result"].clone()
     }
 
@@ -697,17 +705,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             .admitted_witness()
             .expect("T19 first launch canonical off");
         assert_eq!(witness, server.witness());
-        let outcome = host.create(&HerdrCreateRequest {
-            endpoint,
-            label: format!("adk-t19-{provider}"),
-            cwd: server.dir.join("work"),
-            command: format!("/bin/sh {}", path.display()),
-            restore_off_witness: witness,
-        });
-        let pane = match outcome {
-            HerdrCreateOutcome::Created { pane_id } => pane_id,
-            other => panic!("T19 actual launch {provider}: {other:?}"),
-        };
+        let pane = restore_evidence::create(&server, &host, endpoint, witness, provider, &path);
         let provider_pid = server.dir.join(format!("{provider}.pid"));
         wait_for(|| provider_pid.exists(), "fake provider started");
         let pid = std::fs::read_to_string(provider_pid)
@@ -761,7 +759,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         "t19-control-create",
         HerdrRequest::WorkspaceCreate {
             cwd: control_cwd.display().to_string(),
-            label: "t19-positive-control".into(),
+            label: restore_evidence::label("claude"),
             focus: false,
         },
     ) {
@@ -864,6 +862,8 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         "[session]\nresume_agents_on_restore = true\n",
     )
     .unwrap();
+    let before = restore_evidence::snapshot(&server, "before");
+    let before_server = server.witness();
     assert!(server.stop(), "T19 graceful stop publishes the snapshot");
     let persisted: Value = serde_json::from_slice(&std::fs::read(&session).unwrap()).unwrap();
     assert!(
@@ -887,6 +887,8 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         .map(|(provider, _)| std::fs::read(server.dir.join(format!("{provider}.starts"))).unwrap())
         .collect();
     server.start();
+    let used_pane = &launched[1].1;
+    restore_evidence::use_before_read(&server, used_pane);
     wait_for(
         || {
             std::fs::read(server.dir.join("codex-control.starts"))
@@ -958,5 +960,13 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             "foreground":foreground.iter().map(|process| process.pid).collect::<Vec<_>>(), "shell_exec":shell_exe,
             "shell_comm":ps(shell, "comm="), "resumes":0, "provider_starts":1}));
     }
+    restore_evidence::inspect(
+        &mut server,
+        &before,
+        &before_server,
+        &launched,
+        &control_pane,
+    );
     assert!(server.stop(), "T19 second server stops without escalation");
+    restore_evidence::reused_id(&mut server, &session, &before, &launched[0].1);
 }
