@@ -94,6 +94,14 @@ fn refusal(status: Option<u16>) -> Option<u16> {
     status.filter(|status| matches!(status, 400 | 403 | 404))
 }
 
+async fn send(
+    http: &serenity::Http,
+    channel: u64,
+    message: CreateMessage,
+) -> Result<serenity::Message, serenity::Error> {
+    super::census_scope(None, ChannelId::new(channel).send_message(http, message)).await
+}
+
 impl DiscordPort for GatewayPort {
     fn bot_id(&self) -> u64 {
         self.bot_id
@@ -109,9 +117,7 @@ impl DiscordPort for GatewayPort {
             let message = CreateMessage::new()
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
-            match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
-                .await
-            {
+            match send(&http, channel, message).await {
                 Ok(message) => {
                     crate::services::legacy_body_census::transport::record_o_created(
                         channel,

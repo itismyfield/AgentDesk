@@ -8,10 +8,11 @@ use std::future::{Future, poll_fn};
 use std::num::NonZeroU64;
 use std::task::Poll;
 
-pub(crate) use plan::{Hash, Piece, Plan, TurnKey, TurnLease, hash};
+pub(crate) use plan::{Piece, Plan, hash};
 
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::agy_delivery::{Attempt, Journal, Receipt, Stage, State};
+pub(crate) use crate::services::tui_o::store::agy_delivery::{TurnKey, TurnLease};
 use crate::services::tui_o::store::{ChannelStore, StoreError};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,7 +112,7 @@ impl<'a> Replay<'a> {
         lease: Option<TurnLease>,
     ) -> Result<Self, Error> {
         let journal = gate
-            .admit(|current| (current == epoch).then(|| Journal::open(store, plan, lease)))
+            .admit(|current| (current == epoch).then(|| Journal::open(store, plan.stamp(), lease)))
             .flatten()
             .ok_or(Error::Authority)?;
         let journal = journal?;

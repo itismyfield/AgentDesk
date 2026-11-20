@@ -6,7 +6,29 @@ use serde::{Deserialize, Serialize};
 
 use super::{ChannelStore, StoreError, damage, durable};
 use crate::domain::file_sync::fsync_parent_dir;
-use crate::services::tui_o::writer::agy_delivery::{Hash, Plan, TurnKey, TurnLease};
+use uuid::Uuid;
+
+pub(crate) type Hash = [u8; 32];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TurnKey {
+    pub destination: NonZeroU64,
+    pub id: NonZeroU64,
+    pub nonce: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnLease {
+    pub key: TurnKey,
+    pub revision: NonZeroU64,
+}
+
+pub(crate) struct PlanStamp {
+    pub key: TurnKey,
+    pub fingerprint: Hash,
+    pub last_seq: u64,
+    pub pieces: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Stage {
@@ -53,7 +75,7 @@ pub(crate) struct Journal<'a> {
 impl<'a> Journal<'a> {
     pub(crate) fn open(
         store: &'a mut ChannelStore,
-        plan: &Plan,
+        plan: PlanStamp,
         lease: Option<TurnLease>,
     ) -> Result<Self, StoreError> {
         if lease.is_some_and(|lease| lease.key != plan.key)
@@ -86,13 +108,13 @@ impl<'a> Journal<'a> {
                     || lease.is_some_and(|lease| state.revision != lease.revision)
                     || state.fingerprint != plan.fingerprint
                     || state.last_seq != plan.last_seq
-                    || state.receipts.len() > plan.body.len()
-                    || (state.ended.is_some() && state.receipts.len() != plan.body.len())
+                    || state.receipts.len() > plan.pieces
+                    || (state.ended.is_some() && state.receipts.len() != plan.pieces)
                     || (state.ended.is_some_and(|stage| stage != Stage::Footer)
                         && (state.footer.is_none() || state.attempt.is_some()))
                     || (matches!(state.ended, None | Some(Stage::Footer)) && state.footer.is_some())
                     || (state.ended.is_none()
-                        && state.receipts.len() == plan.body.len()
+                        && state.receipts.len() == plan.pieces
                         && state.attempt.is_some())
                 {
                     return Err(damage("agy Done, lease or delivery ledger conflict"));

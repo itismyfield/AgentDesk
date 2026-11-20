@@ -1,26 +1,10 @@
-use std::num::NonZeroU64;
 use std::ops::Range;
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::message_split::split_with_source_ranges;
-
-pub(crate) type Hash = [u8; 32];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TurnKey {
-    pub destination: NonZeroU64,
-    pub id: NonZeroU64,
-    pub nonce: Uuid,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TurnLease {
-    pub key: TurnKey,
-    pub revision: NonZeroU64,
-}
+use crate::services::tui_o::store::agy_delivery::{Hash, PlanStamp, TurnKey};
 
 /// Terminal output after the spool reader verifies custody and the committed prefix.
 pub(crate) struct Seal {
@@ -55,6 +39,15 @@ pub(crate) struct Piece {
 }
 
 impl Plan {
+    pub(super) fn stamp(&self) -> PlanStamp {
+        PlanStamp {
+            key: self.key,
+            fingerprint: self.fingerprint,
+            last_seq: self.last_seq,
+            pieces: self.body.len(),
+        }
+    }
+
     pub(crate) fn derive(seal: Seal) -> Result<Self, &'static str> {
         if seal.key.nonce.is_nil() || seal.last_seq == 0 {
             return Err("invalid agy seal identity");
