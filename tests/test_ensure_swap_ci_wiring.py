@@ -175,9 +175,12 @@ class SwapStepWiring(unittest.TestCase):
                             next(i for i, step in enumerate(job["steps"]) if needs_swap(step, job)))
             self.assertIn("RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\n", uncached["run"])
 
-    def test_rust_build_bypasses_cargo_slot_only_for_self_hosted_archive_list(self):
+    def test_rust_build_bypasses_cargo_slot_only_for_self_hosted_nextest_queries(self):
         slot = "ADK_CARGO_SLOT_HELD"
-        archive_list = "cargo nextest list --archive-file "
+        query = re.compile(
+            r"(?P<prefix>\$\{\{ [^{}\n]+ \}\})?"
+            r"(?P<command>cargo nextest (?:--version\b|(?:list|run) [^|)\n]*?--archive-file\b))"
+        )
         for workflow in DUAL_RUNNER_WORKFLOWS:
             with self.subTest(workflow=workflow):
                 document = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))
@@ -185,16 +188,18 @@ class SwapStepWiring(unittest.TestCase):
                 steps = job["steps"]
                 for scope in (document, job, *steps):
                     self.assertNotIn(slot, scope.get("env", {}))
-                plan, = [step["run"] for step in steps if "cargo nextest archive " in step.get("run", "")]
-                command, = [line.strip() for line in plan.splitlines() if archive_list in line]
-                slot_lines = [
-                    line.strip() for step in steps for line in step.get("run", "").splitlines() if slot in line
-                ]
-                self.assertEqual(slot_lines, [command])
-                prefix = command.split(archive_list, 1)[0]
-                self.assertRegex(prefix, r"^\$\{\{ .+ \}\}$")
-                for environment, expected in (("self-hosted", f"{slot}=1 "), ("github-hosted", "")):
-                    self.assertEqual(eval_expression(prefix, {"runner.environment": environment}), expected)
+                run = "\n".join(step.get("run", "") for step in steps)
+                self.assertIn("cargo nextest archive ", run)
+                calls = list(query.finditer(run.replace("\\\n", "")))
+                commands = {call["command"] for call in calls}
+                self.assertIn("cargo nextest list --archive-file", commands)
+                self.assertIn("cargo nextest --version", commands)
+                for call in calls:
+                    prefix = call["prefix"]
+                    self.assertIsNotNone(prefix, call["command"])
+                    for environment, expected in (("self-hosted", f"{slot}=1 "), ("github-hosted", "")):
+                        self.assertEqual(eval_expression(prefix, {"runner.environment": environment}), expected)
+                self.assertEqual(run.count(slot), len(calls))
 
     def test_every_ubuntu_lib_build_job_adds_swap_before_its_first_cargo_step(self) -> None:
         for relative, expected in EXPECTED_SWAP_JOBS.items():

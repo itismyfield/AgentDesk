@@ -849,6 +849,8 @@ jobs:
 
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
+        # Same budget as the PR relay job: one cold lib test build peaks near 30G RAM + swap.
+        with: {size-gb: "24"}
 
       - name: Fetch Cargo dependencies
         env:

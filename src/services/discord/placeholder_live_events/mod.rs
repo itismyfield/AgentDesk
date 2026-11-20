@@ -345,6 +345,7 @@ impl PlaceholderLiveEvents {
         )
     }
 
+    #[cfg(any(unix, test))]
     pub(in crate::services::discord) fn set_session_panel_lifecycle_event(
         &self,
         channel_id: ChannelId,
@@ -352,8 +353,29 @@ impl PlaceholderLiveEvents {
         kind: &str,
         details: &Value,
     ) -> bool {
-        let snapshot =
-            SessionPanelSnapshot::from_lifecycle_event(session_instance_key, kind, details);
+        self.set_session_panel_lifecycle_event_with_start(
+            channel_id,
+            session_instance_key,
+            kind,
+            details,
+            false,
+        )
+    }
+
+    pub(in crate::services::discord) fn set_session_panel_lifecycle_event_with_start(
+        &self,
+        channel_id: ChannelId,
+        session_instance_key: Option<&str>,
+        kind: &str,
+        details: &Value,
+        headless_process_start: bool,
+    ) -> bool {
+        let snapshot = SessionPanelSnapshot::from_lifecycle_event(
+            session_instance_key,
+            kind,
+            details,
+            headless_process_start,
+        );
         self.set_session_panel_snapshot(channel_id, snapshot)
     }
 
