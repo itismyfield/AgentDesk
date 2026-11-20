@@ -10,3 +10,19 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
     pub shared: &'a Arc<SharedData>,
     pub token: &'a str,
 }
+
+pub(super) fn track_inflight_create(
+    saved: &mut bool,
+    mut create: impl FnMut(
+        &mut InflightTurnState,
+    )
+        -> Result<(), crate::services::discord::inflight::CreateNewInflightError>,
+) -> impl FnMut(
+    &mut InflightTurnState,
+) -> Result<(), crate::services::discord::inflight::CreateNewInflightError> {
+    move |state| {
+        let result = create(state);
+        *saved = result.is_ok();
+        result
+    }
+}

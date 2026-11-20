@@ -1245,6 +1245,7 @@ fn idle_turn(
     let turn = StreamingTurn {
         pool: None,
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: &front.1.text,

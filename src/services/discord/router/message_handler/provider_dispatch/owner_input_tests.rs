@@ -355,6 +355,7 @@ impl Rig {
         let turn = StreamingTurn {
             pool: self.pool.get(),
             registration_origin: None,
+            agy_foreground: None,
             shared: None,
             provider,
             prompt: PROMPT,

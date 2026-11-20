@@ -676,6 +676,7 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         let turn = StreamingTurn {
             pool: Some(&host.pool), provider: &provider, prompt: "prepared", session_id: None,
             registration_origin: None,
+            agy_foreground: None,
             shared: None,
             working_dir: host._workspace.path().to_str().unwrap(), system_prompt: None,
             allowed_tools: &[], cancel: token.clone(), codex_observation: None,

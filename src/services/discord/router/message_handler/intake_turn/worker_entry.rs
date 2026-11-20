@@ -107,7 +107,7 @@ pub(crate) async fn execute_intake_turn_core(
         request,
         (false, None, None),
         uploads,
-        true,
+        (true, None),
     )
     .await
 }
