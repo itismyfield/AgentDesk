@@ -34,15 +34,15 @@ static COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
-pub(crate) const HEADER_OPTION_PATTERN: &str =
+const HEADER_OPTION_PATTERN: &str =
     r"(?:-[A-Za-z]*?H[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--header)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
-pub(crate) const CURL_COOKIE_OPTION_PATTERN: &str =
+const CURL_COOKIE_OPTION_PATTERN: &str =
     r"(?:-[A-Za-z]*?b[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--cookie)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
 // A shell word can concatenate unquoted, single-quoted, double-quoted, and
 // ANSI-C-quoted fragments without whitespace. Backslash-newline is part of the
 // same logical word, and quoted fragments may contain literal newlines. Keep
 // this grammar shared so header and curl-cookie options cannot drift apart.
-pub(crate) const SHELL_WORD_FRAGMENT_PATTERN: &str = r#"(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\]|'[^']*'|"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*"|\$'(?:\\(?:\r?\n|[^\r\n])|[^'\\])*')"#;
+const SHELL_WORD_FRAGMENT_PATTERN: &str = r#"(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\]|'[^']*'|"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*"|\$'(?:\\(?:\r?\n|[^\r\n])|[^'\\])*')"#;
 
 static SINGLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
@@ -516,8 +516,13 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
     redacted
 }
 
+#[path = "redact/registered.rs"]
 mod registered;
-pub(crate) use registered::{contains_registered_secret, registered_secret_ranges};
+pub(crate) use registered::with_registered_secret_ranges;
+
+pub(crate) fn contains_registered_secret(input: &str) -> bool {
+    with_registered_secret_ranges(input, |ranges| ranges.next().is_some())
+}
 
 #[cfg(test)]
 mod tests {
