@@ -116,12 +116,12 @@ E20의 동일 ticket과 E29의 동일 front·frozen followers를 사용한다. B
 
 prod 수와 순증은 구현 계획 추정이다. giant의 새 코드는 인자 전달과 호출 교체 또는 기존 블록의 child 이동으로 제한한다.
 
-| 조각 | 경계와 배치 | prod 파일 / 순증 추정 | 수용 시험 |
-|---|---|---:|---|
-| 1. 정확한 실행 판정·발행 | `recovery_engine` child가 E06–E13, E48–E49의 read/attach/registry를 판단. 기존 transition 및 source authority 재사용 | 6 / +330 | Claude/Codex idle, busy, Missing, unplaced/Unknown, provider exited, endpoint/root/nonce 교체, boot와 intake 두 순서, 이전 nonce publish 0 |
-| 2. 같은 입력의 owner 경로 | `session_preparation`과 owner child에서 E19–E29, E51을 연결. giant `intake_turn.rs`, `headless_turn.rs`, `owner_input.rs`에는 호출 교체만 | 7 / +350 | early Held와 wake, Busy grant 또는 idle 진입, catch-up 중복, 첫 키 전 사망/stop/reset, 1회 제출, AckUnknown 무재전송 |
-| 3. 종료 resume과 표시 | 종료 provenance와 launch receipt는 child에 둔다. Claude 현재 resume와 Codex `ResumeStart` 검증 재사용, E30–E33/E50/E52의 render와 emit에 연결 | 8 / +470 | 확인된 종료 뒤 Claude/Codex 새 nonce와 표시 각 1회, 옛 retry envelope, old selector만 있는 행, 두 번째 boot, 명시적 clear/ordinary fresh/provider restart 대조 |
-| **합계** | 공용 파일의 조각 간 중복을 보수적으로 포함 | **21 / +1150** | PLAN_READY 정지선 +1200, 상한 30 prod 파일 / +1500 |
+| 조각 | 경계와 배치 | 운영 배선 | prod 파일 / 순증 추정 | 수용 시험 |
+|---|---|---|---:|---|
+| 1. 정확한 실행 판정·발행 | `recovery_engine` child가 E06–E13, E48–E49의 read/attach/registry를 판단. 기존 transition 및 source authority 재사용 | 비활성 착지. 기존 부팅 결과와 side effect 순서를 보존한다. 첫 입력의 판정 호출과 확인된 Herdr reverse owner 발행, 종료 증거의 입력 소비는 꺼져 있다. | 6 / +330 | Claude/Codex idle, busy, Missing, unplaced/Unknown, provider exited, endpoint/root/nonce 교체, boot와 intake 두 순서, 이전 nonce publish 0 |
+| 2. 같은 입력의 owner 경로 | `session_preparation`과 owner child에서 E19–E29, E51을 연결. giant `intake_turn.rs`, `headless_turn.rs`, `owner_input.rs`에는 호출 교체만 | 비활성 착지. owner 전달과 최종 frame 구성 위치를 준비한다. 운영에서는 기존 판정·prompt·표시 흐름을 유지한다. | 7 / +350 | early Held와 wake, Busy grant 또는 idle 진입, catch-up 중복, 첫 키 전 사망/stop/reset, 1회 제출, AckUnknown 무재전송 |
+| 3. 종료 resume과 표시 | 종료 provenance와 launch receipt는 child에 둔다. Claude 현재 resume와 Codex `ResumeStart` 검증 재사용, E30–E33/E50/E52의 render와 emit에 연결 | 실제 resume 증거와 문맥 구성·안내 정산을 완성한 뒤 공통 진입점에서 판정과 표시를 함께 활성화한다. | 8 / +470 | 확인된 종료 뒤 Claude/Codex 새 nonce와 표시 각 1회, 옛 retry envelope, old selector만 있는 행, 두 번째 boot, 명시적 clear/ordinary fresh/provider restart 대조 |
+| **합계** | 공용 파일의 조각 간 중복을 보수적으로 포함 | 조각 1 또는 1+2에서 운영 효과 동일성 확인 | **21 / +1150** | PLAN_READY 정지선 +1200, 상한 30 prod 파일 / +1500 |
 
 E2E 칸은 가능하다. `src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs:457`의 실제 kickoff를 `RelayE2eHarness`, isolated PG, mock Discord 및 exact Herdr rig로 확장한다. 같은 pane과 내구성 큐/source를 새 shared runtime에 연결한다. Busy는 boot reader와 첫 intake의 순서를 barrier로 뒤집고 이전 턴 종료 전후를 관찰한다. Codex는 mock rollout/hook fixtures를 재사용한다. Discord 캡처, provider 입력 프레임, receipt와 새 launch frame을 함께 확인한다. 죽은 pane은 old key send 0, 새 nonce에 1회, 세 복원 효과를 각각 검사한다. Native Herdr 교차 프로세스 시험은 격리 래퍼와 throwaway PG를 쓰는 별도 프로필이다. Rust/PG/E2E는 구현 조각의 수용 시험이다.
 

@@ -24,18 +24,22 @@
 
 기존 Busy turn이 계속 작동하면 후속 원본을 안전한 입력 경계까지 보류한다. 모델의 Busy 진행은 그 턴이 Idle에 도달하는 경우다. 이미 허가된 Busy steer와 provider별 composer는 기존 구현 계약을 따른다. Weak fairness는 부팅, 관찰 가능해진 증거, wake 이후 재구동, 확인된 종료의 resume와 submit을 진행시킨다. 영구 socket 장애, native resume가 불가능한 세션, 계속 Busy인 pane, Enter 여부가 영원히 불명인 경우, clear/stop의 명시적 폐기, 복수 메시지/채널 및 물리 I/O와 DB 간 원자성은 이 투영 밖이다. 이 경계는 설계에서 기존 큐·제어/hold 계약으로 다룬다.
 
+## 조각 1의 제출 횟수 보강
+
+실제 기존·후계 제출 전이가 전달 횟수를 누적한다. 확정 receipt와 재구동 시도는 별개 상태다. Duplicate는 확정 receipt를 무시해 정상 제출 전이에 다시 들어간다. 같은 재구동에서 기존 덮어쓰기 계수만 되살린 진단 모델은 GREEN이었다. 누적 계수에서는 두 번째 제출 직후 ExactlyOnce가 깨진다. 기존 cfg 위반 집합은 동일하다.
+
 ## 새 cfg의 수정 전과 제안·대조 결과
 
 | cfg | 비교 의미 | TLC 결과 | 상태/step | 차트와 반례 |
 |---|---|---|---:|---|
-| Before | 기존 cache miss의 잘못된 분류 | RED `NoLiveRestore` | 77 / 120 | [차트](herdr-live-reattach-Before.chart.mmd) · [4단계](herdr-live-reattach-Before.report.md) |
-| After | 네 시작 경우, 부팅/intake 양 순서 | GREEN | 77 / 120 | [차트](herdr-live-reattach-After.chart.mmd) · [TLC](herdr-live-reattach-After.report.md) |
-| AfterStale | 판정 뒤 첫 key 전 죽음 | GREEN | 23 / 35 | [차트](herdr-live-reattach-AfterStale.chart.mmd) · [TLC](herdr-live-reattach-AfterStale.report.md) |
+| Before | 기존 cache miss의 잘못된 분류 | RED `NoLiveRestore` | 90 / 151 | [차트](herdr-live-reattach-Before.chart.mmd) · [4단계](herdr-live-reattach-Before.report.md) |
+| After | 네 시작 경우, 부팅/intake 양 순서 | GREEN | 90 / 151 | [차트](herdr-live-reattach-After.chart.mmd) · [TLC](herdr-live-reattach-After.report.md) |
+| AfterStale | 판정 뒤 첫 key 전 죽음 | GREEN | 26 / 42 | [차트](herdr-live-reattach-AfterStale.chart.mmd) · [TLC](herdr-live-reattach-AfterStale.report.md) |
 | NoRecheck | AfterStale의 첫 key 재검사 제거 | RED `NoDeadPaneWrite`, `ExactlyOnce`, `FirstInputDelivered` | 15 / 24 | [차트](herdr-live-reattach-NoRecheck.chart.mmd) · [6·6·7단계](herdr-live-reattach-NoRecheck.report.md) |
-| NoWake | 증거 확인 뒤 기존 front wake 제거 | RED `FirstInputDelivered` | 59 / 88 | [차트](herdr-live-reattach-NoWake.chart.mmd) · [6단계 정지](herdr-live-reattach-NoWake.report.md) |
-| Duplicate | receipt가 있는 원본을 다시 제출 | RED `ExactlyOnce` | 90 / 151 | [차트](herdr-live-reattach-Duplicate.chart.mmd) · [6단계](herdr-live-reattach-Duplicate.report.md) |
-| TrustRow | 행만 보고 제출 | RED `NoDeadPaneWrite`, `ExactlyOnce`, `FirstInputDelivered` | 60 / 95 | [차트](herdr-live-reattach-TrustRow.chart.mmd) · [5·5·6단계](herdr-live-reattach-TrustRow.report.md) |
-| NoRecoveryEffects | 종료 후 실제 resume의 표시를 끔 | RED `EndedResumeShowsRecovery` | 77 / 120 | [차트](herdr-live-reattach-NoRecoveryEffects.chart.mmd) · [5단계](herdr-live-reattach-NoRecoveryEffects.report.md) |
+| NoWake | 증거 확인 뒤 기존 front wake 제거 | RED `FirstInputDelivered` | 64 / 100 | [차트](herdr-live-reattach-NoWake.chart.mmd) · [6단계 정지](herdr-live-reattach-NoWake.report.md) |
+| Duplicate | 확정 receipt를 무시해 정상 제출 전이에 한 번 더 진입 | RED `ExactlyOnce` | 103 / 169 | [차트](herdr-live-reattach-Duplicate.chart.mmd) · [7단계](herdr-live-reattach-Duplicate.report.md) |
+| TrustRow | 행만 보고 제출 | RED `NoDeadPaneWrite`, `ExactlyOnce`, `FirstInputDelivered` | 67 / 112 | [차트](herdr-live-reattach-TrustRow.chart.mmd) · [5·5·6단계](herdr-live-reattach-TrustRow.report.md) |
+| NoRecoveryEffects | 종료 후 실제 resume의 표시를 끔 | RED `EndedResumeShowsRecovery` | 90 / 151 | [차트](herdr-live-reattach-NoRecoveryEffects.chart.mmd) · [5단계](herdr-live-reattach-NoRecoveryEffects.report.md) |
 
 Before의 최단 경로를 소스와 대조했다. (1) E02의 새 runtime 부팅, (2) E19–E20에서 메시지를 원래 입력으로 보관, (3) E04의 reconcile 완료와 queue kickoff, (4) E22–E23에서 cache miss에 selector 복원을 먼저 준비하고 E27에서 살아 있는 Bound pane을 사용한다. E30–E32에서 복원 신호가 만들어질 수 있다. #8280에서 확인된 작업 중 사례는 같은 원인의 Busy 분기다. 복구 안내의 실제 emitter와 세 효과의 상호 순서는 이 모델에서 하나로 단정하지 않는다. 나머지 RED는 데이터 유실·중복·회귀를 탐지하는 설계 대조군이며 실제 운영에서 재현되었다는 뜻이 아니다. E2E 재생 절차와 경계는 설계의 수용 시험에 있다.
 

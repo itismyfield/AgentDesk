@@ -209,7 +209,8 @@ AttachInit ==
        attach = [phase |-> "down", target |-> target, initial |-> target,
                  reconciled |-> FALSE, scan |-> FALSE, mirror |-> FALSE, owner |-> FALSE,
                  route |-> "none", changed |-> FALSE, deadWrite |-> FALSE,
-                 delivered |-> 0, banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE]
+                 delivered |-> 0, receipt |-> "none", redrive |-> FALSE,
+                 banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE]
 
 Boot ==
     /\ attach.phase = "down"
@@ -268,7 +269,8 @@ SubmitExisting ==
     /\ (attach.target = "idle" \/ Policy \in {"no-recheck", "trust-row"})
     /\ attach' = [attach EXCEPT !.phase = "done", !.owner = attach.target = "idle",
                   !.deadWrite = attach.target # "idle",
-                  !.delivered = IF attach.target = "idle" THEN 1 ELSE 0]
+                  !.delivered = @ + (IF attach.target = "idle" THEN 1 ELSE 0),
+                  !.receipt = IF attach.target = "idle" THEN "confirmed" ELSE "none"]
     /\ UNCHANGED vars
 
 ResumeEnded ==
@@ -280,12 +282,16 @@ ResumeEnded ==
 
 SubmitResumed ==
     /\ attach.phase = "resumed"
-    /\ attach' = [attach EXCEPT !.phase = "done", !.delivered = 1]
+    /\ attach' = [attach EXCEPT !.phase = "done", !.delivered = @ + 1,
+                  !.receipt = "confirmed"]
     /\ UNCHANGED vars
 
-ReplayReceipt ==
-    /\ Policy = "duplicate" /\ attach.phase = "done" /\ attach.delivered = 1
-    /\ attach' = [attach EXCEPT !.delivered = 2]
+RedriveFront ==
+    /\ attach.phase = "done" /\ ~attach.redrive
+    /\ attach.receipt = "confirmed"
+    /\ attach' = [attach EXCEPT !.redrive = TRUE,
+                  !.phase = IF Policy # "duplicate" THEN @
+                            ELSE IF attach.route = "existing" THEN "submit" ELSE "resumed"]
     /\ UNCHANGED vars
 
 AttachDone ==
@@ -294,7 +300,7 @@ AttachDone ==
 
 AttachNext == Boot \/ FirstInput \/ ReconcileIntake \/ ReconnectSource \/ ChooseRoute
               \/ ReadinessChanges \/ LosePaneBeforeEffect \/ RecheckEffect \/ SubmitExisting
-              \/ ResumeEnded \/ SubmitResumed \/ ReplayReceipt \/ AttachDone
+              \/ ResumeEnded \/ SubmitResumed \/ RedriveFront \/ AttachDone
 
 AttachSpec ==
     /\ AttachInit /\ [][AttachNext]_allVars

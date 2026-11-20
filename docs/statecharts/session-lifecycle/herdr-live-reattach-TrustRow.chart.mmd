@@ -51,7 +51,7 @@ stateDiagram-v2
   s2 --> s3: 첫 메시지를 같은 큐에 등록
   s9 --> s10: 첫 메시지를 같은 큐에 등록
   s16 --> s17: 첫 메시지를 같은 큐에 등록
-  s22 --> s22: 입력 reconcile 완료 or 독립 reader가 source를 대조
+  s22 --> s22: 독립 reader가 source를 대조
   s22 --> s23: 첫 메시지를 같은 큐에 등록
   s23 --> s23: 입력 reconcile 완료
   s3 --> s4: 현재 실행 증거로 경로를 고름

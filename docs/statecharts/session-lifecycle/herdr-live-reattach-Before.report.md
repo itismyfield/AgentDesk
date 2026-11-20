@@ -2,8 +2,8 @@
 
 기준 소스 `8470a8b911849b2570e00103fb9bee33c5d9c7eb`.
 
-TLC reached 77 states and 120 steps. The chart draws 27 states and 25 arrows.
-The chart does not draw 61 steps that stay in one chart state.
+TLC reached 90 states and 151 steps. The chart draws 27 states and 25 arrows.
+The chart does not draw 92 steps that stay in one chart state.
 
 ## NoLiveRestore breaks
 The shortest path has 4 steps:

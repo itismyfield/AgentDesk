@@ -20,12 +20,12 @@ stateDiagram-v2
   }
   [*] --> s1
   s1 --> s2: dcserver가 부팅됨
+  s2 --> s2: 독립 reader가 source를 대조
   s2 --> s3: 첫 메시지를 같은 큐에 등록
   s3 --> s3: 입력 reconcile 완료
   s3 --> s4: 현재 실행 증거로 경로를 고름
   s4 --> s5: 첫 키 전에 pane이 종료됨
   s5 --> s6: 종료되거나 미확인인 pane에 제출
-  s5 --> s5: 독립 reader가 source를 대조
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s1 bugPath
   class s2 bugPath

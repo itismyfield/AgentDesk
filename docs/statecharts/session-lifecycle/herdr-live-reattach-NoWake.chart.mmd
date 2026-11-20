@@ -45,6 +45,7 @@ stateDiagram-v2
   s7 --> s8: dcserver가 부팅됨
   s14 --> s15: dcserver가 부팅됨
   s20 --> s21: dcserver가 부팅됨
+  s2 --> s2: 독립 reader가 source를 대조
   s2 --> s3: 첫 메시지를 같은 큐에 등록
   s8 --> s9: 첫 메시지를 같은 큐에 등록
   s15 --> s16: 첫 메시지를 같은 큐에 등록
@@ -56,7 +57,6 @@ stateDiagram-v2
   s22 --> s23: 현재 실행 증거로 경로를 고름
   s10 --> s11: 기존 실행을 정리하고 새 프로세스로 resume
   s17 --> s18: 기존 pane에 한 번 제출
-  s4 --> s4: 독립 reader가 source를 대조
   s4 --> s5: pane 또는 입력 준비 상태가 확인됨
   s23 --> s24: pane 또는 입력 준비 상태가 확인됨
   s11 --> s12: 후계에 같은 원본을 한 번 제출

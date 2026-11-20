@@ -41,7 +41,7 @@ const actions = {
   SubmitExisting: "기존 pane에 한 번 제출",
   ResumeEnded: "기존 실행을 정리하고 새 프로세스로 resume",
   SubmitResumed: "후계에 같은 원본을 한 번 제출",
-  ReplayReceipt: "이미 결산한 원본을 다시 제출",
+  RedriveFront: "이미 결산한 원본의 재구동 요청",
   AttachDone: "결산 유지",
 };
 
