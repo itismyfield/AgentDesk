@@ -2,7 +2,7 @@
 
 기준 main: `832254536a342caf0d94bf91abf281a93f43e2ce`. 실제 등록 진입점은
 `src/services/discord/runtime_bootstrap/framework_setup.rs:208`의
-`run_bot_build_slash_commands`다. 최상위 24개, 하위 명령 1개를 모두 조사했다.
+`run_bot_build_slash_commands`다. 현행 최상위 명령은 25개이며 하위 명령은 1개다.
 파일 좌표는 이번 조각의 소스 기준이며 아래 경로는 `src/services/discord/` 기준이다. 인자가 없는 명령도 누락 판단을 위해 적었다.
 
 | 명령 | 인자 | 처리 | 코드 좌표 | 소유 레인 |
@@ -31,6 +31,7 @@
 | `/health` | 없음 | 대상 인자 없음 | `commands/diagnostics/mod.rs:13` | #7678-1 |
 | `/allowall` | `action` | 기존 choices: on / off / status, 소유 레인 착지 뒤 | `commands/config.rs:556` | #6486 |
 | `/usage` | `period` | 기존 choices: ratelimit / month | `commands/receipt.rs:21` | #7678-1 |
+| `/usage-footer` | `action` | 선택 choices: on / off, 생략하면 현재 채널의 쿼터 표시를 토글 | `commands/usage_footer.rs:13` | #8141 |
 | `/help` | 없음 | 대상 인자 없음 | `commands/help.rs:83` | #7678-1 |
 | `/system-prompt` | 없음 | 대상 인자 없음 | `commands/system_prompt.rs:97` | #7678-1 |
 | `/restart` | 없음 | 대상 인자 없음 | `commands/restart.rs:353` | #7678-1 |

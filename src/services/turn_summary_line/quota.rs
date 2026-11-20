@@ -4,6 +4,8 @@ use std::sync::{LazyLock, RwLock};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::Model;
+
 use crate::services::cswap::{ClaudeAccountsResponse, ClaudeAccountsStatus, CswapService};
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
 
@@ -15,6 +17,7 @@ mod statusline;
 pub(crate) struct Quota {
     five_hour: Option<Window>,
     seven_day: Option<Window>,
+    fable_seven_day: Option<Window>,
 }
 
 // Native starts follow launch selection; Legacy intake timestamps precede it.
@@ -41,25 +44,32 @@ impl Window {
 
 impl Quota {
     pub(super) fn append(self, line: &mut String) {
-        for (label, window, format) in [
+        let windows = [
             ("5h", self.five_hour, "%H:%M"),
             ("7d", self.seven_day, "%m/%d %H:%M"),
-        ] {
-            if let Some(window) = window {
-                let reset = window.reset.with_timezone(&chrono_tz::Asia::Seoul);
-                line.push_str(&format!(
-                    " · {label} {}% ({})",
-                    window.percent,
-                    reset.format(format)
-                ));
-            }
+            ("Fable 7d", self.fable_seven_day, "%m/%d %H:%M"),
+        ];
+        for (index, (label, window, format)) in windows
+            .into_iter()
+            .filter_map(|(label, window, format)| Some((label, window?, format)))
+            .enumerate()
+        {
+            let reset = window.reset.with_timezone(&chrono_tz::Asia::Seoul);
+            line.push_str(if index == 0 { "\n-# " } else { " · " });
+            line.push_str(&format!(
+                "{label} {}% ({})",
+                window.percent,
+                reset.format(format)
+            ));
         }
     }
 
     fn current(mut self, now: DateTime<Utc>) -> Option<Self> {
         self.five_hour = self.five_hour.filter(|window| window.reset > now);
         self.seven_day = self.seven_day.filter(|window| window.reset > now);
-        (self.five_hour.is_some() || self.seven_day.is_some()).then_some(self)
+        self.fable_seven_day = self.fable_seven_day.filter(|window| window.reset > now);
+        (self.five_hour.is_some() || self.seven_day.is_some() || self.fable_seven_day.is_some())
+            .then_some(self)
     }
 }
 
@@ -109,11 +119,31 @@ fn claude(response: &ClaudeAccountsResponse, now: DateTime<Utc>) -> Option<Quota
     Quota {
         five_hour: usage.five_hour.as_ref().and_then(window),
         seven_day: usage.seven_day.as_ref().and_then(window),
+        fable_seven_day: usage
+            .extra
+            .get("scoped")
+            .and_then(|scoped| fable_scoped(scoped, now)),
     }
     .current(now)
 }
 
-fn codex(data: &str, now: DateTime<Utc>) -> Option<Quota> {
+fn fable_scoped(scoped: &Value, now: DateTime<Utc>) -> Option<Window> {
+    let mut fable = scoped
+        .as_array()?
+        .iter()
+        .filter(|window| window["name"] == "Fable");
+    let window = fable.next()?;
+    if fable.next().is_some() {
+        return None;
+    }
+    Window::new(
+        window["pct"].as_f64()?,
+        window["resetsAt"].as_str()?.parse().ok()?,
+        now,
+    )
+}
+
+fn buckets(data: &str, now: DateTime<Utc>, claude: bool) -> Option<Quota> {
     let value: Value = serde_json::from_str(data).ok()?;
     let buckets = value.get("buckets")?.as_array()?;
     let window = |name: &str| {
@@ -133,13 +163,14 @@ fn codex(data: &str, now: DateTime<Utc>) -> Option<Quota> {
     Quota {
         five_hour: window("5h"),
         seven_day: window("7d"),
+        fable_seven_day: if claude { window("7d Fable") } else { None },
     }
     .current(now)
 }
 
 #[derive(Default)]
 struct Cache {
-    quotas: BTreeMap<String, (DateTime<Utc>, Quota)>,
+    quotas: BTreeMap<(String, String), (DateTime<Utc>, Quota)>,
     profiles: BTreeMap<(String, u64), Selection>,
 }
 
@@ -169,19 +200,40 @@ pub(crate) fn record_launch(
 }
 
 pub(crate) fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64) {
-    if provider != "codex" {
+    if provider != "codex" && (provider != "claude" || profile == "default") {
         return;
     }
     let Some(fetched) = DateTime::from_timestamp(fetched_at, 0) else {
         return;
     };
-    let quota = codex(data, fetched);
+    let quota = buckets(data, fetched, provider == "claude");
     if let Ok(mut cache) = CACHE.write() {
-        cache.quotas.remove(profile);
+        let key = (provider.to_string(), profile.to_string());
         if let Some(quota) = quota {
-            cache.quotas.insert(profile.to_string(), (fetched, quota));
+            cache.quotas.insert(key, (fetched, quota));
+        } else {
+            cache.quotas.remove(&key);
         }
     }
+}
+
+fn selected_quota(
+    cache: &Cache,
+    provider: &str,
+    selected: &Selection,
+    selection: Selected,
+    now: DateTime<Utc>,
+) -> Option<Quota> {
+    let allowed = match selection {
+        Selected::Before(started) => selected.at <= started,
+        Selected::Within(started) => (started..=now).contains(&selected.at),
+    };
+    if !allowed {
+        return None;
+    }
+    let key = (provider.to_string(), selected.profile.clone());
+    let (fetched, quota) = cache.quotas.get(&key)?;
+    fresh(*fetched, now).then_some(*quota)?.current(now)
 }
 
 fn cached_codex(
@@ -192,15 +244,45 @@ fn cached_codex(
 ) -> Option<Quota> {
     let cache = cache.try_read().ok()?;
     let selected = cache.profiles.get(&("codex".to_string(), channel))?;
-    let allowed = match selection {
-        Selected::Before(started) => selected.at <= started,
-        Selected::Within(started) => (started..=now).contains(&selected.at),
-    };
-    if !allowed {
-        return None;
+    selected_quota(&cache, "codex", selected, selection, now)
+}
+
+fn cached_claude(channel: u64, selection: Option<Selected>, now: DateTime<Utc>) -> Option<Quota> {
+    {
+        let cache = CACHE.try_read().ok()?;
+        if let Some(selected) = cache.profiles.get(&("claude".to_string(), channel))
+            && selected.profile != "default"
+        {
+            return selected_quota(&cache, "claude", selected, selection?, now);
+        }
     }
-    let (fetched, quota) = cache.quotas.get(&selected.profile)?;
-    fresh(*fetched, now).then_some(*quota)?.current(now)
+    claude(&CswapService::global().cached_accounts_for_summary()?, now)
+}
+
+fn merge_claude(session: Option<Quota>, account: Option<Quota>) -> Option<Quota> {
+    if let Some(mut session) = session {
+        session.fable_seven_day = account.and_then(|quota| quota.fable_seven_day);
+        Some(session)
+    } else {
+        account
+    }
+}
+
+pub(crate) struct Snapshot {
+    pub quota: Option<Quota>,
+    statusline: Option<statusline::Record>,
+}
+
+impl Snapshot {
+    pub(crate) fn model(&self) -> Model<'_> {
+        self.statusline
+            .as_ref()
+            .map_or_else(Model::default, |record| Model {
+                name: record.model(),
+                effort: record.effort(),
+                fast: record.fast(),
+            })
+    }
 }
 
 pub(crate) fn snapshot(
@@ -208,28 +290,35 @@ pub(crate) fn snapshot(
     channel: u64,
     selection: Option<Selected>,
     session_id: Option<&str>,
-) -> Option<Quota> {
+    show_quota: bool,
+) -> Snapshot {
     let now = Utc::now();
-    match provider {
-        "claude" => statusline::with_fallback(
-            &crate::services::claude_tui::hook_bundle::statusline::record_dir(),
-            session_id,
-            now,
-            || {
-                let cache = CACHE.try_read().ok()?;
-                if cache
-                    .profiles
-                    .get(&(provider.to_string(), channel))
-                    .is_some_and(|selected| selected.profile != "default")
-                {
-                    return None;
-                }
-                claude(&CswapService::global().cached_accounts_for_summary()?, now)
-            },
-        ),
-        "codex" => cached_codex(&CACHE, channel, selection?, now),
-        _ => None,
-    }
+    let statusline = if provider == "claude" {
+        session_id.and_then(|session| {
+            statusline::read(
+                &crate::services::claude_tui::hook_bundle::statusline::record_dir(),
+                session,
+                now,
+            )
+        })
+    } else {
+        None
+    };
+    let quota = if show_quota {
+        match provider {
+            "claude" => merge_claude(
+                statusline.as_ref().and_then(|record| record.quota(now)),
+                cached_claude(channel, selection, now),
+            ),
+            "codex" => {
+                selection.and_then(|selection| cached_codex(&CACHE, channel, selection, now))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Snapshot { quota, statusline }
 }
 
 pub(crate) fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {

@@ -1,16 +1,21 @@
 //! Live Legacy terminal chrome, sharing the O summary format without claiming its body.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+
 use super::gateway::{DiscordGateway, TurnGateway};
 use super::inflight::InflightTurnState;
+use super::runtime_store::usage_footer;
 use super::turn_finalizer::{LedgerKey, TurnKey};
 use super::{ChannelId, SharedData, serenity};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::codex_tui::rollout_index::summary_context;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_summary_line::{Outcome, quota, render};
+use crate::services::turn_summary_line::{Footer, Model, Outcome, quota, render};
 
 const TTL: Duration = Duration::from_secs(60 * 60);
 const CAP: usize = 1024;
@@ -69,8 +74,30 @@ pub(in crate::services::discord) struct LiveSummary {
     outcome: Outcome,
     elapsed_ms: Option<u64>,
     context_pct: Option<u8>,
-    started: Option<chrono::DateTime<chrono::Utc>>,
+    started: Option<DateTime<Utc>>,
+    ended: Option<DateTime<Utc>>,
     session_id: Option<String>,
+    codex_rollout: Option<CodexRollout>,
+}
+
+#[derive(Clone)]
+struct CodexRollout {
+    path: String,
+    turn_start_offset: Option<u64>,
+    native_turn_id: Option<String>,
+}
+
+impl CodexRollout {
+    fn capture(state: &InflightTurnState) -> Option<Self> {
+        if state.runtime_kind != Some(RuntimeHandoffKind::CodexTui) {
+            return None;
+        }
+        Some(Self {
+            path: state.output_path.clone()?,
+            turn_start_offset: state.turn_start_offset,
+            native_turn_id: state.native_turn_id.clone(),
+        })
+    }
 }
 
 pub(in crate::services::discord) fn outcome(cancelled: bool, failed: bool) -> Outcome {
@@ -91,6 +118,7 @@ impl LiveSummary {
         outcome: Outcome,
         elapsed_ms: Option<u64>,
     ) -> Self {
+        let started = quota::legacy_started(&state.started_at);
         Self {
             key: TurnKey::new(channel, state.effective_finalizer_turn_id(), generation)
                 .with_episode_nonce(state.turn_nonce.as_deref()),
@@ -98,8 +126,10 @@ impl LiveSummary {
             outcome,
             elapsed_ms,
             context_pct: None,
-            started: quota::legacy_started(&state.started_at),
+            started,
+            ended: (started.is_some() || elapsed_ms.is_some()).then(Utc::now),
             session_id: state.session_id.clone(),
+            codex_rollout: CodexRollout::capture(state),
         }
     }
 
@@ -132,10 +162,11 @@ impl LiveSummary {
         {
             return None;
         }
-        let elapsed_ms =
-            chrono::NaiveDateTime::parse_from_str(&state.started_at, "%Y-%m-%d %H:%M:%S")
-                .ok()
-                .and_then(|started| elapsed_since(started, chrono::Local::now().naive_local()));
+        let started = quota::legacy_started(&state.started_at);
+        let ended = started.map(|_| Utc::now());
+        let elapsed_ms = started
+            .zip(ended)
+            .and_then(|(start, end)| elapsed_since(start, end));
         Some(
             Self {
                 key,
@@ -147,15 +178,17 @@ impl LiveSummary {
                 },
                 elapsed_ms,
                 context_pct: None,
-                started: quota::legacy_started(&state.started_at),
+                started,
+                ended,
                 session_id: state.session_id.clone(),
+                codex_rollout: CodexRollout::capture(state),
             }
             .with_context(shared),
         )
     }
 }
 
-fn elapsed_since(started: chrono::NaiveDateTime, ended: chrono::NaiveDateTime) -> Option<u64> {
+fn elapsed_since(started: DateTime<Utc>, ended: DateTime<Utc>) -> Option<u64> {
     let elapsed = ended - started;
     if elapsed < chrono::Duration::zero() {
         return None;
@@ -227,17 +260,51 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
         return;
     }
     // An error may follow a successful POST, so the attempt remains consumed even on cancellation.
-    let quota = quota::snapshot(
+    let channel = summary.key.channel_id.get();
+    let snapshot = quota::snapshot(
         provider.as_str(),
-        summary.key.channel_id.get(),
+        channel,
         summary.started.map(quota::Selected::Within),
         summary.session_id.as_deref(),
+        summary.outcome == Outcome::Completed && usage_footer::enabled(channel),
+    );
+    let codex = if *provider == ProviderKind::Codex {
+        summary
+            .codex_rollout
+            .as_ref()
+            .zip(summary.session_id.as_deref())
+            .zip(summary.started.zip(summary.ended))
+            .and_then(|((rollout, session), (started, ended))| {
+                summary_context::read(
+                    Path::new(&rollout.path),
+                    session,
+                    rollout.turn_start_offset,
+                    rollout.native_turn_id.as_deref(),
+                    started,
+                    ended,
+                )
+            })
+    } else {
+        None
+    };
+    let model = codex.as_ref().map_or_else(
+        || snapshot.model(),
+        |codex| Model {
+            name: codex.model.as_deref(),
+            effort: codex.effort.as_deref(),
+            fast: false,
+        },
     );
     let text = render(
         summary.outcome,
-        summary.elapsed_ms,
-        summary.context_pct,
-        quota,
+        Footer {
+            elapsed_ms: summary.elapsed_ms,
+            started: summary.started,
+            ended: summary.ended,
+            model,
+            context_pct: summary.context_pct,
+            quota: snapshot.quota,
+        },
     );
     if let Err(error) =
         super::outbound::confirmation::send_terminal_notice(gateway, summary.key.channel_id, &text)
