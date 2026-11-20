@@ -1458,11 +1458,11 @@ async fn send_review_result_message_via_http(
     // #1457: review followups use the v3 envelope directly so final
     // notification delivery shares the same message/policy/result contract
     // as dispatch outbox.
+    use crate::domain::outbound::policy::DiscordOutboundPolicy;
+    use crate::domain::outbound::result::DeliveryResult;
     use crate::services::discord::outbound::HttpOutboundClient;
     use crate::services::discord::outbound::delivery::deliver_outbound;
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-    use crate::services::discord::outbound::result::DeliveryResult;
     use crate::services::discord::outbound::shared_outbound_deduper;
     use poise::serenity_prelude::ChannelId;
 
