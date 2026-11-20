@@ -769,7 +769,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
-    "job_timeout_minutes" => 100, "job_sha256" => "ae7d7ced831496a2e7e8024ab2b77bb41752efe4a70101d07fe581e08e4dbca2",
+    "job_timeout_minutes" => 100, "job_sha256" => "61a778cc7baaa8f73daf531613ffa819267031cc51b766f091dda9bf91c30fa3",
     "cargo_steps" => {
       "Disable remote compiler cache" => {
         "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
@@ -779,7 +779,7 @@ targets = {
       "Archive, list, compare and plan" => {
         "commands" => [
           "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"',
-          'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
+          'cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
           %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\},
           '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
           'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
@@ -872,7 +872,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "fc080a14aa7bffb9b6e155f6982a8973c78cf726e8794f429ef5b6ed6a3f8300",
+    "job_sha256" => "4d9ff695c9d13d016955896b145475ffb668a8f55568c54809eb2ee0f062bf1c",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -882,7 +882,7 @@ targets = {
       "Compare Windows Rust test sources with the nextest list" => {
         "commands" => [
           "set -euo pipefail",
-          "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json",
+          "cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json",
           "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json",
         ],
         "timeout_minutes" => 30,

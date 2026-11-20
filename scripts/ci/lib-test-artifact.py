@@ -14,7 +14,7 @@ import sys
 
 BUILD = ["cargo", "test", "--locked", "--lib", "--no-run",
          "--message-format=json"]
-NEXTEST_BUILD = ["cargo", "nextest", "archive", "--lib"]
+NEXTEST_BUILD = ["cargo", "nextest", "archive", "--lib", "--workspace"]
 FILES = ("lib-tests", "plain.list", "ignored.list")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -156,20 +156,25 @@ def prepare_nextest(directory, source, root=ROOT):
         "--workspace-remap", str(root), "--extract-to", str(extract),
         "--extract-overwrite", "--ignore-default-filter", "--message-format", "json",
     ], root))
-    suites = list(listing["rust-suites"].values())
-    if len(suites) != 1 or suites[0]["kind"] != "lib":
-        raise ValueError("nextest archive must contain exactly one lib binary")
-    suite = suites[0]
-    binary = Path(suite["binary-path"]).resolve()
-    if not binary.is_relative_to(extract) or not binary.is_file():
-        raise ValueError("nextest binary must be inside the extracted archive")
     runnable = {tuple(test) for worker in plan["workers"] for test in worker["tests"]}
     ignored = {tuple(test) for test in plan["ignored"]}
-    if {binary_id for binary_id, _ in runnable | ignored} != {suite["binary-id"]}:
-        raise ValueError("nextest plan binary identity mismatch")
+    if nextest_ci.universe_from_list(listing) != (runnable, ignored):
+        raise ValueError("nextest archive inventory differs from the workspace plan")
+    binaries = {}
+    for suite in listing["rust-suites"].values():
+        if suite["kind"] != "lib":
+            raise ValueError("nextest archive must contain only lib binaries")
+        binary = Path(suite["binary-path"]).resolve()
+        if not binary.is_relative_to(extract) or not binary.is_file():
+            raise ValueError("nextest binary must be inside the extracted archive")
+        binaries[suite["binary-id"]] = binary
+    if "agentdesk" not in binaries:
+        raise ValueError("nextest archive lacks the agentdesk lib binary")
+    # The direct cargo test --lib consumer runs the root package's harness.
     metadata["build"] = NEXTEST_BUILD
-    _package(directory, binary, metadata, root,
-             ({name for _, name in runnable | ignored}, {name for _, name in ignored}))
+    _package(directory, binaries["agentdesk"], metadata, root,
+             ({name for lib, name in runnable | ignored if lib == "agentdesk"},
+              {name for lib, name in ignored if lib == "agentdesk"}))
     print("lib-test artifact: reused validated nextest archive (no build)", file=sys.stderr)
 
 

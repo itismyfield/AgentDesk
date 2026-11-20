@@ -14,6 +14,80 @@ from ci.rust_test_sources import production_tokens, walk
 
 
 class ModuleLayerMeasurementTests(unittest.TestCase):
+    def test_workspace_dependency_paths_reach_the_member_that_owns_the_source(self):
+        from audit_maintainability.checks.module_layers import analyze
+
+        files = {
+            "Cargo.toml": '''
+[package]
+name = "agentdesk"
+version = "0.1.0"
+[workspace]
+members = ["crates/adk-store"]
+[workspace.dependencies]
+store-seed = { path = "crates/adk-store", package = "adk-store" }
+[dependencies]
+store-seed = { workspace = true }
+''',
+            "crates/adk-store/Cargo.toml": '''
+[package]
+name = "adk-store"
+version = "0.1.0"
+[lib]
+path = "../../src/db/adk_store_lib.rs"
+[dependencies]
+url = "2"
+''',
+            "src/lib.rs": '''
+mod db {
+    pub use store_seed::queries as store;
+}
+mod caller {
+    use crate::db::store::write;
+    use store_seed as direct;
+    fn run() {
+        crate::db::store::write();
+        direct::queries::write();
+        direct::queries::missing();
+    }
+}
+''',
+            "src/db/adk_store_lib.rs": "pub mod queries;",
+            "src/db/queries.rs": '''
+pub fn write() { url::Url::parse("https://example.test/").unwrap(); }
+''',
+        }
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for path, content in files.items():
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            occurrences = []
+            graph = analyze(root, occurrence_projection=occurrences)
+
+        store = "src/db/adk_store_lib.rs::crate"
+        caller = "src/lib.rs::crate::caller"
+        self.assertEqual(graph["coverage"]["library_files"], {
+            "src/db/adk_store_lib.rs": ["src/db/adk_store_lib.rs", "src/db/queries.rs"],
+            "src/lib.rs": ["src/lib.rs"],
+        })
+        self.assertEqual(
+            {(edge["source"], edge["target"], edge["kind"]): edge["count"] for edge in occurrences},
+            {
+                ("src/lib.rs::crate::db", store + "::queries", "reexport"): 1,
+                (caller, store, "import"): 1,
+                (caller, store + "::queries", "import"): 1,
+                (caller, store + "::queries", "path"): 2,
+            },
+        )
+        self.assertEqual(graph["coverage"]["module_errors"], [])
+        self.assertEqual(graph["coverage"]["read_failures"], [])
+        self.assertEqual(
+            [(row["source"], row["path"]) for row in graph["coverage"]["unresolved_references"]],
+            [(caller, "direct::queries::missing")],
+        )
+
     def test_macro_expression_evidence_keeps_literals_operators_and_balanced_groups(self):
         from audit_maintainability.checks.module_layers import _call_expressions
         with TemporaryDirectory() as temporary:
