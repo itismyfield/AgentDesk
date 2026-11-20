@@ -729,6 +729,9 @@ pub(super) mod provider_output_guard_tests {
         /// When set, every send or edit is checked against the watched adoption as it is made.
         pub(in crate::services::discord::turn_bridge) check:
             Option<crate::services::tui_o::channel_policy::BodyCheck>,
+        /// When set, every edit first clears this provider/channel's inflight row.
+        pub(in crate::services::discord::turn_bridge) clear_row_on_edit:
+            Option<(ProviderKind, u64)>,
     }
 
     impl CapturingGateway {
@@ -761,6 +764,9 @@ pub(super) mod provider_output_guard_tests {
             content: &'a str,
         ) -> GatewayFuture<'a, Result<(), String>> {
             self.observe(channel_id, SinkOp::Patch, content);
+            if let Some((provider, channel)) = &self.clear_row_on_edit {
+                crate::services::discord::inflight::clear_inflight_state(provider, *channel);
+            }
             self.edits
                 .lock()
                 .expect("edits lock")

@@ -12,7 +12,8 @@ async fn tick(channel: ChannelId, full_response: &str, gateway: Arc<CapturingGat
     tick_with(shared, channel, full_response, gateway, done, false).await;
 }
 
-/// The same tick on `shared`, in footer mode or not; returns the turn's inflight state after it.
+/// The same tick on `shared`, in footer mode or not; returns the turn's inflight state after it
+/// and whether the tick released the reader's session-row writer.
 async fn tick_with(
     shared: Arc<SharedData>,
     channel: ChannelId,
@@ -20,7 +21,7 @@ async fn tick_with(
     gateway: Arc<CapturingGateway>,
     done: bool,
     footer: bool,
-) -> InflightTurnState {
+) -> (InflightTurnState, bool) {
     let mut inflight_state = InflightTurnState::new(
         ProviderKind::Codex,
         channel.get(),
@@ -140,7 +141,7 @@ async fn tick_with(
     )
     .await;
     assert_eq!(outcome, StreamTickOutcome::Continue);
-    inflight_state
+    (inflight_state, heartbeat.released())
 }
 
 /// A tick that streams no body (no unsent visible text, or a done tick that leaves the answer to
@@ -217,7 +218,7 @@ async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
         });
         let shared = panel_with_last_tool(channel);
         let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
-        let state = tick_with(shared, channel, BODY, gateway.clone(), false, footer).await;
+        let (state, _) = tick_with(shared, channel, BODY, gateway.clone(), false, footer).await;
         let edits = gateway.edits.lock().unwrap().clone();
         assert!(
             edits.is_empty(),
@@ -247,7 +248,7 @@ async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
     });
     let shared = panel_with_last_tool(channel);
     let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
-    let state = tick_with(shared, channel, BODY, gateway.clone(), true, footer).await;
+    let (state, _) = tick_with(shared, channel, BODY, gateway.clone(), true, footer).await;
     let edits = gateway.edits.lock().unwrap().clone();
     assert!(
         edits.is_empty(),
@@ -272,7 +273,29 @@ async fn legacy_channel_placeholder_is_never_moved() {
         ..Default::default()
     });
     let shared = panel_with_last_tool(channel);
-    let state = tick_with(shared, channel, "", gateway.clone(), false, true).await;
+    let (state, _) = tick_with(shared, channel, "", gateway.clone(), false, true).await;
     assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
     assert_eq!(state.current_msg_id, 18);
+}
+
+/// A row cleared while the O panel edit runs is first seen by the tick's dirty flush; that
+/// RowAbsent alone releases the reader's session-row writer, so this tick sends no heartbeat.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dirty_flush_that_finds_the_owned_row_gone_releases_the_writer() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_593_340);
+    let _o = test_override::force_channels(&[(channel.get(), RuntimeHandoffKind::CodexTui)]);
+    let gateway = Arc::new(CapturingGateway {
+        direct: true,
+        clear_row_on_edit: Some((ProviderKind::Codex, channel.get())),
+        ..Default::default()
+    });
+    let shared = panel_with_last_tool(channel);
+    let (_, released) = tick_with(shared, channel, BODY, gateway.clone(), false, true).await;
+    assert!(
+        !gateway.edits.lock().unwrap().is_empty(),
+        "the O panel edit ran"
+    );
+    assert!(released, "the dirty flush's RowAbsent released the writer");
 }
