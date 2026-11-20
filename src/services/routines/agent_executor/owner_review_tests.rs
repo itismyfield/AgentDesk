@@ -511,7 +511,7 @@ async fn settlement_boundary(
         .unwrap()
         .join("settlement-owner.json");
     handle
-        .v2_adopt(path, input.namespace.clone())
+        .v2_adopt(path.clone(), input.namespace.clone())
         .await
         .unwrap();
     assert!(input.confirm_admission(&handle).await.unwrap());
@@ -562,6 +562,17 @@ async fn settlement_boundary(
         }
     }
 
+    let handle = if recover && matches!(boundary, SettlementBoundary::Claimed) {
+        let restarted =
+            ChannelMailboxRegistry::default().handle(poise::serenity_prelude::ChannelId::new(7272));
+        restarted
+            .v2_adopt(path, input.namespace.clone())
+            .await
+            .unwrap();
+        restarted
+    } else {
+        handle
+    };
     let expired = (Utc::now() - Duration::hours(2)).to_rfc3339();
     sqlx::query(
         "UPDATE routine_runs SET lease_expires_at=NOW()-INTERVAL '1 second',
@@ -585,12 +596,13 @@ async fn settlement_boundary(
             .unwrap();
     }
 
-    let (status, retries): (String, i32) =
-        sqlx::query_as("SELECT status,retry_count FROM routine_runs WHERE id=$1")
-            .bind(&run.run_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (status, retries, projection): (String, i32, String) = sqlx::query_as(
+        "SELECT status,retry_count,result_json->>'status' FROM routine_runs WHERE id=$1",
+    )
+    .bind(&run.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let (empty, payload_started) = handle
         .v2_request(|slot| {
             let owner = slot.as_mut().ok_or("owner missing")?;
@@ -606,8 +618,37 @@ async fn settlement_boundary(
         })
         .await
         .unwrap();
+    if matches!(boundary, SettlementBoundary::Approved) {
+        sqlx::query(
+            "INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'late receipt')",
+        )
+        .bind(run.turn_id.as_deref().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store.record_late_owner_completions().await.unwrap();
+        let (closed, evidence): (String, Option<String>) = sqlx::query_as(
+            "SELECT status,result_json#>>'{late_completion,kind}' FROM routine_runs WHERE id=$1",
+        )
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (closed.as_str(), evidence.as_deref()),
+            (status.as_str(), Some("transcript"))
+        );
+    } else {
+        assert!(!input.confirm_admission(&handle).await.unwrap_or(false));
+    }
     pool.close().await;
     db.drop().await;
+    let expected_projection = match (boundary, recover) {
+        (SettlementBoundary::Approved, _) => "completion_unconfirmed",
+        (_, true) => "interrupted",
+        (_, false) => "channel_input_unavailable",
+    };
+    assert_eq!(projection, expected_projection);
     (status, empty, payload_started, retries)
 }
 

@@ -34,7 +34,8 @@ impl RoutineStore {
         Ok(sqlx::query_as(
             "WITH expired AS (
                 SELECT id FROM routine_runs
-                WHERE status = 'running' AND run_spec IS NOT NULL AND turn_id IS NOT NULL
+                WHERE status = 'running' AND action = 'agent' AND turn_id IS NOT NULL
+                  AND run_spec->>'retry_after_start' = 'false'
                   AND jsonb_typeof(result_json->'owner_input') = 'object'
                   AND (result_json->>'owner_recovering' = 'true' OR lease_expires_at < NOW())
                 FOR UPDATE SKIP LOCKED

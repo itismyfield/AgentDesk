@@ -3096,7 +3096,8 @@ impl RoutineStore {
                 WHERE status = 'running'
                   AND lease_expires_at IS NOT NULL
                   AND lease_expires_at < NOW()
-                  AND (run_spec IS NULL OR turn_id IS NULL
+                  AND (run_spec->>'retry_after_start' IS DISTINCT FROM 'false'
+                       OR action IS DISTINCT FROM 'agent' OR turn_id IS NULL
                        OR jsonb_typeof(result_json->'owner_input') IS DISTINCT FROM 'object')
                 FOR UPDATE SKIP LOCKED
             ),

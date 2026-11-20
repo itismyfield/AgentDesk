@@ -106,8 +106,13 @@ impl Owner {
         head.phase = HeadPhase::MayHaveSent;
         head.confirmation_deadline_ms = (!bootstrap).then(|| now.saturating_add(30_000));
         head.payload_window = bootstrap.then_some(PayloadWindow::Bootstrap);
-        head.routine_delivery = (bootstrap && self.routine_context(key).is_some())
-            .then_some(RoutineDelivery::AwaitingKey);
+        head.routine_delivery = (bootstrap
+            && self.routine_context(key).is_some_and(|context| {
+                context[super::routine_settlement::DELIVERY_DEADLINE]
+                    .as_u64()
+                    .is_some()
+            }))
+        .then_some(RoutineDelivery::AwaitingKey);
         self.commit(next)?;
         Ok(EffectPermit {
             key: key.clone(),
