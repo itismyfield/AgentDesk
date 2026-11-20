@@ -353,6 +353,146 @@ fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
     drop(guards);
 }
 
+#[test]
+fn an_old_readiness_due_cannot_discard_a_front_reobserving_a_live_pane_pg() {
+    use crate::services::discord::queue_io::input_owner::held_watch;
+
+    let fx = Fixture::new("busy-readiness-to-reobserve", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let original_runtime;
+    let mut intake = Intake::new(&fx, &started);
+    original_runtime = recording_runtime(&mut intake, &fx, false);
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    let before = fx.rig.sends().len();
+    intake.runtime.block_on(async {
+        let channel = ChannelId::new(CHANNEL);
+        let _rest = test_rest::install(intake._api.http.clone());
+        intake.install_holder(&fx, &started).await;
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let parked = started.path.with_extension("readiness-unreadable");
+        std::fs::rename(&started.path, &parked).unwrap();
+        let result = dispatch::hand_busy(
+            (intake.mailbox.clone(), Some(fx.pool.clone())),
+            ProviderKind::Claude,
+            (CHANNEL, front.clone()),
+            Some(intake.shared.clone()),
+        )
+        .await;
+        assert!(
+            result.is_err_and(|error| error.contains("busy_source_unavailable")),
+            "the active handoff holds for its unreadable source"
+        );
+        let (started_at, due) = intake
+            .mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_ref().unwrap();
+                let hold = owner.front_hold().ok_or("active Held did not save a due")?;
+                assert_eq!(owner.settle_due(), Some(hold.due_at_ms));
+                Ok((hold.started_at_ms, hold.due_at_ms))
+            })
+            .await
+            .unwrap();
+        assert_eq!(due - started_at, 10_000);
+
+        let persistence =
+            discord::queue_persistence_context(&intake.shared, &ProviderKind::Claude, channel);
+        let finished = intake.mailbox.finish_turn(persistence).await;
+        assert!(finished.removed_token.is_some());
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert!(inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            CHANNEL
+        ));
+        let next = intake
+            .mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_mut().unwrap();
+                let front = owner.front().unwrap();
+                owner.grant_front(&front)?;
+                Ok(front)
+            })
+            .await
+            .unwrap();
+        assert_eq!(next.0, front.0);
+        let result = tokio::time::timeout(
+            LIMIT,
+            dispatch::start_idle_for_test(intake.shared.clone(), channel, next),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("retire: Unproven")),
+            "the live pane needs reobservation: {result:?}"
+        );
+        assert!(held_watch::has_watch(CHANNEL));
+        assert!((chrono::Utc::now().timestamp_millis() as u64) < due);
+        assert_eq!(fx.rig.sends().len(), before);
+
+        let (same, state) = intake
+            .mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.tick(due + 1)?;
+                Ok((owner.front(), owner.json()?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            state["items"],
+            json!([original]),
+            "old due discarded the front: {state}"
+        );
+        let same = same.unwrap();
+        assert_eq!(
+            (same.0, same.1.queued_generation),
+            (front.0, original.queued_generation)
+        );
+        assert!(state["refused_fronts"].is_null(), "{state}");
+        assert!(
+            intake
+                ._api
+                .take()
+                .iter()
+                .all(|call| !call.contains("이 입력을 폐기했습니다"))
+        );
+        assert_eq!(fx.rig.sends().len(), before);
+
+        std::fs::rename(parked, &started.path).unwrap();
+        assert!(
+            crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path))
+                .is_some()
+        );
+        super::source_input_settled(&intake, &original, &heads).await;
+        super::idle_turn_unwound(&intake).await;
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2);
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        assert_eq!(
+            heads.lock().unwrap()[0]["attempt"]["target"]["execution_nonce"],
+            nonce
+        );
+        assert!(
+            intake
+                ._api
+                .take()
+                .iter()
+                .all(|call| !call.contains("이 입력을 폐기했습니다"))
+        );
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    });
+    drop(intake);
+    drop(original_runtime);
+}
+
 pub(super) fn append_terminal(started: &Started, message: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     append(

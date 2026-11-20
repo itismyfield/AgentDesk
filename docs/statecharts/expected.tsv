@@ -1206,6 +1206,7 @@ session-lifecycle/HerdrMissingBoundBeforeEffectIdle.cfg	HerdrMissingBound	-	Inpu
 session-lifecycle/HerdrMissingBoundBeforeInput.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeNoticeRetry.cfg	HerdrMissingBound	NoticeOnce	InputResolves,ReasonDelivered
 session-lifecycle/HerdrMissingBoundBeforeRegistration.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
+session-lifecycle/HerdrMissingBoundBeforeReobserveDue.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
 session-lifecycle/HerdrMissingBoundBeforeRestart.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeRestored.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeUnknown.cfg	HerdrMissingBound	NoIdleHeld	InputResolves
@@ -1222,6 +1223,7 @@ session-lifecycle/HerdrMissingBoundFixedNonceRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNoticeRetry.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedReboot.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRegistration.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedReobserveDue.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRepairFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestart.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestored.cfg	HerdrMissingBound	-	-

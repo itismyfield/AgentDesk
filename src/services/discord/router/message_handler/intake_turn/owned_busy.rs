@@ -15,6 +15,20 @@ enum RecoveryFailure {
     Refused(String),
 }
 
+enum HoldKind {
+    Observe,
+    Readiness,
+    Identity,
+}
+
+fn source_hold(state: BusyState) -> HoldKind {
+    if state == BusyState::Held {
+        HoldKind::Readiness
+    } else {
+        HoldKind::Observe
+    }
+}
+
 /// A managed running turn keeps its inflight cursor while hooks move the verified native source.
 pub(super) async fn running(
     shared: Option<&Shared>,
@@ -32,8 +46,9 @@ pub(super) async fn running(
         host,
         shared.map_or("", |shared| shared.token_hash.as_str()),
     );
-    if observation.state() == BusyState::Busy {
-        let registered = prepare(
+    let state = observation.state();
+    if state == BusyState::Busy
+        && let Ok(registered) = prepare(
             mailbox.clone(),
             provider,
             origin,
@@ -41,15 +56,17 @@ pub(super) async fn running(
             session,
             front,
             observation.clone(),
-        );
-        if registered.is_ok() {
-            return registered.map(Some);
-        }
+        )
+    {
+        finish_identity_hold(mailbox, front)
+            .await
+            .map_err(effect::unsent)?;
+        return Ok(Some(registered));
     }
     let channel = ChannelId::new(channel);
     if let Some(shared) = shared {
         hold(
-            (shared, observation.state() == BusyState::Held),
+            (shared, source_hold(state)),
             mailbox,
             channel,
             front,
@@ -84,16 +101,16 @@ impl OwnerTurn {
         owner: Option<Self>,
         fresh: bool,
     ) -> Result<(Option<Self>, bool), ()> {
-        if fresh
-            || *provider != ProviderKind::Claude
-            || !owner.as_ref().is_some_and(|owner| owner.origin.is_person())
-        {
-            return Ok((owner, true));
+        let Some(owner) = owner else {
+            return Ok((None, true));
+        };
+        if fresh || *provider != ProviderKind::Claude || !owner.origin.is_person() {
+            return Ok((Some(owner), true));
         }
         #[cfg(test)]
         probes::observed(channel.get(), false);
         let Some(session) = session.filter(|session| !session.is_empty()) else {
-            return Ok((owner, true));
+            return Ok((Some(owner), true));
         };
         let host = crate::services::turn_host::for_turn(
             shared.pg_pool.as_ref(),
@@ -109,20 +126,19 @@ impl OwnerTurn {
             && let crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(record) =
                 &row.record
             && crate::services::herdr_launch::retire::recovered_missing(record)
-            && let Some(owner) = owner.as_ref()
         {
             owner.recovery.mark();
         }
-        match observation.state() {
-            BusyState::Legacy => return Ok((owner, true)),
-            BusyState::Idle => return Ok((owner, false)),
+        let state = observation.state();
+        match state {
+            BusyState::Legacy => return Ok((Some(owner), true)),
+            BusyState::Idle if matches!(&host, TurnHost::Herdr(_)) => {
+                return Ok((Some(owner.finish_reobservation().await?), false));
+            }
+            BusyState::Idle => return Ok((Some(owner), false)),
             _ => {}
         }
-        let Some(owner) = owner else {
-            return Ok((None, true));
-        };
-        let typed = observation.state() == BusyState::Held;
-        let registered = if typed {
+        let registered = if state == BusyState::Held {
             Err(SOURCE_HELD.into())
         } else {
             prepare(
@@ -149,7 +165,7 @@ impl OwnerTurn {
                         .await;
                 }
                 hold(
-                    (shared, typed),
+                    (shared, source_hold(state)),
                     &owner.mailbox,
                     channel,
                     owner.front(),
@@ -171,7 +187,7 @@ impl OwnerTurn {
             settled,
             runtime,
             ..
-        } = owner;
+        } = owner.finish_reobservation().await?;
         let runtime = runtime.or_else(|| Some(shared.clone()));
         let _ = paste_busy(
             (shared.pg_pool.clone(), provider.clone(), runtime),
@@ -279,7 +295,7 @@ impl OwnerTurn {
         }
         .await;
         let (reason, probe) = match recovery {
-            Ok(()) => return Ok((Some(self), false)),
+            Ok(()) => return Ok((Some(self.finish_reobservation().await?), false)),
             Err(Refused(reason)) => {
                 let failure = super::super::start_failure::Failure::owner(&self);
                 let result = failure
@@ -304,7 +320,7 @@ impl OwnerTurn {
         // When the exact read cannot be built, re-resolve on the next look.
         let probe = probe.unwrap_or_else(|| Box::new(|| Screen::Ready));
         hold(
-            (shared, false),
+            (shared, HoldKind::Identity),
             &self.mailbox,
             channel,
             self.front(),
@@ -313,6 +329,14 @@ impl OwnerTurn {
         .await;
         self.defer_before_submit(&reason);
         Err(())
+    }
+
+    async fn finish_reobservation(self) -> Result<Self, ()> {
+        if let Err(error) = finish_identity_hold(&self.mailbox, self.front()).await {
+            self.defer_before_submit(&error);
+            return Err(());
+        }
+        Ok(self)
     }
 
     pub(in crate::services::discord) async fn legacy_diagnostic(
@@ -498,15 +522,40 @@ pub(super) fn unwound(
     })
 }
 
-/// Holds the front for its watch; a Busy-held read (`typed`) also gets the owner's deadline.
+async fn finish_identity_hold(mailbox: &ChannelMailboxHandle, front: &Front) -> Result<(), String> {
+    let front = front.clone();
+    mailbox
+        .v2_request(move |slot| {
+            slot.as_mut()
+                .ok_or("V2 not adopted")?
+                .finish_identity_hold(&front)
+        })
+        .await
+}
+
+/// Holds the front and gives the readiness deadline to the watch that owns it.
 async fn hold(
-    (shared, typed): (&Shared, bool),
+    (shared, kind): (&Shared, HoldKind),
     mailbox: &ChannelMailboxHandle,
     channel: ChannelId,
     front: &Front,
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
-    hold_start(mailbox, channel, front).await;
+    if matches!(kind, HoldKind::Identity) {
+        let original = front.clone();
+        let held = mailbox
+            .v2_request(move |slot| {
+                slot.as_mut()
+                    .ok_or("V2 not adopted")?
+                    .hold_identity(&original)
+            })
+            .await;
+        if let Err(error) = held {
+            tracing::warn!(channel_id = channel.get(), %error, "identity hold not recorded");
+        }
+    } else {
+        hold_start(mailbox, channel, front).await;
+    }
     super::super::super::busy_retry::note_busy_result(
         shared,
         &ProviderKind::Claude,
@@ -524,7 +573,7 @@ async fn hold(
         held_front(probe, mailbox.clone(), front.clone()),
     );
     let drive = drive(shared, channel);
-    if typed {
+    if matches!(kind, HoldKind::Readiness) {
         held_watch::readiness::hold(drive.clone(), front).await;
     }
     held_watch::watch(drive, front.1.message_id);
