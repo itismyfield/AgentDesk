@@ -29,6 +29,7 @@ DEFAULT_ROOT = REPO_ROOT / "docs/statecharts"
 FAIRNESS_HELPER = Path(__file__).with_name("StatechartFairness.java")
 DEADLOCK = "NoDeadlock"
 STATECHARTS_PATH = Path("docs/statecharts")
+EXPECTED_REPO_PATH = (STATECHARTS_PATH / "expected.tsv").as_posix()
 CHECKER_PATHS = {
     "scripts/ci/statecharts_tlc.py", "scripts/ci/StatechartFairness.java",
     ".github/workflows/statecharts-tlc.yml",
@@ -446,10 +447,9 @@ def git_selection(base: str, head: str) -> tuple[list[str] | None, dict[str, str
         return None, {}
     # Disable rename detection to retain both the old and new dependency paths.
     paths = git("diff", "--name-only", "--no-renames", "-z", f"{comparison_base}..{head}", "--").split("\0")
-    expected_path = (STATECHARTS_PATH / "expected.tsv").as_posix()
     previous = {}
-    if expected_path in paths and git("ls-tree", "--name-only", comparison_base, "--", expected_path).strip():
-        text = git("show", f"{comparison_base}:{expected_path}")
+    if EXPECTED_REPO_PATH in paths and git("ls-tree", "--name-only", comparison_base, "--", EXPECTED_REPO_PATH).strip():
+        text = git("show", f"{comparison_base}:{EXPECTED_REPO_PATH}")
         parse_expected(text, f"{comparison_base}:expected.tsv")
         previous = expected_rows(text)
     return [path for path in paths if path], previous
@@ -498,6 +498,13 @@ def aggregate_reports(directory: Path, selected: list[str], count: int) -> dict:
             "seconds": max(r["started"] + r["seconds"] for r in reports) - started}
 
 
+def emit_summary(text: str, summary: Path | None) -> None:
+    if summary:
+        with summary.open("a", encoding="utf-8") as out:
+            out.write(text + "\n")
+    print(text, flush=True)
+
+
 def summarize(report: dict, selected_count: int, summary: Path | None) -> None:
     rows = report["results"]
     text = (f"## Statecharts TLC\n\n{'FAIL' if report['problems'] else 'PASS'}: "
@@ -505,10 +512,7 @@ def summarize(report: dict, selected_count: int, summary: Path | None) -> None:
             "### Slowest 10 configs\n\n| cfg | seconds | limit | TLC runs |\n|---|---:|---:|---:|\n")
     for row in sorted(rows, key=lambda r: (-r["seconds"], r["cfg"]))[:10]:
         text += f"| {row['cfg']} | {row['seconds']:.1f} | {row['limit_seconds']:g} | {row['runs']} |\n"
-    print(text, flush=True)
-    if summary:
-        with summary.open("a", encoding="utf-8") as out:
-            out.write(text + "\n")
+    emit_summary(text, summary)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -545,16 +549,23 @@ def main(argv: list[str] | None = None) -> int:
     on_disk = {p.relative_to(root).as_posix() for p in root.rglob("*.cfg")}
     problems = [f"{cfg}: config not listed in expected.tsv" for cfg in sorted(on_disk - set(expected))]
     problems += [f"{cfg}: listed in expected.tsv but the file is gone" for cfg in sorted(set(expected) - on_disk)]
+    if not selected and (paths is None or any(
+        path == EXPECTED_REPO_PATH or (path.endswith((".tla", ".cfg")) and Path(path).is_relative_to(STATECHARTS_PATH))
+        for path in paths
+    )):
+        problems.append("NO_TARGETS: no configs selected; TLC was not run.")
+    skip_summary = "NO_TARGETS(skip): no model inputs changed; TLC was not run."
     if args.aggregate_reports:
         try:
             report = aggregate_reports(args.aggregate_reports, selected, args.shard_count)
             problems += report["problems"]
             if args.upstream_result != "success":
                 problems.append(f"TLC matrix result is {args.upstream_result!r}, not success")
-            if not selected:
-                problems.append("NO_TARGETS: no configs selected; TLC was not run.")
             report["problems"] = problems
-            summarize(report, len(selected), args.summary)
+            if not selected and not problems:
+                emit_summary(skip_summary, args.summary)
+            else:
+                summarize(report, len(selected), args.summary)
         except (CheckError, OSError, ValueError, KeyError, TypeError) as error:
             problems.append(str(error))
         for problem in problems:
@@ -562,16 +573,29 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
     all_selected = selected
     selected = shard_configs(all_selected, args.shard_index, args.shard_count)
+
+    def finish_shard(rows: list[dict]) -> int:
+        report = {"shard_index": args.shard_index, "shard_count": args.shard_count,
+                  "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+                  "selected": all_selected, "started": wall_started, "seconds": time.monotonic() - started,
+                  "results": rows, "problems": problems}
+        if args.report_json:
+            args.report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        if all_selected:
+            summarize(report, len(selected), args.summary)
+        elif not problems:
+            emit_summary(skip_summary, args.summary)
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        return 1 if problems else 0
+
     print(f"Selected {len(selected)} configs ({'changed' if args.base else 'all'}):", flush=True)
     for cfg in selected:
         print(f"  {cfg}", flush=True)
         if cfg in CONFIG_TIMEOUTS:
             print(f"CONFIG_LIMIT {cfg}: {config_timeout(cfg, args.timeout):g}s; {CONFIG_TIMEOUTS[cfg][1]}", flush=True)
     if not all_selected:
-        print("NO_TARGETS: no configs selected; TLC was not run.", flush=True)
-        for problem in problems:
-            print(f"FAIL {problem}", file=sys.stderr)
-        return 1
+        return finish_shard([])
     if not selected:
         print(f"EMPTY_SHARD: no configs assigned to shard {args.shard_index}/{args.shard_count}; "
               "the aggregate check validates full coverage.", flush=True)
@@ -598,16 +622,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = [{"cfg": r.cfg, "seconds": r.seconds, "runs": r.runs,
              "limit_seconds": config_timeout(r.cfg, args.timeout)} for r in results]
     problems += coverage_problems(selected, rows)
-    report = {"shard_index": args.shard_index, "shard_count": args.shard_count,
-              "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
-              "selected": all_selected, "started": wall_started, "seconds": time.monotonic() - started,
-              "results": rows, "problems": problems}
-    if args.report_json:
-        args.report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    summarize(report, len(selected), args.summary)
-    for problem in problems:
-        print(f"FAIL {problem}", file=sys.stderr)
-    return 1 if problems else 0
+    return finish_shard(rows)
 
 
 if __name__ == "__main__":

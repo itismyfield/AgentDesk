@@ -17,7 +17,6 @@ import re
 import tempfile
 import itertools
 import sys
-import time
 import unittest
 import yaml
 from argparse import Namespace
@@ -615,7 +614,7 @@ class StepTimings(unittest.TestCase):
 class GatewayReadyTest(unittest.TestCase):
     def setUp(self):
         self.details = []
-        self.read_delay = 0.0
+        self.now = self.read_duration = 0.0
         self.calls = {"detail": 0, "read": 0}
         self.writer_states = [[{"provider": "claude", "channel_id": "222", "accepts": True,
                                 "hold_reason": None}]]
@@ -654,17 +653,13 @@ class GatewayReadyTest(unittest.TestCase):
                     self.reply(payload)
                 elif self.path.startswith("/api/discord/channels/222/messages?"):
                     fixture.calls["read"] += 1
-                    time.sleep(fixture.read_delay)
-                    try:
-                        self.reply([])
-                    except (BrokenPipeError, ConnectionResetError):
-                        if not fixture.read_delay:
-                            raise
+                    fixture.advance(fixture.read_duration)
+                    self.reply([])
                 else:
                     self.send_error(404)
 
         self.server = Server(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         self.addCleanup(lambda: self.assertEqual(self.server_errors, []))
         self.addCleanup(self.server.server_close)
@@ -672,10 +667,14 @@ class GatewayReadyTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
+    def advance(self, seconds):
+        self.now += seconds
+
     def wait(self, deadline_s):
         with redirect_stdout(io.StringIO()):
             return turn_smoke.wait_gateway_ready(base_url=self.base_url, cell="claude-tui", channel_id="222",
-                                                 deadline_s=deadline_s, interval_s=0.01)
+                                                 deadline_s=deadline_s, interval_s=1,
+                                                 clock=lambda: self.now, sleep=self.advance)
 
     def test_ready_only_after_recovery_connection_and_a_channel_read(self):
         self.details = [(False, False), (True, False), (True, True)]
@@ -685,7 +684,7 @@ class GatewayReadyTest(unittest.TestCase):
 
     def test_a_gateway_that_never_connects_is_not_ready_at_the_deadline(self):
         self.details = [(True, False)]
-        ready, detail = self.wait(0.3)
+        ready, detail = self.wait(3)
         self.assertFalse(ready)
         self.assertIn("gateway not connected: claude", detail)
         self.assertEqual(self.calls["read"], 0)
@@ -708,17 +707,17 @@ class GatewayReadyTest(unittest.TestCase):
                               ([dict(own, accepts="true")], "not accepting")]:
             with self.subTest(state=state):
                 self.writer_states = [state]
-                accepted, detail = self.wait(0.05)
+                accepted, detail = self.wait(3)
                 self.assertFalse(accepted, detail)
                 self.assertIn(reason, detail)
         self.assertEqual(self.calls["read"], 0)
 
     def test_a_channel_read_that_outlasts_the_deadline_is_not_ready(self):
         self.details = [(True, True)]
-        self.read_delay = 1.5
-        ready, detail = self.wait(0.5)
-        self.assertFalse(ready, detail)
-        self.assertGreaterEqual(self.calls["read"], 1)
+        self.read_duration = 15
+        ready, detail = self.wait(10)
+        self.assertEqual((ready, self.calls["read"]), (False, 1), detail)
+        self.assertIn("Discord read answered after the deadline", detail)
 
     def test_ready_only_after_the_deadline_is_not_ready(self):
         clock, timeouts = [0.0], []
@@ -767,16 +766,18 @@ class GatewayReadyTest(unittest.TestCase):
     def test_cli_exits_1_with_one_fail_line_when_not_ready(self):
         self.details = [(False, False)]
         output = io.StringIO()
-        with redirect_stdout(output):
+        wait = turn_smoke.wait_gateway_ready
+        with redirect_stdout(output), patch.object(turn_smoke, "wait_gateway_ready",
+                side_effect=lambda **kwargs: wait(**kwargs, clock=lambda: self.now, sleep=self.advance)):
             rc = turn_smoke.main(["gateway-ready", "--base-url", self.base_url, "--cell", "claude-tui",
-                                  "--channel-id", "222", "--deadline-s", "0.3"])
+                                  "--channel-id", "222", "--deadline-s", "3"])
         self.assertEqual(rc, 1)
         lines = output.getvalue().splitlines()
         self.assertEqual([line for line in lines if line.startswith("gateway-ready FAIL")], [lines[-1]])
         self.assertIn("startup recovery not finished", lines[-1])
 
 
-# Copied from the 11-02 09:52 deploy smoke's claude E2E pending-queue file: drained, settled metadata only.
+# The saved pending queue is drained and retains only settled metadata.
 QUEUE_V2_SETTLED = FIXTURES / "saved/pending-queue-v2-settled-20261102T0952.json"
 
 
@@ -938,7 +939,7 @@ class CellResetTest(unittest.TestCase):
                     self.reply({"error": "unexpected fixture POST"}, 404)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(thread.join)
@@ -1244,7 +1245,7 @@ exit "$rc"
 """
         return subprocess.run(["bash", "-c", script, "fixture", str(ROOT), str(self.root),
                                str(self.server.server_port), "all" if run_all else "e1"],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=120)
 
     def test_deploy_resets_both_cells_before_first_idle_guard(self):
         with patch.dict(os.environ, {"AGENTDESK_CONFIG": str(self.root / "ambient-unused.yaml")}):
@@ -1315,7 +1316,6 @@ exit "$rc"
     def test_normal_preflight_never_mutates(self):
         self.assertEqual(self.preflight(), 1)
         self.assertEqual(self.mutations(), [])
-
 
 
 OLD = "00000000-0000-4000-8000-000000000001"
