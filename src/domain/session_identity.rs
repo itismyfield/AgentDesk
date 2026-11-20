@@ -76,6 +76,12 @@ impl SessionIdentity {
             namespaced,
         })
     }
+
+    /// Render back to the legacy `host:tmux` form.
+    #[cfg(test)]
+    pub fn legacy_key(&self) -> String {
+        format!("{}:{}", self.host, self.tmux_name)
+    }
 }
 
 /// Extract the tmux tail from either session-key format.
