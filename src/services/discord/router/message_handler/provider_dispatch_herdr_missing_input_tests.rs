@@ -574,3 +574,291 @@ fn first_named_live_thread_input_inherits_its_verified_parent_endpoint_pg() {
 fn first_busy_thread_input_inherits_parent_and_keeps_the_child_lease_pg() {
     restarted_front(true, false, Some(CHANNEL + 1));
 }
+
+fn native_modal_after_identity_hold(adopt_after_attach: bool) {
+    use crate::services::discord::queue_io::input_owner::held_watch;
+    use crate::services::discord::recovery_engine::herdr_reattach::{
+        VerifiedReattach, continue_owner,
+    };
+    use crate::services::discord::session_transition::SessionTransitionLease;
+    use crate::services::discord::tui_prompt_relay::synthetic_start::claim::claim_tui_direct_synthetic_turn_for_tests;
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, ExternalInputRelayLease, ExternalInputRelayOwner,
+    };
+
+    let fx = Fixture::new("native-modal-after-attach", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let mut intake = Intake::new(&fx, &started);
+    let old_runtime = recording_runtime(&mut intake, &fx, true);
+    let _rest = test_rest::install(intake._api.http.clone());
+    let endpoint =
+        crate::services::session_host::HerdrEndpoint::new(NODE, KEY, fx.rig.socket(), SESSION)
+            .unwrap();
+    let _named = fx.rig.policy_registry_on_this_thread(endpoint, |host| host);
+    fx.rig.answer("session.snapshot", json!({"type":"session_snapshot","snapshot":{
+        "version":"0.9.3","protocol":22,
+        "workspaces":[{"workspace_id":"w1","label":format!("{}#{nonce}", fx.logical()),"pane_count":1,"tab_count":1}],
+        "panes":[{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":7}]
+    }}));
+    let channel = ChannelId::new(CHANNEL);
+    let mailbox = &intake.mailbox;
+    let provider = &ProviderKind::Claude;
+    let persistence = || discord::queue_persistence_context(&intake.shared, provider, channel);
+    let follower = MESSAGE + 1;
+    let native = MESSAGE + 2;
+    dedupe::release_herdr_execution(fx.logical(), &nonce);
+    fx.rig
+        .foreground(&[crate::services::session_host::herdr_socket_rig_tests::SHELL]);
+
+    let (original, old_due, key) = intake.runtime.block_on(async {
+        for message in [MESSAGE, follower] {
+            let item: PendingQueueItem = serde_json::from_value(json!({
+                "author_id":7,"channel_id":CHANNEL,"message_id":message,
+                "source_message_ids":[message],"queued_generation":1,"text":INPUT,
+                "merge_consecutive":true,
+            }))
+            .unwrap();
+            assert!(matches!(
+                admit(mailbox, &item, AdmissionTicket::new()).await,
+                OwnerAdmission::Accepted(_)
+            ));
+        }
+        let original = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap()))
+            .await
+            .unwrap();
+        let front = original.clone();
+        let old_due = mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                let held = owner.hold_readiness(&front, "busy_readiness_unproven", now)?;
+                assert_eq!(held.members.unwrap().len(), 2);
+                slot.take();
+                Ok(held.due_at_ms)
+            })
+            .await
+            .unwrap();
+        mailbox
+            .v2_ensure_channel(&persistence(), channel)
+            .await
+            .unwrap();
+        let front = mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_mut().unwrap();
+                let front = owner.front().unwrap();
+                owner.grant_front(&front)?;
+                Ok(front)
+            })
+            .await
+            .unwrap();
+        assert_eq!(front.0, original.0);
+        intake
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = None;
+        let error = dispatch::start_idle_for_test(intake.shared.clone(), channel, front)
+            .await
+            .expect_err("unconfirmed identity holds A");
+        assert!(error.contains("herdr_restart_held"), "{error}");
+        assert_eq!(mailbox.has_active_turn().await, Ok(false));
+        assert!(held_watch::has_watch(CHANNEL));
+        let held = mailbox
+            .v2_request(|slot| slot.as_ref().unwrap().json())
+            .await
+            .unwrap();
+        assert!(held["readiness_holds"][0]["identity_held_at_ms"].is_u64());
+        let key = discord::adk_session::turn_session_key(&intake.shared, channel, provider)
+            .await
+            .unwrap();
+        if adopt_after_attach {
+            mailbox
+                .v2_request(|slot| {
+                    slot.take();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        (original, old_due, key)
+    });
+
+    fx.rig
+        .foreground(&[crate::services::session_host::herdr_socket_rig_tests::PROVIDER]);
+    intake.runtime.block_on(async {
+        use crate::db::dispatched_sessions::hosted_execution::{
+            HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+        };
+        assert!(inflight::load_inflight_state_read_only(provider, CHANNEL).is_none());
+        let HostedLookup::Found(row) =
+            load_hosted_execution_pg(&fx.pool, HostedLookupKey::SessionKey(&key)).await
+        else {
+            panic!("the separate recovery has a canonical hosted row")
+        };
+        let transition = SessionTransitionLease::try_acquire(&intake.shared, channel).unwrap();
+        assert_eq!(
+            continue_owner(&intake.shared, &fx.pool, &transition, &row)
+                .await
+                .0,
+            VerifiedReattach::Live,
+        );
+    });
+    assert_eq!(
+        intake
+            .shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(fx.logical()),
+        Some(channel),
+    );
+
+    intake.runtime.block_on(async {
+        if adopt_after_attach {
+            mailbox
+                .v2_ensure_channel(&persistence(), channel)
+                .await
+                .unwrap();
+        }
+        let recovered = mailbox
+            .v2_request(|slot| slot.as_ref().unwrap().json())
+            .await
+            .unwrap();
+        let body = "native B after separate reattachment";
+        append(
+            &started.path,
+            &[json!({"type":"user","sessionId":started.session,
+            "uuid":uuid(),"timestamp":chrono::Utc::now().to_rfc3339(),
+            "message":{"role":"user","content":body}})],
+        );
+        let mut lease = ExternalInputRelayLease::unassigned(Some(CHANNEL));
+        lease.turn_id = Some("native-b-after-restart".into());
+        lease.session_key = Some(key.clone());
+        lease.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        lease.relay_owner = ExternalInputRelayOwner::TmuxWatcher;
+        lease.hosted_source = Some(
+            dedupe::hosted_source::capture(
+                "claude",
+                fx.logical(),
+                CHANNEL,
+                &started.path,
+                Some(&started.session),
+            )
+            .unwrap(),
+        );
+        let lease = dedupe::record_external_input_turn_lease("claude", fx.logical(), lease);
+        assert!(
+            claim_tui_direct_synthetic_turn_for_tests(
+                &intake.shared,
+                provider,
+                channel,
+                fx.logical(),
+                body,
+                MessageId::new(native),
+                &lease,
+            )
+            .await
+        );
+        assert_eq!(mailbox.has_active_turn().await, Ok(true));
+        let active = inflight::load_inflight_state_read_only(provider, CHANNEL).unwrap();
+        assert_eq!(active.user_msg_id, native);
+        assert!(inflight::row_is_current_generation(
+            &active,
+            intake.shared.restart.current_generation
+        ));
+        assert!(matches!(
+            crate::services::turn_host::for_turn(Some(&fx.pool), provider, CHANNEL, Some(&key))
+                .await,
+            TurnHost::Herdr(_)
+        ));
+        assert!(crate::services::tui_o::writer::host::channel_accepts(
+            CHANNEL
+        ));
+        let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
+        assert!(crate::services::claude_tui::busy_inject::modal(modal));
+        fx.rig.answer("pane.read", json!({"type":"pane_read","read":{
+            "pane_id":PANE,"source":"recent_unwrapped","text":modal,"revision":7,"truncated":false
+        }}));
+        let previous = dispatch::OwnerTurn::drive_results(CHANNEL).len();
+        let (_, observed) = held_watch::watch_observed(source_retry_drive(&intake), MESSAGE);
+        let observed = tokio::time::timeout(LIMIT, observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.verdict, held_watch::Verdict::Wake);
+        let result = tokio::time::timeout(LIMIT, async {
+            loop {
+                if let Some(result) = dispatch::OwnerTurn::drive_results(CHANNEL).get(previous) {
+                    break result.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(result.contains("busy_source_unavailable"), "{result}");
+        let (due, snapshot) = mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_ref().unwrap();
+                Ok((owner.settle_due(), owner.json()?))
+            })
+            .await
+            .unwrap();
+        let due = due.expect("the new composer refusal has an active due");
+        if adopt_after_attach {
+            assert!(recovered["readiness_holds"][0]["identity_held_at_ms"].is_u64());
+        } else {
+            assert!(
+                recovered["readiness_holds"].is_null(),
+                "background marker: {}",
+                recovered["readiness_holds"]
+            );
+        }
+        assert!(due > old_due);
+        assert!(snapshot["readiness_holds"][0]["identity_held_at_ms"].is_null());
+        assert!(snapshot["head_injection"].is_null());
+        mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.tick(old_due + 1)?;
+                let front = owner.front().unwrap();
+                assert_eq!(front.0, original.0);
+                assert_eq!(
+                    serde_json::to_value(front.1).unwrap(),
+                    serde_json::to_value(original.1).unwrap()
+                );
+                let kept = owner.json()?;
+                assert_eq!(kept["items"][1]["message_id"], follower);
+                owner.tick(due)?;
+                owner.tick(due + 1)?;
+                let settled = owner.json()?;
+                assert_eq!(settled["items"], json!([]));
+                let refusals = settled["refused_fronts"].as_array().unwrap();
+                assert_eq!(refusals.len(), 1);
+                assert_eq!(refusals[0]["members"].as_array().unwrap().len(), 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    });
+    drop(intake);
+    drop(old_runtime);
+}
+
+#[test]
+fn native_busy_after_background_reattach_gets_a_new_composer_due_pg() {
+    native_modal_after_identity_hold(false);
+}
+
+#[test]
+fn native_busy_after_queue_adoption_gets_a_new_composer_due_pg() {
+    native_modal_after_identity_hold(true);
+}
