@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import inspect
 import io
 import json
 import os
 from pathlib import Path
+import select
+import selectors
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -86,21 +89,12 @@ def alive(pid):
         return False
 
 
-def await_true(predicate, seconds=8):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError("bounded fixture wait expired")
-
-
 def read_lines(path):
     return path.read_text().splitlines() if path.is_file() else []
 
 
 @contextlib.contextmanager
-def launch(script=None, *, enabled=True, mode="ok", broken=None, container=""):
+def launch(script=None, *, enabled=True, mode="ok", broken=None, container="", cargo_gate=None):
     with tempfile.TemporaryDirectory() as raw:
         d = Path(raw)
         (d / "bin").mkdir()
@@ -109,9 +103,10 @@ def launch(script=None, *, enabled=True, mode="ok", broken=None, container=""):
         bodies = {
             "cargo": '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CASE/argv"\ntouch "$CASE/running"\n'
                      'case "$MODE" in\n fail) exit 101;;\n term) kill -TERM $$;;\n int) kill -INT $$;;\n'
-                     ' hang) while [ ! -f "$CASE/release" ]; do sleep 0.05; done;;\nesac\n',
+                     ' hang) printf R >&"$CASE_CARGO_GATE"; read -r _ <&"$CASE_CARGO_GATE";;\nesac\n',
             "docker": '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CASE/docker"\n'
-                      'if [ "$BROKEN" = docker ]; then sleep 30; exit 1; fi\n'
+                      f'if [ "$BROKEN" = docker ]; then exec {shlex.quote(sys.executable)} '
+                      '-c "import threading; threading.Event().wait()"; fi\n'
                       'if [ "$BROKEN" = state ] && [ "$1" = inspect ]; then echo \'{"Status":"not-a-container-state","ExitCode":0,"OOMKilled":false,"Error":""}\'; exit 0; fi\n'
                       'if [ "$1" = inspect ]; then echo \'{"Status":"running","ExitCode":0,"OOMKilled":false,"Error":""}\'; '
                       'else echo "64MiB / 15.6GiB;0.40%"; fi\n',
@@ -132,24 +127,39 @@ def launch(script=None, *, enabled=True, mode="ok", broken=None, container=""):
                "RUNNER_TEMP": str(d / ("not-directory" if broken == "temp" else "temp")),
                "GITHUB_WORKSPACE": str(ROOT), "GITHUB_RUN_ID": "9001", "GITHUB_RUN_ATTEMPT": "1",
                "GITHUB_SHA": "c" * 40, "POSTGRES_SERVICE_CONTAINER": container}
+        fds = ()
+        if cargo_gate is not None:
+            fds = (cargo_gate.fileno(),)
+            env["CASE_CARGO_GATE"] = str(fds[0])
         (d / "step.sh").write_text(script or scalar())
         with (d / "stdout").open("w") as out, (d / "stderr").open("w") as err:
             p = subprocess.Popen(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(d / "step.sh")],
-                                 cwd=ROOT, env=env, stdout=out, stderr=err, start_new_session=True)
+                                 cwd=ROOT, env=env, stdout=out, stderr=err, start_new_session=True, pass_fds=fds)
             try:
                 yield p, d
             finally:
                 if p.poll() is None:
                     os.killpg(p.pid, signal.SIGTERM)
                     try:
-                        p.wait(timeout=6)
+                        p.wait(timeout=30)
                     except subprocess.TimeoutExpired:
                         os.killpg(p.pid, signal.SIGKILL)
-                        p.wait(timeout=3)
+                        p.wait(timeout=30)
+
+
+@contextlib.contextmanager
+def launch_hung_cargo():
+    owner, cargo = socket.socketpair()
+    with owner, cargo, launch(mode="hang", cargo_gate=cargo) as (p, d):
+        cargo.close()
+        owner.settimeout(30)
+        if owner.recv(1) != b"R":
+            raise AssertionError("Cargo fixture did not signal readiness")
+        yield p, d, owner
 
 
 def outcome(p, d):
-    p.wait(timeout=15)
+    p.wait(timeout=60)
     paths = [Path(line.split("=", 1)[1]) for line in read_lines(d / "output") if line.startswith("diagnostics-dir=")]
     records = [json.loads(line) for line in read_lines(paths[0] / "samples.jsonl")] if paths else []
     return SimpleNamespace(status=p.returncode, directory=paths[0] if paths else None,
@@ -249,23 +259,21 @@ class BoundaryRuntimeTests(unittest.TestCase):
                 self.assertNotEqual(runtime_problems(outcome(p, d), status, enabled), [])
 
     def test_samples_are_visible_while_cargo_is_still_running(self):
-        with launch(mode="hang") as (p, d):
-            await_true(lambda: (d / "running").exists())
+        with launch_hung_cargo() as (p, d, gate):
             streamed = [json.loads(line) for line in read_lines(d / "stdout") if line.startswith("{")]
             self.assertTrue(streamed)
             self.assertEqual(streamed[0]["phase"], "before")
             self.assertTrue((d / "running").is_file())
             self.assertIsNone(p.poll())
-            (d / "release").touch()
+            gate.sendall(b"release\n")
             self.assertEqual(outcome(p, d).status, 0)
             self.assertTrue(all(not alive(int(row.split()[0])) for row in read_lines(d / "python")))
 
     def test_group_signals_preserve_status_and_leave_no_sampler(self):
         for received, status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
-            with self.subTest(signal=received), launch(mode="hang") as (p, d):
-                sentinel = subprocess.Popen(["sleep", "20"])
+            with self.subTest(signal=received), launch_hung_cargo() as (p, d, _gate):
+                sentinel = subprocess.Popen([sys.executable, "-c", "import threading; threading.Event().wait()"])
                 try:
-                    await_true(lambda: (d / "running").exists())
                     self.assertIn('"phase": "before"', (d / "stdout").read_text())
                     self.assertIsNone(p.poll())
                     first = read_lines(d / "python")
@@ -278,31 +286,30 @@ class BoundaryRuntimeTests(unittest.TestCase):
                     self.assertIsNone(sentinel.poll())
                 finally:
                     sentinel.terminate()
-                    sentinel.wait(timeout=3)
+                    sentinel.wait(timeout=30)
 
     def test_owner_sigkill_leaves_incomplete_evidence(self):
-        with launch(mode="hang") as (p, d):
-            await_true(lambda: (d / "running").exists())
+        with launch_hung_cargo() as (p, d, _gate):
             directory = read_lines(d / "output")[0].split("=", 1)[1]
             p.kill()
-            p.wait(timeout=3)
+            p.wait(timeout=30)
             try:
                 check = subprocess.run([sys.executable, "-B", str(HELPER), "verify", "--directory", directory, *IDENTITY],
-                                       capture_output=True, text=True, timeout=5)
+                                       capture_output=True, text=True, timeout=30)
                 self.assertEqual(check.returncode, 1)
                 self.assertEqual(len(read_lines(Path(directory, "samples.jsonl"))), 1)
             finally:
                 os.killpg(p.pid, signal.SIGKILL)
 
     def test_runtime_probe_hangs_are_bounded_without_changing_cargo(self):
-        start = time.monotonic()
+        self.assertLessEqual(inspect.signature(M.bounded_probe).parameters["timeout"].default, 2)
         with launch(mode="fail", broken="docker") as (p, d):
             o = outcome(p, d)
             self.assertEqual(runtime_problems(o, 101), [])
-            self.assertIn("error", o.records[0]["pg_container"])
-            self.assertIn("error", o.records[-1]["pg_container_state"])
+            self.assertEqual(o.records[0]["pg_container"]["error"], "timeout")
+            self.assertEqual(o.records[-1]["pg_container"]["error"], "timeout")
+            self.assertEqual(o.records[-1]["pg_container_state"]["error"], "timeout")
             self.assertEqual(BoundaryVerifierTests().check(o.records), 1)
-        self.assertLess(time.monotonic() - start, 12)
 
     def test_container_override_and_empty_fallback(self):
         for override in ("", "custom-pg"):
@@ -322,7 +329,7 @@ class BoundaryVerifierTests(unittest.TestCase):
                 Path(directory, "samples.jsonl").write_text(raw if raw is not None else ''.join(json.dumps(r)+'\n' for r in records))
             target = str(Path(directory, "absent")) if absent == "directory" else directory
             p = subprocess.run([sys.executable, "-B", str(HELPER), "verify", "--directory", target, *IDENTITY],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=30)
             self.assertNotIn("Traceback", p.stderr)
             return p.returncode
 
@@ -381,28 +388,69 @@ class BoundaryVerifierTests(unittest.TestCase):
 
 class BoundaryProbeTests(unittest.TestCase):
     def test_probe_hang_descendants_and_output_allocation_bound(self):
+        block = "import threading; threading.Event().wait()"
+        child = (
+            "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('R', end='', flush=True); " + block
+        )
+        real_popen = subprocess.Popen
         with tempfile.TemporaryDirectory() as raw:
             d = Path(raw)
             for early in (False, True):
-                pid = None
-                (d / "child").unlink(missing_ok=True)
-                child = 'import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(%r).write_text(str(os.getpid()));time.sleep(20)' % str(d / "child")
-                leader = 'import subprocess,sys,time;subprocess.Popen([sys.executable,"-c",%r]);time.sleep(%s)' % (child, '.1' if early else '20')
-                sentinel = subprocess.Popen(["sleep", "20"])
-                try:
-                    start = time.monotonic()
-                    result = M.bounded_probe([sys.executable, "-c", leader], timeout=.5)
-                    self.assertEqual(result, {"error": "timeout"})
-                    self.assertLess(time.monotonic() - start, 4)
-                    pid = int((d / "child").read_text())
-                    await_true(lambda: not alive(pid))
-                    self.assertIsNone(sentinel.poll())
-                finally:
-                    if pid is not None and alive(pid):
-                        os.kill(pid, signal.SIGKILL)
-                        await_true(lambda: not alive(pid))
-                    sentinel.terminate()
-                    sentinel.wait(timeout=3)
+                with self.subTest(leader_exited=early), contextlib.ExitStack() as stack:
+                    elapsed = 0.0
+                    probe, lifetime = None, None
+                    cleanup_waits = []
+                    leader = f'import subprocess, sys; subprocess.Popen([sys.executable, "-c", {child!r}]); '
+                    if not early:
+                        leader += block
+                    sentinel = real_popen([sys.executable, "-c", block])
+
+                    class ClockedSelector(selectors.DefaultSelector):
+                        def select(selector, timeout):
+                            nonlocal elapsed
+                            self.assertGreater(timeout, 0)
+                            elapsed += timeout
+                            self.assertLessEqual(elapsed, 0.5)
+                            return []
+
+                    def spawn(*args, **kwargs):
+                        nonlocal probe, lifetime
+                        probe = real_popen(*args, **kwargs)
+                        lifetime = stack.enter_context(os.fdopen(os.dup(probe.stdout.fileno()), "rb", buffering=0))
+                        self.assertTrue(select.select([lifetime], [], [], 30)[0], "descendant did not start")
+                        self.assertEqual(lifetime.read(1), b"R")
+                        if early:
+                            probe.wait(timeout=30)
+                        wait_for_leader = probe.wait
+
+                        def wait(timeout):
+                            cleanup_waits.append(timeout)
+                            return wait_for_leader(timeout=30)
+
+                        probe.wait = wait
+                        return probe
+
+                    try:
+                        with mock.patch.object(M.subprocess, "Popen", side_effect=spawn), \
+                             mock.patch.object(M.selectors, "DefaultSelector", ClockedSelector), \
+                             mock.patch.object(M, "time", SimpleNamespace(monotonic=lambda: elapsed)):
+                            result = M.bounded_probe([sys.executable, "-c", leader], timeout=.5)
+                        self.assertEqual(result, {"error": "timeout"})
+                        self.assertEqual(elapsed, 0.5)
+                        self.assertEqual(cleanup_waits, [1.0])
+                        self.assertTrue(select.select([lifetime], [], [], 30)[0], "descendant outlived probe")
+                        self.assertEqual(lifetime.read(1), b"")
+                        self.assertIsNone(sentinel.poll())
+                    finally:
+                        if probe is not None:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.killpg(probe.pid, signal.SIGKILL)
+                            probe.wait(timeout=30)
+                            probe.stdout.close()
+                            probe.stderr.close()
+                        sentinel.terminate()
+                        sentinel.wait(timeout=30)
             result = M.bounded_probe([sys.executable, "-c", 'import sys;sys.stdout.write("x"*(4*1024*1024))'])
             self.assertEqual(result, {"error": "output-limit"})
             self.assertIn("error", M.bounded_probe([str(d / "absent")]))

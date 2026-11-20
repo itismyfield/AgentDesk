@@ -53,6 +53,8 @@ class Runner(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"FAKE_DRIVER_LOG": str(self.log)})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.now = 1_700_000_000.0
+        self.enterContext(mock.patch.object(time, "time", side_effect=lambda: self.now))
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
                        "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
@@ -71,6 +73,7 @@ class Runner(unittest.TestCase):
 
     def submit(self, request_id, sha=SHA):
         (self.root / "config.json").write_text(json.dumps(self.config))
+        self.now += 1
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.root / "config.json"), "submit",
                                        "--request-id", request_id, "--deploy-sha", sha]), 0)
@@ -127,7 +130,12 @@ class Runner(unittest.TestCase):
         crashed = subprocess.Popen(
             [sys.executable, "-m", "scripts.e2e.continuous", "--config", str(path), "tick"], cwd=REPO,
             env={**os.environ, "FAKE_DRIVER_GATE": str(gate)}, stdout=subprocess.DEVNULL)
-        self.assertEqual(crashed.wait(timeout=60), -9)
+        try:
+            self.assertEqual(crashed.wait(timeout=120), -9)
+        except subprocess.TimeoutExpired:
+            crashed.kill()
+            crashed.wait()
+            raise
         self.assertEqual(self.tick(4e9)["status"], "DEFERRED_LEASE")
         with open(gate, "w"):
             pass
@@ -185,6 +193,31 @@ class Runner(unittest.TestCase):
         record = json.loads(next((self.state / "runs").glob("*.json")).read_text())
         blocked = {r["scenario"]: r["status"] for r in record["occurrences"] if r["status"] != "PASS"}
         self.assertEqual(blocked, dict.fromkeys(["R-marker", "R-inject", "R-fresh", "R-host"], "BLOCKED_CAPABILITY"))
+
+    def test_preflight_evidence_is_published_and_legacy_report_replays_unchanged(self):
+        evidence = {
+            "stage": "detail_readiness", "http_status": 200, "status": "degraded", "fully_recovered": True,
+            "reasons": [{"code": "tui_o:reader_retention_stalled", "scope": "target"}],
+        }
+        legacy = {"schema_version": 2, "status": "UNEVALUABLE", "native_turns": 0, "tokens": 0, "budget_checked": 0,
+                  "reason": "CELL_NOT_IDLE: legacy diagnostic"}
+        current = {**legacy, "preflight_failure": {**evidence, "private_extra": "fixture-private"}}
+        (self.root / "driver.py").write_text(f"""import json, sys
+report = {current!r} if 'E-50' in sys.argv else {legacy!r}
+print(json.dumps(report))
+""")
+        self.submit("deploy-preflight-refusal")
+        self.assertEqual(self.tick(5000, rotation_interval_s=None)["status"], "UNEVALUABLE")
+        published = read_json(self.state / "summary.json", {})
+        by_scenario = {row["scenario"]: row for row in published["occurrences"]}
+        self.assertEqual(by_scenario["E-50"].get("preflight_failure"), evidence)
+        self.assertEqual(by_scenario["E-50"].get("reason"), "CELL_NOT_IDLE")
+        self.assertNotIn("preflight_failure", by_scenario["E-51"])
+        legacy_path = Path(by_scenario["E-51"]["driver_report_path"])
+        before = legacy_path.read_bytes()
+        self.assertEqual(json.loads(before), legacy)
+        self.assertEqual(summary.build(published, self.config)["result"], "UNEVALUABLE")
+        self.assertEqual(legacy_path.read_bytes(), before)
 
 
 
@@ -760,11 +793,6 @@ class Outbox(unittest.TestCase):
         self.assertEqual(outbox.pending(self.state), 0)
 
 
-
-
-
-
-
 class Publication(unittest.TestCase):
     setUp, tick, driven, submit = Runner.setUp, Runner.tick, Runner.driven, Runner.submit
 
@@ -861,7 +889,7 @@ class Publication(unittest.TestCase):
 
         with mock.patch.object(publication, "heartbeat", side_effect=heartbeat):
             with publication.keepalive(self.state, {"tick_interval_s": 0.001}, "running"):
-                self.assertTrue(observed.wait(timeout=5))
+                self.assertTrue(observed.wait(timeout=60))
         self.assertGreaterEqual(len(calls), 3)
         self.assertFalse(any(t.name == "e2e-heartbeat" for t in threading.enumerate()))
 

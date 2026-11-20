@@ -1,13 +1,78 @@
 //! The Claude sessions one pane moved through in the execution its records name. Only
 //! `Writer::apply` folds it, so a reloaded writer and the live one hold the same history.
 
+use crate::services::tui_o::shadow::{SourceId, capture::same_file};
+#[cfg(unix)]
+use crate::services::tui_o::shadow::{binding_reader::source_id_for, capture::SourceCapture};
+use serde::{Deserialize, Serialize};
 use std::io;
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use chrono::{DateTime, Utc};
 
+use super::super::binding_context::BindingContext;
 use super::{BindingEvent, BindingTarget, Logged, Writer, lock_logs, log_path, read_log};
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::source_verify::{Left, SourceHistory, Visit};
+
+const THREAD_WRITER_POLICY: &str = "claude_thread_writer:";
+
+impl BindingContext {
+    #[cfg(unix)]
+    pub(crate) fn claude_thread_writer_policy(parent: u64) -> String {
+        format!("{THREAD_WRITER_POLICY}{parent}")
+    }
+
+    pub(crate) fn claude_thread_writer_parent(&self) -> Option<u64> {
+        if self.provider != "claude" || self.launch_mode != "fresh" {
+            return None;
+        }
+        self.source_policy
+            .as_deref()?
+            .strip_prefix(THREAD_WRITER_POLICY)?
+            .parse()
+            .ok()
+    }
+
+    pub(crate) fn retains_delivery_context(&self) -> bool {
+        if self.provider == "codex" {
+            return self.source_policy.as_deref() == Some("verified");
+        }
+        let (Some(channel), Some(parent)) = (self.channel_id, self.claude_thread_writer_parent())
+        else {
+            return false;
+        };
+        let disposition = crate::config::runtime_root()
+            .as_deref()
+            .and_then(crate::services::tui_o::store::OStore::existing)
+            .and_then(|store| store.read_init(channel).ok().flatten());
+        !disposition.is_some_and(|init| {
+            init.policy_parent == Some(parent)
+                && init.sources.iter().any(|source| {
+                    self.expected_native_session_id.as_deref()
+                        == Some(source.source_id.session_id.as_str())
+                })
+        })
+    }
+
+    /// Clear preserves the transcript. An unknown or existing file may still owe delivery.
+    pub(crate) fn missing_claude_transcript(&self, native: &str, path: &std::path::Path) -> bool {
+        self.expected_native_session_id.as_deref() == Some(native)
+            && self.provider_root.as_deref().is_some_and(|root| {
+                crate::services::claude_tui::source_verify::is_top_level_transcript(
+                    root, path, native,
+                )
+            })
+            && std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    }
+}
 
 /// Left sessions kept per execution; past it the history is marked incomplete instead.
 const LEFT_LIMIT: usize = 1024;
@@ -137,6 +202,34 @@ pub(crate) fn binding_events_judged_since(
     Ok(records
         .filter(|(record, _)| record.seq > after_seq)
         .collect())
+}
+
+/// Reads the committed hook verification evidence in one pass for a thread takeover.
+pub(crate) fn verified_claude_sources(channel: u64) -> io::Result<Vec<BindingEvent>> {
+    let Some(path) = log_path(channel)? else {
+        return Ok(Vec::new());
+    };
+    let _logs = lock_logs();
+    let read = read_log::<Logged>(&path)?;
+    if read.lines != read.records.len() as u64 {
+        return Err(io::Error::other("incomplete Claude binding history"));
+    }
+    Ok(read
+        .records
+        .into_iter()
+        .filter_map(|record| {
+            let event = record.event;
+            (record.verified && event.channel_id == channel && event.provider == "claude")
+                .then_some(event)
+        })
+        .collect())
+}
+
+pub(crate) fn names_source(event: &BindingEvent, session: &str, source: &SourceId) -> bool {
+    event.tmux_session == session
+        && matches!(&event.new,
+        BindingTarget::Source(bound) | BindingTarget::Resolved { source: bound, .. }
+        if bound.session_id == source.session_id && same_file(bound, source))
 }
 
 /// Observes only a fold already published by the writer; never reloads, repairs or syncs a log.
@@ -367,4 +460,199 @@ fn visit(
         since,
         seen,
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ThreadResume {
+    pub(crate) parent: u64,
+    pub(crate) tmux: String,
+    pub(crate) source: SourceId,
+    pub(crate) offset: u64,
+    pub(crate) sha256: String,
+}
+
+fn thread_resume_path(channel: u64) -> io::Result<PathBuf> {
+    crate::config::runtime_root()
+        .map(|root| {
+            root.join("runtime/claude_thread_resumes")
+                .join(format!("{channel}.json"))
+        })
+        .ok_or_else(|| io::Error::other("runtime root unavailable"))
+}
+
+pub(crate) fn read_thread_resumes(channel: u64) -> io::Result<Vec<ThreadResume>> {
+    match std::fs::read(thread_resume_path(channel)?) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn check_thread_resume(
+    channel: u64,
+    parent: u64,
+    tmux: &str,
+    native: &str,
+    expected: Option<&str>,
+    path: &Path,
+) -> io::Result<()> {
+    let expected = expected.unwrap_or(native);
+    let entries = read_thread_resumes(channel)?;
+    let mut relevant = entries
+        .iter()
+        .filter(|entry| {
+            entry.parent == parent && entry.tmux == tmux && entry.source.session_id == expected
+        })
+        .peekable();
+    if relevant.peek().is_none() {
+        return Ok(());
+    }
+    if expected != native {
+        return Err(io::Error::other(
+            "the Claude resume native session changed before its first key",
+        ));
+    }
+    let resume = relevant
+        .find(|entry| entry.source.path == path)
+        .ok_or_else(|| io::Error::other("the Claude resume source changed before its first key"))?;
+    SourceCapture::reopen(resume.source.clone(), resume.offset, &resume.sha256).map(|_| ())
+}
+
+#[cfg(unix)]
+fn effort_ended(channel: u64, tmux: &str, source: &SourceId, cutoff: u64, hash: &str) -> bool {
+    use super::super::binding_context::{SpawnNonceMarker, observe_spawn_nonce_marker};
+    use crate::services::tui_o::{shadow::ShadowProvider, store::restart_end};
+    let (Some(root), Ok(Ok(events))) = (
+        crate::config::runtime_root(),
+        super::records_strict(channel),
+    ) else {
+        return false;
+    };
+    let Some(bound) = events.iter().rev().find(|event| {
+        event.channel_id == channel
+            && event.provider == "claude"
+            && event.tmux_session == tmux
+            && !matches!(&event.new, BindingTarget::Rejected { .. })
+    }) else {
+        return false;
+    };
+    let (BindingTarget::Source(pinned) | BindingTarget::Resolved { source: pinned, .. }) =
+        &bound.new
+    else {
+        return false;
+    };
+    let Some(nonce) = bound
+        .execution_nonce
+        .as_deref()
+        .filter(|nonce| !nonce.is_empty())
+    else {
+        return false;
+    };
+    let same_launch = match observe_spawn_nonce_marker(tmux) {
+        SpawnNonceMarker::Absent => true,
+        SpawnNonceMarker::Known(current) => current == nonce,
+        SpawnNonceMarker::Unreadable => false,
+    };
+    if !same_launch || !same_file(pinned, source) {
+        return false;
+    }
+    restart_end::read_durable(&root, channel).is_ok_and(|ends| {
+        ends.iter().any(|end| {
+            end.end_id.starts_with("effort-")
+                && end.channel == channel
+                && end.provider == ShadowProvider::Claude
+                && end.tmux_session == tmux
+                && end.execution_nonce == nonce
+                && end.binding_seq == bound.seq
+                && end.source == *pinned
+                && end.cutoff == cutoff
+                && end.prefix_hash == hash
+        })
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn reserve_thread_resume(
+    channel: u64,
+    parent: u64,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    session_id: &str,
+    (transcript, cold): (&Path, bool),
+    before_new_boundary: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
+    let tmux = authority.session();
+    let source = source_id_for(session_id, transcript)?;
+    let mut existing = read_thread_resumes(channel)?;
+    if let Some(resume) = existing.iter().find(|entry| {
+        entry.parent == parent && entry.tmux == tmux && same_file(&entry.source, &source)
+    }) {
+        return SourceCapture::reopen(source, resume.offset, &resume.sha256).map(|_| ());
+    }
+    before_new_boundary()?;
+    if !verified_claude_sources(channel)?
+        .iter()
+        .any(|event| names_source(event, tmux, &source))
+    {
+        return Err(io::Error::other(
+            "Claude thread transcript has no verified binding",
+        ));
+    }
+    let mut file = File::open(transcript)?;
+    let offset = file.metadata()?.len();
+    if offset != 0 {
+        let mut last = [0];
+        file.seek(SeekFrom::Start(offset - 1))?;
+        file.read_exact(&mut last)?;
+        if last != [b'\n'] {
+            return Err(io::Error::other(
+                "Claude transcript is not at a closed turn boundary",
+            ));
+        }
+    }
+    let after = source_id_for(session_id, transcript)?;
+    if source != after
+        || crate::services::tui_o::shadow::capture::file_identity(&file.metadata()?)
+            != (source.dev, source.ino)
+    {
+        return Err(io::Error::other(
+            "Claude thread transcript changed during reservation",
+        ));
+    }
+    let capture = SourceCapture::open(source.clone(), offset)?;
+    let sha256 = capture.prefix_hash();
+    if offset != 0
+        && observe_claude_jsonl_turn_state(transcript) != TuiTurnState::Idle
+        && !(cold && effort_ended(channel, tmux, &source, offset, &sha256))
+    {
+        return Err(io::Error::other(
+            "Claude transcript is not at a closed turn boundary",
+        ));
+    }
+    capture.verify_eof(offset, &sha256)?;
+    existing.push(ThreadResume {
+        parent,
+        tmux: tmux.into(),
+        source,
+        offset,
+        sha256,
+    });
+    let target = thread_resume_path(channel)?;
+    let directory = target
+        .parent()
+        .ok_or_else(|| io::Error::other("thread resume directory unavailable"))?;
+    super::super::binding_context::durable_directory(directory)?;
+    let data = serde_json::to_string(&existing)?;
+    crate::domain::atomic_write::prepare(&target, &data)
+        .and_then(|write| write.publish())
+        .map_err(|failure| failure.error)?;
+    crate::domain::file_sync::fsync_parent_dir(&target)?;
+    let saved = read_thread_resumes(channel)?;
+    if saved != existing {
+        return Err(io::Error::other(
+            "Claude thread frontier changed after publication",
+        ));
+    }
+    Ok(())
 }

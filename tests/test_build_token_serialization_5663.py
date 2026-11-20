@@ -23,6 +23,7 @@ import json
 import functools
 import os
 import re
+import select
 import signal
 import shutil
 import subprocess
@@ -66,13 +67,11 @@ bt.run = functools.partial(bt.run, path=TOKEN)
 run = bt.run
 """
 
-_CHILD_IGNORES_EMT = """
-import os, signal, sys, time
-signal.signal(signal.SIGEMT, signal.SIG_IGN)
-open(sys.argv[1], "w").write(str(os.getpid()))
-deadline = time.monotonic() + 90
-while time.monotonic() < deadline and not os.path.exists(sys.argv[2]):
-    time.sleep(0.05)
+_CHILD_SURVIVES_EMT = """
+import os, signal, sys
+signal.signal(signal.SIGEMT, lambda *_: print("SIGEMT", flush=True))
+print(os.getpid(), flush=True)
+sys.stdin.read()
 """
 
 _CHILD_FD_SCAN = """
@@ -180,16 +179,21 @@ class TokenTestCase(unittest.TestCase):
         self.addCleanup(os.close, fd)
         return fd
 
-    def driver(self, body: str, *args: str, env: dict[str, str] | None = None):
+    def driver(self, body: str, *args: str, env: dict[str, str] | None = None, stdin=None):
         merged = dict(os.environ)
         merged.update(env or {})
         proc = subprocess.Popen(
             [sys.executable, "-c", _SEAL + body, str(self.token), *args],
-            env=merged, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=merged, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         for pipe in (proc.stdout, proc.stderr):
             self.addCleanup(pipe.close)
         return proc
+
+    def child_line(self, stream):
+        ready, _, _ = select.select([stream], [], [], 30)
+        self.assertTrue(ready, "child never sent its event")
+        return stream.readline().strip()
 
     def isolated_cli(self, entered: Path | None = None, extra_seal: str = "") -> Path:
         source = (SCRIPTS / "build_token.py").read_text()
@@ -386,13 +390,12 @@ class DeployPreflightTokenTests(unittest.TestCase):
         build = build_start + deploy.split(build_start, 1)[1].split("# Rebuild dashboard", 1)[0]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            token, marker = root / "token", root / "built"
+            token = root / "token"
             driver = root / "driver.py"
             driver.write_text(_SEAL + """
 assert os.path.isabs(sys.argv[2]) and sys.argv[2].endswith("/build_token.py")
 assert sys.argv[3] == "--release-source" and sys.argv[7] == "--"
 assert sys.argv[8:10] == ["bash", "-c"]
-open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))
 command = sys.argv[8:-1]
 idx = command.index("cargo")
 assert command[idx:idx + 2] == ["cargo", "build"]
@@ -436,29 +439,50 @@ ps() {
  esac
 }
 """)
-            env = dict(os.environ, TEST_PYTHON=sys.executable,
-                       ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="2")
+            watchdog = 120
+            env = {**os.environ, "TEST_PYTHON": sys.executable,
+                   bt.WAIT_TIMEOUT_ENV: str(watchdog), bt.DIAG_FD_ENV: ""}
             for key in list(env):
                 if key.startswith("AGENTDESK_DEPLOY_") or key == bt.LEASE_ENV:
                     env.pop(key)
-            command = ["/bin/bash", str(script), str(SCRIPTS), str(driver), str(token), str(marker)]
+            command = ["/bin/bash", str(script), str(SCRIPTS), str(driver), str(token)]
+
+            @contextlib.contextmanager
+            def scenario(profile, environment):
+                with tempfile.TemporaryDirectory(dir=root) as attempt:
+                    marker = Path(attempt) / "built"
+                    with subprocess.Popen(command + [str(marker), profile, str(root)], env=environment,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                          start_new_session=True) as child:
+                        try:
+                            yield child, marker
+                        finally:
+                            if child.returncode is None:
+                                with contextlib.suppress(ProcessLookupError):
+                                    os.killpg(child.pid, signal.SIGKILL)
+                                child.communicate()
+
+            def wait_notice(child):
+                ready, _, _ = select.select([child.stderr], [], [], watchdog)
+                self.assertTrue(ready, "build token never reported a wait")
+                notice = child.stderr.readline()
+                self.assertIn("build token: waiting for", notice)
+                return notice
+
             for profile in ("release", "dev"):
                 with self.subTest(profile=profile), token.open("a+") as holder:
                     fcntl.flock(holder, fcntl.LOCK_EX)
-                    with subprocess.Popen(command + [profile, str(root)], env=env, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True) as child:
+                    with scenario(profile, env) as (child, marker):
                         try:
-                            notice = child.stderr.readline()
-                            self.assertIn("build token: waiting for", notice)
+                            wait_notice(child)
                             self.assertFalse(marker.exists(), "build started before token release")
                             self.assertIsNone(child.poll(), "busy token must queue, not reject")
                         finally:
                             fcntl.flock(holder, fcntl.LOCK_UN)
-                        out, err = child.communicate(timeout=10)
+                        out, err = child.communicate(timeout=watchdog)
                         self.assertEqual(child.returncode, 0, out + err)
                         self.assertNotIn("command not found", err)
                         self.assertTrue(marker.exists())
-                        marker.unlink()
             for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
                                   ({"TEST_PRESSURE": "4"}, "memory pressure"),
                                   ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool"),
@@ -468,35 +492,24 @@ ps() {
                                   ({"AFTER_BUILDER": "UnrealEditor"}, "concurrent build tool"),
                                   ({"AFTER_LOAD": "99"}, "load average"),
                                   ({"AFTER_PRESSURE": "4"}, "memory pressure")):
-                with self.subTest(extra=extra):
-                    result = subprocess.run(command + ["release", str(root)], env=dict(env, **extra),
-                                            capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(reason, result.stderr)
-                    self.assertNotIn("build token: waiting", result.stderr)
+                with self.subTest(extra=extra), scenario("release", dict(env, **extra)) as (child, marker):
+                    out, err = child.communicate(timeout=watchdog)
+                    self.assertEqual(child.returncode, 1, out + err)
+                    self.assertIn(reason, err)
+                    self.assertNotIn("build token: waiting", err)
                     self.assertFalse(marker.exists())
 
-            # Inspect the first notice so a missing bound fails before a long wait.
-            # Stop the waiter while the token is held; its shell reaps it before unlock.
+            # Inspect the first notice so a missing bound fails before the default wait.
             bounded = dict(env, TEST_LOCK_TIMEOUT="1")
             bounded.pop(bt.WAIT_TIMEOUT_ENV, None)
             with self.subTest(bound="token wait duration"), token.open("a+") as holder:
                 fcntl.flock(holder, fcntl.LOCK_EX)
-                with subprocess.Popen(command + ["release", str(root)], env=bounded,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as child:
-                    try:
-                        notice = child.stderr.readline()
-                        self.assertIn("build token: waiting for", notice)
-                        self.assertIn("of 1s;", notice)
-                        out, err = child.communicate(timeout=5)
-                        self.assertEqual(child.returncode, bt.EXIT_TOKEN_TIMEOUT, out + err)
-                        self.assertIn("still held after 1s", err)
-                    finally:
-                        if child.poll() is None:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.kill(int(Path(str(marker) + ".waiter").read_text()), signal.SIGTERM)
-                        child.communicate(timeout=5)
-                self.assertFalse(marker.exists(), "the build must not start without the token")
+                with scenario("release", bounded) as (child, marker):
+                    self.assertIn("of 1s;", wait_notice(child))
+                    out, err = child.communicate(timeout=watchdog)
+                    self.assertEqual(child.returncode, bt.EXIT_TOKEN_TIMEOUT, out + err)
+                    self.assertIn("still held after 1s", err)
+                    self.assertFalse(marker.exists(), "the build must not start without the token")
 
 
 class WaitTimeoutTests(TokenTestCase):
@@ -545,10 +558,7 @@ class FailClosedTests(TokenTestCase):
 
     def test_a_timeout_is_classified_before_its_base_error(self) -> None:
         self.assertTrue(issubclass(bt.BuildTokenTimeout, bt.BuildTokenError))
-        holder = self.driver("run([sys.executable, '-c', 'import time; time.sleep(6)'])")
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.kill)
-        time.sleep(1.5)
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         rc = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "1"}, path=str(self.token))
         self.assertEqual(rc, bt.EXIT_TOKEN_TIMEOUT)
 
@@ -586,15 +596,19 @@ class SerializationTests(TokenTestCase):
         self.assertEqual(out.read_text(), "[]")
 
     def test_a_second_wrapper_blocks_until_the_first_finishes(self) -> None:
-        first = self.driver("run([sys.executable, '-c', 'import time; time.sleep(3)'])")
-        self.addCleanup(first.wait)
-        self.addCleanup(first.kill)
-        time.sleep(1.0)
-        started = time.monotonic()
-        rc = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "30"}, path=str(self.token))
-        waited = time.monotonic() - started
-        self.assertEqual(rc, 0)
-        self.assertGreater(waited, 0.5, "second wrapper did not wait for the first")
+        first = self.driver("raise SystemExit(run([sys.executable, '-c', 'import sys; print(\"held\", flush=True); sys.stdin.read()']))",
+                            stdin=subprocess.PIPE)
+        self.addCleanup(first.wait, timeout=30)
+        self.addCleanup(first.stdin.close)
+        self.assertEqual(self.child_line(first.stdout), "held")
+        second = self.driver("raise SystemExit(run([sys.executable, '-c', '']))",
+                             env={bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: ""})
+        self.addCleanup(second.wait, timeout=30)
+        self.addCleanup(second.kill)
+        self.assertIn("waiting for", self.child_line(second.stderr))
+        first.stdin.close()
+        self.assertEqual(first.wait(timeout=30), 0)
+        self.assertEqual(second.wait(timeout=30), 0)
 
 
 class ReentrantContractTests(TokenTestCase):
@@ -771,36 +785,14 @@ class SigemtLifetimeTests(TokenTestCase):
     """The exact regression: SIGEMT to the wrapper must not free a live build."""
 
     def test_sigemt_never_frees_the_token_while_the_direct_child_lives(self) -> None:
-        wrapper_pid = self.tmp / "wrapper.pid"
-        child_pid = self.tmp / "child.pid"
-        release = self.tmp / "release"
-        body = (f"open({str(wrapper_pid)!r}, 'w').write(str(os.getpid()))\n"
-                f"run([sys.executable, '-c', {_CHILD_IGNORES_EMT!r},"
-                f" {str(child_pid)!r}, {str(release)!r}])\n")
-        first = self.driver(body)
-        reaped = []
-
-        def cleanup() -> None:
-            release.touch()
-            if not reaped:
-                try:
-                    first.wait(timeout=15)
-                except subprocess.TimeoutExpired:  # pragma: no cover
-                    first.kill()
-                    first.wait()
-
-        self.addCleanup(cleanup)
-
-        wait_for(wrapper_pid)
-        wait_for(child_pid)
-        w1 = int(wrapper_pid.read_text())
-        c1 = int(child_pid.read_text())
-        self.assertEqual(w1, first.pid, "driver must report its own pid")
+        first = self.driver(f"run([sys.executable, '-c', {_CHILD_SURVIVES_EMT!r}])", stdin=subprocess.PIPE)
+        self.addCleanup(first.wait, timeout=30)
+        self.addCleanup(first.stdin.close)
+        c1 = int(self.child_line(first.stdout))
         self.assertTrue(alive(c1), "protected child should be running")
 
-        # Only PIDs this test created and recorded are ever signalled.
-        os.kill(w1, signal.SIGEMT)
-        time.sleep(1.0)
+        first.send_signal(signal.SIGEMT)
+        self.assertEqual(self.child_line(first.stdout), "SIGEMT")
 
         self.assertTrue(alive(c1), "the protected child must outlive the signal")
         second = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "2"},
@@ -811,9 +803,8 @@ class SigemtLifetimeTests(TokenTestCase):
         )
         self.assertTrue(alive(c1), "child died before the serialization check ended")
 
-        release.touch()
+        first.stdin.close()
         first.wait(timeout=30)
-        reaped.append(True)
         self.assertEqual(first.returncode, -int(signal.SIGEMT),
                          "wrapper must die from SIGEMT only after reaping its child")
         self.assertFalse(alive(c1), "child must be reaped before the token is released")
@@ -928,9 +919,9 @@ class NestedHolderTests(TokenTestCase):
         self.assertFalse(ran.exists(), "a refused wrapper ran its command")
 
     def test_only_a_live_ancestor_holding_this_inode_refuses(self) -> None:
-        sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        sibling = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
         self.addCleanup(sibling.wait)
-        self.addCleanup(sibling.kill)
+        self.addCleanup(sibling.stdin.close)
         other = self.tmp / "other.lock"
         other.touch()
         ppid, some_start = os.getppid(), bt.process_start(os.getpid())

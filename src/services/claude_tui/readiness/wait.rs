@@ -66,7 +66,7 @@ pub(crate) fn prepare(
                         continue;
                     }
                     Expiry::Unproven(end) => Some(end),
-                    Expiry::Waits => None,
+                    Expiry::Waits(_) => None,
                 };
             return Err(Stopped {
                 error: "timeout waiting for claude tui current Idle/SessionStart evidence and empty composer".into(),
