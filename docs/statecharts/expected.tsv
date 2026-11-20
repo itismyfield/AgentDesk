@@ -1201,6 +1201,14 @@ session-lifecycle/HerdrHintANoOutboxDiscovery.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrMissingBoundAttachAfter.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundAttachAfterStale.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundAttachBefore.cfg	HerdrMissingBound	NoLiveRestore	-
+session-lifecycle/HerdrMissingBoundAttachDuplicate.cfg	HerdrMissingBound	ExactlyOnce	-
+session-lifecycle/HerdrMissingBoundAttachNoRecheck.cfg	HerdrMissingBound	NoDeadPaneWrite,ExactlyOnce	FirstInputDelivered
+session-lifecycle/HerdrMissingBoundAttachNoRecoveryEffects.cfg	HerdrMissingBound	EndedResumeShowsRecovery	-
+session-lifecycle/HerdrMissingBoundAttachNoWake.cfg	HerdrMissingBound	-	FirstInputDelivered
+session-lifecycle/HerdrMissingBoundAttachTrustRow.cfg	HerdrMissingBound	NoDeadPaneWrite,ExactlyOnce	FirstInputDelivered
 session-lifecycle/HerdrMissingBoundBeforeEffectActive.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundBeforeEffectIdle.cfg	HerdrMissingBound	-	InputResolves,WatchResolves
 session-lifecycle/HerdrMissingBoundBeforeInput.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves

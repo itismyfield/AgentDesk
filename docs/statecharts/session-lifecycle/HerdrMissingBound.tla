@@ -4,9 +4,11 @@ EXTENDS Naturals
 CONSTANTS Policy, Reading, Entry, Restored, RepairFails, LaunchFails, ReplaceNonce,
           Control, RebootMidProof
 VARIABLES row, pane, nonce, captured, retired, phase, mode, input, notices,
-          watching, active, checked, launched, rebooted, controlled, debt, rest
+          watching, active, checked, launched, rebooted, controlled, debt, rest, attach
 vars == <<row, pane, nonce, captured, retired, phase, mode, input, notices,
           watching, active, checked, launched, rebooted, controlled, debt, rest>>
+
+allVars == <<vars, attach>>
 
 EffectRace == Entry \in {"effect-idle", "effect-active"}
 NoticeFails == Entry = "notice-retry"
@@ -179,7 +181,8 @@ Next == Reconnect \/ Input \/ Read \/ Proof \/ Retire \/ Launch \/ Deliver \/ Re
         \/ Boundary \/ HeldWatch \/ Reboot \/ ControlAction
         \/ EarlyBusy \/ LosePane \/ BusyEffect \/ EffectWatch \/ UnknownRecovers
         \/ FirstNoticeFails \/ RestRecovers \/ OutboxPost \/ RepeatFailure
-Spec == Init /\ [][Next]_vars /\ WF_vars(Reconnect) /\ WF_vars(Input) /\ WF_vars(Read)
+Spec == Init /\ attach = "off" /\ [][Next /\ UNCHANGED attach]_allVars
+        /\ WF_vars(Reconnect) /\ WF_vars(Input) /\ WF_vars(Read)
         /\ WF_vars(Proof) /\ WF_vars(Retire) /\ WF_vars(Launch) /\ WF_vars(Deliver)
         /\ WF_vars(Reject) /\ WF_vars(Boundary) /\ WF_vars(Reboot) /\ WF_vars(ControlAction)
         /\ WF_vars(EarlyBusy) /\ WF_vars(LosePane) /\ WF_vars(BusyEffect)
@@ -197,4 +200,115 @@ NoOldDelivery == (input = "delivered" /\ Reading = "Missing" /\ ~ReplaceNonce) =
 NoRetainedRefusal == input # "retained"
 InputResolves == <> (input = "delivered" \/ (input = "discarded" /\ notices = 1))
 ReasonDelivered == [](input = "discarded" => <> (notices = 1))
+
+\* #8280 boot-to-first-input projection. See the design evidence table.
+\* The historical Missing Bound variables remain fixed in this projection.
+AttachInit ==
+    /\ Init
+    /\ \E target \in (IF ReplaceNonce THEN {"idle"} ELSE {"idle", "busy", "dead", "rowOnly"}) :
+       attach = [phase |-> "down", target |-> target, initial |-> target,
+                 reconciled |-> FALSE, scan |-> FALSE, mirror |-> FALSE, owner |-> FALSE,
+                 route |-> "none", changed |-> FALSE, deadWrite |-> FALSE,
+                 delivered |-> 0, banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE]
+
+Boot ==
+    /\ attach.phase = "down"
+    /\ attach' = [attach EXCEPT !.phase = "await"]
+    /\ UNCHANGED vars
+
+FirstInput ==
+    /\ attach.phase = "await"
+    /\ attach' = [attach EXCEPT !.phase = "queued"]
+    /\ UNCHANGED vars
+
+ReconcileIntake ==
+    /\ attach.phase # "down" /\ ~attach.reconciled
+    /\ attach' = [attach EXCEPT !.reconciled = TRUE]
+    /\ UNCHANGED vars
+
+ReconnectSource ==
+    /\ attach.phase # "down" /\ ~attach.scan
+    /\ attach' = [attach EXCEPT !.scan = TRUE, !.mirror = attach.target \in {"idle", "busy"}]
+    /\ UNCHANGED vars
+
+ChooseRoute ==
+    /\ attach.phase = "queued" /\ attach.reconciled
+    /\ CASE attach.target = "rowOnly" /\ Policy # "trust-row" ->
+               attach' = [attach EXCEPT !.phase = "waiting"]
+         [] attach.target = "dead" ->
+               attach' = [attach EXCEPT !.phase = "start", !.route = "ended"]
+         [] OTHER ->
+               attach' = [attach EXCEPT !.phase = IF attach.target = "busy" THEN "waiting" ELSE "submit",
+                          !.route = "existing", !.owner = Policy # "before" /\ attach.target # "rowOnly",
+                          !.banner = Policy = "before", !.notice = Policy = "before",
+                          !.reinjected = Policy = "before"]
+    /\ UNCHANGED vars
+
+ReadinessChanges ==
+    /\ attach.phase = "waiting"
+    /\ attach.target \in {"busy", "rowOnly"}
+    /\ \E nextTarget \in (IF attach.target = "busy" THEN {"idle"} ELSE {"idle", "dead"}) :
+       attach' = [attach EXCEPT !.target = nextTarget,
+                  !.phase = IF Policy = "no-wake" THEN "waiting" ELSE "queued"]
+    /\ UNCHANGED vars
+
+LosePaneBeforeEffect ==
+    /\ ReplaceNonce /\ ~attach.changed /\ attach.phase = "submit"
+    /\ attach' = [attach EXCEPT !.changed = TRUE, !.target = "dead", !.owner = FALSE, !.mirror = FALSE]
+    /\ UNCHANGED vars
+
+RecheckEffect ==
+    /\ attach.phase = "submit" /\ attach.target = "dead" /\ Policy # "no-recheck"
+    /\ attach' = [attach EXCEPT !.phase = "queued", !.route = "none"]
+    /\ UNCHANGED vars
+
+SubmitExisting ==
+    /\ attach.phase = "submit" /\ (~ReplaceNonce \/ attach.changed)
+    /\ (attach.owner \/ Policy \in {"before", "no-recheck", "trust-row"})
+    /\ (attach.target = "idle" \/ Policy \in {"no-recheck", "trust-row"})
+    /\ attach' = [attach EXCEPT !.phase = "done", !.owner = attach.target = "idle",
+                  !.deadWrite = attach.target # "idle",
+                  !.delivered = IF attach.target = "idle" THEN 1 ELSE 0]
+    /\ UNCHANGED vars
+
+ResumeEnded ==
+    /\ attach.phase = "start" /\ attach.target = "dead"
+    /\ attach' = [attach EXCEPT !.phase = "resumed", !.target = "idle", !.owner = TRUE,
+                  !.banner = Policy # "no-recovery-effects", !.notice = Policy # "no-recovery-effects",
+                  !.reinjected = Policy # "no-recovery-effects"]
+    /\ UNCHANGED vars
+
+SubmitResumed ==
+    /\ attach.phase = "resumed"
+    /\ attach' = [attach EXCEPT !.phase = "done", !.delivered = 1]
+    /\ UNCHANGED vars
+
+ReplayReceipt ==
+    /\ Policy = "duplicate" /\ attach.phase = "done" /\ attach.delivered = 1
+    /\ attach' = [attach EXCEPT !.delivered = 2]
+    /\ UNCHANGED vars
+
+AttachDone ==
+    /\ attach.phase = "done" /\ UNCHANGED attach
+    /\ UNCHANGED vars
+
+AttachNext == Boot \/ FirstInput \/ ReconcileIntake \/ ReconnectSource \/ ChooseRoute
+              \/ ReadinessChanges \/ LosePaneBeforeEffect \/ RecheckEffect \/ SubmitExisting
+              \/ ResumeEnded \/ SubmitResumed \/ ReplayReceipt \/ AttachDone
+
+AttachSpec ==
+    /\ AttachInit /\ [][AttachNext]_allVars
+    /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
+    /\ WF_attach(ReconnectSource) /\ WF_attach(ChooseRoute) /\ WF_attach(ReadinessChanges)
+    /\ WF_attach(LosePaneBeforeEffect) /\ WF_attach(RecheckEffect) /\ WF_attach(SubmitExisting)
+    /\ WF_attach(ResumeEnded) /\ WF_attach(SubmitResumed)
+
+NoLiveRestore ==
+    attach.route = "existing" => ~(attach.banner \/ attach.notice \/ attach.reinjected)
+EndedResumeShowsRecovery ==
+    attach.route = "ended" /\ attach.phase \in {"resumed", "done"}
+        => attach.banner /\ attach.notice /\ attach.reinjected
+NoDeadPaneWrite == ~attach.deadWrite
+ExactlyOnce == attach.delivered <= 1 /\ (attach.phase = "done" => attach.delivered = 1)
+FirstInputDelivered == [](attach.phase = "queued" => <>(attach.phase = "done" /\ attach.delivered = 1))
 ====
