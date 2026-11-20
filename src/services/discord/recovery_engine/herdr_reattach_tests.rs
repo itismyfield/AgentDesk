@@ -1,4 +1,5 @@
 use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::*;
@@ -28,6 +29,7 @@ struct Fixture {
     pool: PgPool,
     row: HostedObservation,
     source: SourceId,
+    context_path: PathBuf,
     db: TestPostgresDb,
 }
 
@@ -144,7 +146,10 @@ impl Fixture {
             cause: CauseSource::Launch,
             hook: None,
         };
-        binding_events::record_verified(&proposal, &source).unwrap();
+        assert_eq!(
+            binding_events::record_verified(&proposal, &source).unwrap(),
+            binding_events::Committed::Appended,
+        );
         assert_eq!(
             nonce_baseline(CHANNEL, &owner.logical_key, NONCE),
             Some(source.clone())
@@ -156,6 +161,7 @@ impl Fixture {
             pool,
             row,
             source,
+            context_path: context.path,
             db,
         }
     }
@@ -246,6 +252,14 @@ impl Fixture {
     }
 }
 
+struct BindingLogRoot(Option<PathBuf>);
+
+impl Drop for BindingLogRoot {
+    fn drop(&mut self) {
+        binding_events::set_test_root(self.0.as_deref());
+    }
+}
+
 async fn read_row(pool: &PgPool, key: &str) -> HostedObservation {
     match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
         HostedLookup::Found(row) => row,
@@ -260,6 +274,11 @@ fn run(
     verify: impl FnOnce(Fixture, &tokio::runtime::Runtime),
 ) {
     let test_root = crate::config::TestRuntimeRootGuard::new();
+    let state = dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let log_root = BindingLogRoot(binding_events::test_root());
+    binding_events::set_test_root(Some(test_root.path()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -276,7 +295,7 @@ fn run(
     let codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
     let fixture = runtime.block_on(Fixture::new(rig, provider, tag, busy));
     verify(fixture, &runtime);
-    drop((codex, registry, hosts, test_root));
+    drop((codex, registry, hosts, log_root, state, test_root));
 }
 
 fn live_case(provider: ProviderKind, busy: bool, boot_first: bool, tag: &str) {
@@ -356,7 +375,7 @@ fn unknown_unplaced_and_replaced_execution_do_not_publish_pg() {
         fx.rig.serve_as(&[7, 8, 7]);
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
         fx.rig.serve_as(&[7]);
-        fx.rig.restart_shell(&fx.rig.context(NONCE));
+        fx.rig.restart_shell(&fx.context_path);
         assert_eq!(rt.block_on(fx.verify(&fx.row)), VerifiedReattach::Held);
 
         let mut wrong = fx.record.clone();
