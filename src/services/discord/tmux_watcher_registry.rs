@@ -328,6 +328,32 @@ impl TmuxWatcherRegistry {
             channel,
         )
     }
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn publish_restored_owner(
+        &self,
+        session: &str,
+        channel: ChannelId,
+        publish_source: impl FnOnce() -> bool,
+    ) -> bool {
+        let guard = match TMUX_WATCHER_REGISTRY_LOCK.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        let owner = self.storage.owner_channel_for_tmux_session(session);
+        if owner.is_some_and(|owner| owner != channel) || !publish_source() {
+            return false;
+        }
+        if owner.is_none() {
+            self.storage.restore_owner_channel_for_tmux_session(
+                Self::observers(),
+                &guard,
+                session,
+                channel,
+            );
+        }
+        true
+    }
     pub(in crate::services::discord) fn clear_restored_owner_for_tmux_session(
         &self,
         session: &str,

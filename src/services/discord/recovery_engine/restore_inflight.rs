@@ -42,6 +42,12 @@ fn recovery_output_path_with_tmux_fallback(
 #[cfg(unix)]
 use super::herdr_row_end::held_at_restore;
 
+#[cfg(unix)]
+#[path = "restore_inflight/live_reattach.rs"]
+mod live_reattach;
+#[cfg(unix)]
+pub(super) use live_reattach::attach as reattach_live_herdr;
+
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
 pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mailbox;
@@ -205,6 +211,12 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         #[cfg(unix)]
         if let Some(r) = super::herdr_before_start_restart::decode(shared, provider, &state) {
             r.settle(http, shared, &state).await;
+            continue;
+        }
+        #[cfg(unix)]
+        if state.hosted_execution_nonce.is_some()
+            && live_reattach::restore_channel(shared, provider, channel_id).await
+        {
             continue;
         }
         // A held Herdr turn, or a restarted one its end pass reads later, skips the wrapper path.
@@ -1984,109 +1996,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             };
 
             // Immediately spawn watcher to avoid race condition.
-            if std::fs::metadata(&output_path).is_ok() {
-                let (initial_offset, current_len, truncated) =
-                    recovery_watcher_start_offset_for_state(&output_path, &state);
-                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
-                let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
-                    super::tmux_watcher_now_ms(),
-                ));
-                let handle = TmuxWatcherHandle {
-                    tmux_session_name: tmux_session_name.clone(),
-                    output_path: output_path.clone(),
-                    paused: paused.clone(),
-                    resume_offset: resume_offset.clone(),
-                    cancel: cancel.clone(),
-                    pause_epoch: pause_epoch.clone(),
-                    turn_delivered: turn_delivered.clone(),
-                    last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                };
-                let watcher_claimed = {
-                    #[cfg(unix)]
-                    {
-                        let host = super::tmux::watch_host_of(
-                            shared,
-                            provider,
-                            channel_id.get(),
-                            &tmux_session_name,
-                        )
-                        .await;
-                        let claim = super::tmux::claim_or_reuse_watcher_for_host(
-                            &shared.tmux_watchers,
-                            channel_id,
-                            handle,
-                            provider,
-                            "inflight_recovery",
-                            super::tmux::thread_follow_up_parent_channel_id(
-                                channel_id,
-                                state.logical_channel_id,
-                                state.thread_id,
-                            ),
-                            host,
-                        );
-                        claim.is_ok_and(|claim| claim.should_spawn())
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = handle;
-                        false
-                    }
-                };
-                if watcher_claimed {
-                    shared
-                        .restart
-                        .recovering_channels
-                        .insert(channel_id, std::time::Instant::now());
-                    let ts2 = chrono::Local::now().format("%H:%M:%S");
-                    if truncated {
-                        tracing::info!(
-                            "  [{ts2}] ↻ recovery: output truncated for #{} (saved offset {}, file len {}), restarting watcher from 0",
-                            tmux_session_name,
-                            state.last_offset,
-                            current_len
-                        );
-                    }
-                    tracing::info!(
-                        "  [{ts2}] 👁 recovery: spawned watcher for #{} at offset {}",
-                        tmux_session_name,
-                        initial_offset
-                    );
-                    #[cfg(unix)]
-                    {
-                        let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
-                            &state,
-                            &tmux_session_name,
-                            finish_mailbox_on_completion,
-                        );
-                        shared.record_tmux_watcher_reconnect(channel_id);
-                        super::task_supervisor::spawn_observed_tmux_watcher(
-                            "recovery_restore_inflight_tmux_output_watcher_with_restore",
-                            shared.clone(),
-                            tmux_session_name.clone(),
-                            cancel.clone(),
-                            super::tmux::tmux_output_watcher_with_restore(
-                                channel_id,
-                                http.clone(),
-                                shared.clone(),
-                                output_path.clone(),
-                                tmux_session_name.clone(),
-                                initial_offset,
-                                cancel,
-                                paused,
-                                resume_offset,
-                                pause_epoch,
-                                turn_delivered,
-                                last_heartbeat_ts_ms,
-                                restored_turn,
-                            ),
-                        );
-                    }
-                }
-            }
+            #[cfg(unix)]
+            live_reattach::spawn(
+                http,
+                shared,
+                provider,
+                channel_id,
+                &tmux_session_name,
+                &output_path,
+                (Some(&state), finish_mailbox_on_completion, 0),
+            )
+            .await;
 
             // Keep the inflight state until the watcher either relays the final response or
             // triggers watcher-death handoff. Clearing it here breaks the handoff path if the

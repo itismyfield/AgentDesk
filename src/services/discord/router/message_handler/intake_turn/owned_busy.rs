@@ -2,9 +2,12 @@
 use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
 use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
+use crate::services::discord::recovery_engine::herdr_reattach::confirm_admitted_input_identity;
 
 #[path = "owned_busy/missing_watch.rs"]
 mod missing_watch;
+#[path = "owned_busy/reconnect.rs"]
+mod reconnect;
 pub(super) use missing_watch::guard as watch_guard;
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
@@ -71,12 +74,10 @@ pub(super) async fn running(
 impl OwnerTurn {
     pub(in crate::services::discord) async fn early(
         shared: &Shared,
-        provider: &ProviderKind,
-        channel: ChannelId,
-        session: Option<&str>,
-        key: Option<&str>,
+        (provider, channel, session, key): (&ProviderKind, ChannelId, Option<&str>, Option<&str>),
         owner: Option<Self>,
         fresh: bool,
+        lease: Option<&crate::services::discord::session_transition::SessionTransitionLease<'_>>,
     ) -> Result<(Option<Self>, bool), ()> {
         if fresh
             || *provider != ProviderKind::Claude
@@ -107,18 +108,30 @@ impl OwnerTurn {
         {
             owner.recovery.mark();
         }
-        match observation.state() {
-            BusyState::Legacy => return Ok((owner, true)),
-            BusyState::Idle => return Ok((owner, false)),
-            _ => {}
-        }
         let Some(owner) = owner else {
             return Ok((None, true));
         };
+        if let Err(error) = confirm_admitted_input_identity(
+            shared,
+            &owner.mailbox,
+            channel,
+            (&host, session, owner.front()),
+        )
+        .await
+        {
+            tracing::warn!(channel_id = channel.get(), %error, "restart identity hold not settled");
+            owner.defer_before_submit("herdr_restart_hold_unsettled");
+            return Err(());
+        }
+        match observation.state() {
+            BusyState::Legacy => return Ok((Some(owner), true)),
+            BusyState::Idle => return Ok((Some(owner), false)),
+            _ => {}
+        }
         if observation.state() == BusyState::Held {
-            if owner.mailbox.has_active_turn().await != Ok(true) {
+            if owner.late.restarted.is_none() && owner.mailbox.has_active_turn().await != Ok(true) {
                 return owner
-                    .recover_or_discard(shared, (provider, channel, key, session), &host)
+                    .recover_or_hold(shared, (provider, channel, key, session), &host, lease)
                     .await;
             }
             hold(
@@ -150,9 +163,11 @@ impl OwnerTurn {
         let registered = match registered {
             Ok(registered) => registered,
             Err(error) => {
-                if owner.mailbox.has_active_turn().await != Ok(true) {
+                if owner.late.restarted.is_none()
+                    && owner.mailbox.has_active_turn().await != Ok(true)
+                {
                     return owner
-                        .recover_or_discard(shared, (provider, channel, key, session), &host)
+                        .recover_or_hold(shared, (provider, channel, key, session), &host, lease)
                         .await;
                 }
                 hold(
@@ -177,8 +192,11 @@ impl OwnerTurn {
             claim,
             settled,
             runtime,
+            late,
             ..
         } = owner;
+        let mut registered = registered;
+        registered.restarted = late.restarted;
         let runtime = runtime.or_else(|| Some(shared.clone()));
         let _ = paste_busy(
             (shared.pg_pool.clone(), provider.clone(), runtime),
@@ -189,88 +207,6 @@ impl OwnerTurn {
         )
         .await;
         Err(())
-    }
-
-    async fn recover_or_discard(
-        self,
-        shared: &Shared,
-        (provider, channel, key, session): (&ProviderKind, ChannelId, Option<&str>, &str),
-        host: &TurnHost,
-    ) -> Result<(Option<Self>, bool), ()> {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-        use crate::services::claude::herdr_turn::HoldRelease;
-        use crate::services::herdr_launch::retire::{self, Scope};
-        let recovery = async {
-            let TurnHost::Herdr(plan) = host else {
-                return Err("host is not a local Herdr execution".to_string());
-            };
-            let row = plan.row.as_ref().ok_or("hosted row unavailable")?;
-            let HostedRecord::Known(record) = &row.record else {
-                return Err("hosted record unreadable".into());
-            };
-            let root = crate::config::runtime_root();
-            let at = record
-                .location
-                .as_ref()
-                .ok_or("recorded pane unavailable")?;
-            if record.state != HostedState::Bound
-                || record.owner.provider != "claude"
-                || record.owner.discord_token_hash != shared.token_hash
-                || record.owner.channel_id != channel.get().to_string()
-                || record.owner.logical_key != session
-                || root.as_deref() != Some(std::path::Path::new(&record.owner.runtime_root))
-                || crate::config::session_hosts::local_node().as_deref()
-                    != Some(record.owner.owner_node.as_str())
-                || record.owner.owner_node != plan.endpoint.execution_node
-                || at.execution_node != plan.endpoint.execution_node
-                || at.endpoint_config_key != plan.endpoint.config_key
-                || at.socket_addr != plan.endpoint.socket_addr
-                || at.named_session != plan.endpoint.herdr_session
-            {
-                return Err("local execution owner or endpoint differs".into());
-            }
-            let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
-            crate::services::discord::herdr_terminate::root_replaced::current(pool, row).await?;
-            let retired = retire::observed(pool, row, Scope::Missing)
-                .await
-                .map_err(|e| format!("retire: {e:?}"))?;
-            if retired.hold != HoldRelease::Released {
-                return Err("retired execution input hold could not be released".into());
-            }
-            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
-                session,
-                Some(&record.execution_nonce),
-            );
-            self.recovery.mark();
-            let mut expected = record.clone();
-            expected.state = HostedState::Retired;
-            match crate::services::turn_host::for_turn(Some(pool), provider, channel.get(), key)
-                .await
-            {
-                TurnHost::Herdr(next)
-                    if next
-                        .row
-                        .as_ref()
-                        .is_some_and(|row| row.record == HostedRecord::Known(expected.clone())) =>
-                {
-                    Ok(())
-                }
-                _ => Err("fresh Herdr execution is not admissible after retirement".into()),
-            }
-        }
-        .await;
-        match recovery {
-            Ok(()) => Ok((Some(self), false)),
-            Err(reason) => {
-                let failure = super::super::start_failure::Failure::owner(&self);
-                let result = failure
-                    .discard(Some(shared.clone()), channel, reason)
-                    .await
-                    .map(|_| ());
-                let _ = self.settled.send(result.map_err(effect::unsent));
-                Err(())
-            }
-        }
     }
 
     pub(in crate::services::discord) async fn legacy_diagnostic(
@@ -463,6 +399,16 @@ async fn hold(
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
     hold_start(mailbox, channel, front).await;
+    watch_held((shared, typed), mailbox, channel, front, probe).await;
+}
+
+async fn watch_held(
+    (shared, typed): (&Shared, bool),
+    mailbox: &ChannelMailboxHandle,
+    channel: ChannelId,
+    front: &Front,
+    probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
+) {
     super::super::super::busy_retry::note_busy_result(
         shared,
         &ProviderKind::Claude,

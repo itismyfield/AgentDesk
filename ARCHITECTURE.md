@@ -2293,6 +2293,7 @@ src/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
+│   │   │   │   ├── live_reattach.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
@@ -2313,6 +2314,8 @@ src/
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_missing_tests.rs
 │   │   │   ├── herdr_reader_tests.rs
+│   │   │   ├── herdr_reattach.rs
+│   │   │   ├── herdr_reattach_tests.rs
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
@@ -2491,7 +2494,8 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── owned_busy/
-│   │   │   │   │   │   └── missing_watch.rs
+│   │   │   │   │   │   ├── missing_watch.rs
+│   │   │   │   │   │   └── reconnect.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
@@ -2534,6 +2538,10 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   ├── restart_busy.rs
+│   │   │   │   │   │   ├── restarted.rs
+│   │   │   │   │   │   └── restarted_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -4266,6 +4274,7 @@ src/
 │   │   │   ├── missing_marker_rig_tests.rs
 │   │   │   ├── notice_fence_tests.rs
 │   │   │   ├── policy_tests.rs
+│   │   │   ├── restart_read.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
 │   │   ├── tmux_host/

@@ -146,6 +146,41 @@ fn the_first_due_survives_rehold_restart_and_a_clock_set_back_then_tells_once() 
 }
 
 #[test]
+fn only_a_new_composer_hold_can_set_a_due_after_identity_is_resolved() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = queue_dir();
+    let mut owner = owner(&dir, &[(6, 7), (7, 7)]);
+    let front = owner.front().unwrap();
+    let now = super::super::origin::now_ms();
+    let old = owner
+        .hold_readiness(&front, "composer_unavailable", now)
+        .unwrap();
+    owner.hold_identity(&front).unwrap();
+    assert_eq!(owner.settle_due(), None);
+    assert!(!owner.refuse_readiness_front(&old, old.due_at_ms).unwrap());
+    assert_eq!(
+        owner
+            .hold_readiness(&front, "composer_unavailable", old.due_at_ms)
+            .unwrap()
+            .due_at_ms,
+        old.due_at_ms
+    );
+    assert_eq!(owner.settle_due(), None);
+    owner.finish_identity_hold(&front).unwrap();
+    assert_eq!(owner.settle_due(), None);
+
+    let current = owner
+        .hold_readiness(&front, "composer_unavailable", old.due_at_ms)
+        .unwrap();
+    assert!(current.due_at_ms > old.due_at_ms);
+    owner.tick(old.due_at_ms).unwrap();
+    assert_eq!(owner.snapshot.items.len(), 2);
+    owner.tick(current.due_at_ms).unwrap();
+    assert!(owner.snapshot.items.is_empty());
+    assert_eq!(owner.snapshot.refused_fronts[0].members.len(), 2);
+}
+
+#[test]
 fn a_reserved_leaf_starts_its_first_key_only_before_the_original_due() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     for (start, started) in [(11_000, false), (10_999, true)] {

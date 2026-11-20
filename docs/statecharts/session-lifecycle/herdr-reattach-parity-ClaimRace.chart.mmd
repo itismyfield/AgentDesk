@@ -1,0 +1,48 @@
+---
+title: "Herdr 재시작 재부착과 평소 입력 경로"
+---
+stateDiagram-v2
+  state "작업 중 pane" as s0 {
+    state "이름 유일#183;nonce 일치" as s1 {
+      s2: dcserver 종료
+      s3: 첫 원본 대기
+      s4: 같은 원본이 큐에 있음
+      s5: 이름으로 pane 선택
+      s6: watcher#183;진행 턴 lease#183;Busy grant 인수
+      s7: 이름으로 pane 선택 (기존 lease에 headless claim 거절)
+      s8: watcher#183;진행 턴 lease#183;Busy grant 인수 (기존 lease에 headless claim 거절)
+      s9: 평소 composer 차단
+      s10: 원본의 평소 Busy 주입 예약
+      s11: 평소 composer 차단 (기존 lease에 headless claim 거절)
+      s12: 제출 결산
+      s13: 원본의 평소 Busy 주입 예약 (기존 lease에 headless claim 거절)
+      s14: 응답 불명, receipt 대기
+      s15: 답 채널 게시
+      s16: 제출 결산 (기존 lease에 headless claim 거절)
+      s17: 응답 불명, receipt 대기 (기존 lease에 headless claim 거절)
+      s18: 답 채널 게시 (기존 lease에 headless claim 거절)
+    }
+  }
+  [*] --> s2
+  s2 --> s3: dcserver 부팅
+  s3 --> s4: 같은 원본 수락
+  s4 --> s5: 현재 pane과 이름을 확인
+  s5 --> s6: 위치#183;registry#183;watcher와 owner 인수
+  s5 --> s7: 같은 채널의 새 headless claim
+  s6 --> s8: 같은 채널의 새 headless claim
+  s6 --> s9: 평소 입력 규칙 적용
+  s6 --> s10: 평소 입력 규칙 적용
+  s7 --> s8: 위치#183;registry#183;watcher와 owner 인수
+  s8 --> s11: 평소 입력 규칙 적용
+  s8 --> s13: 평소 입력 규칙 적용
+  s9 --> s6: composer가 입력 가능한 상태로 전환
+  s10 --> s12: 원본 한 번 전달
+  s10 --> s13: 같은 채널의 새 headless claim
+  s10 --> s14: 원본 한 번 전달
+  s11 --> s8: composer가 입력 가능한 상태로 전환
+  s12 --> s15: 채널에 답 게시
+  s13 --> s16: 원본 한 번 전달
+  s13 --> s17: 원본 한 번 전달
+  s14 --> s12: 제출 증거 확인
+  s16 --> s18: 채널에 답 게시
+  s17 --> s16: 제출 증거 확인

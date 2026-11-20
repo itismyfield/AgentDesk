@@ -54,10 +54,10 @@ async fn a_routine_starts_token_gates_its_writers_first_key() {
             UserId::new(7),
             &reservation,
             (ProviderKind::Claude, None),
-            None,
+            (None, None),
         )
         .await;
-        let Ok((_transition, token)) = claimed else {
+        let Ok((_transition, token, false)) = claimed else {
             panic!("an idle channel claims");
         };
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;

@@ -195,7 +195,7 @@ async fn start_reserved_headless_turn_admitted(
     .await?;
     let early_fast_mode_channel_id =
         feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
-    if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
+    let early_goal_kind = classify_codex_goal_command_for_provider(
         &provider,
         prompt,
         super::super::super::commands::channel_codex_goals_setting(
@@ -203,7 +203,8 @@ async fn start_reserved_headless_turn_admitted(
             early_fast_mode_channel_id,
         )
         .await,
-    ) {
+    );
+    if let GoalCommandKind::Lifecycle(command) = early_goal_kind {
         consume_codex_goal_lifecycle_command(
             &ctx.http,
             shared,
@@ -245,13 +246,20 @@ async fn start_reserved_headless_turn_admitted(
     );
     let claim = super::super::turn_start::claim_reserved_headless_turn;
     let front = owner.as_ref().map(|owner| owner.front().clone());
-    let (session_transition_guard, cancel_token) = claim(
+    let shared_pane = isolated_run.is_none()
+        && tmux_session_label.is_none()
+        && !fresh_routine_turn(metadata.as_ref())
+        && !matches!(early_goal_kind, GoalCommandKind::FreshStart)
+        && crate::services::turn_host::has_effective_herdr_endpoint(channel_id.get());
+    let transition_completion =
+        shared_pane.then(|| shared.session_transition_completion(channel_id));
+    let (session_transition_guard, cancel_token, continued_herdr) = claim(
         shared,
         channel_id,
         request_owner,
         &reservation,
         identity,
-        front,
+        (front, shared_pane.then_some(shared)),
     )
     .await?;
     let mailbox_scope = process_mailbox::ProcessMailboxScope::of(
@@ -523,7 +531,7 @@ async fn start_reserved_headless_turn_admitted(
             reservation.turn_id(channel_id),
         ));
     }
-    let session_retry_context = shares_channel_session
+    let session_retry_context = (shares_channel_session && !continued_herdr)
         .then(|| take_session_retry_context(shared, channel_id, Some(&turn_id)))
         .flatten();
     let retry_context = session_retry_context.as_ref();
@@ -613,18 +621,43 @@ async fn start_reserved_headless_turn_admitted(
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
         }
     }
-    // The owned start's late read takes the session id only for the channel's own pane, and runs
-    // the binding clear a fresh or snapshot start deferred.
     #[cfg(unix)]
-    let owner = owner.map(|mut owner| {
-        let channel_pane = channel_name
-            .as_deref()
-            .map(|name| provider.build_tmux_session_name(name));
-        let own = channel_pane.is_some() && channel_pane == tmux_session_name;
-        owner.read_late(own, force_fresh_provider_session || turn_local_session);
-        owner
-    });
-    if session_id.is_none() {
+    let owner = super::intake_turn::session_preparation::prepare_headless_owner(
+        (shared, &cancel_token),
+        (
+            &provider,
+            channel_id,
+            tmux_session_name.as_deref(),
+            adk_session_key.as_deref(),
+        ),
+        owner,
+        (
+            channel_name.as_deref(),
+            force_fresh_provider_session || turn_local_session,
+            session_was_cleared,
+        ),
+        continued_herdr
+            .then(|| {
+                crate::services::discord::session_transition::SessionTransitionLease::borrow(
+                    shared,
+                    channel_id,
+                    &session_transition_guard,
+                )
+                .ok()
+            })
+            .flatten()
+            .as_ref(),
+    )
+    .await?;
+    if continued_herdr
+        && !force_fresh_provider_session
+        && !turn_local_session
+        && !session_was_cleared
+    {
+        use super::intake_turn::session_preparation::{CONTINUED_HERDR, continued_session_id};
+        session_strategy_reason = CONTINUED_HERDR;
+        session_id = continued_session_id(shared, channel_id, tmux_session_name.as_deref()).await;
+    } else if session_id.is_none() {
         if force_fresh_provider_session || turn_local_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let reason = if goal_fresh {
@@ -731,24 +764,29 @@ async fn start_reserved_headless_turn_admitted(
     .await;
 
     drop(session_transition_guard);
+    drop(transition_completion);
 
     // General recall stays model-owned; session anchors use the native instruction layer.
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
 
     let memory_injection_plan =
         build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
-    let channel_recent_context = load_channel_recent_context(
-        shared.pg_pool.as_ref(),
-        channel_id,
-        session_id.as_deref(),
-        force_fresh_provider_session,
-        session_was_cleared,
-        turn_local_session,
-        dispatch_profile,
-        None,
-        session_retry_context.as_ref(),
-    )
-    .await;
+    let channel_recent_context = if continued_herdr {
+        None
+    } else {
+        load_channel_recent_context(
+            shared.pg_pool.as_ref(),
+            channel_id,
+            session_id.as_deref(),
+            force_fresh_provider_session,
+            session_was_cleared,
+            turn_local_session,
+            dispatch_profile,
+            None,
+            session_retry_context.as_ref(),
+        )
+        .await
+    };
     let materialized_uploads =
         match crate::services::cluster::attachment_transfer::materialize::prepare(
             &pending_uploads,

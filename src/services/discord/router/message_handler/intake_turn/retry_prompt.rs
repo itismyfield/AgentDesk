@@ -19,16 +19,19 @@ pub(super) fn ingress(reply: Option<String>, queued: bool, worker: bool) -> Retr
     }
 }
 
-pub(super) async fn prepare(
+pub(super) async fn prepare_for_owner(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
     mut context: RetryPromptContext,
+    continued: bool,
 ) -> Prepared {
     let mut recovery = None;
 
     if context.may_select() {
-        if context.selected.recovery.is_none() {
+        if continued {
+            context.selected.recovery = None;
+        } else if context.selected.recovery.is_none() {
             context.selected.recovery = store::peek(
                 shared.pg_pool.as_ref(),
                 &store::key("session_retry_context", provider, channel.get()),
