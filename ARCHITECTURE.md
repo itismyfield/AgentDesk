@@ -1398,6 +1398,8 @@ src/
 │   │   │   └── reaping_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
+│   │   │   │   ├── pg_tests/
+│   │   │   │   │   └── pending_lookup_tests.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -4555,6 +4557,8 @@ src/
 │   │   │   │   ├── probe.rs
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
+│   │   │   ├── fresh_resume_tests/
+│   │   │   │   └── authority_contention_tests.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── child_retirement.rs

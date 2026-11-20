@@ -327,9 +327,20 @@ where
     let progress = super::progress::Publisher::new(actor.writer.channel());
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
-        if actor.rescope() {
-            sources_resumed = false;
-            resumed.send_replace(false);
+        match actor.rescope() {
+            fresh_resume::Rescope::Changed => {
+                sources_resumed = false;
+                resumed.send_replace(false);
+            }
+            fresh_resume::Rescope::Busy => {
+                // Later source reads can take the same lock, so defer the whole poll.
+                tokio::select! {
+                    () = tokio::time::sleep(POLL_INTERVAL) => {},
+                    changed = stop.changed() => if changed.is_err() { break },
+                }
+                continue;
+            }
+            fresh_resume::Rescope::Unchanged => {}
         }
         if actor.writer.is_stopped() {
             break;
@@ -525,7 +536,7 @@ mod fresh_resume;
 mod notice_settlement;
 mod notice_work;
 #[cfg(test)]
-pub(crate) use fresh_resume::work_for_tests;
+pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
