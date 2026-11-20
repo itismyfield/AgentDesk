@@ -18,7 +18,7 @@ Both endpoints take a registered agent ID and an optional `provider=claude|codex
 
 Each section has `name`, `source` (`canon_file`, `memento`, `runtime`, or `conditional`), a nullable logical `path`, `chars` (Unicode scalar count of the displayed text), `text`, and `masked_count`. The session-start manifest identifies sections whose full text matches the captured launch text. Unattributed text is grouped into runtime sections. Reassembly uses the current shared and provider-role prompt files as a canon preview.
 
-Credential patterns cover key, token, secret, password and authorization assignments, credential command arguments and folded headers, YAML values with indented continuation lines, sensitive URL query values, PEM private keys, and recognized standalone access tokens. A truncated PEM key is masked through the end of the input. Each matching item contributes one to the count and is replaced with `***` in displayed text.
+Credential patterns cover key, token, secret, password and authorization assignments, credential command arguments and headers, sensitive URL query values, PEM private keys, and recognized standalone access tokens. A line with a match is masked from the value through the end of its paragraph, up to the next blank line; if the masked text leaves a single or double quote open at that blank line, masking continues to the end of the input. A PEM key is masked from BEGIN through END, or through the end of the input when END is missing. Each masked span contributes one to the count and is replaced with `***` in displayed text, so a paragraph holding several credentials counts once.
 
 ## GET /api/agents/{id}/anchors
 

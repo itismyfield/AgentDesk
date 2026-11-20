@@ -20,19 +20,20 @@ use super::*;
 
 const CREDENTIALS: &str = concat!(
     "Ordinary instructions.\n",
-    "--key fixture-command-value\n",
-    "Authorization: Bearer fixture-bearer-value\n",
-    "SERVICE_PASSWORD=\"fixture password with spaces\"\n",
-    "{\"api_key\":\"fixture-key-with-escaped-\\\"-quote\"}\n",
-    "postgres://audit:fixture-uri-password@localhost/db\n",
-    "ghp_fixtureStandaloneToken\n",
+    "--key fixture-command-value\n\n",
+    "Authorization: Bearer fixture-bearer-value\n\n",
+    "SERVICE_PASSWORD=\"fixture password with spaces\"\n\n",
+    "{\"api_key\":\"fixture-key-with-escaped-\\\"-quote\"}\n\n",
+    "postgres://audit:fixture-uri-password@localhost/db\n\n",
+    "ghp_fixtureStandaloneToken\n\n",
     "-----BEGIN PRIVATE KEY-----\nfixture-private-material\n-----END PRIVATE KEY-----\n",
 );
 
 const FAIL_CLOSED_SECRET: &str = "opaque-fixture-credential";
 const UNCERTAIN_PREFIX: &str = "Public malformed fixture prefix. ";
 
-// Each case has a label before |, with § marking fragments that must be absent.
+// Each case has a label before |, with § marking fragments that must be absent
+// and ¶ marking text that must stay visible.
 const PEM_CASES: &[&str] = &[
     "assigned PEM|GITHUB_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n§FAKE_PRIVATE_MATERIAL_X7Z8§\n§fixture-last-pem-row§\n-----§END RSA PRIVATE KEY§-----",
     "truncated PEM|private_key=-----BEGIN OPENSSH PRIVATE KEY-----\n§fixture-truncated-pem§\n§fixture-truncated-tail§",
@@ -63,7 +64,7 @@ fn review_cases(cases: &[&'static str]) -> impl Iterator<Item = (&'static str, &
 }
 
 fn review_input(case: &str) -> String {
-    case.replace('§', "")
+    case.replace(['§', '¶'], "")
 }
 
 fn review_fragments(case: &str) -> impl Iterator<Item = &str> {
@@ -260,20 +261,12 @@ fn prompt_audit_legacy_session_copy_preserves_multiline_anchor_without_guessing_
 }
 
 #[test]
-fn prompt_audit_legacy_session_copy_keeps_outer_anchor_on_equal_policy() {
+fn prompt_audit_anchor_context_keeps_the_last_closed_legacy_block() {
     use crate::domain::memory::{ANCHOR_CONTEXT_END as END, ANCHOR_CONTEXT_START as START};
-    let mut saved = snapshot();
-    saved.anchors = None;
-    let content = format!("Earlier anchor.\n{START}[ANCHOR MEMORY]\nQuoted item.");
-    saved.system_prompt = format!("{START}[ANCHOR MEMORY]\n{content}{END}");
-    let kind = ProviderKind::Claude;
-    let response = anchors::response("audit-fixture", &kind, None, Some(&saved), None, &[]);
-    assert_eq!(to_value(response).unwrap()["anchors"][0]["text"], content);
-    let policy = crate::domain::memory::ANCHOR_CONTEXT_POLICY;
-    let current = format!("{START}{policy}\n[ANCHOR MEMORY]\nCurrent item.{END}");
-    let prompt = format!("{START}[ANCHOR MEMORY]\nEarlier item.\n{current}");
+    let last = format!("{START}[ANCHOR MEMORY]\n- Injected item.{END}");
+    let prompt = format!("{START}[ANCHOR MEMORY]\n- Example item.{END}\nPlain text.\n{last}");
     let range = projection::anchor_context(&prompt).unwrap();
-    assert_eq!(&prompt[range], current);
+    assert_eq!(&prompt[range], last);
 }
 
 #[tokio::test]
@@ -550,6 +543,12 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
         "cookie before query|curl --cookie 'sid=@@' 'https://e.test/?token=@@' --cookie \\\n    'sid=§fixture-cookie-query-tail§'",
         "cookie before assignment|curl --cookie 'sid=@@'; SERVICE_PASSWORD=@@ curl --cookie \\\n    'sid=§fixture-cookie-assignment-tail§'",
         "adjacent shell quote fragments|curl --cookie 'sid=@@''part\n§fixture-adjacent-quote-tail§'",
+        "new key inside continued quote|API_TOKEN=\"@@ --cookie 'literal\n\"; SERVICE_PASSWORD='second\n§fixture-new-key-tail§'",
+        "single-quoted joined assignment|export API_TOKEN='@@ part'\\\n§fixture-single-joined-tail§",
+        "double-quoted joined assignment|export API_TOKEN=\"@@ part\"\\\n§fixture-double-joined-tail§",
+        "escaped-space joined assignment|export API_TOKEN=@@\\ part\\\n§fixture-escaped-space-tail§",
+        "blank line inside quoted value|PASSWORD=\"@@\n\n§fixture-blank-quoted-tail§\"",
+        "paragraph after balanced value|SERVICE_PASSWORD=\"@@\"\n\n¶Public paragraph after a masked line.¶",
     ];
     let mut failed = Vec::new();
     for (index, (name, input)) in cases
@@ -590,6 +589,11 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
                 .chain(review_fragments(truncated_pem))
                 .chain(review_fragments(input))
                 .any(|fragment| body.contains(fragment))
+                || input
+                    .split('¶')
+                    .skip(1)
+                    .step_by(2)
+                    .any(|text| !body.contains(text))
             {
                 failed.push((name, path));
             }

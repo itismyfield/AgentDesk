@@ -154,7 +154,7 @@ pub(super) fn anchor_context(input: &str) -> Option<Range<usize>> {
             };
             (!policy.contains('\n')).then_some((policy == ANCHOR_CONTEXT_POLICY, start))
         })
-        .max_by_key(|&(matches_policy, start)| (matches_policy, std::cmp::Reverse(start)))?;
+        .max()?;
     Some(start..end)
 }
 

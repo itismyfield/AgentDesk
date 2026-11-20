@@ -34,169 +34,65 @@ static SECRET: LazyLock<Regex> = LazyLock::new(|| {
     )).expect("valid standalone credential patterns")
 });
 
-#[derive(Clone, Copy)]
-enum Quote {
-    Single,
-    Double,
-    AnsiSingle,
+/// A backslash never escapes a single quote in plain shell text, but it does in `$'...'` and
+/// before a double quote, so either single-quote count being odd leaves a quote open.
+fn unbalanced(span: &str) -> bool {
+    let (mut single, mut unescaped, mut double, mut escaped) = (0, 0, 0, false);
+    for byte in span.bytes() {
+        match byte {
+            b'\'' => {
+                single += 1;
+                unescaped += usize::from(!escaped);
+            }
+            b'"' if !escaped => double += 1,
+            _ => {}
+        }
+        escaped = byte == b'\\' && !escaped;
+    }
+    (single | unescaped | double) % 2 == 1
 }
 
-impl Quote {
-    fn unclosed(mut value: &[u8]) -> Option<Self> {
-        // Adjacent quoted fragments belong to the same shell word.
-        loop {
-            let (quote, body) = match value {
-                [b'\'', body @ ..] => (Self::Single, body),
-                [b'"', body @ ..] => (Self::Double, body),
-                [b'$', b'\'', body @ ..] => (Self::AnsiSingle, body),
-                []
-                | [
-                    b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>',
-                    ..,
-                ] => {
-                    return None;
-                }
-                [b'\\', _, rest @ ..] | [_, rest @ ..] => {
-                    value = rest;
-                    continue;
-                }
-            };
-            let Some(close) = quote.close(body) else {
-                return Some(quote);
-            };
-            value = &body[close..];
-        }
-    }
-
-    fn close(self, body: &[u8]) -> Option<usize> {
-        let (delimiter, escapes) = match self {
-            Self::Single => (b'\'', false),
-            Self::Double => (b'"', true),
-            Self::AnsiSingle => (b'\'', true),
-        };
-        let mut bytes = body.iter().copied().enumerate();
-        while let Some((index, byte)) = bytes.next() {
-            if byte == delimiter {
-                return Some(index + 1);
-            }
-            if escapes && byte == b'\\' {
-                bytes.next();
+fn value_start(line: &str) -> Option<usize> {
+    let keyed = KEY.captures_iter(line).filter_map(|hit| {
+        if let Some(query) = hit.name("query") {
+            match url::form_urlencoded::parse(query.as_str().as_bytes()).next() {
+                Some((name, _)) if FIELD_NAME.is_match(&name) => {}
+                Some((name, _)) if !name.contains(['%', '\u{fffd}']) => return None,
+                _ => return Some(0),
             }
         }
-        None
-    }
-}
-
-#[derive(Default)]
-struct Continuation {
-    indent: Option<usize>,
-    quotes: [Option<Quote>; 3],
-    escaped: bool,
+        let end = hit.get(0).unwrap().end();
+        // An escaped or quoted start can bind the apparent key to preceding text.
+        let uncertain = line[end..].trim_start().starts_with(['"', '\'', '$', '\\']);
+        Some(if uncertain { 0 } else { end })
+    });
+    keyed.chain(SECRET.find(line).map(|hit| hit.start())).min()
 }
 
 pub(super) fn ranges(input: &str) -> Vec<Range<usize>> {
     let mut matches: Vec<_> = with_registered_secret_ranges(input, |ranges| ranges.collect());
     matches.extend(PEM.find_iter(input).map(|hit| hit.range()));
-    let mut offset = 0;
-    let mut fold: Option<(usize, Continuation)> = None;
+    // A sensitive value is masked through the end of its paragraph; a quote still open at the
+    // blank line keeps masking to the end of the input.
+    let (mut open, mut offset, mut end) = (None, 0, 0);
     for raw in input.split_inclusive('\n') {
         let base = offset;
         offset += raw.len();
         let line = raw.trim_end_matches(['\r', '\n']);
-        let end = base + line.len();
-        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-        let blank = line.trim().is_empty();
-        let mut scan = line;
-        let mut next = Continuation::default();
-        let mut joined = None;
-        if let Some((index, previous)) = fold.take() {
-            let quoted = previous.quotes.iter().any(Option::is_some);
-            if previous.escaped
-                || quoted
-                || previous
-                    .indent
-                    .is_some_and(|limit| indent > limit && !blank)
-            {
-                joined = Some(index);
-                next.indent = previous.indent;
-                if quoted {
-                    let mut resume = 0;
-                    for quote in previous.quotes.into_iter().flatten() {
-                        let open = if let Some(close) = quote.close(line.as_bytes()) {
-                            resume = resume.max(close);
-                            Quote::unclosed(&line.as_bytes()[close..])
-                        } else {
-                            Some(quote)
-                        };
-                        if let Some(quote) = open {
-                            next.quotes[quote as usize] = Some(quote);
-                            resume = line.len();
-                        }
-                    }
-                    scan = &line[resume..];
-                } else if previous.escaped
-                    && let Some(quote) = Quote::unclosed(line.trim_start().as_bytes())
-                {
-                    next.quotes[quote as usize] = Some(quote);
+        match open {
+            Some(start) if line.trim().is_empty() => {
+                if unbalanced(&input[start..base]) {
+                    break;
                 }
-            } else if blank {
-                fold = Some((index, previous));
-                continue;
+                matches.push(start..end);
+                open = None;
             }
+            Some(_) => {}
+            None => open = value_start(line).map(|start| base + start),
         }
-
-        let mut start = SECRET.find(scan).map(|hit| hit.start());
-        for hit in KEY.captures_iter(scan) {
-            let end = hit.get(0).unwrap().end();
-            let value = scan[end..].trim_start();
-            if let Some(query) = hit.name("query") {
-                match url::form_urlencoded::parse(query.as_str().as_bytes()).next() {
-                    Some((name, _)) if FIELD_NAME.is_match(&name) => {}
-                    Some((name, _)) if !name.contains(['%', '\u{fffd}']) => continue,
-                    _ => {
-                        start = Some(0);
-                        continue;
-                    }
-                }
-            } else {
-                // A key opened inside quotes, as in 'X-Api-Key: ', lets the value close them.
-                let open = match Quote::unclosed(hit.get(0).unwrap().as_str().as_bytes()) {
-                    Some(quote) => match quote.close(value.as_bytes()) {
-                        Some(close) => Quote::unclosed(&value.as_bytes()[close..]),
-                        None => Some(quote),
-                    },
-                    None => Quote::unclosed(value.as_bytes()),
-                };
-                if let Some(quote) = open {
-                    next.quotes[quote as usize] = Some(quote);
-                }
-                next.escaped |= value.ends_with('\\') && !value.contains(char::is_whitespace);
-            }
-            if hit.name("fold").is_some() {
-                let limit = if hit.name("setting").is_some() {
-                    indent
-                } else {
-                    0
-                };
-                next.indent = Some(next.indent.map_or(limit, |prior| prior.min(limit)));
-            }
-            let candidate = if value.starts_with(['"', '\'', '$', '\\']) {
-                0
-            } else {
-                end
-            };
-            start = Some(start.map_or(candidate, |prior| prior.min(candidate)));
-        }
-        if let Some(index) = joined {
-            matches[index].end = end;
-        } else if let Some(start) = start {
-            matches.push(base + start..end);
-        } else {
-            continue;
-        }
-        next.escaped |= line.ends_with('\\') && (joined.is_some() || next.indent.is_some());
-        fold = Some((joined.unwrap_or(matches.len() - 1), next));
+        end = base + line.len();
     }
+    matches.extend(open.map(|start| start..input.len()));
     matches.retain(|span| !span.is_empty());
     matches.sort_unstable_by_key(|range| range.start);
     let mut ranges: Vec<Range<usize>> = Vec::new();
