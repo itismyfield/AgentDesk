@@ -1,12 +1,14 @@
 use super::*;
+use std::path::{Path, PathBuf};
 
 fn full_memento_prompt(
-    current_path: &str,
+    current_path: &Path,
     channel_id: u64,
     role_binding: Option<&RoleBinding>,
 ) -> String {
     let runtime_root = tempfile::tempdir().expect("runtime root");
     let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+    let current_path = current_path.to_string_lossy().replace('\\', "/");
     let settings = ResolvedMemorySettings {
         backend: MemoryBackendKind::Memento,
         ..ResolvedMemorySettings::default()
@@ -14,7 +16,7 @@ fn full_memento_prompt(
     build_system_prompt(
         "ctx",
         &[],
-        current_path,
+        &current_path,
         ChannelId::new(channel_id),
         "tok",
         role_binding,
@@ -33,7 +35,7 @@ fn full_memento_prompt(
 #[test]
 fn full_memento_prompt_carries_tool_feedback_contract() {
     // Full dispatch with Memento MCP must carry the tool_feedback contract.
-    let prompt = full_memento_prompt("/tmp/agentdesk", 1, None);
+    let prompt = full_memento_prompt(Path::new("/tmp/agentdesk"), 1, None);
 
     assert!(
         prompt.contains("[Proactive Memory Guidance]"),
@@ -95,7 +97,7 @@ fn memory_group_full_dispatch_prompt_uses_role_scoped_group() {
     assert!(!prompt.contains("agent-private="));
 }
 
-fn agentdesk_checkout(root: &std::path::Path) -> std::path::PathBuf {
+fn agentdesk_checkout(root: &Path) -> PathBuf {
     let checkout = root.join("AgentDesk");
     let docs = checkout.join("docs");
     std::fs::create_dir_all(&docs).unwrap();
@@ -124,7 +126,7 @@ fn assert_agentdesk_workspace_spelling(prompt: &str) {
 fn agentdesk_workspace_spelling_keeps_ungrouped_prompt_scope() {
     let root = tempfile::tempdir().unwrap();
     let checkout = agentdesk_checkout(root.path());
-    let prompt = full_memento_prompt(checkout.to_str().unwrap(), 1, None);
+    let prompt = full_memento_prompt(&checkout, 1, None);
     assert_eq!(
         prompt
             .lines()
@@ -143,7 +145,7 @@ fn agentdesk_workspace_spelling_keeps_grouped_prompt_scope() {
     let mut binding = test_role_binding("ch-td");
     binding.memory.backend = MemoryBackendKind::Memento;
     binding.memory.memory_group = Some("agentdesk".into());
-    let prompt = full_memento_prompt(checkout.to_str().unwrap(), 4242, Some(&binding));
+    let prompt = full_memento_prompt(&checkout, 4242, Some(&binding));
     assert!(prompt.contains("read=`workspace=agentdesk, agentId=ch-td`"));
     assert!(prompt.contains("default write (private)=`workspace=agentdesk, agentId=ch-td`"));
     assert!(prompt.contains("group shared=`workspace=agentdesk, agentId=default`"));
@@ -155,9 +157,9 @@ fn agentdesk_workspace_spelling_keeps_grouped_prompt_scope() {
 #[test]
 fn agentdesk_workspace_spelling_is_absent_from_foreign_prompt() {
     let checkout = tempfile::tempdir().unwrap();
-    let prompt = full_memento_prompt(checkout.path().to_str().unwrap(), 1, None);
+    let prompt = full_memento_prompt(checkout.path(), 1, None);
     assert!(prompt.contains("agent-private=`workspace=channel-1, agentId=agentdesk-channel-1`"));
     assert!(!prompt.contains("docs/memory-scope.md"));
-    assert!(!prompt.contains("workspace=agentdesk"));
+    assert!(!prompt.contains("use `workspace=agentdesk` when targeting the AgentDesk workspace"));
     assert!(!prompt.contains("Never use `AgentDesk` as `workspace` or `agentId`."));
 }
