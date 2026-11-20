@@ -8,7 +8,7 @@ import re
 import subprocess
 import tomllib
 
-from ci.rust_test_sources import attribute_span, crate_roots, walk
+from ci.rust_test_sources import attribute_span, crate_roots, walk, workspace_lib_roots, workspace_packages
 from .service_server_backflow import USE_TREE, _use_paths
 from .. import common
 from ..common import Finding
@@ -17,6 +17,7 @@ from .module_layer_baseline import _id, load_mapping, project
 
 SCHEMA_VERSION = 1
 ITEMS = {"fn", "struct", "enum", "union", "trait", "type", "const", "static"}
+EXTERNAL_ROOTS = {"std", "core", "alloc", "Self", "Vec", "String", "Box", "Option", "Result"}
 
 
 def _code(tokens):
@@ -90,11 +91,12 @@ def _call_expressions(source):
     return result
 
 
-def _crate(root, repo, coverage, external, occurrences=None, reference_expressions=False):
-    inv = walk(root, repo, production=True)
+def _crate(root, repo, coverage, external, local_crates, occurrences=None, reference_expressions=False,
+           *, manifest_dir=None):
+    inv = walk(root, repo, production=True, manifest_dir=manifest_dir)
     root, repo = root.resolve(), repo.resolve()
     rel_root = root.relative_to(repo).as_posix()
-    node = lambda names: rel_root + "::crate" + ("::" + "::".join(names) if names else "")
+    node = lambda names: "::".join((rel_root, "crate", *names))
     nodes = {node(names) for names in inv.logical_modules}
     coverage["reached_files"].update(p.relative_to(repo).as_posix() for p in inv.reached)
     coverage["read_failures"].extend(inv.read_failures)
@@ -319,7 +321,7 @@ def _crate(root, repo, coverage, external, occurrences=None, reference_expressio
         return (prefix, prefix), "resolved"
 
     edges, census = defaultdict(set), []
-    resolved_refs = []
+    resolved_refs, workspace_refs = [], []
     for ref in refs:
         path, owner, scope, file, line, kind, _offset, namespace = ref
         result, reason = resolve(path, owner, scope, macro=kind == "macro", namespace=namespace)
@@ -338,6 +340,8 @@ def _crate(root, repo, coverage, external, occurrences=None, reference_expressio
                 if occurrences is not None:
                     occurrences.add((*key, file, _offset))
             resolved_refs.append((ref, canonical, target))
+        elif result is not None and result[1][0] in local_crates:
+            workspace_refs.append((ref, result[1]))
         # This census counts written boundary paths, independent of canonical ownership.
         clean = list(path)
         if clean and clean[0] in {"crate", "$crate", "self", "super"}:
@@ -369,7 +373,46 @@ def _crate(root, repo, coverage, external, occurrences=None, reference_expressio
                 edges[key].add(f"{caller[3]}:{caller[4]}")
                 if occurrences is not None:
                     occurrences.add((*key, caller[3], caller[6], body[3], body[6]))
-    return nodes, edges, census
+    return nodes, edges, census, workspace_refs, follow, inv.reached
+
+
+def _local_dependencies(manifest, cargo, workspace, libraries):
+    """Find declared workspace path dependencies under their Rust import names."""
+    workspace_dir, shared = workspace
+    dependencies = [cargo.get("dependencies", {})]
+    dependencies.extend(target.get("dependencies", {}) for target in cargo.get("target", {}).values())
+    aliases = defaultdict(set)
+    for section in dependencies:
+        for name, spec in section.items():
+            directory = manifest.parent
+            if isinstance(spec, dict) and spec.get("workspace") is True:
+                directory, spec = workspace_dir, shared.get(name)
+            path = spec.get("path") if isinstance(spec, dict) else None
+            aliases[name.replace("-", "_")].add(libraries.get((directory / path).resolve()) if path else None)
+    return {name: next(iter(paths)) if len(paths) == 1 else None
+            for name, paths in aliases.items() if any(paths)}
+
+
+def _workspace_edge(root, path, ref, dependencies, resolvers):
+    """Resolve the remaining path in its actual crate, including further reexports."""
+    trail = set()
+    while path[0] in dependencies[root]:
+        target = dependencies[root][path[0]]
+        if target is None:
+            return None, "cfg-ambiguous workspace dependency"
+        if target in trail or target == root:
+            return None, "workspace dependency cycle"
+        trail.add(root)
+        root = target
+        if root not in resolvers:
+            return None, "workspace dependency library root not reached"
+        result, reason = resolvers[root]((), list(path[1:]), frozenset(), ref[5] == "macro", ref[7])
+        if result is None:
+            return None, reason
+        owner, path = result
+        if owner is not None:
+            return "::".join((root, "crate", *owner)), "resolved"
+    return None, "external"
 
 
 def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
@@ -378,27 +421,70 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
     coverage = {"reached_files": set(), "cfg_scope": "all-non-test-cfg-union", "read_failures": [],
                 "module_errors": [], "cfg_uncertainties": [], "unresolved_references": [], "cfg_conditions": [],
                 "target_os": "all (source union; cfg feasibility not evaluated)"}
-    external = {"std", "core", "alloc", "Self", "Vec", "String", "Box", "Option", "Result"}
+    repo_path = repo.resolve()
     manifest = repo / "Cargo.toml"
-    if manifest.is_file():
-        try:
-            cargo = tomllib.loads(manifest.read_text("utf-8"))
-            for section in ("dependencies", "dev-dependencies", "build-dependencies"):
-                external.update(name.replace("-", "_") for name in cargo.get(section, {}))
-        except (OSError, UnicodeError, ValueError) as exc:
-            coverage["read_failures"].append(f"Cargo.toml: {exc}")
-    nodes, edges, census = set(), defaultdict(set), []
+    root_package = (manifest, {})
+    try:
+        packages = {path.parent.resolve(): (path, cargo) for path, cargo in workspace_packages(repo)}
+        library_packages = {lib.resolve(): path.parent.resolve() for path, lib in workspace_lib_roots(repo).values()}
+        libraries = {package: lib.relative_to(repo_path).as_posix() for lib, package in library_packages.items()}
+        roots = crate_roots(repo)
+        if repo_path in packages:
+            root_package = packages[repo_path]
+        elif manifest.is_file():
+            root_package = (manifest, tomllib.loads(manifest.read_text("utf-8")))
+    except (OSError, UnicodeError, ValueError) as exc:
+        coverage["read_failures"].append(f"Cargo.toml: {exc}")
+        packages, library_packages, libraries, roots = {}, {}, {}, []
+    shared = (repo_path, root_package[1].get("workspace", {}).get("dependencies", {}))
+    aliases_by_package = {path: _local_dependencies(path, cargo, shared, libraries)
+                          for path, cargo in packages.values()}
+    targets = {target for aliases in aliases_by_package.values() for target in aliases.values() if target}
+    nodes, edges, census, pending = set(), defaultdict(set), [], []
+    dependencies, resolvers, library_files = {}, {}, {}
     # Physical token provenance preserves repeated references and removes repeated cfg visits.
     occurrences = set() if occurrence_projection is not None else None
-    roots = crate_roots(repo)
     if not roots:
         coverage["module_errors"].append("no crate roots found")
     for root in roots:
-        found, dependencies, references = _crate(root, repo, coverage, external, occurrences, reference_expressions)
+        root = root.resolve()
+        rel_root = root.relative_to(repo_path).as_posix()
+        if root in library_packages:
+            path, cargo = packages[library_packages[root]]
+        else:
+            path, cargo = next((packages[parent] for parent in root.parents if parent in packages), root_package)
+        aliases = aliases_by_package.get(path, {})
+        dependencies[rel_root] = aliases
+        external = EXTERNAL_ROOTS | set(aliases)
+        for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+            external.update(name.replace("-", "_") for name in cargo.get(section, {}))
+        found, crate_edges, references, workspace_refs, resolve_export, reached = _crate(
+            repo / rel_root, repo, coverage, external, aliases, occurrences, reference_expressions,
+            manifest_dir=path.parent)
+        if rel_root in targets:
+            resolvers[rel_root] = resolve_export
+        if rel_root in libraries.values():
+            library_files[rel_root] = sorted(p.relative_to(repo_path).as_posix() for p in reached)
+        pending.extend((rel_root, ref, path) for ref, path in workspace_refs)
         nodes.update(found)
-        for key, sites in dependencies.items():
+        for key, sites in crate_edges.items():
             edges[key].update(sites)
         census.extend(references)
+    for missing in sorted(set(libraries.values()) - library_files.keys()):
+        coverage["module_errors"].append(f"{missing}: workspace library root not reached")
+    for rel_root, ref, path in pending:
+        written, owner, _scope, file, line, kind, offset, _namespace = ref
+        source = "::".join((rel_root, "crate", *owner))
+        target, reason = _workspace_edge(rel_root, path, ref, dependencies, resolvers)
+        site = f"{file}:{line}"
+        if target is not None:
+            key = (source, target, kind)
+            edges[key].add(site)
+            if occurrences is not None:
+                occurrences.add((*key, file, offset))
+        elif reason != "external":
+            coverage["unresolved_references"].append(
+                {"source": source, "site": site, "path": "::".join(written), "reason": reason})
     if occurrence_projection is not None:
         counts = defaultdict(int)
         for source, target, kind, *_provenance in occurrences:
@@ -406,7 +492,8 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
         occurrence_projection.extend({"source": source, "target": target, "kind": kind, "count": count}
                                      for (source, target, kind), count in sorted(counts.items()))
     git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
-    coverage.update(reached_files=sorted(coverage["reached_files"]), logical_modules=len(nodes),
+    coverage.update(reached_files=sorted(coverage["reached_files"]), library_files=library_files,
+                    logical_modules=len(nodes),
                     unclassified_modules=sorted(nodes), classification="not-configured", complete=False)
     return {"schema_version": SCHEMA_VERSION, "tool_version": 1, "input_sha": git.stdout.strip() if git.returncode == 0 else None,
             "coverage": coverage, "nodes": sorted(nodes), "census": census, "sccs": _sccs(nodes, edges),

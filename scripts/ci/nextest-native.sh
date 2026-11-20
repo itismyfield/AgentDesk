@@ -20,7 +20,7 @@ ci() { python3 scripts/ci/nextest_ci.py "$@"; }
 mkdir -p "$dir/extract"
 
 if [ "$phase" != run ]; then
-  cargo nextest archive --lib --archive-file "$archive"
+  cargo nextest archive --lib --workspace --archive-file "$archive"
   cargo nextest list --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \
     --ignore-default-filter --message-format json >"$dir/universe.json"
   python3 scripts/ci/rust_test_sources.py compare --platform "$platform" --list "$dir/universe.json" \

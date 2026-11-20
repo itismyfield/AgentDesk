@@ -83,9 +83,31 @@ def _id_text(test_id):
 
 
 def _check_id(binary_id, test_name):
-    if not ID_RE.match(binary_id) or not ID_RE.match(test_name):
+    if any(not isinstance(part, str) or not ID_RE.fullmatch(part) for part in (binary_id, test_name)):
         raise PlanError(f"unsupported characters in test ID {binary_id!r} {test_name!r}")
     return (binary_id, test_name)
+
+
+def _test_id(value, legacy_binary=None):
+    if isinstance(value, list) and len(value) == 2:
+        return _check_id(*value)
+    if isinstance(value, str) and legacy_binary is not None:
+        return _check_id(legacy_binary, value)
+    raise PlanError(f"expected a binary-qualified test ID, found {value!r}")
+
+
+def _test_ids(values, legacy_binary=None):
+    if not isinstance(values, list):
+        raise PlanError("expected a list of test IDs")
+    ids = {_test_id(value, legacy_binary) for value in values}
+    if len(ids) != len(values):
+        raise PlanError("duplicate test ID")
+    return ids
+
+
+def _single_binary(ids):
+    binaries = {test[0] for test in ids}
+    return binaries.pop() if len(binaries) == 1 else None
 
 
 def load_universe(path):
@@ -94,10 +116,14 @@ def load_universe(path):
         doc = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
         raise PlanError(f"cannot read nextest list {path}: {exc}") from exc
+    return universe_from_list(doc)
+
+
+def universe_from_list(doc):
     suites = doc.get("rust-suites") if isinstance(doc, dict) else None
     if not isinstance(suites, dict):
         raise PlanError("nextest list has no rust-suites object (old or non-nextest format)")
-    runnable, ignored = set(), set()
+    runnable, ignored, binaries = set(), set(), set()
     for key, suite in suites.items():
         if not isinstance(suite, dict) or not isinstance(suite.get("testcases"), dict):
             raise PlanError(f"suite {key!r} has no testcases object")
@@ -106,6 +132,9 @@ def load_universe(path):
         binary_id = suite.get("binary-id")
         if not isinstance(binary_id, str):
             raise PlanError(f"suite {key!r} has no binary-id")
+        if binary_id in binaries:
+            raise PlanError(f"duplicate nextest binary ID {binary_id!r}")
+        binaries.add(binary_id)
         for name, case in suite["testcases"].items():
             if not isinstance(case, dict) or not isinstance(case.get("ignored"), bool):
                 raise PlanError(f"testcase {name!r} has no ignored flag")
@@ -348,15 +377,20 @@ def adopt_identity(args):
 
 
 def only_listed(universe, ignored, path):
-    """Keep the lib tests pg_test_classifier.py's JSON names under non_pg."""
+    """Keep the exact non-PG IDs from the source classifier."""
+    listed = universe | ignored
     try:
-        names = set(json.loads(Path(path).read_text())["non_pg"])
+        doc = json.loads(Path(path).read_text())
+        if "non_pg_ids" in doc:
+            ids = _test_ids(doc["non_pg_ids"])
+        else:
+            ids = _test_ids(doc["non_pg"], _single_binary(listed))
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PlanError(f"cannot read non_pg names from {path}: {exc}") from exc
-    keep = {t for t in universe if t[1] in names}
-    if not keep or names - {t[1] for t in universe | ignored}:
+        raise PlanError(f"cannot read non-PG IDs from {path}: {exc}") from exc
+    keep = universe & ids
+    if not keep or ids - listed:
         raise PlanError(f"{path} names tests outside the listed universe or selects none")
-    return keep, {t for t in ignored if t[1] in names}
+    return keep, ignored & ids
 
 
 def census_source(root):
@@ -712,42 +746,55 @@ def load_justifications(path):
     return rows
 
 
-def platform_losses(path, binary_id):
-    """Native losses and IDs present in either source tree; unknown presence stays fail-closed."""
+def source_losses(path, legacy_binary):
+    """Read binary-qualified source losses, presence and verified relocations."""
+    platforms = ("linux", "macos", "windows")
     try:
         doc = json.loads(Path(path).read_text())
-        lost = {(kind, p): doc[key][p] for kind, key in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored"))
-                for p in ("macos", "windows")}
+        if not isinstance(doc, dict):
+            raise PlanError("source losses must be an object")
+        source = doc.get("by_binary", doc)
+        if not isinstance(source, dict):
+            raise PlanError("binary-qualified source losses must be an object")
+        legacy = legacy_binary if source is doc else None
+        removed = {p: _test_ids(source["removed"][p], legacy) for p in platforms}
+        new_ignored = {p: _test_ids(source["runnable_to_ignored"][p], legacy) for p in platforms}
+        presence = source.get("present_tests")
+        present = None
+        if presence is not None:
+            if source is doc:
+                # Old reports may lack native presence or separately lack Linux presence.
+                try:
+                    present = {p: _test_ids(presence[p], legacy) for p in platforms if p != "linux"}
+                except (KeyError, TypeError, PlanError):
+                    pass
+                if present is not None:
+                    try:
+                        present["linux"] = _test_ids(presence["linux"], legacy)
+                    except (KeyError, TypeError, PlanError):
+                        pass
+            else:
+                present = {p: _test_ids(presence[p]) for p in platforms}
+        moves = doc.get("relocated", {})
+        if not isinstance(moves, dict) or set(moves) - set(platforms):
+            raise PlanError("invalid source relocation platforms")
+        relocated = {p: {} for p in platforms}
+        for platform, rows in moves.items():
+            if not isinstance(rows, list):
+                raise PlanError("expected a list of source relocations")
+            destinations = set()
+            for row in rows:
+                if not isinstance(row, list) or len(row) != 2:
+                    raise PlanError("expected a source and destination for each relocation")
+                old, new = map(_test_id, row)
+                if (old in relocated[platform] or new in destinations or old not in removed[platform]
+                        or new in removed[platform] or present is None or new not in present.get(platform, ())):
+                    raise PlanError(f"invalid {platform} source relocation: {old!r} -> {new!r}")
+                relocated[platform][old] = new
+                destinations.add(new)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PlanError(f"cannot read source losses {path}: {exc}") from exc
-    found = {}
-    for (kind, platform), names in lost.items():
-        for name in names:
-            found.setdefault((_id_text(_check_id(binary_id, name)), kind), []).append(platform)
-    presence = doc.get("present_tests")
-    if not isinstance(presence, dict) or any(not isinstance(presence.get(p), list) for p in ("macos", "windows")):
-        return found, None
-    names = presence["macos"] + presence["windows"]
-    if any(not isinstance(name, str) or not ID_RE.fullmatch(name) for name in names):
-        return found, None
-    by_platform = {p: {_check_id(binary_id, name) for name in presence[p]} for p in ("macos", "windows")}
-    linux_removed = doc["removed"].get("linux")
-    if all(isinstance(names, list) and all(isinstance(t, str) and ID_RE.fullmatch(t) for t in names)
-           for names in (presence.get("linux"), linux_removed)):
-        # Legacy rows ignore Linux presence; scoped rows need current source IDs as well as plan IDs.
-        by_platform["linux"] = ({_check_id(binary_id, name) for name in presence["linux"]}
-                                - {_check_id(binary_id, name) for name in linux_removed})
-    return found, by_platform
-
-
-def linux_source_losses(path, binary_id):
-    """Linux losses between the base and head sources, for a baseline plan older than the base."""
-    try:
-        doc = json.loads(Path(path).read_text())
-        names = {kind: doc[key]["linux"] for kind, key in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored"))}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PlanError(f"cannot read source losses {path}: {exc}") from exc
-    return {(_id_text(_check_id(binary_id, name)), kind): ["linux"] for kind, found in names.items() for name in found}
+    return removed, new_ignored, present, relocated
 
 
 def cmd_base_diff(args):
@@ -778,22 +825,34 @@ def cmd_base_diff(args):
 
     run, ign = sets(plan)
     base_run, base_ign = sets(base)
-    binaries = {t[0] for t in run | ign}
-    if len(binaries) != 1:
-        raise PlanError(f"source removals need one lib binary in the plan, found {sorted(binaries)}")
-    binary_id = binaries.pop()
-    platform_lost, native_present = platform_losses(args.source_removed, binary_id)
+    head_ids, base_ids = run | ign, base_run | base_ign
+    removed, new_ignored, present_sources, relocated = source_losses(
+        args.source_removed, _single_binary(head_ids | base_ids))
     ancestor = baseline_sha != args.comparison_base_sha
-    if ancestor:
-        # The ancestor plan cannot see tests the base added; the base -> head sources stand in for Linux.
-        for (test, kind), platforms in linux_source_losses(args.source_removed, binary_id).items():
-            platform_lost.setdefault((test, kind), []).extend(platforms)
+    linux_moves = relocated["linux"]
+    for old, new in linux_moves.items():
+        if (old in head_ids or new not in head_ids or new in base_ids
+                or (old not in base_ids and not ancestor)
+                or (old in base_ids and (old in base_ign) != (new in ign))):
+            raise PlanError(f"source relocation disagrees with compiled plans: {old!r} -> {new!r}")
+    platform_lost = {}
+    for platform in removed:
+        # The ancestor plan cannot see tests the base added; those Linux losses come from sources.
+        if platform == "linux" and not ancestor:
+            continue
+        for kind, ids in (("removed", removed[platform] - relocated[platform].keys()),
+                          ("runnable->ignored", new_ignored[platform])):
+            for test in ids:
+                platform_lost.setdefault((_id_text(test), kind), []).append(platform)
     diff = {"comparison_base_sha": args.comparison_base_sha, "scope": plan["identity"]["scope"],
-            "removed": sorted(_id_text(t) for t in (base_run | base_ign) - (run | ign)),
+            "removed": sorted(_id_text(t) for t in base_ids - head_ids - linux_moves.keys()),
             "runnable_to_ignored": sorted(_id_text(t) for t in base_run & ign),
             "ignored_to_runnable": sorted(_id_text(t) for t in base_ign & run),
-            "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign)),
+            "added": sorted(_id_text(t) for t in head_ids - base_ids - set(linux_moves.values())),
             "platform_losses": {f"{t} | {kind}": p for (t, kind), p in sorted(platform_lost.items())}}
+    if any(relocated.values()):
+        diff["relocated"] = {p: [[old, new] for old, new in sorted(moves.items())]
+                             for p, moves in relocated.items()}
     if ancestor:
         diff["baseline_sha"] = baseline_sha
     losses = {key: set(platforms) for key, platforms in platform_lost.items()}
@@ -806,21 +865,18 @@ def cmd_base_diff(args):
     matched = {row for row in justified if row[:2] in losses
                and (row[2] is None or row[2] in losses[row[:2]])}
     stale = set(justified) - matched
-    present = base_run | base_ign | run | ign
+    present = base_ids | head_ids
     # A platform exclusion remains meaningful only while another platform retains coverage.
     def platform_exclusion_remains(row):
         test, _kind, platform = row
-        if platform is None or native_present is None or platform not in native_present:
+        if platform is None or present_sources is None or platform not in present_sources:
             return False
         test_id = tuple(test.split(" "))
 
         def in_head(p):
-            if p == "linux":
-                return native_present.get("linux", set()) | run | ign
             # Source presence is base | head; subtract native removals to recover head.
-            removed = {tuple(t.split(" ")) for (t, kind), platforms in platform_lost.items()
-                       if kind == "removed" and p in platforms}
-            return native_present[p] - removed
+            current = present_sources.get(p, set()) - removed[p]
+            return current | head_ids if p == "linux" else current
 
         target = in_head(platform)
         others = set().union(*(in_head(p) for p in ("linux", "macos", "windows") if p != platform))
@@ -829,7 +885,7 @@ def cmd_base_diff(args):
     carried = {row for row in stale if platform_exclusion_remains(row)}
     stale -= carried
     # Legacy rows retain their existing whole-test removal and warning behavior.
-    native_union = native_present["macos"] | native_present["windows"] if native_present is not None else None
+    native_union = present_sources["macos"] | present_sources["windows"] if present_sources is not None else None
     landed = {row for row in stale if row[2] is None
               and native_union is not None and tuple(row[0].split(" ")) not in present | native_union}
 

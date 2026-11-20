@@ -262,7 +262,10 @@ class LibTestArtifactTests(unittest.TestCase):
         binary.write_bytes(self.executable.read_bytes())
         binary.chmod(0o755)
         return {"rust-suites": {"agentdesk": {"binary-id": "agentdesk", "kind": "lib",
-                                                "binary-path": str(binary)}}}
+                                                "binary-path": str(binary), "testcases": {
+                                                    "alpha::test": {"ignored": False},
+                                                    "beta::ignored": {"ignored": True},
+                                                }}}}
 
     def import_nextest(self, source, listing):
         def capture(argv, root, env=None):
@@ -284,6 +287,27 @@ class LibTestArtifactTests(unittest.TestCase):
         self.assertEqual(self.builds, 0)
         os.environ["GITHUB_RUN_ATTEMPT"] = "3"
         self.assertEqual(artifact.validate(self.directory, self.root), self.directory / "lib-tests")
+
+    def test_workspace_archive_validates_both_libs_and_packages_only_the_root(self):
+        source, plan = self.nextest_source()
+        plan["workers"][0]["tests"].append(["adk-store", "alpha::test"])
+        plan["universe_count"] = 2
+        plan["universe_digest"] = nextest_ci._digest(sorted(plan["workers"][0]["tests"]))
+        self.save_plan(source, plan)
+        listing = self.nextest_list(source)
+        with self.assertRaisesRegex(ValueError, "workspace plan"):
+            self.import_nextest(source, listing)
+        child = source / "extract/target/debug/deps/adk-store-fixture"
+        child.write_bytes(b"fake member executable\n")
+        listing["rust-suites"]["adk-store"] = {
+            "binary-id": "adk-store", "kind": "lib", "binary-path": str(child),
+            "testcases": {"alpha::test": {"ignored": False}},
+        }
+        self.import_nextest(source, listing)
+        self.assertEqual((self.directory / "lib-tests").read_bytes(), self.executable.read_bytes())
+        listing["rust-suites"]["adk-store"]["testcases"]["alpha::test"]["ignored"] = True
+        with self.assertRaisesRegex(ValueError, "workspace plan"):
+            self.import_nextest(source, listing)
 
     def test_nextest_rejects_foreign_run_sha_build_and_archive_before_listing(self):
         source, original = self.nextest_source()
