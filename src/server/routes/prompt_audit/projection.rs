@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::db::{prompt_manifests::PromptManifest, provider_session_prompts::SessionPrompt};
-use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_START};
+use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_POLICY, ANCHOR_CONTEXT_START};
 use crate::services::{discord::prompt_builder::audit::CanonPrompt, provider::ProviderKind};
 
 use super::redaction;
@@ -143,7 +143,18 @@ fn locate(input: &str, content: &str) -> Option<Range<usize>> {
 
 pub(super) fn anchor_context(input: &str) -> Option<Range<usize>> {
     let end = input.rfind(ANCHOR_CONTEXT_END)? + ANCHOR_CONTEXT_END.len();
-    let start = input[..end].rfind(ANCHOR_CONTEXT_START)?;
+    let (_, start) = input[..end]
+        .match_indices(ANCHOR_CONTEXT_START)
+        .filter_map(|(start, marker)| {
+            let body = &input[start + marker.len()..end];
+            let policy = if body.starts_with("[ANCHOR MEMORY]\n") {
+                ""
+            } else {
+                body.split_once("\n[ANCHOR MEMORY]\n")?.0.trim_end()
+            };
+            (!policy.contains('\n')).then_some((policy == ANCHOR_CONTEXT_POLICY, start))
+        })
+        .max()?;
     Some(start..end)
 }
 

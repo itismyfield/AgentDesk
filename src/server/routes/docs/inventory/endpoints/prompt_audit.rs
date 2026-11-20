@@ -33,7 +33,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "session_started_at":"2026-11-20T01:00:00Z","source":"latest_saved",
                 "memento":{"status":"disconnected","checked_at":"2026-11-20T01:05:00Z"},
                 "anchor_count":1,"anchors":[{"id":"frag-example","type":"procedure","scope":"project",
-                    "chars":20,"limit":300,"text":"Reuse canon guidance.","masked_count":0,
+                    "chars":21,"limit":300,"text":"Reuse canon guidance.","masked_count":0,
                     "overlap_candidates":[{"source":"canon_file","path":"agents/_shared.prompt.md"}],
                     "receiving_agents":["example-agent"]}]
             })),

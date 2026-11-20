@@ -16,9 +16,9 @@ Both endpoints take a registered agent ID and an optional `provider=claude|codex
 | `masked_count` | nonnegative integer | Total credential matches across all sections. |
 | `sections[]` | array | Sections in launch-text order, or configured canon sections when reassembled. |
 
-Each section has `name`, `source` (`canon_file`, `memento`, `runtime`, or `conditional`), a nullable logical `path`, `chars` (Unicode scalar count of the displayed text), `text`, and `masked_count`. The session-start manifest identifies sections whose full text matches the captured launch text. Unattributed text is grouped into runtime sections. Reassembly uses the configured shared and provider-role prompt files.
+Each section has `name`, `source` (`canon_file`, `memento`, `runtime`, or `conditional`), a nullable logical `path`, `chars` (Unicode scalar count of the displayed text), `text`, and `masked_count`. The session-start manifest identifies sections whose full text matches the captured launch text. Unattributed text is grouped into runtime sections. Reassembly uses the current shared and provider-role prompt files as a canon preview.
 
-Credential patterns cover key, token, secret, password and authorization assignments, credential command arguments, Bearer and Basic authentication, credential-bearing URLs, PEM private keys, and recognized standalone access tokens. Each matching item contributes one to the count and is replaced with `***` in displayed text.
+Credential patterns cover key, token, secret, password and authorization assignments, credential command arguments and folded headers, YAML values with indented continuation lines, sensitive URL query values, PEM private keys, and recognized standalone access tokens. A truncated PEM key is masked through the end of the input. Each matching item contributes one to the count and is replaced with `***` in displayed text.
 
 ## GET /api/agents/{id}/anchors
 

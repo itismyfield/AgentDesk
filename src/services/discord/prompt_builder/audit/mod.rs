@@ -43,6 +43,8 @@ pub(crate) struct CanonPrompt {
 }
 
 pub(crate) fn canon(config: &Config, agent_id: &str, provider: &ProviderKind) -> Vec<CanonPrompt> {
+    let live = crate::config::snapshot();
+    let config = live.as_deref().unwrap_or(config);
     let role = config
         .agents
         .iter()
