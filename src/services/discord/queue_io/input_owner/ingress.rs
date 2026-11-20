@@ -109,13 +109,17 @@ pub(crate) enum Hold {
     ScreenContention,
     #[cfg(any(unix, test))]
     OwnerChange,
+    /// A dialog, such as a permission prompt, covers the composer until someone answers it.
+    #[cfg(any(unix, test))]
+    Dialog,
 }
 
 const QUEUE_NOTICE: &str = "큐에 들어갔습니다";
+const DIALOG_NOTICE: &str = "큐에 들어갔습니다 · 승인 창 응답 대기";
 
 impl Hold {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::SessionSwitch,
         Self::RestartRecovery,
         Self::Uploads,
@@ -123,15 +127,20 @@ impl Hold {
         Self::Modal,
         Self::ScreenContention,
         Self::OwnerChange,
+        Self::Dialog,
     ];
 
     pub(crate) fn notice(self) -> String {
-        QUEUE_NOTICE.into()
+        match self {
+            #[cfg(any(unix, test))]
+            Self::Dialog => DIALOG_NOTICE.into(),
+            _ => QUEUE_NOTICE.into(),
+        }
     }
 
     /// Whether a posted text is a hold notice, whatever hold posted it.
     pub(crate) fn is_notice(text: &str) -> bool {
-        text.trim() == QUEUE_NOTICE
+        [QUEUE_NOTICE, DIALOG_NOTICE].contains(&text.trim())
     }
 
     /// Only a refusal proven to precede any content can owe a queue-hold notice.
@@ -147,6 +156,8 @@ impl Hold {
             Self::RestartRecovery
         } else if error.contains("upload_materialization") {
             Self::Uploads
+        } else if error.contains("waits(modal)") {
+            Self::Dialog
         } else if error.contains("modal") {
             Self::Modal
         } else if error.contains("lockcontended") || error.contains("physical writer busy") {
