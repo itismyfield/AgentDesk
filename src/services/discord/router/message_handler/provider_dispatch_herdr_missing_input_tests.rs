@@ -250,6 +250,10 @@ fn restarted_front(busy: bool) {
     let mut intake = Intake::new(&fx, &started);
     let old_runtime = recording_runtime(&mut intake, &fx, true);
     let _rest = test_rest::install(intake._api.http.clone());
+    let endpoint =
+        crate::services::session_host::HerdrEndpoint::new(NODE, KEY, fx.rig.socket(), SESSION)
+            .unwrap();
+    let _named = fx.rig.policy_registry_on_this_thread(endpoint, |host| host);
     tui_prompt_dedupe::reset_state_for_tests();
     tui_prompt_dedupe::binding_events::forget_channel_for_tests(CHANNEL);
     fx.rig.answer("session.snapshot", json!({"type":"session_snapshot","snapshot":{
@@ -273,6 +277,7 @@ fn restarted_front(busy: bool) {
         }}),
     );
     let before = fx.rig.sends().len();
+    let before_requests = fx.rig.requests().len();
     let reply = "answer after Herdr reattach";
     let answer_path = started.path.clone();
     let session = started.session.clone();
@@ -294,6 +299,14 @@ fn restarted_front(busy: bool) {
     record.location.as_mut().unwrap().pane_id = "w0:p1".into();
     intake.runtime.block_on(async {
         let channel = ChannelId::new(CHANNEL);
+        let old_context = "user: history that must stay out of the first live input";
+        discord::turn_bridge::recovery_text::store_session_retry_context_with_audit(
+            Some(&fx.pool),
+            CHANNEL,
+            old_context,
+            None,
+        )
+        .unwrap();
         let row_id: i64 = sqlx::query_scalar(
             "UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2 RETURNING id",
         )
@@ -387,6 +400,7 @@ fn restarted_front(busy: bool) {
         let payload = sends[before]["text"].as_str().unwrap();
         assert_eq!(payload.matches(INPUT).count(), 1);
         assert!(!payload.contains("already running before restart"));
+        assert!(!payload.contains(old_context));
         assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
         let busy_marks = intake
             .shared
@@ -397,6 +411,11 @@ fn restarted_front(busy: bool) {
             .count();
         assert_eq!(busy_marks, usize::from(busy));
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        assert!(
+            !fx.rig.requests()[before_requests..]
+                .iter()
+                .any(|request| request["method"] == "workspace.create")
+        );
         let saved: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE id=$1")
             .bind(row_id)
             .fetch_one(&fx.pool)
