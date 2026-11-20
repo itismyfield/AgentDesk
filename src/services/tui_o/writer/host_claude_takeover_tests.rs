@@ -472,13 +472,15 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
     assert_eq!(reserved_adoption(CH), Adoption::Deferred);
     f.start_host();
     tokio::time::advance(std::time::Duration::from_secs(81 * 60)).await;
+    settle().await;
     assert_eq!(claim.peek(), Err(IdentityError::ChildDeliveryHeld));
     assert_eq!(reserved_adoption(CH), Adoption::Deferred);
+    assert!(f.harness.port.posts().is_empty());
     *f.io.custody.lock().unwrap() = Ok(Custody::Free);
     *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
     tokio::time::resume();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while f.harness.port.posts().is_empty() {
+        while f.body_posts().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -486,7 +488,7 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
     .unwrap();
     assert_eq!(reserved_adoption(CH), Adoption::Committed);
     assert_eq!(f.init(), [(source, 0)]);
-    assert_eq!(f.harness.port.posts(), ["buffered child answer"]);
+    assert_eq!(f.body_posts(), ["buffered child answer"]);
     assert_eq!(
         claim_then_send_at(BodySite::WatcherStreaming, Some(claim), send).await,
         Ok(BodySend::OwnedByO)
