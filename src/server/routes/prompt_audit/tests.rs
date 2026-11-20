@@ -29,116 +29,52 @@ const CREDENTIALS: &str = concat!(
     "-----BEGIN PRIVATE KEY-----\nfixture-private-material\n-----END PRIVATE KEY-----\n",
 );
 
-const PEM_CASES: &[(&str, &str, &[&str])] = &[
-    (
-        "assigned PEM",
-        "GITHUB_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\nFAKE_PRIVATE_MATERIAL_X7Z8\nfixture-last-pem-row\n-----END RSA PRIVATE KEY-----",
-        &[
-            "FAKE_PRIVATE_MATERIAL_X7Z8",
-            "fixture-last-pem-row",
-            "END RSA PRIVATE KEY",
-        ],
-    ),
-    (
-        "truncated PEM",
-        "private_key=-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-truncated-pem\nfixture-truncated-tail",
-        &["fixture-truncated-pem", "fixture-truncated-tail"],
-    ),
+const FAIL_CLOSED_SECRET: &str = "opaque-fixture-credential";
+const UNCERTAIN_PREFIX: &str = "Public malformed fixture prefix. ";
+
+// Each case has a label before |, with § marking fragments that must be absent.
+const PEM_CASES: &[&str] = &[
+    "assigned PEM|GITHUB_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n§FAKE_PRIVATE_MATERIAL_X7Z8§\n§fixture-last-pem-row§\n-----§END RSA PRIVATE KEY§-----",
+    "truncated PEM|private_key=-----BEGIN OPENSSH PRIVATE KEY-----\n§fixture-truncated-pem§\n§fixture-truncated-tail§",
 ];
 
-const SYNTAX_CASES: &[(&str, &str, &[&str])] = &[
-    (
-        "cookie",
-        r#"Cookie: sid="fixture-cookie-value""#,
-        &["fixture-cookie-value"],
-    ),
-    (
-        "digest",
-        r#"Authorization: Digest username="u", realm="r", nonce="n", response="fixture-response""#,
-        &["fixture-response"],
-    ),
-    (
-        "bearer",
-        "Authorization: Bearer fixture-review-bearer",
-        &["fixture-review-bearer"],
-    ),
-    (
-        "key header",
-        r#"X-Api-Key: "fixture-review-header-key""#,
-        &["fixture-review-header-key"],
-    ),
-    (
-        "curl cookie",
-        "curl --cookie sid=fixture-curl-cookie https://example.test",
-        &["fixture-curl-cookie"],
-    ),
-    (
-        "curl short cookie",
-        "curl -b'sid=fixture-short-cookie' https://example.test",
-        &["fixture-short-cookie"],
-    ),
-    (
-        "shell folded header",
-        "curl -H 'Authorization: Digest response=\"fixture-header-quoted\"\n fixture-header-fold' https://example.test",
-        &["fixture-header-quoted", "fixture-header-fold"],
-    ),
-    (
-        "shell long header",
-        r#"curl --header='X-Api-Key: '"fixture-shell-key" https://example.test"#,
-        &["fixture-shell-key"],
-    ),
-    (
-        "token argument",
-        r#"agent --token "fixture-token-one ""fixture-token-two""#,
-        &["fixture-token-one", "fixture-token-two"],
-    ),
-    (
-        "password argument",
-        r#"tool -p"fixture-short-password fixture-short-password-tail""#,
-        &["fixture-short-password", "fixture-short-password-tail"],
-    ),
-    (
-        "yaml empty first line",
-        "password:\t\n fixture-yaml-password\n fixture-second-line",
-        &["fixture-yaml-password", "fixture-second-line"],
-    ),
-    (
-        "yaml literal",
-        "password: |- # note\n  fixture-yaml-literal\n  fixture-yaml-literal-tail",
-        &["fixture-yaml-literal", "fixture-yaml-literal-tail"],
-    ),
-    (
-        "yaml folded",
-        "  password: >2+\r\n    fixture-yaml-folded\r\n    fixture-yaml-tail",
-        &["fixture-yaml-folded", "fixture-yaml-tail"],
-    ),
-    (
-        "basic",
-        "Authorization: Basic Zml4dHVyZS1iYXNpYw==",
-        &["Zml4dHVyZS1iYXNpYw=="],
-    ),
-    (
-        "plain query",
-        "https://example.test/?api_key=fixture-plain-query",
-        &["fixture-plain-query"],
-    ),
-    (
-        "base64 field",
-        r#"{"api_key_b64":"Zml4dHVyZS1zZWNyZXQ="}"#,
-        &["Zml4dHVyZS1zZWNyZXQ="],
-    ),
-    (
-        "encoded query",
-        "https://example.test/?a%70i_%6Bey=fixture-encoded-key",
-        &["fixture-encoded-key"],
-    ),
+const SYNTAX_CASES: &[&str] = &[
+    r#"cookie|Cookie: sid="§fixture-cookie-value§""#,
+    r#"digest|Authorization: Digest username="u", realm="r", nonce="n", response="§fixture-response§""#,
+    "bearer|Authorization: Bearer §fixture-review-bearer§",
+    r#"key header|X-Api-Key: "§fixture-review-header-key§""#,
+    "curl cookie|curl --cookie sid=§fixture-curl-cookie§ https://example.test",
+    "curl short cookie|curl -b'sid=§fixture-short-cookie§' https://example.test",
+    "shell folded header|curl -H 'Authorization: Digest response=\"§fixture-header-quoted§\"\n §fixture-header-fold§' https://example.test",
+    r#"shell long header|curl --header='X-Api-Key: '"§fixture-shell-key§" https://example.test"#,
+    r#"token argument|agent --token "§fixture-token-one§ ""§fixture-token-two§""#,
+    r#"password argument|tool -p"§fixture-short-password§ §fixture-short-password-tail§""#,
+    "yaml empty first line|password:\t\n §fixture-yaml-password§\n §fixture-second-line§",
+    "yaml literal|password: |- # note\n  §fixture-yaml-literal§\n  §fixture-yaml-literal-tail§",
+    "yaml folded|  password: >2+\r\n    §fixture-yaml-folded§\r\n    §fixture-yaml-tail§",
+    "basic|Authorization: Basic §Zml4dHVyZS1iYXNpYw==§",
+    "plain query|https://example.test/?api_key=§fixture-plain-query§",
+    r#"base64 field|{"api_key_b64":"§Zml4dHVyZS1zZWNyZXQ=§"}"#,
+    "encoded query|https://example.test/?a%70i_%6Bey=§fixture-encoded-key§",
 ];
+
+fn review_cases(cases: &[&'static str]) -> impl Iterator<Item = (&'static str, &'static str)> {
+    cases.iter().map(|case| case.split_once('|').unwrap())
+}
+
+fn review_input(case: &str) -> String {
+    case.replace('§', "")
+}
+
+fn review_fragments(case: &str) -> impl Iterator<Item = &str> {
+    case.split('§').skip(1).step_by(2)
+}
 
 fn assert_review_secrets_absent(body: &[u8]) {
     let body = std::str::from_utf8(body).unwrap();
-    for (name, _, fragments) in PEM_CASES.iter().chain(SYNTAX_CASES) {
+    for (name, case) in review_cases(PEM_CASES).chain(review_cases(SYNTAX_CASES)) {
         assert!(
-            fragments.iter().all(|fragment| !body.contains(fragment)),
+            review_fragments(case).all(|fragment| !body.contains(fragment)),
             "{name}: credential fragment leaked"
         );
     }
@@ -147,21 +83,21 @@ fn assert_review_secrets_absent(body: &[u8]) {
 #[test]
 fn prompt_audit_p1_pem_masks_complete_and_truncated_blocks_once() {
     let mut failed = Vec::new();
-    for (name, input, fragments) in PEM_CASES {
+    for (name, case) in review_cases(PEM_CASES) {
+        let input = &review_input(case);
         let split = input.find('\n').unwrap() + 1;
         let spans = redaction::ranges(input);
         if spans.len() != 1 {
-            failed.push(*name);
+            failed.push(name);
             continue;
         }
         let (left, first) = redaction::mask_range(input, 0..split, &spans);
         let (right, second) = redaction::mask_range(input, split..input.len(), &spans);
         if (first, second) != (1, 0)
-            || fragments
-                .iter()
+            || review_fragments(case)
                 .any(|fragment| left.contains(fragment) || right.contains(fragment))
         {
-            failed.push(*name);
+            failed.push(name);
         }
     }
     assert!(failed.is_empty(), "PEM masking/count failures: {failed:?}");
@@ -169,11 +105,11 @@ fn prompt_audit_p1_pem_masks_complete_and_truncated_blocks_once() {
 
 #[test]
 fn prompt_audit_p1_syntax_masks_review_fixtures_and_counts() {
-    let failed: Vec<_> = SYNTAX_CASES
-        .iter()
-        .filter_map(|(name, input, fragments)| {
-            let (text, count) = redaction::mask(input);
-            (count != 1 || fragments.iter().any(|fragment| text.contains(fragment))).then_some(name)
+    let failed: Vec<_> = review_cases(SYNTAX_CASES)
+        .filter_map(|(name, case)| {
+            let (text, count) = redaction::mask(&review_input(case));
+            (count != 1 || review_fragments(case).any(|fragment| text.contains(fragment)))
+                .then_some(name)
         })
         .collect();
     assert!(
@@ -400,10 +336,10 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     let pool = db.connect_and_migrate().await;
     sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('audit-fixture','Fixture','claude','400642'), ('canon-fixture','Canon','claude','400643')")
         .execute(&pool).await.unwrap();
-    let fixtures = PEM_CASES[..1]
-        .iter()
-        .chain(SYNTAX_CASES)
-        .map(|(_, input, _)| *input)
+    let (_, truncated_pem) = review_cases(PEM_CASES).last().unwrap();
+    let fixtures = review_cases(&PEM_CASES[..1])
+        .chain(review_cases(SYNTAX_CASES))
+        .map(|(_, case)| review_input(case))
         .collect::<Vec<_>>()
         .join("\n\nPublic fixture boundary.\n\n");
     let mut saved = snapshot();
@@ -411,7 +347,10 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     saved.system_prompt.push_str(&fixtures);
     saved.anchors.as_mut().unwrap()[1]
         .content
-        .push_str(&format!("\n\n{fixtures}\n\n{}", PEM_CASES[1].1));
+        .push_str(&format!(
+            "\n\n{fixtures}\n\n{}",
+            review_input(truncated_pem)
+        ));
     provider_session_prompts::save(&pool, &saved).await.unwrap();
     let mut wrong = saved.clone();
     wrong.channel_id = "400644".into();
@@ -514,7 +453,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     assert!(response["canon_modified_at"].is_string());
     assert!(response["session_id"].is_null());
     assert_eq!(response["masked_count"], 1);
-    assert_eq!(response["sections"][0]["text"], "Canon fixture.\n***");
+    let canon_text = response["sections"][0]["text"].clone();
 
     let live_prompt = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(live_prompt.path(), "Live canon.\nReuse canon guidance.").unwrap();
@@ -557,6 +496,73 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     log.read_to_string(&mut captured).unwrap();
     assert!(captured.contains("audit fixture started"));
     assert_review_secrets_absent(captured.as_bytes());
+
+    let cases = [
+        ("cookie", r#"Cookie: sid="@@""#),
+        (
+            "digest fold",
+            "Authorization: Digest response=\"@@\"\n    @@",
+        ),
+        ("yaml block", "password: |\n    @@\n    @@"),
+        ("star list", "Public fixture.\n  * Cookie: sid=\"@@\"\n  @@"),
+        ("numbered list", "Public fixture.\n  1. password: |\n    @@"),
+        ("principal", "[k:cd34] password: |\n    @@"),
+        ("query opening", "https://e.test/?password=(@@)"),
+        ("query middle", "https://e.test/?password=@@(@@)@@"),
+        ("encoded opening", "https://e.test/?a%70i_%6Bey=(@@)"),
+        ("encoded middle", "https://e.test/?a%70i_%6Bey=@@(@@)@@"),
+        ("malformed query key", "https://e.test/?a%ZZpi_key=@@"),
+        ("cut double", r#"SERVICE_PASSWORD="@@…"#),
+        ("cut single", "SERVICE_PASSWORD='@@..."),
+        ("cut token", r#"agent --token "@@…"#),
+        ("cut password", "tool --password='@@..."),
+        ("cut cookie", "curl --cookie 'sid=@@…"),
+        ("truncated PEM", truncated_pem),
+    ];
+    let mut failed = Vec::new();
+    for (index, (name, input)) in cases.into_iter().enumerate() {
+        let prefix = if name.starts_with("cut ") {
+            UNCERTAIN_PREFIX
+        } else {
+            ""
+        };
+        let content = format!(
+            "{prefix}{}",
+            review_input(input).replace("@@", FAIL_CLOSED_SECRET)
+        );
+        let mut fixture = snapshot();
+        fixture.provider_session_id = format!("fail-closed-fixture-{index}");
+        fixture.started_at += chrono::Duration::seconds(index as i64 + 1);
+        fixture.system_prompt = fixture
+            .system_prompt
+            .replace("password=fixture-anchor-password", &content);
+        fixture.anchors.as_mut().unwrap()[1].content = content;
+        provider_session_prompts::save(&pool, &fixture)
+            .await
+            .unwrap();
+        for path in [uri, anchor_uri] {
+            let (status, bytes) = get(&router, path, true).await;
+            let body = std::str::from_utf8(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{name}: {path}");
+            assert!(
+                body.contains(&fixture.provider_session_id),
+                "{name}: {path}"
+            );
+            if [FAIL_CLOSED_SECRET, UNCERTAIN_PREFIX]
+                .iter()
+                .copied()
+                .chain(review_fragments(truncated_pem))
+                .any(|fragment| body.contains(fragment))
+            {
+                failed.push((name, path));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "fail-closed response failures: {failed:?}"
+    );
+    assert_eq!(canon_text, "Canon fixture.\nPASSWORD=***");
 
     drop(router);
     pool.close().await;
