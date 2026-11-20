@@ -3247,6 +3247,7 @@ src/
 │   │   │   │   ├── tool_arms/
 │   │   │   │   │   ├── authority.rs
 │   │   │   │   │   ├── authority_tests.rs
+│   │   │   │   │   ├── session_activity.rs
 │   │   │   │   │   ├── task_notification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
