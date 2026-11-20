@@ -820,7 +820,9 @@ class HealthWait(unittest.TestCase):
         with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
             driver.wait_for_health("http://agentdesk.test", timeout_s=1, poll_interval_s=0)
 
-    def test_wait_for_health_times_out_on_degraded_payload(self):
+    @patch("run_tui_relay.time.monotonic", side_effect=(0, 0, 1))
+    @patch("run_tui_relay.time.sleep")
+    def test_wait_for_health_times_out_on_degraded_payload(self, _sleep, _clock):
         degraded = {
             "status": "degraded",
             "ok": False,
@@ -838,7 +840,9 @@ class HealthWait(unittest.TestCase):
                 )
         self.assertIn("status=degraded", str(ctx.exception))
 
-    def test_wait_for_health_preserves_non_json_body_in_timeout(self):
+    @patch("run_tui_relay.time.monotonic", side_effect=(0, 0, 1))
+    @patch("run_tui_relay.time.sleep")
+    def test_wait_for_health_preserves_non_json_body_in_timeout(self, _sleep, _clock):
         payloads = {"/api/health": [(200, "not-json-body")]}
 
         with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
@@ -1184,7 +1188,9 @@ class PostScenarioIdle(unittest.TestCase):
         )
         self.assertEqual(diagnostic["tmux"]["prompt_draft_present"], False)
 
-    def test_assert_cell_idle_requires_matching_mailbox(self):
+    @patch("run_tui_relay.time.monotonic", side_effect=(0, 0, 1))
+    @patch("run_tui_relay.time.sleep")
+    def test_assert_cell_idle_requires_matching_mailbox(self, _sleep, _clock):
         payloads = {"/api/health/detail": [(200, _health_detail())]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1220,7 +1226,9 @@ class PostScenarioIdle(unittest.TestCase):
                 )
         self.assertEqual(result["status"], "idle")
 
-    def test_assert_cell_idle_fails_on_nonempty_placeholder_file(self):
+    @patch("run_tui_relay.time.monotonic", side_effect=(0, 0, 1))
+    @patch("run_tui_relay.time.sleep")
+    def test_assert_cell_idle_fails_on_nonempty_placeholder_file(self, _sleep, _clock):
         payloads = {
             "/api/health/detail": [(200, _health_detail(_idle_mailbox("42", provider="codex")))]
         }
@@ -1744,6 +1752,17 @@ class ScenarioHealthProbe(unittest.TestCase):
 
 
 class ControlFlowPrimitives(unittest.TestCase):
+    def wait_for_provider_hold(self, after_poll=lambda: None, **kwargs):
+        now = 0.0
+
+        def advance(seconds):
+            nonlocal now
+            after_poll()
+            now += seconds
+
+        with patch.object(driver.time, "monotonic", side_effect=lambda: now), patch.object(driver.time, "sleep", side_effect=advance):
+            return driver.wait_for_provider_hold_state(**kwargs)
+
     def test_timed_response_prompt_builds_control_window(self):
         prompt = driver.build_timed_response_prompt(
             {
@@ -1798,7 +1817,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bad_root = Path(tmp) / "missing-runtime"
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=bad_root,
                     provider="claude",
                     channel_id="42",
@@ -1834,7 +1853,7 @@ class ControlFlowPrimitives(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = driver.wait_for_provider_hold_state(
+            result = self.wait_for_provider_hold(
                 runtime_root=tmp,
                 provider="claude",
                 channel_id="1509350490461180105",
@@ -1874,7 +1893,7 @@ class ControlFlowPrimitives(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = driver.wait_for_provider_hold_state(
+            result = self.wait_for_provider_hold(
                 runtime_root=tmp,
                 provider="codex",
                 channel_id="42",
@@ -1923,25 +1942,12 @@ class ControlFlowPrimitives(unittest.TestCase):
                 True,
             )
 
-            def publish_current_turn() -> None:
-                threading.Event().wait(0.03)
-                write_state(222, "[E2E:E18:OK]\n\n", False)
-
-            updater = threading.Thread(target=publish_current_turn)
-            updater.start()
-            try:
-                result = driver.wait_for_provider_hold_state(
-                    runtime_root=tmp,
-                    provider="claude",
-                    channel_id="42",
-                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
-                    ok_marker="[E2E:E18:OK]",
-                    late_marker="[E2E:E18:LATE]",
-                    timeout_s=0.5,
-                    poll_interval_s=0.01,
-                )
-            finally:
-                updater.join(timeout=1.0)
+            result = self.wait_for_provider_hold(
+                lambda: write_state(222, "[E2E:E18:OK]\n\n", False),
+                runtime_root=tmp, provider="claude", channel_id="42",
+                expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                ok_marker="[E2E:E18:OK]", late_marker="[E2E:E18:LATE]", timeout_s=0.5, poll_interval_s=0.01,
+            )
 
         self.assertEqual(result["turn_identity"]["user_msg_id"], "222")
 
@@ -1964,7 +1970,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=tmp,
                     provider="claude",
                     channel_id="42",
@@ -1997,7 +2003,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=tmp,
                     provider="claude",
                     channel_id="42",
@@ -2032,29 +2038,13 @@ class ControlFlowPrimitives(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def remove_current_turn() -> None:
-                threading.Event().wait(0.03)
-                path.unlink(missing_ok=True)
-
-            remover = threading.Thread(target=remove_current_turn)
-            remover.start()
-            try:
-                with self.assertRaises(assertions.AssertionError) as ctx:
-                    driver.wait_for_provider_hold_state(
-                        runtime_root=tmp,
-                        provider="claude",
-                        channel_id="42",
-                        expected_identity={
-                            "channel_id": "42",
-                            "user_msg_id": "222",
-                        },
-                        ok_marker="[E2E:E18:OK]",
-                        late_marker="[E2E:E18:LATE]",
-                        timeout_s=0.5,
-                        poll_interval_s=0.01,
-                    )
-            finally:
-                remover.join(timeout=1.0)
+            with self.assertRaises(assertions.AssertionError) as ctx:
+                self.wait_for_provider_hold(
+                    lambda: path.unlink(missing_ok=True),
+                    runtime_root=tmp, provider="claude", channel_id="42",
+                    expected_identity={"channel_id": "42", "user_msg_id": "222"},
+                    ok_marker="[E2E:E18:OK]", late_marker="[E2E:E18:LATE]", timeout_s=0.5, poll_interval_s=0.01,
+                )
 
         self.assertIn("disappeared before cancel", str(ctx.exception))
         self.assertIn("last_current_state=", str(ctx.exception))
@@ -2078,7 +2068,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=tmp,
                     provider="claude",
                     channel_id="42",
@@ -2113,7 +2103,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=tmp,
                     provider="codex",
                     channel_id="42",
@@ -2145,7 +2135,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             )
 
             with self.assertRaises(assertions.AssertionError) as ctx:
-                driver.wait_for_provider_hold_state(
+                self.wait_for_provider_hold(
                     runtime_root=tmp,
                     provider="claude",
                     channel_id="42",
@@ -2467,6 +2457,7 @@ class ControlFlowPrimitives(unittest.TestCase):
 
             def __init__(self):
                 self.lock = threading.Lock()
+                self.dispatches = threading.Barrier(2)
                 self.active = 0
                 self.max_active = 0
                 self.sent: list[str] = []
@@ -2482,7 +2473,7 @@ class ControlFlowPrimitives(unittest.TestCase):
                     self.active += 1
                     self.max_active = max(self.max_active, self.active)
                     self.sent.append(content)
-                threading.Event().wait(0.05)
+                self.dispatches.wait(timeout=60)
                 with self.lock:
                     self.active -= 1
                 return {"id": str(len(self.sent))}

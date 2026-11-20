@@ -36,7 +36,10 @@ const CHANNEL: &str = "1479671301387059300";
 const PANE: &str = "pane-7";
 
 /// The launch's Herdr side: E7 off, one created pane, its root and provider processes.
-struct Launcher;
+struct Launcher {
+    pane_id: &'static str,
+    evidence: ExpectedExecution,
+}
 
 impl HerdrLaunchHost for Launcher {
     fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
@@ -51,17 +54,20 @@ impl HerdrLaunchHost for Launcher {
 
     fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         HerdrCreateOutcome::Created {
-            pane_id: PANE.into(),
+            pane_id: self.pane_id.into(),
         }
     }
 
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-        Ok(expected(&probe.execution_nonce, 100))
+        let mut evidence = self.evidence.clone();
+        evidence.binding_nonce = probe.execution_nonce.clone();
+        Ok(evidence)
     }
 }
 
-/// One exact pane as the restart reader sees it; `reads` counts panes it was asked for.
-struct Pane {
+/// One exact pane as the restart reader sees it.
+pub(crate) struct Pane {
+    id: &'static str,
     endpoint: Option<HerdrEndpointId>,
     reading: HerdrPaneReading,
 }
@@ -72,32 +78,36 @@ impl HerdrExecutionReader for Pane {
     }
 
     fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
-        assert_eq!(pane_id, PANE, "only the stored pane is read");
+        assert_eq!(pane_id, self.id, "only the stored pane is read");
         self.reading.clone()
     }
 }
 
 /// A Claude channel's canonical row, its scratch binding log and transcripts, and the receiver.
-struct Herdr {
-    ingress: Ingress,
-    rt: tokio::runtime::Runtime,
+pub(crate) struct Herdr {
+    pub(crate) ingress: Ingress,
+    pub(crate) rt: tokio::runtime::Runtime,
     db: Option<crate::db::auto_queue::test_support::TestPostgresDb>,
-    pool: PgPool,
-    owner: HostedOwner,
-    channel: u64,
+    pub(crate) pool: PgPool,
+    pub(crate) owner: HostedOwner,
+    pub(crate) channel: u64,
     location: Option<HostedLocation>,
     _root: crate::config::TestRuntimeRootGuard,
 }
 
 impl Herdr {
-    fn new(tag: &str) -> Self {
-        // The root guard takes the shared env lock before the receiver takes the dedupe lock.
-        let root = crate::config::TestRuntimeRootGuard::new();
-        let ingress = Ingress::new();
+    pub(crate) fn new(tag: &str) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+        Self::with_runtime(tag, rt)
+    }
+
+    fn with_runtime(tag: &str, rt: tokio::runtime::Runtime) -> Self {
+        // The root guard takes the shared env lock before the receiver takes the dedupe lock.
+        let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+        let ingress = Ingress::new();
         let mut owner = owner(CHANNEL);
         owner.logical_key = format!("AgentDesk-claude-p7s-{tag}");
         let (db, pool) = rt.block_on(async {
@@ -137,7 +147,30 @@ impl Herdr {
 
     /// Launches `session` through the production Herdr launch, with the Claude TUI's own
     /// settings and script preparation; returns the execution nonce.
-    fn launch(&mut self, session: &str) -> String {
+    pub(crate) fn launch(&mut self, session: &str) -> String {
+        self.launch_on(
+            session,
+            HerdrLaunchEndpoint {
+                execution_node: "test-node".into(),
+                config_key: "herdr.default".into(),
+                socket_addr: "/adk/herdr.sock".into(),
+                herdr_session: "agentdesk".into(),
+            },
+            Launcher {
+                pane_id: PANE,
+                evidence: expected("unused", 100),
+            },
+            None,
+        )
+    }
+
+    fn launch_on(
+        &mut self,
+        session: &str,
+        endpoint: HerdrLaunchEndpoint,
+        launcher: Launcher,
+        provider_root: Option<PathBuf>,
+    ) -> String {
         // The launch refuses a cwd that is not an existing directory before Pending.
         let dir = self.ingress.path("cwd").with_extension("");
         std::fs::create_dir_all(&dir).unwrap();
@@ -163,22 +196,16 @@ impl Herdr {
                 command: format!("bash {}", files.launch_script_path.display()),
             })
         };
-        let endpoint = HerdrLaunchEndpoint {
-            execution_node: "test-node".into(),
-            config_key: "herdr.default".into(),
-            socket_addr: "/adk/herdr.sock".into(),
-            herdr_session: "agentdesk".into(),
-        };
         let launch = HerdrLaunch {
             endpoint: Some(endpoint),
             owner: self.owner.clone(),
             channel_id: Some(self.channel),
             expected_native_session_id: Some(session.to_owned()),
             resume: false,
-            provider_root: None,
+            provider_root,
             resume_start: None,
         };
-        let host: Arc<dyn HerdrLaunchHost> = Arc::new(Launcher);
+        let host: Arc<dyn HerdrLaunchHost> = Arc::new(launcher);
         let outcome = self
             .rt
             .block_on(launch_herdr_session(&self.pool, launch, prepare, host));
@@ -195,7 +222,7 @@ impl Herdr {
     }
 
     /// The launched pane still running execution `nonce`, edited by `change`.
-    fn pane(&self, nonce: &str, change: impl FnOnce(&mut HerdrPaneEvidence)) -> Pane {
+    pub(crate) fn pane(&self, nonce: &str, change: impl FnOnce(&mut HerdrPaneEvidence)) -> Pane {
         let stamps = expected("unused", 100);
         let mut evidence = HerdrPaneEvidence {
             binding_nonce: Some(nonce.to_owned()),
@@ -206,12 +233,13 @@ impl Herdr {
         change(&mut evidence);
         let location = self.location.as_ref().unwrap();
         Pane {
+            id: PANE,
             endpoint: Some(HerdrEndpointId::of(location)),
             reading: HerdrPaneReading::Present(evidence),
         }
     }
 
-    fn launched(&self, nonce: &str, session: &str, reader: &Pane) -> HerdrSourceAttach {
+    pub(crate) fn launched(&self, nonce: &str, session: &str, reader: &Pane) -> HerdrSourceAttach {
         let transcript = self.ingress.path(session);
         let (pool, owner, channel) = (&self.pool, &self.owner, self.channel);
         self.rt.block_on(attach_launched_herdr_source(
@@ -264,7 +292,7 @@ impl Herdr {
             .collect()
     }
 
-    fn bound(&self) -> Option<TuiRuntimeBinding> {
+    pub(crate) fn bound(&self) -> Option<TuiRuntimeBinding> {
         runtime_binding_for_tmux_session(self.logical())
     }
 
@@ -275,12 +303,15 @@ impl Herdr {
     }
 
     /// A UserPromptSubmit of the launched session naming `next` as its transcript.
-    fn switch_hook(&self, launched: &str, next: &str, id: &str) -> u16 {
+    pub(crate) fn switch_hook(&self, launched: &str, next: &str, id: &str) -> u16 {
         let payload = self.ingress.payload(next, None);
         self.ingress
             .claude_hook("UserPromptSubmit", launched, &payload, Some(id))
     }
 }
+
+#[path = "herdr_cold_first_turn_tests.rs"]
+mod cold_first_turn;
 
 impl Drop for Herdr {
     fn drop(&mut self) {
@@ -537,6 +568,7 @@ fn herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_p
             (
                 "no endpoint",
                 Pane {
+                    id: PANE,
                     endpoint: None,
                     reading: HerdrPaneReading::Missing,
                 },
@@ -545,6 +577,7 @@ fn herdr_restart_attach_restores_only_a_matched_execution_on_its_logged_source_p
             (
                 "pane gone",
                 Pane {
+                    id: PANE,
                     endpoint: herdr.location.as_ref().map(HerdrEndpointId::of),
                     reading: HerdrPaneReading::Missing,
                 },
@@ -636,6 +669,7 @@ fn a_refused_restart_attach_withholds_hook_switches_until_a_match_pg() {
             HerdrSourceAttach::Published { .. }
         ));
         let gone = Pane {
+            id: PANE,
             endpoint: herdr.location.as_ref().map(HerdrEndpointId::of),
             reading: HerdrPaneReading::Missing,
         };

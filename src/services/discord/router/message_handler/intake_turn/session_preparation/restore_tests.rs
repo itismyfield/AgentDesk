@@ -121,3 +121,64 @@ async fn preparation_restores_provider_session_and_memento_from_memory() {
     );
     assert!(!shared.core.lock().await.sessions[&channel].memento_reflected);
 }
+
+// A turn that starts before the settle pass retires an in-pane /clear rotation, for example when
+// the frozen turn's finish released the queue first, resumes the session the pane runs now.
+#[cfg(unix)]
+#[test]
+fn preparation_follows_a_pane_rotation_its_settle_pass_has_not_retired() {
+    use crate::services::tui_prompt_dedupe as dedupe;
+    let _serial = dedupe::lock_claude_session_rotations_for_tests();
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (old, new) = ("af3ece1a-pending", "fd530b40-pending");
+    let (channel, tmux) = (ChannelId::new(727395), "claude-rotation-pending");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, tmux).await;
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = Some(old.into());
+        dedupe::record_claude_session_rotation(dedupe::ClaudeSessionRotation {
+            tmux_session_name: tmux.to_string(),
+            old_session_id: Some(old.to_string()),
+            old_output_path: "/nonexistent/old.jsonl".to_string(),
+            old_last_offset: 0,
+            new_session_id: new.to_string(),
+            new_output_path: "/nonexistent/new.jsonl".to_string(),
+            observed_drain_frontier: 0,
+            polls_without_drain_progress: 0,
+            selector_followed: false,
+            left_session_ids: Vec::new(),
+        });
+        let (mut session, mut memento, mut reason) = (Some(old.to_string()), true, "before");
+        let state = Restore {
+            session_id: &mut session,
+            memento_context_loaded: &mut memento,
+            reason: &mut reason,
+            force_fresh: false,
+            cleared: false,
+            reset: false,
+            recreate: false,
+            session_key: None,
+            tmux: Some(tmux),
+        };
+        restore(&shared, &ProviderKind::Claude, channel, state).await;
+        assert_eq!(
+            (session.as_deref(), reason),
+            (Some(new), "claude_session_rotation_followed")
+        );
+        let cached = shared.core.lock().await.sessions[&channel]
+            .session_id
+            .clone();
+        assert_eq!(cached.as_deref(), Some(new));
+        assert!(dedupe::claude_session_rotation_for_tmux(tmux).is_some());
+    });
+}

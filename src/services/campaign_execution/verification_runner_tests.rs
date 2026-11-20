@@ -398,6 +398,12 @@ fn adk_phase_commands_run_in_the_verification_checkout_with_a_private_target() {
                 "{kind:?}: {arg}"
             );
         }
+        if kind == PhaseKind::Archive {
+            assert_eq!(
+                command.argv[..4],
+                ["nextest", "archive", "--lib", "--workspace"]
+            );
+        }
         if matches!(kind, PhaseKind::List | PhaseKind::Test) {
             let remap = command
                 .argv

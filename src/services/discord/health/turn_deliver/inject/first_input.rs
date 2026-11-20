@@ -85,7 +85,7 @@ impl ChannelMailboxHandle {
     ) -> Result<(serde_json::Value, ColdOutcome<O>), String> {
         use crate::services::claude_tui::owner_input;
         use std::sync::{Arc, Mutex};
-        let (key, permit, frame, registry, namespace, channel) = self
+        let (key, permit, frame, registry, namespace, channel, retry_due) = self
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
                 let key = owner.active_attempt()?;
@@ -104,8 +104,11 @@ impl ChannelMailboxHandle {
                     .namespace
                     .clone()
                     .ok_or("missing namespace")?;
+                let retry_due = owner
+                    .attempt_readiness_hold(&key)
+                    .map(|hold| (hold.started_at_ms, hold.due_at_ms));
                 let permit = owner.arm_bootstrap(&key, now)?;
-                Ok((key, permit, frame, registry, namespace, channel))
+                Ok((key, permit, frame, registry, namespace, channel, retry_due))
             })
             .await?;
         let identity = serde_json::to_value(&key).map_err(|e| e.to_string())?;
@@ -123,6 +126,15 @@ impl ChannelMailboxHandle {
                         let owner = s.as_mut().ok_or("owner missing")?;
                         owner.approve_first_key(&key, &*clock)
                     }))
+                });
+                let readiness_deadline = retry_due.map(|(started, due)| {
+                    let at = clock();
+                    let remaining = if at < started {
+                        0
+                    } else {
+                        due.saturating_sub(at)
+                    };
+                    std::time::Instant::now() + std::time::Duration::from_millis(remaining)
                 });
                 let m = mailbox.clone();
                 let k = key.clone();
@@ -176,7 +188,7 @@ impl ChannelMailboxHandle {
                         key.attempt.provider.clone(),
                         target,
                         channel,
-                        (commit, approve),
+                        (commit, approve, readiness_deadline),
                         pin,
                         hold,
                         || effect(frame),

@@ -369,4 +369,4 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
 
 #[cfg(test)]
 #[path = "herdr_source_tests.rs"]
-mod tests;
+pub(crate) mod tests;
