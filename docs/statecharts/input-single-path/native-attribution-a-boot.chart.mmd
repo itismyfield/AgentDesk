@@ -1,0 +1,18 @@
+---
+title: "Reader A: follower 결과와 boot 준비"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoBootTicketLoss
+    lg1: Path to the NoBootTicketLoss bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: boot 준비 전: 옛 row 보존
+  s1: 준비 없이 row 삭제: ticket 복구 불가
+  [*] --> s0
+  s0 --> s1: 준비#183;custody 없이 reaper
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath

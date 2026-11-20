@@ -243,3 +243,12 @@ async fn takeover() {
 
 #[path = "o_writer_host_takeover_tests.rs"]
 mod takeover;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_8148_activation_gateway_only_supplies_claude_inputs() {
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    let host = test_host::over(shared, Duration::ZERO, Some("fixture-native-host"));
+    assert!(host.native_inputs(81489940, Claude).is_some());
+    assert!(host.native_inputs(81489940, Codex).is_none());
+}
