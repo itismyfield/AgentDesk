@@ -270,9 +270,12 @@ pub(super) fn reused_id(server: &mut T19Server, session: &Path, before: &Value, 
             "W1 server request audit is missing {phase}"
         );
     }
+    let termination_method =
+        crate::services::session_host::herdr_termination_rig::SINGLE_PANE_TERMINATION;
+    let termination_log_field = format!("method=\"{termination_method}\"");
     let closes = log
         .lines()
-        .filter(|line| line.contains("method=\"pane.close\""))
+        .filter(|line| line.contains(&termination_log_field))
         .count();
     assert_eq!(closes, 0);
     server.append(
