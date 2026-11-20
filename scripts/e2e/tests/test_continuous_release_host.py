@@ -30,7 +30,9 @@ RUNNING = {"channel": "20", "provider": "claude", "state": "bound", "input_hold"
 RESOURCE = {"guild": "1", "parents": ["20", "30"], "bot_set": ["4"]}
 CONTRACT = {"busy_basis": None, "placement": None, "operation": "clear_and_turns", "occurrence": 1}
 SESSION = "AgentDesk-claude-adk-claude-tui-2-e2e"
+FOREIGN_RETENTION = "tui_o:reader_retention_stalled:30"
 TARGET_RETENTION = "tui_o:reader_retention_stalled:20"
+UNATTRIBUTED_RETENTION = "tui_o:reader_retention_stalled:unattributed"
 
 
 def degraded_detail(*reasons):
@@ -174,7 +176,8 @@ class Posted:
 
 class Driver(Fixture):
     def drive(self, budget_left=None, lease=True, harness=None, cell="claude-herdr", answers=(), prompts=3,
-              scenario="E-50", stray=None, host="herdr", herdr=None, cli=True, detail_fields=None):
+              scenario="E-50", stray=None, host="herdr", herdr=None, cli=True, detail_fields=None,
+              before_final_observe=None, profile="default"):
         """Run the driver with the real smoke preflight and a fake harness that keeps going after a refused input.
 
         `answers[i]` makes turn i 'silent' or 'huge'; `stray` is an extra prompt after the first turn; `!clear`
@@ -230,6 +233,8 @@ class Driver(Fixture):
                     row.update(status="fail", reason=f"harness: {stop}")
                     state["rc"] = 1
             if args.cell.endswith("-herdr"):
+                if before_final_observe:
+                    before_final_observe(detail)
                 row["herdr_observations"].append(driver.herdr.observe(driver, args))
             (harness or (lambda _state: None))(state)
             log = self.root / "server.log"
@@ -238,7 +243,7 @@ class Driver(Fixture):
                 {"run_id": args.run_id, "cell": args.cell, "channel_id": "20", "coverage_class_violations": [], "scenarios": [row]}))
             return state["rc"]
 
-        args = argparse.Namespace(scenario=scenario, cell=cell, run_id="run", profile="default", deploy_sha=None,
+        args = argparse.Namespace(scenario=scenario, cell=cell, run_id="run", profile=profile, deploy_sha=None,
                                   budget=json.dumps(budget_left or {"turns": 3, "tokens": 300, "time_s": 10}))
         held = channel_lock.acquire(self.root / "state", RESOURCE)
         self.addCleanup(held.close)
@@ -265,6 +270,43 @@ class Driver(Fixture):
             {"code": "unclassified", "scope": "unknown"},
         ])
         self.assertNotIn("_private_fixture", json.dumps(report))
+
+    def test_release_herdr_policy_allows_proven_foreign_reasons_through_both_entrypoints(self):
+        unknown = "turn_presence_unknown:codex:other:session_identity_unresolved:hosted_active_or_unknown:1:80"
+        detail = {
+            **degraded_detail(FOREIGN_RETENTION, "relay_verdict_unknown_antigravity_30", unknown),
+            "turn_presence_unknown": [
+                {"channel_id": 30, "provider": "codex", "agent_id": "other", "reason": "session_identity_unresolved",
+                 "hold_leaf": "hosted_active_or_unknown", "elapsed_secs": 80, "unknown_since": "2026-11-20T00:00:00Z"},
+            ],
+        }
+        report, prompts, _ = self.drive(detail_fields=detail)
+        self.assertEqual((report["status"], len(prompts), report["native_turns"]), ("PASS", 3, 3))
+        self.assertEqual(report["assertions"], [{"key": "turns_delivered_once", "status": "PASS", "complete": True}])
+        row = read_json(Path(report["evidence_paths"][0]), {})["scenarios"][0]
+        self.assertEqual(len(row["herdr_observations"]), 2)
+        for observation in row["herdr_observations"]:
+            self.assertEqual(observation["readiness"]["ignored_degraded_reasons_unattributed"], [])
+
+    def test_release_herdr_policy_refuses_target_and_unattributed_reasons(self):
+        for reason in (TARGET_RETENTION, UNATTRIBUTED_RETENTION, "relay_verdict_unknown_codex_20",
+                       "turn_presence_unknown:codex:other:session_identity_unresolved:hosted_active_or_unknown:1:80"):
+            with self.subTest(reason=reason):
+                report, prompts, _ = self.drive(detail_fields=degraded_detail(reason))
+                self.assertEqual((report["status"], prompts, report["real_provider_contacted"]), ("UNEVALUABLE", [], False))
+
+    def test_release_herdr_policy_revalidates_after_initial_foreign_reason(self):
+        def target_appears(detail):
+            detail["degraded_reasons"] = [TARGET_RETENTION]
+
+        report, prompts, _ = self.drive(detail_fields=degraded_detail(FOREIGN_RETENTION),
+                                        before_final_observe=target_appears)
+        self.assertEqual(len(prompts), 3)
+        self.assertNotEqual(report["status"], "PASS")
+
+    def test_herdr_profile_without_opt_in_requires_healthy_detail(self):
+        report, prompts, _ = self.drive(detail_fields=degraded_detail(FOREIGN_RETENTION), profile="other")
+        self.assertEqual((report["status"], prompts, report["native_turns"]), ("UNEVALUABLE", [], 0))
 
     def test_passing_scenario_reports_turns_tokens_identity_and_the_host_the_server_admits(self):
         stdout = os.fstat(1)

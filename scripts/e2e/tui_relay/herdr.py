@@ -80,15 +80,25 @@ def send_key_sequence(keys, *, agent_workspace, agent, key_interval_s=0.0, herdr
             "key_interval_s": key_interval_s}
 
 
+def add_degraded_reason_arguments(parser):
+    parser.add_argument(
+        "--herdr-allowed-degraded-reason", action="append", metavar="PATTERN",
+        help="Waive a Herdr detail degraded reason (exact or trailing-* prefix). Repeatable. "
+             "Herdr and target-channel reasons are never waived.")
+    parser.add_argument(
+        "--herdr-foreign-degraded-only", action="store_true",
+        help="Require same-response evidence that each waived reason belongs to another channel.")
+
+
 def validate_arguments(parser, args):
     allowed = args.herdr_allowed_degraded_reason or []
-    if allowed and not args.cell.endswith("-herdr"):
+    if (allowed or getattr(args, "herdr_foreign_degraded_only", False)) and not args.cell.endswith("-herdr"):
         parser.error("--herdr-allowed-degraded-reason applies only to Herdr cells")
     if any(pattern.strip() in ("", "*") for pattern in allowed):
         parser.error("--herdr-allowed-degraded-reason must name a reason or prefix; empty or bare '*' waives everything")
 
 
-def detail_ready(driver, http_status, payload, *, allowed, channel):
+def detail_ready(driver, http_status, payload, *, allowed, channel, foreign_only=False):
     """Return the degraded reasons waived by the operator allowlist; raise unless detail health is ready."""
     if not allowed:
         if (http_status != 200 or payload.get("status") != "healthy"
@@ -109,6 +119,15 @@ def detail_ready(driver, http_status, payload, *, allowed, channel):
             or ("degraded" in payload and payload["degraded"] is not (state == "degraded"))
             or healthy == bool(reasons)):
         raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+    if foreign_only:
+        patterns = tuple(allowed)
+        blocked = sorted({
+            (code, scope) for reason, code, scope in health_readiness.classify_degraded_reasons(payload, channel)
+            if scope != "foreign" or reason is None or not driver._health_reason_allowed(reason, patterns)
+        })
+        if blocked:
+            raise assertions.AssertionError(f"Herdr detail degraded_reasons not waived: {blocked}")
+        return reasons
     error = health_readiness.unknown_error(payload, channel)
     if error:
         raise assertions.AssertionError(f"Herdr detail degraded_reasons never_waived: {error}")
@@ -133,7 +152,8 @@ def waiver_summary(args, observations):
     # Derived from the union, so observations recorded before the marker existed are still marked.
     return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
             "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored,
-            "ignored_degraded_reasons_unattributed": unattributed(ignored)}
+            "ignored_degraded_reasons_unattributed": [] if getattr(args, "herdr_foreign_degraded_only", False)
+            else unattributed(ignored)}
 
 
 def report_waiver(args, result):
@@ -216,6 +236,7 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
     operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
     allowed = operator if waivable else []
+    foreign_only = getattr(args, "herdr_foreign_degraded_only", False)
     # Waiver metadata precedes the request so refused or failed requests still record it.
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -235,10 +256,11 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "boot_incarnation") if k in payload}
-        ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
+        ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id,
+                               foreign_only=foreign_only)
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
-                                         ignored_degraded_reasons_unattributed=unattributed(ignored))
+                                         ignored_degraded_reasons_unattributed=[] if foreign_only else unattributed(ignored))
             if any(health_readiness.unknown_family(r) for r in ignored):
                 evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
         stage = "herdr_readiness"
