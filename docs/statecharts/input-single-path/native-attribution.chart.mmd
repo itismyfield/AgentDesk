@@ -1,0 +1,50 @@
+---
+title: "Claude 입력: 자기 실행의 종료만 정리한다"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoForeignResponse in some cases
+    lg1: Path to the EveryInputEventuallySettled or HeadEventuallyInjected or IdleEventuallyReleased or NoForeignResponse bug
+    lg2: Repeats forever, so EveryInputEventuallySettled or HeadEventuallyInjected or IdleEventuallyReleased breaks
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 원본 두 개 대기
+  s1: 외부 입력 enqueue
+  s2: 외부 턴 실행
+  s3: AgentDesk 입력 주입
+  s4: Claude 내부 큐 수신
+  s5: 재시작: 원본과 결과 보존
+  s6: 외부 assistant end: native 종료 전 #183; 남의 본문 축적
+  s7: 외부 native 종료: 내 큐 입력은 미실행 #183; 남의 본문 축적
+  s8: dequeue: 다음 user 대기 #183; 남의 본문 축적
+  s9: 자기 입력의 native 실행 #183; 남의 본문 축적
+  s10: 자기 native 종료: 결과 확정 대기 #183; 남의 본문 축적
+  [*] --> s0
+  s0 --> s1: 외부 예약#183;알림 입력 enqueue
+  s1 --> s2: 예약#183;알림#183;TUI 직접 입력 시작
+  s2 --> s3: AgentDesk 입력 주입
+  s3 --> s4: Claude 내부 큐 enqueue
+  s4 --> s5: 프로세스 재시작
+  s4 --> s6: 외부 assistant end_turn
+  s5 --> s4: boot: 원본과 cleanup debt 복원
+  s6 --> s7: 외부 strict closer
+  s7 --> s7: native idle 미종결 경보 1회
+  s7 --> s8: Claude 내부 큐 dequeue
+  s8 --> s9: 자기 user로 실행 시작
+  s9 --> s9: 자기 assistant end_turn
+  s9 --> s10: 자기 strict closer
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 mayBreak
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 bugPath
+  class s10 repeats

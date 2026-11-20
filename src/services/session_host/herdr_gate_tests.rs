@@ -197,7 +197,7 @@ fn answer(
         return;
     }
     if let Some(request) = request {
-        let close = request["method"] == "pane.close";
+        let close = request["method"] == p11::SINGLE_PANE_TERMINATION;
         let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
         let info = process_info.lock().unwrap().clone();
         let info = info.filter(|_| request["method"] == "pane.process_info");
@@ -2091,6 +2091,8 @@ fn m2t_u8_stop_between_close_and_cas_then_rerun_pg() {
 /// The fake Herdr server and scripted OS wired into a caller's runtime, pool and root; every
 /// runtime thread reads the boot registry, whose launch host dials the same server.
 pub(crate) mod p11 {
+    pub(crate) const SINGLE_PANE_TERMINATION: &str = "pane.close";
+
     use super::*;
     use crate::config::session_hosts::BootSessionHosts;
     use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;

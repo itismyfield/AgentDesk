@@ -1,5 +1,8 @@
 //! Persisted turn and queue recovery shared by Gateway and REST worker runtimes.
 use super::*;
+#[path = "native_input.rs"]
+mod native_input;
+pub(super) use native_input::prepare_native_boot;
 
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
@@ -325,3 +328,14 @@ mod draft_tests;
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_consent_tests.rs"]
 mod consent_tests;
+
+/// Opens intake only after this active runtime restored its queues and inflight work.
+pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+    mark_reconcile_complete(shared);
+    #[cfg(unix)]
+    for channel in
+        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
+    {
+        super::super::session_transition::wake_installed_owner(shared, channel).await;
+    }
+}

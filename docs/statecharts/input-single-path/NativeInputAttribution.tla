@@ -1,0 +1,585 @@
+-------------------- MODULE NativeInputAttribution --------------------
+EXTENDS Naturals, FiniteSets, Sequences
+\* Pre-key intent/AnyKey/NotSent are refined in NativeInputPreparation; finalization stays B2.
+CONSTANTS Mode, Scenario, Legacy
+Ids == {1, 2}
+VARIABLES pc, native, members, nativeQueue, stage, lease, rows, pending,
+          result, count, proof, closed, ran, injected, wake, booted,
+          generation, known, restarted, foreignBody, staleReleased, warned,
+          incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review
+vars == <<pc, native, members, nativeQueue, stage, lease, rows, pending,
+          result, count, proof, closed, ran, injected, wake, booted,
+          generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+
+ConsumerModes == {"BootGcBefore", "BootGcFixed", "CustodyReceiptBefore", "CustodyReceiptFixed", "CustodySourceBefore", "CustodySourceFixed", "BootSavedBefore", "BootSavedFixed", "BootCustodyBefore", "BootCustodyFixed", "BootCorruptBefore", "BootCorruptFixed", "BootOldGenerationBefore", "BootOldGenerationFixed", "BootQueueBefore", "BootQueueFixed", "BootPendingFixed"}
+ControlModes == {"ControlBefore", "ControlFixed", "ControlCustodyBefore", "ControlCustodyFixed", "ControlStaleBefore", "ControlStaleFixed", "ControlUnreadableFixed", "ControlNoKeyFixed"}
+ReviewModes == ControlModes \cup ConsumerModes \cup {"NeutralTransferBefore", "NeutralTransferFixed", "FollowerBefore", "FollowerFixed", "BootBefore", "BootFixed",
+                "BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
+                "PreflightBefore", "PreflightFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable"}
+ReviewBoot == Mode \in {"BootBefore", "BootFixed", "BootFailureFixed", "BootIgnoreFailure"}
+
+Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
+        /\ stage = [i \in Ids |-> "Pending"] /\ lease = 0 /\ rows = {}
+        /\ pending = Ids /\ result = [i \in Ids |-> "None"]
+        /\ count = [i \in Ids |-> 0] /\ proof = [i \in Ids |-> "None"]
+        /\ closed = {} /\ ran = {} /\ injected = {} /\ wake = FALSE
+        /\ booted = TRUE /\ generation = IF Mode \in ConsumerModes THEN 2 ELSE 1
+        /\ known = (Mode \notin {"BootCustodyBefore", "BootCustodyFixed"})
+        /\ restarted = FALSE /\ foreignBody = FALSE /\ staleReleased = FALSE
+        /\ warned = {} /\ incarnation = 1 /\ inputInc = [i \in Ids |-> 0]
+        /\ proofInc = [i \in Ids |-> 0] /\ replaced = FALSE /\ staleSeen = FALSE /\ outsideQueued = FALSE
+        /\ review \in [phase : {IF ReviewBoot \/ Mode \in ConsumerModes THEN "Prepare" ELSE IF Mode \in ReviewModes THEN "Registered" ELSE "Dormant"},
+             outcome : {"Executed", "Withdrawn"}, commits : {0, 1}, result : {"None", "Executed"},
+             row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
+             failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
+                "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed", "ControlUnreadableFixed"}}, notice : {0},
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, aStep : {0}, barrier : {FALSE}, aIdle : {FALSE}, aCaughtUp : {FALSE}, aLeft : {3}, aAck : {FALSE}, aNext : {0}, aOwnSends : {0}, aIdleValid : {FALSE}, aParentDone : {FALSE}, aVersion : {0}, aRowFail : {Mode \in {"AbstainRowBefore", "AbstainRowFixed"}}, aLeaseChanged : {FALSE}]
+        /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
+        /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
+        /\ Mode \in ConsumerModes => review.result = IF Mode \in {"BootPendingFixed", "BootGcBefore", "BootGcFixed"} THEN "None" ELSE "Executed"
+        /\ Mode \notin ReviewModes => review.outcome = "Executed"
+
+ExternalEnqueue == /\ booted /\ pc = 0 /\ ~outsideQueued
+                   /\ outsideQueued' = TRUE /\ nativeQueue' = <<"External">>
+                   /\ UNCHANGED <<pc, native, members, stage, lease, rows, pending,
+                       result, count, proof, closed, ran, injected, wake, booted,
+                       generation, known, restarted, foreignBody, staleReleased, warned,
+                       incarnation, inputInc, proofInc, replaced, staleSeen, review>>
+ExternalStart == /\ booted /\ pc = 0 /\ outsideQueued
+                 /\ native' = "External" /\ pc' = 1 /\ nativeQueue' = <<>>
+                 /\ UNCHANGED <<members, stage, lease, rows, pending,
+                     result, count, proof, closed, ran, injected, wake, booted,
+                     generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+Inject == /\ booted /\ pc = 1 /\ lease = 0
+          /\ lease' = 1 /\ rows' = rows \cup {1} /\ injected' = injected \cup {1}
+          /\ stage' = [stage EXCEPT ![1] = "Injected"] /\ pc' = 2
+          /\ inputInc' = [inputInc EXCEPT ![1] = incarnation]
+    /\ UNCHANGED <<native, members, nativeQueue, pending, result, count, proof,
+              closed, ran, wake, booted, generation, known, restarted, foreignBody,
+              staleReleased, warned, incarnation, proofInc, replaced, staleSeen, outsideQueued, review>>
+Enqueue == /\ booted /\ pc = 2
+           /\ nativeQueue' = <<1>> /\ stage' = [stage EXCEPT ![1] = "Waiting"]
+           /\ pc' = 3
+           /\ UNCHANGED <<native, members, lease, rows, pending, result, count,
+               proof, closed, ran, injected, wake, booted, generation, known,
+               restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+MidTurnJoin == /\ booted /\ Scenario = "MidTurn" /\ pc = 3
+               /\ nativeQueue' = <<>> /\ members' = {1} /\ ran' = ran \cup {1}
+               /\ stage' = [stage EXCEPT ![1] = "Running"] /\ pc' = 4
+               /\ UNCHANGED <<native, lease, rows, pending, result, count, proof,
+                   closed, injected, wake, booted, generation, known, restarted,
+                   foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+Withdraw == /\ booted /\ Scenario = "Withdraw" /\ pc = 3
+            /\ nativeQueue' = <<>> /\ pc' = 4
+            /\ stage' = [stage EXCEPT ![1] = "Withdrawn"]
+            /\ proof' = [proof EXCEPT ![1] = IF Mode \in {"Current", "NoWithdraw", "DropWithdraw"}
+                                                   THEN "None" ELSE "Withdrawn"]
+            /\ pending' = IF Mode = "DropWithdraw" THEN pending \ {1} ELSE pending
+            /\ rows' = IF Mode = "DropWithdraw" THEN rows \ {1} ELSE rows
+            /\ UNCHANGED <<native, members, lease, result, count, closed, ran,
+                injected, wake, booted, generation, known, restarted, foreignBody,
+                staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+ExternalAssistantEnd ==
+    /\ booted /\ ((Scenario = "Queue" /\ pc = 3) \/ (Scenario # "Queue" /\ pc = 4))
+    /\ pc' = 5
+    /\ foreignBody' = (foreignBody \/ (Mode = "Current" /\ Scenario = "Queue"))
+    /\ UNCHANGED <<native, members, nativeQueue, stage, lease, rows, pending,
+        result, count, proof, closed, ran, injected, wake, booted, generation,
+        known, restarted, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+ExternalDuration ==
+    /\ booted /\ pc = 5 /\ pc' = 6 /\ native' = "Idle"
+    /\ closed' = closed \cup members /\ members' = {}
+    /\ proof' = IF Mode = "ForeignEnd" THEN [proof EXCEPT ![1] = "Complete"]
+                ELSE IF 1 \in members /\ Mode # "Current"
+                     THEN [proof EXCEPT ![1] = "Complete"] ELSE proof
+    /\ proofInc' = IF Mode = "ForeignEnd" \/ (1 \in members /\ Mode # "Current")
+                         THEN [proofInc EXCEPT ![1] = inputInc[1]] ELSE proofInc
+    /\ UNCHANGED <<nativeQueue, stage, lease, rows, pending, result, count, ran,
+        injected, wake, booted, generation, known, restarted, foreignBody,
+        staleReleased, warned, incarnation, inputInc, replaced, staleSeen, outsideQueued, review>>
+Dequeue == /\ booted /\ Scenario = "Queue" /\ pc = 6
+           /\ nativeQueue' = <<>> /\ pc' = 7
+           /\ stage' = [stage EXCEPT ![1] = "Dequeued"]
+           /\ UNCHANGED <<native, members, lease, rows, pending, result, count,
+               proof, closed, ran, injected, wake, booted, generation, known,
+               restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+OwnStart == /\ booted /\ Scenario = "Queue" /\ pc = 7
+            /\ native' = "Own" /\ members' = {1} /\ ran' = ran \cup {1}
+            /\ stage' = [stage EXCEPT ![1] = "Running"] /\ pc' = 8
+            /\ UNCHANGED <<nativeQueue, lease, rows, pending, result, count, proof,
+                closed, injected, wake, booted, generation, known, restarted,
+                foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+OwnAssistantEnd == /\ booted /\ Scenario = "Queue" /\ pc = 8 /\ pc' = 9
+                   /\ UNCHANGED <<native, members, nativeQueue, stage, lease, rows,
+                       pending, result, count, proof, closed, ran, injected, wake,
+                       booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+OwnDuration == /\ booted /\ Scenario = "Queue" /\ pc = 9 /\ pc' = 10
+               /\ native' = "Idle" /\ closed' = closed \cup members /\ members' = {}
+               /\ proof' = IF Mode = "Current" THEN proof
+                           ELSE [proof EXCEPT ![1] = "Complete"]
+               /\ proofInc' = IF Mode = "Current" THEN proofInc ELSE [proofInc EXCEPT ![1] = inputInc[1]]
+    /\ UNCHANGED <<nativeQueue, stage, lease, rows, pending, result,
+                   count, ran, injected, wake, booted, generation, known, restarted,
+                   foreignBody, staleReleased, warned, incarnation, inputInc, replaced, staleSeen, outsideQueued, review>>
+
+\* Outcome commit is durable before releasing the mailbox; replay is idempotent.
+ObserveProof(i) == /\ booted /\ known /\ proof[i] # "None" /\ result[i] = "None"
+                   /\ result' = [result EXCEPT ![i] = proof[i]]
+                   /\ count' = [count EXCEPT ![i] = @ + 1]
+                   /\ pending' = pending \ {i}
+                   /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease,
+                       rows, proof, closed, ran, injected, wake, booted, generation,
+                       known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+Settle(i) == /\ booted /\ result[i] # "None" /\ lease = i
+             /\ lease' = 0
+             /\ UNCHANGED <<pc, native, members, nativeQueue, stage, rows, pending,
+                 result, count, proof, closed, ran, injected, wake, booted, generation,
+                 known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+ProjectionClear(i) == /\ booted /\ result[i] # "None" /\ lease # i /\ i \in rows
+                      /\ rows' = rows \ {i}
+                      /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease,
+                          pending, result, count, proof, closed, ran, injected, wake,
+                          booted, generation, known, restarted, foreignBody,
+                          staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+Kick == /\ booted /\ Mode # "NoWake" /\ lease = 0 /\ rows = {}
+        /\ result[1] # "None" /\ ~wake /\ 2 \notin injected
+        /\ wake' = TRUE
+        /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending,
+            result, count, proof, closed, ran, injected, booted, generation, known,
+            restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+InjectHead == /\ booted /\ wake /\ lease = 0 /\ rows = {} /\ native = "Idle"
+              /\ nativeQueue = <<>> /\ (Scenario # "Queue" \/ pc = 10) /\ 2 \notin injected
+              /\ lease' = 2 /\ rows' = {2} /\ injected' = injected \cup {2}
+              /\ native' = "Own" /\ members' = {2} /\ ran' = ran \cup {2}
+              /\ stage' = [stage EXCEPT ![2] = "Running"] /\ wake' = FALSE
+              /\ inputInc' = [inputInc EXCEPT ![2] = incarnation]
+    /\ UNCHANGED <<pc, nativeQueue, pending, result, count, proof, closed,
+                  booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, proofInc, replaced, staleSeen, outsideQueued, review>>
+HeadAssistantEnd == /\ booted /\ 2 \in members /\ stage[2] = "Running"
+                    /\ stage' = [stage EXCEPT ![2] = "AssistantEnd"]
+                    /\ UNCHANGED <<pc, native, members, nativeQueue, lease, rows,
+                        pending, result, count, proof, closed, ran, injected, wake,
+                        booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+HeadDuration == /\ booted /\ 2 \in members /\ stage[2] = "AssistantEnd"
+                /\ native' = "Idle" /\ members' = {} /\ closed' = closed \cup {2}
+                /\ proof' = [proof EXCEPT ![2] = "Complete"]
+                /\ proofInc' = [proofInc EXCEPT ![2] = inputInc[2]]
+    /\ UNCHANGED <<pc, nativeQueue, stage, lease, rows, pending, result,
+                    count, ran, injected, wake, booted, generation, known, restarted,
+                    foreignBody, staleReleased, warned, incarnation, inputInc, replaced, staleSeen, outsideQueued, review>>
+
+\* Existing operator/adjacent actions record a non-success result, never provider completion.
+OperatorRelease == /\ booted /\ lease \in Ids /\ result[lease] = "None"
+                   /\ result' = [result EXCEPT ![lease] = "OperatorReleased"]
+                   /\ count' = [count EXCEPT ![lease] = @ + 1]
+                   /\ pending' = pending \ {lease}
+                   /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease,
+                       rows, proof, closed, ran, injected, wake, booted, generation,
+                       known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+AdjacentEnd == /\ booted /\ lease \in Ids /\ result[lease] = "None"
+               /\ result' = [result EXCEPT ![lease] = "Cancelled"]
+               /\ count' = [count EXCEPT ![lease] = @ + 1]
+               /\ pending' = pending \ {lease}
+               /\ native' = "Idle" /\ nativeQueue' = <<>> /\ members' = {}
+               /\ pc' = IF lease = 1 THEN (IF Scenario = "Queue" THEN 10 ELSE 6) ELSE pc
+               /\ UNCHANGED <<stage, lease, rows, proof, closed, ran, injected, wake,
+                   booted, generation, known, restarted, foreignBody, staleReleased, warned,
+                   incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+Restart == /\ booted /\ ~restarted /\ restarted' = TRUE /\ booted' = FALSE
+           /\ generation' = 2 /\ lease' = 0 /\ wake' = FALSE
+           /\ known' = ~Legacy
+           /\ UNCHANGED <<pc, native, members, nativeQueue, stage, rows, pending,
+               result, count, proof, closed, ran, injected, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+BootRestore == /\ ~booted /\ booted' = TRUE
+               /\ lease' = IF rows = {} THEN 0 ELSE CHOOSE i \in rows : TRUE
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, rows, pending,
+                   result, count, proof, closed, ran, injected, wake, generation,
+                   known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+\* Legacy reconstruction replays the authenticated source; this is a port assumption.
+Reconstruct == /\ booted /\ ~known /\ Mode # "Unavailable" /\ known' = TRUE
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows,
+                   pending, result, count, proof, closed, ran, injected, wake, booted,
+                   generation, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+\* Historical WARN action: excluded from production scope by user 2026-11-14.
+WarnIdle == /\ booted /\ native = "Idle" /\ lease \in Ids /\ lease \notin warned
+            /\ warned' = warned \cup {lease}
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows,
+                pending, result, count, proof, closed, ran, injected, wake, booted,
+                generation, known, restarted, foreignBody, staleReleased, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+\* Late proof from the old input/execution must not borrow the successor's lease.
+StaleEvidence == /\ booted /\ lease = 2 /\ result[1] # "None" /\ ~staleSeen
+                 /\ staleSeen' = TRUE
+                 /\ IF Mode = "NoFence" /\ result[2] = "None"
+                     THEN /\ result' = [result EXCEPT ![2] = "Complete"]
+                          /\ proofInc' = [proofInc EXCEPT ![2] = proofInc[1]]
+                          /\ count' = [count EXCEPT ![2] = @ + 1]
+                          /\ pending' = pending \ {2} /\ staleReleased' = TRUE
+                     ELSE UNCHANGED <<result, proofInc, count, pending, staleReleased, outsideQueued, review>>
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows,
+                     proof, closed, ran, injected, wake, booted, generation, known,
+                     restarted, foreignBody, warned, incarnation, inputInc, replaced, outsideQueued, review>>
+ExecutionReplaced == /\ booted /\ ~replaced /\ lease = 0 /\ rows = {} /\ native = "Idle"
+                     /\ result[1] # "None" /\ 2 \notin injected
+                     /\ nativeQueue = <<>> /\ (Scenario # "Queue" \/ pc = 10)
+                     /\ incarnation' = 2 /\ replaced' = TRUE
+                     /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows,
+                         pending, result, count, proof, closed, ran, injected, wake,
+                         booted, generation, known, restarted, foreignBody, staleReleased,
+                         warned, inputInc, proofInc, staleSeen, outsideQueued, review>>
+DuplicateSettlement == /\ booted /\ Mode = "DoubleSettle"
+                       /\ \E i \in Ids : /\ result[i] # "None" /\ count[i] = 1
+                            /\ count' = [count EXCEPT ![i] = 2]
+                       /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease,
+                           rows, pending, result, proof, closed, ran, injected, wake,
+                           booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued, review>>
+
+ReviewFollowerCommit == /\ Mode = "FollowerFixed" /\ review.phase = "Registered"
+                        /\ review' = [review EXCEPT !.phase = "Done", !.result = review.outcome,
+                             !.commits = 1, !.notice = IF review.outcome = "Withdrawn" THEN 1 ELSE 0]
+                        /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ReviewPrepare == /\ ReviewBoot /\ review.phase = "Prepare" /\ ~review.prepared
+                 /\ review' = [review EXCEPT !.prepared = TRUE, !.preserved = ~review.failed]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ReviewReap == /\ ReviewBoot /\ review.phase = "Prepare"
+              /\ (Mode \in {"BootBefore", "BootIgnoreFailure"} \/ (review.prepared /\ review.preserved))
+              /\ review' = [review EXCEPT !.phase = "Reaped", !.row = FALSE]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ReviewRestore == /\ ReviewBoot /\ review.phase = "Reaped" /\ review.preserved
+                 /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE,
+                      !.result = "Executed", !.commits = 1]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+Next == ReviewFollowerCommit \/ ReviewPrepare \/ ReviewReap \/ ReviewRestore \/ ExternalEnqueue \/ ExternalStart \/ Inject \/ Enqueue \/ MidTurnJoin \/ Withdraw
+        \/ ExternalAssistantEnd \/ ExternalDuration \/ Dequeue \/ OwnStart
+        \/ OwnAssistantEnd \/ OwnDuration \/ (\E i \in Ids : ObserveProof(i) \/ Settle(i) \/ ProjectionClear(i))
+        \/ Kick \/ InjectHead \/ HeadAssistantEnd \/ HeadDuration \/ OperatorRelease
+        \/ AdjacentEnd \/ Restart \/ BootRestore \/ Reconstruct \/ WarnIdle
+        \/ StaleEvidence \/ ExecutionReplaced \/ DuplicateSettlement
+Spec == Init /\ [][Next]_vars
+        /\ WF_vars(ReviewFollowerCommit) /\ WF_vars(ReviewPrepare) /\ WF_vars(ReviewReap) /\ WF_vars(ReviewRestore)
+        /\ WF_vars(ExternalEnqueue) /\ WF_vars(ExternalStart) /\ WF_vars(Inject) /\ WF_vars(Enqueue)
+        /\ WF_vars(MidTurnJoin) /\ WF_vars(Withdraw) /\ WF_vars(ExternalAssistantEnd)
+        /\ WF_vars(ExternalDuration) /\ WF_vars(Dequeue) /\ WF_vars(OwnStart)
+        /\ WF_vars(OwnAssistantEnd) /\ WF_vars(OwnDuration)
+        /\ (\A i \in Ids : WF_vars(ObserveProof(i)) /\ WF_vars(Settle(i)) /\ WF_vars(ProjectionClear(i)))
+        /\ WF_vars(Kick) /\ WF_vars(InjectHead) /\ WF_vars(HeadAssistantEnd)
+        /\ WF_vars(HeadDuration) /\ WF_vars(BootRestore) /\ WF_vars(Reconstruct)
+
+CompletionExactlyOnce == \A i \in Ids : count[i] = IF result[i] = "None" THEN 0 ELSE 1
+NoForeignEnd == \A i \in Ids : result[i] = "Complete" => i \in closed /\ i \in ran
+NoSilentLoss == \A i \in Ids : i \in pending \/ result[i] # "None"
+NoForeignResponse == ~foreignBody
+NoSuccessorRelease == ~staleReleased
+NoSourceBorrow == \A i \in Ids : result[i] = "Complete" => proofInc[i] = inputInc[i] /\ inputInc[i] > 0
+IdleEventuallyReleased == (booted /\ native = "Idle") ~> (booted /\ lease = 0 /\ rows = {})
+HeadEventuallyInjected == <>(2 \in injected)
+EveryInputEventuallySettled == \A i \in Ids : <>(result[i] # "None")
+FollowerKeepsParent == review.parentLease = 1 /\ review.parentRow /\ review.parentActive = 1
+ReviewResultOnce == review.commits <= 1
+NoBootTicketLoss == ~ReviewBoot \/ review.row \/ review.preserved
+FailureKeepsRow == ~review.failed \/ review.row
+FollowerEventuallySettles == (Mode \in {"FollowerBefore", "FollowerFixed"}) => <>(review.phase = "Done")
+BootEventuallyRestores == (Mode \in {"BootBefore", "BootFixed"}) => <>review.head
+
+\* The native cleanup port: a corrupt row remains debt after the exact lease was released.
+DebtCommit == /\ review.phase = "Registered"
+              /\ review' = [review EXCEPT !.phase = "Result", !.result = "Executed", !.commits = 1]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRelease == /\ review.phase = "Result"
+               /\ review' = [review EXCEPT !.phase = "Row", !.parentLease = 0, !.parentActive = 0]
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRow == /\ review.phase = "Row"
+           /\ review' = IF review.failed
+                THEN [review EXCEPT !.phase = IF Mode = "DebtBefore" THEN "Done" ELSE "Blocked",
+                     !.head = Mode = "DebtBefore"]
+                ELSE [review EXCEPT !.phase = "Wake", !.row = FALSE]
+           /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtRepair == /\ review.phase = "Blocked" /\ Mode # "DebtNoRetry"
+              /\ review' = [review EXCEPT !.phase = "Row", !.failed = FALSE]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtWake == /\ review.phase = "Wake"
+            /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+DebtNext == DebtCommit \/ DebtRelease \/ DebtRow \/ DebtRepair \/ DebtWake
+DebtSpec == Init /\ [][DebtNext]_vars /\ WF_vars(DebtCommit) /\ WF_vars(DebtRelease)
+            /\ WF_vars(DebtRow) /\ WF_vars(DebtRepair) /\ WF_vars(DebtWake)
+NativeRowBarrier == review.head => ~review.row
+NativeResultBeforeRelease == review.parentLease = 0 => review.result = "Executed"
+NativeDebtEventuallyDrained == <>(review.head /\ ~review.row)
+
+\* Actor registration is acknowledged before the key; failed preflight cannot release a lease.
+PortRegister == /\ review.phase = "Registered"
+                /\ review' = [review EXCEPT !.phase = "Prepared", !.prepared = TRUE]
+                /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortResult == /\ review.phase = "Prepared" /\ review.prepared
+              /\ review' = [review EXCEPT !.phase = "Result", !.result = "Executed", !.commits = 1]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortPreflight == /\ review.phase = "Result" /\ review.parentLease = 1
+                 /\ review' = IF review.failed /\ Mode # "PreflightBefore"
+                      THEN [review EXCEPT !.phase = "Blocked"]
+                      ELSE [review EXCEPT !.phase = "Released", !.parentLease = 0, !.parentActive = 0]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortRepair == /\ ((review.phase = "Blocked" /\ review.parentLease = 1)
+                  \/ (review.phase = "Result" /\ review.parentLease \in {0, 2} /\ review.failed))
+              /\ review' = [review EXCEPT !.phase = "Result", !.failed = FALSE]
+              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortRow == /\ review.phase = "Released" /\ ~review.failed
+           /\ review' = [review EXCEPT !.phase = "Done", !.row = FALSE, !.nativeAck = TRUE, !.head = TRUE]
+           /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortTransferred == /\ review.phase = "Result" /\ review.parentLease \in {0, 2} /\ ~review.row /\ ~review.failed
+                   /\ Mode \notin {"TransferBefore", "TransferAbsentBefore"}
+                   /\ review' = [review EXCEPT !.phase = "Done", !.nativeAck = TRUE,
+                        !.parentRow = IF Mode = "TransferDeletes" THEN FALSE ELSE review.parentRow]
+                   /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortNeutral == /\ review.phase = "Done" /\ review.nativeAck /\ ~review.neutral
+               /\ Mode # "NeutralTransferBefore"
+               /\ review' = [review EXCEPT !.neutral = TRUE]
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+PortNext == PortRegister \/ PortResult \/ PortPreflight \/ PortRepair \/ PortRow \/ PortTransferred \/ PortNeutral
+PortSpec == Init /\ [][PortNext]_vars /\ WF_vars(PortRegister) /\ WF_vars(PortResult)
+            /\ WF_vars(PortPreflight) /\ WF_vars(PortRepair) /\ WF_vars(PortRow)
+            /\ WF_vars(PortTransferred) /\ WF_vars(PortNeutral)
+FailedPreflightKeepsLease == Mode \in {"PreflightBefore", "PreflightFixed"} => (review.failed => review.parentLease # 0)
+NativeAckReadable == review.nativeAck => ~review.failed
+NativePortBarrier == review.head => review.result = "Executed" /\ ~review.row /\ review.nativeAck
+NativePortRegistered == review.result # "None" => review.prepared
+NativeTransferKeepsSuccessor == Mode \notin {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}
+                                \/ (review.parentLease \in {0, 2} /\ review.parentRow /\ ~review.head)
+NativePortEventuallyDone == <>(review.phase = "Done" /\ review.neutral)
+
+\* The boot consumer adopts full custody without minting a live actor for the old generation.
+ConsumerStable == <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count, proof, closed, ran, injected, wake, booted, generation, restarted, foreignBody, staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ConsumerAdopt == /\ review.phase = "Prepare"
+                 /\ review' = [review EXCEPT !.phase = "Prepared", !.prepared = TRUE,
+                      !.preserved = (~review.failed /\ Mode \notin {"CustodyReceiptBefore", "CustodySourceBefore"}),
+                      !.failed = (review.failed \/ Mode = "CustodySourceBefore")]
+                 /\ known' = (IF Mode = "BootCustodyBefore" THEN known ELSE TRUE)
+                 /\ UNCHANGED ConsumerStable
+ConsumerRepair == /\ review.phase = "Prepared" /\ review.failed
+                  /\ review' = [review EXCEPT !.phase = "Prepare", !.prepared = FALSE, !.failed = FALSE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerReap == /\ review.phase = "Prepared"
+                /\ (review.preserved \/ Mode \in {"BootCorruptBefore", "CustodyReceiptBefore"})
+                /\ review' = [review EXCEPT !.phase = "Reaped", !.row = FALSE]
+                /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerSettle == /\ review.phase = "Reaped" /\ known /\ ~review.failed
+                  /\ review.result = "Executed"
+                  /\ Mode \notin {"BootSavedBefore", "BootOldGenerationBefore"}
+                  /\ review' = [review EXCEPT !.phase = "Consumed", !.nativeAck = TRUE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerOwnerDrive == /\ review.phase \in {"Reaped", "Consumed"} /\ review.nativeAck /\ ~review.row
+                     /\ (Mode \notin {"CustodyReceiptBefore", "CustodyReceiptFixed"} \/ review.preserved)
+                     /\ Mode # "BootQueueBefore"
+                     /\ review' = [review EXCEPT !.phase = "Done", !.head = TRUE]
+                     /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerGenericTerminal == /\ Mode \in {"BootGcBefore", "BootGcFixed"}
+                           /\ review.phase = "Reaped" /\ review.result = "None"
+                           /\ review' = [review EXCEPT !.phase = "Finalized"]
+                           /\ UNCHANGED <<ConsumerStable, known>>
+ConsumerGc == /\ review.phase = "Finalized"
+              /\ (Mode = "BootGcBefore" \/ review.nativeAck)
+              /\ review' = [review EXCEPT !.phase = "Collected", !.nativeAck = TRUE]
+              /\ known' = FALSE
+              /\ UNCHANGED ConsumerStable
+NativeBootPendingPreserved == review.result = "None" => known
+ConsumerNext == ConsumerAdopt \/ ConsumerRepair \/ ConsumerReap \/ ConsumerSettle \/ ConsumerOwnerDrive
+                \/ ConsumerGenericTerminal \/ ConsumerGc
+ConsumerSpec == Init /\ [][ConsumerNext]_vars
+                /\ WF_vars(ConsumerAdopt) /\ WF_vars(ConsumerRepair) /\ WF_vars(ConsumerReap)
+                /\ WF_vars(ConsumerSettle) /\ WF_vars(ConsumerOwnerDrive)
+NativeBootFailureKeepsRow == review.failed => (review.row /\ ~review.nativeAck)
+NativeBootNoFabrication == review.result = "None" => (~review.nativeAck /\ ~review.head)
+NativeBootAdmission == review.nativeAck => (review.result = "Executed" /\ known /\ ~review.failed)
+NativeBootNoLeaseRemint == review.parentLease = 0 /\ generation = 2
+NativeBootEventuallyDone == <>(review.phase = "Done" /\ review.head /\ ~review.row)
+ControlGrant == /\ review.phase = "Registered"
+                /\ review' = [review EXCEPT !.phase = "Granted", !.prepared = Mode # "ControlNoKeyFixed"]
+                /\ UNCHANGED <<ConsumerStable, known>>
+ControlRepair == /\ review.failed
+                 /\ review' = [review EXCEPT !.failed = FALSE]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlResult == /\ review.phase = "Granted" /\ review.parentLease = 1
+                 /\ review.prepared /\ ~review.failed /\ review.result = "None"
+                 /\ review' = [review EXCEPT !.phase = "Result", !.result = "Cancelled", !.commits = @ + 1]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlNativeResult == /\ review.phase = "Granted" /\ review.parentLease = 1
+                       /\ review.prepared /\ ~review.failed /\ review.result = "None"
+                       /\ review' = [review EXCEPT !.phase = "Result", !.result = "Executed", !.commits = @ + 1]
+                       /\ UNCHANGED <<ConsumerStable, known>>
+ControlRelease == /\ review.phase = "Result" \/ (Mode \in {"ControlBefore", "ControlStaleBefore"} /\ review.phase = "Granted")
+                  /\ review' = [review EXCEPT !.phase = "Released", !.parentLease = 0, !.parentActive = 0]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ControlCustody == /\ review.phase = "Released"
+                  /\ review' = [review EXCEPT !.phase = "Custody", !.preserved = TRUE]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+ControlDelete == /\ review.phase = "Custody" \/ (Mode = "ControlCustodyBefore" /\ review.phase = "Released")
+                 /\ review' = [review EXCEPT !.phase = "RowGone", !.parentRow = FALSE]
+                 /\ UNCHANGED <<ConsumerStable, known>>
+ControlAck == /\ review.phase = "RowGone"
+              /\ review' = [review EXCEPT !.phase = "Done", !.nativeAck = TRUE, !.head = TRUE]
+              /\ UNCHANGED <<ConsumerStable, known>>
+ControlNext == ControlGrant \/ ControlRepair \/ ControlResult \/ ControlNativeResult \/ ControlRelease \/ ControlCustody \/ ControlDelete \/ ControlAck
+ControlSpec == Init /\ [][ControlNext]_vars /\ WF_vars(ControlGrant) /\ WF_vars(ControlRepair)
+               /\ WF_vars(ControlResult) /\ WF_vars(ControlNativeResult) /\ WF_vars(ControlRelease)
+               /\ WF_vars(ControlCustody) /\ WF_vars(ControlDelete) /\ WF_vars(ControlAck)
+ControlDurableBeforeRelease == review.parentLease = 0 => review.result # "None"
+ControlCustodyBeforeDelete == ~review.parentRow => review.preserved
+ControlKeepsSuccessor == Mode \notin {"ControlStaleBefore", "ControlStaleFixed"} \/ (review.parentLease = 2 /\ review.parentRow /\ review.parentActive = 1)
+ControlNoKeyPreserved == Mode # "ControlNoKeyFixed" \/ (review.parentLease = 1 /\ review.result = "None" /\ review.parentRow)
+ControlEventuallyDone == <>(review.phase = "Done" /\ review.nativeAck /\ review.head)
+
+
+\* The reopen pass owns the seed; a pre-key caller closes its unstarted scope on return.
+PrefixHashPass == /\ review.prefixStep = 0
+                  /\ review' = [review EXCEPT !.prefixStep = 1, !.prefixReads = 1,
+                       !.seed = IF Mode = "PrefixGapBefore" THEN "Absent"
+                          ELSE IF (review.prefixHash /\ review.prefixFifo) \/ Mode \in {"PrefixHashBefore", "PrefixFifoBefore"}
+                               THEN "Ready" ELSE "Unavailable"]
+                  /\ UNCHANGED <<ConsumerStable, known>>
+PrefixTicketChange == /\ review.prefixStep = 1
+                      /\ review' = [review EXCEPT !.prefixStep = 2,
+                           !.prefixReads = IF Mode = "PrefixReadBefore" THEN 2 ELSE review.prefixReads]
+                      /\ UNCHANGED <<ConsumerStable, known>>
+PrefixScopeClose == /\ review.prefixStep = 2 /\ review.seed # "Absent"
+                    /\ review' = [review EXCEPT !.prefixStep = 3, !.prefixLease = 0]
+                    /\ UNCHANGED <<ConsumerStable, known>>
+PrefixNext == PrefixHashPass \/ PrefixTicketChange \/ PrefixScopeClose
+PrefixSpec == Init /\ [][PrefixNext]_vars /\ WF_vars(PrefixHashPass)
+              /\ WF_vars(PrefixTicketChange) /\ WF_vars(PrefixScopeClose)
+PrefixAuthenticated == review.seed = "Ready" => review.prefixHash /\ review.prefixFifo
+PrefixNoReread == review.prefixReads <= 1
+PrefixNoFabrication == review.result = "None" /\ ~review.nativeAck
+PrefixSeedEventuallyAvailable == <>(review.seed # "Absent")
+PrefixLeaseEventuallyFree == <>(review.prefixLease = 0)
+
+\* Abstention suppresses native outcomes; only the existing Idle cleanup releases an own lease.
+ABoot == Mode \in {"AbstainBootBefore", "AbstainBootFixed"}
+AFollower == Mode \in {"AbstainFollowerFixed", "AbstainSuccessorFixed"}
+ACapture == /\ review.aStep = 0
+            /\ lease' = IF AFollower THEN 2 ELSE 1
+            /\ rows' = IF AFollower THEN {2} ELSE {1}
+            /\ injected' = {1}
+            /\ review' = [review EXCEPT !.aStep = 1, !.phase = "Pending", !.aOwnSends = 1]
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
+                 closed, ran, wake, booted, generation, known, restarted, foreignBody,
+                 staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AEndTurn == /\ review.aStep = 1 /\ review' = [review EXCEPT !.aStep = 2]
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                 proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                 staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AStopOnly == /\ review.aStep = 2 /\ review' = [review EXCEPT !.aStep = 3]
+             /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                  proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                  staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AForeignPrompt == /\ review.aStep = 3
+                  /\ review' = [review EXCEPT !.aStep = 4, !.barrier = Mode \notin {"AbstainForeignBefore", "AbstainNoMarkerFixed"}]
+                  /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                       proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                       staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ARestart == /\ ((ABoot /\ review.aStep = 4) \/ (Mode \in {"AbstainCrashFixed", "AbstainCrashPendingBefore"} /\ review.aAck) \/ (Mode = "AbstainCrashRowFixed" /\ review.phase = "Finalizing")) /\ ~restarted
+            /\ restarted' = TRUE /\ generation' = 2 /\ lease' = 0 /\ rows' = {}
+            /\ review' = [review EXCEPT !.aAck = FALSE, !.phase = "Pending", !.parentActive = 0]
+            /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
+                 closed, ran, injected, wake, booted, known, foreignBody, staleReleased, warned,
+                 incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AForeignCloser == /\ review.aStep = 4 /\ review.aLeft > 0 /\ (ABoot => restarted)
+                  /\ result' = IF Mode = "AbstainForeignBefore" THEN [result EXCEPT ![1] = "Executed"] ELSE result
+                  /\ review' = [review EXCEPT !.aLeft = @ - 1, !.aIdle = TRUE,
+                       !.aCaughtUp = review.aLeft = 1, !.aStep = IF review.aLeft = 1 THEN 5 ELSE @]
+                  /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, count, proof,
+                       closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                       staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AOldWrongFinish == /\ Mode = "AbstainForeignBefore" /\ review.aStep = 5 /\ ~review.aAck
+                   /\ lease' = 0 /\ rows' = {} /\ review' = [review EXCEPT !.aAck = TRUE, !.phase = "Finalized", !.aIdleValid = TRUE, !.parentActive = 0]
+                   /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
+                        closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                        staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AIdleFinish == /\ review.barrier /\ review.aIdle /\ ~review.aAck /\ review.phase = "Pending"
+               /\ (Mode # "AbstainCrashPendingBefore" \/ ~restarted)
+               /\ (Mode \notin {"AbstainStampBefore", "AbstainStampFixed"} \/ review.aVersion > 0)
+               /\ (review.aVersion # 1 \/ Mode = "AbstainStampBefore")
+               /\ (review.aCaughtUp \/ Mode = "AbstainIdleBefore")
+               /\ Mode \notin {"AbstainPendingBefore", "AbstainBootBefore"}
+               /\ lease' = IF AFollower THEN lease ELSE 0
+               /\ UNCHANGED rows
+               /\ review' = [review EXCEPT !.phase = "Finalizing",
+                    !.aIdleValid = review.aCaughtUp /\ review.aVersion # 1, !.parentActive = IF AFollower THEN @ ELSE 0]
+               /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
+                    closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                    staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ARowRetry == /\ review.phase = "Finalizing" /\ review.aRowFail /\ ~review.aAck
+             /\ review' = [review EXCEPT !.aRowFail = FALSE]
+             /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                  proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                  staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ARowAck == /\ review.phase = "Finalizing" /\ ~review.aAck
+           /\ (~review.aRowFail \/ Mode = "AbstainRowBefore")
+           /\ rows' = IF AFollower \/ review.aRowFail THEN rows ELSE {}
+           /\ review' = [review EXCEPT !.aAck = TRUE, !.phase = "Finalized"]
+           /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, pending, result, count,
+                proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AParentFinish == /\ AFollower /\ review.aAck /\ review.aCaughtUp /\ ~review.aParentDone
+                 /\ lease' = 0 /\ rows' = {} /\ review' = [review EXCEPT !.aParentDone = TRUE, !.parentActive = 0]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
+                      closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                      staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ANextHead == /\ review.aAck /\ lease = 0 /\ rows = {} /\ review.aCaughtUp /\ (review.aNext = 0 \/ (Mode = "AbstainNextDuplicateBefore" /\ review.aNext < 2))
+             /\ wake' = TRUE /\ review' = [review EXCEPT !.aNext = @ + 1,
+                  !.aOwnSends = IF Mode = "AbstainReplayBefore" THEN 2 ELSE @]
+             /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                  proof, closed, ran, injected, booted, generation, known, restarted, foreignBody,
+                  staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AStampChanges == /\ Mode \in {"AbstainStampBefore", "AbstainStampFixed"} /\ review.aStep = 5 /\ review.aVersion = 0
+                 /\ review' = [review EXCEPT !.aVersion = 1]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                      proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                      staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AStampRefresh == /\ review.aVersion = 1 /\ ~review.aAck
+                 /\ review' = [review EXCEPT !.aVersion = 2]
+                 /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
+                      proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                      staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+ADone == /\ review.aStep = 5 /\ UNCHANGED vars
+AbstainSpec == Init /\ [][ACapture \/ AEndTurn \/ AStopOnly \/ AForeignPrompt \/ ARestart \/ AForeignCloser
+                  \/ AOldWrongFinish \/ AIdleFinish \/ ARowRetry \/ ARowAck \/ AParentFinish \/ ANextHead \/ AStampChanges \/ AStampRefresh \/ ADone]_vars
+               /\ WF_vars(ACapture) /\ WF_vars(AEndTurn) /\ WF_vars(AStopOnly) /\ WF_vars(AForeignPrompt)
+               /\ WF_vars(ARestart) /\ WF_vars(AForeignCloser) /\ WF_vars(AOldWrongFinish)
+               /\ WF_vars(AIdleFinish) /\ WF_vars(ARowRetry) /\ WF_vars(ARowAck) /\ WF_vars(AParentFinish) /\ WF_vars(ANextHead) /\ WF_vars(AStampChanges) /\ WF_vars(AStampRefresh)
+AbstainNoForeignExecuted == result[1] = "None"
+AbstainNoReplay == review.aOwnSends <= 1 /\ review.aNext <= 1
+AbstainIdleAuthority == review.aAck => review.aIdleValid
+AbstainEventuallyLeavesPending == (review.barrier /\ review.aIdle /\ review.aCaughtUp /\ review.phase = "Pending") ~> review.aAck
+AbstainQueueEventuallyProgresses == (review.barrier /\ review.aIdle /\ review.aCaughtUp) ~> (review.aNext >= 1)
+AbstainFollowerKeepsParent == (AFollower /\ ~review.aParentDone /\ review.aStep > 0) => lease = 2 /\ rows = {2} /\ review.parentActive = 1
+AbstainBootNoRemint == restarted => lease = 0
+
+AbstainNoMarkerKeepsGuard == (Mode = "AbstainNoMarkerFixed" /\ review.aStep > 0) => ~review.aAck /\ lease = 1 /\ rows = {1}
+AbstainSessionEventuallyIdle == <>(review.aStep = 5 /\ review.aCaughtUp)
+
+AbstainOwnCounter == (review.aStep > 0 /\ review.aNext = 0 /\ ~AFollower) => review.parentActive = (IF lease = 0 THEN 0 ELSE 1)
+
+AbstainRowBarrier == (review.aAck /\ ~AFollower) => rows = {}
+
+\* A restored same-actor/same-nonce lease still has a different activation cutoff.
+AEpochRebind == /\ review.aStep = 5 /\ ~review.aLeaseChanged /\ review.phase = "Pending"
+                /\ lease' = 2 /\ review' = [review EXCEPT !.aLeaseChanged = TRUE]
+                /\ UNCHANGED <<pc, native, members, nativeQueue, stage, rows, pending, result, count,
+                     proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                     staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AEpochFinalize == /\ review.aLeaseChanged /\ review.phase = "Pending"
+                  /\ lease' = IF Mode = "AbstainEpochBefore" THEN 0 ELSE lease
+                  /\ rows' = IF Mode = "AbstainEpochBefore" THEN {} ELSE rows
+                  /\ review' = [review EXCEPT !.phase = "Finalizing",
+                       !.parentActive = IF Mode = "AbstainEpochBefore" THEN 0 ELSE @]
+                  /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count,
+                       proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                       staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AbstainEpochSpec == Init /\ [][ACapture \/ AEndTurn \/ AStopOnly \/ AForeignPrompt \/ AForeignCloser
+                       \/ AEpochRebind \/ AEpochFinalize \/ ADone]_vars
+                    /\ WF_vars(ACapture) /\ WF_vars(AEndTurn) /\ WF_vars(AStopOnly)
+                    /\ WF_vars(AForeignPrompt) /\ WF_vars(AForeignCloser)
+                    /\ WF_vars(AEpochRebind) /\ WF_vars(AEpochFinalize)
+AbstainEpochPreserved == review.aLeaseChanged => lease = 2 /\ rows = {1} /\ review.parentActive = 1 /\ ~wake
+AbstainEpochAttempted == <>(review.phase = "Finalizing")
+
+=============================================================================

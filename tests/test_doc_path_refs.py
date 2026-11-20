@@ -83,6 +83,12 @@ class PathExistenceTest(RepoCase):
         self.assertIn("link target missing", found[0])
 
 
+    def test_checkout_local_statechart_index_may_be_named_but_not_linked(self) -> None:
+        self.assertEqual(self.findings("Build `docs/statecharts/index.generated.md` first."), [])
+        found = self.findings("[index](statecharts/index.generated.md)")
+        self.assertIn("link target missing", found[0])
+
+
 class LineRefTest(RepoCase):
     def test_line_past_eof_is_reported(self) -> None:
         found = self.findings("`src/services/turn_host.rs:10` and `src/services/turn_host.rs:11`.\n")

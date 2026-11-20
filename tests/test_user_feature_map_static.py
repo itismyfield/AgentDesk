@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from collections import Counter
 from collections.abc import Mapping
@@ -20,6 +21,7 @@ RUNNER = ROOT / "scripts/ci-script-checks.sh"
 GENERATOR = ROOT / "scripts/generate_user_feature_map.py"
 GUARD_TITLE = "User feature map static check"
 CONTRACT_TITLE = "User feature map generation contract"
+SOURCE_TITLE = "User feature map source contract"
 
 
 def feature_map_base(env: Mapping[str, str]) -> str:
@@ -47,12 +49,13 @@ def block(title: str, shard: str) -> str:
 class UserFeatureMapStatic(unittest.TestCase):
     def test_repository_generator_check_runs_and_inventory_is_nonempty(self) -> None:
         base = feature_map_base(os.environ)
-        done = subprocess.run(
-            [sys.executable, str(GENERATOR), "--check", "--base-ref", base], cwd=ROOT,
-            capture_output=True, text=True, timeout=60,
-        )
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        report = json.loads((ROOT / "docs/generated/user-feature-coverage.json").read_text())
+        with tempfile.TemporaryDirectory(prefix="feature-map-guards-") as directory:
+            done = subprocess.run(
+                [sys.executable, str(GENERATOR), "--output-dir", directory, "--base-ref", base], cwd=ROOT,
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            report = json.loads((Path(directory) / "user-feature-coverage.json").read_text())
         self.assertEqual(report["schema_version"], 1)
         self.assertGreater(report["applicable"], 0)
         self.assertEqual(report["covered"] + report["missing"], report["applicable"])
@@ -94,9 +97,11 @@ class UserFeatureMapStatic(unittest.TestCase):
                       block(GUARD_TITLE, "guards"))
 
     def test_contracts_register_generator_and_complete_red_suite(self) -> None:
-        source = block(CONTRACT_TITLE, "contracts")
-        self.assertIn('"$PYTHON" scripts/generate_user_feature_map.py --check --base-ref "$feature_map_base"', source)
-        self.assertIn('"$PYTHON" -m unittest tests.test_generate_user_feature_map', source)
+        source = block(SOURCE_TITLE, "contracts")
+        self.assertIn('"$PYTHON" scripts/generate_user_feature_map.py --validate --base-ref "$feature_map_base"', source)
+        self.assertIn('-m scripts.ci.user_feature_map_report --base-ref "$feature_map_base"', source)
+        self.assertIn('"$PYTHON" -m unittest tests.test_generate_user_feature_map',
+                      block(CONTRACT_TITLE, "contracts"))
         self.assertIn("TEST_LANE_BASELINE_REF", source)
         self.assertIn("GFP_BASE_SHA", source)
         self.assertIn("origin/main", source)
@@ -120,6 +125,16 @@ class UserFeatureMapStatic(unittest.TestCase):
                 self.assertEqual(done.stdout.splitlines().count(f"{shard}\t{title}"), 1)
                 self.assertTrue(any("pyyaml" in str(step.get("run", "")) for step in job["steps"]))
 
+    def test_pr_and_main_publish_full_coverage_and_main_checks_landed_markdown(self) -> None:
+        for workflow in ("ci-pr.yml", "ci-main.yml"):
+            steps = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"]["scripts_contracts"]["steps"]
+            upload = next(step for step in steps if step.get("name") == "Upload user feature map")
+            self.assertEqual(upload["with"]["path"], "target/generated-contracts/user-feature-map/")
+            self.assertEqual(upload["with"]["if-no-files-found"], "error")
+            checks = [step["run"] for step in steps if step.get("name") == "Check landed user feature map"]
+            self.assertEqual(checks, ["python3 scripts/generate_user_feature_map.py --check --base-ref HEAD"]
+                             if workflow == "ci-main.yml" else [])
+
     def test_base_resolution_is_explicit_in_ci_and_checked_locally(self) -> None:
         self.assertEqual(feature_map_base({}), "origin/main")
         self.assertEqual(feature_map_base({"GFP_BASE_SHA": "origin/main", "CI": "true"}), "origin/main")
@@ -132,7 +147,7 @@ class UserFeatureMapStatic(unittest.TestCase):
 
     def test_generator_rejects_unavailable_base_instead_of_skipping(self) -> None:
         done = subprocess.run(
-            [sys.executable, str(GENERATOR), "--check", "--base-ref", "refs/heads/feature-map-nonexistent-base"],
+            [sys.executable, str(GENERATOR), "--validate", "--base-ref", "refs/heads/feature-map-nonexistent-base"],
             cwd=ROOT, capture_output=True, text=True, timeout=60,
         )
         self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)

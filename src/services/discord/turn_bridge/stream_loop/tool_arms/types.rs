@@ -42,6 +42,8 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmC
         crate::services::discord::footer_view_reconciler::CompletionFooterOwner,
     pub(in crate::services::discord::turn_bridge::stream_loop) current_msg_id: &'a mut MessageId,
     pub(in crate::services::discord::turn_bridge::stream_loop) captured_nonce: Option<&'a str>,
+    /// The reader released its session row, so a tool frame records no session-row activity.
+    pub(in crate::services::discord::turn_bridge::stream_loop) session_row_released: bool,
 }
 
 pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmState<'a> {

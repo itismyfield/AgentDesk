@@ -29,6 +29,15 @@ pub(super) fn purge_queue(
             .as_ref()
             .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed))
     {
+        if super::policy_close::admit_control(&state, channel_id, false).is_err() {
+            let _ = reply.send(PurgeQueueResult {
+                queued_head_refused: true,
+                own_files_removed: Some(0),
+                queue_len_after: state.intervention_queue.len(),
+                ..Default::default()
+            });
+            return state;
+        }
         release_active_turn_anchor(&mut state, channel_id, Some(&persistence.provider));
         true
     } else {

@@ -91,10 +91,6 @@ fn update_completion_admission(
         pending_admission
             .entry(ledger_key)
             .or_insert_with(|| PendingCompletionAdmission {
-                turn_key: TurnKey {
-                    generation: ledger_key.generation,
-                    ..key
-                },
                 completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
                 updated_at: Instant::now(),
             });
@@ -334,7 +330,6 @@ mod tests {
             let mut pending = HashMap::from([(
                 exact_old,
                 PendingCompletionAdmission {
-                    turn_key: old_key,
                     completion_admission: CompletionAdmission::new(
                         CompletionAdmissionPlan::AfterTerminalProjectionSettled,
                     ),
