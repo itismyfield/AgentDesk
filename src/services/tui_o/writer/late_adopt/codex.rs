@@ -333,9 +333,9 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send started since the baseline".into(),
             )),
             Some(Verdict::Eligible(prefix)) => {
-                let records = self.records(&events)?;
+                let records = self.records(&events).await?;
                 let judged = (&records, sent_from.as_slice(), &mut *unresolved);
-                let owed = match self.owed(&events, &bound, (at, since), judged) {
+                let owed = match self.owed(&events, &bound, (at, since), judged).await {
                     Ok(owed) => owed,
                     Err(taken) => return Err(taken),
                 };
@@ -345,7 +345,7 @@ impl<I: HostIo> Takeover<'_, I> {
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
             Some(Verdict::Refuse(_)) | None => {
-                let records = self.records(&events)?;
+                let records = self.records(&events).await?;
                 let judged = (&records, sent_from.as_slice(), &mut *unresolved);
                 self.warm(&events, &bound, (at, since), judged).await
             }
@@ -378,14 +378,18 @@ impl<I: HostIo> Takeover<'_, I> {
         self.candidate.sends().0 != at.sends.0
     }
 
-    /// Legacy's Codex delivery records for the tmux the log binds now.
-    fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
+    /// Legacy's Codex delivery records for the tmux the log binds now, with the turns rejections
+    /// closed; an unread closure retries rather than take without it.
+    async fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
         let tmux = adoption::current(events).map(|(_, tmux)| tmux);
+        let legacy = self.io.legacy();
         let delivered = match tmux {
-            Some(tmux) => self.io.legacy().codex_delivered(self.channel, &tmux),
+            Some(tmux) => legacy.codex_delivered(self.channel, &tmux),
             None => Ok(Default::default()),
         };
-        Ok(Records::new(delivered.map_err(Taken::Retry)?, events))
+        let records = Records::new(delivered.map_err(Taken::Retry)?, events);
+        let closed = legacy.codex_closures(self.channel).await;
+        Ok(records.closing(closed.map_err(Taken::Retry)?))
     }
 
     /// Takes `bound` where Legacy's records stop, with every source owed before it.
@@ -401,7 +405,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send started since the baseline".into(),
             ));
         }
-        let start = match self.start_on(bound, (at, since), (records, sent_from)) {
+        let start = match self.placed(bound, (at, since), (records, sent_from)).await {
             Ok(Start::Owed(start)) => {
                 remember(unresolved, &bound.0);
                 start
@@ -420,45 +424,77 @@ impl<I: HostIo> Takeover<'_, I> {
             }
         };
         let judged = (records, sent_from, unresolved);
-        let mut sources = self.owed(events, bound, (at, since), judged)?;
+        let mut sources = self.owed(events, bound, (at, since), judged).await?;
         sources.push(ranged(&bound.0, start)?);
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`: at its earliest turn, ended or not, that Legacy's records do not
-    /// show delivered, once no Legacy send can be part of it. Turn time and custody prove nothing.
+    /// Where O starts on `source`: its earliest undelivered, unclosed turn once no Legacy send can
+    /// be part of it, with any uncovered range before the last closed turn to close with a reason.
     fn start_on(
         &self,
         (source, seq): &(SourceId, u64),
         (at, since): (Baseline, Since),
         (records, sent_from): (&Records, &[SourceId]),
-    ) -> Result<Start, Taken> {
+    ) -> Result<(Start, Option<(u64, u64)>), Taken> {
         let frontier = prefix::frontier(source).map_err(retry)?;
         let floor = records.floor(source, &frontier);
         let covered = |end: Option<u64>| end.is_some_and(|end| end <= floor);
-        let Some(turn) = frontier.turns.iter().find(|turn| !covered(turn.ended_end)) else {
-            return Ok(Start::End(frontier.complete));
+        let closed = |turn: &prefix::Span| records.closed(source, turn.opened);
+        let owed: Vec<_> = (frontier.turns.iter())
+            .filter(|turn| !covered(turn.ended_end))
+            .collect();
+        let last = owed.iter().rposition(|turn| closed(turn));
+        let unplaced = last.and_then(|at| {
+            let left = owed[..at].iter().find(|turn| !closed(turn))?;
+            Some((left.opened, owed[at].opened))
+        });
+        let Some(turn) = last.map_or(&owed[..], |at| &owed[at + 1..]).first() else {
+            // An open closed turn may still write: wait for its end or the next opener.
+            if last.is_some_and(|at| owed[at].ended_end.is_none()) {
+                return Err(Taken::Retry(
+                    "a turn closed with its reason has not ended".into(),
+                ));
+            }
+            return Ok((Start::End(frontier.complete), unplaced));
         };
         if turn.ended_at.is_none() && sent_from.contains(source) {
-            return Ok(Start::Legacy(
-                "a turn Legacy sent from is still open".into(),
-            ));
+            let held = "a turn Legacy sent from is still open".into();
+            return Ok((Start::Legacy(held), unplaced));
         }
         // Sends read before a later bind or before the turn opened cannot hold it; nor can none.
         let opened_after = (turn.opened_at)
             .is_some_and(|opened| since.proves && opened > since.at + BIND_CLOCK_SLACK);
         if *seq > at.seq || at.sends.0 == 0 || opened_after {
-            Ok(Start::Owed(turn.opened))
+            Ok((Start::Owed(turn.opened), unplaced))
         } else {
-            Ok(Start::Legacy(
-                "Legacy may have sent from the earliest undelivered turn".into(),
-            ))
+            let held = "Legacy may have sent from the earliest undelivered turn".into();
+            Ok((Start::Legacy(held), unplaced))
         }
+    }
+
+    /// `start_on`, after the range it leaves before a closed turn is closed with its reason;
+    /// without that reason the takeover waits.
+    async fn placed(
+        &self,
+        source: &(SourceId, u64),
+        times: (Baseline, Since),
+        seen: (&Records, &[SourceId]),
+    ) -> Result<Start, Taken> {
+        let (start, unplaced) = self.start_on(source, times, seen)?;
+        if let Some(range) = unplaced {
+            let close = self
+                .io
+                .legacy()
+                .close_unplaced(self.channel, &source.0, range);
+            close.await.map_err(Taken::Retry)?;
+        }
+        Ok(start)
     }
 
     /// Every other source the current tmux generation bound, and every one judged before, from
     /// its earliest turn owed to O; one Legacy may have sent part of retries the takeover.
-    fn owed(
+    async fn owed(
         &self,
         events: &[BindingEvent],
         bound: &(SourceId, u64),
@@ -473,7 +509,11 @@ impl<I: HostIo> Takeover<'_, I> {
             let seq = (events.iter().rev())
                 .find(|event| bound_source(event) == Some(&source))
                 .map_or(0, |event| event.seq);
-            match self.start_on(&(source.clone(), seq), (at, since), (records, sent_from)) {
+            let judged = (source.clone(), seq);
+            match self
+                .placed(&judged, (at, since), (records, sent_from))
+                .await
+            {
                 Ok(Start::End(_)) => unresolved.retain(|judged| *judged != source),
                 Ok(Start::Owed(start)) => {
                     remember(unresolved, &source);

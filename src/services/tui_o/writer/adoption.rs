@@ -57,6 +57,21 @@ pub trait LegacyView: Send + Sync + 'static {
     fn codex_delivered(&self, _channel: u64, _tmux: &str) -> Result<CodexDelivered, String> {
         Ok(CodexDelivered::default())
     }
+    /// The native turns `channel`'s rejections closed, by source, opener and the end of the
+    /// closed range; a takeover never starts on one. None from a host that stores no rejection.
+    fn codex_closures(&self, _channel: u64) -> futures::future::BoxFuture<'static, Closures> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Closes `source`'s uncovered turns from `from` up to `until` with their own reason; a host
+    /// that stores no rejection cannot, so the takeover waits.
+    fn close_unplaced(
+        &self,
+        _channel: u64,
+        _source: &SourceId,
+        _range: (u64, u64),
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Err("no rejection store".into()) })
+    }
     /// An old run's exact receipt; a current channel frontier cannot stand in for this proof.
     fn historical_frontier(
         &self,
@@ -88,6 +103,9 @@ pub struct CodexDelivery {
     pub range: (u64, u64),
     pub at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+/// Closed turns by source, native opener and, for a range, the end it closes before.
+pub type Closures = Result<Vec<(SourceId, u64, Option<u64>)>, String>;
 
 /// A channel's Codex delivery records of one tmux generation; they name no rollout file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

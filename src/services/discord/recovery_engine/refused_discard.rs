@@ -76,8 +76,15 @@ pub(in crate::services::discord) async fn discard_held(
                     crate::services::tui_o::cutover::codex_first_rejection(channel_id, nonce)
                 });
                 let reason = fresh.unwrap_or(Reason::AdoptionRefused);
-                let persisted = disposition::persist_intent(&pool, &id, reason).await;
-                persisted.map(|()| (id, reason))
+                let closure = closure::of(provider, row).await;
+                if closure.is_none() && matches!(provider, ProviderKind::Codex) {
+                    tracing::warn!(
+                        channel_id,
+                        "refused body's turn has no raw position to close"
+                    );
+                }
+                let persist = disposition::closure::persist(&pool, &id, reason, closure.as_ref());
+                persist.await.map(|()| (id, reason))
             }
             None => Err("the refused body has no key".into()),
         },
@@ -97,6 +104,32 @@ pub(in crate::services::discord) async fn discard_held(
         crate::services::discord::task_supervisor::spawn_observed("tui_rejection_notice", notice);
     }
     true
+}
+
+/// Closes a takeover's uncovered turns before a closed one with their own reason and closure;
+/// the key names the range, so a repeated attempt reuses one row and one notice.
+pub(in crate::services::discord) async fn close_unplaced(
+    pool: &PgPool,
+    http: Option<Arc<serenity::Http>>,
+    channel: u64,
+    closed: &disposition::closure::Closure,
+) -> Result<(), String> {
+    let range = (closed.from, closed.until.unwrap_or(closed.from));
+    let (session, file) = (&closed.session_id, (closed.dev, closed.ino));
+    let id = Identity {
+        channel,
+        input: 0,
+        nonce: format!("{session}:{}:{}:{}:{}", file.0, file.1, range.0, range.1),
+        execution: "codex".into(),
+        source: "unplaced:v1".into(),
+    };
+    disposition::closure::persist(pool, &id, Reason::Unplaced, Some(closed)).await?;
+    if let Some(http) = http {
+        let (pool, intent) = (pool.clone(), (id, Reason::Unplaced));
+        let notice = async move { post(&http, &pool, &[intent]).await };
+        crate::services::discord::task_supervisor::spawn_observed("tui_rejection_notice", notice);
+    }
+    Ok(())
 }
 
 /// Boot: posts every intent no attempt holds; the row and body may be gone, so the intent
@@ -149,6 +182,9 @@ pub(in crate::services::discord) async fn post(
         }
     }
 }
+
+#[path = "refused_discard_closure.rs"]
+mod closure;
 
 #[cfg(test)]
 #[path = "refused_discard_tests.rs"]

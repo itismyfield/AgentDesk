@@ -905,7 +905,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 34] = [
+    let expected: [(i64, &[&str]); 35] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -1088,6 +1088,13 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
             &[
                 "table:tui_output_dispositions",
                 "column:tui_output_dispositions.message_id",
+            ],
+        ),
+        (
+            202,
+            &[
+                "column:tui_output_dispositions.closure",
+                "constraint:tod_closure_object",
             ],
         ),
     ];
