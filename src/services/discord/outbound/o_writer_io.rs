@@ -27,6 +27,7 @@ pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+    agy_correlation: Option<agy::Correlation>,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -37,6 +38,7 @@ impl GatewayPort {
             http,
             bot_id,
             owner: None,
+            agy_correlation: None,
             #[cfg(test)]
             repost_base: None,
         }
@@ -94,14 +96,6 @@ fn refusal(status: Option<u16>) -> Option<u16> {
     status.filter(|status| matches!(status, 400 | 403 | 404))
 }
 
-async fn send(
-    http: &serenity::Http,
-    channel: u64,
-    message: CreateMessage,
-) -> Result<serenity::Message, serenity::Error> {
-    super::census_scope(None, ChannelId::new(channel).send_message(http, message)).await
-}
-
 impl DiscordPort for GatewayPort {
     fn bot_id(&self) -> u64 {
         self.bot_id
@@ -113,11 +107,28 @@ impl DiscordPort for GatewayPort {
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let http = Arc::clone(&self.http);
+        let agy = self.agy_correlation.clone();
+        let bot_id = self.bot_id;
         async move {
             let message = CreateMessage::new()
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
-            match send(&http, channel, message).await {
+            let message = match &agy {
+                Some(correlation) => correlation.attach(message),
+                None => message,
+            };
+            match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
+                .await
+            {
+                Ok(message)
+                    if agy.as_ref().is_some_and(|correlation| {
+                        !correlation.matches(&message, channel, bot_id)
+                    }) =>
+                {
+                    PostOutcome::Uncertain(
+                        "agy Discord response lacks exact receipt evidence".into(),
+                    )
+                }
                 Ok(message) => {
                     crate::services::legacy_body_census::transport::record_o_created(
                         channel,

@@ -2,7 +2,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{GatewayPort, confirm, http_status, refusal, send, serenity};
+use super::{DiscordPort, GatewayPort, PostOutcome, confirm, serenity};
 use crate::services::discord::{self, SharedData, inflight};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::writer::agy_delivery::{
@@ -10,32 +10,48 @@ use crate::services::tui_o::writer::agy_delivery::{
 };
 use serenity::{ChannelId, CreateEmbed, CreateEmbedFooter, CreateMessage, GetMessages, Nonce};
 
+#[derive(Clone)]
+pub(super) struct Correlation {
+    token: String,
+    payload_hash: [u8; 32],
+}
+
+impl Correlation {
+    pub(super) fn attach(&self, message: CreateMessage) -> CreateMessage {
+        message
+            .embed(CreateEmbed::new().footer(CreateEmbedFooter::new(&self.token)))
+            .nonce(Nonce::String(self.token.chars().take(25).collect()))
+            .enforce_nonce(true)
+    }
+
+    pub(super) fn matches(&self, message: &serenity::Message, channel: u64, bot: u64) -> bool {
+        message.channel_id.get() == channel
+            && message.author.id.get() == bot
+            && correlation(message) == Some(self.token.as_str())
+            && hash(&message.content) == self.payload_hash
+    }
+}
+
 impl Transport for GatewayPort {
     fn bot(&self) -> Option<NonZeroU64> {
         NonZeroU64::new(self.bot_id)
     }
 
     async fn post(&self, channel: u64, piece: &Piece) -> Post {
-        let request = CreateMessage::new()
-            .content(&piece.payload)
-            .embed(CreateEmbed::new().footer(CreateEmbedFooter::new(&piece.correlation)))
-            .nonce(Nonce::String(piece.correlation.chars().take(25).collect()))
-            .enforce_nonce(true)
-            .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
-        match send(&self.http, channel, request).await {
-            Ok(message)
-                if message.channel_id.get() == channel
-                    && message.author.id.get() == self.bot_id
-                    && correlation(&message) == Some(piece.correlation.as_str())
-                    && hash(&message.content) == piece.payload_hash =>
-            {
-                Post::Created(NonZeroU64::from(message.id))
+        let mut port = Self::new(Arc::clone(&self.http), self.bot_id);
+        port.agy_correlation = Some(Correlation {
+            token: piece.correlation.clone(),
+            payload_hash: piece.payload_hash,
+        });
+        match DiscordPort::post(&port, channel, piece.payload.clone()).await {
+            PostOutcome::Created(message) => {
+                NonZeroU64::new(message.id).map_or(Post::Unknown, Post::Created)
             }
-            Err(error) if refusal(http_status(&error)).is_some() => Post::NotSent(format!(
-                "agy Discord POST refused ({:?})",
-                http_status(&error)
-            )),
-            _ => Post::Unknown,
+            PostOutcome::Refused(status) => {
+                Post::NotSent(format!("agy Discord POST refused ({status})"))
+            }
+            PostOutcome::Withheld(reason) => Post::NotSent(reason),
+            PostOutcome::Uncertain(_) => Post::Unknown,
         }
     }
 
