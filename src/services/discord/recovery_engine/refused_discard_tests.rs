@@ -1,5 +1,4 @@
 use super::*;
-use crate::db::auto_queue::test_support::TestPostgresDb;
 
 // The key follows the turn nonce alone: a later view of the same turn reuses the first reason.
 #[test]
