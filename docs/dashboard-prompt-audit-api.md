@@ -15,7 +15,7 @@ Both endpoints take a registered agent ID and an optional `provider=claude|codex
 | `masked_count` | nonnegative integer | Sum of the section counts reported by the redaction. |
 | `sections[]` | array | Sections in launch-text order; empty when `origin` is `unavailable`. |
 
-Each section has `name`, `source` (`canon_file`, `memento`, `runtime`, or `conditional`), a nullable logical `path`, `chars` (Unicode scalar count of the displayed text), `text`, and `masked_count`. The session-start manifest identifies sections whose full text matches the captured launch text. Unattributed text is grouped into runtime sections. Like Discord `/system-prompt`, the endpoint reads only the saved session copy; it does not rebuild a missing one, because a rebuild depends on the requesting Discord user.
+Each section has `name`, `source` (`canon_file`, `memento`, `runtime`, or `conditional`), a nullable logical `path`, `chars` (Unicode scalar count of the displayed text), `text`, and `masked_count`. The session-start manifest identifies sections whose full text matches the captured launch text. Unattributed text is grouped into runtime sections. Saved-copy lookup and redaction reuse the Discord `/system-prompt` path. When the saved copy is missing, Discord rebuilds the prompt for the requesting user, but this endpoint returns `origin: unavailable` instead, because a requester-dependent rebuild does not fit the dashboard.
 
 Displayed text uses the same redaction as Discord `/system-prompt` (`system_prompt_audit::redact`), and each `masked_count` is the number of values it replaced with `***`. This screen is tailnet-only, so it adds no stronger masking (user decision 2026-11-20).
 

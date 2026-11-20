@@ -70,7 +70,8 @@ pub(super) fn prompt_response(
             },
             saved_sections(&saved.system_prompt, manifest, canon),
         ),
-        // Like /system-prompt, only the saved copy is shown; a rebuild depends on the requester.
+        // Lookup and redaction reuse /system-prompt's saved-copy path, but a missing copy is not
+        // rebuilt here: Discord's rebuild depends on the requesting user.
         None => (Origin::Unavailable, Vec::new()),
     };
     let session_id = snapshot

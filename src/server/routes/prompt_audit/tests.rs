@@ -275,18 +275,20 @@ async fn prompt_audit_http_reuses_system_prompt_redaction_and_checks_binding_pg(
     assert!(!serialized.contains("different agent private text"));
     let response: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(response["origin"], "latest_saved");
-    let sources: Vec<_> = response["sections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|section| section["source"].as_str().unwrap())
-        .collect();
-    assert!(
-        sources.contains(&"runtime")
-            && sources.contains(&"canon_file")
-            && sources.contains(&"memento")
-            && sources.contains(&"conditional")
-    );
+    let memento = "[Memento anchor context]\nPolicy\n\n[ANCHOR MEMORY]\n- Reuse canon guidance.\n- password=***\n\n[End Memento anchor context]";
+    let expected: Vec<_> = [
+        ("role_prompt", "canon_file", json!("agents/role.prompt.md"), "Role guidance.", 0),
+        ("review_rules", "conditional", Value::Null, "[Review Rules]\nTest the result.", 0),
+        ("runtime", "runtime", Value::Null, "\n\nOrdinary instructions.\nAPI_TOKEN=*** --key ***\n\n", 2),
+        ("memento_anchors", "memento", Value::Null, memento, 1),
+    ]
+    .into_iter()
+    .map(|(name, source, path, text, masked_count)| {
+        let chars = text.chars().count();
+        json!({"name": name, "source": source, "path": path, "chars": chars, "text": text, "masked_count": masked_count})
+    })
+    .collect();
+    assert_eq!(response["sections"], json!(expected));
 
     let anchor_uri = "/api/agents/audit-fixture/anchors";
     let (status, bytes) = get(&router, anchor_uri, true).await;
