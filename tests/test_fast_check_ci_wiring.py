@@ -2625,7 +2625,7 @@ jobs:
             ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
-            ("job timeout leading zero is not decimal 60", mutations, "    timeout-minutes: 60\n", "    timeout-minutes: 074\n"),
+            ("job timeout octal alias is not decimal 80", mutations, "    timeout-minutes: 80\n", "    timeout-minutes: 0120\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):
