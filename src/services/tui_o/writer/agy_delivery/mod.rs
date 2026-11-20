@@ -11,8 +11,8 @@ use std::task::Poll;
 pub(crate) use plan::{Piece, Plan, hash};
 
 use crate::services::tui_o::ownership::OwnershipGate;
+pub(crate) use crate::services::tui_o::store::agy_delivery::TurnLease;
 use crate::services::tui_o::store::agy_delivery::{Attempt, Journal, Receipt, Stage, State};
-pub(crate) use crate::services::tui_o::store::agy_delivery::{TurnKey, TurnLease};
 use crate::services::tui_o::store::{ChannelStore, StoreError};
 
 #[derive(Debug, PartialEq, Eq)]
