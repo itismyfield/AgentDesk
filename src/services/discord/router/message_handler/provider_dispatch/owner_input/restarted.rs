@@ -51,7 +51,7 @@ type Route<'a> = (
 
 impl OwnerTurn {
     pub(in crate::services::discord) fn continues_herdr(&self) -> bool {
-        self.late.continued || self.late.restarted.is_some()
+        (self.late.continued || self.late.restarted.is_some()) && !self.recovery.repaired()
     }
 
     pub(in crate::services::discord) fn awaiting_restarted_clear(&self) -> bool {
