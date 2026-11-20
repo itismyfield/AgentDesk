@@ -26,6 +26,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
+pub(crate) mod agy_host;
 mod child_retirement;
 mod first_init;
 mod fresh_input;

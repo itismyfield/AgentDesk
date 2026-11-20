@@ -957,3 +957,62 @@ fn kept_registered_channels_still_reject_invalid_provider_and_runtime() {
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
 }
+
+#[test]
+fn agy_shadow_accepts_explicit_process_bindings_without_tui_body_ownership() {
+    for provider in ["antigravity", "agy"] {
+        let config = serde_json::from_value(serde_json::json!({
+            "server": {}, "tui_o": {"writer": {"channels": [41]}},
+            "agents": [{"id": "agy", "name": "AGY",
+                "channels": {provider: {"id": "41"}}}]
+        }))
+        .unwrap();
+        let snapshot = BootChannels::validate(&config).unwrap();
+        assert!(!snapshot.hosts_output(41));
+        assert_eq!(snapshot.kind(41), None);
+    }
+}
+
+#[test]
+fn agy_shadow_child_inherits_verified_parent_without_claiming_legacy_body() {
+    let config = serde_json::from_value(serde_json::json!({
+        "server": {}, "agents": [{"id": "agy", "name": "AGY",
+            "channels": {"agy": {"id": "41"}}}]
+    }))
+    .unwrap();
+    let snapshot = BootChannels::validate(&config).unwrap();
+    assert!(snapshot.agy_selected(41));
+    let thread = |parent, kind| {
+        serde_json::from_value(serde_json::json!({
+            "id": "43", "parent_id": parent, "type": kind, "name": "fixture"
+        }))
+        .unwrap()
+    };
+    assert_eq!(snapshot.agy_target(43), None);
+    assert!(!snapshot.record_agy_thread(&thread("41", 0)));
+    assert!(!snapshot.record_agy_thread(&thread("99", 11)));
+    assert!(snapshot.record_agy_thread(&thread("41", 11)));
+    let target = snapshot.agy_target(43).unwrap();
+    assert_eq!((target.destination, target.logical_channel), (43, 41));
+    assert!(!snapshot.hosts_output(43));
+    assert!(!snapshot.record_agy_thread(&thread("99", 11)));
+    assert_eq!(snapshot.agy_target(43), None);
+    assert!(!snapshot.record_agy_thread(&thread("41", 11)));
+}
+
+#[test]
+fn agy_shadow_selection_rejects_a_committed_pane_store_for_the_same_channel() {
+    let config = serde_json::from_value(serde_json::json!({
+        "server": {}, "agents": [{"id": "agy", "name": "AGY",
+            "channels": {"antigravity": {"id": "41"}}}]
+    }))
+    .unwrap();
+    let snapshot = BootChannels::validate(&config).unwrap();
+    assert!(
+        snapshot
+            .seeded(&config, |_, _| {
+                Ok(BTreeMap::from([(41, Adoption::Committed)]))
+            })
+            .is_err()
+    );
+}

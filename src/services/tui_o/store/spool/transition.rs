@@ -34,6 +34,7 @@ impl ChannelStore {
                     .retention
                     .as_ref()
                     .is_some_and(|evidence| evidence.valid(expected, &audit, store.init.channel)),
+                ShadowProvider::Antigravity => false,
             };
             if !retention_valid {
                 return Err(rejected(

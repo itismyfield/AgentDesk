@@ -216,6 +216,7 @@ impl TurnSummaryRun {
             ShadowProvider::Codex => {
                 value.pointer("/payload/type").and_then(Value::as_str) == Some("turn_aborted")
             }
+            ShadowProvider::Antigravity => return Vec::new(),
         };
         let failed = turn.failed
             || value.get("is_error") == Some(&Value::Bool(true))
@@ -246,6 +247,7 @@ impl TurnSummaryRun {
         let provider = match self.provider {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
+            ShadowProvider::Antigravity => "antigravity",
         };
         let quota = quota::snapshot(
             provider,

@@ -54,6 +54,7 @@ async fn resumed_summary(provider: ShadowProvider, channel: u64) {
             serde_json::json!({"type":"event_msg","timestamp":"2026-10-19T00:00:07Z","payload":{"type":"task_complete","turn_id":"summary-turn"}}),
             "summary-body",
         ),
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     };
     let (stop, task) = spawn_with(harness.writer(), provider, Arc::clone(&bindings));
     append(&path, &native(start));

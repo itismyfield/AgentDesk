@@ -235,6 +235,7 @@ impl UnitDeriver {
                             .and_then(serde_json::Value::as_bool)
                             .filter(|failed| *failed)
                             .or_else(|| code_mode_exec_failed(&value)),
+                        ShadowProvider::Antigravity => None,
                     };
                     out.extend(self.unit(unit_key, content, meta, failed));
                 }

@@ -15,6 +15,7 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::writer::WriterAlarm;
 
 mod adoption;
+mod agy;
 mod children;
 pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
@@ -35,6 +36,7 @@ pub(crate) struct BootChannels {
     children: children::ChildEntries,
     init_scope: Arc<OnceLock<Arc<crate::services::session_host::surface_policy::InitScope>>>,
     selected: BTreeSet<u64>,
+    agy: agy::AgySelection,
     /// Every TUI binding in the boot config, selected or not.
     tui_bindings: BTreeSet<u64>,
     dormant_channels: BTreeSet<u64>,
@@ -59,6 +61,7 @@ impl PartialEq for BootChannels {
             let kinds: Vec<_> = kinds.collect();
             (
                 &boot.selected,
+                &boot.agy.channels,
                 &boot.dormant_channels,
                 kinds,
                 &boot.site,
@@ -135,6 +138,7 @@ fn tui_kind(
     let kind = match provider.as_str() {
         "claude" => RuntimeHandoffKind::ClaudeTui,
         "codex" => RuntimeHandoffKind::CodexTui,
+        "antigravity" | "agy" => return Ok(Ok(RuntimeHandoffKind::ProcessBackend)),
         _ => {
             return Ok(Err(format!(
                 "{key}: channel {id} has non-TUI provider {provider}"
@@ -246,20 +250,23 @@ fn all_tui_kinds(config: &Config) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
 impl BootChannels {
     pub(crate) fn validate(config: &Config) -> Result<Self> {
         let tui_o = tui_o_of(config);
-        let kinds = selected_kinds(config, true)?;
-        let channels: BTreeSet<u64> = kinds.keys().copied().collect();
+        let mut kinds = selected_kinds(config, true)?;
+        let all_selected: BTreeSet<u64> = kinds.keys().copied().collect();
+        let agy = agy::AgySelection::project(&mut kinds);
+        let channels = kinds.keys().copied().collect::<BTreeSet<_>>();
         let dormant_channels = configured_dormant_channels(config);
         ensure!(
             !dormant_channels.contains(&0),
             "tui_o.writer.dormant_channels rejects channel 0"
         );
         ensure!(
-            dormant_channels.is_subset(&channels),
+            dormant_channels.is_subset(&all_selected),
             "tui_o.writer.dormant_channels must be a subset of the selected O writer channels"
         );
-        let (site, configured_id) = site(config, !channels.is_empty())?;
+        let (site, configured_id) = site(config, !all_selected.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
+            agy,
             bindings: agent_bindings(config).map(|(id, _, _)| id).collect(),
             children: children::ChildEntries::default(),
             init_scope: Arc::default(),
@@ -288,20 +295,29 @@ impl BootChannels {
         config: &Config,
         stored: impl FnOnce(&BTreeSet<u64>, bool) -> std::io::Result<BTreeMap<u64, Adoption>>,
     ) -> Result<Self> {
-        if self.selected.is_empty() {
+        if self.selected.is_empty() && self.agy.channels.is_empty() {
             return Ok(self);
         }
         let alarms = AlarmRouter::for_process(None, None);
         match &self.site {
             Site::Home => {
                 let states = stored(&self.selected, true)?;
+                ensure!(
+                    !self
+                        .agy
+                        .channels
+                        .iter()
+                        .any(|channel| states.contains_key(channel)),
+                    "an agy shadow selection conflicts with a committed pane writer store"
+                );
                 let kept: BTreeSet<u64> = states
                     .keys()
                     .filter(|channel| !self.selected.contains(channel))
                     .copied()
                     .collect();
-                let kinds = registered_kinds(config, "o_store", &kept)
+                let mut kinds = registered_kinds(config, "o_store", &kept)
                     .context("a channel committed to O here left the writer selection")?;
+                kinds.retain(|_, kind| *kind != RuntimeHandoffKind::ProcessBackend);
                 for &channel in &kept {
                     let alarm = if kinds.contains_key(&channel) {
                         tracing::warn!(

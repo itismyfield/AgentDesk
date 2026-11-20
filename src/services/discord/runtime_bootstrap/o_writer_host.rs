@@ -144,6 +144,7 @@ impl HostIo for GatewayHost {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return None,
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -309,6 +310,7 @@ impl HostIo for GatewayHost {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return Err("agy uses committed spool custody".into()),
         };
         let pending = |record: &super::super::tui_direct_pending_start::TuiDirectPendingStart| {
             record.channel_id == channel && record.provider.eq_ignore_ascii_case(kind.as_str())
@@ -400,6 +402,7 @@ impl HostIo for GatewayHost {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return,
         };
         super::super::queue_io::schedule_writer_ready_queue_kick(
             self.shared.clone(),
@@ -412,6 +415,7 @@ impl HostIo for GatewayHost {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return,
         };
         let confirm =
             super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
@@ -507,6 +511,10 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
+    if *provider == ProviderKind::Antigravity {
+        install_thread_lookup(shared, provider);
+        return;
+    }
     let Some(shadow) = shadow_of(provider) else {
         return;
     };

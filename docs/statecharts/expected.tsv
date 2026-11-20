@@ -1447,6 +1447,11 @@ tui-o-writer/WriterAgyMissingDisposition.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyMissingDone.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyMissingLostChild.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyMissingSpawnFailure.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyOwnerCutover.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyOwnerDual.cfg	WriterAdoption	AgyChildSingleOwner	-
+tui-o-writer/WriterAgyOwnerLate.cfg	WriterAdoption	AgyRetirementFenced	-
+tui-o-writer/WriterAgyOwnerLost.cfg	WriterAdoption	-	AgyRestartResolvesOwner
+tui-o-writer/WriterAgyOwnerShadow.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyPreview.cfg	WriterAdoption	AgyNoPrematureBody	-
 tui-o-writer/WriterAgyRepost.cfg	WriterAdoption	AgyExactlyOneAnswer,AgyNoDuplicate	-
 tui-o-writer/WriterAgyRewind.cfg	WriterAdoption	AgyOffsetMonotone	-
