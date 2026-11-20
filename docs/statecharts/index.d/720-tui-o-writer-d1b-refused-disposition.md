@@ -1,0 +1,2 @@
+key: 720-tui-o-writer-d1b-refused-disposition
+| `tui-o-writer` D1b admitted prior evidence (#7651, design r2) | `6467b53cab` + D1b design r2 | The landed admitted takeover drops a proven-undelivered earlier rollout; singleton-finish/any-B/drop-on-generation/memory-only/absence-as-owed/ignore-late/block mutants are expected RED | Ten cfg: 1 GREEN (admitted design) / 9 expected RED; the Herdr row-end discard cfgs stay with the deferred Herdr body-debt work. [design](tui-o-writer/d1b-refused-disposition.design.md) |

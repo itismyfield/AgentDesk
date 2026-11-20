@@ -258,3 +258,26 @@ async fn an_unobserved_held_context_leaves_later_ambient_metadata_intact() {
     drop(context);
     assert_eq!(candidate.sends(), (1, 1));
 }
+
+// The deciding adoption stays locked while the caller acts on the observation, and a refusal
+// already made reads as refused there.
+#[cfg(unix)]
+#[test]
+fn a_guarded_observation_holds_the_deciding_adoption_and_reads_its_refusal() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let _pending = test_override::force_candidates(&[(61, ClaudeTui)]);
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+    let candidate = snapshot.candidate(61).unwrap();
+    assert!(candidate.defer(61));
+    let seen = with_peeked_o_output(61, Some(ClaudeTui), |seen| {
+        assert!(
+            candidate.locked_for_test(),
+            "the adoption is held through the caller's step"
+        );
+        seen
+    });
+    assert_eq!(seen, Err(IdentityError::AwaitingAdoption));
+    candidate.release(61);
+    let refused = with_peeked_o_output(61, Some(ClaudeTui), |seen| seen);
+    assert_eq!(refused, Err(IdentityError::AdoptionRefused));
+}

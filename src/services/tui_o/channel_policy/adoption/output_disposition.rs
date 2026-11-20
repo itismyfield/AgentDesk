@@ -18,24 +18,6 @@ impl Identity {
         super::first_prompt_digest(&serde_json::to_string(source).expect("source identity"))
     }
 }
-impl Reason {
-    pub(crate) fn message(self) -> &'static str {
-        match self {
-            Self::Deadline => {
-                "출력 연결 정상화 시간이 만료되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
-            }
-            Self::Invalidated => {
-                "이 실행이 취소되거나 교체되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
-            }
-            Self::SourceRejected => {
-                "응답의 실행·출처 연결을 검증하지 못해 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
-            }
-            Self::TrustUnavailable => {
-                "작업 폴더 신뢰 또는 로그인을 정상화하지 못해 응답을 게시하지 않았습니다. 터미널 세션을 확인해 주세요."
-            }
-        }
-    }
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
     Normalizing,

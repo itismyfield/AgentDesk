@@ -1,4 +1,5 @@
-//! Body-free notice delivery; a committed uncertain attempt may only reconcile history.
+//! Body-free notice delivery; an uncertain attempt stays held and is never posted again. No
+//! automatic reconciliation is installed: `reconcile` waits for a path that supplies message ids.
 use std::future::Future;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub(crate) trait NoticePort {
         content: &str,
         nonce: &str,
     ) -> impl Future<Output = PostResult> + Send;
+    #[cfg(test)]
     fn lookup(
         &self,
         channel: u64,
@@ -83,6 +85,7 @@ impl NoticePort for GatewayNoticePort {
             Err(_) => PostResult::Uncertain,
         }
     }
+    #[cfg(test)]
     async fn lookup(&self, channel: u64, message: u64) -> Result<Option<Observation>, String> {
         self.http
             .get_message(
@@ -121,6 +124,9 @@ pub(crate) async fn deliver(
     }
 }
 
+/// History reconciliation needs the posted message id. No production source supplies one yet,
+/// so this stays test-only and a held attempt is left as it is.
+#[cfg(test)]
 pub(crate) async fn reconcile(
     pool: &PgPool,
     id: &Identity,
@@ -149,5 +155,6 @@ pub(crate) async fn reconcile(
     ))
 }
 
+#[cfg(test)]
 #[path = "tui_rejection_notice_tests.rs"]
 pub(crate) mod tests;

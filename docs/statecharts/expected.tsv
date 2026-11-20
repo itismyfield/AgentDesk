@@ -1375,6 +1375,16 @@ tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfir
 tui-o-turn-mode/CodexTakeoverNoArchive.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverNoBinding.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverRetryAll.cfg	CodexTakeover	NoEarlyConfirmation	-
+tui-o-writer/CodexAdmittedPriorAbsenceAsOwedMut.cfg	CodexAdmittedPrior	NoAbsenceAsOwed	-
+tui-o-writer/CodexAdmittedPriorBlockMut.cfg	CodexAdmittedPrior	-	AdmittedEventuallyCommitted
+tui-o-writer/CodexAdmittedPriorDesign.cfg	CodexAdmittedPrior	-	-
+tui-o-writer/CodexAdmittedPriorDropOnGenMut.cfg	CodexAdmittedPrior	ProvenOwedKept	-
+tui-o-writer/CodexAdmittedPriorFinishNoListMut.cfg	CodexAdmittedPrior	AdoptedMatchesProof	-
+tui-o-writer/CodexAdmittedPriorFinishNoOwnMut.cfg	CodexAdmittedPrior	AdoptedMatchesProof	-
+tui-o-writer/CodexAdmittedPriorFinishSingletonMut.cfg	CodexAdmittedPrior	AdoptedMatchesProof	OwnCommitAdopted
+tui-o-writer/CodexAdmittedPriorIgnoreLateMut.cfg	CodexAdmittedPrior	DeliveredNotReposted	-
+tui-o-writer/CodexAdmittedPriorMain.cfg	CodexAdmittedPrior	ProvenOwedKept	-
+tui-o-writer/CodexAdmittedPriorMemoryOnlyMut.cfg	CodexAdmittedPrior	ProvenOwedKept	-
 tui-o-writer/CodexLateDeliveryD1Gen.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryD1Moved.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryD1Pending.cfg	CodexLateDelivery	NoAdoptionLoss	-

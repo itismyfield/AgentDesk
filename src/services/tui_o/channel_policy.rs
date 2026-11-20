@@ -715,5 +715,7 @@ mod tests;
 #[cfg(test)]
 mod late_reservation_tests;
 
+#[cfg(unix)]
+pub(crate) use adoption::episode_key;
 #[cfg(test)]
 pub(crate) use adoption::output_disposition;

@@ -17,6 +17,30 @@ pub(crate) enum Reason {
     Invalidated,
     SourceRejected,
     TrustUnavailable,
+    /// The channel's O adoption was refused or released, so its held body is discarded.
+    AdoptionRefused,
+}
+
+impl Reason {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Deadline => {
+                "출력 연결 정상화 시간이 만료되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
+            }
+            Self::Invalidated => {
+                "이 실행이 취소되거나 교체되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
+            }
+            Self::SourceRejected => {
+                "응답의 실행·출처 연결을 검증하지 못해 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
+            }
+            Self::TrustUnavailable => {
+                "작업 폴더 신뢰 또는 로그인을 정상화하지 못해 응답을 게시하지 않았습니다. 터미널 세션을 확인해 주세요."
+            }
+            Self::AdoptionRefused => {
+                "이 채널의 출력 연결이 거부되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
+            }
+        }
+    }
 }
 
 impl Identity {
@@ -118,6 +142,7 @@ impl Attempt {
 }
 
 /// Rehydration only authorizes checking history; it never grants another POST.
+#[cfg(test)]
 pub(crate) async fn pending(
     pool: &PgPool,
     id: &Identity,
@@ -196,17 +221,50 @@ pub(crate) async fn persist_intent(
     id: &Identity,
     reason: Reason,
 ) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    persist_intent_in(&mut tx, id, reason).await?;
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
+/// The intent commits with the caller's transaction, so it lands together with the release it
+/// guards. A key that already holds an intent keeps it; a different identity or reason fails.
+pub(crate) async fn persist_intent_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &Identity,
+    reason: Reason,
+) -> Result<(), String> {
     let identity = serde_json::to_value(id).map_err(|e| e.to_string())?;
+    let reason = serde_json::to_string(&reason).map_err(|e| e.to_string())?;
     sqlx::query("INSERT INTO tui_output_dispositions(output_key,identity,reason) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-        .bind(id.key()).bind(identity).bind(serde_json::to_string(&reason).map_err(|e| e.to_string())?)
-        .execute(pool).await.map_err(|e| e.to_string())?;
-    if record(pool, id)
-        .await?
-        .is_none_or(|(stored, _)| stored != reason)
-    {
+        .bind(id.key()).bind(&identity).bind(&reason)
+        .execute(&mut **tx).await.map_err(|e| e.to_string())?;
+    let stored: (serde_json::Value, String, i32) = sqlx::query_as(
+        "SELECT identity,reason,template_version FROM tui_output_dispositions WHERE output_key=$1 FOR UPDATE")
+        .bind(id.key()).fetch_one(&mut **tx).await.map_err(|e| e.to_string())?;
+    if stored != (identity, reason, 1) {
         return Err("rejection identity/reason changed".into());
     }
     Ok(())
+}
+
+/// Intents never tried, or freed by a proven no-effect: each may take one more post. An intent
+/// holding an attempt keeps it and is never listed here; nothing reconciles it automatically yet.
+#[cfg(unix)]
+pub(crate) async fn unposted(pool: &PgPool) -> Result<Vec<(Identity, Reason)>, String> {
+    let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
+        "SELECT identity,reason FROM tui_output_dispositions WHERE attempt IS NULL AND message_id IS NULL ORDER BY output_key")
+        .fetch_all(pool).await.map_err(|e| e.to_string())?;
+    let mut intents = Vec::with_capacity(rows.len());
+    for (identity, reason) in rows {
+        let parsed = serde_json::from_value::<Identity>(identity)
+            .ok()
+            .zip(serde_json::from_str::<Reason>(&reason).ok());
+        match parsed {
+            Some(intent) => intents.push(intent),
+            None => tracing::warn!("tui rejection intent row is unreadable and stays unposted"),
+        }
+    }
+    Ok(intents)
 }
 
 pub(crate) async fn record(

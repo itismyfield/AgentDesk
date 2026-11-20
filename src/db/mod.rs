@@ -50,5 +50,5 @@ pub(crate) mod status_check_migration_tests;
 pub(crate) mod timestamps;
 pub mod turns;
 
-#[cfg(test)]
+#[cfg(any(test, unix))]
 pub(crate) mod tui_output_disposition;

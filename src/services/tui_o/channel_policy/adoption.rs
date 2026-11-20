@@ -17,6 +17,8 @@ use crate::services::tui_o::store::OStore;
 pub(crate) mod output_disposition;
 
 mod child_run;
+#[cfg(unix)]
+pub(crate) mod episode_key;
 pub(crate) use child_run::LegacyRun;
 mod first_turn;
 pub(crate) use first_turn::{
@@ -37,7 +39,8 @@ pub(crate) enum Adoption {
     /// The writer host waits for a turn to close and retries; the body is held meanwhile, and
     /// only that host sets or leaves it.
     Deferred,
-    /// The adoption was refused: no store is written and the body stays held, never Legacy's.
+    /// The adoption was refused: no store is written and a held body is discarded with one
+    /// reason, never Legacy's.
     Refused,
 }
 
