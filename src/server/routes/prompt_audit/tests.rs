@@ -259,6 +259,38 @@ fn prompt_audit_legacy_session_copy_preserves_multiline_anchor_without_guessing_
     assert_eq!(response["anchors"][1]["masked_count"], 1);
 }
 
+#[test]
+fn prompt_audit_legacy_session_copy_keeps_outer_anchor_on_equal_policy() {
+    use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_POLICY, ANCHOR_CONTEXT_START};
+
+    let mut saved = snapshot();
+    saved.anchors = None;
+    saved.anchor_count = 1;
+    let content = format!("Earlier anchor.\n{ANCHOR_CONTEXT_START}[ANCHOR MEMORY]\nQuoted item.");
+    for policy in [String::new(), "Historical policy.\n".into()] {
+        saved.system_prompt = format!(
+            "{ANCHOR_CONTEXT_START}{policy}[ANCHOR MEMORY]\n- {content}{ANCHOR_CONTEXT_END}"
+        );
+        let response = to_value(anchors::response(
+            "audit-fixture",
+            &ProviderKind::Claude,
+            None,
+            Some(&saved),
+            None,
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(response["anchors"][0]["text"], content);
+    }
+
+    let current = format!(
+        "{ANCHOR_CONTEXT_START}{ANCHOR_CONTEXT_POLICY}\n[ANCHOR MEMORY]\n- Current item.{ANCHOR_CONTEXT_END}"
+    );
+    let prompt = format!("{ANCHOR_CONTEXT_START}[ANCHOR MEMORY]\n- Earlier item.\n{current}");
+    let range = projection::anchor_context(&prompt).unwrap();
+    assert_eq!(&prompt[range], current);
+}
+
 #[tokio::test]
 async fn prompt_audit_docs_publish_both_response_contracts() {
     use super::super::docs::api_docs_group_category;
@@ -519,8 +551,27 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
         ("cut cookie", "curl --cookie 'sid=@@…"),
         ("truncated PEM", truncated_pem),
     ];
+    let continuation_cases = [
+        "multiline double assignment|SERVICE_PASSWORD=\"@@\n    §fixture-double-tail§\"",
+        "multiline single assignment CRLF|export API_TOKEN='@@\r\n    §fixture-single-tail§'",
+        "multiline truncated assignment|SERVICE_PASSWORD=\"@@\n    §fixture-truncated-assignment-tail§",
+        "multiline unindented assignment|SERVICE_PASSWORD=\"@@\\\"\n§fixture-unindented-assignment-tail§\"",
+        "multiline unindented cookie|curl --cookie 'sid=@@\n§fixture-unindented-cookie-tail§'",
+        "explicitly continued assignment|SERVICE_PASSWORD=@@\\\n§fixture-continued-assignment-tail§",
+        "quoted continued cookie argument|curl --cookie \\\n'sid=@@\n§fixture-continued-cookie-quote-tail§'",
+        "overlapping quote candidates|printf %s \"public --cookie 'candidate\"; export API_TOKEN=\"@@\n'\n§fixture-quote-candidates-tail§\"",
+        "query before continued cookie|curl 'https://e.test/?token=@@' --cookie \\\n    'sid=§fixture-query-cookie-tail§'",
+        "assignment before continued cookie|SERVICE_PASSWORD=@@ curl --cookie \\\n'sid=§fixture-assignment-cookie-tail§'",
+        "cookie before query|curl --cookie 'sid=@@' 'https://e.test/?token=@@' --cookie \\\n    'sid=§fixture-cookie-query-tail§'",
+        "cookie before assignment|curl --cookie 'sid=@@'; SERVICE_PASSWORD=@@ curl --cookie \\\n    'sid=§fixture-cookie-assignment-tail§'",
+        "adjacent shell quote fragments|curl --cookie 'sid=@@''part\n§fixture-adjacent-quote-tail§'",
+    ];
     let mut failed = Vec::new();
-    for (index, (name, input)) in cases.into_iter().enumerate() {
+    for (index, (name, input)) in cases
+        .into_iter()
+        .chain(review_cases(&continuation_cases))
+        .enumerate()
+    {
         let prefix = if name.starts_with("cut ") {
             UNCERTAIN_PREFIX
         } else {
@@ -552,6 +603,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
                 .iter()
                 .copied()
                 .chain(review_fragments(truncated_pem))
+                .chain(review_fragments(input))
                 .any(|fragment| body.contains(fragment))
             {
                 failed.push((name, path));

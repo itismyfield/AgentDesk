@@ -34,55 +34,160 @@ static SECRET: LazyLock<Regex> = LazyLock::new(|| {
     )).expect("valid standalone credential patterns")
 });
 
+#[derive(Clone, Copy)]
+enum Quote {
+    Single,
+    Double,
+    AnsiSingle,
+}
+
+impl Quote {
+    fn unclosed(mut value: &[u8]) -> Option<Self> {
+        // Adjacent quoted fragments belong to the same shell word.
+        loop {
+            let (quote, body) = match value {
+                [b'\'', body @ ..] => (Self::Single, body),
+                [b'"', body @ ..] => (Self::Double, body),
+                [b'$', b'\'', body @ ..] => (Self::AnsiSingle, body),
+                []
+                | [
+                    b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>',
+                    ..,
+                ] => {
+                    return None;
+                }
+                [b'\\', _, rest @ ..] | [_, rest @ ..] => {
+                    value = rest;
+                    continue;
+                }
+            };
+            let Some(close) = quote.close(body) else {
+                return Some(quote);
+            };
+            value = &body[close..];
+        }
+    }
+
+    fn close(self, body: &[u8]) -> Option<usize> {
+        let (delimiter, escapes) = match self {
+            Self::Single => (b'\'', false),
+            Self::Double => (b'"', true),
+            Self::AnsiSingle => (b'\'', true),
+        };
+        let mut bytes = body.iter().copied().enumerate();
+        while let Some((index, byte)) = bytes.next() {
+            if byte == delimiter {
+                return Some(index + 1);
+            }
+            if escapes && byte == b'\\' {
+                bytes.next();
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct Continuation {
+    indent: Option<usize>,
+    quotes: [Option<Quote>; 3],
+    escaped: bool,
+}
+
 pub(super) fn ranges(input: &str) -> Vec<Range<usize>> {
     let mut matches: Vec<_> = with_registered_secret_ranges(input, |ranges| ranges.collect());
     matches.extend(PEM.find_iter(input).map(|hit| hit.range()));
     let mut offset = 0;
-    let mut fold: Option<(usize, usize, bool)> = None;
+    let mut fold: Option<(usize, Continuation)> = None;
     for raw in input.split_inclusive('\n') {
         let base = offset;
         offset += raw.len();
         let line = raw.trim_end_matches(['\r', '\n']);
         let end = base + line.len();
         let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-        let escaped = line.ends_with('\\');
-        if let Some((index, key_indent, continued)) = fold {
-            if continued || indent > key_indent && !line.trim().is_empty() {
-                matches[index].end = end;
-                fold = Some((index, key_indent, escaped));
-                continue;
-            }
-            if line.trim().is_empty() {
+        let blank = line.trim().is_empty();
+        let mut scan = line;
+        let mut next = Continuation::default();
+        let mut joined = None;
+        if let Some((index, previous)) = fold.take() {
+            let quoted = previous.quotes.iter().any(Option::is_some);
+            if previous.escaped
+                || quoted
+                || previous
+                    .indent
+                    .is_some_and(|limit| indent > limit && !blank)
+            {
+                joined = Some(index);
+                next.indent = previous.indent;
+                if quoted {
+                    let mut resume = 0;
+                    for quote in previous.quotes.into_iter().flatten() {
+                        let open = if let Some(close) = quote.close(line.as_bytes()) {
+                            resume = resume.max(close);
+                            Quote::unclosed(&line.as_bytes()[close..])
+                        } else {
+                            Some(quote)
+                        };
+                        if let Some(quote) = open {
+                            next.quotes[quote as usize] = Some(quote);
+                            resume = line.len();
+                        }
+                    }
+                    scan = &line[resume..];
+                } else if previous.escaped
+                    && let Some(quote) = Quote::unclosed(line.trim_start().as_bytes())
+                {
+                    next.quotes[quote as usize] = Some(quote);
+                }
+            } else if blank {
+                fold = Some((index, previous));
                 continue;
             }
         }
-        let key = KEY.captures_iter(line).find_map(|hit| {
-            if let Some(query) = hit.name("query") {
-                let (name, _) = url::form_urlencoded::parse(query.as_str().as_bytes()).next()?;
-                if !FIELD_NAME.is_match(&name) {
-                    return name.contains(['%', '\u{fffd}']).then_some((hit, 0));
-                }
-            }
+
+        let mut start = SECRET.find(scan).map(|hit| hit.start());
+        for hit in KEY.captures_iter(scan) {
             let end = hit.get(0).unwrap().end();
-            // An escaped or quoted start can bind the apparent key to preceding text.
-            let uncertain = line[end..].trim_start().starts_with(['"', '\'', '$', '\\']);
-            Some((hit, if uncertain { 0 } else { end }))
-        });
-        let keyed = key.as_ref().map(|(_, start)| *start);
-        let standalone = SECRET.find(line).map(|hit| hit.start());
-        let start = keyed.into_iter().chain(standalone).min();
-        fold = None;
-        if let Some(start) = start {
-            if let Some((hit, _)) = key.filter(|(hit, _)| hit.name("fold").is_some()) {
-                let indent = if hit.name("setting").is_some() {
+            let value = scan[end..].trim_start();
+            if let Some(query) = hit.name("query") {
+                match url::form_urlencoded::parse(query.as_str().as_bytes()).next() {
+                    Some((name, _)) if FIELD_NAME.is_match(&name) => {}
+                    Some((name, _)) if !name.contains(['%', '\u{fffd}']) => continue,
+                    _ => {
+                        start = Some(0);
+                        continue;
+                    }
+                }
+            } else {
+                if let Some(quote) = Quote::unclosed(value.as_bytes()) {
+                    next.quotes[quote as usize] = Some(quote);
+                }
+                next.escaped |= value.ends_with('\\') && !value.contains(char::is_whitespace);
+            }
+            if hit.name("fold").is_some() {
+                let limit = if hit.name("setting").is_some() {
                     indent
                 } else {
                     0
                 };
-                fold = Some((matches.len(), indent, escaped));
+                next.indent = Some(next.indent.map_or(limit, |prior| prior.min(limit)));
             }
-            matches.push(base + start..end);
+            let candidate = if value.starts_with(['"', '\'', '$', '\\']) {
+                0
+            } else {
+                end
+            };
+            start = Some(start.map_or(candidate, |prior| prior.min(candidate)));
         }
+        if let Some(index) = joined {
+            matches[index].end = end;
+        } else if let Some(start) = start {
+            matches.push(base + start..end);
+        } else {
+            continue;
+        }
+        next.escaped |= line.ends_with('\\') && (joined.is_some() || next.indent.is_some());
+        fold = Some((joined.unwrap_or(matches.len() - 1), next));
     }
     matches.retain(|span| !span.is_empty());
     matches.sort_unstable_by_key(|range| range.start);
