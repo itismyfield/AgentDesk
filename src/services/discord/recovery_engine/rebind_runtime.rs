@@ -766,7 +766,6 @@ pub(super) fn codex_rebind_stream_message_json(
         crate::services::agent_protocol::StreamMessage::ClaudeTuiTerminalDone { .. } => None,
         crate::services::agent_protocol::StreamMessage::ActiveUsageSnapshot { .. }
         | crate::services::agent_protocol::StreamMessage::StatusEvents { .. }
-        | crate::services::agent_protocol::StreamMessage::RetryBoundary
         | crate::services::agent_protocol::StreamMessage::TmuxReady { .. }
         | crate::services::agent_protocol::StreamMessage::RuntimeReady { .. }
         | crate::services::agent_protocol::StreamMessage::ProcessReady { .. }

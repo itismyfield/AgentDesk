@@ -13,7 +13,7 @@ when the code has none).
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
 - AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 95
-- Platform and third-party variables: 41
+- Platform and third-party variables: 39
 
 ## AgentDesk variables
 
@@ -130,8 +130,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
 | `GEMINI_API_KEY` | `src/services/decision_gate/runtime/key_initial_env.rs` | # Safety Call only before the binary starts threads or children. |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |
 | `GROK_BIN_DIR` | `src/services/platform/binary_resolver/grok.rs` |  |
 | `GROK_HOME` | `src/services/platform/binary_resolver/grok.rs` |  |

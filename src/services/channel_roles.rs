@@ -139,7 +139,7 @@ channels:
   by_id:
     '9041':
       agent: org-agent
-      provider: gemini
+      provider: qwen
       model: channel-model
       workspace: ~/r04-channel
       peer_agents: false
@@ -164,7 +164,7 @@ channels:
             fixture.reload();
             let binding = resolve_role_binding(channel, Some("org-alias")).unwrap();
             assert_eq!(binding.role_id, "org-agent");
-            assert_eq!(binding.provider, Some(ProviderKind::Gemini));
+            assert_eq!(binding.provider, Some(ProviderKind::Qwen));
             assert_eq!(binding.model.as_deref(), Some("channel-model"));
             assert!(!binding.peer_agents_enabled);
             assert_eq!(

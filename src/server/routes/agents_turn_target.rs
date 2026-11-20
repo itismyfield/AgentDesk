@@ -303,7 +303,7 @@ mod tests {
                 .0,
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        for provider in ["claude", "codex", "gemini"] {
+        for provider in ["claude", "codex", "qwen"] {
             let single = crate::db::agents::AgentChannelBindings {
                 provider: Some(provider.into()),
                 discord_channel_id: Some("201".into()),

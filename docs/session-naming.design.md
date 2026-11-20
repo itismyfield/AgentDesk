@@ -971,7 +971,7 @@ HashedV2 basename = "adk-v2-" + lowercase_hex(SHA256(domain, runtime, host, exac
 
 ## 입력 소유 범위 — token logical key 함정과 non-prefix 이름
 
-- Herdr `HostedOwner.logical_key`는 namespaced key 전체가 아니다. `discord/router/message_handler/provider_dispatch.rs:652-668`은 SessionIdentity로 parse한 뒤 **tmux_name tail**을 logical_key에 넣는다. `herdr_launch.rs:393,742,772`의 fence/context/host marker는 그 tail을 사용하므로 현재 운영 producer가 만든 legacy Herdr artifact도 `AgentDesk-` class다.
+- Herdr `HostedOwner.logical_key`는 namespaced key 전체가 아니다. `discord/router/message_handler/provider_dispatch.rs:648-664`은 SessionIdentity로 parse한 뒤 **tmux_name tail**을 logical_key에 넣는다. `herdr_launch.rs:393,742,772`의 fence/context/host marker는 그 tail을 사용하므로 현재 운영 producer가 만든 legacy Herdr artifact도 `AgentDesk-` class다.
 - tmux·process wrapper의 실제 production 생성은 기존 provider builder를 경유한다. `claude/process_session_launch.rs:119`, `codex/process_session_launch.rs:117`, `qwen/session_lifecycle.rs:396`의 SessionConfig는 이미 선택된 session_name을 전달한다. process 모드라는 이유로 namespaced `provider/token/host:` 전체를 artifact key로 바꾸면 안 된다.
 - generic `session_temp_path(&str, ext)` 자체는 임의 문자열을 허용한다. 따라서 **모든 임의 non-prefix 옛 파일 경로까지 byte-identical라고 쓰면 틀린다.** 기존 main이 제공한 managed `AgentDesk-*` 이름의 live compatibility를 보장하고, 사용자/외부 non-prefix 세션은 S1 소유 관문에서 조작하지 않는 범위다. 외부에서 임의 non-prefix raw artifact를 이미 만들었다는 운영 가정은 이번 금지 범위상 조회하지 않았다.
 - 소문자 `agentdesk-claude-channel-*`는 `domain/session_identity.rs:125-139`의 key parsing 호환 fixture와 API inventory 예제에서 확인했다. 현재 production managed builder로 생성하는 경로는 확인되지 않았다. lower-case parser fixture가 있다는 사실만으로 과거 운영 artifact가 있었다고 단정하거나 old files를 지우지 않는다. 구현에서 새 legacy writer가 발견되면 추가 frozen class 또는 별도 호환 계약을 잡고 활성화 전에 해결한다.

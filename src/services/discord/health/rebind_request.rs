@@ -26,7 +26,8 @@ pub(super) fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'st
     let provider = ProviderKind::from_str(provider_raw).ok_or_else(|| {
         (
             "400 Bad Request",
-            r#"{"ok":false,"error":"provider must be one of: claude, codex, gemini, opencode, qwen"}"#.to_string(),
+            r#"{"ok":false,"error":"provider must be one of: claude, codex, opencode, qwen"}"#
+                .to_string(),
         )
     })?;
     let channel_id = match json.get("channel_id") {

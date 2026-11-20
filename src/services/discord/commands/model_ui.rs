@@ -14,7 +14,6 @@ pub(super) fn provider_card_color(provider: &ProviderKind) -> u32 {
     match provider {
         ProviderKind::Claude => 0xD97706,
         ProviderKind::Codex => 0x10B981,
-        ProviderKind::Gemini => 0x3B82F6,
         ProviderKind::OpenCode => 0x8B5CF6,
         ProviderKind::Qwen => 0x0EA5A4,
         ProviderKind::Grok => 0x111827,

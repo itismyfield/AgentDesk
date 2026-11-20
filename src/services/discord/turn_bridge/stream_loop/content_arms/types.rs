@@ -5,7 +5,6 @@ use super::super::super::stream_tick::{
 use super::*;
 
 pub(in super::super) enum StreamContentArmMessage {
-    RetryBoundary,
     Init {
         session_id: String,
         raw_session_id: Option<String>,

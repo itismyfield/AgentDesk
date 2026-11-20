@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) fn into_content_message(message: StreamMessage) -> Option<StreamContentArmMessage> {
     match message {
-        StreamMessage::RetryBoundary => Some(StreamContentArmMessage::RetryBoundary),
         StreamMessage::ActiveUsageSnapshot {
             model,
             input_tokens,

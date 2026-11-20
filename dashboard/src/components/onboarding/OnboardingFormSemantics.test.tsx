@@ -57,6 +57,15 @@ function renderStep1(tr = english): HTMLDivElement {
 }
 
 describe("onboarding form semantics", () => {
+  it("offers only registered command providers, never the retired Gemini", () => {
+    for (const tr of [english, korean]) {
+      const step = renderStep1(tr);
+      const labels = Array.from(step.querySelectorAll("button"), (button) => button.textContent?.trim());
+      expect(labels).toEqual(expect.arrayContaining(["Claude", "Codex"]));
+      expect(step.innerHTML).not.toMatch(/gemini/i);
+    }
+  });
+
   it("gives every token input a unique name and shared credential-manager hints", () => {
     const tokenInputs = Array.from(
       renderStep1().querySelectorAll<HTMLInputElement>('input[type="password"]'),

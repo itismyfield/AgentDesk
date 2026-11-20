@@ -105,7 +105,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             .with_params([
                 (
                     "provider",
-                    query_param("string", false, "Filter by provider id (claude/codex/gemini/opencode/qwen)"),
+                    query_param("string", false, "Filter by provider id (claude/codex/opencode/qwen)"),
                 ),
                 (
                     "channelId",
@@ -133,7 +133,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([
             (
                 "provider",
-                query_param("string", false, "Filter by provider id (claude/codex/gemini/opencode/qwen)"),
+                query_param("string", false, "Filter by provider id (claude/codex/opencode/qwen)"),
             ),
             (
                 "channelId",

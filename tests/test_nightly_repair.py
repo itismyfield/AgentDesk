@@ -1,4 +1,4 @@
-"""Nightly #6006: job profiles, tmux and unchanged executable selection."""
+"""Nightly job profiles, tmux and platform test selection."""
 from __future__ import annotations
 
 import importlib.util
@@ -16,8 +16,14 @@ DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (e2e smoke against PostgreSQL)"
 PG_CARGO = "cargo test --test e2e -- --test-threads=1"
 NON_PG_CARGO = "cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres"
-NATIVE_LIB_STEPS = (("Build and plan non-PG lib tests", "prepare"),
-                    ("Run and audit non-PG lib tests", "run"))
+WINDOWS_LIB_STEPS = (("Build and plan non-PG lib tests", "prepare"),
+                     ("Run and audit non-PG lib tests", "run"))
+MACOS_LIB_STEP_NAMES = {
+    "Install cargo-nextest",
+    "Report macOS memory before the lib build",
+    "Report macOS memory after the lib build",
+    *(name for name, _ in WINDOWS_LIB_STEPS),
+}
 
 
 def load_module(name: str, path: Path):
@@ -75,17 +81,22 @@ def nightly_contract_problems(text: str) -> list[str]:
          "full_macos does not actually brew install tmux")
     need("tmux -V" in tmux, "full_macos prints no tmux provisioning evidence")
 
-    for name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
+    for name in ("full_macos", "full_windows"):
         run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
         need(run.strip() == NON_PG_CARGO,
              f"{name} changed its canonical non-PG non-lib sweep")
-        for step_name, phase in NATIVE_LIB_STEPS:
-            lib = step_of(jobs, name, step_name) or {}
-            # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
-            wrap = "/usr/bin/time -l " if (name, phase) == ("full_macos", "prepare") else ""
-            need(lib.get("run", "").strip() == f"{wrap}bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier {phase}",
-                 f"{name} stopped running its lib {phase} through the audited native nextest path")
-            need("if" not in lib and not lib.get("continue-on-error"), f"{name} made its native lib {phase} conditional")
+    for step in jobs.get("full_macos", {}).get("steps", []):
+        name = step.get("name")
+        tool = str((step.get("with") or {}).get("tool", ""))
+        need(name not in MACOS_LIB_STEP_NAMES and not tool.startswith("cargo-nextest")
+             and "nextest-native.sh" not in step.get("run", ""),
+             f"full_macos still has a lib-only step: {name}")
+    for step_name, phase in WINDOWS_LIB_STEPS:
+        lib = step_of(jobs, "full_windows", step_name) or {}
+        need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier {phase}",
+             f"full_windows stopped running its lib {phase} through the audited native nextest path")
+        need("if" not in lib and not lib.get("continue-on-error"),
+             f"full_windows made its native lib {phase} conditional")
 
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
@@ -131,11 +142,16 @@ STRUCTURAL_MUTANTS = (
     ("replaces the native audited run",
      lambda t: t.replace("bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier run",
                          "cargo nextest run --lib", 1)),
-    ("narrows the native run to a filter",
-     lambda t: t.replace("macos macos-lib pg-classifier run", "macos macos-lib relay_recovery run", 1)),
-    ("skips the native run",
-     lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier run",
-                         "        if: false\n        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier run", 1)),
+    ("narrows the Windows native run to a filter",
+     lambda t: t.replace("windows windows-lib pg-classifier run", "windows windows-lib relay_recovery run", 1)),
+    ("skips the Windows native run",
+     lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier run",
+                         "        if: false\n        run: bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier run", 1)),
+    ("restores the macOS lib build under a different name",
+     lambda t: t.replace("      - name: cargo test (non-PG, non-lib targets)\n",
+                         "      - name: Prepare lib tests\n"
+                         "        run: /usr/bin/time -l bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier prepare\n\n"
+                         "      - name: cargo test (non-PG, non-lib targets)\n", 1)),
 )
 
 WRAPPER_MUTANTS = (
