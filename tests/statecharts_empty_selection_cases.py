@@ -5,8 +5,8 @@ from contextlib import nullcontext
 from unittest import mock
 
 
-def empty_reports(test, count):
-    reports = test.repo / "reports"
+def empty_reports(test, count, name="reports"):
+    reports = test.repo / name
     reports.mkdir()
     for index in range(count):
         (reports / f"tlc-{index}.json").write_text(json.dumps({
@@ -73,6 +73,33 @@ def assert_documentation_skip(test) -> None:
     test.assertEqual(rc, 1)
     test.assertIn("shard coverage mismatch", err)
     test.assertNotIn("NO_TARGETS(skip)", out + err)
+
+
+def assert_non_model_paths_skip(test) -> None:
+    fixture_path = "tests/fixtures/list_merge/delete-modify/ours/expected.tsv"
+    fixture = test.repo / fixture_path
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("original\n", encoding="utf-8")
+    test.git("add", "--", fixture_path)
+    test.git("commit", "-qm", "list merge fixture")
+    test.base = test.git("rev-parse", "HEAD").strip()
+
+    readme_path = "docs/statecharts/README.md"
+    (test.repo / readme_path).write_text("documentation change\n", encoding="utf-8")
+    fixture.write_text("changed\n", encoding="utf-8")
+    test.git("add", "--", readme_path, fixture_path)
+    test.git("commit", "-qm", "non-model changes")
+    test.assertCountEqual(test.git("diff", "--name-only", f"{test.base}..HEAD").splitlines(),
+                          [readme_path, fixture_path])
+
+    reports = empty_reports(test, 1, "non-model-reports")
+    for mode, args in (("check", ()), ("coverage", ("--aggregate-reports", str(reports)))):
+        with test.subTest(mode=mode):
+            rc, out, err, checked = test.run_main(*args)
+            test.assertEqual((rc, err), (0, ""))
+            test.assertIn("NO_TARGETS(skip)", out)
+            test.assertNotIn("PASS", out)
+            checked.assert_not_called()
 
 
 def assert_model_change_failures(test, tlc) -> None:

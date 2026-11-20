@@ -18,6 +18,7 @@ from tests.statecharts_empty_selection_cases import (
     assert_documentation_skip,
     assert_empty_full_fallback,
     assert_model_change_failures,
+    assert_non_model_paths_skip,
 )
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ci" / "statecharts_tlc.py"
@@ -661,6 +662,7 @@ class SelectionCliTest(unittest.TestCase):
         (self.repo / "README.md").write_text("docs only\n", encoding="utf-8")
         self.commit()
         assert_documentation_skip(self)
+        assert_non_model_paths_skip(self)
 
     def test_model_changes_with_empty_selection_fail_in_check_and_coverage(self) -> None:
         assert_model_change_failures(self, tlc)

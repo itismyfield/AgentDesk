@@ -33,7 +33,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(503, "DO_NOT_LEAK_SECRET")
             return
         if self.server.mode == "timeout":
-            self.server.release_response.wait(30)
+            release_response = self.server.release_response
+            wait_finished = self.server.timeout_wait_finished
+            self.server.timeout_wait_started.set()
+            release_response.wait(30)
+            wait_finished.set()
             return
         if request["method"] == "initialize":
             result = {"protocolVersion": "2025-11-25", "capabilities": {}}
@@ -90,6 +94,8 @@ class AnchorTests(unittest.TestCase):
         self.server.calls = []
         self.server.mode = "ok"
         self.server.release_response = threading.Event()
+        self.server.timeout_wait_started = threading.Event()
+        self.server.timeout_wait_finished = threading.Event()
         inherited = {k: v for k, v in os.environ.items() if k not in COMPACT_ENV}
         self.env = dict(inherited, HOME=str(self.root), CODEX_HOME=str(self.codex_home),
                         PATH=str(self.bin) + ":" + os.environ["PATH"],
@@ -196,8 +202,13 @@ class AnchorTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.server.calls = []
                 self.server.mode = mode
+                self.server.release_response = threading.Event()
                 try:
                     data, result = self.run_wrapper("cc", ["hello"])
+                    if mode == "timeout":
+                        self.assertTrue(self.server.timeout_wait_started.is_set())
+                        self.assertFalse(self.server.release_response.is_set())
+                        self.assertFalse(self.server.timeout_wait_finished.is_set())
                 finally:
                     self.server.release_response.set()
                 self.assertEqual(data["args"], ["--dangerously-skip-permissions", "hello"])

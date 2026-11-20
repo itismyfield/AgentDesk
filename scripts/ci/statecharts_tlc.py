@@ -29,6 +29,7 @@ DEFAULT_ROOT = REPO_ROOT / "docs/statecharts"
 FAIRNESS_HELPER = Path(__file__).with_name("StatechartFairness.java")
 DEADLOCK = "NoDeadlock"
 STATECHARTS_PATH = Path("docs/statecharts")
+EXPECTED_REPO_PATH = (STATECHARTS_PATH / "expected.tsv").as_posix()
 CHECKER_PATHS = {
     "scripts/ci/statecharts_tlc.py", "scripts/ci/StatechartFairness.java",
     ".github/workflows/statecharts-tlc.yml",
@@ -446,10 +447,9 @@ def git_selection(base: str, head: str) -> tuple[list[str] | None, dict[str, str
         return None, {}
     # Disable rename detection to retain both the old and new dependency paths.
     paths = git("diff", "--name-only", "--no-renames", "-z", f"{comparison_base}..{head}", "--").split("\0")
-    expected_path = (STATECHARTS_PATH / "expected.tsv").as_posix()
     previous = {}
-    if expected_path in paths and git("ls-tree", "--name-only", comparison_base, "--", expected_path).strip():
-        text = git("show", f"{comparison_base}:{expected_path}")
+    if EXPECTED_REPO_PATH in paths and git("ls-tree", "--name-only", comparison_base, "--", EXPECTED_REPO_PATH).strip():
+        text = git("show", f"{comparison_base}:{EXPECTED_REPO_PATH}")
         parse_expected(text, f"{comparison_base}:expected.tsv")
         previous = expected_rows(text)
     return [path for path in paths if path], previous
@@ -550,7 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     problems = [f"{cfg}: config not listed in expected.tsv" for cfg in sorted(on_disk - set(expected))]
     problems += [f"{cfg}: listed in expected.tsv but the file is gone" for cfg in sorted(set(expected) - on_disk)]
     if not selected and (paths is None or any(
-        path.endswith((".tla", ".cfg")) or Path(path).name == "expected.tsv" for path in paths
+        path == EXPECTED_REPO_PATH or (path.endswith((".tla", ".cfg")) and Path(path).is_relative_to(STATECHARTS_PATH))
+        for path in paths
     )):
         problems.append("NO_TARGETS: no configs selected; TLC was not run.")
     skip_summary = "NO_TARGETS(skip): no model inputs changed; TLC was not run."
