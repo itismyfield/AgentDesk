@@ -17,7 +17,6 @@ use crate::services::provider::cancel_token_claude_interrupt::{
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::{HerdrMutation, HerdrTarget, HostMutation};
-use crate::services::tui_turn_state::TuiTurnState;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodexStopTurnIdentity {
@@ -788,12 +787,8 @@ fn deliver(
                             classify_tui_interrupt_phase(structured, ready || draft, active)
                                 == ClaudeTuiInterruptPhase::ActiveGeneration
                         }
-                        // Unread, the turn is live only on Claude's own interrupt footer, and
-                        // never once the transcript's tail shows it ended.
-                        None => {
-                            structured != Some(TuiTurnState::Idle)
-                                && super::claude_stop_pane::interrupt_offered(&screen)
-                        }
+                        // Unread, the turn is live only on Claude's own interrupt offer.
+                        None => super::claude_stop_pane::interrupt_offered(&screen),
                     };
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
                         && !draft
