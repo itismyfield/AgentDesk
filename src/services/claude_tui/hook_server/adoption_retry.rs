@@ -10,7 +10,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
-    AdoptSkip, adopt_claude_continuation_moved, claude_session_rotation_for_tmux,
+    AdoptSkip, adopt_claude_continuation_moved, claude_rotation_blocks_adoption,
     reclaim_with_current_prompt, resolve_tmux_session_name,
 };
 
@@ -207,7 +207,7 @@ pub(crate) fn adopt_from_enveloped_hook(
         }
         // A hook naming another session replaces a recorded Pending still waiting for its transcript,
         // once the new session's own evidence is durable.
-        if claude_session_rotation_for_tmux(&tmux).is_none()
+        if !claude_rotation_blocks_adoption(&tmux)
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != payload_session_id)
         {
             let http = settle(&tmux, &request, false).http;
@@ -224,7 +224,7 @@ pub(crate) fn adopt_from_enveloped_hook(
             return AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind);
         };
         queue_behind(&tmux, &request);
-        let settles_now = own_is_front && claude_session_rotation_for_tmux(&tmux).is_none();
+        let settles_now = own_is_front && !claude_rotation_blocks_adoption(&tmux);
         match own_recorded {
             true => {
                 // Settling now only saves the poll's delay, but an adoption this hook could not
@@ -346,7 +346,7 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             } else {
                 no_channel
                     || transient
-                    || (adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some())
+                    || (adopted.is_some() && claude_rotation_blocks_adoption(tmux))
             };
             let queue = match (held, yields) {
                 (true, _) => QueueStep::Hold,
@@ -470,8 +470,8 @@ pub(crate) fn retry_deferred_claude_adoptions() {
     let panes: Vec<String> = deferred().keys().cloned().collect();
     for tmux in panes {
         with_tmux_source_authority(&tmux, |_| {
-            // The rotation ledger keeps only the first old transcript, so B→C waits until A→B settles.
-            while claude_session_rotation_for_tmux(&tmux).is_none()
+            // B→C waits until A→B settles, or until a watcherless pane's selector followed B.
+            while !claude_rotation_blocks_adoption(&tmux)
                 && let Some(request) = front(&tmux)
             {
                 match settle(&tmux, &request, true).queue {

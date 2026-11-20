@@ -244,6 +244,8 @@ pub(in crate::services::discord) use self::claude_source::{
     claude_tui_launch_context, other_session_claimed_transcripts,
 };
 #[cfg(unix)]
+pub(in crate::services::discord) use self::session_rotation_settle::follow_pending_rotation_selector;
+#[cfg(unix)]
 use self::session_rotation_settle::settle_claude_session_rotations;
 
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
