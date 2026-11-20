@@ -758,8 +758,12 @@ fn publish_effort_end(f: &Reserved, path: &Path, end: EffortEnd) -> u64 {
 async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end: EffortEnd) {
     use crate::config::TestEnvVarGuard as Guard;
     use crate::services::claude_tui::{
+        guarded_outcome::SubmissionError,
         hook_server::HookEventKind,
-        input::submission::tests::{ScriptedTmux, view},
+        input::{
+            EffectPhase,
+            submission::tests::{ScriptedTmux, view},
+        },
         owner_input::{self, Lineage},
         readiness,
         session::expect_owner_first_submit,
@@ -856,7 +860,25 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
             readiness::observe(&tmux, Some(&path)).is_some(),
             "resumed SessionStart proves readiness independently of the old hash"
         );
-        submit(PROMPT.into()).map_err(|error| format!("{error:?}"))
+        let submitted = submit(PROMPT.into());
+        if end == EffortEnd::Rewritten {
+            let changed = p5::claude_fold::check_thread_resume(
+                ch,
+                parent,
+                &tmux,
+                SESSION,
+                Some(SESSION),
+                &path,
+            )
+            .expect_err("the rewritten prefix must invalidate the stored reservation");
+            assert_eq!(changed.kind(), std::io::ErrorKind::InvalidData);
+            assert!(
+                matches!(&submitted, Err(SubmissionError::Held(hold))
+                    if hold.phase == EffectPhase::BeforePayload && hold.reason == "composer_not_ready"),
+                "the rewritten prefix must hold submission before payload: {submitted:?}"
+            );
+        }
+        submitted.map_err(|error| format!("{error:?}"))
     }));
     let token = Arc::new(CancelToken::new());
     expect_owner_first_submit(SESSION);
@@ -876,7 +898,6 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
                 args.is_file(),
                 "the original prefix admitted the cold launch"
             );
-            assert!(refused.contains("composer_not_ready"), "{refused}");
             assert_eq!(resumes.len(), 1);
             assert_eq!(resumes[0].offset, cutoff);
         } else {
