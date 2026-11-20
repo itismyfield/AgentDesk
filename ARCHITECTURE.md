@@ -436,7 +436,9 @@ src/
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_template.rs
 │   │   ├── pipeline_tests.rs
+│   │   ├── pipeline_validate.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -756,6 +758,8 @@ src/
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── pipeline.rs
+│   │   │   ├── pipeline_http_tests.rs
 │   │   │   └── protocol.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
@@ -1045,6 +1049,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
+│   │   ├── pipeline_editor.rs
 │   │   ├── pipeline_rules.rs
 │   │   ├── pipeline_rules_tests.rs
 │   │   ├── profile.rs

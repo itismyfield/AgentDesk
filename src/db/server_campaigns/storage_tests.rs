@@ -322,6 +322,7 @@ async fn failed_create_and_missing_target_receipts_survive_new_pool_pg() {
                 code: definition::DefinitionErrorCode::EmptyAcceptance,
                 target: Some("a".into()),
                 path: Vec::new(),
+                pipeline_errors: Vec::new(),
             }),
         }))
     );

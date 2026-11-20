@@ -315,6 +315,7 @@ fn pipeline_wire_decodes_without_enabling_legacy_writes() {
     let serialized = serde_json::to_value(&input).unwrap();
     assert!(serialized["pipeline"].is_object());
     let error = validate_definition(input).unwrap_err();
-    assert_eq!(error.code, DefinitionErrorCode::InvalidField);
+    assert_eq!(error.code, DefinitionErrorCode::InvalidPipeline);
     assert_eq!(error.target.as_deref(), Some("pipeline"));
+    assert!(!error.pipeline_errors.is_empty());
 }

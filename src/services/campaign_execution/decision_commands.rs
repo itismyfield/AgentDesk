@@ -19,6 +19,7 @@ pub(super) fn validate_edit_input(input: &DefinitionInput) -> Result<(), Rejecti
             code: DefinitionErrorCode::InvalidField,
             target: Some("workflow_options".into()),
             path: Vec::new(),
+            pipeline_errors: Vec::new(),
         }));
     }
     Ok(())

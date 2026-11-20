@@ -7,7 +7,7 @@ use super::{
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
     lifecycle,
     model::*,
-    review_wait, stage_fsm, verification_commands,
+    pipeline_editor, review_wait, stage_fsm, verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -26,7 +26,7 @@ fn run_mut(state: &mut CampaignState) -> DecisionResult<&mut Run> {
         .as_mut()
         .ok_or_else(|| reject(RejectionCode::StaleRun))
 }
-fn revision(state: &CampaignState, expected: u64) -> DecisionResult<()> {
+pub(super) fn revision(state: &CampaignState, expected: u64) -> DecisionResult<()> {
     if state.definition_revision != expected {
         return Err(reject(RejectionCode::StaleDefinition));
     }
@@ -306,9 +306,15 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         } => {
             revision(state, *expected_revision)?;
             edit_guard(state)?;
+            if definition.pipeline.is_none() && state.definition.input().pipeline.is_some() {
+                return Err(reject(RejectionCode::DefinitionSchemaUpgradeRequired));
+            }
             decision_commands::validate_edit_input(definition)?;
             let validated = definition::validate_definition(definition.clone())
                 .map_err(Rejection::invalid_definition)?;
+            if let Some(pipeline) = &definition.pipeline {
+                pipeline_editor::require_references(state, pipeline)?;
+            }
             let superseded_nodes = state.definition.superseded_nodes(&validated);
             if !superseded_nodes.is_empty()
                 && !change.as_ref().is_some_and(|c| {
@@ -342,6 +348,17 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 superseded_nodes,
                 change: change.clone(),
             }
+        }
+        Command::EditPipeline {
+            expected_revision,
+            pipeline,
+        } => {
+            let Some(event) =
+                pipeline_editor::save(&mut next, *expected_revision, pipeline.as_deref())?
+            else {
+                return Ok(unchanged(state));
+            };
+            event
         }
         Command::Start { expected_revision } => {
             revision(state, *expected_revision)?;

@@ -48,6 +48,34 @@ fn server_campaign_router() -> ApiRouter {
             "/server-campaigns/{id}/events",
             get(server_campaigns::events),
         )
+        .route(
+            "/server-campaigns/pipeline/condition-fields",
+            get(server_campaigns::pipeline::condition_fields),
+        )
+        .route(
+            "/server-campaigns/pipeline/templates",
+            get(server_campaigns::pipeline::templates),
+        )
+        .route(
+            "/server-campaigns/pipeline/templates/{template_id}/{version}",
+            get(server_campaigns::pipeline::template),
+        )
+        .route(
+            "/server-campaigns/pipeline/validate",
+            post(server_campaigns::pipeline::validate),
+        )
+        .route(
+            "/server-campaigns/{id}/pipeline",
+            get(server_campaigns::pipeline::detail).put(server_campaigns::pipeline::save),
+        )
+        .route(
+            "/server-campaigns/{id}/pipeline/validate",
+            post(server_campaigns::pipeline::validate_for_campaign),
+        )
+        .route(
+            "/server-campaigns/{id}/pipeline/migrate",
+            post(server_campaigns::pipeline::migrate),
+        )
         .layer(DefaultBodyLimit::max(server_campaigns::BODY_LIMIT_BYTES))
 }
 
