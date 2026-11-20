@@ -1,0 +1,26 @@
+stateDiagram-v2
+  state "B1 입력 준비" as prepare {
+    [*] --> Original: 원본 admission
+    Original --> Reserved: explicit Primary/Follower를 durable reserve
+    Reserved --> Ready: RuntimeReady · 같은 intent
+    Reserved --> Held: 잘못된 primary · 첫 key 전 NotSent
+    Ready --> Unknown: 기존 effect의 송신 불확실
+    Unknown --> Unknown: 재시작 · 원본과 intent 보존
+    Held --> Original: unarmed boot restore
+  }
+  state "B1 같은 O capture" as observe {
+    [*] --> Waiting: 외부와 AgentDesk enqueue 전체
+    Waiting --> Taken: FIFO dequeue
+    Taken --> Member: 유일한 native user/receipt
+    Waiting --> Member: command/absorption · 같은 run
+    Waiting --> Withdrawn: remove/popAll · source 확정
+    Waiting --> Transferred: delivered_to_agent
+    Member --> Proof: 같은 run의 strict closer
+    Waiting --> Pending: source/twin/receipt 불명확
+    Member --> Pending: 다른 run에 중복 가입
+  }
+  state "B2 비활성: 결과→CAS→row→wake / boot / WARN" as B2
+  note right of B2
+    B1의 후보는 운영 완료·배송 receipt가 아니다.
+    timeout은 종결 증거가 아니다.
+  end note

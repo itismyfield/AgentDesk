@@ -157,6 +157,7 @@ pub(super) fn gate_closed_arm(
         M::PolicyClose { ref request, .. } if request.reconciles(state, channel_id) => return Some(msg),
         M::PolicyClose { reply, .. } => super::policy_close::refuse_closed(reply),
         M::ClaimPolicyTail(claim) => claim.closed(),
+        M::ControlCustody(_) => "ControlCustody",
         // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
         // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.
         M::CancelActiveTurnWithReason { .. }

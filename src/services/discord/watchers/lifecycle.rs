@@ -61,6 +61,7 @@ pub(in crate::services::discord) use self::watch_host::{HostSnapshot, WatchHost,
 
 #[path = "lifecycle/restore_support.rs"]
 mod restore_support;
+pub(in crate::services::discord) use self::restore_support::inflight_duration_ms;
 pub(super) use self::restore_support::*;
 #[cfg(test)]
 #[path = "lifecycle/tests.rs"]
