@@ -4406,6 +4406,7 @@ src/
 │   │   │   ├── channel_gate.rs
 │   │   │   ├── channel_lookup_tests.rs
 │   │   │   ├── child_funnel_tests.rs
+│   │   │   ├── claude_thread.rs
 │   │   │   ├── intake_route.rs
 │   │   │   └── thread_child_record_tests.rs
 │   │   ├── ownership/
