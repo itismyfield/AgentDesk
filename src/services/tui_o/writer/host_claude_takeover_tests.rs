@@ -875,6 +875,10 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
                 args.is_file(),
                 "the original prefix admitted the cold launch"
             );
+            assert!(
+                refused.contains("source bytes before the cursor changed"),
+                "{refused}"
+            );
             assert_eq!(resumes.len(), 1);
             assert_eq!(resumes[0].offset, cutoff);
         } else {
@@ -931,6 +935,23 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
         Ok(BodySend::OwnedByO)
     );
     assert_eq!(legacy_posts.get(), 0);
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        SpawnNonceMarker, observe_spawn_nonce_marker,
+    };
+    let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(&session) else {
+        panic!("the cold pane must retain its launch nonce");
+    };
+    assert_eq!(
+        crate::services::claude::tui_session_launch::reserve_thread_body_before_key(
+            Some(ch),
+            &session,
+            Some(&nonce),
+            "other-native",
+            &transcript,
+            false,
+        ),
+        Err("the Claude resume native session changed before its first key".into()),
+    );
     f.stop_host().await;
 }
 

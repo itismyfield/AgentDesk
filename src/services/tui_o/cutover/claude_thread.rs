@@ -51,9 +51,23 @@ pub(crate) fn reserve_resume(
     let _body_fence = child.candidate.lock_thread_body();
     let adoption = child.candidate.lock();
     if adoption.owned() {
-        if matches!(pane, ResumePane::BeforeKey { warm: false, .. }) {
-            return claude_fold::check_thread_resume(channel, child.parent, session, native, path)
-                .map_err(|error| error.to_string());
+        if let ResumePane::BeforeKey {
+            nonce, warm: false, ..
+        } = pane
+        {
+            let expected = nonce
+                .and_then(|nonce| own_context(channel, session, nonce))
+                .filter(|context| context.launch_mode == "resume")
+                .and_then(|context| context.expected_native_session_id);
+            return claude_fold::check_thread_resume(
+                channel,
+                child.parent,
+                session,
+                native,
+                expected.as_deref(),
+                path,
+            )
+            .map_err(|error| error.to_string());
         }
         return Ok(());
     }
@@ -68,7 +82,14 @@ pub(crate) fn reserve_resume(
                 (Some(expected), SpawnNonceMarker::Known(actual)) if expected == actual => {
                     let context = own_context(channel, session, &actual)
                         .ok_or("the Claude pane changed before writer reservation")?;
-                    if context.claude_thread_writer_parent() == Some(child.parent)
+                    if !warm && context.launch_mode == "resume" {
+                        if context.expected_native_session_id.as_deref() != Some(native) {
+                            return Err(
+                                "the Claude resume native session changed before its first key"
+                                    .into(),
+                            );
+                        }
+                    } else if context.claude_thread_writer_parent() == Some(child.parent)
                         && context.expected_native_session_id.as_deref() == Some(native)
                     {
                         return Ok(());

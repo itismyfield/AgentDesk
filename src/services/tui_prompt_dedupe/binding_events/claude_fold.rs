@@ -494,17 +494,24 @@ pub(crate) fn check_thread_resume(
     parent: u64,
     tmux: &str,
     native: &str,
+    expected: Option<&str>,
     path: &Path,
 ) -> io::Result<()> {
+    let expected = expected.unwrap_or(native);
     let entries = read_thread_resumes(channel)?;
     let mut relevant = entries
         .iter()
         .filter(|entry| {
-            entry.parent == parent && entry.tmux == tmux && entry.source.session_id == native
+            entry.parent == parent && entry.tmux == tmux && entry.source.session_id == expected
         })
         .peekable();
     if relevant.peek().is_none() {
         return Ok(());
+    }
+    if expected != native {
+        return Err(io::Error::other(
+            "the Claude resume native session changed before its first key",
+        ));
     }
     let resume = relevant
         .find(|entry| entry.source.path == path)
