@@ -1438,6 +1438,7 @@ tui-o-writer/WriterAgyAbandon.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
 tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyDoubleEnd.cfg	WriterAdoption	AgyEndOnce	-
+tui-o-writer/WriterAgyDoubleRelease.cfg	WriterAdoption	AgyEndOnce	-
 tui-o-writer/WriterAgyDualOwner.cfg	WriterAdoption	AgyNoDuplicate	-
 tui-o-writer/WriterAgyEarlyPurge.cfg	WriterAdoption	AgyNoSilentLoss	-
 tui-o-writer/WriterAgyFailed.cfg	WriterAdoption	-	-

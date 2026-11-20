@@ -1,6 +1,7 @@
 //! The O writer: posts transcript pieces under gateway ownership and a delivery lease, settles
 //! unclear results from history, and permits one durable retry after confirmed absence.
 
+pub(crate) mod agy_delivery;
 pub mod activation;
 pub mod actor;
 pub mod adoption;

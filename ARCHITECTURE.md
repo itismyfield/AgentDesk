@@ -2064,6 +2064,8 @@ src/
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
+│   │   │   ├── o_writer_io/
+│   │   │   │   └── agy.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -4496,6 +4498,7 @@ src/
 │   │   │   ├── thread_children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
+│   │   │   ├── agy_delivery.rs
 │   │   │   ├── agy_spool.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -4553,6 +4556,10 @@ src/
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
 │   │   │   │   └── child_debt.rs
+│   │   │   ├── agy_delivery/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── plan.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/

@@ -45,6 +45,14 @@
 | `MissingLostChild.cfg` | `AgyAcceptedEnds` | `AgyAcceptedEnds` | 실행 중 child 소실을 관측하고 실패 기록 없이 정지. |
 | `MissingDisposition.cfg` | `AgyAcceptedEnds` | `AgyAcceptedEnds` | 명시적 폐기 신호를 받았으나 처분 없이 정지. |
 
+## 조각 3에서 추가한 전이
+
+- `AgyRejectReceipt`는 외부 생성 뒤 영수증 저장을 거부한다. 새 owner는 Prepared를 보존해 이미 생성된 조각을 확인하고 연속 오프셋을 진전시킨다.
+- `AgyApplyEnd`는 footer·해제·큐 알림을 적용하고, `AgyAckEnd`는 해당 단계의 완료를 저장한다. 그 사이 종료 저장을 거부하거나 권한을 회수할 수 있다. 큐의 다음 durable claim은 앞선 lease 해제에 의존한다.
+- `WriterAgyDoubleRelease.cfg`는 해제 적용 뒤 저장 거부에서 복원하여 같은 lease 해제를 다시 적용하는 돌연변이다. `AgyEndOnce`가 반례를 검출한다.
+
+TLC 1.7.4의 조각 3 정상 사례는 `Long` 418개, `TwoTurns` 834개, `Clear` 2,016개 고유 상태를 확인했다.
+
 갱신 전 모델(`5eb6a8cb65fa365d1408e21fe68363018c85c115`)의 `AgyAppendDone`을 비활성화하면 기존 Long cfg가 GREEN(고유 상태 13개)이다. 위 표의 `MissingDone.cfg`는 인수 이후 종료를 요구하므로 같은 terminal 누락을 RED로 판정한다. 정상 `Long.cfg`와 `Clear.cfg`는 GREEN이다.
 
 `Rewind`는 기존 `content_arms.rs:335,355` → `inflight/store.rs:497,502,516` 순으로, `Abandon`은 저장 거부 뒤 `guarded_persist.rs:77` → `runtime.rs:194,221` 순으로 소스에서 대조했다. 나머지는 제안 가드의 제거 실험이다. 설계 7절이 구현 후 동일 단계를 거치는 fault injection을 정의한다.

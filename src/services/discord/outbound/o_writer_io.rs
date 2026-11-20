@@ -1,6 +1,8 @@
 //! Discord side of the O writer: POSTs and history reads through the gateway's shared HTTP client,
 //! and one hold on the channel's shared delivery lease per piece.
 
+mod agy;
+
 use std::future::Future;
 use std::sync::Arc;
 
