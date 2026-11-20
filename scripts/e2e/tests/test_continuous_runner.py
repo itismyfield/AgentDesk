@@ -54,7 +54,7 @@ class Runner(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.now = 1_700_000_000.0
-        self.enterContext(mock.patch.object(time, "time", return_value=self.now))
+        self.enterContext(mock.patch.object(time, "time", side_effect=lambda: self.now))
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
                        "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
@@ -73,6 +73,7 @@ class Runner(unittest.TestCase):
 
     def submit(self, request_id, sha=SHA):
         (self.root / "config.json").write_text(json.dumps(self.config))
+        self.now += 1
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.root / "config.json"), "submit",
                                        "--request-id", request_id, "--deploy-sha", sha]), 0)
@@ -765,11 +766,6 @@ class Outbox(unittest.TestCase):
         for result in ("PASS", "DISABLED", "DEFERRED_BUDGET", "DEFERRED_LEASE", "NOT_DUE"):
             self.assertIsNone(outbox.enqueue(self.state, {**self.summary, "result": result}, 100))
         self.assertEqual(outbox.pending(self.state), 0)
-
-
-
-
-
 
 
 class Publication(unittest.TestCase):

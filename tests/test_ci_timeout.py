@@ -566,12 +566,12 @@ class CiTimeoutTests(unittest.TestCase):
 
         child = "\n".join(
             (
-                "import signal, threading",
+                "import os, signal, threading",
                 "def handled(signum, _frame):",
-                "    print(signum, flush=True)",
-                "    raise SystemExit(0)",
+                "    os.write(1, str(signum).encode())",
+                "    os._exit(0)",
                 "signal.signal(signal.SIGTERM, handled)",
-                "print('R', end='', flush=True)",
+                "os.write(1, b'R')",
                 "threading.Event().wait()",
             )
         )
@@ -592,7 +592,7 @@ class CiTimeoutTests(unittest.TestCase):
                  contextlib.redirect_stderr(io.StringIO()):
                 rc = ci_timeout.run_command(30, [sys.executable, "-c", child])
             self.assertEqual(rc, 143)
-            children[0].wait(timeout=30)
+            self.assertEqual(children[0].wait(timeout=30), 0)
             self.assertEqual(children[0].stdout.read().strip(), str(signal.SIGTERM).encode())
             self.assertEqual(handlers.call_count, 4)
             self.assertEqual(
