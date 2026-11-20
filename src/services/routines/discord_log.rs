@@ -12,6 +12,7 @@ use crate::domain::outbound::{
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::HttpOutboundClient;
 
+use super::provider_choice::AgentProviderChannels;
 use super::run_diagnostics::formatting::*;
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
@@ -546,16 +547,15 @@ impl RoutineDiscordLogger {
             }
         }
 
-        let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, agent_id)
-            .await
-            .map_err(|error| anyhow!("load agent bindings for routine log {agent_id}: {error}"))?
-            .ok_or_else(|| anyhow!("agent {agent_id} not found for routine log"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} has no primary provider for routine log"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} has no primary channel for routine log"))?;
+        let choice = store
+            .load_provider_choices(&[routine_id.to_string()])
+            .await?
+            .remove(routine_id)
+            .unwrap_or_default();
+        let route = AgentProviderChannels::load(&self.pool, agent_id)
+            .await?
+            .route(agent_id, &choice)?;
+        let (provider, primary_channel) = (route.provider, route.channel);
         let parent_channel_id = crate::services::dispatches::outbox_route::resolve_channel_alias_pub(
             &primary_channel,
         )
@@ -576,7 +576,7 @@ impl RoutineDiscordLogger {
         .await?;
         let thread_id_string = thread_id.get().to_string();
         store
-            .update_discord_thread_id(routine_id, &thread_id_string)
+            .update_choice_discord_thread_id(routine_id, &thread_id_string, agent_id, &choice)
             .await
             .map_err(|error| anyhow!("persist routine discord_thread_id failed: {error}"))?;
         Ok((format!("channel:{thread_id_string}"), bot))

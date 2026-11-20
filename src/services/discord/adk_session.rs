@@ -163,7 +163,7 @@ pub(in crate::services::discord) fn build_session_key_candidates(
     ]
 }
 
-fn legacy_session_key_from_namespaced(session_key: &str) -> Option<String> {
+pub(super) fn legacy_session_key_from_namespaced(session_key: &str) -> Option<String> {
     let mut parts = session_key.splitn(3, '/');
     let _provider = parts.next()?;
     let _token_hash = parts.next()?;

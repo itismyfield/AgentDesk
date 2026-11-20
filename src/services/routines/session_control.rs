@@ -1,13 +1,18 @@
+mod persistent_target;
 use anyhow::{Result, anyhow};
+#[cfg(test)]
+pub(crate) use persistent_target::seed_started_control_session;
+#[cfg(all(test, unix))]
+pub(crate) use persistent_target::{CONTROL_TEST_PAUSE, ControlPause};
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
-use crate::services::discord::admin_host_guard::ManagedReset;
-use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
+use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
+use crate::services::routines::provider_choice::{owned_session_route, session_route};
 use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget, force_kill_turn,
     force_kill_turn_for_row,
@@ -48,6 +53,9 @@ pub struct RoutineSessionControlResult {
     pub queued_remaining: Option<usize>,
     pub queue_preserved: Option<bool>,
     pub disconnected_sessions: u64,
+    pub controlled_run_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) interrupted_run_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -81,77 +89,6 @@ impl RoutineSessionController {
         }
     }
 
-    pub async fn control_persistent_session(
-        &self,
-        routine: &RoutineRecord,
-        command: RoutineSessionCommand,
-        reason: &str,
-    ) -> Result<RoutineSessionControlResult> {
-        ensure_persistent_routine(routine)?;
-        let target = self.resolve_target(routine).await?;
-        let provider_clear_behavior = provider_clear_behavior(&target.provider);
-
-        let mut runtime_cleared = false;
-        let mut tmux_killed = false;
-        let mut inflight_cleared = false;
-        let mut lifecycle_path = "registry-unavailable";
-        let mut queued_remaining = None;
-        let mut queue_preserved = None;
-        let mut disconnected_sessions = 0;
-
-        match command {
-            RoutineSessionCommand::Reset => {
-                if let Some(registry) = self.health_registry.as_deref() {
-                    let reset = clear_provider_channel_runtime(
-                        registry,
-                        target.provider.as_str(),
-                        target.channel_id,
-                        target.session_key.as_deref(),
-                    )
-                    .await;
-                    runtime_cleared = matches!(reset, Some(ManagedReset::Applied(_)));
-                    lifecycle_path = match reset {
-                        Some(ManagedReset::Applied(_)) => "runtime-clear",
-                        Some(ManagedReset::Refused(_)) => "runtime-clear-refused",
-                        None => "runtime-clear-unavailable",
-                    };
-                }
-            }
-            RoutineSessionCommand::Kill => {
-                let lifecycle = self
-                    .force_kill(&target, reason, "routine_session_kill")
-                    .await;
-                tmux_killed = lifecycle.tmux_killed;
-                inflight_cleared = lifecycle.inflight_cleared;
-                lifecycle_path = lifecycle.lifecycle_path;
-                queued_remaining = lifecycle.queue_depth;
-                queue_preserved = lifecycle.queue_preserved;
-                // A kill the host guard keeps changed nothing, so the session rows stay too.
-                if !lifecycle.host_guard_kept() {
-                    disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
-                }
-            }
-        }
-
-        Ok(RoutineSessionControlResult {
-            action: command.as_str(),
-            routine_id: routine.id.clone(),
-            agent_id: target.agent_id,
-            provider: target.provider.as_str().to_string(),
-            channel_id: target.channel_id.get().to_string(),
-            session_key: target.session_key,
-            tmux_session: target.tmux_session,
-            provider_clear_behavior,
-            runtime_cleared,
-            tmux_killed,
-            inflight_cleared,
-            lifecycle_path,
-            queued_remaining,
-            queue_preserved,
-            disconnected_sessions,
-        })
-    }
-
     pub async fn teardown_fresh_session(
         &self,
         routine: &RoutineRecord,
@@ -168,10 +105,12 @@ impl RoutineSessionController {
         let disconnected_sessions = if lifecycle.host_guard_kept() {
             0
         } else {
-            self.disconnect_matching_sessions(&target).await?
+            Self::disconnect_matching_sessions(&target, &*self.pool).await?
         };
 
         Ok(RoutineSessionControlResult {
+            controlled_run_id: None,
+            interrupted_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -296,6 +235,8 @@ impl RoutineSessionController {
         };
 
         Ok(RoutineSessionControlResult {
+            controlled_run_id: None,
+            interrupted_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -317,14 +258,8 @@ impl RoutineSessionController {
         })
     }
 
-    /// Builds a teardown target pinned to a recovered run's owned session
-    /// (#3022). The provider and primary channel come from the agent bindings
-    /// (for runtime-mailbox routing); the channel is the routine log thread when
-    /// known, otherwise the primary channel. The owned session row is resolved
-    /// namespace-exact from `ownership_token` when it is a full `session_key`,
-    /// or by the bare tmux suffix otherwise, so the disconnect targets only that
-    /// exact row.
-    ///
+    /// Resolves a recovered run's exact owned session; its recorded provider and claimed thread
+    /// route teardown without following a later definition change.
     async fn resolve_fresh_target_for_name(
         &self,
         routine: &RoutineRecord,
@@ -339,12 +274,15 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for fresh routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for fresh routine teardown"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
+        let route = owned_session_route(
+            &self.pool,
+            bindings,
+            &agent_id,
+            &routine.id,
+            ownership_token,
+        )
+        .await?;
+        let (provider, primary_channel) = (route.provider, route.channel);
         let primary_channel_id =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
@@ -372,76 +310,6 @@ impl RoutineSessionController {
         })
     }
 
-    async fn resolve_target(&self, routine: &RoutineRecord) -> Result<RoutineSessionTarget> {
-        let agent_id = routine
-            .agent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow!(
-                    "persistent routine {} is not attached to an agent",
-                    routine.id
-                )
-            })?
-            .to_string();
-
-        let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, &agent_id)
-            .await
-            .map_err(|error| {
-                anyhow!("load agent bindings for routine session {agent_id}: {error}")
-            })?
-            .ok_or_else(|| anyhow!("agent {agent_id} not found for routine session control"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
-        let channel_id =
-            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
-                .or_else(|| primary_channel.parse::<u64>().ok())
-                .ok_or_else(|| {
-                    anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")
-                })?;
-        let routine_thread_channel_id = routine
-            .discord_thread_id
-            .as_deref()
-            .and_then(parse_discord_channel_id);
-
-        let session = self
-            .load_latest_session(&agent_id, &provider, channel_id, routine_thread_channel_id)
-            .await?;
-        let session_thread_channel_id = session
-            .as_ref()
-            .and_then(|row| row.thread_channel_id.as_deref())
-            .and_then(parse_discord_channel_id);
-        let target_channel_id = target_channel_id(
-            channel_id,
-            routine_thread_channel_id,
-            session_thread_channel_id,
-        );
-        let channel = ChannelId::new(target_channel_id);
-        let fallback_channel_name =
-            fallback_tmux_channel_name(&primary_channel, channel_id, target_channel_id);
-        let session_id = session.as_ref().map(|row| row.id);
-        let session_key = session.as_ref().and_then(|row| row.session_key.clone());
-        let tmux_session = session_key
-            .as_deref()
-            .and_then(tmux_name_from_session_key)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| provider.build_tmux_session_name(&fallback_channel_name));
-
-        Ok(RoutineSessionTarget {
-            agent_id,
-            provider,
-            channel_id: channel,
-            session_id,
-            session_key,
-            tmux_session,
-        })
-    }
-
     async fn resolve_fresh_target(
         &self,
         routine: &RoutineRecord,
@@ -455,9 +323,9 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for fresh routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for fresh routine teardown"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        let provider = session_route(&self.pool, bindings, &agent_id, &routine.id, result_json)
+            .await?
+            .provider;
         let routine_thread_channel_id =
             fresh_teardown_thread_channel_id(routine, result_json).ok_or_else(|| {
                 anyhow!(
@@ -487,71 +355,6 @@ impl RoutineSessionController {
             session_key,
             tmux_session,
         })
-    }
-
-    async fn load_latest_session(
-        &self,
-        agent_id: &str,
-        provider: &ProviderKind,
-        primary_channel_id: u64,
-        routine_thread_channel_id: Option<u64>,
-    ) -> Result<Option<RoutineSessionRow>> {
-        let primary_channel_id = primary_channel_id.to_string();
-        let routine_thread_channel_id = routine_thread_channel_id.map(|value| value.to_string());
-        let row = sqlx::query(
-            r#"
-            SELECT id, session_key, thread_channel_id
-            FROM sessions
-            WHERE agent_id = $1
-              AND LOWER(COALESCE(provider, '')) = LOWER($2)
-              AND status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle', 'connected')
-              AND (
-                thread_channel_id = $3
-                OR ($4::text IS NOT NULL AND thread_channel_id = $4)
-                OR thread_channel_id IS NULL
-              )
-            ORDER BY
-              CASE
-                WHEN $4::text IS NOT NULL AND thread_channel_id = $4 THEN 0
-                WHEN thread_channel_id = $3 THEN 1
-                ELSE 2
-              END,
-              CASE status
-                WHEN 'turn_active' THEN 0
-                WHEN 'working' THEN 0
-                WHEN 'awaiting_bg' THEN 1
-                WHEN 'awaiting_user' THEN 2
-                WHEN 'idle' THEN 3
-                WHEN 'connected' THEN 4
-                ELSE 5
-              END,
-              last_heartbeat DESC NULLS LAST,
-              created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(agent_id)
-        .bind(provider.as_str())
-        .bind(primary_channel_id)
-        .bind(routine_thread_channel_id)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| anyhow!("load routine session for {agent_id}: {error}"))?;
-
-        row.map(|row| {
-            Ok(RoutineSessionRow {
-                id: row
-                    .try_get("id")
-                    .map_err(|error| anyhow!("decode routine session id: {error}"))?,
-                session_key: row
-                    .try_get("session_key")
-                    .map_err(|error| anyhow!("decode routine session_key: {error}"))?,
-                thread_channel_id: row
-                    .try_get("thread_channel_id")
-                    .map_err(|error| anyhow!("decode routine thread_channel_id: {error}"))?,
-            })
-        })
-        .transpose()
     }
 
     async fn load_latest_thread_session(
@@ -735,7 +538,10 @@ impl RoutineSessionController {
         Ok(result.rows_affected())
     }
 
-    async fn disconnect_matching_sessions(&self, target: &RoutineSessionTarget) -> Result<u64> {
+    async fn disconnect_matching_sessions<'e>(
+        target: &RoutineSessionTarget,
+        executor: impl sqlx::PgExecutor<'e>,
+    ) -> Result<u64> {
         let session_key = target.session_key.as_deref();
         let target_channel_id = target.channel_id.get().to_string();
         let result = sqlx::query(
@@ -760,7 +566,7 @@ impl RoutineSessionController {
         .bind(target.session_id)
         .bind(target_channel_id)
         .bind(session_key)
-        .execute(&*self.pool)
+        .execute(executor)
         .await
         .map_err(|error| {
             anyhow!(
@@ -770,17 +576,6 @@ impl RoutineSessionController {
         })?;
 
         Ok(result.rows_affected())
-    }
-}
-
-fn ensure_persistent_routine(routine: &RoutineRecord) -> Result<()> {
-    if routine.execution_strategy == "persistent" {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "routine {} requires execution_strategy=persistent for session control",
-            routine.id
-        ))
     }
 }
 
@@ -874,28 +669,6 @@ fn parse_discord_channel_id(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
-fn target_channel_id(
-    primary_channel_id: u64,
-    routine_thread_channel_id: Option<u64>,
-    session_thread_channel_id: Option<u64>,
-) -> u64 {
-    session_thread_channel_id
-        .or(routine_thread_channel_id)
-        .unwrap_or(primary_channel_id)
-}
-
-fn fallback_tmux_channel_name(
-    primary_channel: &str,
-    primary_channel_id: u64,
-    target_channel_id: u64,
-) -> String {
-    if target_channel_id == primary_channel_id {
-        primary_channel.to_string()
-    } else {
-        format!("{primary_channel}-t{target_channel_id}")
-    }
-}
-
 fn fresh_teardown_fallback_tmux_session_name(
     routine: &RoutineRecord,
     agent_id: &str,
@@ -938,6 +711,10 @@ mod tests {
                 .await
                 .unwrap()
         } else {
+            let key = "fixture-host:queue-truth";
+            sqlx::query("INSERT INTO sessions (session_key, agent_id, provider, status) VALUES ($1,'agent-1','claude','idle')")
+                .bind(key).execute(&pool).await.unwrap();
+            seed_started_control_session(&pool, &routine, "claude", "6038771", key).await;
             controller
                 .control_persistent_session(&routine, RoutineSessionCommand::Reset, "test")
                 .await
@@ -966,11 +743,13 @@ mod tests {
         let pool = db.connect_and_migrate().await;
         sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified routine reset', 'codex', $1)")
             .bind(fixture.channel.get().to_string()).execute(&pool).await.unwrap();
-        let (shared, registry, _key) = fixture.shared(&pool).await;
+        let (shared, registry, key) = fixture.shared(&pool).await;
         let queue = fixture.queue_bytes(&shared);
         let pin = fixture.pin_after_legacy_verdict();
         let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
-        let routine = routine_with_thread("persistent", Some(&fixture.channel.get().to_string()));
+        let channel = fixture.channel.get().to_string();
+        let routine = routine_with_thread("persistent", Some(&channel));
+        seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;
         let actual = controller
             .control_persistent_session(&routine, RoutineSessionCommand::Reset, "verified pin race")
             .await
@@ -1066,25 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn target_channel_prefers_session_thread_then_routine_thread_then_primary() {
-        assert_eq!(target_channel_id(100, Some(200), Some(300)), 300);
-        assert_eq!(target_channel_id(100, Some(200), None), 200);
-        assert_eq!(target_channel_id(100, None, None), 100);
-    }
-
-    #[test]
-    fn fallback_tmux_channel_name_preserves_thread_suffix() {
-        assert_eq!(
-            fallback_tmux_channel_name("agent-cdx", 100, 100),
-            "agent-cdx"
-        );
-        assert_eq!(
-            fallback_tmux_channel_name("agent-cdx", 100, 200),
-            "agent-cdx-t200"
-        );
-    }
-
-    #[test]
     fn fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label() {
         let provider = ProviderKind::Claude;
         let mut routine = routine_with_thread("fresh", Some("1485506232256168011"));
@@ -1100,9 +860,8 @@ mod tests {
 
         assert_eq!(teardown_time, spawn_time);
 
-        let old_channel_thread_fallback = provider.build_tmux_session_name(
-            &fallback_tmux_channel_name("1481478222", 1_481_478_222, 1_485_506_232_256_168_011),
-        );
+        let old_channel_thread_fallback =
+            provider.build_tmux_session_name("1481478222-t1485506232256168011");
         assert_ne!(teardown_time, old_channel_thread_fallback);
     }
 
@@ -1155,3 +914,6 @@ mod tests {
         assert!(ensure_fresh_routine(&routine).is_err());
     }
 }
+
+#[cfg(test)]
+mod provider_choice_tests;

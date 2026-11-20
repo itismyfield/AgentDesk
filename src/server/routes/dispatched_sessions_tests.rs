@@ -1374,6 +1374,14 @@ async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
                 let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
                 let result = match entry {
                     "kill" => {
+                        crate::services::routines::session_control::seed_started_control_session(
+                            &pool,
+                            &routine,
+                            "claude",
+                            routine.discord_thread_id.as_deref().unwrap(),
+                            &key,
+                        )
+                        .await;
                         let kill = RoutineSessionCommand::Kill;
                         let control = controller.control_persistent_session(&routine, kill, "test");
                         control.await
@@ -1693,6 +1701,14 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
                 let before = untouched(&pool, &shared, channel, &other, &rows).await;
                 let result = match entry {
                     "kill" => {
+                        crate::services::routines::session_control::seed_started_control_session(
+                            &pool,
+                            &routine,
+                            "claude",
+                            routine.discord_thread_id.as_deref().unwrap(),
+                            &key,
+                        )
+                        .await;
                         let kill = RoutineSessionCommand::Kill;
                         let control = controller.control_persistent_session(&routine, kill, "test");
                         control.await
@@ -1856,3 +1872,6 @@ async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[path = "routines/session_patch_tests.rs"]
+mod session_patch_tests;
