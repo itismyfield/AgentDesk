@@ -1,4 +1,5 @@
-//! Stop-only evidence for a current foreground tool; shared readiness stays unchanged.
+//! Stop-only pane evidence: a running turn's own chrome rows and a current foreground tool.
+//! Shared readiness stays unchanged.
 
 use crate::services::tmux_common as screen;
 
@@ -68,8 +69,9 @@ fn chrome_rows(pane: &str) -> Vec<&str> {
     let composer = recent.iter().rposition(|row| row.starts_with('❯'));
     let below = |at: usize| Some(at + recent[at..].iter().position(border)?);
     let status = composer.and_then(below).unwrap_or(recent.len());
-    let chrome = |(at, row): (usize, &&str)| (at > status || edge(row)).then_some(*row);
-    recent.iter().enumerate().filter_map(chrome).collect()
+    let rows = recent.iter().enumerate();
+    let chrome = rows.filter(|(at, row)| *at > status || edge(row));
+    chrome.map(|(_, row)| *row).collect()
 }
 
 /// Claude's own `esc to interrupt` offer, in the footer or on a spinner row: what an unread turn
