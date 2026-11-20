@@ -1076,7 +1076,7 @@ main_workflow=".github/workflows/ci-main.yml"
 warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
 nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
-verify_helper_hash scripts/ci/generated_artifact_steps.rb 50a11150a23cb46e1e740612fb27232d276d63f8c51c70a1391de5621e4c4bbf || exit 1
+verify_helper_hash scripts/ci/generated_artifact_steps.rb 870d236cd7867ddb578830cb7e60ce864d3c68ec9a4c89d678cf14c0780e98fb || exit 1
 verify_helper_hash scripts/ci/main_script_check_shards.rb 52bd83f0cf608795ab5e9df277dad307dd92e252f83ae26912a1a3c9acdca32b || exit 1
 validate_runner_memory_wiring
 validate_main_script_check_shards() {

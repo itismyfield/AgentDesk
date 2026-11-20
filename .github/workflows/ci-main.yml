@@ -685,3 +685,14 @@ jobs:
           path: target/generated-contracts/statechart-index/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload user feature map
+        uses: actions/upload-artifact@v4
+        with:
+          name: user-feature-map-main-${{ github.run_attempt }}
+          path: target/generated-contracts/user-feature-map/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Check landed user feature map
+        run: python3 scripts/generate_user_feature_map.py --check --base-ref HEAD

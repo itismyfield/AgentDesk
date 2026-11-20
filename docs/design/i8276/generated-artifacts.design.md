@@ -2,7 +2,7 @@
 
 <!-- doc-path-refs: external scripts/ci_guard_audits.sh merge_main_regen.sh prepush_gates.sh build_land_simple.sh batch_conflicts.sh scripts/statechart.ts scripts/pipeline.ts -->
 <!-- doc-path-refs: proposed docs/statecharts/index.generated.md -->
-<!-- doc-path-refs: removed scripts/check_sql_execution_surface_inventory.py -->
+<!-- doc-path-refs: removed scripts/check_sql_execution_surface_inventory.py docs/generated/user-feature-coverage.json -->
 
 조사 기준은 `origin/main`의 `6c1c003402d55fb340d864ec5c768c690a30064f`다. 구현 범위는 S1–S5다. PR에서는 후보 소스의 계약을 검사하고 base 대비 변화량을 공개한다. 착지는 현재 main과 후보를 합친 트리에서 독자가 읽는 산출물을 재생성하고, 게시할 트리의 바이트까지 검사한다. 예상 위반·승인 목록·골든 fixture는 독립적인 비교 기준으로 유지한다.
 

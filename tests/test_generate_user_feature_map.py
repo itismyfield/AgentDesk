@@ -1,6 +1,7 @@
 """Feature declarations cannot manufacture live coverage or erase inventory."""
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +12,7 @@ import unittest
 import yaml
 
 from scripts import generate_user_feature_map as gen
+from scripts.ci import user_feature_map_report
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -102,9 +104,9 @@ class FeatureMapTests(unittest.TestCase):
         self.save()
         return gen.generate(self.root, "HEAD")
 
-    def cli(self, mode):
+    def cli(self, *mode):
         return subprocess.run(
-            [sys.executable, str(GENERATOR), mode, "--root", str(self.root),
+            [sys.executable, str(GENERATOR), *mode, "--root", str(self.root),
              "--base-ref", "HEAD"], text=True, capture_output=True,
         )
 
@@ -513,27 +515,122 @@ class FeatureMapTests(unittest.TestCase):
                 self.assertEqual(changed, gen.generate(self.root, "HEAD")[1])
                 path.write_text(before)
 
+    def test_raw_source_only_change_keeps_markdown_identical(self):
+        original_markdown, original = self.generate()
+        path = self.root / ROWS
+        path.write_text(path.read_text() + "\n# commentary only\n")
+        markdown, report = gen.generate(self.root, "HEAD")
+        self.assertEqual(original_markdown, markdown)
+        self.assertNotEqual(original["source_hash"], report["source_hash"])
+
+    def test_validation_and_separate_output_do_not_need_committed_coverage(self):
+        directory = self.root / "artifacts"
+        valid = self.cli("--validate")
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        rendered = self.cli("--output-dir", str(directory))
+        self.assertEqual(rendered.returncode, 0, rendered.stdout + rendered.stderr)
+        report = json.loads((directory / "user-feature-coverage.json").read_text())
+        self.assertEqual(report["covered"], 1)
+        self.assertFalse((self.root / OUTPUTS[1]).exists())
+        self.assertFalse((self.root / OUTPUTS[0]).exists())
+
+    def commit_snapshot(self, message):
+        registry = self.root / gen.REGISTRY
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_bytes((REPO / gen.REGISTRY).read_bytes())
+        self.git("add", "scripts", "docs", "tests")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def push_event(self, base):
+        event = self.root / "event.json"
+        event.write_text(json.dumps({"before": base, "ref": "refs/heads/main"}))
+        return {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event),
+                "TEST_LANE_BASELINE_REF": "HEAD", "GFP_BASE_SHA": "HEAD"}
+
+    def test_main_report_uses_previous_push_sha_instead_of_validation_baseline(self):
+        base = self.commit_snapshot("covered")
+        self.scenario["coverage_class"] = "fixture"
+        self.save()
+        head = self.commit_snapshot("coverage gap")
+        output = self.root / "push"
+        user_feature_map_report.report(self.root, output, head, self.push_event(base))
+        summary = (output / "summary.md").read_text()
+        self.assertIn("covered → gap", summary)
+        self.assertIn(f"Source validation baseline: `{head}`", summary)
+        self.assertIn("feature-map.diff", summary)
+        manifest = json.loads((output / "manifest.json").read_text())
+        self.assertEqual((manifest["base"], manifest["head"]), (base, head))
+        for name in ("head.md", "head.json", "base.md", "base.json", "summary.md", "feature-map.diff"):
+            self.assertEqual(manifest["sha256"][name], hashlib.sha256((output / name).read_bytes()).hexdigest())
+
+    def test_report_for_source_only_change_keeps_markdown_identical(self):
+        base = self.commit_snapshot("before")
+        rows = self.root / ROWS
+        rows.write_text(rows.read_text() + "\n# commentary only\n")
+        head = self.commit_snapshot("comment")
+        output = self.root / "push"
+        user_feature_map_report.report(self.root, output, head, self.push_event(base))
+        self.assertEqual((output / "base.md").read_bytes(), (output / "head.md").read_bytes())
+        self.assertNotEqual((output / "base.json").read_bytes(), (output / "head.json").read_bytes())
+        self.assertIn("Markdown unchanged.", (output / "summary.md").read_text())
+        self.assertIn("Source hash changed:", (output / "summary.md").read_text())
+
+    def test_report_validates_both_snapshots_and_rejects_hidden_contract_changes(self):
+        extra = applicable()
+        extra["qualifiers"]["turn_origin"] = "native"
+        self.rows["features"][0]["applicable"].append(extra)
+        self.save()
+        original_rows, original_scenario = deepcopy(self.rows), deepcopy(self.scenario)
+        good = self.commit_snapshot("valid coverage")
+        errors = (
+            ("missing assertion", "E-900.yaml.*required witness"),
+            ("unsupported witness", "user-feature-map.rows.yaml.*unsupported required assertion"),
+            ("hidden tuple", "user-feature-map.rows.yaml.*new removal_reason"),
+        )
+        for kind, error in errors:
+            with self.subTest(kind=kind):
+                self.git("switch", "--detach", good)
+                self.rows, self.scenario = deepcopy(original_rows), deepcopy(original_scenario)
+                apps = self.rows["features"][0]["applicable"]
+                if kind == "missing assertion":
+                    self.scenario["assertions"].append({"no_duplicate_marker": "marker"})
+                    self.scenario["feature_coverage"]["claims"][0]["assertion_ids"] = ["no_duplicate_marker"]
+                elif kind == "unsupported witness":
+                    apps[0]["required_assertion_ids"].append("unsupported_witness")
+                else:
+                    apps.pop()
+                self.save()
+                broken = self.commit_snapshot(kind)
+                output = self.root / "invalid"
+                with self.assertRaisesRegex(gen.MapError, error):
+                    user_feature_map_report.report(self.root, output, good, self.push_event(good))
+                self.assertFalse(output.exists())
+                self.rows, self.scenario = deepcopy(original_rows), deepcopy(original_scenario)
+                self.save()
+                restored = self.commit_snapshot("restore valid coverage")
+                with self.assertRaisesRegex(gen.MapError, error):
+                    user_feature_map_report.report(self.root, output, restored, self.push_event(broken))
+                self.assertFalse(output.exists())
+
     def test_generated_bytes_are_repeatable_and_drift_is_rejected(self):
         self.save()
         first = self.cli("--write")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        original = {name: (self.root / name).read_bytes() for name in OUTPUTS}
+        target = self.root / OUTPUTS[0]
+        original = target.read_bytes()
         second = self.cli("--write")
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-        self.assertEqual(original, {name: (self.root / name).read_bytes() for name in OUTPUTS})
-        report = json.loads(original[OUTPUTS[1]])
-        self.assertEqual(report["covered"], 1)
-        for name in OUTPUTS:
-            with self.subTest(output=name):
-                path = self.root / name
-                path.write_bytes(original[name] + b" ")
-                result = self.cli("--check")
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertRegex(result.stdout + result.stderr, "drift|generated|stale")
-                restored = self.cli("--write")
-                self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
-        checked = self.cli("--check")
-        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse((self.root / OUTPUTS[1]).exists())
+        target.write_bytes(original + b" ")
+        result = self.cli("--check")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"drift: regenerate {OUTPUTS[0]}", result.stderr)
+        self.assertIn("--write --base-ref HEAD", result.stderr)
+        self.assertEqual(self.cli("--validate").returncode, 0)
+        self.assertEqual(self.cli("--write").returncode, 0)
+        self.assertEqual(self.cli("--check").returncode, 0)
 
 
 if __name__ == "__main__":
