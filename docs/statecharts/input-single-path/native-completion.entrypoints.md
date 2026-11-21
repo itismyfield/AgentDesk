@@ -31,7 +31,8 @@ The table covers the completion entry points audited for this slice.
 | C6 | `src/services/discord/turn_bridge/completion_postlude.rs:256` isolated session close | S1 keeps the existing session lifecycle. Native holds can include an isolated scheduled row. |
 | C7 | `src/services/discord/turn_bridge/completion_postlude.rs` watcher resume | O retains its native channel. |
 | C8 | `src/services/discord/turn_bridge/completion_postlude/channel_writeback.rs:86` completion scope | `src/services/discord/turn_bridge/completion_postlude/channel_writeback.rs::native_completion_scope` recognizes the durable channel key and its promoted aliases, then applies the existing scheduled/legacy scope and routine ownership. Per-run presentation determines `channel_context`. |
-| C9, C10 | `src/services/discord/turn_bridge/completion_postlude.rs:342` memory history and session identity | Follow-up session writeback. |
+| C9 | `src/services/discord/turn_bridge/completion_postlude.rs:342` memory history | Follow-up session writeback. |
+| C10 | `src/services/discord/turn_bridge/completion_postlude.rs:342`, `:389` session identity | `src/services/discord/turn_finalizer/native_completion.rs::record_selector` stores the run's own session as the channel's stored and cached provider selector. A channel cleared since the turn began, an isolated run and a protected request without an ordinary classification keep what they had; a pane that already rotated keeps its new session. |
 | C11 | `src/services/discord/turn_bridge/completion_postlude/prelude_lifecycle.rs:166` prelude consumption | S2. A confirmed prelude can be injected again before that work lands. |
 | C12, C13 | `src/services/discord/turn_bridge/completion_postlude.rs:420` feedback and WIP reminders | Follow-up intake context. |
 | C14 | `src/services/discord/turn_bridge/completion_postlude.rs:504` completion telemetry | Follow-up observations. |
@@ -75,12 +76,13 @@ The table covers the completion entry points audited for this slice.
 
 ## TLC configurations
 
-The original 27 configurations cover the reviewed S1 design. Four repair configurations exercise startup before the sessions map is populated and registry contention between prepare and cleanup. The full list of expected violations is in `docs/statecharts/expected.tsv`.
+The original 27 configurations cover the reviewed S1 design. Four repair configurations exercise startup before the sessions map is populated and registry contention between prepare and cleanup. One more before configuration covers the channel session selector, which the bridge postlude wrote before native ownership skipped it; four fixed configurations also check `SelectorEventuallyStored` and `SelectorNotRevivedAfterClear`. The full list of expected violations is in `docs/statecharts/expected.tsv`.
 
 | Before suffix | Fixed suffix | Failure before |
 |---|---|---|
 | `Before` | `FixedNormal` | Recording progress |
 | `BootEmptySessionMapBefore` | `FixedBootEmptySessionMap` | Transcript progress with no session map entry |
+| `SelectorBefore` | `FixedNormal`, `FixedEmpty`, `FixedBootEmptySessionMap`, `FixedClearBeforeRecord` | Session selector progress: a fresh session's first native turn left the stored selector empty (#8261 regression) |
 | `RegistryContendedBefore` | `FixedRegistryContended` | Transcript, scheduled and work progress while the registry is held |
 | `CapturedBefore` | `FixedClearBeforeRecord` | Resurrection after clear |
 | `EmptyGateBefore` | `FixedEmpty` | Scheduled completion progress |
