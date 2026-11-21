@@ -6,11 +6,12 @@ import { Drawer } from "../common/overlay/Drawer";
 import { DrawerDockContext } from "../common/overlay/DrawerDock";
 import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 import { DetailDockPane, useDetailDock } from "./TaskListParts";
+import { TaskScreen } from "./TaskScreen";
 
 type View = "overview" | "relations" | "board";
 
 /** The open campaign: title, chips and one status sentence, then 현황 (with 관계도 and 단계 보드 when given), and the task
- * opened from it in the pinned pane on wide screens or a bottom sheet on phones. */
+ * opened from it in the pinned pane on wide screens or its own screen on phones. */
 export default function CampaignDetail({ title, showTitle, chips, sentence, actions, notes, description, overview, relations, board, task, onCloseTask, tr }: {
   title: string; showTitle: boolean; chips?: ReactNode; sentence: string; actions?: ReactNode; notes?: ReactNode;
   /** In the header on wide screens; below everything on phones, which lead with status and tasks. */
@@ -46,8 +47,9 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, acti
     {relations && view === "relations" ? relations : board && view === "board" ? board(controls) : overview(controls)}
     {!showTitle && description}
     {task && <DetailDockPane dock={dock} label={tr("선택 작업", "Selected task")} empty={null} />}
+    {task && !dock.dock && <TaskScreen campaign={title} label={task.label} onClose={onCloseTask} tr={tr}>{task.body}</TaskScreen>}
     <DrawerDockContext.Provider value={dock.dock}>
-      {task && <Drawer open onClose={close} ariaLabel={tr("선택 작업", "Selected task")} width="min(560px, 100vw)">
+      {task && dock.dock && <Drawer open onClose={close} ariaLabel={tr("선택 작업", "Selected task")} width="min(560px, 100vw)">
         <div className={`${CAMPAIGN_SCOPE} campaign-inspector min-w-0 gap-3 text-sm [overflow-wrap:anywhere]`}>
           <div className="campaign-inspector-header flex items-center justify-between gap-3 border-b border-[var(--line)] pb-2 text-xs text-[var(--fg-muted)]">
             <span className="tabular-nums">{task.label}</span>
