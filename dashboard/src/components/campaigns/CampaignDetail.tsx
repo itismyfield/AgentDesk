@@ -51,7 +51,7 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, acti
     <DrawerDockContext.Provider value={dock.dock}>
       {task && dock.dock && <Drawer open onClose={close} ariaLabel={tr("선택 작업", "Selected task")} width="min(560px, 100vw)">
         <div className={`${CAMPAIGN_SCOPE} campaign-inspector min-w-0 gap-3 text-sm [overflow-wrap:anywhere]`}>
-          <div className="campaign-inspector-header flex items-center justify-between gap-3 border-b border-[var(--line)] pb-2 text-xs text-[var(--fg-muted)]">
+          <div className="campaign-inspector-header flex items-center justify-between gap-3 border-b border-[var(--line-soft)] pb-2 text-xs text-[var(--fg-muted)]">
             <span className="tabular-nums">{task.label}</span>
             <IconButton icon={<X aria-hidden />} label={tr("상세 닫기", "Close details")} onClick={close} />
           </div>

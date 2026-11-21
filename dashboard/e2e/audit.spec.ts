@@ -117,6 +117,7 @@ test("desktop: bound agents, sections by source, copy and the provider key", asy
   await expect(page.getByTestId("audit-source-summary")).toContainText("agents/role.prompt.md");
   await rows.nth(5).getByRole("button").click();
   await expect(rows.nth(5).locator("pre")).toContainText("ADK Dashboard frontend specialist");
+  await expect(rows.nth(5).getByRole("button")).not.toHaveAttribute("aria-current");
   await page.getByTestId("audit-copy").click();
   await expect(page.getByTestId("audit-copy")).toHaveText("복사했어요");
   const copied = await page.evaluate(() => navigator.clipboard.readText());
