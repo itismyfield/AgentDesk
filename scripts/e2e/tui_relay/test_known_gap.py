@@ -680,12 +680,12 @@ class HerdrScopedGapRepairs(unittest.TestCase):
 
 
 class HerdrStopCases(unittest.TestCase):
-    def run_e54(self, *, late=False, follow=True, notice=None, destructive=True):
+    def run_e54(self, *, late=False, follow=True, notice=None, destructive=True, early_done=False, **gates):
         from unittest.mock import Mock
         from tui_relay import herdr, herdr_stop as stop
         scenario = driver.yaml.safe_load((Path(__file__).resolve().parents[3] / 'tests/e2e/tui_relay/scenarios/E-54-discord-stop-active-and-idle.yaml').read_text())
         args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
-                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=destructive, final_refetches=1)
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=destructive, final_refetches=1, **gates)
         rows, sends, setups = [], [], iter(range(100, 2000, 200))
         setup, client = [], Mock()
         client.send_control.side_effect = lambda *a: {'id': str(setup.append(next(setups)) or setup[-1])}
@@ -697,6 +697,8 @@ class HerdrStopCases(unittest.TestCase):
             if 'probe.' in text:
                 rows.clear()
                 add(text.split('First output ')[1].split(']')[0].replace('{run_id}', 'run') + ']')
+                if early_done and 'S15C' in text:  # The relay posted the whole hold turn at once.
+                    add('[E2E:S15C:run:HOLD_DONE]')
             elif text == '!stop':
                 add(stop.STOPPING + ' 턴은 provider가 유지해요.')
             elif text.startswith('!stop'):
@@ -726,3 +728,7 @@ class HerdrStopCases(unittest.TestCase):
         self.assertEqual((statuses[1], counts['전달하지 않'], counts['원문은 보관하지 않']), ('known_gap', 1, 1))
         self.assertEqual(self.run_e54(notice=dropped)[1][1], 'fail')
         self.assertEqual(self.run_e54(destructive=False)[0]['status'], 'skipped')
+        self.assertEqual(self.run_e54(destructive=False, required_coverage_class='live')[0]['status'], 'fail')
+        result, statuses, _ = self.run_e54(early_done=True)
+        self.assertEqual((statuses[1], result['subcases'][1].get('known_gaps')), ('fail', None), result)
+        self.assertIn('inconclusive', result['subcases'][1]['reason'])
