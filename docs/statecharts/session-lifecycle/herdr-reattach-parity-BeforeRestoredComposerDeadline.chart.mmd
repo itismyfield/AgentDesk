@@ -28,22 +28,21 @@ stateDiagram-v2
     }
   }
   [*] --> s2
-  s2 --> s2: intake reconcile 완료
   s2 --> s3: composer 기한과 입력을 저장한 뒤 재시작
+  s2 --> s2: intake reconcile 완료
   s3 --> s4: dcserver 부팅
   s4 --> s5: 같은 원본 수락
   s5 --> s5: intake reconcile 완료
   s5 --> s6: 현재 pane과 이름을 확인
   s5 --> s7: 현재 pane과 이름을 확인
   s6 --> s8: 사용자 제어
-  s6 --> s6: 사용자 제어
   s6 --> s10: 보류 기준 시각 경과
   s7 --> s8: 사용자 제어
   s7 --> s9: 보류 기준 시각 경과
+  s7 --> s7: identity 보류 중 같은 큐 재인수
   s10 --> s11: 별도 복구가 identity를 확인
   s10 --> s8: 사용자 제어
   s11 --> s12: 별도 직접 입력 B 수락
-  s10 --> s10: identity 보류 중 같은 큐 재인수
   s12 --> s13: 같은 실행의 일반 Busy 경로로 재진입
   s13 --> s14: 평소 입력 규칙 적용
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
