@@ -5,6 +5,7 @@ import {
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { PageFrame } from "../../app/PageFrame";
+import { useShellFocus } from "../../app/shellFocus";
 import { Badge as KitBadge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
@@ -352,6 +353,17 @@ export default function CampaignsPanel({ language }: { language: string }) {
       onCloseTask={() => setNode(null)} />;
   })();
 
+  const legacyError = error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />;
+  // On desktop the relations editor takes the whole window: the shell drops its rail and top bar, and no page title shows.
+  const fullEditor = tab === "campaigns" && editing && !phone && campaign;
+  useShellFocus(!!fullEditor);
+  if (fullEditor) return <section data-testid="campaigns-page" className={`${CAMPAIGN_SCOPE} h-full min-w-0 text-sm`}>
+    <div className="flex h-full min-h-0 flex-col">
+      {legacyError}
+      <CampaignRelationsEditor key={fullEditor.id} campaign={fullEditor} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
+    </div>
+  </section>;
+
   // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
   const folded = !phone && !!openNode;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
@@ -368,10 +380,9 @@ export default function CampaignsPanel({ language }: { language: string }) {
           selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
-      {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
+      {legacyError}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      {editing && !phone && campaign ? <CampaignRelationsEditor key={campaign.id} campaign={campaign} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
-        : <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
         {(phone || folded) && <button type="button" className={`campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left ${folded ? "min-[1280px]:!hidden" : ""}`} aria-haspopup="dialog" onClick={() => setPicking(true)}>
             <span className="grid min-w-0 flex-1 gap-0.5">
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
@@ -391,7 +402,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
             ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
               : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}
         </div>
-      </div>}
+      </div>
     </div>}
   </section>
   </PageFrame>;

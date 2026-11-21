@@ -517,6 +517,13 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   const editor = page.locator(".campaign-relations-editor");
   const task = (id: string) => editor.locator(`.react-flow__node[data-id="${id}"]`);
   await expect(editor.locator(".react-flow__node")).toHaveCount(3);
+  // The editor fills the window: no rail or top bar, so the first Tab lands on its way back.
+  await expect(page.getByTestId("app-sidebar-nav")).toHaveCount(0);
+  await expect(page.getByTestId("topbar")).toHaveCount(0);
+  expect(await editor.boundingBox()).toEqual({ x: 0, y: 0, width: 1440, height: 900 });
+  await page.keyboard.press("Tab");
+  await expect(editor.getByRole("button", { name: "캠페인", exact: true })).toBeFocused();
+  await expect(editor.getByRole("complementary", { name: "범위 요약" })).toContainText("그룹 · Gateway");
   await task("i7401").click();
   await expect(editor.getByRole("complementary")).toContainText("완료 · 바꿀 수 없음");
   await expect(editor.getByLabel("선행 추가")).toHaveCount(0);
@@ -529,6 +536,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(save).toBeDisabled();
   await editor.getByRole("button", { name: /^선행 #7272 .+ 빼기$/ }).click();
   await expect(editor.getByText("저장 안 됨 · 선행 2")).toBeVisible();
+  // With nothing chosen the column lists what changed, and a row opens its task.
+  await editor.locator("[data-editor-canvas]").click({ position: { x: 40, y: 300 } });
+  const changed = editor.getByRole("complementary", { name: "범위 요약" }).getByRole("button");
+  await expect(changed).toHaveText([/^#7402 .+선행$/, /^#7272 .+선행$/]);
+  await changed.first().click();
+  await expect(editor.getByRole("complementary")).toContainText("#7402 · Gateway");
   await save.click();
   await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
   expect(puts.map((body) => body.expected_revision)).toEqual([7, 8]);
@@ -546,11 +559,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(dialog).toBeVisible();
   await expect(page).toHaveURL(/edit=relations/);
   await dialog.getByRole("button", { name: "계속 편집" }).click();
-  await page.getByRole("tab", { name: "대기열" }).click();
+  await editor.getByRole("button", { name: "캠페인", exact: true }).click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "버리고 나가기" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page).not.toHaveURL(/edit=relations/);
+  await expect(page.getByTestId("app-sidebar-nav")).toBeVisible();
 });
 
 test("relations editor: phones get no way in, a direct link only shows relations, and another campaign picked there opens no editor once widened", async ({ page }, testInfo) => {
@@ -636,7 +650,8 @@ test("relations editor: cable ties bundle lines, move on the grid and untie with
 
 test("relations editor: below 1280px a double-click on a line where the inspector opens ties it, and a single click opens the inspector once no second click comes", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
-  await page.setViewportSize({ width: 1100, height: 900 });
+  // The canvas spans the whole window now, so a narrow one keeps the line under the overlay.
+  await page.setViewportSize({ width: 920, height: 900 });
   const { calls, editor, tie, lines, pointOn } = await openLinkedEditor(page);
   const canvas = (await editor.locator("[data-editor-canvas]").boundingBox())!;
   // A point of #7402 → #7272 inside the 320px the overlay inspector covers.
@@ -659,7 +674,8 @@ test("relations editor: a draft kept while another page shows asks before a relo
   const [panel, editor, asked] = [page.locator(".campaigns-panel"), page.locator(".campaign-relations-editor"), [] as string[]];
   const open = async (name: string) => { await panel.getByRole("tab", { name: "관계도" }).click(); await panel.getByRole("button", { name, exact: true }).click(); };
   const reload = async (home = true) => {
-    if (home) await page.getByRole("link", { name: "홈" }).click();
+    // The full-window editor has no rail, so the home page is reached with its shortcut.
+    if (home) { await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur()); await page.keyboard.press("Alt+1"); await expect(page).toHaveURL(/\/home/); }
     page.once("dialog", (dialog) => { asked.push(dialog.type()); void dialog.dismiss(); });
     await page.reload({ timeout: 5_000 }).catch(() => undefined);
   };

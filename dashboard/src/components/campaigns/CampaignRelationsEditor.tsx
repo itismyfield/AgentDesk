@@ -16,12 +16,12 @@ import { LEDGER_STATUS_LABELS } from "./campaignOverviewModel";
 import { Badge, LABELS, type Tr } from "./campaignPresentation";
 import { applyTieCommand, type TieCommand } from "./campaignTieEditor";
 import { definitionCleaner, editorViewScope, loadCampaignView, pruneStoredView, saveCampaignView, storedEditorScopes } from "./campaignViewStorage";
-import RelationsInspector from "./RelationsInspector";
+import RelationsInspector, { type ScopeOverview } from "./RelationsInspector";
 import { RelationsTaskNode, RelationsTieNode, type TaskNodeData, type TieMenu, type TieNodeData } from "./RelationsTaskNode";
 import { nodeMarker } from "./StatusMarker";
 import {
   MAX_DEPTH, adoptLatest, applyEdits, editCounts, editField, fieldErrors, findCycles, isLocked, keepDraft, layoutTasks, parseScope, rebaseEdits, scopeKey,
-  NODE_WIDTH, dropKeptDraft, keptDraft, scopeTasks, tieChanges, warnBeforeUnload, taskLabel, taskName, type Conflict, type EditScope, type Edits, type TieDrafts,
+  NODE_WIDTH, dropKeptDraft, keptDraft, scopeTasks, tieChanges, warnBeforeUnload, taskLabel, taskName, type Conflict, type EditField, type EditScope, type Edits, type TieDrafts,
 } from "./relationsEditorModel";
 
 const NODE_TYPES = { relationsTask: RelationsTaskNode, relationsTie: RelationsTieNode };
@@ -39,6 +39,10 @@ const UNDO_LIMIT = 50;
 const READABLE_ZOOM = 0.8;
 const NODE_HEIGHT = 150;
 const WIDE = "(min-width: 1280px)";
+const FIELD: Record<EditField, readonly [string, string]> = { dependencies: ["선행", "dependencies"], title: ["제목", "title"], issue_url: ["이슈", "issue"] };
+/** Floating canvas chrome: a card over the dots, and 40px tool buttons as in the design. */
+const FLOAT = "absolute z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--th-card-bg)] shadow-[var(--shadow-sm)]";
+const TOOL = "!size-10 [&>span]:!size-[18px] aria-pressed:!bg-[var(--accent-soft)] aria-pressed:!text-[var(--fg)]";
 
 /** True at 1280px and up, where the inspector stays docked beside the canvas. */
 function useWide() {
@@ -77,6 +81,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const root = useRef<HTMLElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLDivElement>(null);
+  const scopeBar = useRef<HTMLDivElement>(null);
   const flow = useRef<ReactFlowInstance | null>(null);
   const [tool, setTool] = useState<"select" | "connect" | "tie">("select");
   const [from, setFrom] = useState<string | null>(null);
@@ -181,7 +186,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       const { campaign: latest } = await getCampaignDetail(base.id);
       const merged = rebaseEdits(base.nodes, edits, latest.nodes);
       if ("conflicts" in merged) {
-        const what = { dependencies: ["선행", "dependencies"], title: ["제목", "title"], issue_url: ["이슈", "issue"], missing: ["사라짐", "gone"], locked: ["잠김", "locked"] } as const;
+        const what = { ...FIELD, missing: ["사라짐", "gone"], locked: ["잠김", "locked"] } as const;
         const list = merged.conflicts.map(({ id, field }) => `${label(id)} ${tr(what[field][0], what[field][1])}`).join(" · ");
         setProblem({ text: tr(`다른 곳에서도 바뀌어 저장하지 않았어요: ${list}`, `Changed elsewhere too, so nothing was saved: ${list}`), conflicts: merged.conflicts, latest });
         return null;
@@ -239,7 +244,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const discard = () => { reset(campaign, {}); setTies({}); setRestored(false); };
 
   // Leaving with unsaved changes: the parent asks through `leave`, a reload or close through beforeunload, and an
-  // unmount without a decision (rail, palette) keeps the draft, ties included, for this tab's session.
+  // unmount without a decision (palette, shortcut) keeps the draft, ties included, for this tab's session.
   const keep = useRef<{ base: Campaign; edits: Edits; ties: TieDrafts } | null>(null);
   keep.current = dirty ? { base, edits, ties } : null;
   const request = useCallback((proceed: () => void) => keep.current ? setLeaving(() => proceed) : proceed(), []);
@@ -336,6 +341,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const chosen = selection?.kind === "node" ? byId.get(selection.id) ?? null : null;
   const problems = [...cycles.map(cycleText), ...invalid.map(({ id, field }) => `${label(id)} ${field === "title" ? tr("제목", "title") : tr("이슈 주소", "issue link")}`)];
   const done = ids.filter((id) => byId.get(id)!.status === "completed").length;
+  const finished = nodes.filter((node) => node.status === "completed").length;
   /** First view: every task while that stays legible, else the chosen task (or the scope's start) at a legible zoom. */
   const firstView = (instance: ReactFlowInstance) => {
     flow.current = instance;
@@ -344,11 +350,13 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     if (!box || placed.length === 0) return;
     const left = Math.min(...placed.map((point) => point.x)), top = Math.min(...placed.map((point) => point.y));
     const bounds = { x: left, y: top, width: Math.max(...placed.map((point) => point.x)) + NODE_WIDTH - left, height: Math.max(...placed.map((point) => point.y)) + NODE_HEIGHT - top };
-    const all = getViewportForBounds(bounds, box.width, box.height, 0.1, 1, 0.08);
+    // The scope bar and the tool row float over the canvas, so tasks are fitted into the band between them.
+    const above = (scopeBar.current?.offsetHeight ?? 0) + 12, band = Math.max(box.height - above - 64, 1);
+    const all = getViewportForBounds(bounds, box.width, band, 0.1, 1, 0.08);
     const focus = scope.kind === "task" ? positions.get(scope.id) : undefined;
-    if (all.zoom >= READABLE_ZOOM) void instance.setViewport(all);
-    else if (focus) void instance.setCenter(focus.x + NODE_WIDTH / 2, focus.y + NODE_HEIGHT / 2, { zoom: READABLE_ZOOM });
-    else void instance.setViewport({ x: 24 - left * READABLE_ZOOM, y: 24 - top * READABLE_ZOOM, zoom: READABLE_ZOOM });
+    if (all.zoom >= READABLE_ZOOM) void instance.setViewport({ ...all, y: all.y + above });
+    else if (focus) void instance.setViewport({ x: box.width / 2 - (focus.x + NODE_WIDTH / 2) * READABLE_ZOOM, y: above + band / 2 - (focus.y + NODE_HEIGHT / 2) * READABLE_ZOOM, zoom: READABLE_ZOOM });
+    else void instance.setViewport({ x: 24 - left * READABLE_ZOOM, y: above + 12 - top * READABLE_ZOOM, zoom: READABLE_ZOOM });
   };
   /** Closing the overlay inspector drops the choice and puts the focus back on the task or line it showed. */
   const closeInspector = () => {
@@ -368,8 +376,16 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     const view = flow.current.getViewport();
     if (hidden > 0) void flow.current.setViewport({ ...view, x: view.x - hidden }, { duration: 200 });
   }, [selection, wide]);
+  // With nothing chosen the docked column sums up the scope: its tasks, the checks and every unsaved change.
+  const overview: ScopeOverview = {
+    name: scope.kind === "group" ? tr(`그룹 · ${scope.key || "미분류"}`, `Group · ${scope.key || "Ungrouped"}`) : tr(`작업 주변 · ${label(scope.id)} · ${scope.depth}단계`, `Around ${label(scope.id)} · ${scope.depth} step${scope.depth > 1 ? "s" : ""}`),
+    meta: tr(`작업 ${ids.length}개 · 완료 ${done}`, `${ids.length} tasks · ${done} done`),
+    changes: Object.entries(edits).map(([id, fields]) => ({ id, name: byId.get(id) ? taskName(byId.get(id)!) : id,
+      fields: (Object.keys(fields) as EditField[]).map((field) => tr(...FIELD[field])).join(" · "), open: inScope.has(id) ? () => setSelection({ kind: "node", id }) : undefined })),
+    ties: tieCount,
+  };
   const inspector = <RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
-    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} busy={saving} tr={tr}
+    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} overview={overview} cycleText={cycleText} busy={saving} tr={tr}
     act={{
       field: (field, value) => chosen && setText(chosen.id, field, value),
       add: (dependency) => chosen && link(dependency, chosen.id),
@@ -379,7 +395,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     }} />;
 
   return <section ref={root} aria-label={tr("작업 관계도 편집", "Edit task relations")}
-    className="campaign-relations-editor grid h-[calc(100dvh-10rem)] min-h-[34rem] min-w-0 grid-rows-[auto_auto_auto_minmax(0,1fr)_auto] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--th-bg-primary)]"
+    className="campaign-relations-editor grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden bg-[var(--th-bg-primary)]"
     onKeyDown={(event) => {
       if (!event.currentTarget.contains(event.target as HTMLElement)) return;
       // The tie keys answer only on the canvas and its chrome, never while typing; Escape closes whatever is open.
@@ -391,19 +407,19 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       else if (event.key === "Escape" && activeTie) { setChosenTie(null); setPreviewing(false); }
       else if (event.key === "Escape" && !wide && selection) { event.stopPropagation(); closeInspector(); }
     }}>
-    <header className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2.5">
-      <Button variant="ghost" size="sm" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => request(onExit)}>{tr("캠페인", "Campaign")}</Button>
-      <div className="grid min-w-0 flex-[1_1_12rem] gap-0.5">
+    <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line-soft)] px-6 py-2">
+      <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => request(onExit)}>{tr("캠페인", "Campaign")}</Button>
+      <div className="grid min-w-0 flex-[0_1_auto] gap-0.5">
         <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-[15px] text-[var(--fg)]">{base.title}</strong><Badge status={base.status} label={tr(...LEDGER_STATUS_LABELS[base.status])} tr={tr} /></span>
-        <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{tr(`원장 · rev ${base.revision} · 범위 작업 ${ids.length}개 · 완료 ${done}`, `Ledger · rev ${base.revision} · ${ids.length} tasks in scope · ${done} done`)}</span>
+        <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{tr(`원장 · rev ${base.revision} · 작업 ${nodes.length}개 · 완료 ${finished}`, `Ledger · rev ${base.revision} · ${nodes.length} tasks · ${finished} done`)}</span>
       </div>
-      <div className="w-52 shrink-0"><SegmentedControl kind="tabs" variant="tray" size="sm" aria-label={tr("편집할 관계", "Relation to edit")} value="relations"
+      <div className="w-60 shrink-0"><SegmentedControl kind="tabs" variant="tray" aria-label={tr("편집할 관계", "Relation to edit")} value="relations"
         options={[{ value: "relations", label: tr("작업 관계", "Task relations") }, { value: "pipeline", label: tr("파이프라인", "Pipeline"), badge: tr("준비 중", "Coming later"), disabled: true }]} /></div>
       <div className="ml-auto flex flex-wrap items-center gap-2">
-        <KitBadge tone={errors ? "danger" : "success"}>{errors ? tr(`오류 ${errors}`, `${errors} errors`) : tr("검사 통과", "Checks pass")}</KitBadge>
-        {dirty && <KitBadge tone="warning">{tr(`저장 안 됨 · ${summary}`, `Unsaved · ${summary}`)}</KitBadge>}
-        <Button variant="secondary" size="sm" icon={<Undo2 aria-hidden className="size-4" />} disabled={!undo.length || saving} onClick={stepBack}>{tr("되돌리기", "Undo")}</Button>
-        <Button variant="primary" size="sm" loading={saving} disabled={!dirty || errors > 0}
+        <KitBadge size="md" tone={errors ? "danger" : "success"}>{errors ? tr(`오류 ${errors}`, `${errors} errors`) : tr("검사 통과", "Checks pass")}</KitBadge>
+        {dirty && <KitBadge size="md" tone="warning">{tr(`저장 안 됨 · ${summary}`, `Unsaved · ${summary}`)}</KitBadge>}
+        <Button variant="secondary" size="lg" icon={<Undo2 aria-hidden className="size-4" />} disabled={!undo.length || saving} onClick={stepBack}>{tr("되돌리기", "Undo")}</Button>
+        <Button variant="primary" size="lg" loading={saving} disabled={!dirty || errors > 0}
           title={errors ? tr("오류를 고쳐야 저장돼요", "Fix the errors to save") : undefined} onClick={() => void save()}>{tr("저장", "Save")}</Button>
       </div>
     </header>
@@ -417,22 +433,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
         <Button variant="ghost" size="sm" disabled={saving} onClick={discard}>{tr("버리기", "Discard")}</Button>
       </div>}
     </div>
-    <div data-editor-chrome="scope" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2">
-      <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-64 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
-        onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
-        {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
-        {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
-      </Select>
-      {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
-        {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
-      </Select>}
-      {total > ids.length && <span role="status" className="text-xs text-[var(--warn)]">{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</span>}
-      {ids.length === 0 && <span role="status" className="text-xs text-[var(--fg-muted)]">{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</span>}
-      {tool === "connect" && <span role="status" className="text-xs text-[var(--fg)]">{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</span>}
-      {tool === "tie" && <span role="status" className="text-xs text-[var(--fg)]">{chosenLines.length ? tr(`선 ${chosenLines.length}개를 골랐어요.`, `${chosenLines.length} lines chosen.`) : tr("묶을 선을 누르세요. 선 하나는 두 번 눌러도 그 자리에 묶여요.", "Choose the lines to tie. Double-click one line to tie it where it is.")}</span>}
-      {tool === "tie" && chosenLines.length > 0 && <Button variant="primary" size="sm" disabled={saving} onClick={tieBundle}>{tr("묶기", "Tie")}<kbd className="ml-1.5 rounded border border-current/40 px-1 font-mono text-[11px]">B</kbd></Button>}
-    </div>
-    <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_20rem]" : ""}`}>
+    <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_22.5rem]" : ""}`}>
       <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0">
         <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} proOptions={{ hideAttribution: true }}
           minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false} snapToGrid snapGrid={[GRID, GRID]}
@@ -469,32 +470,45 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           onEdgesDelete={(deleted) => { unlink(deleted.flatMap((edge) => edge.data ? [[(edge.data as Line).dep, (edge.data as Line).id] as [string, string]] : [])); setSelection(null); }}>
           <Background />
         </ReactFlow>
+        <div ref={scopeBar} data-editor-chrome="scope" className={`${FLOAT} top-3 left-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-3 gap-y-1.5 p-1.5`}>
+          <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-64 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
+            onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
+            {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
+            {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
+          </Select>
+          {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
+            {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
+          </Select>}
+          {total > ids.length && <span role="status" className="text-xs text-[var(--warn)]">{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</span>}
+          {ids.length === 0 && <span role="status" className="text-xs text-[var(--fg-muted)]">{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</span>}
+          {tool === "connect" && <span role="status" className="text-xs text-[var(--fg)]">{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</span>}
+          {tool === "tie" && <span role="status" className="text-xs text-[var(--fg)]">{chosenLines.length ? tr(`선 ${chosenLines.length}개를 골랐어요.`, `${chosenLines.length} lines chosen.`) : tr("묶을 선을 누르세요. 선 하나는 두 번 눌러도 그 자리에 묶여요.", "Choose the lines to tie. Double-click one line to tie it where it is.")}</span>}
+          {tool === "tie" && chosenLines.length > 0 && <Button variant="primary" size="sm" disabled={saving} onClick={tieBundle}>{tr("묶기", "Tie")}<kbd className="ml-1.5 rounded border border-current/40 px-1 font-mono text-[11px]">B</kbd></Button>}
+        </div>
+        <div data-editor-chrome="legend" className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(50%-9rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
+          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
+          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
+          <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" />{tr("케이블타이 · 실행에는 영향 없음", "Cable tie · no effect on runs")}</span>
+        </div>
+        <div data-editor-chrome="tools" role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className={`${FLOAT} bottom-4 left-1/2 flex -translate-x-1/2 gap-0.5 p-1`}>
+          <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); setBundle([]); }} />
+          <IconButton icon={<Plus aria-hidden />} className={TOOL} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
+          <IconButton icon={<Spline aria-hidden />} className={TOOL} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => { setTool("connect"); setBundle([]); }} />
+          <IconButton icon={<Cable aria-hidden />} className={TOOL} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
+          <IconButton icon={<LayoutGrid aria-hidden />} className={TOOL} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
+        </div>
+        <div data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} className={`${FLOAT} right-4 bottom-4 flex gap-0.5 p-1`}>
+          <IconButton icon={<ZoomOut aria-hidden />} className={TOOL} label={tr("축소", "Zoom out")} onClick={() => void flow.current?.zoomOut()} />
+          <IconButton icon={<ZoomIn aria-hidden />} className={TOOL} label={tr("확대", "Zoom in")} onClick={() => void flow.current?.zoomIn()} />
+          <IconButton icon={<Maximize aria-hidden />} className={TOOL} label={tr("전체 보기", "Show every task")} onClick={() => void flow.current?.fitView({ padding: 0.08, minZoom: 0.1, maxZoom: 1 })} />
+        </div>
       </div>
       {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
-      {wide ? <div className="flex min-h-0 flex-col">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
+      {wide ? <div className="flex min-h-0 flex-col bg-[var(--bg-1)]">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
         <div className="flex justify-end border-b border-l border-[var(--line)] px-2 py-1"><IconButton icon={<X aria-hidden />} label={tr("검사기 닫기", "Close the inspector")} onClick={closeInspector} /></div>
         {inspector}
       </div>}
     </div>
-    <footer className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-t border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-1.5">
-      <div data-editor-chrome="legend" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-muted)]">
-        <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
-        <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
-        <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" />{tr("케이블타이 · 실행에는 영향 없음", "Cable tie · no effect on runs")}</span>
-      </div>
-      <div data-editor-chrome="tools" role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className="flex gap-1">
-        <IconButton icon={<MousePointer2 aria-hidden />} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); setBundle([]); }} />
-        <IconButton icon={<Plus aria-hidden />} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
-        <IconButton icon={<Spline aria-hidden />} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => { setTool("connect"); setBundle([]); }} />
-        <IconButton icon={<Cable aria-hidden />} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
-        <IconButton icon={<LayoutGrid aria-hidden />} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
-      </div>
-      <div data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} className="flex gap-1 justify-self-end">
-        <IconButton icon={<ZoomOut aria-hidden />} label={tr("축소", "Zoom out")} onClick={() => void flow.current?.zoomOut()} />
-        <IconButton icon={<ZoomIn aria-hidden />} label={tr("확대", "Zoom in")} onClick={() => void flow.current?.zoomIn()} />
-        <IconButton icon={<Maximize aria-hidden />} label={tr("전체 보기", "Show every task")} onClick={() => void flow.current?.fitView({ padding: 0.08, minZoom: 0.1, maxZoom: 1 })} />
-      </div>
-    </footer>
     <Dialog open={leaving !== null} onOpenChange={(open) => { if (!open) setLeaving(null); }} size="md"
       title={tr(`저장하지 않은 변경이 ${pending}건 있어요`, `${pending} unsaved changes`)}
       description={tr(`${summary}. 나가면 이 변경은 사라져요.`, `${summary}. Leaving drops them.`)}

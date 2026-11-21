@@ -14,17 +14,20 @@ export type InspectorActions = {
   focus: () => void;
 };
 
+/** What the docked column shows with nothing chosen; `open` is set for a changed task drawn in this scope. */
+export type ScopeOverview = { name: string; meta: string; changes: { id: string; name: string; fields: string; open?: () => void }[]; ties: number };
+
 const SECTION = "grid gap-2 border-b border-[var(--line)] px-4 py-3 [&>*]:min-w-0";
 const HEADING = "m-0 text-xs font-medium text-[var(--fg-muted)]";
 
-/** The editor's right column: the chosen task's fields and dependency chips, the chosen line, or the check results. */
-export default function RelationsInspector({ node, edge, lock, busy, nodes, cycles, errors, problems, cycleText, act, tr }: {
+/** The editor's right column: the chosen task's fields and dependency chips, the chosen line, or the scope's summary. */
+export default function RelationsInspector({ node, edge, lock, busy, nodes, cycles, errors, problems, overview, cycleText, act, tr }: {
   node: CampaignNode | null; edge: { source: string; target: string } | null;
   /** Why the chosen task (or the chosen line's dependent) cannot change, or null. */
   lock: string | null;
   /** A save is out: every control waits for its answer. */
   busy: boolean;
-  nodes: ReadonlyMap<string, CampaignNode>; cycles: string[][]; errors: ReadonlySet<string>; problems: string[];
+  nodes: ReadonlyMap<string, CampaignNode>; cycles: string[][]; errors: ReadonlySet<string>; problems: string[]; overview: ScopeOverview;
   cycleText: (path: string[]) => string; act: InspectorActions; tr: Tr;
 }) {
   const name = (id: string) => nodes.get(id) ? taskName(nodes.get(id)!) : id;
@@ -36,13 +39,29 @@ export default function RelationsInspector({ node, edge, lock, busy, nodes, cycl
       {lockNote ?? <div><Button variant="secondary" size="sm" disabled={busy} onClick={act.unlink}>{tr("선 끊기", "Remove line")}</Button></div>}
     </div>
   </aside>;
-  if (!node) return <aside aria-label={tr("검사", "Checks")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
+  if (!node) return <aside aria-label={tr("범위 요약", "Scope summary")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
     <div className={SECTION}>
-      <h3 className={HEADING}>{tr("검사", "Checks")}</h3>
+      <span className="text-xs text-[var(--fg-muted)]">{tr("편집 범위", "Scope")}</span>
+      <h3 className="m-0 text-base text-[var(--fg)] [overflow-wrap:anywhere]">{overview.name}</h3>
+      <span className="text-xs text-[var(--fg-muted)] tabular-nums">{overview.meta}</span>
+    </div>
+    <div className={SECTION}>
+      <h4 className={HEADING}>{tr("검사", "Checks")}</h4>
       {problems.length ? <ul className="m-0 grid list-none gap-1.5 p-0 text-sm text-[var(--err)]">{problems.map((text) => <li key={text}>{text}</li>)}</ul>
         : <p className="m-0 text-sm text-[var(--fg-muted)]">{tr("오류가 없어요.", "No errors.")}</p>}
-      <p className="m-0 text-xs text-[var(--fg-muted)]">{tr("작업을 고르면 여기서 고쳐요.", "Choose a task to edit it here.")}</p>
     </div>
+    <div className={SECTION}>
+      <h4 className={`${HEADING} flex justify-between`}><span>{tr("저장 전 바뀐 곳", "Unsaved changes")}</span><span className="tabular-nums">{overview.changes.length + overview.ties}</span></h4>
+      {overview.changes.length + overview.ties ? <ul className="m-0 grid list-none gap-1 p-0 text-sm">
+        {overview.changes.map((change) => <li key={change.id} className="min-w-0">
+          {change.open ? <button type="button" onClick={change.open} className="!m-0 flex w-full min-w-0 items-center justify-between gap-3 !rounded-md !border-0 !bg-transparent !px-2 !py-1.5 text-left text-[var(--fg)] hover:!bg-[color-mix(in_oklch,var(--fg)_6%,transparent)]">
+            <span className="min-w-0 truncate">{change.name}</span><span className="shrink-0 text-xs text-[var(--warn)]">{change.fields}</span></button>
+            : <span className="flex min-w-0 justify-between gap-3 px-2 py-1.5 text-[var(--fg-muted)]"><span className="min-w-0 truncate">{change.name}</span><span className="shrink-0 text-xs">{change.fields}</span></span>}
+        </li>)}
+        {overview.ties > 0 && <li className="flex justify-between gap-3 px-2 py-1.5 text-[var(--fg)]"><span>{tr("케이블타이", "Cable ties")}</span><span className="text-xs text-[var(--warn)] tabular-nums">{overview.ties}</span></li>}
+      </ul> : <p className="m-0 text-sm text-[var(--fg-muted)]">{tr("바뀐 곳이 없어요.", "Nothing changed yet.")}</p>}
+    </div>
+    <p className="m-0 px-4 py-3 text-xs text-[var(--fg-muted)]">{tr("작업이나 선을 고르면 여기서 고쳐요.", "Choose a task or a line to edit it here.")}</p>
   </aside>;
 
   const locked = lock !== null;
