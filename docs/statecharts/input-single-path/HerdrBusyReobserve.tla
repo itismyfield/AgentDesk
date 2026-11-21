@@ -161,8 +161,8 @@ RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
                       !.owned = FALSE, !.reason = Scenario]
 \* retire refuses Unproven for a present pane (herdr_launch/retire.rs:59), so the original is held
 \* for reobservation (intake_turn/owned_busy.rs:261,308,547) under READINESS_HOLD_MS counted from
-\* this hold (queued_head/v2/readiness_hold.rs:7,52) with the drive's timer armed
-\* (input_owner/held_watch/readiness.rs:34). Expiry is RHExpire (readiness_hold.rs:154).
+\* this hold (queued_head/v2/readiness_hold.rs:7,51) with the drive's timer armed
+\* (input_owner/held_watch/readiness.rs:34). Expiry is RHExpire (readiness_hold.rs:153).
 \* "IdentityUntimed" is the #8280 hold before: no due, no timer.
 RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy
                   /\ r' = [r EXCEPT !.phase = "held", !.visible = TRUE, !.age = 1,
