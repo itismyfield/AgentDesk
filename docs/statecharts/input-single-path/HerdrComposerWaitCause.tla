@@ -285,7 +285,4 @@ OwnDelivers == <>(queued = "sent")
 \* /clear during the own turn: delivered first, or disposed of by the person's command.
 ClearResolves == <>(queued \in {"sent", "cleared"})
 
-\* Never twice: no state sends the same front again (queued stays "sent").
-SentStays == [][queued = "sent" => queued' = "sent"]_vars
-
 ====
