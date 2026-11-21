@@ -372,9 +372,10 @@ async function pickAndSave(page: Page, key: string, option: string, phone: boole
   const scope = phone ? page.getByTestId("settings-edit-sheet") : row(page, key);
   await scope.getByRole("combobox").click();
   await page.getByRole("option", { name: option }).click();
-  const save = (phone ? scope : page.getByTestId("settings-save-bar")).getByRole("button", { name: /^(저장|Save)$/ });
-  await save.click();
-  await expect(save).toHaveCount(0);
+  const container = phone ? scope : page.getByTestId("settings-save-bar");
+  await container.getByRole("button", { name: /^(저장|Save)$/ }).click();
+  // The button turns into "저장 중…" mid-save; the bar or sheet only goes away once the PUT has landed.
+  await expect(container).toHaveCount(0);
 }
 
 test.describe("settings catalog", () => {
