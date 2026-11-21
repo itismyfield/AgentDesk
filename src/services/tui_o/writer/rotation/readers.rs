@@ -118,7 +118,7 @@ impl<B: BindingEvents> Sources<B> {
                 Fingerprint::path(&cursor.source),
                 Err((SourceAnomalyKind::Missing, _))
             );
-            let capture = match reopen(&cursor) {
+            let capture = match self.reopen_native(&cursor) {
                 Ok(capture) => Some(capture),
                 Err(Reopen::Unread(_)) if cursor.retired => None,
                 Err(Reopen::Unread(error))
@@ -457,7 +457,10 @@ impl<B: BindingEvents> Sources<B> {
                 .store()
                 .cursor(&reader.source)
                 .ok_or_else(|| halt("dormant cursor missing"))?;
-            reader.capture = Some(reopen(cursor).map_err(|failed| failed.halt_at(&reader.source))?);
+            reader.capture = Some(
+                owe::reopen_native(&mut self.native, self.channel, self.provider, cursor)
+                    .map_err(|failed| failed.halt_at(&reader.source))?,
+            );
             reader.dormant = None;
             reader.idle = None;
         }

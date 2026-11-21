@@ -88,6 +88,8 @@ pub(super) struct TickRuntime<'a> {
     pub(super) pending_current_message_candidate: &'a mut Option<MessageId>,
     pub(super) bridge_created_response_placeholder_msg_id: &'a mut Option<MessageId>,
     pub(super) bridge_spans: &'a mut BridgeLatencySpans,
+    pub(super) session_row_writer:
+        &'a mut crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter,
 }
 
 // Reconcile detached locals after a guarded save so subsequent phases see the durable winner.
@@ -180,6 +182,7 @@ pub(super) async fn authorize_visible_mutation(
         caller,
     )
     .await;
+    tick.session_row_writer.observe(guarded_outcome);
     let state_dirty = dirty_after_guarded_save(guarded_outcome);
     if guarded_outcome == GuardedSaveOutcome::Saved
         || (guarded_outcome.is_identity_mismatch_legacy()

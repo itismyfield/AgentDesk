@@ -45,16 +45,6 @@ pub(crate) fn log_inflight_remove(
     );
 }
 
-fn inflight_age_secs_for_path(path: &Path) -> Option<u64> {
-    fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .elapsed()
-        .ok()
-        .map(|age| age.as_secs())
-}
-
 fn log_loader_inflight_remove(
     provider: &ProviderKind,
     channel_id: u64,
@@ -883,6 +873,12 @@ fn load_inflight_probe_with_scope(
 }
 
 mod boot_custody;
+use boot_custody::inflight_age_secs_for_path;
+pub(in crate::services::discord) use boot_custody::inflight_runtime_root;
+#[cfg(unix)]
+pub(in crate::services::discord) use boot_custody::{
+    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+};
 mod boot_reaper;
 mod custody_notice;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
@@ -1705,3 +1701,6 @@ mod host_liveness_stale_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod native_input_tests;

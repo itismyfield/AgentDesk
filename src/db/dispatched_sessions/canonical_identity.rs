@@ -7,7 +7,7 @@ use key_promotion::RegistrationWitness;
 #[path = "key_promotion_pg_tests.rs"]
 mod key_promotion_pg_tests;
 #[path = "retired_status_fence.rs"]
-mod retired_status_fence;
+pub(crate) mod retired_status_fence;
 use retired_status_fence::retired_revival_fence;
 
 use crate::db::dispatched_sessions::HookSessionUpsert;
@@ -103,6 +103,8 @@ impl HookSessionUpsertError {
 pub(crate) struct HookSessionUpsertOutcome {
     pub(crate) inserted: bool,
     pub(crate) session_key: String,
+    /// False when an existing row's update was skipped by its `WHERE` fence (no row change).
+    pub(crate) applied: bool,
 }
 
 /// Durable actor state observed before admitting a new mailbox actor.
@@ -291,7 +293,7 @@ async fn upsert_hook_session_pg(
                 expected_terminal_nonce,
             )
             .await?;
-            update_target(
+            let applied = update_target(
                 &mut tx,
                 target.id,
                 &params,
@@ -310,6 +312,7 @@ async fn upsert_hook_session_pg(
                 HookSessionUpsertOutcome {
                     inserted: false,
                     session_key,
+                    applied,
                 },
                 target.id,
             )
@@ -879,7 +882,7 @@ async fn update_target(
     identity: Option<CanonicalSessionIdentity<'_>>,
     expected_actor: Option<(Option<&str>, Option<&str>)>,
     expected_terminal_nonce: Option<&str>,
-) -> Result<(), HookSessionUpsertError> {
+) -> Result<bool, HookSessionUpsertError> {
     // Recheck background occupancy under the parent lock so a late terminal
     // publication cannot restore awaiting_bg after the last child closed.
     let terminal_actor_fenced = expected_terminal_nonce.is_some();
@@ -965,7 +968,7 @@ async fn update_target(
             "hook session actor state changed after observation",
         ));
     }
-    Ok(())
+    Ok(updated.rows_affected() == 1)
 }
 
 async fn insert_target(
@@ -1017,6 +1020,7 @@ async fn insert_target(
         HookSessionUpsertOutcome {
             inserted: true,
             session_key: params.session_key.to_string(),
+            applied: true,
         },
         inserted,
     ))

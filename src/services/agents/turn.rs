@@ -5,6 +5,10 @@ use serde_json::json;
 use sqlx::Row;
 use std::sync::OnceLock;
 
+#[cfg(unix)]
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedExecution, HostedObservation, HostedRecord, HostedState,
+};
 use crate::services::agents::query::agent_exists_pg;
 use crate::services::agents::serialization::transcript_json;
 use crate::services::session_activity::SessionActivityResolver;
@@ -40,6 +44,55 @@ pub struct AgentTurnSession {
     pub is_working: bool,
     /// Why the session may not be probed or captured by its tmux name, if it may not.
     pub host_unsupported: Option<String>,
+    #[cfg(unix)]
+    pub(crate) herdr_stop: Option<AgentHerdrStop>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub(crate) struct AgentHerdrStop {
+    session_id: i64,
+    agent_id: String,
+    pub(crate) execution: Box<HostedExecution>,
+    pub(crate) turn_nonce: Option<String>,
+}
+
+#[cfg(unix)]
+impl AgentHerdrStop {
+    fn from_row(row: &sqlx::postgres::PgRow, agent_id: &str) -> Result<Option<Self>, sqlx::Error> {
+        let raw: Option<serde_json::Value> = row.try_get("hosted_execution")?;
+        let HostedRecord::Known(execution) = HostedRecord::decode(raw.as_ref()) else {
+            return Ok(None);
+        };
+        if execution.state != HostedState::Bound {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            session_id: row.try_get("id")?,
+            agent_id: agent_id.to_owned(),
+            execution: Box::new(execution),
+            turn_nonce: row.try_get("active_turn_nonce")?,
+        }))
+    }
+
+    pub(crate) fn matches(&self, row: &HostedObservation) -> bool {
+        row.session_id() == self.session_id
+            && matches!(&row.record, HostedRecord::Known(record) if record == self.execution.as_ref())
+    }
+
+    pub(crate) async fn still_assigned(&self, pool: &sqlx::PgPool) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sessions
+                WHERE id = $1 AND agent_id = $2 AND active_turn_nonce = $3 AND hosted_execution = $4)",
+        )
+        .bind(self.session_id)
+        .bind(&self.agent_id)
+        .bind(&self.turn_nonce)
+        .bind(sqlx::types::Json(self.execution.as_ref()))
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+    }
 }
 
 #[derive(Debug)]
@@ -65,6 +118,8 @@ struct AgentTurnSessionRow {
     thread_channel_id: Option<String>,
     runtime_channel_id: Option<String>,
     host_unsupported: Option<String>,
+    #[cfg(unix)]
+    herdr_stop: Option<AgentHerdrStop>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +172,8 @@ fn resolve_agent_turn_session_rows(rows: Vec<AgentTurnSessionRow>) -> Option<Age
             effective_active_dispatch_id: effective.active_dispatch_id,
             is_working: effective.is_working,
             host_unsupported: row.host_unsupported,
+            #[cfg(unix)]
+            herdr_stop: row.herdr_stop,
         };
         if latest.is_none() {
             latest = Some(candidate.clone());
@@ -135,6 +192,7 @@ pub async fn find_agent_turn_session_pg(
 ) -> Result<Option<AgentTurnSession>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT COALESCE(s.session_key, '') AS session_key,
+                s.id, s.active_turn_nonce, s.hosted_execution,
                 s.provider,
                 s.status,
                 s.active_dispatch_id,
@@ -174,6 +232,8 @@ pub async fn find_agent_turn_session_pg(
                 thread_channel_id: row.try_get("thread_channel_id")?,
                 runtime_channel_id: row.try_get("runtime_channel_id")?,
                 host_unsupported: None,
+                #[cfg(unix)]
+                herdr_stop: AgentHerdrStop::from_row(&row, agent_id)?,
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
@@ -767,6 +827,8 @@ mod tests {
             thread_channel_id: Some("thread-1".to_string()),
             runtime_channel_id: Some("thread-1".to_string()),
             host_unsupported: None,
+            #[cfg(unix)]
+            herdr_stop: None,
         }
     }
 

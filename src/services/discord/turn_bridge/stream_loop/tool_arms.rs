@@ -10,6 +10,7 @@ use super::*;
 mod authority;
 #[cfg(test)]
 mod authority_tests;
+mod session_activity;
 mod task_notification;
 mod types;
 pub(super) use authority::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
@@ -48,6 +49,7 @@ pub(super) async fn handle_stream_tool_message(
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;
     let (current_msg_id, captured_nonce) = (&mut *ctx.current_msg_id, ctx.captured_nonce);
+    let session_row_released = ctx.session_row_released;
 
     let mut state_dirty = *state.state_dirty;
     let inflight_state = &mut *state.inflight_state;
@@ -107,7 +109,7 @@ pub(super) async fn handle_stream_tool_message(
                 (shared_owned.pg_pool.as_ref(), adk_session_key.as_deref())
             {
                 if let Err(error) =
-                    mark_session_tool_use_pg(pg_pool, session_key).await
+                    session_activity::mark_tool_use(pg_pool, session_key, session_row_released).await
                 {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -206,7 +208,8 @@ pub(super) async fn handle_stream_tool_message(
                         tool_input: input.clone(),
                         tool_use_id: tool_use_id.clone(),
                     };
-                    match insert_background_child_pg(pg_pool, &spawn).await {
+                    let registered = session_activity::register_background_child(pg_pool, &spawn, session_row_released);
+                    match registered.await {
                         Ok(Some(child_session_id)) => {
                             // A transcript completion read before this insert
                             // committed found no child, so recheck it here.

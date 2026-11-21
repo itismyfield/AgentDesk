@@ -372,3 +372,37 @@ async fn background_final_upsert_before_last_close_releases_occupancy_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A tool record never reopens a retired row that left active, and the late heartbeat after it
+/// keeps the row inactive; legacy, Pending and already reopened rows still take it.
+#[tokio::test(flavor = "current_thread")]
+async fn tool_use_never_reopens_a_retired_inactive_row_pg() {
+    let (db, pool) = setup().await;
+    for (state, status, marked, after) in [
+        (Some("retired"), "disconnected", false, "disconnected"),
+        (Some("retired"), "idle", false, "idle"),
+        (Some("retired"), "awaiting_bg", false, "awaiting_bg"),
+        (Some("retired"), "awaiting_user", false, "awaiting_user"),
+        (Some("retired"), "turn_active", true, "turn_active"),
+        (Some("pending"), "idle", true, "turn_active"),
+        (None, "idle", true, "turn_active"),
+    ] {
+        let key = format!("claude/tool-{}-{status}", state.unwrap_or("legacy"));
+        seed_parent(&pool, &key, status).await;
+        let raw = state.map(|state| serde_json::json!({ "state": state }));
+        let set = sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1");
+        set.bind(&key).bind(raw).execute(&pool).await.unwrap();
+        assert_eq!(
+            super::mark_session_tool_use_pg(&pool, &key).await.unwrap(),
+            marked,
+            "{key}"
+        );
+        let mut beat = terminal_params(&key);
+        (beat.status, beat.turn_start_nonce) = ("turn_active", None);
+        upsert_hook_session_with_identity_pg(&pool, beat, None)
+            .await
+            .unwrap();
+        assert_eq!(parent_state(&pool, &key).await.1, after, "{key}");
+    }
+    db.drop().await;
+}

@@ -21,6 +21,17 @@ pub(crate) struct CurrentTaskContext<'a> {
     pub(crate) github_issue_url: Option<&'a str>,
 }
 
+impl CurrentTaskContext<'_> {
+    pub(crate) fn id_only(&self) -> bool {
+        self.dispatch_id.is_some()
+            && self.card_id.is_none()
+            && self.dispatch_title.is_none()
+            && self.dispatch_context.is_none()
+            && self.card_title.is_none()
+            && self.github_issue_url.is_none()
+    }
+}
+
 pub(super) fn parse_dispatch_context(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
     dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
 }
@@ -471,6 +482,7 @@ pub(super) fn render_dispatch_contract(
                  - review verdict API는 사용하지 않는다."
             ))
         }
+        None if current_task.id_only() => None,
         _ => Some(
             current_task.dispatch_id.map_or_else(
                 || {

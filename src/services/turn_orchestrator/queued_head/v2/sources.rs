@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::tui_input::human_frame::history::CAPACITY;
 
 pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
     let item = super::super::super::pending_queue_persistence::pending_queue_item_to_intervention(
@@ -10,6 +11,25 @@ pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
 }
 
 impl Owner {
+    pub(crate) fn native_intent(
+        &self,
+    ) -> Result<Option<crate::services::tui_input::human_frame::history::v2::native::Episode>, String>
+    {
+        let input = self
+            .snapshot
+            .head_injection
+            .as_ref()
+            .ok_or("no reserved native input")?;
+        let value = &input
+            .payload
+            .as_ref()
+            .ok_or("no native payload")?
+            .attribution["native_intent"];
+        let intent: crate::services::tui_input::human_frame::history::v2::native::Intent =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        intent.episode(input.identity.primary)
+    }
+
     pub(super) fn fenced(&self, item: &PendingQueueItem) -> bool {
         let wanted = identity(item);
         let mut known = self
@@ -86,11 +106,42 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
         ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
+    validate_source_bindings(&snapshot)?;
     // Released unarmed, every member still holds the queued bind its reserve kept.
     snapshot
         .head_injection
         .take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
+}
+
+fn validate_source_bindings(snapshot: &SnapshotV2) -> Result<(), String> {
+    if snapshot.source_bindings.len() > CAPACITY {
+        return Err("source binding debt exceeds capacity".into());
+    }
+    let mut keys = std::collections::HashSet::new();
+    for intent in &snapshot.source_bindings {
+        let key: AttemptRef =
+            serde_json::from_value(intent.ticket.key.clone()).map_err(|e| e.to_string())?;
+        if !keys.insert(serde_json::to_string(&intent.ticket.key).map_err(|e| e.to_string())?)
+            || intent.ticket.source.is_some()
+            || key.attempt.provider != "claude"
+            || !matches!(key.attempt.source, AttemptSource::PreSource { .. })
+            || intent.pin.binding_seq == 0
+            || intent.pin.session_id.is_empty()
+            || intent.pin.owner_root.is_empty()
+            || intent.selected.as_ref().is_some_and(|s| {
+                s.target != intent.ticket.key["attempt"]["target"]
+                    || s.provider != "claude"
+                    || s.session_id != intent.pin.session_id
+                    || s.transcript != intent.pin.transcript
+                    || s.offset != intent.pin.offset
+                    || intent.pin.file.is_some_and(|f| f != s.file)
+            })
+        {
+            return Err("stored source binding lineage invalid".into());
+        }
+    }
+    Ok(())
 }
 
 /// Puts an unmatched reserved unit back as single queued originals in member order, lost members
@@ -173,13 +224,35 @@ impl Owner {
             .head_injection
             .as_ref()
             .ok_or("no selected input")?;
+        let namespace = self
+            .snapshot
+            .namespace
+            .as_deref()
+            .ok_or("missing namespace")?;
         history.prepare(
-            self.snapshot
-                .namespace
-                .as_deref()
-                .ok_or("missing namespace")?,
+            namespace,
             &serde_json::to_value(input).map_err(|e| e.to_string())?,
-        )
+        )?;
+        if let Some(value) = input
+            .payload
+            .as_ref()
+            .and_then(|p| p.attribution.get("native_intent"))
+        {
+            use crate::services::tui_input::human_frame::history::v2::native::Intent;
+            let intent: Intent =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            let key = serde_json::json!({"identity":input.identity,"attempt":input.attempt});
+            if key["attempt"]["provider"] != "claude" {
+                return Err("native intent requires Claude".into());
+            }
+            history.prepare_native_intent(
+                namespace,
+                &key,
+                input.original.channel_id.ok_or("native channel missing")?,
+                &intent,
+            )?;
+        }
+        Ok(())
     }
     #[cfg(test)]
     pub(crate) fn bind_source(

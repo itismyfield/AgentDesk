@@ -300,7 +300,7 @@ fn external_thread_http_revalidates_herdr_pane_before_first_key_pg() {
         assert_eq!(fx.rig.sends().len(), before);
         fx.rig.run_provider(&context, true);
         release.send(()).unwrap();
-        idle_turn_unwound(&intake).await;
+        wait_for_idle_turn_to_unwind(&intake).await;
         assert_eq!(
             fx.rig.sends().len(),
             before,
