@@ -2470,7 +2470,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_inject/
-│   │   │   │   │   └── payload_tests.rs
+│   │   │   │   │   ├── payload_tests.rs
+│   │   │   │   │   └── thread_host_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
@@ -4349,6 +4350,8 @@ src/
 │   │   ├── surface_policy.rs
 │   │   ├── termination.rs
 │   │   ├── test_support.rs
+│   │   ├── thread_host.rs
+│   │   ├── thread_host_tests.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
 │   ├── session_resume/
