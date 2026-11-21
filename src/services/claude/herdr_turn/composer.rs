@@ -228,6 +228,11 @@ pub(crate) fn when_idle(
         }
         match watched.expired(&mut capture) {
             Expiry::Requiet => budget = budget.min(readiness::WINDOW),
+            Expiry::Unproven(end) if own_turn(end, &mut capture) => {
+                let cause = readiness::WaitCause::OwnTurn;
+                tracing::info!(session, ?end, ?cause, "herdr composer readiness wait held");
+                return InputRun::Refused(InputRefusal::Waits(cause));
+            }
             Expiry::Unproven(end) => return InputRun::Refused(InputRefusal::Unproven(end)),
             Expiry::Waits(cause) => {
                 tracing::info!(session, ?cause, "herdr composer readiness wait held");
@@ -259,6 +264,23 @@ pub(crate) fn when_idle(
             InputRun::Refused(InputRefusal::Waits(cause))
         }
         _ => InputRun::Refused(InputRefusal::Unknown),
+    }
+}
+
+/// Whether an unproven wait saw the session's own turn: its transcript moved, or its screen shows a
+/// turn over unchanged bytes. The front then waits for that turn's end instead of ending.
+fn own_turn(
+    end: crate::services::claude_tui::readiness::Unproven,
+    capture: impl FnOnce() -> Option<String>,
+) -> bool {
+    use crate::services::claude_tui::readiness::Unproven;
+    match end {
+        Unproven::Refused => true,
+        Unproven::Retained => capture().is_some_and(|pane| {
+            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&pane);
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain)
+        }),
+        Unproven::Lost => false,
     }
 }
 
