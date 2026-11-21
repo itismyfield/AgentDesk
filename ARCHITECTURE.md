@@ -689,6 +689,7 @@ src/
 │   │   │   │       ├── part_11.rs
 │   │   │   │       ├── prompt_audit.rs
 │   │   │   │       ├── public_surfaces.rs
+│   │   │   │       ├── server_campaign_pipeline.rs
 │   │   │   │       ├── server_campaigns.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── group_response.rs
