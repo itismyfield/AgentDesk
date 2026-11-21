@@ -37,7 +37,7 @@ fn recording_runtime(intake: &mut Intake, fx: &Fixture, launch: bool) -> tokio::
     std::mem::replace(&mut intake.runtime, runtime)
 }
 
-fn idle_case(missing: bool, restored_after_reconnect: bool) {
+fn idle_case(missing: bool, restored_after_reconnect: bool, endpoint_differs: bool) {
     let fx = Fixture::new("missing-idle", None);
     let launcher = Arc::new(Launcher::default());
     let (nonce, started) = reconnect::launch(&fx, &launcher);
@@ -53,6 +53,15 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
         fx.rig.show_panes(&[]);
     } else {
         fx.rig.answer("session.snapshot", json!({"type":"ok"}));
+    }
+    if endpoint_differs {
+        fx.rt.block_on(async {
+            sqlx::query("UPDATE sessions SET hosted_execution=jsonb_set(hosted_execution,'{location,named_session}', to_jsonb('foreign-session'::text)) WHERE channel_id=$1")
+                .bind(CHANNEL.to_string())
+                .execute(&fx.pool)
+                .await
+                .unwrap();
+        });
     }
     if restored_after_reconnect {
         crate::services::tui_prompt_dedupe::release_herdr_execution(fx.logical(), &nonce);
@@ -132,6 +141,7 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
                 .await
                 .unwrap();
         }
+        let original = front.1.clone();
         let before = dispatch::OwnerTurn::probes(CHANNEL);
         let (entered, resume) =
             discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
@@ -150,8 +160,8 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!(
             after.0 - before.0,
-            1,
-            "the actual idle intake makes an early decision after the identity check"
+            if endpoint_differs { 0 } else { 1 },
+            "a confirmed route refusal ends before ordinary Busy admission"
         );
         let row: Value =
             sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
@@ -169,9 +179,11 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
             .v2_request(|slot| slot.as_ref().unwrap().json())
             .await
             .unwrap();
+        let keep = !missing && !endpoint_differs;
         let items = state["items"].as_array().unwrap();
-        assert_eq!(items.len(), usize::from(!missing));
-        if !missing {
+        assert_eq!(items.len(), usize::from(keep));
+        if keep {
+            assert_eq!(state["items"], json!([original]));
             assert_eq!(items[0]["message_id"], MESSAGE);
             assert_eq!(items[0]["text"], INPUT);
         }
@@ -181,22 +193,30 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
         );
         assert_eq!(
             discord::queue_io::input_owner::held_watch::has_watch(CHANNEL),
-            !missing,
+            keep,
         );
         assert_eq!(
             intake.shared.turn_view_reconciler.ops().iter().any(|op| {
                 op.target.message_id.get() == MESSAGE && op.add && op.emoji == '📬'
             }),
-            !missing,
+            keep,
             "only an unresolved pane identity keeps this input visibly queued"
         );
         let calls = intake._api.take();
+        if endpoint_differs {
+            assert!(
+                calls
+                    .iter()
+                    .any(|call| call.contains("local execution owner or endpoint differs")),
+                "{calls:?}"
+            );
+        }
         assert_eq!(
             calls
                 .iter()
                 .filter(|call| call.contains("이 입력을 폐기했습니다"))
                 .count(),
-            usize::from(missing),
+            usize::from(missing || endpoint_differs),
             "only proven terminal failure may discard the original"
         );
         assert_eq!(fx.rig.sends().len(), 2, "no input reached the old pane");
@@ -207,18 +227,272 @@ fn idle_case(missing: bool, restored_after_reconnect: bool) {
 
 #[test]
 fn a_missing_idle_bound_pane_retires_and_a_failed_restart_discards_the_front_pg() {
-    idle_case(true, false);
+    idle_case(true, false, false);
 }
 
 // Keep the existing test ID in the PG lane. Its custody assertion now requires the original.
 #[test]
-fn an_unreadable_idle_bound_pane_is_not_retired_and_its_front_is_discarded_pg() {
-    idle_case(false, false);
+fn an_unreadable_idle_bound_pane_keeps_its_input_pg() {
+    idle_case(false, false, false);
+}
+
+#[test]
+fn a_confirmed_endpoint_mismatch_discards_the_front_with_one_notice_pg() {
+    idle_case(false, false, true);
 }
 
 #[test]
 fn a_front_restored_after_missing_reconnect_uses_the_same_disposal_rule_pg() {
-    idle_case(true, true);
+    idle_case(true, true, false);
+}
+
+#[test]
+fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
+    use crate::services::claude_tui::host_input::busy::BusyState;
+    use crate::services::discord::queue_io::input_owner::held_watch;
+
+    let fx = Fixture::new("busy-registration-reobserve", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let guards = (
+        fx.rig.registry_on_this_thread(),
+        open_admission(),
+        discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL),
+        crate::services::herdr_launch::force_writer_accepts(Some(true)),
+    );
+    let original_runtime;
+    let mut intake = Intake::new(&fx, &started);
+    original_runtime = recording_runtime(&mut intake, &fx, false);
+    let screen = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
+    ));
+    let screen_at = |text: &str| {
+        json!({"type":"pane_read","read":{
+            "pane_id":PANE, "source":"recent_unwrapped", "text":text,
+            "revision":2, "truncated":false
+        }})
+    };
+    fx.rig
+        .answer("pane.read", screen_at(&screen.replace("Baked", "Thinking")));
+    let now = chrono::Utc::now().to_rfc3339();
+    append(
+        &started.path,
+        &[
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,"timestamp":now,
+            "message":{"role":"user","content":"keep working"}}),
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,
+            "timestamp":now,"message":{"id":"registration-working","role":"assistant",
+            "content":[{"type":"text","text":"working"}]}}),
+        ],
+    );
+    let before = fx.rig.sends().len();
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    intake.runtime.block_on(async {
+        let channel = ChannelId::new(CHANNEL);
+        let key = discord::adk_session::turn_session_key(&intake.shared, channel, &ProviderKind::Claude)
+            .await.unwrap();
+        let host = crate::services::turn_host::for_turn(Some(&fx.pool), &ProviderKind::Claude, CHANNEL, Some(&key)).await;
+        assert_eq!(claude_handoff::observe_busy(CHANNEL, fx.logical(), &host, &intake.shared.token_hash).state(), BusyState::Busy);
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let ticket = front.0.clone();
+        let parked = started.path.with_extension("registration-race");
+        let path = started.path.clone();
+        let saved = parked.clone();
+        dispatch::OwnerTurn::before_busy_registration(CHANNEL, move || {
+            std::fs::rename(path, saved).unwrap();
+        });
+        let rest = test_rest::install(intake._api.http.clone());
+        let result = tokio::time::timeout(LIMIT, dispatch::start_idle_for_test(intake.shared.clone(), channel, front)).await.unwrap();
+        assert!(parked.exists(), "the Busy observation reached registration before its transcript disappeared: {result:?}");
+        let state = intake.mailbox.v2_request(|slot| slot.as_ref().unwrap().json()).await.unwrap();
+        let before_recovery = intake._api.take();
+        let discards: Vec<_> = before_recovery.iter().filter(|call| call.contains("이 입력을 폐기했습니다")).collect();
+        assert!(discards.is_empty(), "live pane discarded input: {discards:?}");
+        assert!(result.is_err(), "the original is deferred before submit: {result:?}");
+        assert_eq!(state["items"], json!([original]));
+        assert!(state["head_injection"].is_null());
+        assert_eq!(state["retained_inputs"], json!([]));
+        let same = intake.mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap())).await.unwrap();
+        assert_eq!((same.0, same.1.queued_generation), (ticket, original.queued_generation));
+        assert!(held_watch::has_watch(CHANNEL), "the early hold starts its own reobservation");
+        assert_eq!(fx.rig.sends().len(), before);
+
+        // Keep the original inode so the same pinned source can become Idle.
+        std::fs::rename(parked, &started.path).unwrap();
+        append_terminal(&started, "registration-working");
+        fx.rig.answer("pane.read", screen_at(screen));
+        assert!(crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path)).is_some());
+        let state = super::source_input_settled(&intake, &original, &heads).await;
+        assert_eq!(state["items"], json!([]));
+        super::idle_turn_unwound(&intake).await;
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2, "one paste and one Enter");
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        assert_eq!(heads.lock().unwrap()[0]["attempt"]["target"]["execution_nonce"], nonce);
+        assert!(intake._api.take().iter().all(|call| !call.contains("이 입력을 폐기했습니다")));
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        drop(rest);
+    });
+    drop(intake);
+    drop(original_runtime);
+    drop(guards);
+}
+
+#[test]
+fn an_old_readiness_due_cannot_discard_a_front_reobserving_a_live_pane_pg() {
+    use crate::services::discord::queue_io::input_owner::held_watch;
+
+    let fx = Fixture::new("busy-readiness-to-reobserve", None);
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let original_runtime;
+    let mut intake = Intake::new(&fx, &started);
+    original_runtime = recording_runtime(&mut intake, &fx, false);
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    let before = fx.rig.sends().len();
+    intake.runtime.block_on(async {
+        let channel = ChannelId::new(CHANNEL);
+        let _rest = test_rest::install(intake._api.http.clone());
+        intake.install_holder(&fx, &started).await;
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let parked = started.path.with_extension("readiness-unreadable");
+        std::fs::rename(&started.path, &parked).unwrap();
+        let result = dispatch::hand_busy(
+            (intake.mailbox.clone(), Some(fx.pool.clone())),
+            ProviderKind::Claude,
+            (CHANNEL, front.clone()),
+            Some(intake.shared.clone()),
+        )
+        .await;
+        assert!(
+            result.is_err_and(|error| error.contains("busy_source_unavailable")),
+            "the active handoff holds for its unreadable source"
+        );
+        let (started_at, due) = intake
+            .mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_ref().unwrap();
+                let hold = owner.front_hold().ok_or("active Held did not save a due")?;
+                assert_eq!(owner.settle_due(), Some(hold.due_at_ms));
+                Ok((hold.started_at_ms, hold.due_at_ms))
+            })
+            .await
+            .unwrap();
+        assert_eq!(due - started_at, 10_000);
+
+        let persistence =
+            discord::queue_persistence_context(&intake.shared, &ProviderKind::Claude, channel);
+        let finished = intake.mailbox.finish_turn(persistence).await;
+        assert!(finished.removed_token.is_some());
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert!(inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            CHANNEL
+        ));
+        let next = intake
+            .mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_mut().unwrap();
+                let front = owner.front().unwrap();
+                owner.grant_front(&front)?;
+                Ok(front)
+            })
+            .await
+            .unwrap();
+        assert_eq!(next.0, front.0);
+        let result = tokio::time::timeout(
+            LIMIT,
+            dispatch::start_idle_for_test(intake.shared.clone(), channel, next),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("pane identity or end unproven")),
+            "the live pane needs reobservation: {result:?}"
+        );
+        assert!(held_watch::has_watch(CHANNEL));
+        assert!((chrono::Utc::now().timestamp_millis() as u64) < due);
+        assert_eq!(fx.rig.sends().len(), before);
+
+        let (same, state) = intake
+            .mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.tick(due + 1)?;
+                Ok((owner.front(), owner.json()?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            state["items"],
+            json!([original]),
+            "old due discarded the front: {state}"
+        );
+        let same = same.unwrap();
+        assert_eq!(
+            (same.0, same.1.queued_generation),
+            (front.0, original.queued_generation)
+        );
+        assert!(state["refused_fronts"].is_null(), "{state}");
+        assert!(
+            intake
+                ._api
+                .take()
+                .iter()
+                .all(|call| !call.contains("이 입력을 폐기했습니다"))
+        );
+        assert_eq!(fx.rig.sends().len(), before);
+
+        std::fs::rename(parked, &started.path).unwrap();
+        assert!(
+            crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path))
+                .is_some()
+        );
+        super::source_input_settled(&intake, &original, &heads).await;
+        super::idle_turn_unwound(&intake).await;
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2);
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        assert_eq!(
+            heads.lock().unwrap()[0]["attempt"]["target"]["execution_nonce"],
+            nonce
+        );
+        assert!(
+            intake
+                ._api
+                .take()
+                .iter()
+                .all(|call| !call.contains("이 입력을 폐기했습니다"))
+        );
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    });
+    drop(intake);
+    drop(original_runtime);
+}
+
+pub(super) fn append_terminal(started: &Started, message: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    append(
+        &started.path,
+        &[
+            json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":1,"sessionId":started.session,
+            "timestamp":now,"message":{"id":message,"role":"assistant",
+            "content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+            json!({"type":"system","subtype":"turn_duration","sessionId":started.session,"timestamp":now}),
+        ],
+    );
 }
 
 #[path = "provider_dispatch_herdr_missing_success_tests.rs"]

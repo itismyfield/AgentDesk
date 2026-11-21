@@ -2,15 +2,38 @@
 use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
 use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
-use crate::services::discord::recovery_engine::herdr_reattach::confirm_admitted_input_identity;
+use crate::services::discord::recovery_engine::herdr_reattach::{
+    confirm_admitted_input_identity, confirm_input_identity,
+};
 
 #[path = "owned_busy/missing_watch.rs"]
 mod missing_watch;
 #[path = "owned_busy/reconnect.rs"]
 mod reconnect;
 pub(super) use missing_watch::guard as watch_guard;
+pub(in crate::services::discord) use reconnect::{ROUTE_DIFFERS, route_matches};
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
+
+enum RecoveryFailure {
+    Reobserve(String),
+    Retry(String),
+    Refused(String),
+}
+
+enum HoldKind {
+    Observe,
+    Readiness,
+    Identity,
+}
+
+fn source_hold(state: BusyState) -> HoldKind {
+    if state == BusyState::Held {
+        HoldKind::Readiness
+    } else {
+        HoldKind::Observe
+    }
+}
 
 /// A managed running turn keeps its inflight cursor while hooks move the verified native source.
 pub(super) async fn running(
@@ -29,8 +52,9 @@ pub(super) async fn running(
         host,
         shared.map_or("", |shared| shared.token_hash.as_str()),
     );
-    if observation.state() == BusyState::Busy {
-        let registered = prepare(
+    let state = observation.state();
+    if state == BusyState::Busy
+        && let Ok(registered) = prepare(
             mailbox.clone(),
             provider,
             origin,
@@ -38,15 +62,17 @@ pub(super) async fn running(
             session,
             front,
             observation.clone(),
-        );
-        if registered.is_ok() {
-            return registered.map(Some);
-        }
+        )
+    {
+        confirm_input_identity(mailbox, Some(front))
+            .await
+            .map_err(effect::unsent)?;
+        return Ok(Some(registered));
     }
     let channel = ChannelId::new(channel);
     if let Some(shared) = shared {
         hold(
-            (shared, observation.state() == BusyState::Held),
+            (shared, source_hold(state)),
             mailbox,
             channel,
             front,
@@ -79,16 +105,16 @@ impl OwnerTurn {
         fresh: bool,
         lease: Option<&crate::services::discord::session_transition::SessionTransitionLease<'_>>,
     ) -> Result<(Option<Self>, bool), ()> {
-        if fresh
-            || *provider != ProviderKind::Claude
-            || !owner.as_ref().is_some_and(|owner| owner.origin.is_person())
-        {
-            return Ok((owner, true));
+        let Some(owner) = owner else {
+            return Ok((None, true));
+        };
+        if fresh || *provider != ProviderKind::Claude || !owner.origin.is_person() {
+            return Ok((Some(owner), true));
         }
         #[cfg(test)]
         probes::observed(channel.get(), false);
         let Some(session) = session.filter(|session| !session.is_empty()) else {
-            return Ok((owner, true));
+            return Ok((Some(owner), true));
         };
         let host = crate::services::turn_host::for_turn(
             shared.pg_pool.as_ref(),
@@ -104,13 +130,9 @@ impl OwnerTurn {
             && let crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(record) =
                 &row.record
             && crate::services::herdr_launch::retire::recovered_missing(record)
-            && let Some(owner) = owner.as_ref()
         {
             owner.recovery.mark();
         }
-        let Some(owner) = owner else {
-            return Ok((None, true));
-        };
         if let Err(error) = confirm_admitted_input_identity(
             shared,
             &owner.mailbox,
@@ -123,55 +145,45 @@ impl OwnerTurn {
             owner.defer_before_submit("herdr_restart_hold_unsettled");
             return Err(());
         }
-        match observation.state() {
+        let state = observation.state();
+        match state {
             BusyState::Legacy => return Ok((Some(owner), true)),
+            BusyState::Idle if matches!(&host, TurnHost::Herdr(_)) => {
+                return Ok((Some(owner.finish_restart_identity().await?), false));
+            }
             BusyState::Idle => return Ok((Some(owner), false)),
             _ => {}
         }
-        if observation.state() == BusyState::Held {
-            if owner.late.restarted.is_none() && owner.mailbox.has_active_turn().await != Ok(true) {
-                return owner
-                    .recover_or_hold(shared, (provider, channel, key, session), &host, lease)
-                    .await;
-            }
-            hold(
-                (shared, true),
-                &owner.mailbox,
-                channel,
+        let registered = if state == BusyState::Held {
+            Err(SOURCE_HELD.into())
+        } else {
+            prepare(
+                owner.mailbox.clone(),
+                provider,
+                owner.origin,
+                &host,
+                session,
                 owner.front(),
-                recoverable_probe(
-                    &host,
-                    &observation,
-                    shared.pg_pool.as_ref(),
-                    &owner.mailbox,
-                    Some(owner.front()),
-                ),
+                observation.clone(),
             )
-            .await;
-            owner.defer_before_submit(SOURCE_HELD);
-            return Err(());
-        }
-        let registered = prepare(
-            owner.mailbox.clone(),
-            provider,
-            owner.origin,
-            &host,
-            session,
-            owner.front(),
-            observation.clone(),
-        );
+        };
         let registered = match registered {
             Ok(registered) => registered,
             Err(error) => {
                 if owner.late.restarted.is_none()
-                    && owner.mailbox.has_active_turn().await != Ok(true)
+                    && owner.mailbox.has_active_turn().await == Ok(false)
                 {
                     return owner
-                        .recover_or_hold(shared, (provider, channel, key, session), &host, lease)
+                        .recover_or_discard(
+                            shared,
+                            (provider, channel, key, session),
+                            &host,
+                            (&observation, lease),
+                        )
                         .await;
                 }
                 hold(
-                    (shared, false),
+                    (shared, source_hold(state)),
                     &owner.mailbox,
                     channel,
                     owner.front(),
@@ -194,7 +206,7 @@ impl OwnerTurn {
             runtime,
             late,
             ..
-        } = owner;
+        } = owner.finish_restart_identity().await?;
         let mut registered = registered;
         registered.restarted = late.restarted;
         let runtime = runtime.or_else(|| Some(shared.clone()));
@@ -320,9 +332,9 @@ fn hold_late(
     let probe = recoverable_probe(turn.host, observation, turn.pool, mailbox, Some(front))
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
-    let typed = observation.state() == BusyState::Held;
+    let kind = source_hold(observation.state());
     if let Some(shared) = turn.shared {
-        handle.block_on(hold((shared, typed), mailbox, channel, front, probe));
+        handle.block_on(hold((shared, kind), mailbox, channel, front, probe));
     } else {
         handle.block_on(hold_start(mailbox, channel, front));
         if let Some(probe) = probe {
@@ -349,6 +361,8 @@ fn prepare(
     let target = observation.target().ok_or_else(unavailable)?;
     let source = observation.source().ok_or_else(unavailable)?;
     let herdr = observation.herdr().ok_or_else(unavailable)?;
+    #[cfg(test)]
+    probes::before_registration(front.1.channel_id);
     let mut registered = Registration::observed(
         mailbox,
         (provider.as_str(), origin, true),
@@ -390,25 +404,29 @@ pub(super) fn unwound(
     })
 }
 
-/// Holds the front for its watch; a Busy-held read (`typed`) also gets the owner's deadline.
+/// Holds the front and gives the readiness deadline to the watch that owns it.
 async fn hold(
-    (shared, typed): (&Shared, bool),
+    (shared, kind): (&Shared, HoldKind),
     mailbox: &ChannelMailboxHandle,
     channel: ChannelId,
     front: &Front,
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
-    hold_start(mailbox, channel, front).await;
-    watch_held((shared, typed), mailbox, channel, front, probe).await;
-}
-
-async fn watch_held(
-    (shared, typed): (&Shared, bool),
-    mailbox: &ChannelMailboxHandle,
-    channel: ChannelId,
-    front: &Front,
-    probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
-) {
+    if matches!(kind, HoldKind::Identity) {
+        let original = front.clone();
+        let held = mailbox
+            .v2_request(move |slot| {
+                slot.as_mut()
+                    .ok_or("V2 not adopted")?
+                    .hold_identity(&original)
+            })
+            .await;
+        if let Err(error) = held {
+            tracing::warn!(channel_id = channel.get(), %error, "identity hold not recorded");
+        }
+    } else {
+        hold_start(mailbox, channel, front).await;
+    }
     super::super::super::busy_retry::note_busy_result(
         shared,
         &ProviderKind::Claude,
@@ -426,7 +444,7 @@ async fn watch_held(
         held_front(probe, mailbox.clone(), front.clone()),
     );
     let drive = drive(shared, channel);
-    if typed {
+    if matches!(kind, HoldKind::Readiness) {
         held_watch::readiness::hold(drive.clone(), front).await;
     }
     held_watch::watch(drive, front.1.message_id);
@@ -441,6 +459,30 @@ fn recoverable_probe(
 ) -> Option<crate::services::claude_tui::host_input::busy::BusyProbe> {
     observation.herdr()?;
     watch_guard(pool, host, mailbox.clone(), front).map(|guard| guard(observation.probe()))
+}
+
+fn recovery_probe(
+    host: &TurnHost,
+    observation: &BusyObservation,
+    pool: Option<&sqlx::PgPool>,
+    mailbox: &ChannelMailboxHandle,
+    front: &Front,
+) -> Option<crate::services::claude_tui::host_input::busy::BusyProbe> {
+    use crate::services::discord::herdr_terminate::root_replaced::current;
+    let TurnHost::Herdr(plan) = host else {
+        return None;
+    };
+    let row = plan.row.as_ref()?.clone();
+    let pool = pool?.clone();
+    let mut read = recoverable_probe(host, observation, Some(&pool), mailbox, Some(front))?;
+    Some(Box::new(move || {
+        let screen = read();
+        // A replaced row needs a fresh intake decision even if its old pane never looks Idle.
+        if screen != Screen::Ready && futures::executor::block_on(current(&pool, &row)).is_err() {
+            return Screen::Ready;
+        }
+        screen
+    }))
 }
 
 fn same_front(expected: &Front, current: Option<&Front>) -> bool {
@@ -547,6 +589,30 @@ mod probes {
                 .unwrap_or_else(|error| error.into_inner())
                 .insert(channel, (entered, wait));
             (observed, release)
+        }
+    }
+
+    type BeforeRegistration = Option<(u64, Box<dyn FnOnce()>)>;
+    thread_local! {
+        static BEFORE_REGISTRATION: std::cell::RefCell<BeforeRegistration> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    impl OwnerTurn {
+        pub(in crate::services::discord) fn before_busy_registration(
+            channel: u64,
+            action: impl FnOnce() + 'static,
+        ) {
+            BEFORE_REGISTRATION.with_borrow_mut(|slot| *slot = Some((channel, Box::new(action))));
+        }
+    }
+
+    pub(super) fn before_registration(channel: Option<u64>) {
+        let action = BEFORE_REGISTRATION
+            .with_borrow_mut(|slot| slot.take_if(|(expected, _)| Some(*expected) == channel));
+        if let Some((_, action)) = action {
+            action();
         }
     }
 

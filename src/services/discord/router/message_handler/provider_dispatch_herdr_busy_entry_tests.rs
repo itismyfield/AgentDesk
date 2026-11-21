@@ -1706,6 +1706,12 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
         );
         assert_eq!(fx.rig.sends().len(), before);
         assert!(heads.lock().unwrap().is_empty());
+
+        missing_input::append_terminal(&started, "i8114-working-message");
+        assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
+        source_input_settled(&intake, &original, &heads).await;
+        idle_turn_unwound(&intake).await;
+        assert_eq!(fx.rig.sends().len() - before, 2);
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
         let now = chrono::Utc::now().to_rfc3339();
         append(&started.path, &[

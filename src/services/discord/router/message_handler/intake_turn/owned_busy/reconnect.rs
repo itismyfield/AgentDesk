@@ -1,121 +1,211 @@
-//! An uncertain end keeps the original claim available for normal input after reattach.
+//! Resolve a failed Busy registration against the exact hosted execution.
 use super::*;
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedExecution, HostedRecord, HostedState,
+};
+use crate::services::discord::herdr_terminate::root_replaced;
 use crate::services::discord::recovery_engine::herdr_reattach::{VerifiedReattach, continue_owner};
 use crate::services::discord::session_transition::SessionTransitionLease;
+use crate::services::herdr_launch::retire::{self, RetireRefusal, Scope};
+use crate::services::turn_host::HerdrTurnPlan;
+use RecoveryFailure::{Refused, Reobserve, Retry};
+
+pub(in crate::services::discord) const ROUTE_DIFFERS: &str =
+    "local execution owner or endpoint differs";
+
+pub(in crate::services::discord) fn route_matches(
+    shared: &Shared,
+    channel: ChannelId,
+    session: &str,
+    plan: &HerdrTurnPlan,
+    record: &HostedExecution,
+) -> Option<bool> {
+    let root = crate::config::runtime_root()?;
+    let node = crate::config::session_hosts::local_node()?;
+    let at = record.location.as_ref()?;
+    Some(
+        record.state == HostedState::Bound
+            && record.owner.provider == "claude"
+            && record.owner.discord_token_hash == shared.token_hash
+            && record.owner.channel_id == channel.get().to_string()
+            && record.owner.logical_key == session
+            && root == std::path::Path::new(&record.owner.runtime_root)
+            && node == record.owner.owner_node
+            && record.owner.owner_node == plan.endpoint.execution_node
+            && at.execution_node == plan.endpoint.execution_node
+            && at.endpoint_config_key == plan.endpoint.config_key
+            && at.socket_addr == plan.endpoint.socket_addr
+            && at.named_session == plan.endpoint.herdr_session,
+    )
+}
 
 impl OwnerTurn {
-    pub(super) async fn recover_or_hold(
+    pub(in crate::services::discord) async fn discard_busy_recovery(
         self,
         shared: &Shared,
-        (provider, channel, key, session): (&ProviderKind, ChannelId, Option<&str>, &str),
+        channel: ChannelId,
+        reason: String,
+    ) {
+        let failure = super::super::super::start_failure::Failure::owner(&self);
+        let result = failure
+            .discard(Some(shared.clone()), channel, reason)
+            .await
+            .map(|_| ());
+        let _ = self.settled.send(result.map_err(effect::unsent));
+    }
+
+    pub(super) async fn recover_or_discard(
+        self,
+        shared: &Shared,
+        route: (&ProviderKind, ChannelId, Option<&str>, &str),
         host: &TurnHost,
-        lease: Option<&SessionTransitionLease<'_>>,
+        (observation, lease): (&BusyObservation, Option<&SessionTransitionLease<'_>>),
     ) -> Result<(Option<Self>, bool), ()> {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-        use crate::services::claude::herdr_turn::HoldRelease;
-        use crate::services::herdr_launch::retire::{self, Scope};
+        let (provider, channel, key, session) = route;
         let acquired = lease
             .is_none()
             .then(|| SessionTransitionLease::try_acquire(shared, channel).ok())
             .flatten();
         let lease = lease.or(acquired.as_ref());
-        let mut owner = self;
-        let mut may_retire = false;
-        if let (Some(lease), TurnHost::Herdr(plan), Some(pool)) =
-            (lease, host, shared.pg_pool.as_ref())
-            && let Some(row) = &plan.row
-        {
-            match continue_owner(shared, pool, lease, row).await.0 {
-                result @ (VerifiedReattach::Live | VerifiedReattach::AwaitingClear) => {
-                    owner = owner
-                        .prepare_restarted(shared, (provider, channel, Some(session), key), lease)
-                        .await?;
-                    if result == VerifiedReattach::AwaitingClear || owner.late.restarted.is_none() {
-                        return Ok((Some(owner), false));
-                    }
-                    return Box::pin(OwnerTurn::early(
-                        shared,
-                        (provider, channel, Some(session), key),
-                        Some(owner),
-                        false,
-                        Some(lease),
-                    ))
-                    .await;
-                }
-                VerifiedReattach::Ended => may_retire = true,
-                VerifiedReattach::Held => {}
-            }
-        }
-        let recovery = async {
-            if !may_retire {
-                return Err("pane identity or end unproven".to_owned());
-            }
+        let candidate = async {
+            let lease = lease.ok_or_else(|| Retry("channel transition unavailable".into()))?;
             let TurnHost::Herdr(plan) = host else {
-                return Err("host is not a local Herdr execution".to_string());
+                return Err(Retry("local Herdr execution unavailable".into()));
             };
-            let row = plan.row.as_ref().ok_or("hosted row unavailable")?;
+            let row = plan
+                .row
+                .as_ref()
+                .ok_or_else(|| Retry("hosted row unavailable".into()))?;
             let HostedRecord::Known(record) = &row.record else {
-                return Err("hosted record unreadable".into());
+                return Err(Retry("hosted record unreadable".into()));
             };
-            // The reattach verdict already checked this Bound row's canonical owner and locality.
-            if record.owner.logical_key != session {
-                return Err("the observed execution belongs to another route".into());
-            }
-            let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
-            crate::services::discord::herdr_terminate::root_replaced::current(pool, row).await?;
-            let retired = retire::observed(pool, row, Scope::Missing)
-                .await
-                .map_err(|e| format!("retire: {e:?}"))?;
-            if retired.hold != HoldRelease::Released {
-                return Err("retired execution input hold could not be released".into());
-            }
-            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
-                session,
-                Some(&record.execution_nonce),
-            );
-            owner.recovery.mark();
-            let mut expected = record.clone();
-            expected.state = HostedState::Retired;
-            match crate::services::turn_host::for_turn(Some(pool), provider, channel.get(), key)
-                .await
-            {
-                TurnHost::Herdr(next)
-                    if next
-                        .row
-                        .as_ref()
-                        .is_some_and(|row| row.record == HostedRecord::Known(expected.clone())) =>
-                {
-                    Ok(())
+            let pool = shared
+                .pg_pool
+                .as_ref()
+                .ok_or_else(|| Retry("database unavailable".into()))?;
+            match route_matches(shared, channel, session, plan, record) {
+                Some(true) => Ok((lease, pool, row, record)),
+                Some(false) => {
+                    root_replaced::current(pool, row).await.map_err(Retry)?;
+                    Err(Refused(ROUTE_DIFFERS.into()))
                 }
-                _ => Err("fresh Herdr execution is not admissible after retirement".into()),
+                None => Err(Reobserve("local pane identity unavailable".into())),
             }
         }
         .await;
-        match recovery {
-            Ok(()) => Ok((Some(owner.finish_restart_identity().await?), false)),
-            Err(reason) => {
-                let observation =
-                    claude_handoff::observe_busy(channel.get(), session, host, &shared.token_hash);
-                let watch = recoverable_probe(
-                    host,
-                    &observation,
-                    shared.pg_pool.as_ref(),
-                    &owner.mailbox,
-                    Some(owner.front()),
-                );
-                owner.hold_restart_identity(channel).await;
-                watch_held(
-                    (shared, false),
-                    &owner.mailbox,
-                    channel,
-                    owner.front(),
-                    watch,
-                )
-                .await;
-                owner.defer_before_submit(&reason);
-                Err(())
+        let recovery = match candidate {
+            Ok((lease, pool, row, record)) => {
+                match continue_owner(shared, pool, lease, row).await.0 {
+                    result @ (VerifiedReattach::Live | VerifiedReattach::AwaitingClear) => {
+                        let owner = self
+                            .prepare_restarted(
+                                shared,
+                                (provider, channel, Some(session), key),
+                                lease,
+                            )
+                            .await?;
+                        if result == VerifiedReattach::AwaitingClear
+                            || owner.late.restarted.is_none()
+                        {
+                            return Ok((Some(owner), false));
+                        }
+                        return Box::pin(OwnerTurn::early(
+                            shared,
+                            (provider, channel, Some(session), key),
+                            Some(owner),
+                            false,
+                            Some(lease),
+                        ))
+                        .await;
+                    }
+                    VerifiedReattach::Held => {
+                        Err(Reobserve("pane identity or end unproven".into()))
+                    }
+                    VerifiedReattach::Ended => {
+                        async {
+                            root_replaced::current(pool, row).await.map_err(Retry)?;
+                            let retired = retire::observed(pool, row, Scope::Missing)
+                                .await
+                                .map_err(|error| {
+                                    let reason = format!("retire: {error:?}");
+                                    match error {
+                                        RetireRefusal::Unproven(_)
+                                        | RetireRefusal::ProviderRunning => Reobserve(reason),
+                                        RetireRefusal::Changed(_)
+                                        | RetireRefusal::NoLocalEndpoint => Retry(reason),
+                                        RetireRefusal::NoRow(_) => Refused(reason),
+                                    }
+                                })?;
+                            if retired.hold
+                                != crate::services::claude::herdr_turn::HoldRelease::Released
+                            {
+                                return Err(Refused(
+                                    "retired execution input hold could not be released".into(),
+                                ));
+                            }
+                            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
+                                session,
+                                Some(&record.execution_nonce),
+                            );
+                            self.recovery.mark();
+                            let mut expected = record.clone();
+                            expected.state = HostedState::Retired;
+                            match crate::services::turn_host::for_turn(
+                                Some(pool),
+                                provider,
+                                channel.get(),
+                                key,
+                            )
+                            .await
+                            {
+                                TurnHost::Herdr(next)
+                                    if next.row.as_ref().is_some_and(|row| {
+                                        row.record == HostedRecord::Known(expected.clone())
+                                    }) =>
+                                {
+                                    Ok(())
+                                }
+                                _ => Err(Refused(
+                                    "fresh Herdr execution is not admissible after retirement"
+                                        .into(),
+                                )),
+                            }
+                        }
+                        .await
+                    }
+                }
             }
-        }
+            Err(error) => Err(error),
+        };
+        let (reason, probe) = match recovery {
+            Ok(()) => return Ok((Some(self.finish_restart_identity().await?), false)),
+            Err(Refused(reason)) => {
+                self.discard_busy_recovery(shared, channel, reason).await;
+                return Err(());
+            }
+            Err(Reobserve(reason)) => (
+                reason,
+                recovery_probe(
+                    host,
+                    observation,
+                    shared.pg_pool.as_ref(),
+                    &self.mailbox,
+                    self.front(),
+                ),
+            ),
+            Err(Retry(reason)) => (reason, None),
+        };
+        // A changed observation schedules the usual input route, where continuation runs again.
+        hold(
+            (shared, HoldKind::Identity),
+            &self.mailbox,
+            channel,
+            self.front(),
+            Some(probe.unwrap_or_else(|| Box::new(|| Screen::Ready))),
+        )
+        .await;
+        self.defer_before_submit(&reason);
+        Err(())
     }
 }
 
@@ -182,12 +272,18 @@ mod tests {
                         })
                         .await
                         .unwrap();
+                    let observation = claude_handoff::observe_busy(
+                        CHANNEL,
+                        fixture.logical(),
+                        &host,
+                        &shared.token_hash,
+                    );
                     let (owner, _) = owner
-                        .recover_or_hold(
+                        .recover_or_discard(
                             shared,
                             (&shared.provider, channel, key, fixture.logical()),
                             &host,
-                            None,
+                            (&observation, None),
                         )
                         .await
                         .expect("the live pane keeps the front in the ordinary input path");

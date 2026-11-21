@@ -85,17 +85,37 @@ impl OwnerTurn {
         .await;
         let row = match host {
             TurnHost::Tmux | TurnHost::Return(_) => return self.finish_restart_identity().await,
-            TurnHost::Herdr(plan) => match plan.row {
-                None => return self.finish_restart_identity().await,
-                Some(row) if matches!(&row.record, HostedRecord::Legacy) => {
-                    return self.finish_restart_identity().await;
-                }
-                Some(row) if matches!(&row.record, HostedRecord::Known(record) if record.state != HostedState::Bound) =>
+            TurnHost::Herdr(plan) => {
+                // The restart check runs before Busy intake. Keep the same confirmed refusal for
+                // a current mismatched route that Busy recovery would otherwise adjudicate.
+                if *provider == ProviderKind::Claude
+                    && self.origin.is_person()
+                    && let (Some(pool), Some(row), Some(logical)) =
+                        (shared.pg_pool.as_ref(), plan.row.as_ref(), logical)
+                    && let HostedRecord::Known(record) = &row.record
+                    && record.state == HostedState::Bound
+                    && owned_busy::route_matches(shared, channel, logical, &plan, record)
+                        == Some(false)
+                    && crate::services::herdr_admission::check().is_ok()
+                    && self.mailbox.has_active_turn().await == Ok(false)
+                    && root_replaced::current(pool, row).await.is_ok()
                 {
-                    return self.finish_restart_identity().await;
+                    self.discard_busy_recovery(shared, channel, owned_busy::ROUTE_DIFFERS.into())
+                        .await;
+                    return Err(());
                 }
-                row => row,
-            },
+                match plan.row {
+                    None => return self.finish_restart_identity().await,
+                    Some(row) if matches!(&row.record, HostedRecord::Legacy) => {
+                        return self.finish_restart_identity().await;
+                    }
+                    Some(row) if matches!(&row.record, HostedRecord::Known(record) if record.state != HostedState::Bound) =>
+                    {
+                        return self.finish_restart_identity().await;
+                    }
+                    row => row,
+                }
+            }
             TurnHost::Refused(_) => None,
         };
         let observed = row.as_ref().and_then(|row| {
