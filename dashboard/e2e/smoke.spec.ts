@@ -1393,6 +1393,8 @@ test.describe("Dashboard smoke tests", () => {
     // v3 rail order: settings sits below a divider and ops is off the menu.
     await expect(sidebar.getByRole("link")).toHaveText([/홈|Home/, /캠페인|Campaigns/, /에이전트|Agents/, /루틴|Routines/, /감사|Audit/, /통계|Stats/, /설정|Settings/]);
     await expect(sidebar.getByRole("link", { name: /^홈$|^Home$/ })).toHaveAttribute("aria-current", "page");
+    await expect(sidebar.getByRole("link", { name: /캠페인, 확인할 일 2건|Campaigns, 2 need attention/ })).toContainText("2");
+    await expect(page.getByTestId("topbar-search").locator("kbd")).toContainText(/Command K|Control K/);
   });
 
   test("desktop: a short window keeps the rail status in view and the menu scrollable", async ({ page }, testInfo) => {
@@ -1438,6 +1440,8 @@ test.describe("Dashboard smoke tests", () => {
     }
     await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더 보기|More/);
     await expect(page.getByTestId("app-mobile-tab-home")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-tab-campaigns")).toHaveAttribute("aria-label", /캠페인, 확인할 일 2건|Campaigns, 2 need attention/);
+    await expect(page.getByTestId("app-mobile-tab-campaigns")).toContainText("2");
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
       buttons.map((button) => {
