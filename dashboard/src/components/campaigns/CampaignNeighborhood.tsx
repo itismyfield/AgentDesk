@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
+import { Cap, RowButton } from "../common/KitPrimitives";
 import { rawEdgeId } from "./campaignGraphRouting";
 import { dependencyNeighborhood } from "./campaignModel";
 import { COLORS, LABELS, type Tr } from "./campaignPresentation";
@@ -38,8 +39,8 @@ export default function CampaignNeighborhood({ nodes: allNodes, selectedId, visi
     </div></div>
     {(context.omittedUpstream > 0 || context.omittedDownstream > 0) && <p role="status">{tr(`그래프 밖: 선행 ${context.omittedUpstream}개 · 후속 ${context.omittedDownstream}개. 아래 전체 연결에서 선택하세요.`, `Outside this graph: ${context.omittedUpstream} dependencies · ${context.omittedDownstream} dependents. Select from all connections below.`)}</p>}
     <details className="campaign-connections"><summary>{tr("전체 연결", "All connections")} · {context.upstream.length + context.downstream.length}</summary><div>
-      {context.upstream.map((node) => <button key={`up:${node.id}`} onClick={() => onSelect(node.id)}><span>← {tr("선행", "Dependency")}</span><strong>{node.title}</strong><small>{node.group || tr("미분류", "Ungrouped")}</small></button>)}
-      {context.downstream.map((node) => <button key={`down:${node.id}`} onClick={() => onSelect(node.id)}><span>→ {tr("후속", "Dependent")}</span><strong>{node.title}</strong><small>{node.group || tr("미분류", "Ungrouped")}</small></button>)}
+      {context.upstream.map((node) => <RowButton key={`up:${node.id}`} onClick={() => onSelect(node.id)} className="gap-2 rounded-[var(--r-sm)] px-2.5 py-2 sm:px-3"><Cap className="shrink-0">← {tr("선행", "Dependency")}</Cap><strong className="min-w-0 truncate">{node.title}</strong><Cap className="shrink-0">{node.group || tr("미분류", "Ungrouped")}</Cap></RowButton>)}
+      {context.downstream.map((node) => <RowButton key={`down:${node.id}`} onClick={() => onSelect(node.id)} className="gap-2 rounded-[var(--r-sm)] px-2.5 py-2 sm:px-3"><Cap className="shrink-0">→ {tr("후속", "Dependent")}</Cap><strong className="min-w-0 truncate">{node.title}</strong><Cap className="shrink-0">{node.group || tr("미분류", "Ungrouped")}</Cap></RowButton>)}
     </div></details>
   </div>;
 }

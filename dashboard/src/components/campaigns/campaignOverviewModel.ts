@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Campaign, CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import type { ServerCampaignDocument, ServerCampaignEvent, ServerCampaignSummary } from "../../api/serverCampaigns";
 import type { Agent } from "../../types";
+import type { TrackSegment } from "../common/KitPrimitives";
 import { CAMPAIGN_STAGES, campaignProgress, campaignStageStep, campaignTaskNumber, campaignTaskTitle, liveIsWorking, safeCampaignLink } from "./campaignModel";
 import type { Tr } from "./campaignPresentation";
 import { DISPLAY_LABELS, DISPOSITION_LABELS, REASON_LABELS, STAGE_LABELS, nodeReasons } from "./serverCampaignModel";
@@ -25,6 +26,7 @@ export function serverBucket(display: Display): CampaignBucket {
 export interface CampaignEntry {
   key: string; kind: "legacy" | "server"; id: string; title: string; description: string; repo: string | null;
   bucket: CampaignBucket; status: string; statusLabel: string; done: number | null; total: number | null; attention: string | null;
+  segments?: TrackSegment[] | null; ratio?: number | null;
 }
 export const entryKey = (kind: CampaignEntry["kind"], id: string) => `${kind}:${id}`;
 
@@ -36,17 +38,24 @@ export function legacyEntry(campaign: Campaign, live: Record<string, CampaignNod
     key: entryKey("legacy", campaign.id), kind: "legacy", id: campaign.id, title: campaign.title, description: campaign.description, repo: null,
     bucket: LEDGER_BUCKETS[campaign.status], status: campaign.status, statusLabel: tr(...LEDGER_STATUS_LABELS[campaign.status]),
     done: counts.done, total, attention: attentionText(counts.blocked, counts.failed, tr),
+    segments: null, ratio: total > 0 ? counts.done / total : null,
   };
 }
 
-/** A summary carries no node list; the full document, once read, adds the task counts. */
+const TRACK_STAGES = Object.keys(STAGE_LABELS).filter((stage) => stage !== "complete");
+
+/** A summary carries no node list; the full document, once read, adds the task counts and stage track. */
 export function serverEntry(summary: ServerCampaignSummary, doc: ServerCampaignDocument | null, tr: Tr): CampaignEntry {
   const { definition, view } = summary;
-  const done = doc ? doc.view.nodes.filter((node) => node.runtime.disposition === "complete").length : null;
+  const nodes = doc?.view.nodes ?? [];
+  const done = doc ? nodes.filter((node) => node.runtime.disposition === "complete").length : null;
+  const at = nodes.length ? Math.min(...nodes.map(({ runtime }) => runtime.stage === "complete" ? TRACK_STAGES.length : TRACK_STAGES.indexOf(runtime.stage))) : null;
+  const head: TrackSegment = view.display === "unable_to_progress" || view.failed_count > 0 ? "fail" : view.display === "waiting" || view.display === "stopping" || view.display === "stopped" || view.display === "needs_inspection" ? "wait" : view.display === "prepared" ? "todo" : "now";
   return {
     key: entryKey("server", view.campaign_id), kind: "server", id: view.campaign_id, title: definition.title, description: definition.goal,
     repo: definition.repository, bucket: serverBucket(view.display), status: view.display, statusLabel: tr(...DISPLAY_LABELS[view.display]),
     done, total: doc ? doc.definition.nodes.length : null, attention: attentionText(view.blocked_count, view.failed_count, tr),
+    segments: at === null ? null : TRACK_STAGES.map((_, index) => index < at ? "done" : index === at ? head : "todo"), ratio: null,
   };
 }
 

@@ -100,10 +100,10 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
     {error && <p role="alert" className="campaign-filter-note">{error}</p>}
     {serverHoldsIncomplete && !loading && <WidgetState kind="stale" title={tr("서버 캠페인 일부를 읽지 못했습니다.", "Some server campaigns did not load.")}
       description={tr("여기 보이는 카드 가운데 서버 캠페인이 이미 맡은 것이 있을 수 있습니다.", "Some cards shown here may already belong to a server campaign.")}
-      action={<button type="button" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</button>} />}
+      action={<Button variant="secondary" size="sm" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</Button>} />}
     {campaignsError ? <WidgetState kind="error" title={tr("캠페인을 읽지 못해 어느 카드가 캠페인 밖인지 알 수 없습니다.", "Campaigns did not load, so the queue cannot tell which cards they hold.")}
-      description={campaignsError} action={<button type="button" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</button>} />
-      : kanbanCardsState === "error" ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load cards.")} action={<button type="button" onClick={reloadKanbanCards}>{tr("다시 시도", "Retry")}</button>} />
+      description={campaignsError} action={<Button variant="secondary" size="sm" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</Button>} />
+      : kanbanCardsState === "error" ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load cards.")} action={<Button variant="secondary" size="sm" onClick={reloadKanbanCards}>{tr("다시 시도", "Retry")}</Button>} />
       : loading ? <Loading label={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} className="grid gap-1">
         {[3, 2].map((rows, group) => <div key={group} className="grid gap-1">
           <div className="flex h-11 items-center gap-2 px-2"><Skeleton width={14} height={14} radius={4} /><Skeleton width={[96, 72][group]} height={10} /></div>

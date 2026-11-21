@@ -1,8 +1,9 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowLeft, Check, Copy } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
+import { Eyebrow, KitCard, Num, StageTrack, StatusDot, type DotTone, type TrackSegment } from "../common/KitPrimitives";
 import { useReturnFocus } from "../common/overlay/useReturnFocus";
 import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 
@@ -69,27 +70,39 @@ export function TaskScreen({ campaign, label, onClose, tr, children }: { campaig
   </Dialog.Root>;
 }
 
-/** Where the task stands: its status, one line for now, then what holds it or comes next. */
-export const STATUS_CARD = "grid min-w-0 justify-items-start gap-1.5 rounded-[14px] border border-[var(--line-soft)] bg-[var(--bg-2)] p-3 text-[13px] leading-[18px] text-[var(--fg-muted)] [&_p]:!text-[13px] [&_p]:!leading-[18px]";
-export const WARN_CARD = "!border-[color-mix(in_srgb,var(--warn)_45%,var(--line))] !bg-[color-mix(in_srgb,var(--warn)_8%,var(--bg-2))]";
+const WARN_CARD_STYLE = {
+  borderColor: "color-mix(in srgb, var(--warn) 45%, var(--line))",
+  background: "color-mix(in srgb, var(--warn) 8%, var(--bg-2))",
+} as CSSProperties;
+
+/** Where the task stands: a `KitCard` surface with optional warning tint for gates and blockers. */
+export function StatusCard({ label, warn = false, children }: { label: string; warn?: boolean; children: ReactNode }) {
+  return <KitCard as="section" aria-label={label} pad="sm" style={warn ? WARN_CARD_STYLE : undefined}>
+    <div className="grid min-w-0 justify-items-start gap-1.5 text-[13px] leading-[18px] text-[var(--fg-muted)] [&_p]:!text-[13px] [&_p]:!leading-[18px]">
+      {children}
+    </div>
+  </KitCard>;
+}
 
 export interface Step { key: string; label: string; state: "done" | "now" | "next"; value?: string; tone?: "warn" | "err" }
-const DOTS = { done: "bg-[var(--ok)]", now: "bg-[var(--info)]", next: "bg-[var(--fg-faint)]", warn: "bg-[var(--warn)]", err: "bg-[var(--err)]" };
+const STEP_DOT: Record<Step["state"] | NonNullable<Step["tone"]>, DotTone> = { done: "ok", now: "info", next: "neutral", warn: "warn", err: "err" };
 
-/** 단계 rows: finished steps, the current one in bold, then the steps still to come in one muted row. */
+/** 단계 rows: stage track, finished steps, the current one in bold, then the steps still to come in one muted row. */
 export function StepList({ steps, tr }: { steps: Step[]; tr: Tr }) {
   const later = steps.filter((step) => step.state === "next");
   const rows: Step[] = [...steps.filter((step) => step.state !== "next"), ...later.length ? [{ key: "later", label: later.map((step) => step.label).join(" · "), state: "next" as const }] : []];
+  const segments: TrackSegment[] = steps.map((step) => step.state === "done" ? "done" : step.state === "now" ? (step.tone === "err" ? "fail" : step.tone === "warn" ? "wait" : "now") : "todo");
   const words = { done: tr("끝남", "done"), now: tr("지금", "now"), next: tr("대기", "waiting") };
   return <section aria-label={tr("단계", "Stages")} className="grid min-w-0 gap-2">
-    <h4 className="!mb-0 text-[var(--fg-muted)]">{tr("단계", "Stages")}</h4>
+    <Eyebrow>{tr("단계", "Stages")}</Eyebrow>
+    <StageTrack segments={segments} />
     <ol className="!m-0 grid !list-none !p-0 !text-sm">
       {rows.map((step) => <li key={step.key} aria-current={step.state === "now" ? "step" : undefined}
         className={`flex min-h-8 min-w-0 items-center gap-2.5 !whitespace-normal ${step.state === "next" ? "text-[var(--fg-faint)]" : "text-[var(--fg)]"}`}>
-        <span aria-hidden className={`size-2 shrink-0 rounded-full ${DOTS[step.tone ?? step.state]}`} />
+        <StatusDot tone={STEP_DOT[step.tone ?? step.state]} />
         <span className="sr-only">{words[step.state]}</span>
         <span className={`min-w-0 flex-1 ${step.state === "now" ? "font-semibold" : ""}`}>{step.label}</span>
-        {step.value && <span className={`shrink-0 text-xs tabular-nums ${step.tone === "warn" ? "text-[var(--warn)]" : step.tone === "err" ? "text-[var(--err)]" : "text-[var(--fg-muted)]"}`}>{step.value}</span>}
+        {step.value && <Num className={`shrink-0 text-xs ${step.tone === "warn" ? "text-[var(--warn)]" : step.tone === "err" ? "text-[var(--err)]" : "text-[var(--fg-muted)]"}`}>{step.value}</Num>}
       </li>)}
     </ol>
   </section>;
@@ -105,7 +118,7 @@ export function RecentList({ label, items, tr }: { label: string; items: string[
   const shown = all ? newest : newest.slice(0, PREVIEW);
   const hidden = newest.length - shown.length;
   return <section aria-label={label} className="grid min-w-0 gap-2">
-    <h4 className="!mb-0">{label}</h4>
+    <Eyebrow>{label}</Eyebrow>
     <ul className="!m-0 grid gap-2 !list-none !p-0">
       {shown.map((text, index) => <li key={index} className={`border-l-2 border-[var(--line)] pl-3 !text-xs leading-[18px] text-[var(--fg)] ${all ? "" : "line-clamp-3"}`}>{text}</li>)}
     </ul>

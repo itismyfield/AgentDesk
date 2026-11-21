@@ -1,11 +1,17 @@
 import { Plus, RefreshCw } from "lucide-react";
-import { useState } from "react";
-import { Badge as KitBadge } from "../../kit/free/badge-clean";
+import { useState, type CSSProperties } from "react";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
+import { Cap, Chip, Desc, KitCard, MeterBar, Num, ROW_HOVER_CLASS, StageTrack, cn } from "../common/KitPrimitives";
 import { BUCKET_LABELS, type CampaignBucket, type CampaignEntry } from "./campaignOverviewModel";
 import { Badge, type Tr } from "./campaignPresentation";
+
+const SELECTED_CARD_STYLE = {
+  borderColor: "var(--accent)",
+  background: "color-mix(in srgb, var(--accent) 7%, var(--bg-2))",
+  "--ui-crdc-shadow-selected": "none",
+} as CSSProperties;
 
 /** Ledger and server campaigns in one list under running · ready · done; the tab follows the open campaign until one is picked. */
 export default function CampaignList({ entries, selectedKey, onSelect, onCreate, createDisabled, onRefresh, refreshing, tr }: {
@@ -17,7 +23,7 @@ export default function CampaignList({ entries, selectedKey, onSelect, onCreate,
   const shown = entries.filter((entry) => entry.bucket === bucket);
   return <section className="grid min-w-0 content-start gap-3" aria-label={tr("캠페인 목록", "Campaign list")}>
     <div className="flex min-w-0 items-center gap-2">
-      <span className="mr-auto text-xs text-[var(--fg-muted)] tabular-nums">{tr(`캠페인 ${entries.length}개`, `${entries.length} campaigns`)}</span>
+      <Cap className="mr-auto font-display tabular-nums">{tr(`캠페인 ${entries.length}개`, `${entries.length} campaigns`)}</Cap>
       <Button variant="secondary" size="sm" icon={<Plus aria-hidden />} disabled={createDisabled} onClick={onCreate}>{tr("새 캠페인", "New campaign")}</Button>
       <IconButton icon={<RefreshCw aria-hidden />} label={refreshing ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")} disabled={refreshing} onClick={onRefresh} />
     </div>
@@ -26,26 +32,26 @@ export default function CampaignList({ entries, selectedKey, onSelect, onCreate,
         options={(Object.keys(BUCKET_LABELS) as CampaignBucket[]).map((value) => ({ value, label: tr(...BUCKET_LABELS[value]), count: entries.filter((entry) => entry.bucket === value).length }))} />
     </div>
     {shown.length === 0 && <p className="px-1 text-xs text-[var(--fg-muted)]">{tr("이 상태의 캠페인이 없어요.", "No campaigns in this state.")}</p>}
-    <ul className="campaign-list grid min-w-0 gap-2">
+    <ul className="campaign-list m-0 grid list-none min-w-0 gap-2.5 p-0">
       {shown.map((entry) => {
         const selected = entry.key === selectedKey;
-        return <li key={entry.key} className="min-w-0">
+        return <KitCard as="li" key={entry.key} pad="none" selected={selected} style={selected ? SELECTED_CARD_STYLE : undefined}>
           <button type="button" data-campaign-key={entry.key} aria-current={selected || undefined} onClick={() => onSelect(entry)}
-            className={`!m-0 grid w-full min-w-0 gap-1.5 !rounded-xl !border !px-3.5 !py-3 text-left transition-colors motion-reduce:transition-none ${selected
-              ? "!border-[var(--accent)] !bg-[var(--accent-soft)]" : "!border-[var(--line)] !bg-[var(--th-card-bg)] hover:!bg-[color-mix(in_oklch,var(--fg)_4%,var(--th-card-bg))]"}`}>
+            className={cn("m-0 grid w-full min-w-0 cursor-pointer gap-1.5 border-0 bg-transparent px-3.5 py-3 text-left font-inherit text-inherit motion-reduce:transition-none", !selected && ROW_HOVER_CLASS)}>
             <span className="flex min-w-0 items-start gap-2">
               <strong className="min-w-0 flex-1 text-sm font-semibold leading-5 text-[var(--fg)] [overflow-wrap:anywhere] [word-break:keep-all]">{entry.title}</strong>
               <Badge status={entry.status} label={entry.statusLabel} tr={tr} />
             </span>
-            {entry.description && <span className="truncate text-xs text-[var(--fg-muted)]">{entry.description.split("\n")[0]}</span>}
-            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-[var(--fg-muted)]">
-              <KitBadge>{entry.kind === "legacy" ? tr("원장", "Ledger") : tr("서버", "Server")}</KitBadge>
+            {entry.description && <Desc className="truncate">{entry.description.split("\n")[0]}</Desc>}
+            {entry.segments ? <StageTrack segments={entry.segments} /> : entry.ratio != null ? <MeterBar ratio={entry.ratio} tone="ok" /> : null}
+            <Cap className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <Chip className="h-[18px] px-1.5 text-[11px]">{entry.kind === "legacy" ? tr("원장", "Ledger") : tr("서버", "Server")}</Chip>
               {entry.repo && <span className="font-mono">{entry.repo}</span>}
-              {entry.total !== null && <span>{tr(`작업 ${entry.done}/${entry.total} 완료`, `${entry.done}/${entry.total} tasks done`)}</span>}
+              {entry.total !== null && <Num>{tr(`작업 ${entry.done}/${entry.total} 완료`, `${entry.done}/${entry.total} tasks done`)}</Num>}
               {entry.attention && <span className="text-[var(--warn)]">{entry.attention}</span>}
-            </span>
+            </Cap>
           </button>
-        </li>;
+        </KitCard>;
       })}
     </ul>
   </section>;
