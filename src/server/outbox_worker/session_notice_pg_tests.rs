@@ -787,7 +787,7 @@ async fn secretary_push_policy_judges_the_channel_each_target_form_resolves_to_p
     let config = |listed: bool| -> crate::config::Config {
         let secretary = listed.then(|| format!("'{CHANNEL}'")).unwrap_or_default();
         serde_yaml::from_str(&format!(
-            "discord: {{secretary_channels: [{secretary}]}}\nagents: [{{id: sec, name: sec, channels: {{claude: {{id: '{CHANNEL}', aliases: [sec-room]}}}}}}]"
+            "server: {{}}\ndiscord: {{secretary_channels: [{secretary}]}}\nagents: [{{id: sec, name: sec, channels: {{claude: {{id: '{CHANNEL}', aliases: [sec-room]}}}}}}]"
         ))
         .unwrap()
     };
