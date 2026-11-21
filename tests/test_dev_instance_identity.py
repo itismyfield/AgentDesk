@@ -336,9 +336,12 @@ class AgyIdentityAdmissionTests(unittest.TestCase):
 
     def test_agy_up_requires_a_complete_admission_before_lease_or_keeper(self):
         frame = (json.dumps(self.frame)+'\n').encode()
-        for name, payload, resources in [('eof', b'', {}), ('partial', frame[:-5], {}), ('no-resources', frame, None)]:
+        padded = lambda size: frame[:-1] + b' '*(size-len(frame)) + b'\n'
+        for name, payload, resources in [('eof', b'', {}), ('partial', frame[:-5], {}), ('no-newline', frame[:-1], {}),
+                                         ('no-resources', frame, None), ('4097-byte line', padded(4097), {})]:
             with self.subTest(case=name):
                 self.assertEqual(self.up(payload, resources=resources)[1:], (False, False))
+        self.assertEqual(self.up(padded(4096)), ('lease reached', True, True))
         self.assertEqual(self.up(frame, delay=.3), ('lease reached', True, True))
         self.assertEqual(self.up(frame, 'antigravity_bot_token', delay=.3)[1:], (True, False))
         (self.root/'credential/notify_bot_token').unlink()

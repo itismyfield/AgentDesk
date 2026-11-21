@@ -208,12 +208,15 @@ def required_frame(stream, deadline):
     data = bytearray()
     while not data.endswith(b'\n'):
         remaining = deadline - time.monotonic()
-        if len(data) > 4096 or remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+        if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
             raise InstanceError('complete admission frame did not arrive before the startup deadline')
         byte = os.read(descriptor, 1)
         if not byte:
             raise InstanceError('admission stream ended before a complete frame')
         data.extend(byte)
+        # The bound covers the whole line, newline included.
+        if len(data) > 4096:
+            raise InstanceError('admission frame exceeds its bound')
     try:
         frame = json.loads(data.decode('utf-8'))
     except ValueError:
