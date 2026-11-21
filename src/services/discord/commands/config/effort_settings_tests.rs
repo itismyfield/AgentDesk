@@ -531,6 +531,8 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
     let _hosts =
         crate::config::session_hosts::force_for_test(Some("node-a"), &[(channel.get(), "node-a")]);
     let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
+    // The Claude Herdr turn is on too, so only the provider keeps a Claude pane off the restart.
+    let _claude = crate::services::turn_host::force_switch_for_test(Some(true));
     assert!(herdr_codex(&ProviderKind::Codex, channel));
     assert!(
         !herdr_codex(&ProviderKind::Claude, channel),
