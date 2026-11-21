@@ -36,13 +36,47 @@ pub async fn stop_agent_turn(
         }
     };
 
-    // A session the host check refuses, working or idle, is neither stopped nor marked.
-    if let Some(session) = session.as_ref()
-        && let Some(reason) = session.host_unsupported.as_deref()
+    #[cfg(unix)]
+    if let Some(session) = session.as_ref().filter(|candidate| candidate.is_working)
+        && let Some(expected) = &session.herdr_stop
+        && let Some(registry) = state.health_registry.as_deref()
     {
-        let (unsupported, key) = ("session_host_not_tmux", &session.session_key);
-        let body = json!({"error": reason, "unsupported": unsupported, "session_key": key});
-        return (StatusCode::CONFLICT, Json(body));
+        let stop = crate::services::discord::zombie_foreground_release::run_herdr_agent_stop;
+        if let Some(mut body) = stop(registry, expected).await {
+            let accepted = matches!(
+                body["intent"].as_str(),
+                Some("recorded" | "already_recorded")
+            );
+            body["ok"] = json!(accepted);
+            body["agent_id"] = json!(id);
+            body["session_key"] = json!(session.session_key);
+            body["status"] = json!(if accepted { "stopping" } else { "refused" });
+            body["queue_preserved"] = json!(true);
+            body["turn_completed_at"] = serde_json::Value::Null;
+            return (
+                if accepted {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CONFLICT
+                },
+                Json(body),
+            );
+        }
+    }
+
+    // A session the host check refuses, working or idle, is neither stopped nor marked.
+    if let Some(session) = session.as_ref() {
+        let reason = session.host_unsupported.as_deref();
+        #[cfg(unix)]
+        let reason = reason.or(session
+            .herdr_stop
+            .as_ref()
+            .map(|_| "no matching Herdr holder turn"));
+        if let Some(reason) = reason {
+            let (unsupported, key) = ("session_host_not_tmux", &session.session_key);
+            let body = json!({"error": reason, "unsupported": unsupported, "session_key": key});
+            return (StatusCode::CONFLICT, Json(body));
+        }
     }
     let Some(session) = session.filter(|candidate| candidate.is_working) else {
         return (

@@ -640,7 +640,7 @@ if run_check guards "Relay-authority named-target floor contract (#5071)"; then
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 fi
 
-if run_check contracts "User feature map generation contract"; then
+if run_check contracts "User feature map source contract"; then
 feature_map_base="${TEST_LANE_BASELINE_REF:-${GFP_BASE_SHA:-}}"
 if [ -z "$feature_map_base" ]; then
   if [ -n "${CI:-}${GITHUB_ACTIONS:-}${GFP_EVENT_NAME:-}${GITHUB_EVENT_NAME:-}" ]; then
@@ -649,7 +649,15 @@ if [ -z "$feature_map_base" ]; then
   fi
   feature_map_base=origin/main
 fi
-"$PYTHON" scripts/generate_user_feature_map.py --check --base-ref "$feature_map_base"
+if [ "${GITHUB_ACTIONS:-}" = true ] || [ -n "${GENERATED_ARTIFACT_REPORT_DIR:-}" ]; then
+  "$PYTHON" -m scripts.ci.user_feature_map_report --base-ref "$feature_map_base" \
+    --output-dir "${GENERATED_ARTIFACT_REPORT_DIR:?}/user-feature-map"
+else
+  "$PYTHON" scripts/generate_user_feature_map.py --validate --base-ref "$feature_map_base"
+fi
+fi
+
+if run_check contracts "User feature map generation contract"; then
 "$PYTHON" -m unittest tests.test_generate_user_feature_map
 fi
 
@@ -670,8 +678,11 @@ if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
 fi
 
-if run_check contracts "Statechart index drift"; then
+if run_check contracts "Statechart index source contract"; then
 "$PYTHON" scripts/ci/statechart_index.py --check
+if [ "${GITHUB_ACTIONS:-}" = true ] || [ -n "${GENERATED_ARTIFACT_REPORT_DIR:-}" ]; then
+  "$PYTHON" -m scripts.ci.statechart_index_report "${GENERATED_ARTIFACT_REPORT_DIR:?}/statechart-index"
+fi
 fi
 
 if run_check contracts "Statechart index generator tests"; then

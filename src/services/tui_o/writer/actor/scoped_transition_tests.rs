@@ -3,6 +3,7 @@
 use super::*;
 use crate::services::tui_o::store::STORE_DIR_NAME;
 use crate::services::tui_o::writer::actor::codex_submission::scoped_tests::{fixture, tree};
+use crate::services::tui_o::writer::actor::fresh_resume::Rescope;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::transition_port::TransitionPort;
 use std::task::Poll;
@@ -129,7 +130,12 @@ where
         scope_hold: None,
         boot_previous_nonce: None,
     };
-    assert_eq!(actor.rescope(), !inspect);
+    let expected = if inspect {
+        Rescope::Unchanged
+    } else {
+        Rescope::Changed
+    };
+    assert_eq!(actor.rescope(), expected);
     assert_eq!(
         actor.writer.suspension.nonce().as_deref(),
         Some(initial_nonce)
@@ -195,8 +201,9 @@ where
         let (reply, completed) = oneshot::channel();
         let port_reply = std::mem::replace(&mut job.reply, reply);
         nonce = next_root();
-        assert!(
+        assert_eq!(
             actor.rescope(),
+            Rescope::Changed,
             "a read-only Inspect in Quiet must not delay a proven fresh root"
         );
         assert_eq!(actor.scope_hold, None);
@@ -246,8 +253,9 @@ where
         });
         nonce = next_root();
         for _ in 0..3 {
-            assert!(
-                !actor.rescope(),
+            assert_eq!(
+                actor.rescope(),
+                Rescope::Unchanged,
                 "an Apply job must still hold the new root"
             );
             assert_eq!(actor.scope_hold, Some("new_root_waiting"));
@@ -264,8 +272,9 @@ where
         actor.finish(job);
         assert!(completed.await.unwrap().refused.is_none());
         assert!(!actor.transitions.has_job());
-        assert!(
+        assert_eq!(
             actor.rescope(),
+            Rescope::Changed,
             "finishing Apply must permit the exact new root"
         );
     }

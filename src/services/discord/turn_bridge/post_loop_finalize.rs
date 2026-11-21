@@ -33,6 +33,8 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) current_msg_id: MessageId,
     pub(super) synthetic_actor: Option<Arc<CancelToken>>,
     pub(super) entry_was_rowless: bool,
+    /// The reader lost the inflight row it owned, so it no longer writes the row active.
+    pub(super) session_row_released: bool,
     pub(super) codex_tui_terminal_range: Option<super::super::inflight::CodexRange>,
     pub(super) cancelled: bool,
     pub(super) transport_error: bool,
@@ -447,7 +449,7 @@ pub(super) async fn run_post_loop_finalize(
     // Keep the session visibly active while Discord terminal delivery and
     // status-panel finalization are still pending. Publishing idle here lets
     // observers race ahead of the final response/status edit.
-    if receipt_disposition == TerminalReceiptDisposition::Continue {
+    if receipt_disposition == TerminalReceiptDisposition::Continue && !ctx.session_row_released {
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),

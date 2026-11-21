@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -9,8 +12,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from scripts.ci import script_check_inputs, statechart_index as index
+from scripts.ci import script_check_inputs, statechart_index as index, statechart_index_report
+from scripts.ci.generated_artifact_report import ReportError, resolve_comparison
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +35,8 @@ class StatechartIndexTest(unittest.TestCase):
         (self.root / "area").mkdir()
         (self.root / "area/report.md").write_bytes(b"# Report\n")
         self.readme = self.root / "README.md"
-        self.readme.write_bytes(PREFIX + index.BEGIN + b"stale\n" + index.END + SUFFIX)
+        self.readme.write_bytes(PREFIX + SUFFIX)
+        self.output = self.root / "index.generated.md"
         self.fragment("alpha", ROW)
 
     def fragment(self, key: str, row: bytes = ROW, *, filename: str | None = None) -> Path:
@@ -44,54 +50,50 @@ class StatechartIndexTest(unittest.TestCase):
 
     def assert_rejected(self, name: str, *, status: int = 1) -> str:
         before = self.readme.read_bytes()
-        for args in ((), ("--check",)):
+        for args in (("--output", str(self.output)), ("--check",)):
             done = self.cli(*args)
             self.assertEqual(done.returncode, status, done.stdout + done.stderr)
             self.assertIn(name, done.stderr)
+            self.assertIn(index.RECOVERY, done.stderr)
+            self.assertFalse(self.output.exists())
             self.assertEqual(self.readme.read_bytes(), before)
         return done.stderr
 
-    def test_generation_is_deterministic_and_preserves_outside_bytes(self) -> None:
-        self.assertEqual(self.cli().returncode, 0)
-        first = self.readme.read_bytes()
-        self.assertEqual(first, PREFIX + index.BEGIN + index.HEADER + ROW + index.END + SUFFIX)
-        self.assertEqual(self.cli().returncode, 0)
-        self.assertEqual(self.readme.read_bytes(), first)
+    def test_standalone_output_rejects_missing_and_stale_published_bytes(self) -> None:
+        self.readme.write_bytes(PREFIX + SUFFIX)
+        output = self.root / "index.generated.md"
+        for expected in (None, b"stale\n"):
+            if expected is not None:
+                output.write_bytes(expected)
+            done = self.cli("--check-output", str(output))
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertIn("drift", done.stderr)
+            self.assertIn("--output docs/statecharts/index.generated.md", done.stderr)
+        self.assertEqual(self.cli("--output", str(output)).returncode, 0)
+        self.assertEqual(self.cli("--check-output", str(output)).returncode, 0)
+        self.assertEqual(self.readme.read_bytes(), PREFIX + SUFFIX)
 
-    def test_migration_inserts_only_markers_around_original_table(self) -> None:
-        original = PREFIX + index.HEADER + ROW + SUFFIX
-        self.readme.write_bytes(PREFIX + index.BEGIN + index.HEADER + ROW + index.END + SUFFIX)
-        self.assertEqual(self.cli().returncode, 0)
-        self.assertEqual(self.readme.read_bytes().replace(index.BEGIN, b"").replace(index.END, b""),
-                         original)
-
-    def test_check_is_read_only_and_detects_drift_then_clean(self) -> None:
-        before = self.readme.read_bytes()
-        self.assertEqual(self.cli("--check").returncode, 1)
-        self.assertEqual(self.readme.read_bytes(), before)
-        self.assertEqual(self.cli().returncode, 0)
-        self.assertEqual(self.cli("--check").returncode, 0)
-        self.fragment("alpha", ROW.replace(b"None", b"Known gap"))
+    def test_plain_readme_accepts_independent_fragment_change(self) -> None:
+        self.readme.write_bytes(PREFIX + SUFFIX)
+        self.fragment("zulu")
         done = self.cli("--check")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.readme.read_bytes(), PREFIX + SUFFIX)
+
+    def test_generation_is_deterministic_and_keeps_readme_bytes(self) -> None:
+        self.fragment("zulu")
+        self.fragment("aardvark", ROW.replace(b"alpha", b"aardvark"))
+        self.assertEqual(self.cli("--output", str(self.output)).returncode, 0)
+        first = self.output.read_bytes()
+        self.assertEqual(first, index.HEADER + ROW.replace(b"alpha", b"aardvark") + ROW + ROW)
+        self.assertEqual(self.cli("--output", str(self.output)).returncode, 0)
+        self.assertEqual(self.output.read_bytes(), first)
+        self.assertEqual(self.readme.read_bytes(), PREFIX + SUFFIX)
+
+    def test_output_cannot_replace_readme(self) -> None:
+        done = self.cli("--output", str(self.readme))
         self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("drift", done.stderr)
-
-    def test_manual_edits_are_preserved_and_do_not_require_a_fixed_digest(self) -> None:
-        self.assertEqual(self.cli().returncode, 0)
-        edited = self.readme.read_bytes().replace(b"Manual introduction.", b"Updated manual text.")
-        self.readme.write_bytes(edited)
-        self.assertEqual(self.cli("--check").returncode, 0)
-        self.assertEqual(self.cli().returncode, 0)
-        self.assertEqual(self.readme.read_bytes(), edited)
-
-    def test_distinct_keys_compose_in_key_order(self) -> None:
-        self.fragment("zulu", ROW.replace(b"alpha", b"zulu"))
-        self.fragment("beta", ROW.replace(b"alpha", b"beta"))
-        self.assertEqual(self.cli().returncode, 0)
-        data = self.readme.read_bytes()
-        self.assertLess(data.index(b"`alpha`"), data.index(b"`beta`"))
-        self.assertLess(data.index(b"`beta`"), data.index(b"`zulu`"))
-        self.assertEqual(self.cli("--check").returncode, 0)
+        self.assertEqual(self.readme.read_bytes(), PREFIX + SUFFIX)
 
     def test_same_key_different_fragments_are_rejected(self) -> None:
         self.fragment("alpha", ROW.replace(b"None", b"Contradiction"), filename="beta")
@@ -133,7 +135,9 @@ class StatechartIndexTest(unittest.TestCase):
         row = ROW.replace(b"None", rb"`a\|b` and a\|b")
         self.fragment("alpha", row)
         self.assertEqual(self.cli().returncode, 0)
-        self.assertIn(row, self.readme.read_bytes())
+        self.assertEqual(self.cli("--output", str(self.output)).returncode, 0)
+        self.assertIn(row, self.output.read_bytes())
+        self.output.unlink()
         self.fragment("alpha", ROW.replace(b"None", b"`a|b`"))
         self.assert_rejected("alpha.md")
 
@@ -174,44 +178,187 @@ class StatechartIndexTest(unittest.TestCase):
         (self.fragments / "alpha.md").unlink()
         self.assert_rejected("index.d")
 
-    def test_marker_damage_or_duplication_has_exit_two(self) -> None:
-        valid = self.readme.read_bytes()
+    def test_retired_markers_are_rejected(self) -> None:
+        for retired in (index.BEGIN, index.END, index.BEGIN + index.HEADER + ROW + index.END):
+            with self.subTest(retired=retired):
+                self.readme.write_bytes(PREFIX + retired + SUFFIX)
+                self.assertIn("retired", self.assert_rejected("README.md", status=2))
+
+    def test_legacy_marker_bounds_and_rows_are_validated(self) -> None:
+        valid = PREFIX + index.BEGIN + index.HEADER + ROW + index.END + SUFFIX
+        self.assertEqual(index.legacy_table(valid, self.readme, lambda _: True), index.HEADER + ROW)
         for data in (valid.replace(index.BEGIN, b""), valid.replace(index.END, b""),
                      valid + index.BEGIN, valid + index.END,
-                     PREFIX + index.END + b"stale\n" + index.BEGIN + SUFFIX,
-                     valid.replace(index.BEGIN, b"<!-- STATECHART INDEX:BEGIN-->\n"),
-                     b"prefix " + index.BEGIN + index.END,
-                     index.END + index.BEGIN,
-                     valid + b"<!-- STATECHART INDEX:OTHER -->\n"):
-            with self.subTest(data=data):
-                self.readme.write_bytes(data)
-                self.assert_rejected("README.md", status=2)
+                     index.END + index.BEGIN, b"prefix " + valid[len(PREFIX):]):
+            with self.subTest(data=data), self.assertRaises(index.MarkerError):
+                index.legacy_table(data, self.readme, lambda _: True)
 
-    def test_unresolved_merge_conflicts_inside_or_outside_markers_are_rejected(self) -> None:
-        valid = self.readme.read_bytes()
+    def test_unresolved_manual_merge_conflicts_are_rejected(self) -> None:
         for conflict in (b"<<<<<<< ours\n", b"=======\n", b">>>>>>> theirs\n", b"||||||| base\n",
                          b"=======\r\n"):
-            for data in (conflict + valid, valid + conflict,
-                         valid.replace(b"stale\n", conflict)):
-                with self.subTest(data=data):
-                    self.readme.write_bytes(data)
-                    self.assert_rejected("README.md")
+            with self.subTest(conflict=conflict):
+                self.readme.write_bytes(PREFIX + conflict + SUFFIX)
+                self.assertIn("conflict", self.assert_rejected("README.md"))
+
+
+class StatechartIndexReportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="statechart-report-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.charts = self.root / "docs/statecharts"
+        self.fragments = self.charts / "index.d"
+        self.fragments.mkdir(parents=True)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        (self.charts / "README.md").write_bytes(PREFIX + SUFFIX)
+        report = self.charts / "area/report.md"
+        report.parent.mkdir()
+        report.write_text("# Report\n")
+        self.fragment("alpha")
+        self.base = self.commit("start")
+
+    def git(self, *args, check=True):
+        return subprocess.run(["git", "-C", str(self.root), *args], text=True,
+                              capture_output=True, check=check, timeout=30)
+
+    def fragment(self, key, row=ROW):
+        (self.fragments / f"{key}.md").write_bytes(f"key: {key}\n".encode() + row)
+
+    def commit(self, message):
+        self.git("add", "docs")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def test_pr_merge_of_independent_rows_uses_merge_base_and_keeps_manual_edits(self):
+        self.git("branch", "other")
+        self.fragment("beta")
+        self.first = self.commit("first row")
+        self.git("switch", "-q", "other")
+        self.fragment("gamma")
+        self.fragment("alpha", ROW.replace(b"None", b"changed contract"))
+        introduction = PREFIX.replace(b"Manual introduction.", b"Revised introduction.")
+        (self.charts / "README.md").write_bytes(introduction + SUFFIX)
+        second = self.commit("second row")
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--no-edit", "other")
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        env = {"GITHUB_EVENT_NAME": "pull_request", "GFP_HEAD_SHA": second, "GITHUB_SHA": head,
+               "TEST_LANE_BASELINE_REF": "HEAD^1", "GITHUB_REPOSITORY": "owner/repo"}
+        output = self.root / "result"
+        statechart_index_report.report(self.root, output, env)
+        manifest = json.loads((output / "manifest.json").read_text())
+        self.assertEqual((manifest["base"], manifest["head"]), (self.base, head))
+        self.assertNotEqual(manifest["base"], self.first)
+        self.assertEqual(manifest["sha256"], {
+            name: hashlib.sha256((output / name).read_bytes()).hexdigest()
+            for name in ("base.md", "head.md", "summary.md")
+        })
+        summary = (output / "summary.md").read_text()
+        self.assertIn("Added (2)", summary)
+        self.assertIn("Changed (1)", summary)
+        self.assertIn(f"/blob/{head}/docs/statecharts/index.d/gamma.md", summary)
+        self.assertIn(f"/blob/{head}/docs/statecharts/area/report.md", (output / "head.md").read_text())
+        self.assertIn(f"/blob/{self.base}/docs/statecharts/area/report.md", (output / "base.md").read_text())
+        self.assertEqual((self.charts / "README.md").read_bytes(), introduction + SUFFIX)
+        self.assertEqual(self.git("status", "--porcelain", "--", "docs").stdout, "")
+
+    def test_publish_rejects_changed_head_bytes(self):
+        output = self.root / "modified"
+        head = output / "head.md"
+        original_write = Path.write_bytes
+
+        def write(path, data):
+            return original_write(path, b"stale table\n" if path == head else data)
+
+        with mock.patch.object(Path, "write_bytes", write):
+            with self.assertRaises(ReportError) as error:
+                statechart_index_report.report(self.root, output, {})
+        self.assertEqual(str(error.exception), f"{head}: artifact bytes differ from generated output")
+        self.assertFalse((output / "manifest.json").exists())
+
+    def test_report_cli_rejects_missing_published_head(self):
+        output = self.root / "missing"
+        head = output / "head.md"
+        original_write = Path.write_bytes
+
+        def write(path, data):
+            return len(data) if path == head else original_write(path, data)
+
+        stderr = StringIO()
+        with (mock.patch.object(Path, "write_bytes", write),
+              mock.patch.object(Path, "cwd", return_value=self.root),
+              mock.patch.object(sys, "argv", ["statechart_index_report", str(output)]),
+              mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": self.base}),
+              redirect_stderr(stderr)):
+            self.assertEqual(statechart_index_report.main(), 1)
+        self.assertIn(str(head), stderr.getvalue())
+        self.assertIn(index.RECOVERY, stderr.getvalue())
+        self.assertFalse((output / "manifest.json").exists())
+
+    def test_main_reports_changes_with_self_baseline_and_manual_is_explicit(self):
+        (self.fragments / "alpha.md").unlink()
+        self.fragment("delta")
+        self.commit("replace row")
+        event = self.root / "event.json"
+        event.write_text(json.dumps({"before": self.base, "ref": "refs/heads/main"}))
+        env = {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event),
+               "TEST_LANE_BASELINE_REF": "HEAD", "GFP_BASE_SHA": "HEAD"}
+        output = self.root / "push"
+        statechart_index_report.report(self.root, output, env)
+        summary = (output / "summary.md").read_text()
+        self.assertIn("Added (1)", summary)
+        self.assertIn("Removed (1)", summary)
+        self.assertIn(f"/blob/{self.base}/docs/statecharts/index.d/alpha.md", summary)
+        manual = self.root / "manual"
+        statechart_index_report.report(self.root, manual, {"GITHUB_EVENT_NAME": "workflow_dispatch"})
+        summary = (manual / "summary.md").read_text()
+        self.assertIn("Self check", summary)
+        self.assertNotIn("Added", summary)
+        self.assertEqual((manual / "base.md").read_bytes(), (manual / "head.md").read_bytes())
+        event.write_text(json.dumps({"before": "0" * 40, "ref": "refs/heads/main"}))
+        with self.assertRaisesRegex(ReportError, "previous main SHA"):
+            resolve_comparison(self.root, env)
+
+    def test_manual_readme_conflict_is_not_resolved_by_index_report(self):
+        self.git("branch", "other")
+        readme = self.charts / "README.md"
+        readme.write_bytes(b"first text\n")
+        self.commit("first manual edit")
+        self.git("switch", "-q", "other")
+        readme.write_bytes(b"second text\n")
+        self.commit("second manual edit")
+        self.git("switch", "-q", "main")
+        self.assertEqual(self.git("merge", "--no-edit", "other", check=False).returncode, 1)
+        self.assertIn("UU docs/statecharts/README.md", self.git("status", "--porcelain").stdout)
+        done = subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.charts), "--check"],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("README.md: unresolved merge conflict", done.stderr)
+        self.assertIn(index.RECOVERY, done.stderr)
 
 
 class StatechartIndexCIContract(unittest.TestCase):
-    def test_committed_index_is_clean(self) -> None:
+    def test_committed_index_sources_are_valid(self) -> None:
         done = subprocess.run([sys.executable, str(SCRIPT), "--check"], cwd=ROOT,
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
 
-    def test_required_script_only_shard_runs_drift_and_selected_tests(self) -> None:
+    def test_required_shard_always_checks_sources_and_publishes_report(self) -> None:
         runner = (ROOT / "scripts/ci-script-checks.sh").read_text()
-        self.assertIn('if run_check contracts "Statechart index drift"; then\n'
-                      '"$PYTHON" scripts/ci/statechart_index.py --check\nfi', runner)
+        self.assertIn('if run_check contracts "Statechart index source contract"; then\n'
+                      '"$PYTHON" scripts/ci/statechart_index.py --check\n', runner)
+        self.assertIn('-m scripts.ci.statechart_index_report', runner)
+        for workflow in ("ci-pr.yml", "ci-main.yml"):
+            contracts = (ROOT / ".github/workflows" / workflow).read_text().split("  scripts_contracts:", 1)[1]
+            self.assertIn("GENERATED_ARTIFACT_REPORT_DIR: target/generated-contracts", contracts)
+            self.assertIn("path: target/generated-contracts/statechart-index/", contracts)
         self.assertIn('if run_check contracts "Statechart index generator tests"; then\n'
                       '"$PYTHON" -m unittest tests.test_statechart_index\nfi', runner)
-        self.assertNotIn("Statechart index drift", script_check_inputs.SELF_TEST_INPUTS)
+        self.assertNotIn("Statechart index source contract", script_check_inputs.SELF_TEST_INPUTS)
         for path in ("scripts/ci/statechart_index.py", "tests/test_statechart_index.py",
+                     "scripts/ci/statechart_index_report.py", "scripts/ci/generated_artifact_report.py",
                      "docs/statecharts/index.d/new-key.md", "docs/statecharts/README.md",
                      "docs/statecharts/area/deleted-report.md"):
             env = {**os.environ, "GITHUB_EVENT_NAME": "pull_request",

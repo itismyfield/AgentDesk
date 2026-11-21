@@ -176,8 +176,10 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     let mut spans =
         bridge_latency_spans::BridgeLatencySpans::starting_at(std::time::Instant::now());
     let mut generation = 0;
-    let (mut heartbeat, mut long_run_heartbeat) =
-        (std::time::Instant::now(), std::time::Instant::now());
+    let (mut heartbeat, mut long_run_heartbeat) = (
+        crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter::new(),
+        std::time::Instant::now(),
+    );
 
     let actor_nonce = baseline.turn_nonce.clone();
     let tick_outcome = run_bridge_stream_tick(
@@ -244,7 +246,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
             pending_long_running_open_after_state_save: &mut open_after,
             pending_long_running_retarget_after_state_save: &mut retarget_after,
             long_running_placeholder_active: &mut long_running,
-            last_adk_heartbeat: &mut heartbeat,
+            session_row_writer: &mut heartbeat,
             last_inflight_long_run_heartbeat: &mut long_run_heartbeat,
         },
     )

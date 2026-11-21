@@ -23,6 +23,7 @@ EXCLUDED_PREFIXES = ("docs/generated/",)
 # Untracked outputs built inside a checkout. Docs may name them (saying how to
 # build them), but a Markdown link to one is dead on a fresh clone.
 CHECKOUT_LOCAL = (
+    "docs/statecharts/index.generated.md",
     "docs/generated/module-inventory.md",
     "docs/generated/giant-file-registry.md",
     "dashboard/dist",

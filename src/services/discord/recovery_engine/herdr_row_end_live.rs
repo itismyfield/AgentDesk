@@ -79,9 +79,10 @@ pub(super) async fn end_live(
     if outcome != RecoveryRelayOutcome::Delivered {
         return keep(&row, "retired, notice not delivered");
     }
-    // While the captured turn still holds the channel, so no successor's status can be overwritten
-    // and the reader's late active status finds the row already ended.
+    // Before the settlement wakes the reader, so its late active status finds the row ended.
     disconnect_ended(pool, &observation, &record).await;
+    #[cfg(test)]
+    super::tests::hook("live_before_settle").await;
     let token = turn.token.clone();
     let settled = settle_captured(shared, provider, Some(turn)).await;
     if settled != TerminationResult::Retired {
