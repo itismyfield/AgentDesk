@@ -92,7 +92,7 @@
 
 ## agy
 
-옵션 (a). #8274의 agy → tui_o 착지 및 해당 provider writer readiness 확인을 구경로 삭제의 배포 선행 조건으로 둔다. A01–A06은 그때까지 agy 실행을 그대로 받으며 이후 해당 legacy 분기만 제거한다. D 행 중 agy와 코드를 공유하는 곳은 먼저 범위와 호출자만 검토하고, 착지 전 범용 함수를 삭제하지 않는다. 원격 구현 ref는 `refs/review/i8274-design-1` (`5eb6a8cb65fa365d1408e21fe68363018c85c115`)과 `refs/review/i8274-s1-wip` (`91151eb3b84048e1c4263f9ec13b2fc328c9ea15`)를 확인했다. 범위 가드는 실제 `ProviderKind::Antigravity`/채널 라우팅과 writer 증거를 사용한다. agy가 아닌 비TUI·headless·수동 메시지까지 자르는 provider-wide 가드는 두지 않는다.
+옵션 (a). #8274의 agy → tui_o 착지 및 해당 provider writer readiness 확인을 agy legacy 분기 삭제(B4)의 배포 선행 조건으로 둔다. Claude·Codex 삭제 조각 B0~B3은 이 조건과 독립이다. A01–A06은 그때까지 agy 실행을 그대로 받으며 이후 해당 legacy 분기만 제거한다. D 행 중 agy와 코드를 공유하는 곳은 먼저 범위와 호출자만 검토하고, 착지 전 범용 함수를 삭제하지 않는다. 원격 구현 ref는 `refs/review/i8274-design-1` (`5eb6a8cb65fa365d1408e21fe68363018c85c115`)과 `refs/review/i8274-s1-wip` (`91151eb3b84048e1c4263f9ec13b2fc328c9ea15`)를 확인했다. 범위 가드는 실제 `ProviderKind::Antigravity`/채널 라우팅과 writer 증거를 사용한다. agy가 아닌 비TUI·headless·수동 메시지까지 자르는 provider-wide 가드는 두지 않는다.
 
 ## R1
 
@@ -118,13 +118,13 @@
 | B3 inflight legacy 재생 제거 | D16–D21 | 16 | +75 / −1,255 / −1,180 |
 | B4 agy 분기와 마지막 legacy-only 호출 제거 | A01–A06, #8274 착지 뒤 | 27 | +50 / −650 / −600 |
 
-총 예상 순증 **−2,480**. 출발점은 B0의 호환·검증이며 삭제 조각의 착지는 #8274 이후다. 1,000줄이 넘는 파일은 기존 블록 제거와 호출 교체만 한다. 지우는 함수·import·필드의 마지막 참조는 `rg`와 lint no-growth로 확인한다. 공용 helper를 삭제 조각의 순감에 포함하지 않는다. 구현 diff가 예산을 넘으면 조각을 다시 나눈 뒤 리뷰한다.
+총 예상 순증 **−2,480**. 출발점은 B0의 호환·검증이다. B0~B3은 #8274와 독립이며 B4만 #8274 착지 뒤다. 1,000줄이 넘는 파일은 기존 블록 제거와 호출 교체만 한다. 지우는 함수·import·필드의 마지막 참조는 `rg`와 lint no-growth로 확인한다. 공용 helper를 삭제 조각의 순감에 포함하지 않는다. 구현 diff가 예산을 넘으면 조각을 다시 나눈 뒤 리뷰한다.
 
 ## DoD 개정안
 
 1. Claude·Codex에서 전수표 D 행의 legacy 본문 게시, watcher 복구와 inflight legacy 재생이 제거되고, #8274 착지와 readiness 확인 후 A 행의 agy legacy 분기가 제거된다.
 2. 공용 sweep, FOREIGN 정산, `closed` wake, Herdr row-end와 주기 호출은 현재 모듈에서 계속 작동한다. 현행 receipt·source binding·headless 전송의 호출 경계도 유지한다.
-3. 검증된 재시작 중단 episode마다 정확한 채널에서 끊김 안내가 한 번 보인다. terminal 직전·직후, 두 번의 boot, 경쟁하는 복구 트리거, Discord 성공 뒤 로컬 ACK 손실을 시험한다.
+3. 검증된 재시작 중단 episode마다 정확한 채널의 끊김 안내는 **최대 1회**다(모든 상태). 원격 결과를 확정할 수 있으면 정확히 1회 보이고 `Posted`로 닫힌다. Prepared 뒤 history가 끝내 증명하지 못한 경우(`NotFound`·`Ambiguous`·`Unresolved`)는 미정으로 닫고 두 번째 CREATE를 하지 않으며, 그 안내는 보이지 않을 수 있다. 대기 입력의 인계·진행은 안내 결과를 기다리지 않는다. terminal 직전·직후, 두 번의 boot, 경쟁하는 복구 트리거, Discord 성공 뒤 로컬 ACK 손실, Prepared 뒤 POST 전 중단, history miss 뒤 늦은 성공을 시험한다.
 4. 재시작 전에 수락한 대기 원본은 동일 id·내용·순서를 유지한다. 실제 provider 전달 또는 기존 receipt 정산까지 V2 custody가 이어지며, 회수 가능한 이전 행의 정산 뒤 다음 입력이 한번 시작한다.
 5. `I7651Restart`에서 삭제만 한 모델은 안내 불변식 RED, 수정 모델은 두 불변식과 진행성 GREEN이다. Rust 구현 리뷰에서는 실제 entrypoint에서 각 원인 제거 뮤턴트의 RED와 원복 바이트 일치를 남긴다.
 6. 구경로와의 동등성 증명은 DoD가 아니다. R1~R7과 #8295의 정교한 재시작 복구는 이번 착지 조건에서 제외한다.
@@ -135,14 +135,17 @@
 
 ## 상태 차트
 
-기존 `docs/statecharts/input-single-path/InputOwnership.tla`의 completion-wake 전이와 첫 레그의 `CBSweepInit`·`CBSweepNext`를 재사용했다. 새 `I7651Restart`는 독립 공용 sweep을 그대로 두고 안내 intent/발송/확인과 durable 대기 원본의 모델을 더한다. 동일 채널에 0/1/2개의 중단 episode, 중복 부팅 1회, 응답 없는 원격 발송과 확정 미수락을 검사한다. 안내 불변식은 모든 중간 상태에서 최대 1회와 완료 시 정확히 1회를 동시에 검사한다. 완료를 끝없이 미루는 경우는 `NoticesEventuallyClosed`가 잡는다.
+기존 `docs/statecharts/input-single-path/InputOwnership.tla`의 completion-wake 전이와 첫 레그의 `CBSweepInit`·`CBSweepNext`를 재사용했다. 새 `I7651Restart`는 독립 공용 sweep을 그대로 두고 안내 intent/발송/확인과 durable 대기 원본의 모델을 더한다. 동일 채널에 0/1/2개의 중단 episode, 중복 부팅 1회, 응답 없는 원격 발송과 확정 미수락을 검사한다. B0 반영으로 안내 규칙을 `NoticeAtMostOnce`(모든 상태)와 `ClosedNoticeWasDelivered`(닫힌 안내는 전달됨)로 나눴다. `GiveUp`은 history miss를 종결 미정(`unknown`)으로 두는 B0 처분이며 새 CREATE 권한이 아니다. 완료는 `NoticesEventuallySettled`(전달 또는 미정 종결)로 검사하고, `NoticesEventuallyClosed`(전달로 종결)는 원격 확인이 결정적인 cfg에서만 GREEN이다.
 
-| 경우 | 안내 정확히 1회 | 대기 입력 유실 0 | 다음 입력이 결국 처리된다 |
-|---|---|---|---|
-| 수정 전, legacy만 삭제하고 공유 sweep 유지 (`I7651RestartDeleteOnly`) | **RED** `NoticeExactlyOnce` | GREEN | GREEN |
-| 수정 후, 공유 sweep 유지 (`I7651RestartAfter`) | **GREEN** | **GREEN** | **GREEN** |
-| 공유 sweep 삭제 과거 반례 (`I7651RestartNoSweep`) | GREEN | GREEN. 원본은 대기에 남는다. | **RED** `NextInputEventuallyProcessed` |
-| ACK 손실 뒤 확인 없이 재전송 (`I7651RestartBlindRetry`) | **RED** `NoticeExactlyOnce` | GREEN | GREEN |
-| 확인 없이 대기 원본 폐기 (`I7651RestartDropInput`) | GREEN | **RED** `NoInputLoss` | **RED** `NextInputEventuallyProcessed` |
+| 경우 | 안내 최대 1회 | 닫힌 안내는 전달됨 | 대기 입력 유실 0 | 다음 입력 처리 | 안내 종결(전달·미정) | 전달로 종결 |
+|---|---|---|---|---|---|---|
+| 수정 전, legacy만 삭제하고 공유 sweep 유지 (`I7651RestartDeleteOnly`) | GREEN | **RED** | GREEN | GREEN | GREEN | 검사 안 함 |
+| 수정 후 (`I7651RestartAfter`) | **GREEN** | **GREEN** | **GREEN** | **GREEN** | **GREEN** | 검사 안 함 |
+| 원격 확인 결정적 (`I7651RestartDecisive`) | GREEN | GREEN | GREEN | GREEN | GREEN | **GREEN** |
+| 원격 확인 영구 불가 (`I7651RestartUnknownForever`) | GREEN | GREEN | GREEN | GREEN | GREEN | **RED**(계약상 기대) |
+| history miss 뒤 재생성 (`I7651RestartNotFoundRetry`) | **RED** | **RED** | GREEN | GREEN | RED(2부 상한의 산물) | 검사 안 함 |
+| ACK 손실 뒤 확인 없이 재전송 (`I7651RestartBlindRetry`) | **RED** | **RED** | GREEN | GREEN | GREEN | 검사 안 함 |
+| 공유 sweep 삭제 과거 반례 (`I7651RestartNoSweep`) | GREEN | GREEN | GREEN. 원본은 대기에 남는다. | **RED** | GREEN | 검사 안 함 |
+| 확인 없이 대기 원본 폐기 (`I7651RestartDropInput`) | GREEN | GREEN | **RED** | **RED** | GREEN | 검사 안 함 |
 
-TLC 1.7.4, 5 cfg·18회 기대 일치, 수정 후 모델의 `NoticesEventuallyClosed`도 GREEN이다. 종료를 위한 native idle, 공유 회수, 큐 drive와 정확한 원격 확인이 공정하게 수행되는 범위의 검사다. 모델의 `Resolve`는 확정 효과/미수락을 아는 포트다. Discord history가 언제 완전해지는지, 실제 capture가 모든 중단을 증명하는지, PG·파일 오류 후 복구를 TLC가 대신 검증하지 않는다. Rust 구현의 관련 실측과 삭제 조각의 gate는 DoD 3–5에서 확인한다.
+TLC 1.7.4, 8 cfg의 기대 일치를 `scripts/ci/statecharts_tlc.py`로 확인한다. 종료를 위한 native idle, 공유 회수, 큐 drive와 원격 확인 시도(`Resolve` 또는 `GiveUp`)가 공정하게 수행되는 범위의 검사다. 모델의 `Resolve`는 확정 효과/미수락을 아는 포트다. Discord history가 언제 완전해지는지, 실제 capture가 모든 중단을 증명하는지, PG·파일 오류 후 복구를 TLC가 대신 검증하지 않는다. Rust 구현의 관련 실측과 삭제 조각의 gate는 DoD 3–5에서 확인한다.

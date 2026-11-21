@@ -29,8 +29,9 @@ Prepare(e) ==
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "prepared"]
     /\ UNCHANGED <<vars, boots>>
 
+(* Two copies already break the rule; the bound keeps a mutant's state space finite. *)
 Create(e) ==
-    /\ restartNotices[e].phase = "prepared"
+    /\ restartNotices[e].phase = "prepared" /\ restartNotices[e].copies < 2
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "uncertain", ![e].copies = @ + 1]
     /\ UNCHANGED <<vars, boots>>
 
@@ -39,10 +40,21 @@ MissBeforeCreate(e) ==
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "uncertain", ![e].mayMiss = FALSE]
     /\ UNCHANGED <<vars, boots>>
 
+(* A decisive answer: the exact POST response or a certain non-send. It may never come. *)
 Resolve(e) ==
+    /\ Mut # "unknownForever"
     /\ restartNotices[e].phase = "uncertain"
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase =
          IF restartNotices[e].copies = 0 THEN "owed" ELSE "closed"]
+    /\ UNCHANGED <<vars, boots>>
+
+(* B0 keeps a history miss (NotFound, Ambiguous, Unresolved) as a terminal unknown: it never
+   authorizes another CREATE, so the notice may stay unseen. The mutant re-owes it instead. *)
+GiveUp(e) ==
+    /\ Mut # "decisive"
+    /\ restartNotices[e].phase = "uncertain"
+    /\ restartNotices' = [restartNotices EXCEPT ![e].phase =
+         IF Mut = "notFoundRetry" THEN "owed" ELSE "unknown"]
     /\ UNCHANGED <<vars, boots>>
 
 (* The model's delivery port resolves an uncertain request before permitting
@@ -67,6 +79,7 @@ DropInput ==
 
 RestartNext == Queue \/ Reboot \/ DropInput
         \/ \E e \in Episodes : RecoverNotice(e) \/ Prepare(e) \/ Create(e) \/ MissBeforeCreate(e) \/ Resolve(e)
+            \/ GiveUp(e)
 RestartSpec == RestartInit /\ [][RestartNext]_restartVars
     /\ WF_restartVars(CBLook /\ UNCHANGED <<restartNotices, boots>>)
     /\ WF_restartVars(CBNativeEnds /\ UNCHANGED <<restartNotices, boots>>)
@@ -76,12 +89,17 @@ RestartSpec == RestartInit /\ [][RestartNext]_restartVars
     /\ \A e \in Episodes : WF_restartVars(RecoverNotice(e))
                           /\ WF_restartVars(Prepare(e))
                           /\ WF_restartVars(Create(e))
-                          /\ WF_restartVars(Resolve(e))
+                          /\ WF_restartVars(Resolve(e) \/ GiveUp(e))
 
-NoticeExactlyOnce == \A e \in Episodes :
-    /\ restartNotices[e].copies <= (IF restartNotices[e].interrupted THEN 1 ELSE 0)
-    /\ restartNotices[e].phase = "closed" /\ restartNotices[e].interrupted => restartNotices[e].copies = 1
+(* P2-1: duplicate suppression holds in every state; delivery is claimed only when closed. *)
+NoticeAtMostOnce == \A e \in Episodes :
+    restartNotices[e].copies <= (IF restartNotices[e].interrupted THEN 1 ELSE 0)
+ClosedNoticeWasDelivered == \A e \in Episodes :
+    restartNotices[e].phase = "closed" /\ restartNotices[e].interrupted => restartNotices[e].copies = 1
 NoInputLoss == CB.pending \/ CB.pastes = 1
 NextInputEventuallyProcessed == <>(CB.pastes = 1 /\ ~CB.pending)
 NoticesEventuallyClosed == <>(\A e \in Episodes : restartNotices[e].phase = "closed")
+(* Every intent ends delivered or as a kept unknown; only a decisive port promises closed. *)
+NoticesEventuallySettled ==
+    <>(\A e \in Episodes : restartNotices[e].phase \in {"closed", "unknown"})
 =============================================================================
