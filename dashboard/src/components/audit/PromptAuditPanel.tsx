@@ -1,23 +1,26 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { Check, ChevronDown, Copy } from "lucide-react";
+import { Check, ChevronRight, Copy } from "lucide-react";
 import { useId, useMemo, useState } from "react";
-import { getPromptAudit, type AuditProvider, type PromptSource } from "../../api/promptAudit";
-import { Badge } from "../../kit/free/badge-clean";
+import { getPromptAudit, type AuditOrigin, type AuditProvider, type PromptSection, type PromptSource } from "../../api/promptAudit";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import type { Agent } from "../../types";
+import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RowButton, RuleItem, Well } from "../common/KitPrimitives";
 import { auditState, fullPromptText, sectionLabels, sourceLabel, sourceShares } from "./auditModel";
-import { AUDIT_TEXT_CLASS, AuditSummaryCard, counter, sessionMeta, useCachedCaptions, useCopyFeedback, type AuditDetailProps } from "./AuditDetailFrame";
-import { AUDIT_CARD_CLASS, AuditRequestState } from "./AuditWorkspace";
+import {
+  AUDIT_PRE_CLASS, AuditSummaryCard, counter, FULL_TOUCH_BUTTON_STYLE, sessionMeta, ShareBar, useCachedCaptions, useCopyFeedback,
+  type AuditDetailProps,
+} from "./AuditDetailFrame";
+import { AuditRequestState } from "./AuditWorkspace";
 
 type Tr = (ko: string, en: string) => string;
 
 const PHONE_SECTION_LIMIT = 5;
-const SOURCE_COLOR: Record<PromptSource, string> = {
-  canon_file: "bg-[var(--accent)]",
-  memento: "bg-[var(--info)]",
-  runtime: "bg-[var(--fg-faint)]",
-  conditional: "bg-[var(--warn)]",
+const SOURCE_CSS_COLOR: Record<PromptSource, string> = {
+  canon_file: "var(--accent)",
+  memento: "var(--info)",
+  runtime: "var(--fg-faint)",
+  conditional: "var(--warn)",
 };
 
 // Keyed by agent and provider, so a late answer lands in its own slot and never replaces the open selection.
@@ -35,6 +38,70 @@ export function usePromptCaptions(list: Agent[], isKo: boolean, tr: Tr): (agent:
     const chars = tr(`${count(total)}자`, `${count(total)} chars`);
     return data.origin === "latest_saved" ? `${chars} · ${tr("최근 저장본", "latest saved")}` : chars;
   });
+}
+
+/** Right-hand desktop inspector summarizing source shares, canon logical paths and origin semantics. */
+function PromptSourceInspector({ sections, labels, origin, maskedCount, isKo, tr }: {
+  sections: PromptSection[];
+  labels: string[];
+  origin: AuditOrigin;
+  maskedCount: number;
+  isKo: boolean;
+  tr: Tr;
+}) {
+  const count = counter(isKo);
+  const chars = (value: number) => tr(`${count(value)}자`, `${count(value)} chars`);
+  const shares = sourceShares(sections);
+  const canonRows = sections.map((section, index) => ({ section, label: labels[index] })).filter(({ section }) => section.source === "canon_file");
+
+  return (
+    <aside aria-label={tr("출처 요약", "Source summary")} data-testid="audit-source-summary" className="w-full xl:w-[288px] xl:shrink-0">
+      <KitCard>
+        <div className="px-4 py-3.5 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("출처 요약", "Source summary")}</div>
+        <InspSection>
+          {shares.map((share) => (
+            <KeyValue
+              key={share.source}
+              leading={<i aria-hidden className="block size-2 shrink-0 rounded-[2px]" style={{ background: SOURCE_CSS_COLOR[share.source] }} />}
+              label={sourceLabel(share.source, tr)}
+              num
+            >
+              {chars(share.chars)} · {share.percent}%
+            </KeyValue>
+          ))}
+        </InspSection>
+        {canonRows.length > 0 ? (
+          <InspSection>
+            <Eyebrow>{tr("정본 파일", "Canon files")}</Eyebrow>
+            {canonRows.map(({ section, label }, index) => (
+              <RuleItem key={index} tone="info">
+                <div className="font-medium text-[var(--fg)]">{label}</div>
+                {section.path ? <Cap className="block font-mono [overflow-wrap:anywhere]">{section.path}</Cap> : null}
+              </RuleItem>
+            ))}
+          </InspSection>
+        ) : null}
+        <InspSection>
+          <Eyebrow>{tr("이 화면이 쓰는 값", "What this screen shows")}</Eyebrow>
+          <RuleItem tone={origin === "current_session" ? "ok" : "neutral"}>
+            <Desc className="text-[var(--fg-dim)]">
+              {origin === "current_session"
+                ? tr("지금 열려 있는 세션의 시스템 프롬프트예요.", "System prompt from the live session.")
+                : tr("열린 세션이 없어 최근 저장본을 보여 줘요.", "No live session; showing the latest saved copy.")}
+            </Desc>
+          </RuleItem>
+          {maskedCount > 0 ? (
+            <RuleItem tone="warn">
+              <Desc className="text-[var(--fg-dim)]">{tr(`민감한 값 ${count(maskedCount)}곳을 *** 로 가렸어요.`, `Masked ${count(maskedCount)} sensitive values with ***.`)}</Desc>
+            </RuleItem>
+          ) : null}
+          <RuleItem tone="neutral">
+            <Desc>{tr("세션과 저장본이 모두 없으면 재구성하지 않고 비워 둬요.", "Shown empty without rebuilding when no session or saved copy exists.")}</Desc>
+          </RuleItem>
+        </InspSection>
+      </KitCard>
+    </aside>
+  );
 }
 
 /** One agent's system prompt: head, totals, share by source and the sections in prompt order. */
@@ -66,8 +133,8 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
     return next;
   });
 
-  return (
-    <div className="flex min-w-0 flex-col gap-3" data-testid="audit-prompt-detail" data-state={state}>
+  const mainContent = (
+    <>
       <AuditSummaryCard
         detail={detail}
         label={tr("프롬프트 요약", "Prompt summary")}
@@ -75,7 +142,7 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
         fetching={query.isFetching}
         onRefresh={retry}
         actions={phone ? (
-          <IconButton icon={copyIcon} label={copyLabel} disabled={!sections.length} onClick={copyAll} data-testid="audit-copy" />
+          <IconButton className="min-h-11 min-w-11" icon={copyIcon} label={copyLabel} disabled={!sections.length} onClick={copyAll} data-testid="audit-copy" />
         ) : (
           <Button variant="secondary" size="sm" icon={copyIcon} disabled={!sections.length} onClick={copyAll} data-testid="audit-copy">{copyLabel}</Button>
         )}
@@ -86,75 +153,113 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
         ] : null}
       >
         {data ? (
-          <>
-            <div
-              role="img"
-              aria-label={`${tr("출처별 비율", "Share by source")}: ${shares.map((share) => `${sourceLabel(share.source, tr)} ${share.percent}%`).join(", ")}`}
-              className="flex h-2.5 gap-0.5 overflow-hidden rounded-full"
-              data-testid="audit-share-bar"
-            >
-              {shares.map((share) => <span key={share.source} className={SOURCE_COLOR[share.source]} style={{ flex: `${share.chars} 1 0` }} />)}
-            </div>
-            <ul className="m-0 flex list-none flex-wrap gap-x-3.5 gap-y-1 p-0 text-xs text-th-text-muted">
-              {shares.map((share) => (
-                <li key={share.source} className="flex items-center gap-1.5">
-                  <span aria-hidden className={`size-2 rounded-[2px] ${SOURCE_COLOR[share.source]}`} />
-                  {sourceLabel(share.source, tr)} {chars(share.chars)}
-                </li>
-              ))}
-            </ul>
-          </>
+          <ShareBar
+            compact={phone}
+            testId="audit-share-bar"
+            ariaLabel={`${tr("출처별 비율", "Share by source")}: ${shares.map((share) => `${sourceLabel(share.source, tr)} ${share.percent}%`).join(", ")}`}
+            segments={shares.map((share) => ({
+              key: share.source,
+              value: share.chars,
+              color: SOURCE_CSS_COLOR[share.source],
+              label: `${sourceLabel(share.source, tr)} ${chars(share.chars)}`,
+            }))}
+          />
         ) : null}
       </AuditSummaryCard>
 
       {state !== "ready" ? (
         <AuditRequestState state={state} retrying={query.isFetching} onRetry={retry} tr={tr} />
       ) : (
-        <section aria-label={tr("섹션", "Sections")} className={`${AUDIT_CARD_CLASS} overflow-hidden [&>*+*]:border-t [&>*+*]:border-[var(--line-soft)]`} data-testid="audit-sections">
+        <KitCard as="section" aria-label={tr("섹션", "Sections")} data-testid="audit-sections">
           {visible.map((section, index) => {
             const expanded = open.has(index);
             return (
-              <div key={index} data-testid="audit-section">
+              <div key={index} data-testid="audit-section" className="border-t border-[var(--line-soft)] first:border-t-0">
                 <div className="flex min-w-0 items-center">
-                  <button
-                    type="button"
+                  <RowButton
                     aria-expanded={expanded}
                     aria-controls={expanded ? `${listId}-${index}` : undefined}
+                    selected={expanded}
                     onClick={() => toggle(index)}
-                    className="flex min-h-14 min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-subtle"
+                    className="min-h-14 flex-1 py-2.5"
                   >
-                    <span aria-hidden className={`shrink-0 ${phone ? "size-2 rounded-full" : "h-7 w-1 rounded-sm"} ${SOURCE_COLOR[section.source]}`} />
+                    <i
+                      aria-hidden
+                      className={`block shrink-0 ${phone ? "size-2 rounded-full" : "h-7 w-1 rounded-[2px]"}`}
+                      style={{ background: SOURCE_CSS_COLOR[section.source] }}
+                    />
                     <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2 text-sm font-medium break-keep text-th-text-primary">
+                      <span className="flex flex-wrap items-center gap-2 text-sm leading-5 font-medium break-keep text-[var(--fg)]">
                         {labels[index]}
-                        {section.masked_count ? <Badge tone="neutral">{tr(`가림 ${section.masked_count}`, `${section.masked_count} masked`)}</Badge> : null}
+                        {section.masked_count ? <Chip tone="neutral">{tr(`가림 ${section.masked_count}`, `${section.masked_count} masked`)}</Chip> : null}
                       </span>
-                      <span className="block text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+                      <Cap className="mt-0.5 block leading-5 [overflow-wrap:anywhere]">
                         {sourceLabel(section.source, tr)}
                         {section.path ? <> · <span className="font-mono">{section.path}</span></> : null}
-                      </span>
+                      </Cap>
                     </span>
-                    <span className="shrink-0 text-xs tabular-nums text-th-text-muted">{chars(section.chars)}</span>
-                    <ChevronDown size={16} aria-hidden className={`shrink-0 text-th-text-muted transition-transform motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`} />
-                  </button>
+                    <Cap className="shrink-0 font-display tabular-nums">{chars(section.chars)}</Cap>
+                    <ChevronRight
+                      size={16}
+                      aria-hidden
+                      className={`shrink-0 text-[var(--fg-muted)] transition-transform motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`}
+                    />
+                  </RowButton>
                   {/* A sibling of the row button: the same agent and provider open on the anchor tab. */}
                   {section.source === "memento" ? (
-                    <Button variant="ghost" size="sm" className="mr-2 shrink-0" onClick={onOpenAnchors} data-testid="audit-open-anchors">{tr("앵커 감사", "Audit anchors")}</Button>
+                    <button
+                      type="button"
+                      onClick={onOpenAnchors}
+                      data-testid="audit-open-anchors"
+                      className="mr-2 inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--r-sm)] px-2.5 text-xs leading-4 font-medium text-[var(--accent-fg)] hover:underline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
+                    >
+                      {tr("앵커 감사", "Audit anchors")}
+                    </button>
                   ) : null}
                 </div>
                 {expanded ? (
-                  <pre id={`${listId}-${index}`} className={`mx-4 mb-3 ${AUDIT_TEXT_CLASS}`}>{section.text.replace(/^\n+|\n+$/g, "")}</pre>
+                  <Well className="mx-3 mb-3 p-3 sm:mx-4">
+                    <pre id={`${listId}-${index}`} className={AUDIT_PRE_CLASS}>{section.text.replace(/^\n+|\n+$/g, "")}</pre>
+                  </Well>
                 ) : null}
               </div>
             );
           })}
           {visible.length < sections.length ? (
-            <div className="flex justify-center p-2">
-              <Button variant="ghost" onClick={() => setShowAll(true)}>{tr(`섹션 ${sections.length - visible.length}개 더 보기`, `Show ${sections.length - visible.length} more sections`)}</Button>
-            </div>
+            <Row className="justify-center py-1.5">
+              <Button variant="ghost" style={FULL_TOUCH_BUTTON_STYLE} onClick={() => setShowAll(true)}>
+                {tr(`섹션 ${sections.length - visible.length}개 더 보기`, `Show ${sections.length - visible.length} more sections`)}
+              </Button>
+            </Row>
           ) : null}
-        </section>
+        </KitCard>
       )}
+    </>
+  );
+
+  if (phone) {
+    return (
+      <div className="flex min-w-0 flex-col gap-3" data-testid="audit-prompt-detail" data-state={state}>
+        {mainContent}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 flex-col gap-5 xl:flex-row xl:items-start" data-testid="audit-prompt-detail" data-state={state}>
+      <div className="flex min-w-0 flex-1 flex-col gap-3">
+        {mainContent}
+      </div>
+      {data ? (
+        <PromptSourceInspector
+          sections={sections}
+          labels={labels}
+          origin={data.origin}
+          maskedCount={data.masked_count}
+          isKo={isKo}
+          tr={tr}
+        />
+      ) : null}
     </div>
   );
 }
