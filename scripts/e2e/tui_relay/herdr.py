@@ -360,10 +360,11 @@ def run(driver, scenario, args, client, run_id, result):
     # As on tmux, a skip or pass without the observed mode/class fails a required gate.
     if not args.dry_run and result["status"] != "fail":
         gate = {"scenario_id": str(scenario.get("id"))}
-        (driver._apply_observed_required_agent_mode_gate(
+        # Both run in order, like the tmux early skips, so a class violation is still recorded.
+        driver._apply_observed_required_agent_mode_gate(
             result, required=getattr(args, "required_agent_mode", None), declared=result["agent_mode"], **gate)
-         or driver._apply_observed_required_coverage_class_gate(
-            result, required=getattr(args, "required_coverage_class", None), declared=result["coverage_class"], **gate))
+        driver._apply_observed_required_coverage_class_gate(
+            result, required=getattr(args, "required_coverage_class", None), declared=result["coverage_class"], **gate)
     return result
 
 
@@ -517,6 +518,16 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             return assertions.provider_bot_id(driver.cell_provider(args.cell)) if (
                 step.get("relay_author") == "provider" or "wait_for_provider_hold_state" in step) else None
 
+        def require_absent(ended):
+            nonlocal phase
+            # Provider content, not relay_body: a streaming footer would hide the marker.
+            ingest(client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
+            provider = assertions.provider_bot_id(driver.cell_provider(args.cell))
+            if any(ended in r.get("content", "") for r in window.raw_messages
+                   if str((r.get("author") or {}).get("id") or "") == provider):
+                phase = "inconclusive"
+                raise assertions.AssertionError(f"inconclusive: {ended} posted before or during the follow-up send")
+
         def open_gap(index, marker=None):
             nonlocal gap_token
             remaining = scenario.get("steps", [])[index + 1:]
@@ -556,11 +567,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     prompt = str(step.get("send_prompt", step.get("send_discord_prompt"))).replace("{run_id}", run_id)
                 if step.get("requires_absent"):
                     # A follow-up after the hold already ended proves nothing about busy input.
-                    ingest(client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
-                    ended = str(step["requires_absent"]).replace("{run_id}", run_id)
-                    if any(ended in (assertions.relay_body(r) or "") for r in window.raw_messages):
-                        phase = "inconclusive"
-                        raise assertions.AssertionError(f"inconclusive: {ended} posted before the follow-up was sent")
+                    require_absent(str(step["requires_absent"]).replace("{run_id}", run_id))
                 gap_token = None
                 is_clear = prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]
                 if is_clear:
@@ -576,11 +583,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     driver._ack_send(entry, sent)
                     result["real_provider_contacted"] = True
                     result["agent_mode_actual"] = "real_live"
-                    driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
                     gap_failure = False
                     raise
+                if step.get("requires_absent"):
+                    # The hold may have ended while the send was in flight.
+                    require_absent(str(step["requires_absent"]).replace("{run_id}", run_id))
+                driver.post_send_sleep(step)
                 if is_clear:
                     # Replies to this clear follow its own message id; without one none can be attributed.
                     raw = (sent.get("message_id") or sent.get("id")) if isinstance(sent, dict) else None

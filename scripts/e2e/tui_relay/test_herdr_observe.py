@@ -400,6 +400,7 @@ class HerdrDegradedWaiver(unittest.TestCase):
                  ("hard reset", plain, {"hard_reset_session_each": True}, "fail"),
                  ("destructive skip", dict(plain, destructive=True), {}, "skipped"),
                  ("destructive skip under required live", dict(plain, destructive=True), {"required_coverage_class": "live"}, "fail"),
+                 ("destructive skip under required agent mode", dict(plain, destructive=True), {"required_agent_mode": "real_live"}, "fail"),
                  ("feature skip", dict(plain, requires_features=["absent"]), {}, "skipped"),
                  ("E36 arguments", dict(plain, e36_normal_intake=True), {"reset_before_each": True}, "fail"),
                  ("E-18 composite refusal", dict(plain, id="E-18", herdr_text_stop=True, agent_mode="controlled"),

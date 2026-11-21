@@ -294,7 +294,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--filter",
         default=None,
-        help="Comma-separated scenario ids (exact match, e.g. E-1,E-5).",
+        help="Comma-separated scenario ids (exact match, e.g. E-1,E-5); an id this cell does not run is refused.",
+    )
+    parser.add_argument(
+        "--filter-skip-other-cells",
+        action="store_true",
+        help="Matrix child: skip --filter ids this cell does not run instead of refusing them.",
     )
     parser.add_argument("--transcript-root", type=Path, help="Local provider transcript root for native evidence.")
     parser.add_argument("--output", default=None)
@@ -5439,6 +5444,11 @@ def main() -> int:
         scenarios = [s for s in scenarios if not s.get("e36_normal_intake")]
     if wanted:
         scenarios = [s for s in scenarios if str(s.get("id")) in wanted]
+        # An explicit id this cell does not run would otherwise pass as an empty green sweep.
+        unmatched = sorted(wanted - {str(s.get("id")) for s in scenarios})
+        if unmatched and not args.filter_skip_other_cells:
+            print(f"[e2e] --filter id(s) not applicable to {cell}: {', '.join(unmatched)}", file=sys.stderr)
+            return 2
     print(f"[e2e] {len(scenarios)} scenarios applicable to {cell}")
     if not scenarios:
         print(f"[e2e] WARNING: no scenarios matched cell {cell}", file=sys.stderr)

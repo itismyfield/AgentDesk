@@ -697,8 +697,8 @@ class HerdrStopCases(unittest.TestCase):
             if 'probe.' in text:
                 rows.clear()
                 add(text.split('First output ')[1].split(']')[0].replace('{run_id}', 'run') + ']')
-                if early_done and 'S15C' in text:  # The relay posted the whole hold turn at once.
-                    add('[E2E:S15C:run:HOLD_DONE]')
+                if early_done in (True, 'footer') and 'S15C' in text:  # The relay posted the whole hold turn at once.
+                    add('[E2E:S15C:run:HOLD_DONE]' + ('\n\n-# ⠸ 진행 중' if early_done == 'footer' else ''))
             elif text == '!stop':
                 add(stop.STOPPING + ' 턴은 provider가 유지해요.')
             elif text.startswith('!stop'):
@@ -707,6 +707,8 @@ class HerdrStopCases(unittest.TestCase):
                     add(stop.LATE)
             elif notice:
                 add(notice)
+            if 'FOLLOW' in text and early_done == 'in_flight':  # The hold ended while the follow-up was sent.
+                add('[E2E:S15C:run:HOLD_DONE]')
             if 'FOLLOW' in text and follow:
                 add(text.split('exactly ')[1].replace('{run_id}', 'run'))
             return {'id': '450'}
@@ -729,6 +731,9 @@ class HerdrStopCases(unittest.TestCase):
         self.assertEqual(self.run_e54(notice=dropped)[1][1], 'fail')
         self.assertEqual(self.run_e54(destructive=False)[0]['status'], 'skipped')
         self.assertEqual(self.run_e54(destructive=False, required_coverage_class='live')[0]['status'], 'fail')
-        result, statuses, _ = self.run_e54(early_done=True)
-        self.assertEqual((statuses[1], result['subcases'][1].get('known_gaps')), ('fail', None), result)
-        self.assertIn('inconclusive', result['subcases'][1]['reason'])
+        both = self.run_e54(destructive=False, required_agent_mode='real_live', required_coverage_class='live')[0]
+        self.assertEqual(len(driver.coverage_class_violations([both])), 1, both)
+        for early_done in (True, 'footer', 'in_flight'):
+            result, statuses, _ = self.run_e54(early_done=early_done)
+            self.assertEqual((statuses[1], result['subcases'][1].get('known_gaps')), ('fail', None), result)
+            self.assertIn('inconclusive', result['subcases'][1]['reason'])
