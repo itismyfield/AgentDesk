@@ -277,7 +277,7 @@ fn unscoped_initialization_does_not_read_org() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid: [");
 }
 
-fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub(super) fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, previous) = tests::fixture();
     let home = temp.path().canonicalize().unwrap();
     let home = if quoted {

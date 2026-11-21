@@ -157,6 +157,8 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── test_instance/
+│   │   ├── agy_cell.rs
+│   │   ├── agy_cell_tests.rs
 │   │   ├── api_boundary_tests.rs
 │   │   ├── bound_health_tests.rs
 │   │   ├── environment.rs

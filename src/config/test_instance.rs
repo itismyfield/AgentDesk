@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use serde_json::Value;
 
+mod agy_cell;
 pub(crate) mod environment;
 pub(crate) mod lifecycle;
 
@@ -172,7 +173,10 @@ fn load_instance_declaration(
         "preferred_node_seed_required",
     ];
     if manifest.as_object().is_none_or(|object| {
-        object.len() != keys.len() + usize::from(object.contains_key("claude_login"))
+        object.len()
+            != keys.len()
+                + usize::from(object.contains_key("claude_login"))
+                + usize::from(object.contains_key("agy_login"))
             || keys.iter().any(|key| !object.contains_key(*key))
     }) || manifest["hosts"]
         .as_object()
@@ -238,8 +242,10 @@ fn load_instance_declaration(
     ] {
         receipt.insert(key.into(), manifest.get(key).ok_or_else(rejected)?.clone());
     }
-    if let Some(login) = manifest.get("claude_login") {
-        receipt.insert("claude_login".into(), login.clone());
+    for key in ["claude_login", "agy_login"] {
+        if let Some(login) = manifest.get(key) {
+            receipt.insert(key.into(), login.clone());
+        }
     }
     for key in ["features", "bots", "channels"] {
         receipt.insert(

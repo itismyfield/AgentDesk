@@ -110,6 +110,8 @@ fn run_prepared_with_clock(
     for (key, value) in &prepared.env {
         command.env(key, value);
     }
+    // Inside a test instance the CLI gets only declared env, never the dcserver's own.
+    crate::config::test_instance::environment::configure_child_command(&mut command)?;
     let mut child = command
         .args(&prepared.args)
         .current_dir(&prepared.current_dir)
