@@ -54,6 +54,7 @@ fn native_records(provider: ShadowProvider) -> (Vec<Vec<u8>>, &'static str) {
             ],
             "fc-tool",
         ),
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     }
 }
 

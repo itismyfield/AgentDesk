@@ -1047,6 +1047,7 @@ impl Ports for LivePorts {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return SessionLiveness::Unknown,
         };
         self.scoped(|| {
             let row = crate::services::discord::inflight::load_inflight_state_read_only_result(

@@ -2731,6 +2731,8 @@ src/
 │   │   │   │   │   └── n3bc_tests.rs
 │   │   │   │   ├── scoped_recovery_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── queued_recovery/
+│   │   │   │   └── agy_shadow.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
@@ -4422,6 +4424,7 @@ src/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── agy.rs
 │   │   │   ├── children.rs
 │   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
@@ -4478,6 +4481,8 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
+│   │   │   ├── agy_spool/
+│   │   │   │   └── replay.rs
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
 │   │   │   │   ├── p5a2_projection_tests.rs
@@ -4579,7 +4584,10 @@ src/
 │   │   │   ├── deliver/
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── host/
+│   │   │   │   ├── agy_host/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── agy_host.rs
 │   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs

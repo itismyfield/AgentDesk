@@ -204,6 +204,7 @@ fn proving_session(event: &BindingEvent) -> Option<&str> {
             )
         }
         ShadowProvider::Codex => *cause == BindingCause::Clear,
+        ShadowProvider::Antigravity => false,
     };
     leaves.then(|| match new {
         BindingTarget::Source(source) => source.session_id.as_str(),

@@ -429,6 +429,7 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
                 ShadowProvider::Codex => {
                     serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":"tail","content":[{"type":"output_text","text":"rollover tail"}]}})
                 }
+                ShadowProvider::Antigravity => unreachable!("pane fixture"),
             };
             let mut file = fs::OpenOptions::new()
                 .append(true)

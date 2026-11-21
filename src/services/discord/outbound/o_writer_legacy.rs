@@ -91,6 +91,7 @@ impl LegacyView for LegacyRelay {
         let provider = match binding.provider {
             crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
             crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+            crate::services::tui_o::shadow::ShadowProvider::Antigravity => return None,
         };
         historical_frontier_in(
             dr::read_record(&provider, scope.owner)?,
@@ -258,6 +259,7 @@ fn historical_frontier_in(
     let provider = match binding.provider {
         crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
         crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+        crate::services::tui_o::shadow::ShadowProvider::Antigravity => return None,
     };
     record
         .confirmed_deliveries
