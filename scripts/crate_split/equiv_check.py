@@ -8,8 +8,9 @@
 The first output line is the verdict, `EQUIV_OK class=<move|vis|C>` or
 `EQUIV_FAIL <item>[,<item>...]`, followed by a detail table and line evidence.
 
-  a cargo     `cargo check --workspace --all-targets` at head; also for
-              x86_64-pc-windows-gnu when the diff touches a unix/windows cfg.
+  a cargo     `cargo check --workspace --all-targets` at head; when the diff touches a
+              unix/windows cfg also `cargo check --lib --tests --target x86_64-pc-windows-gnu`
+              in target-win (EQUIV_WIN_TARGET_DIR), with mingw headers for bindgen.
   b class     move: every changed line is moved (`git diff --color-moved=blocks`)
               or a use/mod item, a path-only or visibility-only rewrite, a comment
               or generated docs. vis: only visibility modifiers changed. C: anything
@@ -46,6 +47,7 @@ except ModuleNotFoundError:  # Python < 3.11 falls back to a [features] key scan
 GENERATED = ("ARCHITECTURE.md", "docs/generated/*")
 MANIFESTS = ("Cargo.toml", "*/Cargo.toml", "Cargo.lock")
 WINDOWS_TARGET = "x86_64-pc-windows-gnu"
+MINGW_INCLUDE = "/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32/include"
 OLD_MOVED, NEW_MOVED = "\x1b[35m", "\x1b[36m"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -416,14 +418,16 @@ def run_cargo(repo, head_sha, log_dir, targets):
         return [("host", None, f"worktree is not a clean checkout of {head_sha[:10]} (HEAD {actual[:10]})", 0)]
     os.makedirs(log_dir, exist_ok=True)
     for target in targets:
-        cmd = ["cargo", "check", "--workspace", "--all-targets"]
-        name = "host"
+        cmd, env, name = ["cargo", "check", "--workspace", "--all-targets"], dict(os.environ), "host"
         if target:
-            cmd += ["--target", target]
-            name = target
+            # Same command and cache as the prepush Windows cross check; bindgen needs the mingw headers.
+            cmd, name = ["cargo", "check", "--lib", "--tests", "--target", target], target
+            env.setdefault("CARGO_TARGET_DIR", env.get("EQUIV_WIN_TARGET_DIR", os.path.join(repo, "target-win")))
+            if os.path.isdir(MINGW_INCLUDE):
+                env.setdefault("BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_gnu", f"-I{MINGW_INCLUDE}")
         log = os.path.join(log_dir, f"cargo-check-{name}.log")
         with open(log, "w") as handle:
-            rc = subprocess.run(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT).returncode
+            rc = subprocess.run(cmd, cwd=repo, env=env, stdout=handle, stderr=subprocess.STDOUT).returncode
         with open(log, errors="replace") as handle:
             warnings = sum(1 for line in handle if line.startswith("warning"))
         results.append((name, rc, log, warnings))
