@@ -449,8 +449,15 @@ async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let channel = 7_340_801_u64;
-    let insert = crate::db::agents::insert_agent_channels_for_tests;
-    insert(&pool, "answer-agent", Some(&channel.to_string()), None).await;
+    // The production agy binding: the primary channel alone, provider antigravity.
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id)
+         VALUES ('answer-agent', 'answer-agent', 'antigravity', $1)",
+    )
+    .bind(channel.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = router_with(crate::config::Config::default(), Some(pool.clone()));
     let turn = |message: u64| format!("discord:{channel}:{message}");
 
@@ -464,14 +471,12 @@ async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
     assert_eq!(answer, "The answer is 42.");
 
     // Not ended yet: the transcript may already hold the body, but no terminal is reported.
-    write_row("claude", channel, &running_row(10, &["G-running"]));
+    write_row("antigravity", channel, &running_row(10, &["G-running"]));
     persist_transcript(&pool, &turn(10), "antigravity", &[&answer]).await;
     assert_eq!(ask_answer(&app, "G-running").await["terminal"], Value::Null);
-    std::fs::remove_file(
-        crate::config::runtime_root()
-            .unwrap()
-            .join(format!("runtime/discord_inflight/claude/{channel}.json")),
-    )
+    std::fs::remove_file(crate::config::runtime_root().unwrap().join(format!(
+        "runtime/discord_inflight/antigravity/{channel}.json"
+    )))
     .unwrap();
 
     commit_receipt(
@@ -576,6 +581,30 @@ async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
         body["terminal"]["final_answer_text"], "The answer is 42.",
         "{body}"
     );
+    // A duplicate archived record: the newest one answers. A live record outranks both.
+    let reinsert = |table: &'static str, id: i64, body: Value| {
+        let pool = pool.clone();
+        let sql = format!(
+            "INSERT INTO {table} (id, turn_id, channel_id, provider, events_json)
+             VALUES ($1, $2, $3, 'antigravity', $4)"
+        );
+        let events = json!([{"kind": "result", "status": "success", "content": body}]);
+        async move {
+            let query = sqlx::query(&sql).bind(id).bind(turn(10));
+            let query = query.bind(channel.to_string()).bind(events);
+            query.execute(&pool).await.unwrap();
+        }
+    };
+    reinsert(
+        "session_transcripts_archive",
+        9_000_002,
+        json!("newer archive"),
+    )
+    .await;
+    let text = |body: Value| body["terminal"]["final_answer_text"].clone();
+    assert_eq!(text(ask_answer(&app, "G-running").await), "newer archive");
+    reinsert("session_transcripts", 9_000_001, json!("live record")).await;
+    assert_eq!(text(ask_answer(&app, "G-running").await), "live record");
 
     pool.close().await;
     db.drop().await;
