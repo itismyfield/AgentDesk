@@ -1517,6 +1517,8 @@ session-lifecycle/HerdrMissingBoundBeforeEffectActive.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundBeforeEffectIdle.cfg	HerdrMissingBound	-	InputResolves,WatchResolves
 session-lifecycle/HerdrMissingBoundBeforeInput.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeNoticeRetry.cfg	HerdrMissingBound	NoticeOnce	InputResolves,ReasonDelivered
+session-lifecycle/HerdrMissingBoundBeforeRegistration.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
+session-lifecycle/HerdrMissingBoundBeforeReobserveDue.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
 session-lifecycle/HerdrMissingBoundBeforeRestart.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeRestored.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeUnknown.cfg	HerdrMissingBound	NoIdleHeld	InputResolves
@@ -1532,6 +1534,8 @@ session-lifecycle/HerdrMissingBoundFixedLaunchFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNonceRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNoticeRetry.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedReboot.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedRegistration.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedReobserveDue.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRepairFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestart.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestored.cfg	HerdrMissingBound	-	-
@@ -1539,6 +1543,8 @@ session-lifecycle/HerdrMissingBoundFixedRunning.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedTerminate.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedUnknown.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundHoldsProvenRefusal.cfg	HerdrMissingBound	-	RegistrationResolves
+session-lifecycle/HerdrMissingBoundNoRegistrationWake.cfg	HerdrMissingBound	-	RegistrationResolves
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
