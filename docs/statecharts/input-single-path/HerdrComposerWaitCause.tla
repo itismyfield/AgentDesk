@@ -75,6 +75,18 @@ Init ==
     /\ moved = (Own /\ Scenario # "own_screen")
     /\ restarts = 0
 
+\* watched.rs `expired`: a moved transcript whose windows end on a screen showing no turn is Refused;
+\* an unmoved one is Retained, whatever its screen shows ("UnprovenTurn" names a turn on it).
+\* U (composer.rs `own_turn`): either trace of the session's own turn waits as "OwnTurn".
+UnprovenCause ==
+    IF /\ Policy = "U"
+       /\ \/ moved /\ Mutant # "RefuseMoved"
+          \/ screen = "turn" /\ Mutant # "RetainScreen"
+    THEN "OwnTurn"
+    ELSE IF moved THEN "Refused"
+    ELSE IF screen = "turn" THEN "UnprovenTurn"
+    ELSE "Unproven"
+
 \* The cause `expired` names, in its own branch order: no source, open fence, then the observed
 \* proof whose screen never let the composer reserve.
 \* Before S0b a dialog over the composer read Unread and ended as an observed proof's wait.
@@ -87,18 +99,6 @@ CauseOf ==
     ELSE IF fence = "open" THEN "Fenced"
     ELSE IF ~proved THEN UnprovenCause
     ELSE "Observed"
-
-\* watched.rs `expired`: a moved transcript whose windows end on a screen showing no turn is Refused;
-\* an unmoved one is Retained, whatever its screen shows ("UnprovenTurn" names a turn on it).
-\* U (composer.rs `own_turn`): either trace of the session's own turn waits as "OwnTurn".
-UnprovenCause ==
-    IF /\ Policy = "U"
-       /\ \/ moved /\ Mutant # "RefuseMoved"
-          \/ screen = "turn" /\ Mutant # "RetainScreen"
-    THEN "OwnTurn"
-    ELSE IF moved THEN "Refused"
-    ELSE IF screen = "turn" THEN "UnprovenTurn"
-    ELSE "Unproven"
 
 \* The composer takes keys: an empty one, or one under an answer that only names a footer.
 Clear == screen \in {"empty", "overlay"}
