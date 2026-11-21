@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 mod durable_ancestors;
 pub(crate) mod durable_publish;
+pub(crate) mod usage_footer;
 pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };

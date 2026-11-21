@@ -4,6 +4,7 @@
 pub mod activation;
 pub mod actor;
 pub mod adoption;
+pub(crate) mod agy_delivery;
 pub mod binding;
 pub(crate) mod boot;
 pub mod codex_adoption;
@@ -93,6 +94,9 @@ pub enum PostOutcome {
 /// Discord operations used for guarded sends and bounded history confirmation.
 pub trait DiscordPort: Send + Sync + 'static {
     fn bot_id(&self) -> u64;
+    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
+        None
+    }
     /// The first poll runs under the ownership gate and starts the request; the future owns
     /// everything it needs.
     fn post(

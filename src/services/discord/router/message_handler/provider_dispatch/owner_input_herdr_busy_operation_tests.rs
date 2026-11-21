@@ -87,6 +87,7 @@ fn an_observed_busy_herdr_front_uses_the_common_operation_once() {
     let turn = StreamingTurn {
         pool: Some(&pool),
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: PROMPT,

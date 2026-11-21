@@ -43,6 +43,7 @@ mod text_commands;
 mod tmux_recreate;
 mod tool_call;
 mod tui_passthrough;
+mod usage_footer;
 
 pub(super) const STOPPING_RESPONSE: &str = "중지하고 있어요...";
 pub(super) const ALREADY_STOPPING_RESPONSE: &str = "이미 중지 중이에요.";
@@ -113,6 +114,7 @@ pub(super) use system_prompt::cmd_system_prompt;
 pub(in crate::services::discord) use text_commands::handle_text_command;
 pub(super) use tool_call::cmd_tool_call;
 pub(super) use tui_passthrough::{cmd_compact, cmd_effort};
+pub(super) use usage_footer::cmd_usage_footer;
 
 #[cfg(test)]
 mod response_wording_tests {

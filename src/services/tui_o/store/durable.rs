@@ -152,6 +152,8 @@ pub(crate) mod fault {
     pub(crate) enum Step {
         /// A synced append that first writes none, half or all of its bytes.
         Append(Keep),
+        /// Synchronizing the agy segment before publishing its frontier.
+        AgySegmentSync,
         /// A temp file written for a create or a replace.
         Write,
         /// The directory sync of a replace, after its rename already published the new file.
