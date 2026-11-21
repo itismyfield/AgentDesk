@@ -613,11 +613,10 @@ fn bad_request_json(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(error_json(message)))
 }
 
-/// A pane named for a provider other than Claude, whose composer the Claude reader cannot read.
+/// A pane recorded for a provider other than Claude, whose composer the Claude reader cannot read.
 fn foreign_provider_pane(session_name: &str) -> bool {
-    use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
-    parse_provider_and_channel_from_tmux_name(session_name)
-        .is_some_and(|(provider, _)| provider != ProviderKind::Claude)
+    use crate::services::provider::{ProviderKind, session_source::tmux_session_provider};
+    tmux_session_provider(session_name).is_some_and(|provider| provider != ProviderKind::Claude)
 }
 
 /// Nothing was sent: the pane protects a person's draft, so the caller keeps the input.

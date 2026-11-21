@@ -291,7 +291,7 @@
 | `POST` | `/api/sessions/{session_key}/force-kill` | `dispatched_sessions::force_kill_session` | `src/server/routes/dispatched_sessions.rs:116` | `src/server/routes/domains/runtime.rs:78` |
 | `POST` | `/api/sessions/{session_key}/kill-tmux` | `dispatched_sessions::kill_tmux_session` | `src/server/routes/dispatched_sessions.rs:132` | `src/server/routes/domains/runtime.rs:82` |
 | `POST` | `/api/sessions/{session_key}/reconcile-stale-turn` | `dispatched_sessions::reconcile_stale_turn` | `src/server/routes/dispatched_sessions.rs:167` | `src/server/routes/domains/runtime.rs:86` |
-| `POST` | `/api/sessions/{session_key}/resume-previous` | `dispatched_sessions::resume_previous_session` | `src/server/routes/dispatched_sessions.rs:243` | `src/server/routes/domains/runtime.rs:90` |
+| `POST` | `/api/sessions/{session_key}/resume-previous` | `dispatched_sessions::resume_previous_session` | `src/server/routes/dispatched_sessions.rs:248` | `src/server/routes/domains/runtime.rs:90` |
 | `GET` | `/api/settings` | `settings::get_settings` | `src/server/routes/settings.rs:17` | `src/server/routes/domains/admin.rs:73` |
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:27` | `src/server/routes/domains/admin.rs:73` |
 | `GET` | `/api/settings/config` | `settings::get_config_entries` | `src/server/routes/settings.rs:40` | `src/server/routes/domains/admin.rs:77` |

@@ -652,4 +652,18 @@ RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
 RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
 SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
 RestartKeepsDurableIdentity == Naming!RestartKeepsDurableIdentity
+
+\* Raw session-key input on the registered row: stop, cleanup, resume and reconcile entry points.
+NamingRawAlias == Naming!RawNext("fixed") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingRawAliasParsed == Naming!RawNext("parse-alias") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingRawAliasProviderDefault == Naming!RawNext("provider-default") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingRawAliasUnnormalized == Naming!RawNext("no-normalize") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingRawAliasGcByAlias == Naming!RawNext("gc-alias") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+RawAliasSpec == NamingInit /\ [][NamingRawAlias]_allVars /\ WF_allVars(NamingRawAlias)
+RawStopEndsCurrent == Naming!RawStopEndsCurrent
+RawMissNeedsRace == Naming!RawMissNeedsRace
+RawAliasReachesRow == Naming!RawAliasReachesRow
+RawProviderFromRecord == Naming!RawProviderFromRecord
+GcKeepsLive == Naming!GcKeepsLive
+RawSettles == Naming!RawSettles
 ====

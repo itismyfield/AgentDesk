@@ -49,40 +49,56 @@ pub(super) fn routable_unwatched_sessions(
     watcher_present: impl Fn(ChannelId) -> bool,
     already_seen: &HashSet<ChannelId>,
 ) -> Vec<RoutableUnwatchedSession> {
+    use crate::services::provider::session_source::tmux_session_provider;
+    routable_unwatched_sessions_reading(
+        provider,
+        live_sessions,
+        tui_binding_kind,
+        authoritative_owner,
+        watcher_present,
+        already_seen,
+        tmux_session_provider,
+    )
+}
+
+/// [`routable_unwatched_sessions`] over a given provider reader. The reader can ask tmux, so
+/// it runs last: a session with no binding, no owner or a live watcher never reaches it.
+fn routable_unwatched_sessions_reading(
+    provider: &ProviderKind,
+    live_sessions: &[String],
+    tui_binding_kind: impl Fn(&str) -> Option<RuntimeHandoffKind>,
+    authoritative_owner: impl Fn(&str) -> Option<ChannelId>,
+    watcher_present: impl Fn(ChannelId) -> bool,
+    already_seen: &HashSet<ChannelId>,
+    session_provider: impl Fn(&str) -> Option<ProviderKind>,
+) -> Vec<RoutableUnwatchedSession> {
     let Some(expected_kind) = tui_runtime_kind_for(provider) else {
         return Vec::new();
     };
     let mut seen = already_seen.clone();
     let mut candidates = Vec::new();
     for tmux_session in live_sessions {
-        if !session_belongs_to_provider(provider, tmux_session) {
-            continue;
-        }
         if tui_binding_kind(tmux_session) != Some(expected_kind) {
             continue;
         }
         let Some(channel_id) = authoritative_owner(tmux_session) else {
             continue;
         };
-        if watcher_present(channel_id) {
+        if watcher_present(channel_id) || seen.contains(&channel_id) {
             continue;
         }
-        if !seen.insert(channel_id) {
+        // One host runs Claude and Codex sessions side by side and each provider's watchdog
+        // pass sweeps only its own.
+        if session_provider(tmux_session).as_ref() != Some(provider) {
             continue;
         }
+        seen.insert(channel_id);
         candidates.push(RoutableUnwatchedSession {
             channel_id,
             tmux_session: tmux_session.clone(),
         });
     }
     candidates
-}
-
-/// One host runs Claude and Codex sessions side by side and each provider's
-/// watchdog pass sweeps only its own.
-fn session_belongs_to_provider(provider: &ProviderKind, tmux_session: &str) -> bool {
-    crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session)
-        .is_some_and(|(session_provider, _)| &session_provider == provider)
 }
 
 /// PURE: one WARN per absence episode, not one per 30 s tick.
@@ -112,23 +128,33 @@ pub(super) async fn observe_routable_unwatched_tui_sessions(
     else {
         return 0;
     };
-    let candidates = routable_unwatched_sessions(
-        provider,
-        &live_sessions,
-        |tmux_session| {
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session)
-                .map(|binding| binding.runtime_kind)
-        },
-        |tmux_session| {
-            runtimes.iter().find_map(|runtime| {
-                runtime
-                    .tmux_watchers
-                    .owner_channel_for_tmux_session(tmux_session)
-            })
-        },
-        |channel_id| runtime_owning_watcher(runtimes, channel_id).is_some(),
-        watcher_derived,
-    );
+    // The arming decision leaves the executor too: a bound session's provider can ask tmux.
+    let (pass_provider, pass_runtimes) = (provider.clone(), runtimes.to_vec());
+    let pass_seen = watcher_derived.clone();
+    let armed = tokio::task::spawn_blocking(move || {
+        let runtimes = pass_runtimes.as_slice();
+        routable_unwatched_sessions(
+            &pass_provider,
+            &live_sessions,
+            |tmux_session| {
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session)
+                    .map(|binding| binding.runtime_kind)
+            },
+            |tmux_session| {
+                runtimes.iter().find_map(|runtime| {
+                    runtime
+                        .tmux_watchers
+                        .owner_channel_for_tmux_session(tmux_session)
+                })
+            },
+            |channel_id| runtime_owning_watcher(runtimes, channel_id).is_some(),
+            &pass_seen,
+        )
+    })
+    .await;
+    let Ok(candidates) = armed else {
+        return 0;
+    };
     let mut absent = 0usize;
     for candidate in candidates {
         if observe_routable_unwatched_session(provider, &candidate, now_unix_secs) {
@@ -369,6 +395,37 @@ mod tests {
             .is_empty(),
             "no TUI runtime means no idle relay to lose"
         );
+    }
+
+    /// Ten personal sessions and a watched one cost no provider read; the one bound,
+    /// unwatched session costs exactly one.
+    #[test]
+    fn only_a_bound_unwatched_session_has_its_provider_read() {
+        let mut sessions: Vec<String> = (0..10).map(|n| format!("work-notes-{n}")).collect();
+        sessions.extend([session("스마트홈-cc"), session("스마트홈-watched")]);
+        let reads = std::cell::RefCell::new(Vec::new());
+        let armed = routable_unwatched_sessions_reading(
+            &ProviderKind::Claude,
+            &sessions,
+            |name| {
+                name.starts_with("스마트홈")
+                    .then_some(RuntimeHandoffKind::ClaudeTui)
+            },
+            |name| match name {
+                "스마트홈-cc" => Some(ChannelId::new(ADK_CC_CHANNEL)),
+                "스마트홈-watched" => Some(ChannelId::new(ADK_CC_CHANNEL + 1)),
+                _ => None,
+            },
+            |channel_id| channel_id.get() != ADK_CC_CHANNEL,
+            &HashSet::new(),
+            |name| {
+                reads.borrow_mut().push(name.to_string());
+                Some(ProviderKind::Claude)
+            },
+        );
+        assert_eq!(reads.into_inner(), vec!["스마트홈-cc".to_string()]);
+        assert_eq!(armed.len(), 1);
+        assert_eq!(armed[0].tmux_session, "스마트홈-cc");
     }
 
     #[test]

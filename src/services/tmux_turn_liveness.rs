@@ -64,8 +64,8 @@ pub(crate) fn provider_session_is_proven_idle_under_authority(
     recover_codex: impl FnOnce() -> Result<std::path::PathBuf, Option<serde_json::Value>>,
 ) -> Result<(), IdlePreserved> {
     let tmux_session_name = authority.session();
-    let Some((provider, _)) =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    let Some(provider) =
+        crate::services::provider::session_source::tmux_session_provider(tmux_session_name)
     else {
         return Err(("provider_unknown", None));
     };
