@@ -10,6 +10,7 @@ import dataclasses
 
 import json
 import math
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -28,11 +29,53 @@ MESSAGE_FETCH_MIN_RETRY_DELAY_S = 0.1
 MESSAGE_FETCH_BODY_LIMIT = 512
 
 
+class FetchTransportError(RuntimeError):
+    """A message lookup that got no usable answer: URL error or HTTP 5xx."""
+
+
+# Lookup failures a wait loop retries until its own step deadline.
+FETCH_TRANSPORT_ERRORS = (TimeoutError, socket.timeout, FetchTransportError)
+
+
+class FetchTransportTimeout(RuntimeError):
+    """The step deadline passed while the latest message lookups failed in transport."""
+
+    def __init__(self, failures: int, last: BaseException, observed: list[dict[str, Any]]):
+        super().__init__(f"unobserved: fetch transport timeout ({failures} failures, "
+                         f"last={type(last).__name__}: {last})")
+        self.observed = observed
+
+
+class TransportRetry:
+    """Lets a wait loop skip failed lookups and report them only if the deadline ends on one."""
+
+    def __init__(self) -> None:
+        self.failures = 0
+        self.pending: BaseException | None = None
+
+    def fetch(self, lookup):
+        try:
+            rows = lookup()
+        except FETCH_TRANSPORT_ERRORS as error:
+            self.failures += 1
+            self.pending = error
+            return None
+        self.pending = None
+        return rows
+
+    def raise_if_unobserved(self, observed: list[dict[str, Any]]) -> None:
+        # A later successful lookup reads the whole fixed window, so only a failing tail is unobserved.
+        if self.pending is not None:
+            raise FetchTransportTimeout(self.failures, self.pending, observed)
+
+
 def _fetch_error(status: int | str, payload: str, reason: str) -> RuntimeError:
     excerpt = repr(payload[:MESSAGE_FETCH_BODY_LIMIT])[:MESSAGE_FETCH_BODY_LIMIT]
     if len(payload) > MESSAGE_FETCH_BODY_LIMIT:
         excerpt += "..."
-    return RuntimeError(f"fetch_messages observed HTTP {status}: {reason}; body={excerpt}")
+    server_error = isinstance(status, int) and 500 <= status <= 599
+    return (FetchTransportError if server_error else RuntimeError)(
+        f"fetch_messages observed HTTP {status}: {reason}; body={excerpt}")
 
 
 def _fetch_retry_delay(headers, body: Any) -> float:
@@ -353,7 +396,7 @@ class DiscordClient:
                 with error:
                     status, headers, raw = error.code, error.headers, error.read()
             except urllib.error.URLError as error:
-                raise RuntimeError(f"fetch_messages URL error: {error}") from error
+                raise FetchTransportError(f"fetch_messages URL error: {error}") from error
             payload = raw.decode("utf-8", "replace")
             try:
                 body = json.loads(raw)
@@ -445,9 +488,13 @@ class DiscordClient:
         observed_by_id: dict[str, dict[str, Any]] = {}
         found: dict[str, Any] | None = None
         poll = 0
+        retry = TransportRetry()
         while time.monotonic() < deadline and found is None:
             poll += 1
-            messages = self.fetch_messages(channel_id, after_id=after_id, limit=100)
+            messages = retry.fetch(lambda: self.fetch_messages(channel_id, after_id=after_id, limit=100))
+            if messages is None:
+                time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
+                continue
             messages = sorted(messages, key=lambda m: int(m.get("id", "0")))
             new_or_updated_messages: list[dict[str, Any]] = []
             for message in messages:
@@ -480,6 +527,8 @@ class DiscordClient:
                 f"label={debug_label!r} after_id={after_id!r} "
                 f"observed_total={len(observed)}"
             )
+        if found is None:
+            retry.raise_if_unobserved(observed)
         return found, observed
 
 

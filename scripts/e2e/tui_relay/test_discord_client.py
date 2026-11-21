@@ -612,6 +612,26 @@ class DiscordClientFetchMessages(unittest.TestCase):
         for call in self.urlopen.call_args_list:
             self.assertTrue(call.args[0].full_url.endswith("limit=100&after=9"))
 
+    def test_wait_retries_lookup_transport_failures_within_the_step_deadline(self):
+        marker = {"id": "10", "content": "[E2E:T2]"}
+        wait = lambda: self.client.wait_for_message(  # noqa: E731
+            "channel", predicate=lambda m: m["content"] == "[E2E:T2]", after_id="9", timeout_s=75, poll_interval_s=5)
+        for failure in (TimeoutError("timed out"), urllib.error.URLError("refused"), self.http_error({}, status=504)):
+            with self.subTest(failure=failure):
+                self.urlopen.side_effect = [failure, _Response([marker])]
+                self.assertEqual(wait()[0], marker)
+
+        def stalled(*_args, **_kwargs):
+            self.advance(15)
+            raise TimeoutError("timed out")
+        start, self.urlopen.side_effect = self.now, stalled
+        with self.assertRaisesRegex(RuntimeError, r"^unobserved: fetch transport timeout \(4 failures, last=TimeoutError: timed out\)$"):
+            wait()
+        self.assertGreaterEqual(self.now - start, 75)
+        # A successful lookup after the failures read the whole window, so absence is observed.
+        self.urlopen.side_effect = [TimeoutError("timed out")] + [_Response([])] * 15
+        self.assertEqual(wait(), (None, []))
+
     def test_post_operations_do_not_retry_rate_limits(self):
         client = DiscordClient(
             base_url="http://offline.invalid", handoff_to_agent="worker", handoff_from_agent="driver",

@@ -268,7 +268,8 @@ def run_cell(
     if getattr(args, "herdr_status_bin", None):
         cmd.extend(["--herdr-status-bin", args.herdr_status_bin])
     if args.filter:
-        cmd.extend(["--filter", args.filter])
+        # The matrix sends one filter to every cell and judges cells by their own pass status.
+        cmd.extend(["--filter", args.filter, "--filter-skip-other-cells"])
     if args.dry_run:
         cmd.append("--dry-run")
     if args.required_agent_mode:
