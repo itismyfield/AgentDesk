@@ -23,6 +23,15 @@ campaign-execution/CampaignApprovalGateNoTargetHead.cfg	CampaignApprovalGate	NoW
 campaign-execution/CampaignApprovalGateNoTargetIdentity.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateNoTargetKind.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateOmitted.cfg	CampaignApprovalGate	OmittedEditNeverClearsGate	-
+campaign-execution/CampaignDeployPermit.cfg	CampaignDeployPermit	-	-
+campaign-execution/CampaignDeployPermitNoAcceptance.cfg	CampaignDeployPermit	CompleteNeedsAcceptance	-
+campaign-execution/CampaignDeployPermitNoApproval.cfg	CampaignDeployPermit	NoStartWithoutApproval	-
+campaign-execution/CampaignDeployPermitNoJournal.cfg	CampaignDeployPermit	NoDuplicateStart	-
+campaign-execution/CampaignDeployPermitNoStartDeadline.cfg	CampaignDeployPermit	-	ApprovedSettles
+campaign-execution/CampaignDeployPermitNoStop.cfg	CampaignDeployPermit	NoStartAfterStop	-
+campaign-execution/CampaignDeployPermitNoWitnessDeadline.cfg	CampaignDeployPermit	-	StartedSettles
+campaign-execution/CampaignDeployPermitStaleHead.cfg	CampaignDeployPermit	ExactApprovedHead	-
+campaign-execution/CampaignDeployPermitUnknownWitness.cfg	CampaignDeployPermit	OnlyWitnessedConfirm	-
 campaign-execution/CampaignDeployment.cfg	CampaignDeployment	-	-
 campaign-execution/CampaignDeploymentBefore.cfg	CampaignDeployment	OnlyWitnessedSource	-
 campaign-execution/CampaignDeploymentNoDeadline.cfg	CampaignDeployment	-	ObservationSettles
