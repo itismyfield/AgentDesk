@@ -62,18 +62,8 @@ pub(super) fn delivery_options(
             None
         },
         image_attachment: attachment,
-        suppress_push: suppresses_push(row),
         ..Default::default()
     })
-}
-
-/// The secretary-channel push decision for this row, shared by every outbox delivery shape.
-fn suppresses_push(row: &PendingMessageOutboxRow) -> bool {
-    use crate::services::discord::outbound::notification_policy as policy;
-    policy::live_suppresses_target_push(
-        &row.target,
-        policy::outbox_class(&row.source, row.reason_code.as_deref()),
-    )
 }
 
 async fn deliver_with_bot(
@@ -148,7 +138,18 @@ async fn deliver_with_bot(
     .await
 }
 
+/// Every post this row makes is judged by its class against the channel its target resolves to.
 pub(super) async fn deliver(
+    registry: &HealthRegistry,
+    pg_pool: &PgPool,
+    row: &PendingMessageOutboxRow,
+) -> (String, String) {
+    use crate::services::discord::outbound::notification_policy as policy;
+    let class = policy::outbox_class(&row.source, row.reason_code.as_deref());
+    policy::scoped(class, deliver_row(registry, pg_pool, row)).await
+}
+
+async fn deliver_row(
     registry: &HealthRegistry,
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,

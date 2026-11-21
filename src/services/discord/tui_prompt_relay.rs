@@ -375,10 +375,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
             return;
         };
-        match super::http::dispatch_channel_message(
-            &notify_http,
-            channel_id,
-            serenity::CreateMessage::new().content(note),
+        match crate::services::discord::outbound::notification_policy::progress(
+            super::http::dispatch_channel_message(
+                &notify_http,
+                channel_id,
+                serenity::CreateMessage::new().content(note),
+            ),
         )
         .await
         {
@@ -563,10 +565,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
             message_id
         } else {
-            match super::http::dispatch_channel_message(
-                &notify_http,
-                channel_id,
-                serenity::CreateMessage::new().content(content),
+            match crate::services::discord::outbound::notification_policy::progress(
+                super::http::dispatch_channel_message(
+                    &notify_http,
+                    channel_id,
+                    serenity::CreateMessage::new().content(content),
+                ),
             )
             .await
             {

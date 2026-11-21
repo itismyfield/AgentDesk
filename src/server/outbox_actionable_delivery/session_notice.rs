@@ -84,7 +84,6 @@ async fn deliver_marked(
         trusted_internal_outbox: true,
         channel_owner_provider: Some(provider.clone()),
         image_attachment: attachment,
-        suppress_push: super::suppresses_push(row),
         ..Default::default()
     };
     let content = if crate::services::message_outbox::is_non_turn_operational_alert(

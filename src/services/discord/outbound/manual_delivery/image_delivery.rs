@@ -71,7 +71,7 @@ impl SerenityManualOutboundClient {
         let file = serenity::CreateAttachment::bytes(attachment.data.to_vec(), attachment.filename);
         self.post_attachment(
             channel,
-            self.message()
+            CreateMessage::new()
                 .content(content)
                 .add_file(file)
                 .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))

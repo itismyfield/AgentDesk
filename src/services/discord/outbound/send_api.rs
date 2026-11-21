@@ -148,10 +148,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
     let dm_delivery_id = request.delivery_id();
 
     match deliver_manual_dm_notification(
-        &SerenityManualOutboundClient {
-            http,
-            suppress_push: false,
-        },
+        &SerenityManualOutboundClient { http },
         shared_outbound_deduper(),
         request.user_id,
         &request.content,

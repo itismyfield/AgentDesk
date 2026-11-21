@@ -1,5 +1,5 @@
-//! Push policy for `discord.secretary_channels`: suppressed posts are still delivered with the
-//! silent flag; progress never pushes, unrequested notices stay silent in KST quiet hours.
+//! Push policy for `discord.secretary_channels`: producers declare a class with [`scoped`] and the
+//! Discord builders decide per resolved channel, so suppressed posts still arrive, silently.
 
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude::{CreateMessage, MessageFlags};
@@ -14,11 +14,11 @@ const QUIET_END_HOUR: i64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoticeClass {
-    /// Tool cards, input notices, recaps, lifecycle and watchdog notices.
+    /// Tool cards, input echoes, recaps, rollovers, lifecycle and watchdog notices.
     Progress,
     /// Notices nobody asked for, such as operational alerts.
     Unrequested,
-    /// Turn replies: direct answers, decision questions and final results.
+    /// Turn replies (answers, decision questions, results) and notices that an input will not run.
     Answer,
     /// Scheduled messages the user set up.
     Reminder,
@@ -28,16 +28,16 @@ pub(crate) fn outbox_class(source: &str, reason_code: Option<&str>) -> NoticeCla
     match (source.trim(), reason_code.map(str::trim)) {
         ("headless_turn", _) => NoticeClass::Answer,
         ("scheduled_message", _) => NoticeClass::Reminder,
-        ("lifecycle_notifier", Some("lifecycle.background_task_complete")) => {
-            NoticeClass::Unrequested
-        }
+        ("lifecycle_notifier", Some("lifecycle.background_task_complete"))
+        | ("retained_input_notice", Some("carried.unverified_closed")) => NoticeClass::Unrequested,
+        ("retained_input_notice", Some("draft.unproven")) => NoticeClass::Progress,
+        // The user's input was refused, held or evicted, so no turn reply will follow.
+        ("retained_input_notice" | "queue_overflow_notice", _) => NoticeClass::Answer,
         (
             "lifecycle_notifier"
             | "long_turn_watchdog"
             | "stall_watchdog"
             | "relay_signal_rollup"
-            | "queue_overflow_notice"
-            | "retained_input_notice"
             | "imessage_input_notice"
             | "boot_custody_notice"
             | "adopt_fence_forward_notice"
@@ -92,15 +92,38 @@ pub(crate) fn live_suppresses_push(channel: u64, class: NoticeClass) -> bool {
     !channels.is_empty() && suppresses_push(channels, channel, class, Utc::now())
 }
 
-/// Accepts the outbox `channel:<id>` target form and a bare id.
-pub(crate) fn live_suppresses_target_push(target: &str, class: NoticeClass) -> bool {
-    let target = target.trim();
-    target
-        .strip_prefix("channel:")
-        .unwrap_or(target)
-        .trim()
-        .parse::<u64>()
-        .is_ok_and(|channel| live_suppresses_push(channel, class))
+tokio::task_local! {
+    static SCOPE: NoticeClass;
+}
+
+/// Runs `send` with `class`; every Discord post it makes is judged against its resolved channel.
+pub(crate) fn scoped<F: std::future::Future>(
+    class: NoticeClass,
+    send: F,
+) -> impl std::future::Future<Output = F::Output> {
+    SCOPE.scope(class, send)
+}
+
+pub(crate) fn progress<F: std::future::Future>(
+    send: F,
+) -> impl std::future::Future<Output = F::Output> {
+    scoped(NoticeClass::Progress, send)
+}
+
+/// Outside a [`scoped`] send nothing is suppressed.
+pub(crate) fn scoped_suppresses(channel: u64) -> bool {
+    SCOPE
+        .try_with(|class| *class)
+        .is_ok_and(|class| live_suppresses_push(channel, class))
+}
+
+/// `message` for `channel` carrying the current scope's push decision.
+pub(crate) fn scoped_flags(channel: u64, message: CreateMessage) -> CreateMessage {
+    silence(message, scoped_suppresses(channel))
+}
+
+pub(crate) fn scoped_message(channel: u64) -> CreateMessage {
+    scoped_flags(channel, CreateMessage::new())
 }
 
 pub(crate) fn silence(message: CreateMessage, suppress_push: bool) -> CreateMessage {

@@ -40,11 +40,11 @@ impl DiscordOutboundClient for MonitoringOutboundClient {
     ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_monitoring_channel_id(target_channel)?;
         wait_if_shared(self.shared.as_ref(), channel_id).await;
-        super::http::dispatch_channel_message(
+        super::outbound::notification_policy::progress(super::http::dispatch_channel_message(
             &self.http,
             channel_id,
             serenity::CreateMessage::new().content(content),
-        )
+        ))
         .await
         .map(|message| message.id.get().to_string())
         .map_err(monitoring_post_error)

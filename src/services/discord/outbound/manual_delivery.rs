@@ -162,14 +162,6 @@ pub(super) enum ManualDeliveryOutcome {
 #[derive(Clone)]
 pub(super) struct SerenityManualOutboundClient {
     pub(super) http: Arc<serenity::Http>,
-    /// When set, every message this client creates carries Discord's silent flag.
-    pub(super) suppress_push: bool,
-}
-
-impl SerenityManualOutboundClient {
-    fn message(&self) -> CreateMessage {
-        super::notification_policy::silence(CreateMessage::new(), self.suppress_push)
-    }
 }
 
 fn map_serenity_post_error(error: serenity::Error) -> DispatchMessagePostError {
@@ -201,10 +193,14 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
                     format!("invalid discord channel id {target_channel}: {error}"),
                 )
             })?;
-        dispatch_channel_message(&self.http, channel_id, self.message().content(content))
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(map_serenity_post_error)
+        dispatch_channel_message(
+            &self.http,
+            channel_id,
+            CreateMessage::new().content(content),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(map_serenity_post_error)
     }
 
     async fn post_message_with_nonce(
@@ -226,7 +222,7 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
         dispatch_channel_message(
             &self.http,
             channel_id,
-            self.message()
+            CreateMessage::new()
                 .content(content)
                 .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
                 .enforce_nonce(enforce_nonce),
@@ -312,7 +308,7 @@ impl ManualOutboundClient for SerenityManualOutboundClient {
         let (inline, attachment) = build_long_message_attachment(content, summary);
         self.post_attachment(
             channel_id,
-            self.message().content(inline).add_file(attachment),
+            CreateMessage::new().content(inline).add_file(attachment),
         )
         .await
     }

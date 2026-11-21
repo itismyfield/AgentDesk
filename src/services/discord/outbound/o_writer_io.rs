@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, GetMessages, MessageId};
+use serenity::{ChannelId, GetMessages, MessageId};
 
 use super::super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};
@@ -25,8 +25,6 @@ pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
-    /// Posts carry Discord's silent flag (secretary-channel progress and quiet-hour notices).
-    silent: bool,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -37,7 +35,6 @@ impl GatewayPort {
             http,
             bot_id,
             owner: None,
-            silent: false,
             #[cfg(test)]
             repost_base: None,
         }
@@ -105,9 +102,9 @@ impl DiscordPort for GatewayPort {
         channel: u64,
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        let (http, silent) = (Arc::clone(&self.http), self.silent);
+        let http = Arc::clone(&self.http);
         async move {
-            let message = super::notification_policy::silence(CreateMessage::new(), silent)
+            let message = super::notification_policy::scoped_message(channel)
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
             match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
@@ -168,16 +165,10 @@ impl DiscordPort for GatewayPort {
         kind: crate::services::tui_o::shadow::UnitKind,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         use super::notification_policy as policy;
-        let port = GatewayPort {
-            http: Arc::clone(&self.http),
-            bot_id: self.bot_id,
-            owner: self.owner.clone(),
-            silent: policy::live_suppresses_push(channel, policy::unit_class(kind)),
-            #[cfg(test)]
-            repost_base: self.repost_base.clone(),
-        };
-        // The copy moves into the future so the request it starts may outlive `self`.
-        async move { port.post_origin(channel, content, origin).await }
+        policy::scoped(
+            policy::unit_class(kind),
+            self.post_origin(channel, content, origin),
+        )
     }
 
     fn history_after(

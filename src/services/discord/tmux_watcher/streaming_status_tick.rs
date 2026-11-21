@@ -471,10 +471,12 @@ pub(super) async fn update_streaming_status_tick(
                     .observe(
                         BodySite::WatcherStreaming,
                         BodyOffer::NonBody,
-                        crate::services::discord::http::send_channel_message(
-                            &http,
-                            channel_id,
-                            &panel_seed,
+                        crate::services::discord::outbound::notification_policy::progress(
+                            crate::services::discord::http::send_channel_message(
+                                &http,
+                                channel_id,
+                                &panel_seed,
+                            ),
                         ),
                     )
                     .await
@@ -818,10 +820,12 @@ pub(super) async fn update_streaming_status_tick(
                         .observe(
                             BodySite::WatcherStreaming,
                             BodyOffer::NonBody,
-                            crate::services::discord::http::send_channel_message(
-                                &http,
-                                channel_id,
-                                visible_status,
+                            crate::services::discord::outbound::notification_policy::progress(
+                                crate::services::discord::http::send_channel_message(
+                                    &http,
+                                    channel_id,
+                                    visible_status,
+                                ),
                             ),
                         )
                         .await
