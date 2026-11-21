@@ -785,7 +785,7 @@ async fn secretary_channel_progress_posts_silently_while_reminders_and_other_cha
             vec![CHANNEL.to_string()],
             "lifecycle_notifier",
             REASON,
-            SESSION,
+            "fixture-host:AgentDesk-claude-secretary-cc",
             ORIGINAL,
         ),
         (
