@@ -4,12 +4,16 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use super::agy_cell::{self, AgyLogin};
 use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
 pub(super) struct Environment {
     api: String,
     claude_login: Option<ClaudeLogin>,
+    agy_login: Option<AgyLogin>,
+    #[cfg(unix)]
+    pub(super) credentials: &'static [&'static str],
     pub(super) required: BTreeMap<String, String>,
     pub(super) flags: BTreeMap<String, String>,
 }
@@ -33,6 +37,8 @@ impl Environment {
             return Err(rejected());
         }
         let claude_login = ClaudeLogin::load(root, manifest)?;
+        let agy_login = AgyLogin::load(root, manifest)?;
+        let profile = agy_cell::profile(manifest);
         let mut required = BTreeMap::new();
         for (key, path) in [
             ("HOME", root.join("home")),
@@ -83,6 +89,12 @@ impl Environment {
                 login.cli.to_string_lossy().into_owned(),
             );
         }
+        if let Some(login) = &agy_login {
+            required.insert(
+                "AGENTDESK_AGY_PATH".into(),
+                login.cli.to_string_lossy().into_owned(),
+            );
+        }
         let org_path = root.join("config/org.yaml");
         checked_path(&org_path)?;
         if !std::fs::metadata(&org_path)
@@ -95,14 +107,17 @@ impl Environment {
             .map_err(|_| rejected())?;
         if org["provider_auth_profiles"]
             .as_object()
-            .is_none_or(|map| map.len() != 2)
+            .is_none_or(|map| map.len() != profile.providers.len())
         {
             return Err(rejected());
         }
-        for provider in ["claude", "codex"] {
+        for &provider in profile.providers {
             let profile = format!("test-{provider}");
             let def = &org["provider_auth_profiles"][&profile];
-            let home = if provider == "claude" {
+            let home = if let Some(login) = agy_login.as_ref().filter(|_| provider == "antigravity")
+            {
+                login.home.clone()
+            } else if provider == "claude" {
                 claude_login
                     .as_ref()
                     .map(|login| login.config_dir.clone())
@@ -138,6 +153,9 @@ impl Environment {
         Ok(Self {
             api,
             claude_login,
+            agy_login,
+            #[cfg(unix)]
+            credentials: profile.credentials,
             required,
             flags,
         })
@@ -257,6 +275,10 @@ pub(crate) fn provider_home(provider: &str) -> Result<Option<PathBuf>, String> {
     {
         return Ok(Some(login.config_dir.clone()));
     }
+    if provider == "antigravity" {
+        let login = snapshot.agy_login.as_ref().ok_or_else(rejected)?;
+        return Ok(Some(login.home.clone()));
+    }
     home_at(&current()?.ok_or_else(rejected)?.root, provider).map(Some)
 }
 
@@ -296,6 +318,17 @@ pub(crate) fn validate_overlay(
             Err(rejected())
         };
     }
+    if let Some(login) = snapshot
+        .agy_login
+        .as_ref()
+        .filter(|_| provider == "antigravity")
+    {
+        return if *env == login.provider_env() {
+            Ok(())
+        } else {
+            Err(rejected())
+        };
+    }
     if env.iter().any(|(key, value)| {
         forbidden(key)
             || snapshot
@@ -314,15 +347,24 @@ pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), Strin
             .get_envs()
             .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
             .collect();
+        let marked = |marker: &str| {
+            extras
+                .iter()
+                .any(|(key, value)| key == marker && value == "1")
+        };
+        let agy = snapshot
+            .agy_login
+            .as_ref()
+            .filter(|_| marked(agy_cell::AGY_LOGIN_MARKER));
+        if let Some(login) = agy {
+            login.verify_no_mcp_servers()?;
+        }
         let provider = snapshot
             .claude_login
             .as_ref()
-            .filter(|_| {
-                extras
-                    .iter()
-                    .any(|(key, value)| key == "AGENTDESK_TEST_CLAUDE_LOGIN" && value == "1")
-            })
-            .map(ClaudeLogin::provider_env);
+            .filter(|_| marked("AGENTDESK_TEST_CLAUDE_LOGIN"))
+            .map(ClaudeLogin::provider_env)
+            .or_else(|| agy.map(AgyLogin::provider_env));
         if extras.iter().any(|(key, value)| {
             forbidden(&key.to_string_lossy())
                 || snapshot
@@ -512,6 +554,17 @@ pub(crate) fn resolve_profile(
     provider_home(provider)?;
     if selected.is_none() {
         return Err("test instance requires a named provider profile".into());
+    }
+    if let Some(login) = snapshot
+        .agy_login
+        .as_ref()
+        .filter(|_| provider == "antigravity")
+    {
+        return if selected == Some("test-antigravity") {
+            Ok(Some(login.overlay()))
+        } else {
+            Err(rejected())
+        };
     }
     let Some(login) = snapshot
         .claude_login

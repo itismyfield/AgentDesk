@@ -30,7 +30,7 @@
 시간 근거는 `scripts/deploy-release.sh:4007–4022`, 위 E-50/51 YAML의 대기 단계, `scripts/e2e/run_tui_relay.py:357–362`, `scripts/e2e/run_tui_relay.py:5464–5471`, `docs/e2e-continuous/release-host.md:24–53`이다.
 
 
-<!-- doc-path-refs: proposed src/config/test_instance/agy_cell.rs scripts/e2e/agy_cell scripts/e2e/agy_cell/driver.py -->
+<!-- doc-path-refs: proposed scripts/e2e/agy_cell scripts/e2e/agy_cell/driver.py -->
 
 ## 격리 경계 (리뷰 P1-1)
 

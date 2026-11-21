@@ -237,12 +237,76 @@ class SharedWriterTests(unittest.TestCase):
         from tests.test_dev_instance_credential import InstanceCredentialCliTests
         fixture = InstanceCredentialCliTests(methodName='runTest')
         fixture.setUp(); self.addCleanup(fixture.doCleanups)
-        for index, name in enumerate(('announce_bot_token', 'notify_bot_token')):
+        for index, name in enumerate(('announce_bot_token', 'notify_bot_token', 'antigravity_bot_token')):
             token = ('SYNTHETIC_UTILITY_STDIN_ONLY_'+str(index)).encode()
             result = fixture.credential(name, token+b'\n')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((fixture.root/'credential'/name).read_bytes(), token)
             self.assertNotIn(token, result.stdout+result.stderr)
+
+
+AGY_IDS = {'antigravity_bot_token': '1573471163663785994', 'announce_bot_token': '900006',
+           'notify_bot_token': '900003'}
+
+
+class AgyIdentityAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_dev_instance as declarations
+        self.fixture = declarations.InstanceDeclarationTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.manifest = self.fixture.prepare(declarations.agy_profile(), agy_login=declarations.agy_login(self.fixture.home))
+        self.root = Path(self.manifest['root'])
+        self.frame = {'kind': 'admission', 'schema': 1, 'identities': dict(AGY_IDS)}
+        for name in AGY_IDS:
+            (self.root/'credential'/name).write_text('SYNTHETIC_'+name)
+            (self.root/'credential'/name).chmod(0o600)
+
+    def answer(self, token, deadline, mismatch=None):
+        name = token.decode().removeprefix('SYNTHETIC_')
+        if mismatch == 'silent':
+            raise ConnectionError('synthetic /users/@me never answered')
+        return '900099' if name == mismatch else AGY_IDS[name]
+
+    def test_agy_probe_binds_test_antigravity_id_and_exactly_three_credentials(self):
+        from scripts.dev_instance import identity
+        probe = lambda frame=self.frame, mismatch=None: identity.probe(
+            self.root, frame, time.monotonic()+2, request=lambda t, d: self.answer(t, d, mismatch),
+            declared_roles=self.manifest['profile']['bots'])
+        self.assertEqual({item['application_id'] for item in probe()}, set(AGY_IDS.values()))
+        tui = {'kind': 'admission', 'schema': 1, 'identities': dict(zip(NAMES, ('900003','900001','900002','900006')))}
+        foreign = {**self.frame, 'identities': {**AGY_IDS, 'antigravity_bot_token': '900099'}}
+        for frame, mismatch in [(self.frame, 'antigravity_bot_token'), (self.frame, 'silent'), (foreign, None),
+                                (foreign, 'antigravity_bot_token'), (tui, None)]:
+            with self.subTest(mismatch=mismatch, names=sorted(frame['identities'])):
+                with self.assertRaises(files.InstanceError):
+                    probe(frame, mismatch)
+        (self.root/'credential/claude_bot_token').write_text('SYNTHETIC_extra')
+        (self.root/'credential/claude_bot_token').chmod(0o600)
+        with self.assertRaises(files.InstanceError):
+            probe()
+
+    def test_up_refuses_a_foreign_discord_identity_before_gateway_spawn(self):
+        from scripts.dev_instance import identity
+        worktree = self.fixture.worktree
+        (worktree/'.git/info/exclude').write_text('target/\n')
+        binary = worktree/'target/debug/agentdesk'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('#!/bin/sh\n')
+        binary.chmod(0o700)
+        spawn = mock.Mock(side_effect=AssertionError('Gateway spawned before identity admission'))
+        for mismatch in ('antigravity_bot_token', 'silent'):
+            read, write = os.pipe()
+            os.write(write, (json.dumps(self.frame)+'\n').encode())
+            os.close(write)
+            with self.subTest(mismatch=mismatch), os.fdopen(read) as stream, mock.patch.object(
+                    identity, 'request_json', side_effect=lambda url, end, token: {'id': self.answer(token, end, mismatch)}) as asked:
+                with self.assertRaisesRegex(files.InstanceError, 'application identity'):
+                    lifecycle.supervise(self.fixture.base, self.fixture.instance_id, {}, head=self.manifest['head'],
+                                        binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), wall_timeout=5,
+                                        stop_grace=.1, spawn=spawn, resources={}, control_stream=stream)
+                self.assertTrue(asked.called, 'refusal must come from the identity probe')
+        spawn.assert_not_called()
 
 
 class IdentityTransportTests(unittest.TestCase):
