@@ -532,7 +532,6 @@ async fn unprepared_replay_uses_model_only_from_its_own_turn_interval() {
     let now = Utc::now();
     let started = now - chrono::Duration::seconds(90);
     let ended = now - chrono::Duration::seconds(80);
-    // A live summary reads the record its status line rewrote just after the turn ended.
     for (id, after_start, owned) in [
         ("later-statusline", 88, false),
         ("settled-statusline", 13, true),

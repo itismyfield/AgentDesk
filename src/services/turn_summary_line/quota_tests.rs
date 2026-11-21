@@ -753,11 +753,8 @@ fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_sessio
     std::fs::create_dir_all(record_dir()).unwrap();
     let footer = |account_week: i64| {
         let limits = json!({"seven_day":{"used_percentage":91,"resets_at":week}});
-        std::fs::write(
-            &path,
-            json!({"session_id":session,"rate_limits":limits}).to_string(),
-        )
-        .unwrap();
+        let record = json!({"session_id":session,"rate_limits":limits});
+        std::fs::write(&path, record.to_string()).unwrap();
         let usage = json!({"buckets":[{"name":"5h","used":40,"limit":100,"reset":week-500_000},
             {"name":"7d","used":91,"limit":100,"reset":account_week},
             {"name":"7d Fable","used":12,"limit":100,"reset":account_week}]});
@@ -777,15 +774,13 @@ fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_sessio
             json!({"type":"system","subtype":"stop_hook_summary","sessionId":session,"timestamp":at(2)}),
         ];
         let work = rows.map(|row| {
-            deriver.derive_with_session(
-                &CapturedRecord {
-                    start: 0,
-                    end: 1,
-                    line: serde_json::to_vec(&row).unwrap(),
-                },
-                IDENTITY_VERSION,
-                || Some(logical.clone()),
-            )
+            let line = serde_json::to_vec(&row).unwrap();
+            let record = CapturedRecord {
+                start: 0,
+                end: 1,
+                line,
+            };
+            deriver.derive_with_session(&record, IDENTITY_VERSION, || Some(logical.clone()))
         });
         let [Derived::Piece(piece)] = work[2].as_slice() else {
             panic!("{work:?}")
@@ -795,11 +790,9 @@ fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_sessio
     let (matched, other) = (footer(week + 30), footer(week + 3600));
     publish("claude", "default", "{}", now.timestamp());
     let _ = std::fs::remove_file(&path);
-    assert!(
-        matched.contains("\n-# 5h 40% (") && matched.contains(" · 7d 91% ("),
-        "{matched}"
-    );
-    assert!(matched.contains(" · Fable 7d 12% ("), "{matched}");
+    for wanted in ["\n-# 5h 40% (", " · 7d 91% (", " · Fable 7d 12% ("] {
+        assert!(matched.contains(wanted), "{matched}");
+    }
     assert!(
         other.contains("\n-# 7d 91% (") && !other.contains("Fable"),
         "{other}"
