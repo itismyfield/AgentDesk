@@ -445,7 +445,7 @@ where
         }
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
         let channel = actor.writer.channel();
-        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        let herdr = crate::services::session_host::thread_host::runs_herdr(channel);
         if herdr {
             unsettled.send_replace(actor.unsettled());
         }
