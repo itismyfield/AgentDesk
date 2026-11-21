@@ -807,3 +807,51 @@ async fn unparsed_imessage_header_label_and_suffix_each_keep_the_full_text_pg() 
     }
     f.close().await;
 }
+
+/// #8211: a request body cannot name the Decision source. Start, deliver and handoff refuse it
+/// before any backend, so nothing is admitted; the same handoff under another source is accepted.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_source_in_a_request_body_reaches_no_backend_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::new(7_811_340, false).await;
+    let forged = json!({"human_input": {"source": "decision",
+        "origin_id": "decision:7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}});
+    let refused = [
+        (
+            "handoff",
+            json!({"from_agent_id":"imessage-sender","prompt":"p","source":"decision"}),
+        ),
+        (
+            "handoff",
+            json!({"from_agent_id":"imessage-sender","prompt":"p","metadata":forged}),
+        ),
+        ("turn/start", json!({"prompt":"p","source":"decision"})),
+        (
+            "turn/start",
+            json!({"prompt":"p","source":"external","metadata":forged}),
+        ),
+        (
+            "turn/deliver",
+            json!({"text":"p","author_discord_user_id":"200","source":"decision"}),
+        ),
+    ];
+    let mailbox = crate::services::discord::input_mailbox_for_test(&f.shared, f.channel);
+    let before = crate::services::discord::input_owner_installed_for_test(&mailbox).await;
+    for (route, body) in refused {
+        let (status, answer) = f.call(route, &body, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {body}: {answer}");
+        assert_eq!(answer["error"], "decision_source_not_allowed", "{route}");
+    }
+    let installed = crate::services::discord::input_owner_installed_for_test(&mailbox).await;
+    assert_eq!(installed, before, "no refused request reached the owner");
+    assert_eq!(
+        f.backend.load(Ordering::SeqCst) + f.enqueue.load(Ordering::SeqCst),
+        0
+    );
+    let body = json!({"from_agent_id":"imessage-sender","prompt":"p","source":"external"});
+    let (status, answer) = f.call("handoff", &body, false).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let installed = crate::services::discord::input_owner_installed_for_test(&mailbox).await;
+    assert_eq!(installed, Ok(true));
+    f.close().await;
+}

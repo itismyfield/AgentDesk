@@ -131,6 +131,17 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     } else {
         prompt
     };
+    plan_submit_bytes(prompt)
+}
+
+/// The plan for an approved Decision opinion: its frame's bytes go out with no line-ending rewrite.
+pub fn plan_preserved_submit(
+    frame: &crate::services::tui_input::human_frame::PreservedFrame,
+) -> Result<Vec<TuiInputAction>, String> {
+    plan_submit_bytes(frame.as_str())
+}
+
+fn plan_submit_bytes(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     validate_prompt_text(prompt)?;
     validate_prompt_not_empty(prompt)?;
     let mut actions = if prompt.contains('\n') {

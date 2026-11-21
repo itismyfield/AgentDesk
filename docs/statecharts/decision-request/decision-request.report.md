@@ -66,3 +66,35 @@ jar SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88.
     java -XX:+UseParallelGC -Xmx2g -cp <jar> tlc2.TLC -workers 2 -config <Discussion*.cfg> -metadir <tmp> DecisionDiscussion.tla
 CI와 같은 기대값 확인은 `python3 scripts/ci/statecharts_tlc.py --jar <tla2tools.jar> --base origin/main`이다.
 .chart.mmd는 수작업 요약이며 전체 상태 공간의 자동 그림이 아니다.
+
+## 조각 2a — event 예약·첫 시도 (코드 좌표)
+
+DecisionRequest 모델의 아래 전이가 코드에 들어왔다. 좌표는 이 조각의 head 기준이다.
+값 범위는 설계 요지의 진입점 전수표(E03·E04·E10~E14·E46·E47·E67~E70)에서만 가져왔다.
+producer가 없어 운영 경로에서는 실행되지 않는다(`agentdesk::decision_input`로만 내보냄).
+
+| 모델 전이 | 코드 | 메모 |
+|---|---|---|
+| Claim | `src/db/decisions.rs:171` reserve_first_attempt, 호출 `src/services/discord/health/turn_deliver/decision_target.rs:190` | not_started→resolving UPDATE 승자만 진행. 패자는 AlreadyReserved |
+| ResolvePresent(busy→queued) | `decision_target.rs:103`(owner가 원본 수용), `:154`(mailbox enqueue) | normal_wait, 원본 1개 |
+| ResolvePresent(idle→prepared) → BeginSend | `decision_target.rs:127` | non-owner 시작은 호출 안에서 쓰므로 may_have_sent를 먼저 기록 |
+| Observe(같은 시도의 증거) | `decision_target.rs:132` | 시작이 첫 prompt로 전달 → delivered. 두 번째 deliver 없음 |
+| QueueRefused → RefusalNormalize | `decision_target.rs:160`, `:208` | enqueue 거절은 미전송 확정 |
+| NormalizeAbsent | `decision_target.rs:204`, `:208` | 채널을 가진 runtime 없음 → resolving→normalizing. PG가 두 번째 정상화를 거절(`src/db/decisions.rs:189`) |
+| NormalizeSuccess | `decision_target.rs:218` | normalizing→resolving, 다시 현재 대상 해석 |
+| NormalizeSuccess(첫 prompt 전달) | `decision_target.rs:212` | delivered로 끝, 뒤의 start 0 |
+| NormalizeFailure | `decision_target.rs:223` | failed(사유) |
+| AbsentAfterNormalize·RefusalFinal | `decision_target.rs:208` | 정상화를 이미 썼으면 failed |
+| Uncertain(정상화 결과 불명) | `decision_target.rs:224` | may_have_sent로 남기고 재전송 0. 닫기는 2b |
+| HandoffDecision(대조) | `src/services/discord/queue_io/decision_drain.rs:22`, 호출 `src/services/discord/agent_handoff.rs:541`·`src/server/routes/agents.rs:1080` | service·HTTP 모두 backend 전에 거절 |
+| SelfDeclared(대조, 신규) | `src/services/discord/queue_io/decision_drain.rs:7`, 호출 `src/server/routes/agents.rs:675`·`src/server/routes/agents_turn_deliver.rs:161`; 보존 planner 입구 `src/services/tui_input/human_frame.rs:120` | 본문이 source=decision을 자기 선언하면 400. 보존 frame은 승인 event가 그 바이트를 승인했을 때만 만들어짐 |
+
+모델에 없는 종료(코드가 더 보수적인 곳): owner 수용의 pending/거절과 owner 시작 오류는 미전송 증거로 쓰지 않고
+정상화 없이 failed로 닫는다(`decision_target.rs:116`). InvalidTarget도 정상화 없이 failed다.
+
+새 규칙·대조:
+- `PreservedNeedsApproval`(Fixed.cfg에 추가): 승인 없는 입력은 보존 planner에 들어가지 못한다. 대조 `Provenance.cfg`(Mode=BadProvenance)가 이 규칙을 깬다.
+- `NoClaimCas.cfg`: 예약 UPDATE의 상태 조건을 뺀 대조. `AttemptOnce`를 깬다.
+
+범위 밖 — 조각 4 활성 조건에 2b 착지: DrainCurrent(대기 뒤 owner·non-owner 재해석), Finalize(원본 제거),
+CloseUnknown·CloseAbandoned, Crash/Boot 복구, CancelClear, WakeFailed 거절. 2a는 normal_wait·may_have_sent 뒤를 정산하지 않는다.

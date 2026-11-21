@@ -233,7 +233,11 @@ async fn decision_forum_pg_concurrent_callers_create_one_forum() {
     assert_eq!(first.id, second.id);
     assert_eq!([first.created, second.created], [true, false]);
     let kinds: Vec<_> = d.channels.lock().unwrap().iter().map(|c| c.1).collect();
-    assert_eq!(kinds, [serenity::ChannelType::Forum], "the create body asked for a forum");
+    assert_eq!(
+        kinds,
+        [serenity::ChannelType::Forum],
+        "the create body asked for a forum"
+    );
     db.drop().await;
 }
 
