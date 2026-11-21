@@ -155,6 +155,15 @@ mod tests {
         let answer = outbox_class("headless_turn", Some("headless.delivery"));
         let reminder = outbox_class("scheduled_message", None);
         let (tool, body) = (unit_class(UnitKind::Tool), unit_class(UnitKind::Body));
+        let retained = |reason| outbox_class("retained_input_notice", Some(reason));
+        let (refused, draft) = (
+            retained("refused.readiness_unproven"),
+            retained("draft.unproven"),
+        );
+        let (restart, evicted) = (
+            retained("carried.unverified_closed"),
+            outbox_class("queue_overflow_notice", Some("queue_overflow.evict")),
+        );
         // (time, class, suppressed in channel 42)
         for (hour, minute, class, suppressed) in [
             (12, 0, progress, true),
@@ -168,6 +177,11 @@ mod tests {
             (23, 0, answer, false),
             (23, 0, body, false),
             (3, 0, reminder, false),
+            (12, 0, draft, true),
+            (23, 0, refused, false),
+            (23, 0, evicted, false),
+            (12, 0, restart, false),
+            (23, 0, restart, true),
         ] {
             assert_eq!(
                 suppresses_push(&channels, 42, class, kst(hour, minute)),

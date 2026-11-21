@@ -766,7 +766,7 @@ async fn explicit_autoqueue_notice_does_not_convert_arbitrary_system_content_pg(
 }
 
 #[tokio::test]
-async fn secretary_channel_progress_posts_silently_while_reminders_and_other_channels_push_pg() {
+async fn secretary_push_policy_judges_the_channel_each_target_form_resolves_to_pg() {
     let _isolation = Isolation::new();
     let (db, pool) = database("secretary channel push policy").await;
     let discord = Discord::new().await;
@@ -779,44 +779,57 @@ async fn secretary_channel_progress_posts_silently_while_reminders_and_other_cha
         pool.as_ref().clone(),
     )
     .await;
-    // (secretary channels, source, reason, session, content)
-    for (channels, source, reason, session, content) in [
+    sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('sec', 'sec', 'claude', $1)")
+        .bind(CHANNEL.to_string())
+        .execute(pool.as_ref())
+        .await
+        .unwrap();
+    let config = |listed: bool| -> crate::config::Config {
+        let secretary = listed.then(|| format!("'{CHANNEL}'")).unwrap_or_default();
+        serde_yaml::from_str(&format!(
+            "discord: {{secretary_channels: [{secretary}]}}\nagents: [{{id: sec, name: sec, channels: {{claude: {{id: '{CHANNEL}', aliases: [sec-room]}}}}}}]"
+        ))
+        .unwrap()
+    };
+    let silent = Some(4096);
+    // (target, source, reason, content and session, flags); `unlisted` runs with an empty list.
+    for (target, source, reason, content, flags) in [
+        (TARGET, "lifecycle_notifier", REASON, ORIGINAL, silent),
         (
-            vec![CHANNEL.to_string()],
-            "lifecycle_notifier",
-            REASON,
-            "fixture-host:AgentDesk-claude-secretary-cc",
-            ORIGINAL,
+            "agent:sec",
+            "imessage_input_notice",
+            "echo",
+            "agent",
+            silent,
         ),
         (
-            vec![CHANNEL.to_string()],
+            "channel:sec-room",
+            "imessage_input_notice",
+            "echo",
+            "alias",
+            silent,
+        ),
+        ("agent:sec", "scheduled_message", "smsg", "reminder", None),
+        (
+            TARGET,
             "retained_input_notice",
-            "retained",
-            "s1",
-            "progress",
+            "refused.readiness_unproven",
+            "refused",
+            None,
         ),
-        (
-            vec![CHANNEL.to_string()],
-            "scheduled_message",
-            "smsg",
-            "s2",
-            "reminder",
-        ),
-        (
-            vec![],
-            "retained_input_notice",
-            "retained",
-            "s3",
-            "unlisted",
-        ),
+        (TARGET, "imessage_input_notice", "echo", "unlisted", None),
     ] {
-        let mut config = crate::config::Config::default();
-        config.discord.secretary_channels = channels;
-        crate::config_live_reload::install(config);
+        let listed = content != "unlisted";
+        let session = if content == ORIGINAL {
+            "fixture-host:AgentDesk-claude-secretary-cc"
+        } else {
+            content
+        };
+        crate::config_live_reload::install(config(listed));
         message_outbox::enqueue_outbox_pg_returning_id(
             &pool,
             OutboxMessage {
-                target: TARGET,
+                target,
                 content,
                 bot: "notify",
                 source,
@@ -831,24 +844,14 @@ async fn secretary_channel_progress_posts_silently_while_reminders_and_other_cha
             drain_message_outbox_once(&pool, &registry, "push-worker").await,
             1
         );
+        let posts = discord.posts();
+        let body = &posts.last().expect("each row posts once").1;
+        assert!(
+            content == ORIGINAL || body["content"] == content,
+            "{content}: {body}"
+        );
+        assert_eq!(body["flags"].as_u64(), flags, "{content}: {body}");
     }
-    let mut flags: Vec<_> = discord
-        .posts()
-        .into_iter()
-        .map(|(_, body)| {
-            (
-                body["content"].as_str().unwrap_or_default().to_string(),
-                body["flags"].as_u64(),
-            )
-        })
-        .collect();
-    flags.sort();
-    let silent = Some(4096);
-    let designated = flags.iter().find(|(content, _)| content.starts_with("-# "));
-    assert_eq!(designated.map(|(_, flag)| *flag), Some(silent));
-    assert!(flags.contains(&("progress".into(), silent)), "{flags:?}");
-    assert!(flags.contains(&("reminder".into(), None)), "{flags:?}");
-    assert!(flags.contains(&("unlisted".into(), None)), "{flags:?}");
     pool.close().await;
     db.drop().await;
 }
