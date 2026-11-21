@@ -518,4 +518,33 @@ class DriverTests(unittest.TestCase):
                 rest.Client(admitted,time.monotonic()+10).create_thread('900004','owned')
         self.assertNotIn(secret,str(caught.exception));self.assertIsNone(caught.exception.__cause__)
 
+
+class AgyDriverAdmissionTests(unittest.TestCase):
+    def test_agy_driver_admission_requires_the_test_antigravity_discord_identity(self):
+        from scripts.dev_instance import driver_admission as admission
+        fixture = declarations.InstanceDeclarationTests(methodName='runTest')
+        fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        manifest = fixture.prepare(declarations.agy_profile(), agy_login=declarations.agy_login(fixture.home))
+        root = Path(manifest['root'])
+        ids = {'antigravity_bot_token':'1573471163663785994', 'announce_bot_token':'900006', 'notify_bot_token':'900003'}
+        for name in ids:
+            (root/'credential'/name).write_text('FAKE_SENTINEL_'+name); (root/'credential'/name).chmod(0o600)
+        record = {'schema':1, 'instance_id':root.name, 'nonce':str(uuid.uuid4()), 'pid':43210, 'supervisor_pid':43211,
+                  'head':manifest['head'], 'port':manifest['api']['port'], 'binary_sha256':'a'*64, 'live_ready':True,
+                  'verified':True, 'identities':[{'name':name, 'application_id':ids[name], **identity._credential(root, name)[0]}
+                                                 for name in sorted(ids)]}
+        fixture_json(root, 'runtime/instance-run.json', record)
+        fixture_json(root, 'runtime/resources-owner.json', {'sockets':{}})
+        def request(answer):
+            def call(url, deadline, token=None):
+                if url.endswith('/users/@me'):
+                    return {'id': answer(token.decode().removeprefix('FAKE_SENTINEL_'))}
+                return {'test_instance': {k: v for k, v in record.items() if k not in ('verified', 'supervisor_pid')}}
+            return call
+        admitted = admission.admit(fixture.base, root.name, time.monotonic()+10, request=request(ids.get))
+        self.assertEqual(admitted.manifest['profile']['bots']['antigravity'], ids['antigravity_bot_token'])
+        with self.assertRaises(admission.IdentityRefused):
+            admission.admit(fixture.base, root.name, time.monotonic()+10,
+                            request=request(lambda name: '900099' if name == 'antigravity_bot_token' else ids[name]))
+
 if __name__=='__main__':unittest.main()

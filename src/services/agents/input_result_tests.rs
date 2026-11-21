@@ -75,3 +75,38 @@ fn an_origin_of_256_bytes_is_carried_and_257_is_refused() {
     let carried = json!({"human_input": {"origin_id": over}});
     assert_eq!(metadata_origin_id(Some(&carried)), None);
 }
+
+#[test]
+fn only_a_single_verified_result_record_is_a_final_answer() {
+    let result = |content: &str| json!({"kind": "result", "content": content, "status": "success"});
+    let note = json!({"kind": "assistant", "content": "progress"});
+    let read =
+        |provider: Option<&str>, events: Value| final_answer_in("discord:1:2", provider, &events);
+    assert_eq!(
+        read(Some("antigravity"), json!([note, result("done")])),
+        Some(FinalAnswer {
+            text: "done".into(),
+            boundary: json!({"turn_id": "discord:1:2", "result_event_index": 1}),
+            source: "agy_terminal_result",
+        })
+    );
+    for (provider, events) in [
+        (Some("claude"), json!([result("done")])),
+        (Some("codex"), json!([result("done")])),
+        (None, json!([result("done")])),
+        (Some("antigravity"), json!([note])),
+        (Some("antigravity"), json!([result("one"), result("two")])),
+        (Some("antigravity"), json!([result("   ")])),
+        (
+            Some("antigravity"),
+            json!([{"kind": "result", "content": "x", "is_error": true}]),
+        ),
+        (Some("antigravity"), json!({"kind": "result"})),
+    ] {
+        assert_eq!(
+            read(provider, events.clone()),
+            None,
+            "{provider:?} {events}"
+        );
+    }
+}

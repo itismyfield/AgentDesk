@@ -309,7 +309,7 @@ fn live_tui_session(
 // Only confirmed transcript-output Claude channels on tmux can submit without a busy veto.
 fn turn_mode_tmux(channel: u64) -> bool {
     crate::services::tui_o::turn_mode::transcript_turns(channel)
-        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
+        && !crate::services::session_host::thread_host::runs_herdr(channel)
 }
 
 /// Whether the transcript shows a turn the input can join: a live Claude turn, or the open Codex

@@ -22,6 +22,7 @@ pub mod pieces;
 pub mod progress;
 mod replay;
 pub(crate) mod restart_end;
+pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;
 pub mod resume;
 pub mod rotation;
@@ -119,6 +120,20 @@ pub trait DiscordPort: Send + Sync + 'static {
                 None => PostOutcome::Withheld("writer has no execution owner scope".into()),
             }
         }
+    }
+
+    /// `post_origin` for one writer unit; the gateway uses `kind` for the push decision.
+    fn post_unit(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        let _ = kind;
+        self.post_origin(channel, content, origin)
     }
 
     /// Up to `confirm::HISTORY_PAGE` messages with ids above `after`, in any order.

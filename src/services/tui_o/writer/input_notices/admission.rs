@@ -128,7 +128,11 @@ pub(crate) fn admit_notice<R>(
             },
             ObservedAttempt::None => {}
         }
-        match crate::config::session_hosts::herdr_endpoint(store.init().channel) {
+        match crate::services::session_host::thread_host::current_execution_cached(
+            store.init().channel,
+        )
+        .endpoint()
+        {
             Some(endpoint) => {
                 session_host::try_notice_fence(&endpoint, &origin.execution_nonce, || start(store))
                     .map_err(|reason| match reason {

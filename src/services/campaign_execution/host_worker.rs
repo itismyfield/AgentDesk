@@ -397,6 +397,27 @@ impl HostWorker {
         Ok(self.gate.admit_and_initiate(envelope, now, initiate)?)
     }
 
+    // The deployment's last check: this node's own Deploy authority under the applied fences.
+    pub(super) fn admit_deploy(
+        &mut self,
+        state: &CampaignState,
+        envelope: &host_gate::EffectEnvelope,
+        now: DateTime<Utc>,
+        initiate: impl FnOnce(&str) -> io::Result<Initiated<()>>,
+    ) -> Result<Admitted<()>, WorkerError> {
+        if envelope.node_id != self.node
+            || envelope.kind != ActionKind::Deploy
+            || !matches!(
+                envelope.authority,
+                host_gate::EffectAuthority::Deployment { .. }
+            )
+        {
+            return Err(WorkerError::Binding);
+        }
+        self.fence_start(state, &envelope.action_id)?;
+        Ok(self.gate.admit_and_initiate(envelope, now, initiate)?)
+    }
+
     pub(super) async fn record_landing(
         &self,
         tx: Transaction<'_, Postgres>,

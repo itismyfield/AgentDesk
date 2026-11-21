@@ -18,13 +18,14 @@ type ForceKillSession = (
     Option<String>,
 );
 
+/// The row a primary key or alias names, with the row's current primary key: every later read,
+/// write and tmux name must follow that key, never the tail of the key that was asked for.
 pub(crate) async fn load_force_kill_session_pg(
     pool: &PgPool,
     session_key: &str,
-    provider_name: Option<&str>,
-) -> Result<Option<ForceKillSession>, String> {
-    let selected = select(pool, session_key, provider_name, |_| Ok(())).await?;
-    Ok(selected.map(|(session, ())| session))
+) -> Result<Option<(String, ForceKillSession)>, String> {
+    let selected = select(pool, session_key, |row| row.try_get("session_key")).await?;
+    Ok(selected.map(|(session, current)| (current, session)))
 }
 
 /// The selected row's own key, identity columns (provider, identity kind, token hash, channel)
@@ -41,9 +42,8 @@ pub(crate) struct ForceKillHosted {
 pub(crate) async fn load_force_kill_session_hosted_pg(
     pool: &PgPool,
     session_key: &str,
-    provider_name: Option<&str>,
 ) -> Result<Option<(ForceKillSession, ForceKillHosted)>, String> {
-    select(pool, session_key, provider_name, |row| {
+    select(pool, session_key, |row| {
         Ok(ForceKillHosted {
             session_key: row.try_get("session_key")?,
             identity: [
@@ -61,7 +61,6 @@ pub(crate) async fn load_force_kill_session_hosted_pg(
 async fn select<R>(
     pool: &PgPool,
     session_key: &str,
-    provider_name: Option<&str>,
     read: impl Fn(&PgRow) -> Result<R, sqlx::Error>,
 ) -> Result<Option<(ForceKillSession, R)>, String> {
     let resolved_session_key =
@@ -106,7 +105,14 @@ async fn select<R>(
         .map_err(|error| format!("decode instance_id for {session_key}: {error}"))?;
     let read = read(&row).map_err(|error| format!("decode row for {session_key}: {error}"))?;
 
-    let effective_provider = provider_name.or(session_provider.as_deref());
+    // The row's own provider, else what its current key records; the request names neither.
+    let key_provider = crate::domain::session_identity::naming::recorded_provider(
+        None,
+        Some(&resolved_session_key),
+    );
+    let effective_provider = (session_provider.as_deref())
+        .filter(|stored| !stored.trim().is_empty())
+        .or(key_provider.as_ref().map(|provider| provider.as_str()));
     let runtime_channel_id =
         if let Some(channel_id) = normalize_thread_channel_id(thread_channel_id.as_deref()) {
             Some(channel_id)

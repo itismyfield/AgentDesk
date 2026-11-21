@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> OwnBootAbsent: own boot Herdr channel, row Missing/Retired, restart
+    [*] --> Thread: thread under a Herdr parent, nothing judged
+    [*] --> JournalHeld: handoff journal on a thread or a left channel
+
+    OwnBootAbsent --> Started: Before/After StartAbsent (boot entry: HerdrFirstCreate/HerdrRetired)
+    OwnBootAbsent --> OwnBootAbsent: Rev3 StartWatchAgain (empty cache: host_unresolved)
+
+    Thread --> Judged: Judge (turn_host for_turn, After records it)
+    Judged --> Thread: Restart (judged map is process memory)
+    Thread --> ReadUnjudged: BusyInput
+    Judged --> ReadJudged: BusyInput
+    ReadUnjudged --> [*]: Before reads Tmux, After reads Unknown
+    ReadJudged --> [*]: Before reads Tmux, After reads the judgement
+
+    JournalHeld --> Dropped: JournalCheck, left (Before: no own boot entry, After: policy Tmux)
+    JournalHeld --> Kept: JournalCheck, not left (After: policy Herdr or Unknown)

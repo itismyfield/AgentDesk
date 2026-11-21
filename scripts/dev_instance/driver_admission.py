@@ -6,7 +6,7 @@ import uuid
 from . import identity
 from .files import InstanceError, instance_root
 from .manifest import read_json, validate
-from .profile import snowflake
+from .profile import profile_spec, snowflake
 
 # Existing relay author defaults are release identities, never instance fallbacks.
 OPERATING_BOT_IDS = frozenset({'1479017284805722200', '1474932782395293736', '1479425196824989758',
@@ -32,8 +32,8 @@ def admit(base, instance_id, deadline, request=None):
         sockets = {path: tuple(value) for path, value in owner['sockets'].items()}
         manifest = validate(base, instance_id, {}, check_ports=False, live_sockets=sockets)
         bots = manifest['profile']['bots']
-        authors = [snowflake(bots[role]) for role in ('claude', 'codex', 'driver')]
-        if len(set(authors)) != 3 or OPERATING_BOT_IDS.intersection(authors):
+        authors = [snowflake(bots[role]) for role in (*profile_spec(manifest['profile'])['providers'], 'driver')]
+        if len(set(authors)) != len(authors) or OPERATING_BOT_IDS.intersection(authors):
             raise IdentityRefused('instance author IDs are invalid')
         run = read_json(root / 'runtime/instance-run.json')
         if (run['instance_id'] != instance_id or run['head'] != manifest['head']

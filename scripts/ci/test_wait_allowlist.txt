@@ -7,7 +7,6 @@ src/config.rs
 src/config/runtime_root_tests.rs
 src/config/test_env/teardown_probe.rs
 src/db/auto_queue/test_support.rs
-src/db/postgres.rs
 src/db/postgres/pool_return_pg_tests.rs
 src/engine/loader.rs
 src/engine/ops/http_ops.rs
@@ -16,7 +15,6 @@ src/github/warn_dedupe.rs
 src/logging.rs
 src/server/dashboard_provision.rs
 src/server/routes/dispatches/crud.rs
-src/server/routes/health_api.rs
 src/server/routes/imessage_input_notice_tests.rs
 src/server/routes/receipt.rs
 src/services/claude_compact_trigger.rs
@@ -188,7 +186,6 @@ src/services/provider/cancel_token_cleanup/executor.rs
 src/services/qwen.rs
 src/services/recovery_defer/tests.rs
 src/services/routines/agent_executor/owner_review_tests.rs
-src/services/routines/loader.rs
 src/services/scheduled_messages/owner_input_tests.rs
 src/services/session_backend.rs
 src/services/session_forwarding/trusted_target/loopback_seam_tests.rs

@@ -97,8 +97,9 @@ pub(crate) fn publish(provider: ProviderKind, name: &str, generation: u64) -> Op
     // below), so a debug_assert here would diverge debug/test behavior from the
     // production contract and panic legitimate callers (e.g. wrapper-interrupt fencing
     // tests whose session name does not parse to the published provider).
+    // Only a legacy name records a provider to compare; the published one is the authority.
     let parsed_provider = parse_provider_and_channel_from_tmux_name(name).map(|(kind, _)| kind);
-    if parsed_provider.as_ref() != Some(&provider) {
+    if parsed_provider.is_some_and(|parsed| parsed != provider) {
         tracing::warn!(
             provider = provider.as_str(),
             tmux_session = name,

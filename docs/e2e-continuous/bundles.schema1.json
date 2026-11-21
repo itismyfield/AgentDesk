@@ -776,10 +776,11 @@
     },
     "E-54": {
       "path": "tests/e2e/tui_relay/scenarios/E-54-discord-stop-active-and-idle.yaml",
-      "sha256": "28c909901625b6abfbe0e271a50fb59d1460b9094c724e3b283f7357bee91cc6",
+      "sha256": "efa3877302b86b43084440f4cdf91883d3d80961d47a06592912e96067c12d11",
       "coverage_class": "live",
       "cells": [
-        "claude-tui"
+        "claude-tui",
+        "claude-herdr"
       ]
     },
     "E-6": {

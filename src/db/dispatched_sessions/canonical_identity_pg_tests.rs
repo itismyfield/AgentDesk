@@ -798,7 +798,7 @@ async fn canonical_identity_alias_provider_resume_read_and_write_seams_pg() {
     .await
     .expect("preserve resume alias");
 
-    let force_kill = load_force_kill_session_pg(&pool, alias_key, Some("claude"))
+    let (_, force_kill) = load_force_kill_session_pg(&pool, alias_key)
         .await
         .expect("load force-kill metadata through alias")
         .expect("aliased force-kill session row");

@@ -57,6 +57,28 @@ struct MementoRuntimeConfig {
     workspace_override: Option<String>,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_MEMENTO_CONFIG: MementoRuntimeConfig;
+}
+
+#[cfg(test)]
+pub(crate) async fn with_memento_test_endpoint<T>(
+    endpoint: String,
+    run: impl std::future::Future<Output = T>,
+) -> T {
+    TEST_MEMENTO_CONFIG
+        .scope(
+            MementoRuntimeConfig {
+                endpoint,
+                access_key: "fixture-only".into(),
+                workspace_override: None,
+            },
+            run,
+        )
+        .await
+}
+
 struct ToolCallResult {
     payload: Value,
     token_usage: TokenUsage,
@@ -103,6 +125,10 @@ impl MementoBackend {
     fn runtime_config(&self) -> Result<MementoRuntimeConfig, String> {
         if crate::config::test_instance::requested() {
             return Err("Memento is unavailable in a test instance".to_string());
+        }
+        #[cfg(test)]
+        if let Ok(config) = TEST_MEMENTO_CONFIG.try_with(Clone::clone) {
+            return Ok(config);
         }
         let root = crate::config::runtime_root().ok_or_else(|| {
             "AGENTDESK runtime root is unavailable; skipping memento backend".to_string()

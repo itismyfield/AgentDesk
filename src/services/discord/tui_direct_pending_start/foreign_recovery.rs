@@ -485,6 +485,9 @@ async fn demote_stale_foreign_inflight(
             relay_frontier = ?relay_frontier,
             capture_offset = ?capture_offset,
             denied_reason = gate.denied_reason().unwrap_or("unknown"),
+            legacy_sends = crate::services::tui_o::cutover::legacy_sends_report(record.channel_id)
+                .as_deref()
+                .unwrap_or("unselected"),
             "tui_direct_pending_start: skipped destructive stale FOREIGN demotion; death/identity gate did not pass (#4030)"
         );
         return ForeignRecovery::default();

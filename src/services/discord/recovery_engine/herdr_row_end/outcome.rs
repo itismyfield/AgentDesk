@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::services::claude::herdr_turn::TurnRead;
+use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::store::restart_notice::Intent;
 
 /// The input's own turn: its terminal, none, or nothing that names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,8 @@ pub(super) enum Settle {
     Notice(String),
     /// Through transport alone: no marker, body claim or delivery context.
     Neutral(String),
+    /// O owns the cut turn's output: its writer posts the one restart notice from this intent.
+    Restart(Intent),
 }
 
 /// Says neither that the turn finished nor that it was cut off.
@@ -54,7 +58,11 @@ pub(super) fn settle(
         (true, Outcome::Terminal(_)) => Settle::Silent,
         // The input reached the provider and the latest turn closed; O relays what followed.
         (true, Outcome::Mixed { after_prompt: true }) if idle => Settle::Silent,
-        (true, Outcome::NoTerminal) | (false, Outcome::NoTerminal) => {
+        (true, Outcome::NoTerminal) => match restart_intent(provider, row) {
+            Some(intent) => Settle::Restart(intent),
+            None => Settle::Notice(interrupted_recovery_message(row, &row.full_response)),
+        },
+        (false, Outcome::NoTerminal) => {
             Settle::Notice(interrupted_recovery_message(row, &row.full_response))
         }
         (true, _) => Settle::Neutral(NEUTRAL_NOTICE.to_string()),
@@ -71,6 +79,17 @@ pub(super) fn settle(
         }
         (false, _) => Settle::Notice(neutral_with_partial(&row.full_response)),
     }
+}
+
+/// The exact episode a restart cut; a row without one keeps the transport notice.
+fn restart_intent(provider: &ProviderKind, row: &inflight::InflightTurnState) -> Option<Intent> {
+    let shadow = match provider {
+        ProviderKind::Claude => ShadowProvider::Claude,
+        ProviderKind::Codex => ShadowProvider::Codex,
+        _ => return None,
+    };
+    let nonce = row.turn_nonce.as_deref();
+    Intent::exact(row.channel_id, shadow, nonce, row.born_generation)
 }
 
 /// The neutral notice after the row's saved partial, which it never calls complete.

@@ -3,13 +3,15 @@ title: S15 Discord !stop interrupts a hold turn, then is harmless while idle
 agent_mode: real_live
 coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
-cells: [claude-tui]
+cells: [claude-tui, claude-herdr]
+# Herdr runs its own cases E-54-AB and E-54-C (tui_relay/herdr_stop.py); the steps below are the tmux path.
+herdr_stop_cases: true
 isolation: required
 feature_coverage:
   schema: 1
   references:
     - feature_id: cancel-stop
-      scope: Claude tmux의 late marker 부재와 idle !stop 답글 정확히 1회 UX만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
+      scope: Claude tmux·Herdr의 late marker 부재와 idle !stop 답글 정확히 1회 UX, Herdr hold 중 후속 입력 전달 여부만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
       needs_live: true
 destructive: true
 acceptance_criteria:
@@ -20,6 +22,11 @@ acceptance_criteria:
 notes: |
   The hold starts with send_discord_prompt; no terminal input is injected.
   This covers the Discord-turn stop path, not the token-free direct-turn path.
+  Herdr cells skip these steps: E-54-AB sends a bare !stop mid-hold, then an
+  idle !stop 15s later whose single no-active-turn reply is the early-idle
+  witness, and waits past the hold for the late sentinel. E-54-C sends a
+  follow-up during a 90s hold; it must be delivered with no not-delivered or
+  not-kept notice, and stays a known gap (known_gap.py) until then.
   Interruption is judged by early idle plus the absent late relay; native
   transcript interrupt counting needs a separate source observer.
   The fixed late sentinel is scoped by the isolated scenario message window;

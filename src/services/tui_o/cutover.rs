@@ -13,7 +13,7 @@ pub(crate) mod intake_route;
 pub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
 pub(crate) use channel_gate::{
     BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send,
-    claim_then_send_at, claim_then_send_held_at, o_keeps_body,
+    claim_then_send_at, claim_then_send_held_at, legacy_sends_report, o_keeps_body,
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
     peek_o_owns_tui_output_for_channel_tmux,
 };
@@ -271,6 +271,20 @@ pub(crate) fn turn_selected(channel: u64) -> bool {
 /// The channel whose boot policy governs `channel`: a resolved thread child's parent, or itself.
 pub(crate) fn policy_channel(channel: u64) -> u64 {
     test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
+}
+
+/// The shared view's relation of `channel`: a held child stays unresolved, never its own parent.
+pub(crate) fn relation(channel: u64) -> crate::services::session_host::surface_policy::Relation {
+    use crate::services::session_host::surface_policy::Relation;
+    test_override::with_channels(|snapshot| {
+        match snapshot.and_then(|snapshot| snapshot.child(channel)) {
+            None => Relation::NotChild,
+            Some(Ok(child)) => Relation::Child {
+                parent: child.parent,
+            },
+            Some(Err(_)) => Relation::Unresolved,
+        }
+    })
 }
 
 /// The legacy mark used by output-free adoption fixtures.
@@ -655,6 +669,7 @@ pub(crate) mod test_override {
         crate::services::session_host::surface_policy::install_policy_channel(
             super::policy_channel,
         );
+        crate::services::session_host::surface_policy::install_relation(super::relation);
         ChannelsGuard {
             previous: CHANNELS.with(|cell| cell.replace(Some(snapshot))),
         }
