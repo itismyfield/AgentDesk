@@ -273,9 +273,8 @@ fn a_restored_reply_with_no_active_turn_delivers_the_original_once_pg() {
     });
 }
 
-/// The same pane still showing a running turn is not restored. With no active turn its absence
-/// is unproven, so the original is held under the readiness due; an idle screen before that due
-/// sends it once, with no notice.
+/// A still-busy pane with no active turn holds the original under the readiness due; an idle
+/// screen before that due sends it once, with no notice.
 #[test]
 fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_delivered_once_when_idle_pg() {
     let fx = Fixture::with_root(

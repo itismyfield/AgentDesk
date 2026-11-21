@@ -45,9 +45,8 @@ impl Owner {
         Ok(hold)
     }
 
-    /// Holds the queued original while its pane identity is re-read, under the same fixed
-    /// deadline a readiness hold has, counted from its first identity hold. An earlier readiness
-    /// due is replaced, so it cannot end the re-read early; a later identity hold keeps the due.
+    /// Holds the original for an identity re-read under a readiness due counted from its first
+    /// identity hold: it replaces an older readiness due, and a later identity hold keeps it.
     #[cfg(unix)]
     pub(crate) fn hold_identity(
         &mut self,
