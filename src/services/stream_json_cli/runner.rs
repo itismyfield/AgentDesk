@@ -16,7 +16,12 @@ use crate::services::platform::{BinaryResolution, apply_binary_resolution};
 use crate::services::process::configure_child_process_group;
 use crate::services::provider::{cancel_requested, register_child_pid, spawn_cancel_watchdog};
 
+use crate::services::tui_o::store::agy_spool::{AgySpool, Failure};
+
 use super::codec::StreamJsonCodec;
+use agy_recording::Recording;
+
+mod agy_recording;
 
 /// Stable marker for a stream that never became live (or stopped producing
 /// output) before its CLI process exited.  Callers use this to discard a
@@ -41,14 +46,52 @@ pub fn run_prepared(
     no_output_timeout: Duration,
     cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> Result<(), String> {
-    run_prepared_with_clock(prepared, sender, no_output_timeout, cancel, Instant::now)
+    run_prepared_with_clock(
+        prepared,
+        sender,
+        no_output_timeout,
+        cancel,
+        None,
+        Instant::now,
+    )
 }
+
+pub(crate) fn run_prepared_recorded(
+    mut prepared: PreparedCommand,
+    sender: Sender<StreamMessage>,
+    timeout: Duration,
+    cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+    spool: &mut AgySpool,
+) -> Result<(), String> {
+    prepared.codec.start_capture(spool.resume());
+    let mut recording = Recording::new(spool);
+    let result = if cancel_requested(cancel.as_deref()) {
+        Ok(())
+    } else {
+        run_prepared_with_clock(
+            prepared,
+            sender,
+            timeout,
+            cancel.clone(),
+            Some(&mut recording),
+            Instant::now,
+        )
+    };
+    if cancel_requested(cancel.as_deref()) {
+        recording.failure = Failure::Cancelled;
+    }
+    result
+}
+
+#[cfg(all(test, unix))]
+mod agy_recording_tests;
 
 fn run_prepared_with_clock(
     prepared: PreparedCommand,
     sender: Sender<StreamMessage>,
     no_output_timeout: Duration,
     cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+    mut recording: Option<&mut Recording<'_>>,
     mut now: impl FnMut() -> Instant,
 ) -> Result<(), String> {
     tracing::info!(
@@ -76,6 +119,9 @@ fn run_prepared_with_clock(
         .spawn_reaping()
         .map_err(|error| format!("Failed to start StreamJson CLI: {error}"))?;
 
+    if let Some(recording) = &mut recording {
+        recording.failure = Failure::Child;
+    }
     register_child_pid(cancel.as_deref(), child.id());
     child.track_cancel_token(cancel.as_ref());
     let watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
@@ -93,17 +139,20 @@ fn run_prepared_with_clock(
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture StreamJson stderr".to_string())?;
-    let (line_tx, line_rx) = stream_queue::channel::<Option<String>>();
+    let (line_tx, line_rx) = stream_queue::channel::<Option<std::io::Result<String>>>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             match line {
                 Ok(value) => {
-                    if line_tx.send(Some(value)).is_err() {
+                    if line_tx.send(Some(Ok(value))).is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(error) => {
+                    let _ = line_tx.send(Some(Err(error)));
+                    break;
+                }
             }
         }
         let _ = line_tx.send(None);
@@ -138,11 +187,14 @@ fn run_prepared_with_clock(
             ));
         }
         match line_rx.recv_timeout(poll) {
-            Ok(Some(line)) => {
+            Ok(Some(Ok(line))) => {
                 stdout_line_count += 1;
                 let messages = match codec.push_stdout_line(&line) {
                     Ok(messages) => messages,
                     Err(error) => {
+                        if let Some(recording) = &mut recording {
+                            recording.failure = Failure::Protocol;
+                        }
                         lifecycle.terminate(&mut child);
                         let _ = child.wait();
                         let _ = finish_reader(&stderr_handle);
@@ -157,13 +209,22 @@ fn run_prepared_with_clock(
                     saw_progress = true;
                 }
                 for message in messages {
-                    if sender.send(message).is_err() {
+                    if let Some(recording) = &mut recording {
+                        recording.message(&message);
+                    }
+                    if sender.send(message).is_err() && recording.is_none() {
                         lifecycle.terminate(&mut child);
                         let _ = child.wait();
                         let _ = finish_reader(&stderr_handle);
                         return Ok(());
                     }
                 }
+            }
+            Ok(Some(Err(_))) => {
+                if let Some(recording) = &mut recording {
+                    recording.failure = Failure::Protocol;
+                }
+                break;
             }
             Ok(None) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
@@ -192,6 +253,13 @@ fn run_prepared_with_clock(
             stderr_len = stderr.len(),
             "stream_json_cli child exited successfully with stderr"
         );
+    }
+    if let Some(recording) = &mut recording
+        && status.success()
+        && !matches!(recording.failure, Failure::Protocol)
+    {
+        recording.failure = Failure::Protocol;
+        recording.done(codec.as_mut());
     }
     let mut messages = codec
         .finish(status.code(), &stderr)
@@ -313,7 +381,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let start = Instant::now();
         let mut ticks = 0;
-        let result = run_prepared_with_clock(prepared, tx, Duration::ZERO, None, || {
+        let result = run_prepared_with_clock(prepared, tx, Duration::ZERO, None, None, || {
             ticks += 1;
             start + Duration::from_secs(if ticks > 2 { 24 * 3600 } else { 0 })
         });

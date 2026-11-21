@@ -1527,6 +1527,8 @@ session-lifecycle/HerdrMissingBoundBeforeEffectActive.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundBeforeEffectIdle.cfg	HerdrMissingBound	-	InputResolves,WatchResolves
 session-lifecycle/HerdrMissingBoundBeforeInput.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeNoticeRetry.cfg	HerdrMissingBound	NoticeOnce	InputResolves,ReasonDelivered
+session-lifecycle/HerdrMissingBoundBeforeRegistration.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
+session-lifecycle/HerdrMissingBoundBeforeReobserveDue.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
 session-lifecycle/HerdrMissingBoundBeforeRestart.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeRestored.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeUnknown.cfg	HerdrMissingBound	NoIdleHeld	InputResolves
@@ -1542,6 +1544,8 @@ session-lifecycle/HerdrMissingBoundFixedLaunchFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNonceRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNoticeRetry.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedReboot.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedRegistration.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedReobserveDue.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRepairFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestart.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestored.cfg	HerdrMissingBound	-	-
@@ -1549,6 +1553,8 @@ session-lifecycle/HerdrMissingBoundFixedRunning.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedTerminate.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedUnknown.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundHoldsProvenRefusal.cfg	HerdrMissingBound	-	RegistrationResolves
+session-lifecycle/HerdrMissingBoundNoRegistrationWake.cfg	HerdrMissingBound	-	RegistrationResolves
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound
@@ -1759,6 +1765,31 @@ tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClea
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
+tui-o-writer/WriterAgyAbandon.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
+tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyDoubleEnd.cfg	WriterAdoption	AgyEndOnce	-
+tui-o-writer/WriterAgyDoubleRelease.cfg	WriterAdoption	AgyEndOnce	-
+tui-o-writer/WriterAgyDualOwner.cfg	WriterAdoption	AgyNoDuplicate	-
+tui-o-writer/WriterAgyEarlyPurge.cfg	WriterAdoption	AgyNoSilentLoss	-
+tui-o-writer/WriterAgyFailed.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyHeadless.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyLong.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyMissingDisposition.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyMissingDone.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyMissingLostChild.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyMissingSpawnFailure.cfg	WriterAdoption	-	AgyAcceptedEnds
+tui-o-writer/WriterAgyOwnerCutover.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyOwnerDual.cfg	WriterAdoption	AgyChildSingleOwner	-
+tui-o-writer/WriterAgyOwnerLate.cfg	WriterAdoption	AgyRetirementFenced	-
+tui-o-writer/WriterAgyOwnerLost.cfg	WriterAdoption	-	AgyRestartResolvesOwner
+tui-o-writer/WriterAgyOwnerShadow.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyPreview.cfg	WriterAdoption	AgyNoPrematureBody	-
+tui-o-writer/WriterAgyRepost.cfg	WriterAdoption	AgyExactlyOneAnswer,AgyNoDuplicate	-
+tui-o-writer/WriterAgyRewind.cfg	WriterAdoption	AgyOffsetMonotone	-
+tui-o-writer/WriterAgyShort.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyStaleChild.cfg	WriterAdoption	AgyInputIdentity	-
+tui-o-writer/WriterAgyTwoTurns.cfg	WriterAdoption	-	-
 tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-
 tui-o-writer/WriterArchivedSourceBefore.cfg	WriterArchivedSource	ArchiveAtVerifiedEofRetires
 tui-o-writer/WriterArchivedSourceBootAfter.cfg	WriterArchivedSource	-	-

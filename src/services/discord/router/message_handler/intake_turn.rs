@@ -52,7 +52,7 @@ mod intake_outbox_state_builder_tests {
                     Option<super::super::OwnerTurn>,
                 ),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-                bool,
+                (bool, Option<MessageId>),
             ) -> F,
         ) -> usize {
             std::mem::size_of::<F>()
@@ -164,7 +164,7 @@ pub(super) async fn handle_text_message(
     request: IntakeRequest,
     (_queued_drain, queued, owner): (bool, Option<adk_thread::Route>, Option<super::OwnerTurn>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    durable_reply_context: bool,
+    (durable_reply_context, discord_message): (bool, Option<MessageId>),
 ) -> Result<IntakeExecution, Error> {
     // Keep the intake body on the heap so worker and local caller frames stay small.
     Box::pin(async move {
@@ -1967,7 +1967,8 @@ pub(super) async fn handle_text_message(
             }
         };
         inflight_create_log::record_turn_start_origin(shared, &provider, channel_id, &inflight_state).await;
-        let create = |state: &mut InflightTurnState| save_intake_inflight(codex_seed.as_ref(), state);
+        let mut inflight_saved = false;
+        let create = context::track_inflight_create(&mut inflight_saved, |state| save_intake_inflight(codex_seed.as_ref(), state));
         let admitted = super::foreign_row::admit(shared, &provider, &mut inflight_state, &cancel_token, create).await;
         if !matches!(admitted, Ok(true)) {
             // The recovery read guard is released before the delete waits on Discord.
@@ -2073,15 +2074,8 @@ pub(super) async fn handle_text_message(
         let cache_ttl_minutes =
             super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
         let registration_origin = Some(dispatch_id.is_some());
-        let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
-            provider: provider.as_str().to_string(),
-            agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
-            channel_id: Some(channel_id.get().to_string()),
-            session_key: adk_session_key.clone(),
-            tmux_session: tmux_session_name.clone(),
-            channel_name: channel_name.clone(),
-            execution_mode: Some("discord_turn".to_string()),
-        };
+        let agy_foreground = super::provider_dispatch::AgyForeground::from_claim(discord_message, turn_kind, inflight_saved, &inflight_state, &cancel_token);
+        let provider_execution_context = super::provider_isolation::execution_context(&provider, role_binding.as_ref(), channel_id.get(), adk_session_key.clone(), tmux_session_name.clone(), channel_name.clone());
         let dispatch_type_for_mcp = dispatch_type_str.clone();
         // Run the provider in a blocking thread
         let provider_for_blocking = provider.clone();
@@ -2122,6 +2116,7 @@ pub(super) async fn handle_text_message(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
                                 registration_origin,
+                                agy_foreground,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

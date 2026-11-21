@@ -38,9 +38,15 @@ impl Completion {
         projection: impl std::future::Future<Output = bool>,
         permitted: impl std::future::Future<Output = bool>,
     ) -> bool {
-        let summary = self.summary.with_context(&self.shared);
+        let mut summary = self.summary.with_context(&self.shared);
         let committed = projection.await;
-        if self.terminal_committed && permitted.await {
+        if !self.terminal_committed {
+            return committed;
+        }
+        summary
+            .load_usage_footer(&self.provider, self.shared.pg_pool.as_ref())
+            .await;
+        if permitted.await {
             post_live(self.gateway.as_ref(), &self.provider, summary).await;
         }
         committed

@@ -233,9 +233,12 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
         "the answer".to_owned(),
         crate::services::turn_summary_line::render(
             crate::services::turn_summary_line::Outcome::Completed,
-            u64::try_from(elapsed).ok(),
-            None,
-            None,
+            crate::services::turn_summary_line::Footer {
+                elapsed_ms: u64::try_from(elapsed).ok(),
+                started: Some(timestamp(&opener).to_utc()),
+                ended: Some(timestamp(&closing).to_utc()),
+                ..Default::default()
+            },
         ),
     ];
     append(&path, &[answer("msg_1", "the answer"), end].concat());

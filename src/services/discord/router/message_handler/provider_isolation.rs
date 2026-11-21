@@ -1,6 +1,25 @@
 use super::*;
 use crate::services::discord::session_runtime::reconstruct_managed_worktree_metadata;
 
+pub(super) fn execution_context(
+    provider: &ProviderKind,
+    role: Option<&settings::RoleBinding>,
+    channel_id: u64,
+    session_key: Option<String>,
+    tmux_session: Option<String>,
+    channel_name: Option<String>,
+) -> crate::services::provider_cli::ProviderExecutionContext {
+    crate::services::provider_cli::ProviderExecutionContext {
+        provider: provider.as_str().to_string(),
+        agent_id: role.map(|binding| binding.role_id.clone()),
+        channel_id: Some(channel_id.to_string()),
+        session_key,
+        tmux_session,
+        channel_name,
+        execution_mode: Some("discord_turn".to_string()),
+    }
+}
+
 pub(super) fn metadata_parent_channel_id(
     metadata: Option<&serde_json::Value>,
 ) -> Option<serenity::ChannelId> {

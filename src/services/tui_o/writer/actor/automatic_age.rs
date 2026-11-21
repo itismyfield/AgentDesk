@@ -52,6 +52,7 @@ pub(super) fn last_dialogue_for(
         ShadowProvider::Codex => {
             super::codex_age::last_dialogue(&bytes, &cursor.source, provider_root?)
         }
+        ShadowProvider::Antigravity => None,
     }
 }
 

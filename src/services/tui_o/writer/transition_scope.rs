@@ -224,6 +224,7 @@ pub(super) fn encode(
     out.push(match provider {
         ShadowProvider::Claude => 1,
         ShadowProvider::Codex => 2,
+        ShadowProvider::Antigravity => 3,
     });
     bytes(&mut out, context.tmux.as_bytes());
     bytes(&mut out, context.nonce.as_bytes());

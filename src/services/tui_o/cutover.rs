@@ -178,6 +178,9 @@ pub(crate) async fn record_thread_child_by_id(
 ) -> Result<bool, String> {
     let provider = test_override::with_channels(|snapshot| {
         let snapshot = snapshot?;
+        if snapshot.agy_selected(hinted_parent) {
+            return Some("antigravity");
+        }
         if !snapshot.channels().contains(&hinted_parent) || snapshot.child(channel).is_some() {
             return None;
         }
@@ -204,6 +207,7 @@ fn record_in(
     fresh: bool,
 ) -> bool {
     use crate::services::session_host::surface_policy::VerifiedSurface;
+    let _ = snapshot.record_agy_thread(channel);
     let parent = channel.parent_id.map(|parent| parent.get());
     let Some(kind) = parent.and_then(|parent| snapshot.kind(parent)) else {
         return false;

@@ -62,6 +62,7 @@ async fn recorded_card_restart(provider: ShadowProvider, channel: u64) {
     let prefix = match provider {
         ShadowProvider::Claude => 1,
         ShadowProvider::Codex => 2,
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     };
     harness.gate.acquired();
     let (stop, task) = spawn_with(harness.writer(), provider, Arc::clone(&bindings));
@@ -102,6 +103,7 @@ async fn recorded_card_restart(provider: ShadowProvider, channel: u64) {
     let status = match provider {
         ShadowProvider::Claude => '✓',
         ShadowProvider::Codex => '·',
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     };
     let expected = vec![
         format!("-# ▸ Bash  cargo check  {status}"),

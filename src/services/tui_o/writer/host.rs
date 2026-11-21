@@ -26,6 +26,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
+pub(crate) mod agy_host;
 mod child_retirement;
 mod first_init;
 mod fresh_input;
@@ -39,6 +40,12 @@ pub use activation_io::{Custody, FencedFacts};
 pub(crate) use child_retirement::{ChildStores, keep_stoppable};
 pub(crate) use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
+/// Only pane writers enter the native turn retirement callback.
+pub enum PaneAdoptionProvider {
+    Claude,
+    Codex,
+}
+
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
     type Port: DiscordPort;
@@ -109,7 +116,15 @@ pub trait HostIo: Send + Sync + 'static {
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
     /// Called once a first activation committed the channel, before it is ready for intake.
-    fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
+    fn adopted(&self, channel: u64, provider: ShadowProvider) {
+        let pane = match provider {
+            ShadowProvider::Claude => PaneAdoptionProvider::Claude,
+            ShadowProvider::Codex => PaneAdoptionProvider::Codex,
+            ShadowProvider::Antigravity => return,
+        };
+        self.pane_adopted(channel, pane);
+    }
+    fn pane_adopted(&self, _channel: u64, _provider: PaneAdoptionProvider) {}
     /// The writer can drain retained inputs now; called after publishing readiness.
     fn input_ready(&self, channel: u64, provider: ShadowProvider) {
         let _ = (channel, provider);
