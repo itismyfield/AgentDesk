@@ -41,7 +41,7 @@ async fn raw_alias_reconcile_follows_current_primary_pg() {
 
 #[tokio::test]
 async fn raw_alias_resume_tears_down_current_session_pg() {
-    let rig = PromotionRig::new(81190323).await;
+    let rig = PromotionRig::new(1_481_190_323_000_000_000).await;
     sqlx::query("UPDATE sessions SET thread_channel_id=channel_id, cwd=$2, claude_session_id='old' WHERE id=$1")
         .bind(rig.id)
         .bind(rig.root.path().to_str().unwrap())
@@ -53,21 +53,31 @@ async fn raw_alias_resume_tears_down_current_session_pg() {
         session_id: Some(target.to_string()),
         cwd: Some(rig.root.path().to_str().unwrap().to_string()),
     };
+    let home = rig.root.path().join("claude-home");
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        rig.root.path(),
+        target,
+        Some(&home),
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(transcript, b"{}\n").unwrap();
     let state = rig.app_state();
     let context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
-    let (status, body) = crate::services::session_resume::dispatch_resume_previous(
+    let resume = crate::services::session_resume::dispatch_resume_previous(
         &rig.pool,
         Some(&rig.registry),
         &context,
         None,
         &rig.old,
         &options,
-    )
-    .await;
+    );
+    let (status, body) =
+        crate::services::session_resume::catalog::scope_claude_home_for_tests(home, resume).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert!(
         rig.others().is_empty(),
-        "the rebind must end the session it replaces"
+        "the rebind must end the session it replaces: {body:?}"
     );
     let bound: Option<String> =
         sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE id=$1")
