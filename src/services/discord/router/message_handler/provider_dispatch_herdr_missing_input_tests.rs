@@ -230,7 +230,6 @@ fn a_missing_idle_bound_pane_retires_and_a_failed_restart_discards_the_front_pg(
     idle_case(true, false, false);
 }
 
-// Keep the existing test ID in the PG lane. Its custody assertion now requires the original.
 #[test]
 fn an_unreadable_idle_bound_pane_keeps_its_input_pg() {
     idle_case(false, false, false);
@@ -327,7 +326,7 @@ fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
         assert!(crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path)).is_some());
         let state = super::source_input_settled(&intake, &original, &heads).await;
         assert_eq!(state["items"], json!([]));
-        super::idle_turn_unwound(&intake).await;
+        super::idle_turn_unwound(&intake, MESSAGE).await;
         let sends = fx.rig.sends();
         assert_eq!(sends.len() - before, 2, "one paste and one Enter");
         assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
@@ -460,7 +459,7 @@ fn an_old_readiness_due_cannot_discard_a_front_reobserving_a_live_pane_pg() {
                 .is_some()
         );
         super::source_input_settled(&intake, &original, &heads).await;
-        super::idle_turn_unwound(&intake).await;
+        super::idle_turn_unwound(&intake, MESSAGE).await;
         let sends = fx.rig.sends();
         assert_eq!(sends.len() - before, 2);
         assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
