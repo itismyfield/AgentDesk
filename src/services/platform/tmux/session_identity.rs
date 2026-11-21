@@ -17,6 +17,20 @@ pub(crate) fn require_managed_with_program(
     if session.starts_with("AgentDesk-") {
         return Ok(());
     }
+    managed_identity_with_program(session, program, budget).map(|_| ())
+}
+
+/// The creation-time identity of a session this runtime scope owns; anything else is refused.
+pub(crate) fn managed_identity(session: &str) -> Result<ManagedIdentity, String> {
+    validate_target(session).map_err(|e| e.to_string())?;
+    managed_identity_with_program(session, Path::new("tmux"), Duration::from_secs(3))
+}
+
+fn managed_identity_with_program(
+    session: &str,
+    program: &Path,
+    budget: Duration,
+) -> Result<ManagedIdentity, String> {
     let refused = || format!("NotSent(\"unverified tmux session owner: {session}\")");
     if session.trim().is_empty() {
         return Err(refused());
@@ -43,5 +57,5 @@ pub(crate) fn require_managed_with_program(
     if identity.owner_scope != scope {
         return Err(refused());
     }
-    Ok(())
+    Ok(identity)
 }

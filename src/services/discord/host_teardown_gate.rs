@@ -191,13 +191,12 @@ fn keyed_lookup_teardown(
     )
 }
 
-/// The provider a stored row names, or with none the one its tmux name records. It only
+/// The provider a stored row names, or with none the one its tmux session records. It only
 /// fills the gate's provider: the row, marker and inflight evidence still decide.
 pub(crate) fn row_provider(stored: Option<&str>, tmux_name: &str) -> Option<ProviderKind> {
     match stored.filter(|value| !value.trim().is_empty()) {
         Some(stored) => ProviderKind::from_str(stored),
-        None => crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
-            .map(|(provider, _)| provider),
+        None => crate::services::provider::session_source::tmux_session_provider(tmux_name),
     }
 }
 

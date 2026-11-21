@@ -1676,6 +1676,8 @@ session-lifecycle/HerdrSessionNamingWithoutAbsenceGuard.cfg	HerdrSession	LiveOld
 session-lifecycle/HerdrSessionNamingWithoutNonceCAS.cfg	HerdrSession	PrimaryNamesCurrentLogical,PrimaryNotAlias,LateOldHookRejected,NoDeadlock	-
 session-lifecycle/HerdrSessionNamingWithoutPromotion.cfg	HerdrSession	PrimaryNamesCurrentLogical,PrimaryNotAlias,NoDeadlock	-
 session-lifecycle/HerdrSessionNamingWithoutPromotionNonceGuard.cfg	HerdrSession	PromotionNonceWasCurrent	-
+session-lifecycle/HerdrSessionRawAliasFixed.cfg	HerdrSession	-	-
+session-lifecycle/HerdrSessionRawAliasProviderDefault.cfg	HerdrSession	RawProviderFromRecord	-
 session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
 session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
 session-lifecycle/SessionNameDualReadEarlyLegacyRemovalNoDuplicate.cfg	SessionNameDualRead	-	-
@@ -1728,6 +1730,11 @@ session-lifecycle/TmuxSessionNamingWithoutAbsenceGuard.cfg	TmuxSession	LiveOldNo
 session-lifecycle/TmuxSessionNamingWithoutNonceCAS.cfg	TmuxSession	PrimaryTailIsCurrentPhysical,PrimaryNotAlias,LateOldHookRejected,NoDeadlock	-
 session-lifecycle/TmuxSessionNamingWithoutPromotion.cfg	TmuxSession	PrimaryTailIsCurrentPhysical,PrimaryNotAlias,NoDeadlock	-
 session-lifecycle/TmuxSessionNamingWithoutPromotionNonceGuard.cfg	TmuxSession	PromotionNonceWasCurrent	-
+session-lifecycle/TmuxSessionRawAliasFixed.cfg	TmuxSession	-	-
+session-lifecycle/TmuxSessionRawAliasGcByAlias.cfg	TmuxSession	GcKeepsLive	-
+session-lifecycle/TmuxSessionRawAliasParsed.cfg	TmuxSession	RawMissNeedsRace	-
+session-lifecycle/TmuxSessionRawAliasProviderDefault.cfg	TmuxSession	RawProviderFromRecord	-
+session-lifecycle/TmuxSessionRawAliasUnnormalized.cfg	TmuxSession	RawAliasReachesRow,NoDeadlock	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
 tui-o-turn-mode/CodexTakeoverAfter.cfg	CodexTakeover	-	-
 tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfirms

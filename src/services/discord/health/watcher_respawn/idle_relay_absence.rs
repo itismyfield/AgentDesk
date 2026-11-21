@@ -81,8 +81,8 @@ pub(super) fn routable_unwatched_sessions(
 /// One host runs Claude and Codex sessions side by side and each provider's
 /// watchdog pass sweeps only its own.
 fn session_belongs_to_provider(provider: &ProviderKind, tmux_session: &str) -> bool {
-    crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session)
-        .is_some_and(|(session_provider, _)| &session_provider == provider)
+    crate::services::provider::session_source::tmux_session_provider(tmux_session)
+        .is_some_and(|session_provider| &session_provider == provider)
 }
 
 /// PURE: one WARN per absence episode, not one per 30 s tick.

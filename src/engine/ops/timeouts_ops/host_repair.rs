@@ -59,6 +59,12 @@ pub(in crate::engine::ops) async fn resolve_policy_target_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<LegacyTarget, Deferral> {
+    // A policy may still hold an alias; the host target is the tail of the row's current primary.
+    let resolved =
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(pool, session_key)
+            .await;
+    let current = resolved.ok().flatten();
+    let session_key = current.as_deref().unwrap_or(session_key);
     let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(session_key)).await;
     policy_target(session_key, lookup)
 }

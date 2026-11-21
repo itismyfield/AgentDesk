@@ -17,7 +17,10 @@ Init(kind) ==
         tx |-> "idle", snapshotNonce |-> "", stagedPrimary |-> "old",
         stagedNonce |-> "", stagedAliases |-> {}, hostWitness |-> "same", witnessChanged |-> FALSE,
         slotIncarnation |-> "none", replacementSeen |-> FALSE,
-        restarts |-> 0, crashDurable |-> <<"old", nonce, {}>>] : nonce \in {"old", ""}}
+        restarts |-> 0, crashDurable |-> <<"old", nonce, {}>>,
+        req |-> "none", reqSrc |-> "none", reqName |-> "none", reqDone |-> "none",
+        reqTries |-> 0, reqEpoch |-> 0, rowProvider |-> "none", effProvider |-> "none",
+        raced |-> FALSE, gc |-> "none"] : nonce \in {"old", ""}}
 
 RequestNewName ==
     /\ n.stage = "old"
@@ -148,6 +151,76 @@ Next(mode) == RequestNewName \/ OldHostEnds \/ ObserveOldHost \/ ProbeFails \/ P
     \/ LateOldNonceHook(mode) \/ StopCurrent \/ RetryStop(mode) \/ Done
 
 NextWithRestart == Next("fixed") \/ DaemonCrashes \/ RestartReadsDurableRow
+
+\* Raw session-key input on a registered row: a stop, cleanup, resume or reconcile asked with the
+\* current primary or with an alias the row kept. The asked key only finds the row; the row's
+\* current primary names the target and the row's record names the provider.
+RawSources == {"person", "http", "routine", "policy", "queue"}
+RawOpen == n.req # "none" /\ n.reqDone = "none"
+
+AskStop(key, src) ==
+    /\ n.stage = "registered" /\ n.tx = "committed" /\ n.current # "none"
+    /\ n.req = "none" \/ n.reqDone \in {"missed", "lost"}
+    /\ n.reqTries < 2
+    /\ src = "queue" => key = "primary"
+    /\ \E provider \in (IF n.rowProvider = "none" THEN {"claude", "codex"} ELSE {n.rowProvider}) :
+        n' = [n EXCEPT !.req = key, !.reqSrc = src, !.reqName = "none", !.reqDone = "none",
+            !.reqTries = @ + 1, !.reqEpoch = n.restarts, !.rowProvider = provider]
+
+\* A Herdr execution is only handed to its terminate service under the row's own primary.
+Normalize(mode) ==
+    /\ RawOpen /\ n.reqName = "none" /\ n.reqEpoch = n.restarts
+    /\ n' = [n EXCEPT
+        !.reqName = IF n.req = "alias" /\ n.host = "herdr" THEN "host-refused"
+            ELSE IF n.req = "alias" /\ mode = "parse-alias" THEN Physical(n.host, "old")
+            ELSE IF n.req = "alias" /\ mode = "no-normalize" THEN "unresolved"
+            ELSE Physical(n.host, n.primary),
+        !.effProvider = IF mode = "provider-default" THEN "claude" ELSE n.rowProvider]
+
+Effect ==
+    /\ RawOpen /\ n.reqName # "none" /\ n.reqEpoch = n.restarts
+    /\ n' = IF n.reqName \in {"host-refused", "unresolved"} THEN [n EXCEPT !.reqDone = "refused"]
+        ELSE IF n.current = "none" THEN [n EXCEPT !.reqDone = "absent"]
+        ELSE IF n.reqName = n.target
+        THEN [n EXCEPT !.reqDone = "effect", !.kills = @ + 1, !.current = "none",
+            !.target = "none", !.stage = "stopped", !.slotIncarnation = "none"]
+        ELSE [n EXCEPT !.reqDone = "missed"]
+
+\* Between the normalization and the effect the session ends and its successor is promoted.
+RawRepromote ==
+    /\ RawOpen /\ n.reqName # "none" /\ ~n.raced /\ n.stage = "registered" /\ n.host = "tmux"
+    /\ n' = [n EXCEPT !.raced = TRUE, !.primary = "next", !.aliases = @ \cup {"new"},
+        !.current = "next", !.target = Physical(n.host, "next")]
+
+\* The row, its aliases and the live session outlast the daemon; an in-flight request does not.
+RawRestart ==
+    /\ n.stage = "registered" /\ n.restarts = 0 /\ n.req # "none"
+    /\ n' = [n EXCEPT !.restarts = 1]
+
+RawLost ==
+    /\ RawOpen /\ n.reqEpoch # n.restarts
+    /\ n' = [n EXCEPT !.reqDone = "lost"]
+
+\* The stale-thread sweep probes the name of the row's primary before it deletes the row.
+RawGc(mode) ==
+    /\ n.stage = "registered" /\ n.current # "none" /\ n.gc = "none"
+    /\ LET probed == Physical(n.host, IF mode = "gc-alias" THEN "old" ELSE n.primary)
+       IN n' = [n EXCEPT !.gc = IF probed = n.target THEN "kept" ELSE "deleted"]
+
+RawDone ==
+    /\ n.stage = "registered" /\ n.primary = "next" /\ n.reqTries = 2
+    /\ n.reqDone \in {"missed", "lost"} /\ UNCHANGED n
+
+RawNext(mode) == Next("fixed") \/ Normalize(mode) \/ Effect \/ RawRepromote \/ RawRestart
+    \/ RawLost \/ RawGc(mode) \/ RawDone
+    \/ \E key \in {"primary", "alias"}, src \in RawSources : AskStop(key, src)
+
+RawStopEndsCurrent == n.reqDone = "effect" => n.current = "none"
+RawMissNeedsRace == n.reqDone = "missed" => n.raced
+RawAliasReachesRow == n.reqDone = "refused" => n.host = "herdr" /\ n.req = "alias"
+RawProviderFromRecord == n.reqDone = "effect" => n.effProvider = n.rowProvider
+GcKeepsLive == n.gc # "deleted"
+RawSettles == RawOpen ~> ~RawOpen
 
 PrimaryTailIsCurrentPhysical == n.current # "none" => n.primary = n.target
 PrimaryNamesCurrentLogical == n.current # "none" => n.primary = n.current

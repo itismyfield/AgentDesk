@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::SharedData;
-use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::provider::{ProviderKind, session_source::tmux_session_provider};
 
 /// Polling interval. Picked lower than `placeholder_sweeper`'s 30s so
 /// the explicit eviction lands before the time-based sweeper has a
@@ -93,9 +93,7 @@ fn run_heartbeat_sweep_pass_inner(
         }
         report.heartbeat_stale += 1;
         let tmux_session_name = entry.value().tmux_session_name.clone();
-        let Some((session_provider, _)) =
-            parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-        else {
+        let Some(session_provider) = tmux_session_provider(&tmux_session_name) else {
             continue;
         };
         // Sweeper is spawned per provider — never touch another bot's

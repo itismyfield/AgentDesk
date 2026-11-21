@@ -4,7 +4,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use sqlx::Row;
 
-use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::provider::{ProviderKind, session_source::tmux_session_provider};
 
 use super::SharedData;
 
@@ -489,8 +489,7 @@ pub(super) async fn resume_aborted_restart_turn(
     tmux_session_name: &str,
     output_path: &str,
 ) -> bool {
-    let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
-    else {
+    let Some(provider_kind) = tmux_session_provider(tmux_session_name) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",

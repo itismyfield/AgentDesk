@@ -65,42 +65,39 @@ impl SessionActivityResolver {
                 return *cached;
             }
             #[cfg(unix)]
-            let ready =
-                crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
-                    .map(|(provider, _)| {
-                        let binding =
-                            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-                                tmux_name,
-                            );
-                        let runtime_kind = binding
-                            .as_ref()
-                            .map(|binding| binding.runtime_kind)
-                            .or_else(|| {
-                                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(
-                                    tmux_name,
-                                )
-                            });
-                        if let Some(ready) = binding
-                            .as_ref()
-                            .and_then(|binding| {
-                                crate::services::tui_turn_state::runtime_binding_ready_for_input(
-                                    &provider, binding, true,
-                                )
-                            })
-                            .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-                        {
-                            return ready;
-                        }
-                        crate::services::provider::tmux_session_fallback_ready_for_input(
+            let ready = crate::services::provider::session_source::tmux_session_provider(tmux_name)
+                .map(|provider| {
+                    let binding =
+                        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
                             tmux_name,
-                            &provider,
-                            runtime_kind,
-                        )
-                        .is_some_and(
-                            crate::services::pane_readiness::FallbackPaneReadiness::is_ready,
-                        )
-                    })
-                    .unwrap_or(false);
+                        );
+                    let runtime_kind = binding
+                        .as_ref()
+                        .map(|binding| binding.runtime_kind)
+                        .or_else(|| {
+                            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(
+                                tmux_name,
+                            )
+                        });
+                    if let Some(ready) = binding
+                        .as_ref()
+                        .and_then(|binding| {
+                            crate::services::tui_turn_state::runtime_binding_ready_for_input(
+                                &provider, binding, true,
+                            )
+                        })
+                        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                    {
+                        return ready;
+                    }
+                    crate::services::provider::tmux_session_fallback_ready_for_input(
+                        tmux_name,
+                        &provider,
+                        runtime_kind,
+                    )
+                    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+                })
+                .unwrap_or(false);
             #[cfg(not(unix))]
             let ready = false; // tmux not available on Windows
             ready_cache.insert(tmux_name.to_string(), ready);
