@@ -50,14 +50,14 @@ pub struct PreparedWrite<'a> {
 
 pub fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a>, NotPublished> {
     if let Some(parent) = path.parent() {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         tests::inject(path, Stage::CreateDir).map_err(|error| Stage::CreateDir.failed(error))?;
         fs::create_dir_all(parent).map_err(|error| Stage::CreateDir.failed(error))?;
     }
     let unique = uuid::Uuid::new_v4().simple();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let temp = path.with_file_name(format!(".{file_name}.{unique}.tmp"));
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     tests::inject(path, Stage::CreateTemp).map_err(|error| Stage::CreateTemp.failed(error))?;
     let file = fs::File::create(&temp).map_err(|error| Stage::CreateTemp.failed(error))?;
     let mut prepared = PreparedWrite {
@@ -65,13 +65,13 @@ pub fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a>, NotP
         temp,
         file,
     };
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     tests::inject(path, Stage::Write).map_err(|error| Stage::Write.failed(error))?;
     prepared
         .file
         .write_all(data.as_bytes())
         .map_err(|error| Stage::Write.failed(error))?;
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     tests::inject(path, Stage::FileSync).map_err(|error| Stage::FileSync.failed(error))?;
     prepared
         .file
@@ -83,12 +83,12 @@ pub fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a>, NotP
 impl PreparedWrite<'_> {
     /// Only rename publishes the whole file; parent sync is deliberately separate.
     pub fn publish(self) -> Result<Published, NotPublished> {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         tests::inject(self.target, Stage::Rename).map_err(|error| Stage::Rename.failed(error))?;
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         rename_fault::before(self.target, &self.temp);
         let renamed = fs::rename(&self.temp, self.target);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         rename_fault::after(self.target, &renamed);
         renamed
             .map(|()| Published)
@@ -96,7 +96,7 @@ impl PreparedWrite<'_> {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub mod rename_fault {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -152,5 +152,5 @@ pub mod rename_fault {
         }
     }
 }
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub mod tests;

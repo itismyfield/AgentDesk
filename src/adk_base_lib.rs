@@ -6,14 +6,12 @@
 #![deny(clippy::correctness)]
 
 pub mod domain {
-    pub mod atomic_write;
     pub mod auto_queue_log;
     pub mod automation_contract;
     pub mod bot_role;
     pub mod conversation;
     pub mod dispatch_route;
     pub mod dispatch_summary;
-    pub mod file_sync;
     pub mod fix_safety;
     pub mod host_observation;
     pub mod intake_consent;

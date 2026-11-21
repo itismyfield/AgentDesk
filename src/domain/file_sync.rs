@@ -1,13 +1,13 @@
 use std::path::Path;
 
-#[cfg(all(not(any(test, feature = "test-support")), not(windows)))]
+#[cfg(all(not(test), not(windows)))]
 use std::fs;
 
 /// Opens the parent read-only and syncs its directory entry, returning I/O errors.
 /// This is separate from file sync and rename; a bare filename uses `.`.
 #[cfg(not(windows))]
 pub fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     use parent_sync_probe as fs;
     let parent = path
         .parent()
@@ -16,7 +16,7 @@ pub fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// Records successful directory syncs while a test arms the thread-local probe.
-#[cfg(all(any(test, feature = "test-support"), not(windows)))]
+#[cfg(all(test, not(windows)))]
 pub mod parent_sync_probe {
     use std::path::{Path, PathBuf};
     thread_local! {

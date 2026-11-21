@@ -1,4 +1,4 @@
-pub(crate) use adk_base::domain::atomic_write;
+pub(crate) mod atomic_write;
 pub(crate) use adk_base::domain::auto_queue_log;
 pub(crate) use adk_base::domain::automation_contract;
 pub(crate) use adk_base::domain::bot_role;
@@ -7,7 +7,7 @@ pub(crate) mod cluster_policy;
 pub(crate) use adk_base::domain::conversation;
 pub(crate) use adk_base::domain::dispatch_route;
 pub(crate) use adk_base::domain::dispatch_summary;
-pub(crate) use adk_base::domain::file_sync;
+pub(crate) mod file_sync;
 pub(crate) use adk_base::domain::fix_safety;
 pub(crate) use adk_base::domain::host_observation;
 pub(crate) mod human_input;
