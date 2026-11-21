@@ -20,6 +20,7 @@ pub(crate) mod projection;
 mod readiness_hold;
 mod refused;
 mod retained;
+pub(crate) mod routine_settlement;
 pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
@@ -174,6 +175,7 @@ impl Owner {
                 admission_receipts: vec![],
                 admission_sequence: 0,
                 admission_binds: Vec::new(),
+                routine_withdrawals: Default::default(),
                 items: vec![],
                 head_injection: None,
                 retained_inputs: vec![],
@@ -214,7 +216,11 @@ impl Owner {
             && head.phase != HeadPhase::Reserved
             && matches!(head.payload_window, Some(PayloadWindow::Bootstrap))
         {
-            head.phase = HeadPhase::Unknown;
+            head.phase = if head.routine_delivery == Some(RoutineDelivery::AwaitingKey) {
+                HeadPhase::Reserved
+            } else {
+                HeadPhase::Unknown
+            };
         }
         owner.commit(restored)?;
         owner.project_slots();
@@ -295,6 +301,7 @@ impl Owner {
             confirmation_deadline_ms: None,
             resolved_source: None,
             payload_window: None,
+            routine_delivery: None,
             resolved_target: None,
             preparation_hold: None,
             legacy_attempt: None,

@@ -4145,6 +4145,7 @@ src/
 │   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   ├── run_policy.rs
+│   │   │   ├── settlement.rs
 │   │   │   ├── start_deferral.rs
 │   │   │   └── surface.rs
 │   │   ├── discord_log/
@@ -4166,6 +4167,7 @@ src/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
 │   │   │   ├── failure_escalation.rs
+│   │   │   ├── recovery.rs
 │   │   │   ├── session_interrupt.rs
 │   │   │   └── thread_choices.rs
 │   │   ├── action.rs
@@ -5028,6 +5030,7 @@ src/
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
 │   │   │   │   ├── start_failure.rs

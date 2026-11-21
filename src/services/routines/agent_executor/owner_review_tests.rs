@@ -486,3 +486,228 @@ async fn start_failure_retained_routine_closes_without_retry_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[derive(Clone, Copy)]
+enum SettlementBoundary {
+    Untried,
+    Claimed,
+    Approved,
+    HerdrIdle,
+}
+
+async fn settlement_boundary(
+    boundary: SettlementBoundary,
+    recover: bool,
+) -> (String, bool, bool, i32) {
+    let (db, pool, store, executor, run, old_handle) = accepted_fixture().await;
+    let mut input =
+        ChannelMailboxHandle::restore_owner_input(run.result_json.unwrap()["owner_input"].clone())
+            .unwrap();
+    let deadline = u64::try_from(Utc::now().timestamp_millis()).unwrap();
+    input.context[ChannelMailboxHandle::ROUTINE_DELIVERY_DEADLINE] = json!(deadline);
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(poise::serenity_prelude::ChannelId::new(7272));
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("settlement-owner.json");
+    handle
+        .v2_adopt(path.clone(), input.namespace.clone())
+        .await
+        .unwrap();
+    assert!(input.confirm_admission(&handle).await.unwrap());
+    sqlx::query(
+        "UPDATE routine_runs SET result_json=jsonb_set(result_json,'{owner_input}',$2)
+        WHERE id=$1",
+    )
+    .bind(&run.run_id)
+    .bind(json!(input))
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(old_handle);
+    match boundary {
+        SettlementBoundary::Untried => {}
+        SettlementBoundary::Claimed | SettlementBoundary::Approved => {
+            handle
+                .v2_reserve_head_for_tests("settlement", false)
+                .await
+                .unwrap();
+            handle
+                .v2_request(move |slot| {
+                    let owner = slot.as_mut().ok_or("owner missing")?;
+                    let key = owner.active_attempt()?;
+                    drop(owner.arm_bootstrap(&key, 0)?);
+                    if matches!(boundary, SettlementBoundary::Approved) {
+                        owner.approve_first_key(&key, &|| 0)?;
+                    } else if !recover {
+                        assert_eq!(
+                            owner.approve_first_key(&key, &|| deadline),
+                            Err("routine_delivery_deadline".into())
+                        );
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        SettlementBoundary::HerdrIdle => {
+            handle
+                .v2_request(|slot| {
+                    let owner = slot.as_mut().ok_or("owner missing")?;
+                    let front = owner.front().ok_or("owner front missing")?;
+                    owner.hold_front(&front)
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    let handle = if recover && matches!(boundary, SettlementBoundary::Claimed) {
+        let restarted =
+            ChannelMailboxRegistry::default().handle(poise::serenity_prelude::ChannelId::new(7272));
+        restarted
+            .v2_adopt(path, input.namespace.clone())
+            .await
+            .unwrap();
+        restarted
+    } else {
+        handle
+    };
+    let expired = (Utc::now() - Duration::hours(2)).to_rfc3339();
+    sqlx::query(
+        "UPDATE routine_runs SET lease_expires_at=NOW()-INTERVAL '1 second',
+        attempts=jsonb_set(attempts, ARRAY[(jsonb_array_length(attempts)-1)::text,'at'], $2::jsonb)
+        WHERE id=$1",
+    )
+    .bind(&run.run_id)
+    .bind(json!(expired))
+    .execute(&pool)
+    .await
+    .unwrap();
+    if recover {
+        OWNER
+            .scope(handle.clone(), executor.recover_stale_running_runs(&store))
+            .await
+            .unwrap();
+    } else {
+        OWNER
+            .scope(handle.clone(), executor.poll_agent_runs(&store, 10, false))
+            .await
+            .unwrap();
+    }
+
+    let (status, retries, projection): (String, i32, String) = sqlx::query_as(
+        "SELECT status,retry_count,result_json->>'status' FROM routine_runs WHERE id=$1",
+    )
+    .bind(&run.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (empty, payload_started) = handle
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("owner missing")?;
+            let after_deadline = deadline.saturating_add(1);
+            let payload_started = owner.active_attempt().ok().is_some_and(|key| {
+                owner.approve_first_key(&key, &|| after_deadline).is_ok()
+                    && owner.payload_started(&key, after_deadline).is_ok()
+            });
+            let snapshot = owner.json()?;
+            let empty = snapshot["items"] == json!([])
+                && snapshot["head_injection"].is_null()
+                && snapshot["retained_inputs"] == json!([]);
+            Ok((empty, payload_started))
+        })
+        .await
+        .unwrap();
+    if matches!(boundary, SettlementBoundary::Approved) {
+        sqlx::query(
+            "INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'late receipt')",
+        )
+        .bind(run.turn_id.as_deref().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store.record_late_owner_completions().await.unwrap();
+        let (closed, evidence): (String, Option<String>) = sqlx::query_as(
+            "SELECT status,result_json#>>'{late_completion,kind}' FROM routine_runs WHERE id=$1",
+        )
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (closed.as_str(), evidence.as_deref()),
+            (status.as_str(), Some("transcript"))
+        );
+    } else {
+        assert!(!input.confirm_admission(&handle).await.unwrap_or(false));
+    }
+    pool.close().await;
+    db.drop().await;
+    let expected_projection = match (boundary, recover) {
+        (SettlementBoundary::Approved, _) => "completion_unconfirmed",
+        (_, true) => "interrupted",
+        (_, false) => "channel_input_unavailable",
+    };
+    assert_eq!(projection, expected_projection);
+    (status, empty, payload_started, retries)
+}
+
+#[tokio::test]
+async fn e0_deadline_withdraws_untried_original_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    assert_eq!(
+        settlement_boundary(SettlementBoundary::Untried, false).await,
+        ("failed".into(), true, false, 0)
+    );
+}
+
+#[tokio::test]
+async fn e0_deadline_beats_claimed_first_key_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    assert_eq!(
+        settlement_boundary(SettlementBoundary::Claimed, false).await,
+        ("failed".into(), true, false, 0)
+    );
+}
+
+#[tokio::test]
+async fn e0_deadline_preserves_approved_payload_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    assert_eq!(
+        settlement_boundary(SettlementBoundary::Approved, false).await,
+        ("failed".into(), false, true, 0)
+    );
+}
+
+#[tokio::test]
+async fn e0_deadline_withdraws_herdr_idle_wait_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    assert_eq!(
+        settlement_boundary(SettlementBoundary::HerdrIdle, false).await,
+        ("failed".into(), true, false, 0)
+    );
+}
+
+#[tokio::test]
+async fn e0_recovery_settles_all_owner_boundaries_pg() {
+    let mut outcomes = Vec::new();
+    for boundary in [
+        SettlementBoundary::Untried,
+        SettlementBoundary::Claimed,
+        SettlementBoundary::Approved,
+        SettlementBoundary::HerdrIdle,
+    ] {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        outcomes.push(settlement_boundary(boundary, true).await);
+    }
+    assert_eq!(
+        outcomes,
+        [
+            ("interrupted".into(), true, false, 0),
+            ("interrupted".into(), true, false, 0),
+            ("interrupted".into(), false, true, 0),
+            ("interrupted".into(), true, false, 0),
+        ]
+    );
+}

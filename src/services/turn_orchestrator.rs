@@ -117,7 +117,8 @@ pub(crate) use queued_head::PreKeyPin;
 pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{
-    OwedDrop, RESTART_SEED_SOURCE, SeedStatus, TurnBind, Waiting, v2_queue, waiting_origin,
+    OwedDrop, RESTART_SEED_SOURCE, RoutineInputSettlement, SeedStatus, TurnBind, Waiting, v2_queue,
+    waiting_origin,
 };
 #[cfg(unix)]
 pub(crate) mod restart_operation;

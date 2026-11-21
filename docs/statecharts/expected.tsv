@@ -1296,6 +1296,16 @@ routine-run/RoutineRunScriptPrejudgeIgnored.cfg	RoutineRun	-	-
 routine-run/RoutineRunThread.cfg	RoutineRun	-	-
 routine-run/RoutineRunThreadPrejudge.cfg	RoutineRun	-	-
 routine-run/RoutineRunThreadPrimaryFallback.cfg	RoutineRun	NoPrimaryFallback	-
+routine-run/RoutineSettlementApprovedBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementApprovedFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementClaimedBefore.cfg	RoutineSettlement	WithdrawsBeforeKey	EveryRunCloses
+routine-run/RoutineSettlementClaimedFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementHerdrIdleBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementHerdrIdleFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementRecoveryBefore.cfg	RoutineSettlement	CloseAfterOwner,WithdrawsBeforeKey	-
+routine-run/RoutineSettlementRecoveryFixed.cfg	RoutineSettlement	-	-
+routine-run/RoutineSettlementUntriedBefore.cfg	RoutineSettlement	-	EveryRunCloses
+routine-run/RoutineSettlementUntriedFixed.cfg	RoutineSettlement	-	-
 session-activity/ActivityBackground.cfg	SessionActivity	-	-
 session-activity/ActivityCurrent.cfg	SessionActivity	-	EventuallyConverges,EventuallyReacquires
 session-activity/ActivityCurrentBackground.cfg	SessionActivity	NoIdleKillWhileBusy	-

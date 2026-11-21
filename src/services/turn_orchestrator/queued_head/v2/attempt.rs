@@ -106,6 +106,11 @@ impl Owner {
         head.phase = HeadPhase::MayHaveSent;
         head.confirmation_deadline_ms = (!bootstrap).then(|| now.saturating_add(30_000));
         head.payload_window = bootstrap.then_some(PayloadWindow::Bootstrap);
+        head.routine_delivery = (bootstrap
+            && self.routine_context(key).is_some_and(|context| {
+                context[ROUTINE_DELIVERY_DEADLINE_FIELD].as_u64().is_some()
+            }))
+        .then_some(RoutineDelivery::AwaitingKey);
         self.commit(next)?;
         Ok(EffectPermit {
             key: key.clone(),
@@ -143,6 +148,9 @@ impl Owner {
         if self.first_key_approved.as_ref() != Some(key) && self.head_outlived_due(now) {
             self.due_refused = Some(key.clone());
             return Err("readiness_deadline".into());
+        }
+        if head.routine_delivery == Some(RoutineDelivery::AwaitingKey) {
+            self.approve_routine_first_key(key, &|| now)?;
         }
         let mut next = self.snapshot.clone();
         let head = next
