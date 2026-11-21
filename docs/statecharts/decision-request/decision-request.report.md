@@ -96,5 +96,45 @@ producer가 없어 운영 경로에서는 실행되지 않는다(`agentdesk::dec
 - `PreservedNeedsApproval`(Fixed.cfg에 추가): 승인 없는 입력은 보존 planner에 들어가지 못한다. 대조 `Provenance.cfg`(Mode=BadProvenance)가 이 규칙을 깬다.
 - `NoClaimCas.cfg`: 예약 UPDATE의 상태 조건을 뺀 대조. `AttemptOnce`를 깬다.
 
-범위 밖 — 조각 4 활성 조건에 2b 착지: DrainCurrent(대기 뒤 owner·non-owner 재해석), Finalize(원본 제거),
-CloseUnknown·CloseAbandoned, Crash/Boot 복구, CancelClear, WakeFailed 거절. 2a는 normal_wait·may_have_sent 뒤를 정산하지 않는다.
+2a 리뷰 반영: Observe 좌표는 2b에서 바뀌었다. 시작 응답(`Started`/`Accepted`)은 전달 증거가 아니라
+`may_have_sent`에 turn만 기록한다(`decision_target.rs:129`, `:151`, `:231`). Observe는 아래 2b 절의 receipt 정산이다.
+
+## 조각 2b — 정산·실패 폐기·부팅 복구 (코드 좌표)
+
+좌표는 조각 2b head 기준이다. 정산은 `src/services/discord/queue_io/decision_drain.rs`의 `settle`(:157) 한 함수가 맡고,
+owner의 쓰기·drain 안내·재시작 requeue·부팅이 모두 그 함수를 부른다. 여전히 producer는 없다.
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| Journal(신규, `journal`) | `src/db/decisions.rs:199` begin_write, 호출 `decision_drain.rs:236` hand_idle | owner의 idle 쓰기 직전 resolving·normal_wait→may_have_sent. 닫혔거나 이미 journal이 있으면 쓰기 0 |
+| DrainCurrent → BeginSend | `owner_input.rs:244`, `:291` → `decision_drain.rs:212` hand_idle | 대기 뒤 owner drive가 그 시점 현재 세션으로 idle 시작. Decision은 busy 합류 0(아래 P2-1) |
+| ReleaseHeld(신규, `holds`) | `decision_drain.rs:187` | 입력창 사용 중(NotSent 증명) → may_have_sent→normal_wait, 같은 원본·ticket이 queue에 남음 |
+| Observe | `decision_drain.rs:178`(쓰기 Ok, owner settled, completed receipt) | 같은 origin의 receipt만 전달 증거. 시작 응답은 아님 |
+| CloseUnknown | `decision_drain.rs:197` | 미확인 쓰기·이전 process의 journal·미완료 receipt → unknown_closed, 원본 안내 0 |
+| CloseAbandoned / Crash+Boot(resolving·normalizing) | `decision_drain.rs:177`, 부팅 `:278` recover_before·`:298` recover_boot·`:310` spawn, 호출 `runtime_bootstrap/spawns.rs:216` | 이전 process가 남긴 resolving·normalizing → `interrupted_before_delivery` |
+| RefusalFinal·NormalizeFailure·AbsentAfterNormalize의 실행권 종결 → Finalize | `decision_drain.rs:118` fail: `src/db/decisions.rs:212` close(fence) → `queued_head/v2/decision.rs:56` discard_decision → closing→failed | fence 먼저, 정확한 원본만 제거, 그 원본의 안내 의무를 지움. fence 뒤 crash는 `:176`(Closing)이 부팅에서 마무리 |
+| OwnerPending(신규) | `decision_target.rs:103` close_admitted(:133, :135) → `decision_drain.rs:138` | owner 수용 응답이 pending/거절이면 fence 후 그 원본 제거. 2a의 "failed만 기록"을 대체 |
+| NoFailureQueue 유지(재시작 requeue·안내) | `input_owner/recovery.rs:21`, `input_owner/notice.rs:15`, `:116` → settle_channel `decision_drain.rs:264` | requeue_known_not_sent·안내 drain 전에 실패 원본 제거 |
+| WakeFailed(대조) | `decision_drain.rs:236` begin_write 거절 → 원본 제거, 쓰기 0 | 닫힌 event는 wake·재시작 뒤에도 쓰지 않음 |
+| CancelClear | 기존 owner cancel·clear 경로(`v2/control.rs:192`, `:365`) | 원본 제거는 기존 경로. 그 뒤 settle이 `Held::Gone`으로 normal_wait를 `original_removed` failed로 닫음(`decision_drain.rs:184`) |
+| PreserveApproved(신규, P2-4) | `src/services/tui_input/human_frame.rs:120` preserved_decision_body | 승인된 opinion의 같은 바이트일 때만 보존 frame |
+
+P2-4 수정(정상 보존 경로):
+- `preserved`를 `"none" | "approved" | "unapproved" | "altered"`로 바꾸고 정상 행동 `PreserveApproved`를 더했다.
+  `PreservedNeedsApproval`은 `preserved # "none" => accepted /\ preserved = "approved"`.
+- 도달성 대조 `PreservedReach.cfg`(Mode=Fixed, `NeverPreserved == preserved = "none"`)는 정상 경로가 있을 때만 깨진다.
+- 승인·본문 검사 제거 대조 `PreserveCheck.cfg`(Mode=BadPreserveCheck)는 `PreservedNeedsApproval`을 깬다.
+
+| cfg | 수정 전(2a 모델 + `NeverPreserved == ~preserved`) | 수정 후 |
+|---|---|---|
+| PreservedReach | **반례 없음(rc=0, 24,546 상태)** — 정상 보존 경로가 없어 Fixed PASS가 공허했음 | `NeverPreserved` 반례(rc=12) — 정상 보존 도달 |
+| PreserveCheck | (2a에 없음) | `PreservedNeedsApproval` 반례(rc=12) |
+| Provenance | `PreservedNeedsApproval` 반례 | 같음 |
+| Fixed | PASS | PASS(`PreservedNeedsApproval`·`JournalBeforeWrite` 포함, 119,114 고유 상태) |
+
+2b 신규 대조: `NoJournal.cfg`(journal 없이 BeginSend → `JournalBeforeWrite`), `PendingLeft.cfg`(owner pending을
+원본 제거 없이 failed로 닫음 → `NoFailureQueue`). TLC: `PASS: 22/22 configs`.
+
+모델과 코드가 다른 곳: 코드는 시작 응답을 Observe로 쓰지 않으므로 non-owner·정상화 시작은 receipt가 올 때까지
+`may_have_sent`다(producer 활성 전까지 이 receipt 조회는 owner drain·부팅 때만 돈다). 원본 식별은 event의 안정
+message id와 source origin_id로 하며, 그 밖의 id로 들어간 원본은 찾지 못해 `Gone`으로 읽는다(운영 진입은 `start::original`의 안정 id만 씀).

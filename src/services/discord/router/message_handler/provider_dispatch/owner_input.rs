@@ -8,6 +8,7 @@ use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::host_input::BusyOperation;
 use crate::services::claude_tui::host_input::busy::BusyObservation;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
+use crate::services::discord::queue_io::decision_drain;
 use crate::services::discord::queue_io::input_owner::claude_handoff::{self, bound_herdr};
 use crate::services::discord::queue_io::input_owner::drive::{
     Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
@@ -239,7 +240,10 @@ pub(in crate::services::discord) fn owner_drive(
             };
             let result = match handoff {
                 Err(error) => Err(error),
-                Ok(true) if !synthetic => idle(front).await,
+                Ok(true) if !synthetic => {
+                    decision_drain::hand_idle(pool.as_ref(), &mailbox, kept.as_ref(), front, &idle)
+                        .await
+                }
                 Ok(_) => {
                     let active = match mailbox.has_active_turn().await {
                         // Without a registry this read considers only a durable external holder.
@@ -253,8 +257,8 @@ pub(in crate::services::discord) fn owner_drive(
                         active => active,
                     };
                     match active {
-                        // A routine, scheduled or HTTP start completes only on its own turn.
-                        Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
+                        // A routine, scheduled, HTTP or Decision start completes only on its own turn.
+                        Ok(true) if !origin.joins_running_turn() => Err(START_WAITS.into()),
                         Ok(true) => {
                             let transition = runtime.as_ref().map(|shared| {
                                 shared
@@ -282,7 +286,10 @@ pub(in crate::services::discord) fn owner_drive(
                                 .await
                             }
                         }
-                        Ok(false) => idle(front).await,
+                        Ok(false) => {
+                            let (pool, kept) = (pool.as_ref(), kept.as_ref());
+                            decision_drain::hand_idle(pool, &mailbox, kept, front, &idle).await
+                        }
                         Err(unreachable) => Err(format!("{unreachable:?}")),
                     }
                 }
@@ -978,7 +985,7 @@ async fn start_idle(
         Some(context) if InputOrigin::from_context(Some(context)) == InputOrigin::RestartSeed => {
             Wait::Go
         }
-        Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
+        Some(context) if !InputOrigin::from_context(Some(context)).joins_running_turn() => {
             start_waits(&shared, channel, context).await
         }
         Some(_) => Wait::Go,
@@ -1225,7 +1232,7 @@ pub(super) fn execute_owned(
     let session = turn.tmux_session_name.unwrap_or_default();
     // A start never joins a running or unreadable native turn: read once before it registers, it
     // waits unsent with a watch of that pane.
-    let synthetic = !origin.is_person()
+    let synthetic = !origin.joins_running_turn()
         && matches!(turn.host, TurnHost::Tmux)
         && matches!(turn.provider, ProviderKind::Claude | ProviderKind::Codex);
     // Its idle or gone read is the pane it registers; no later read can turn it unobserved.

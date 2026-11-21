@@ -7,41 +7,6 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-/// Inserts an approved event with its unstarted workflow, as the service that approves one will.
-async fn insert_event_for_tests(
-    pool: &PgPool,
-    (kind, channel, actor): (EventKind, u64, u64),
-    text: &str,
-) -> Uuid {
-    let event_id = Uuid::new_v4();
-    let (kind, origin) = match kind {
-        EventKind::Selection => ("selection", format!("decision:{event_id}")),
-        EventKind::Opinion => ("opinion", format!("decision:{event_id}:opinion:77")),
-    };
-    sqlx::query(
-        "INSERT INTO decision_input_events (event_id, kind, source_key, origin,
-             requester_agent_id, logical_channel_id, actor_user_id, text_sha256)
-         VALUES ($1, $2, $3, $3, 'decision-agent', $4, $5, $6)",
-    )
-    .bind(event_id)
-    .bind(kind)
-    .bind(origin)
-    .bind(channel.to_string())
-    .bind(actor.to_string())
-    .bind(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
-        text.as_bytes(),
-    )))
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO decision_delivery_attempts (event_id) VALUES ($1)")
-        .bind(event_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    event_id
-}
-
 const TEXT: &str = "[사용자 결정 ref=r1] 질문 → 선택: A";
 
 /// Scripted ports: each start answers the next scripted attempt, and every call is counted.
@@ -129,7 +94,9 @@ impl Pg {
     }
 
     async fn event(&self) -> Uuid {
-        insert_event_for_tests(&self.pool, (EventKind::Selection, 7, 200), TEXT).await
+        let event = (EventKind::Selection, 7, 200);
+        crate::db::decisions::test_support::insert_event(&self.pool, event, TEXT, "not_started")
+            .await
     }
 
     async fn attempt(&self, fake: &Ports, event: Uuid, normalizer: &Normalizes) -> FirstAttempt {
@@ -141,14 +108,8 @@ impl Pg {
 
     /// The workflow row: state, whether normalization was used, the stored ticket and turn.
     async fn row(&self, event: Uuid) -> (String, bool, Option<String>, Option<String>) {
-        sqlx::query_as(
-            "SELECT state, normalization_used, workflow_ticket, attempt_turn_id
-             FROM decision_delivery_attempts WHERE event_id = $1",
-        )
-        .bind(event)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap()
+        let row = crate::db::decisions::test_support::row(&self.pool, event).await;
+        (row.0, row.1, row.2, row.3)
     }
 
     async fn close(self) {
@@ -174,20 +135,20 @@ async fn decision_event_resubmitted_is_reserved_once_and_injected_once_pg() {
     let third = pg.attempt(&fake, event, &none).await;
     let mut outcomes = [first, second, third];
     outcomes.sort_by_key(|outcome| *outcome == FirstAttempt::AlreadyReserved);
-    let delivered = FirstAttempt::Delivered {
+    let started = FirstAttempt::Started {
         turn_id: "discord:7:1".into(),
     };
     assert_eq!(
         outcomes,
         [
-            delivered,
+            started,
             FirstAttempt::AlreadyReserved,
             FirstAttempt::AlreadyReserved
         ]
     );
     assert_eq!(fake.started.load(SeqCst), 1, "one injection for one event");
     let (state, normalized, ticket, turn) = pg.row(event).await;
-    assert_eq!((state.as_str(), normalized), ("delivered", false));
+    assert_eq!((state.as_str(), normalized), ("may_have_sent", false));
     assert_eq!(turn.as_deref(), Some("discord:7:1"));
     // The ticket comes from the channel and the event origin alone, so a retry names the same one.
     let metadata = serde_json::json!({"human_input": {"origin_id": format!("decision:{event}")}});
@@ -248,35 +209,54 @@ async fn decision_normal_busy_waits_as_one_original_pg() {
     pg.close().await;
 }
 
+/// A start answers once its worker is spawned, so its answer is never the delivery: the row keeps
+/// `may_have_sent` under the started turn, and nothing is started or delivered a second time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn decision_idle_start_delivers_the_first_prompt_without_a_second_deliver_pg() {
+async fn decision_start_answer_is_not_a_delivery_and_is_never_repeated_pg() {
     let pg = Pg::new().await;
-    // The start itself carried the input.
-    let idle = ports([started("discord:7:1")]);
-    let event = pg.event().await;
-    let delivered = FirstAttempt::Delivered {
-        turn_id: "discord:7:1".into(),
-    };
-    assert_eq!(pg.attempt(&idle, event, &normalizes([])).await, delivered);
-    assert_eq!(
-        (idle.started.load(SeqCst), idle.enqueued.load(SeqCst)),
-        (1, 0)
-    );
-    // A normalization that already delivered the input as the session's first prompt ends it.
+    for (owner, answer) in [
+        (false, started("discord:7:1")),
+        (false, StartAttempt::Accepted("discord:7:1".into())),
+        (true, started("discord:7:1")),
+    ] {
+        let idle = Ports {
+            owner,
+            ..ports([answer])
+        };
+        let event = pg.event().await;
+        let outcome = pg.attempt(&idle, event, &normalizes([])).await;
+        let turn_id = "discord:7:1".to_string();
+        assert_eq!(outcome, FirstAttempt::Started { turn_id }, "owner={owner}");
+        let (state, _, _, turn) = pg.row(event).await;
+        assert_eq!(state, "may_have_sent", "a start alone proves no delivery");
+        assert_eq!(turn.as_deref(), Some("discord:7:1"));
+        // A provider that failed before its first payload leaves this row as it is; the event
+        // is already past its one start, so a later call neither starts nor delivers again.
+        assert_eq!(
+            pg.attempt(&idle, event, &normalizes([])).await,
+            FirstAttempt::AlreadyReserved
+        );
+        assert_eq!(
+            (idle.started.load(SeqCst), idle.enqueued.load(SeqCst)),
+            (1, 0)
+        );
+    }
+    // A normalization whose session start carried the input is the same kind of answer.
     let absent = ports([StartAttempt::Unavailable("no session".into())]);
     let event = pg.event().await;
-    let normalizer = normalizes([Normalized::Delivered("discord:7:5".into())]);
-    let delivered = FirstAttempt::Delivered {
-        turn_id: "discord:7:5".into(),
-    };
-    assert_eq!(pg.attempt(&absent, event, &normalizer).await, delivered);
+    let normalizer = normalizes([Normalized::FirstPrompt("discord:7:5".into())]);
+    let turn_id = "discord:7:5".to_string();
+    assert_eq!(
+        pg.attempt(&absent, event, &normalizer).await,
+        FirstAttempt::Started { turn_id }
+    );
     assert_eq!(
         (absent.started.load(SeqCst), absent.enqueued.load(SeqCst)),
         (1, 0),
-        "no deliver after the normalization delivered"
+        "no deliver after the normalization carried the input"
     );
     let (state, normalized, _, turn) = pg.row(event).await;
-    assert_eq!((state.as_str(), normalized), ("delivered", true));
+    assert_eq!((state.as_str(), normalized), ("may_have_sent", true));
     assert_eq!(turn.as_deref(), Some("discord:7:5"));
     pg.close().await;
 }
@@ -284,17 +264,20 @@ async fn decision_idle_start_delivers_the_first_prompt_without_a_second_deliver_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decision_only_a_confirmed_unsent_refusal_normalizes_and_only_once_pg() {
     let pg = Pg::new().await;
-    // Not sent, normalized, delivered on the session that normalization started.
+    // Not sent, normalized, started on the session that normalization brought up.
     let recovers = ports([
         StartAttempt::Unavailable("no session".into()),
         started("discord:7:2"),
     ]);
     let event = pg.event().await;
     let normalizer = normalizes([Normalized::Started]);
-    let delivered = FirstAttempt::Delivered {
+    let started_after = FirstAttempt::Started {
         turn_id: "discord:7:2".into(),
     };
-    assert_eq!(pg.attempt(&recovers, event, &normalizer).await, delivered);
+    assert_eq!(
+        pg.attempt(&recovers, event, &normalizer).await,
+        started_after
+    );
     assert_eq!(
         (recovers.started.load(SeqCst), normalizer.0.load(SeqCst)),
         (2, 1)

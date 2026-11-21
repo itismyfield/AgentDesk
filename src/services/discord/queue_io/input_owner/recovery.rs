@@ -16,6 +16,10 @@ pub(crate) async fn recover(
     handle
         .v2_request(move |slot| slot.as_mut().ok_or("no input owner")?.tick(now))
         .await?;
+    // A Decision original whose event failed leaves before the requeue could put it back.
+    if let Some(pool) = pool {
+        crate::services::discord::decision_drain::settle_channel(pool, handle, channel).await;
+    }
     // Requeued before the notice drain, so an input requeued here never gets a resend ask.
     handle
         .v2_request(|slot| {
