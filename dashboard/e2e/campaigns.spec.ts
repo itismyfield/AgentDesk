@@ -286,6 +286,7 @@ test("server campaign: a waiting approval and blocked work lead, and approving s
   await expect(stages.locator('[aria-current="step"]')).toContainText("착지");
   await page.getByRole("button", { name: "승인 검토" }).click();
   const sheet = page.getByRole("dialog", { name: "착지 승인" });
+  await expect(sheet).toContainText("11월 18일 오후 04:37"); // the dashboard's language in KST, whatever the browser's locale
   await expect(sheet.getByRole("button", { name: "승인", exact: true })).toBeDisabled();
   await sheet.getByRole("button", { name: "나중에" }).click();
   await expect(sheet).toHaveCount(0);

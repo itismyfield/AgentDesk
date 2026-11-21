@@ -6,7 +6,7 @@ import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, campaignTaskTitle, safeCampaignLink } from "./campaignModel";
 import { legacyTask } from "./campaignOverviewModel";
-import { Badge, LABELS, LiveChip, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
+import { Badge, LABELS, LiveChip, cardStatusLabel, dispatchLabel, formatCampaignTime, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
 import { RecentList, STATUS_CARD, WARN_CARD, useScreenTitle } from "./TaskScreen";
 
 export interface CampaignDraft {
@@ -218,7 +218,7 @@ export default function CampaignNodeDetails({
               <ol aria-label={tr("단계 기록", "Stage record")}>
                 {[...node.evidence_records].sort((a, b) => (Date.parse(a.recorded_at ?? "") || 0) - (Date.parse(b.recorded_at ?? "") || 0)).map((record, index) => (
                   <li key={index}>
-                    {record.recorded_at && <time className="campaign-muted" dateTime={record.recorded_at}>{new Date(record.recorded_at).toLocaleString()} · </time>}
+                    {record.recorded_at && <time className="campaign-muted" dateTime={record.recorded_at}>{formatCampaignTime(record.recorded_at, tr)} · </time>}
                     <strong>{record.summary}</strong>
                     {record.result && <p>{record.result}</p>}
                     {record.command && <code>{record.command}</code>}
@@ -318,7 +318,7 @@ export default function CampaignNodeDetails({
             </div>
             <div>
               <dt>{tr("작업 기록 시각", "Task updated")}</dt>
-              <dd>{node.updated_at ? new Date(node.updated_at).toLocaleString() : "—"}</dd>
+              <dd>{formatCampaignTime(node.updated_at, tr)}</dd>
             </div>
           </dl>
           <div className="campaign-actions">

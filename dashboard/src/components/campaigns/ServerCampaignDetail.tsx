@@ -4,7 +4,7 @@ import { Button } from "../../kit/free/button-clean";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
-import { Badge, type Tr } from "./campaignPresentation";
+import { Badge, formatCampaignTime, type Tr } from "./campaignPresentation";
 import { safeCampaignLink } from "./campaignModel";
 import { GATE_LABELS, type PendingGate } from "./campaignOverviewModel";
 import { CommandButton, type ControlCommand } from "./ServerCampaignControls";
@@ -14,7 +14,6 @@ import { STATUS_CARD, StepList, WARN_CARD, useScreenTitle, type Step } from "./T
 const VERIFICATION_LABELS: Record<string, [string, string]> = {
   test: ["시험", "Tests"], main: ["main 반영", "In main"], deployment: ["배포 확인", "Deployment"], operational: ["운영 확인", "Operational"],
 };
-const time = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
 
 /** Server-only parts under the overview: why the server holds, sessions it cannot see, the start check and the feedback copy. */
 export default function ServerCampaignSections({ document, link, tr }: { document: ServerCampaignDocument; link: string; tr: Tr }) {
@@ -24,10 +23,10 @@ export default function ServerCampaignSections({ document, link, tr }: { documen
   const feedback = feedbackText(link, view, tr);
   return <div className="campaign-server-detail grid min-w-0 gap-3">
     <p className="campaign-freshness">
-      {tr("서버 관측", "Server as of")} {time(view.as_of)} · {tr("정의", "definition")} r{view.definition_revision} · {tr("이벤트", "event")} #{view.last_event_sequence}{view.run_id && ` · run ${view.run_id}`}
+      {tr("서버 관측", "Server as of")} {formatCampaignTime(view.as_of, tr)} · {tr("정의", "definition")} r{view.definition_revision} · {tr("이벤트", "event")} #{view.last_event_sequence}{view.run_id && ` · run ${view.run_id}`}
     </p>
     {unknown.length > 0 && <ul className="campaign-filter-note" aria-label={tr("확인 불가 관측", "Unknown observations")}>
-      {unknown.map((entry) => <li key={`${entry.host}:${entry.session}`}>{entry.host} · {entry.session} · {entry.reason} · {tr("마지막 확인", "last observed")} {time(entry.lastObservedAt)}</li>)}
+      {unknown.map((entry) => <li key={`${entry.host}:${entry.session}`}>{entry.host} · {entry.session} · {entry.reason} · {tr("마지막 확인", "last observed")} {formatCampaignTime(entry.lastObservedAt, tr)}</li>)}
     </ul>}
     {view.reasons.length > 0 && <ul className="campaign-server-reasons" aria-label={tr("서버 판정 이유", "Server reasons")}>
       {view.reasons.map((reason, index) => <li key={index}>{tr(...REASON_LABELS[reason.code])} · {reason.target}</li>)}
@@ -91,7 +90,7 @@ export function ServerTaskDetails({ document, nodeId, gate, connection, busy, on
   // The sheet only shows what the server gave; approving waits for the approval API (#8249).
   const facts: Array<[string, string]> = gate ? [
     ...runtime ? [[tr("단계", "Stage"), tr(...STAGE_LABELS[runtime.stage])], [tr("리뷰 · 수리", "Reviews · repairs"), tr(`${runtime.review_rounds}회 · ${runtime.repair_cycles}회`, `${runtime.review_rounds} · ${runtime.repair_cycles}`)]] as Array<[string, string]> : [],
-    [tr("수용조건", "Acceptance"), String(node.acceptance.length)], [tr("요청 시각", "Requested"), time(gate.openedAt)],
+    [tr("수용조건", "Acceptance"), String(node.acceptance.length)], [tr("요청 시각", "Requested"), formatCampaignTime(gate.openedAt, tr)],
   ] : [];
   const sheet = gate && <div className="grid gap-3 text-sm text-[var(--fg)]">
     <p>{tr(`${node.title}의 ${gateName} 승인을 기다려요.`, `${node.title} is waiting for ${gateName} approval.`)}</p>
