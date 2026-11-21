@@ -176,7 +176,8 @@ impl DiscordPort for GatewayPort {
             #[cfg(test)]
             repost_base: self.repost_base.clone(),
         };
-        port.post_origin(channel, content, origin)
+        // The copy moves into the future so the request it starts may outlive `self`.
+        async move { port.post_origin(channel, content, origin).await }
     }
 
     fn history_after(
