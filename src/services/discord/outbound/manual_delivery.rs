@@ -162,7 +162,7 @@ pub(super) enum ManualDeliveryOutcome {
 #[derive(Clone)]
 pub(super) struct SerenityManualOutboundClient {
     pub(super) http: Arc<serenity::Http>,
-    /// Every message this client creates carries Discord's silent flag.
+    /// When set, every message this client creates carries Discord's silent flag.
     pub(super) suppress_push: bool,
 }
 

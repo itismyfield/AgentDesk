@@ -1,9 +1,5 @@
-//! Push policy for the channels listed in `discord.secretary_channels`.
-//!
-//! Every post is still delivered and stored; a suppressed post only carries Discord's
-//! `SUPPRESS_NOTIFICATIONS` flag. Progress never pushes there, unrequested notices stay
-//! silent in the KST quiet hours, and answers and reminders always push. Other channels
-//! keep their existing behavior.
+//! Push policy for `discord.secretary_channels`: suppressed posts are still delivered with the
+//! silent flag; progress never pushes, unrequested notices stay silent in KST quiet hours.
 
 use chrono::{DateTime, FixedOffset, Timelike, Utc};
 use poise::serenity_prelude::{CreateMessage, MessageFlags};
