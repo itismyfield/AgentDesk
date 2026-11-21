@@ -195,7 +195,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn scoped_progress_silences_the_shared_turn_and_relay_builders() {
+    async fn scoped_progress_silences_the_shared_card_and_relay_builders() {
         use crate::services::discord::{admin_host_guard::tests::Recorder, gateway, http};
         let _root = crate::config::TestRuntimeRootGuard::new();
         let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
@@ -207,9 +207,6 @@ mod tests {
             crate::services::discord::make_shared_data_for_tests(),
         );
         let channel = poise::serenity_prelude::ChannelId::new(74_190_301);
-        let rollover =
-            gateway::send_outbound_message(api.http.clone(), shared.clone(), channel, "rollover");
-        let _ = progress(rollover).await;
         let card = gateway::send_outbound_message_with_nonce_classified(
             api.http.clone(),
             shared,
@@ -230,6 +227,6 @@ mod tests {
             })
             .map(|body| serde_json::from_str::<serde_json::Value>(&body).unwrap()["flags"].as_u64())
             .collect();
-        assert_eq!(flags, [Some(4096), Some(4096), Some(4096), None]);
+        assert_eq!(flags, [Some(4096), Some(4096), None]);
     }
 }

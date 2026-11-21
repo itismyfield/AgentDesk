@@ -192,9 +192,7 @@ pub(super) async fn run_rollover_loop(
                     .observe(
                         BodySite::BridgeStreaming,
                         BodyOffer::NonBody,
-                        crate::services::discord::outbound::notification_policy::progress(
-                            TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor),
-                        ),
+                        TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor),
                     )
                     .await
                 {

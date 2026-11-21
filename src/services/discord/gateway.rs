@@ -334,11 +334,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             super::outbound::raw_output::Operation::Post,
             channel_id.send_message(
                 &self.http,
-                crate::services::discord::outbound::notification_policy::scoped_message(
-                    channel_id.get(),
-                )
-                .content(content)
-                .allowed_mentions(super::http::relay_allowed_mentions()),
+                serenity::CreateMessage::new()
+                    .content(content)
+                    .allowed_mentions(super::http::relay_allowed_mentions()),
             ),
         )
         .await
@@ -371,15 +369,16 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             super::outbound::raw_output::Operation::Post,
             channel_id.send_message(
                 &self.http,
-                crate::services::discord::outbound::notification_policy::scoped_message(
-                    channel_id.get(),
-                )
-                .reference_message(
-                    serenity::MessageReference::from((reference_channel_id, reference_message_id))
+                serenity::CreateMessage::new()
+                    .reference_message(
+                        serenity::MessageReference::from((
+                            reference_channel_id,
+                            reference_message_id,
+                        ))
                         .fail_if_not_exists(false),
-                )
-                .content(content)
-                .allowed_mentions(super::http::relay_allowed_mentions()),
+                    )
+                    .content(content)
+                    .allowed_mentions(super::http::relay_allowed_mentions()),
             ),
         )
         .await
