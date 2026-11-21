@@ -123,9 +123,8 @@ fn fail(reason: impl Into<String>, uncertain: bool) -> (DeployFact, DeployProgre
     )
 }
 
-/// Advance the node's deployment by one step: request it, wait for the Deploy approval, start the
-/// executor inside the final gate, then reconcile the running binaries. The journal is replayed
-/// before any start, so a restart or a lost reply never starts the same deployment again.
+/// Advance the deployment one step: request, Deploy approval, start inside the final gate, witness.
+/// The journal is replayed before any start, so a restart never starts the same deployment again.
 pub async fn step_deploy(
     worker: &mut HostWorker,
     pool: &PgPool,
