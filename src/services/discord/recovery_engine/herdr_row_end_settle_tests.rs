@@ -549,3 +549,39 @@ fn the_sweep_wakes_a_stalled_end_pass_pg() {
         },
     );
 }
+
+const CUT: u64 = 1_479_671_399_000_128;
+
+/// #7651 B0: an O-owned turn the restart cut before its terminal hands its one notice to the O
+/// writer as a durable intent; the row ends without a transport notice and its spinner goes.
+#[test]
+fn an_o_owned_cut_turn_hands_its_restart_notice_to_the_writer_pg() {
+    let path = concat!(
+        module_path!(),
+        "::an_o_owned_cut_turn_hands_its_restart_notice_to_the_writer_pg"
+    );
+    in_child(path, CUT, ProviderKind::Claude, Owner::O, |rig| async move {
+        use crate::services::tui_o::shadow::ShadowProvider;
+        use crate::services::tui_o::store::restart_notice::{self, Intent};
+        let run = Run::start(
+            &rig,
+            Setup {
+                provider: ProviderKind::Claude,
+                channel: CUT,
+                routed: true,
+            },
+        )
+        .await;
+        run.mock.seed_message(run.row.current_msg_id, SPINNER);
+        run.relay.set(|pane| pane.screen = Some(READY.into()));
+        run.pass().await;
+        assert_silent(&run).await;
+        assert_card_deleted(&run).await;
+        let nonce = run.row.turn_nonce.as_deref();
+        let born = run.row.born_generation;
+        let intent = Intent::exact(CUT, ShadowProvider::Claude, nonce, born).unwrap();
+        let root = crate::config::runtime_root().unwrap();
+        assert_eq!(restart_notice::pending(&root, CUT), [intent]);
+        run.close().await;
+    });
+}

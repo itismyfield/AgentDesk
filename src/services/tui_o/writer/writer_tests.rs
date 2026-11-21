@@ -1043,6 +1043,8 @@ mod turn_summary_replay;
 
 #[path = "boundary_pending_health_tests.rs"]
 mod boundary_pending_health_tests;
+#[path = "restart_notice_tests.rs"]
+mod restart_notice_tests;
 #[path = "codex_launch_cause_tests.rs"]
 mod codex_launch_cause;
 
