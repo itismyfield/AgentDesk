@@ -30,7 +30,7 @@
 시간 근거는 `scripts/deploy-release.sh:4007–4022`, 위 E-50/51 YAML의 대기 단계, `scripts/e2e/run_tui_relay.py:357–362`, `scripts/e2e/run_tui_relay.py:5464–5471`, `docs/e2e-continuous/release-host.md:24–53`이다.
 
 
-<!-- doc-path-refs: proposed scripts/e2e/agy_cell scripts/e2e/agy_cell/driver.py -->
+<!-- doc-path-refs: proposed scripts/e2e/agy_cell/driver.py -->
 
 ## 격리 경계 (리뷰 P1-1)
 
@@ -87,6 +87,8 @@
 **시간 상한 제안** — 시나리오 상한은 E-65가 360초(preflight 최대 30초 + 60/180/60초 + 판정 30초), E-66과 E-67이 각각 120초(최대 20초 + 80초 + 20초)다. 여기에 instance 기동·admission 120초와 정지 20초를 더해 `up --wall-timeout`은 E-65 500초, E-66·E-67 260초로 준다. supervisor 상한 600초 안이다(`scripts/dev_instance/lifecycle.py:22–23`). 같은 단조시계 절대 기한의 잔여 시간으로 각 요청·대기·판정을 자르고 기한 직후 응답은 timeout으로 기록한다. instance 바이너리 빌드는 이 상한 밖이며 따로 1,800초로 끊는다. legacy 첫 실기에서 기동, 입력→첫 본문·마지막 본문·종료와 wall time을 남기고 상한을 다시 본다. Google 쿼터는 호출 수를 우선 제어한다. E-65는 배포당 한 시도에 프롬프트 3개, E-66은 주기 칸당 1개, E-67은 1b 수용 실행당 1개를 예약한다. 짧은 전용 시스템 프롬프트와 일반 텍스트만 쓴다. agy는 tool allowlist를 지원하지 않으므로(`src/services/stream_json_cli/dialects/agy.rs:15–36`) 도구 호출 여부는 격리 수단이 아니다. 격리는 위 instance 경계가 맡고, 도구 관측은 「리뷰 P2 판단」을 따른다.
 
 **배포 접점** — E-65는 배포 스크립트 안에서 동기로 돌지 않는다. 시험 instance는 `.adk/release` 밖 worktree의 `target/debug/agentdesk`만 띄울 수 있어(`src/config/test_instance.rs:100–133`, `scripts/dev_instance/lifecycle.py:212–218`) 배포 head의 별도 빌드가 필요하고, 그 빌드를 배포 안에 넣으면 배포가 그만큼 늘어난다. 그래서 기존 배포 뒤 후크(`scripts/deploy-release.sh:4978`, `scripts/e2e/continuous/after_deploy.sh`)가 agy 전용 config에 `deploy-<stamp>` 요청(head 포함)을 넣고 끝난다. 20초 안에 못 넣으면 그 단계만 끊는 기존 계약을 그대로 쓴다. agy 전용 tick이 요청을 받아 전용 worktree를 그 head로 맞추고, 빌드하고, instance를 준비해 E-65를 돌린다. 결과는 배포 stamp·head에 묶인 terminal 기록 한 건으로 agy 상태 디렉터리의 summary·outbox에 남고 `E2E_MONITOR`가 읽는다. 셀이 켜진 호스트에서 instance 준비 실패·admission 거절·채널 바쁨·timeout·judge 실패는 모두 `E-65=FAIL`(사유 포함)이다. 요청 뒤 2,900초(빌드 1,800 + 실행 500 + tick 300×2) 안에 terminal 기록이 없으면 다음 tick이 `E-65=FAIL(NO_RESULT)`를 쓴다. 셀을 켜지 않은 Mac은 요청을 넣지 않고 비대상으로 기록한다. 배포 자체는 지금처럼 fail-open이다(`scripts/deploy-release.sh:4930–4973`).
+
+- S2 구현: 후크 분기는 `scripts/e2e/continuous/after_deploy.sh`가 기존 config 검사보다 먼저 `AGENTDESK_E2E_AGY_CONFIG`를 보고 `python3 -E -s -m scripts.e2e.agy_cell enqueue`만 부른다. `deploy-release.sh`는 이미 이 후크를 부르므로 바꾸지 않는다. 요청의 소비자는 S2의 `agy_cell drain`이다(설계 리뷰 P2-c). drain은 가장 새 요청 하나만 실행하고 앞 요청은 `SUPERSEDED(<새 요청>)`로 닫으며, 2,900초를 넘긴 요청은 실행 없이 `FAIL(NO_RESULT)`로 닫는다(P2-d). 주기적으로 drain을 부르는 launchd tick은 S3가 넣는다. E-65 명세는 tui_relay 카탈로그에 넣지 않고 `scripts/e2e/agy_cell/E-65.yaml`에 둔다.
 
 - [U] DoD 2의 "실패면 배포 결과에 FAIL로 남는다"를 배포 스크립트 출력이 아니라 배포 stamp에 묶인 사후 기록으로 채운다. 동기 실행을 원하면 배포마다 debug 빌드 한 번이 배포 시간에 더해진다. 코디네이터가 사용자 확인을 받는다.
 
