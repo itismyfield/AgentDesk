@@ -12,7 +12,7 @@ use crate::{
     },
     error::{AppError, AppResult, ErrorCode},
     services::campaign_execution::{
-        definition,
+        definition::{self, DefinitionErrorCode},
         model::{Rejection, RejectionCode},
     },
 };
@@ -85,6 +85,18 @@ pub(super) fn store_error(error: StoreError) -> AppError {
 
 fn rejection(rejection: &Rejection) -> AppError {
     let error = match rejection.code {
+        RejectionCode::InvalidDefinition
+            if rejection
+                .definition_error
+                .as_ref()
+                .is_some_and(|error| error.code == DefinitionErrorCode::InvalidPipeline) =>
+        {
+            AppError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::Validation,
+                "invalid pipeline definition",
+            )
+        }
         RejectionCode::InvalidDefinition | RejectionCode::MissingChangeReason => {
             AppError::bad_request("server campaign command rejected")
         }

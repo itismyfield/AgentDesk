@@ -69,7 +69,10 @@ pub(super) fn gate_status(
             && matches!(&bound.target, ApprovalTarget::Candidate { base_sha, head_sha }
                 if base_sha == t.base_sha && head_sha == t.head_sha)
     });
-    if bound.run_id != run.id || bound.definition_revision != state.definition_revision || !exact {
+    if bound.run_id != run.id
+        || bound.definition_revision != state.legacy_execution_revision()
+        || !exact
+    {
         GateStatus::Unopened
     } else if item.approval.is_none() {
         GateStatus::Unapproved
@@ -493,7 +496,7 @@ fn slot_approval(
         run_id: run.id.clone(),
         node_id: node_id.into(),
         gate,
-        definition_revision: state.definition_revision,
+        definition_revision: state.legacy_execution_revision(),
         policy_hash: policy_hash.into(),
         target,
     };

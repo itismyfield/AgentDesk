@@ -209,6 +209,11 @@ fn pipeline_execution_hash_changes_with_execution_inputs() {
         ("/transitions/0/id", json!("changed_transition_id")),
         ("/transitions/0/from", json!("wait")),
         ("/transitions/0/to", json!("done")),
+        (
+            "/transitions/0/condition/all/1/all/0/field",
+            json!("verification.review_start_passed"),
+        ),
+        ("/transitions/0/condition/all/0/op", json!("ne")),
         ("/transitions/0/condition/all/0/value", json!("failed")),
         ("/transitions/0/gate", json!("review")),
         ("/transitions/2/retry/max", json!(0)),
@@ -292,6 +297,151 @@ fn pipeline_fields_expose_typed_capabilities_and_subjects() {
 }
 
 #[test]
+fn pipeline_vocabulary_enforces_executor_capability_matrix() {
+    use PipelineField as Field;
+    use PipelineKind::*;
+
+    let common = [
+        Field::StateOutcome,
+        Field::TimerExpired,
+        Field::EventType,
+        Field::PolicyDesignEnabled,
+    ];
+    let registered: [(&str, PipelineKind, &[Field]); 8] = [
+        ("r8.requirements", AutoCheck, &[Field::RequirementsReady]),
+        ("r8.design", AgentTask, &[]),
+        (
+            "r8.design_review",
+            AgentTask,
+            &[
+                Field::ReviewVerdict,
+                Field::ReviewP0Count,
+                Field::ReviewP1Count,
+                Field::ReviewScopeComplete,
+            ],
+        ),
+        (
+            "r8.work",
+            AgentTask,
+            &[
+                Field::WorkSealValid,
+                Field::VerificationReviewStartPassed,
+                Field::VerificationVerdict,
+                Field::CiRequiredResult,
+                Field::CiHeadMatches,
+                Field::TlcMergeGatePassed,
+            ],
+        ),
+        (
+            "r8.review",
+            AgentTask,
+            &[
+                Field::ReviewVerdict,
+                Field::ReviewP0Count,
+                Field::ReviewP1Count,
+                Field::ReviewScopeComplete,
+                Field::VerificationVerdict,
+                Field::CiRequiredResult,
+                Field::CiHeadMatches,
+                Field::TlcMergeGatePassed,
+            ],
+        ),
+        (
+            "r8.landing",
+            AutoAction,
+            &[
+                Field::ReviewVerdict,
+                Field::ReviewP0Count,
+                Field::ReviewP1Count,
+                Field::ReviewScopeComplete,
+                Field::VerificationVerdict,
+                Field::CiRequiredResult,
+                Field::CiHeadMatches,
+                Field::TlcMergeGatePassed,
+                Field::ActionResult,
+                Field::PrMerged,
+                Field::MainContainsCandidate,
+                Field::AcceptanceComplete,
+                Field::EvidenceCurrent,
+                Field::ActionsSettled,
+            ],
+        ),
+        (
+            "r8.main_check",
+            AutoCheck,
+            &[
+                Field::VerificationVerdict,
+                Field::CiRequiredResult,
+                Field::CiHeadMatches,
+                Field::TlcMergeGatePassed,
+                Field::MainContainsCandidate,
+                Field::AcceptanceComplete,
+                Field::EvidenceCurrent,
+                Field::ActionsSettled,
+            ],
+        ),
+        (
+            "r8.final_check",
+            AutoAction,
+            &[
+                Field::VerificationVerdict,
+                Field::CiRequiredResult,
+                Field::CiHeadMatches,
+                Field::TlcMergeGatePassed,
+                Field::ActionResult,
+                Field::DeploymentObserved,
+                Field::MainContainsCandidate,
+                Field::AcceptanceComplete,
+                Field::EvidenceCurrent,
+                Field::ActionsSettled,
+            ],
+        ),
+    ];
+    for kind in [
+        AgentTask,
+        AutoCheck,
+        AutoAction,
+        HumanDecision,
+        Wait,
+        EndSuccess,
+        EndFailure,
+    ] {
+        let kind_fields: &[Field] = match kind {
+            AgentTask => &[Field::AgentReportResult, Field::AgentReportArtifactPresent],
+            HumanDecision => &[Field::DecisionResult, Field::DecisionChoice],
+            Wait => &[Field::EventReceived],
+            _ => &[],
+        };
+        let check = |executor: Option<(&str, u32)>, registered_fields: &[Field]| {
+            let executor = executor.map(|(id, version)| PipelineExecutor {
+                id: id.into(),
+                version,
+                parameters: Default::default(),
+            });
+            for field in Field::ALL {
+                let expected = common.contains(field)
+                    || kind_fields.contains(field)
+                    || registered_fields.contains(field);
+                assert_eq!(
+                    field.spec(kind, executor.as_ref()).available,
+                    expected,
+                    "{kind:?} / {executor:?} / {field:?}",
+                );
+            }
+        };
+        check(None, &[]);
+        check(Some(("unknown.executor", 1)), &[]);
+        for (id, registered_kind, fields) in registered {
+            check(
+                Some((id, 1)),
+                if kind == registered_kind { fields } else { &[] },
+            );
+            check(Some((id, 99)), &[]);
+        }
+    }
+}
+
+#[test]
 fn pipeline_preserves_legacy_definition_snapshots() {
     let legacy = legacy_wire();
     let input = serde_json::from_value::<DefinitionInput>(legacy.clone()).unwrap();
@@ -315,6 +465,7 @@ fn pipeline_wire_decodes_without_enabling_legacy_writes() {
     let serialized = serde_json::to_value(&input).unwrap();
     assert!(serialized["pipeline"].is_object());
     let error = validate_definition(input).unwrap_err();
-    assert_eq!(error.code, DefinitionErrorCode::InvalidField);
+    assert_eq!(error.code, DefinitionErrorCode::InvalidPipeline);
     assert_eq!(error.target.as_deref(), Some("pipeline"));
+    assert!(!error.pipeline_errors.is_empty());
 }
