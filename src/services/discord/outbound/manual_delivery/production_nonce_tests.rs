@@ -124,7 +124,7 @@ async fn production_serenity_inline_path_serializes_canonical_durable_row_nonces
             .ratelimiter_disabled(true)
             .build(),
     );
-    let client = production_manual_outbound_client(http);
+    let client = production_manual_outbound_client(http, false);
 
     async fn send(
         client: &super::SerenityManualOutboundClient,

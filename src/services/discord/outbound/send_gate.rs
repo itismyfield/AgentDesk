@@ -100,8 +100,12 @@ const HEADLESS_TURN_OUTBOX_SOURCE: &str = "headless_turn";
 
 pub(super) fn production_manual_outbound_client(
     http: std::sync::Arc<serenity::Http>,
+    suppress_push: bool,
 ) -> SerenityManualOutboundClient {
-    SerenityManualOutboundClient { http }
+    SerenityManualOutboundClient {
+        http,
+        suppress_push,
+    }
 }
 
 pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private_channel(
@@ -137,6 +141,8 @@ pub(crate) struct ManualOutboundOptions {
         Option<std::sync::Arc<crate::services::message_outbox::StoredOutboxAttachment>>,
     pub(crate) record_transcript: bool,
     pub(crate) transcript_source_label: Option<String>,
+    /// Posts with Discord's silent flag; the message is still delivered.
+    pub(crate) suppress_push: bool,
 }
 
 /// Provider-owned notices use the same channel runtime credentials as tool cards.
@@ -167,7 +173,7 @@ pub(crate) async fn post_routing_notice(
     let channel = ChannelId::new(channel_id);
     let http = resolve_manual_bot_http(registry, bot, channel, &Default::default()).await?;
     super::manual_delivery::post_with_stored_nonce(
-        &production_manual_outbound_client(http),
+        &production_manual_outbound_client(http, false),
         channel,
         content,
         nonce,
@@ -407,7 +413,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         Err(resp) => return resp,
     };
 
-    let outbound_client = production_manual_outbound_client(http);
+    let outbound_client = production_manual_outbound_client(http, options.suppress_push);
     send_authorized_manual_message(
         &outbound_client,
         shared_outbound_deduper(),

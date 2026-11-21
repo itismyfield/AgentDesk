@@ -227,7 +227,14 @@ async fn client() -> (
             .ratelimiter_disabled(true)
             .build(),
     );
-    (state, SerenityManualOutboundClient { http }, task)
+    (
+        state,
+        SerenityManualOutboundClient {
+            http,
+            suppress_push: false,
+        },
+        task,
+    )
 }
 
 async fn send_image(

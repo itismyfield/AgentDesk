@@ -661,10 +661,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        let post = port.post_origin(
+                        let post = port.post_unit(
                             channel,
                             piece.payload.clone(),
                             piece.output_origin.clone(),
+                            piece.unit_key.kind,
                         );
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
