@@ -72,3 +72,24 @@ class Client:
         if type(result) is not list or any(type(row) is not dict or row.get('channel_id') != thread for row in result):
             raise InstanceError('observed message channel mismatch')
         return result
+
+    def send_announce(self, channel, text):
+        """Post one plain Test-Announce input into a declared test channel of the admitted instance."""
+        if channel not in self.admission.manifest['profile']['channels']:
+            raise InstanceError('announce target is outside the test allowlist')
+        announce = next(item['application_id'] for item in self.admission.observed
+                        if item['name'] == 'announce_bot_token')
+        result = self._request('announce','POST',f'/channels/{snowflake(channel)}/messages',
+                               {'content':text,'allowed_mentions':{'parse':[]}})
+        if (type(result) is not dict or result.get('channel_id') != channel
+                or result.get('author',{}).get('id') != announce):
+            raise InstanceError('input message identity mismatch')
+        return snowflake(result.get('id'))
+
+    def channel_messages(self, channel, after):
+        if channel not in self.admission.manifest['profile']['channels']:
+            raise InstanceError('observed channel is outside the test allowlist')
+        result = self._request('announce','GET',f'/channels/{snowflake(channel)}/messages?after={snowflake(after)}&limit=100')
+        if type(result) is not list or any(type(row) is not dict or row.get('channel_id') != channel for row in result):
+            raise InstanceError('observed message channel mismatch')
+        return result

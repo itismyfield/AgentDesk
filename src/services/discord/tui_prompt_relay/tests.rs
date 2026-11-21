@@ -7083,14 +7083,20 @@ async fn active_loop_note_p2_allowed_mentions_preserve_rendered_body() {
 }
 
 #[cfg(unix)]
-async fn synthetic_prompt_note_on_wire(route: u8) -> serde_json::Value {
+async fn synthetic_prompt_note_on_wire(route: u8, secretary: bool) -> serde_json::Value {
     use crate::services::discord::admin_host_guard::tests::Recorder;
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
     let api = Recorder::start().await;
     let registry = Arc::new(super::super::health::HealthRegistry::new());
     let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
     Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
     let channel = ChannelId::new(74_190_210 + u64::from(route));
+    if secretary {
+        let mut config = crate::config::Config::default();
+        config.discord.secretary_channels = vec![channel.get().to_string()];
+        crate::config_live_reload::install(config);
+    }
     shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
     registry.register("claude".into(), shared.clone()).await;
     let _http = super::super::shared_state::test_rest::install(api.http.clone());
@@ -7181,8 +7187,19 @@ async fn synthetic_prompt_note_on_wire(route: u8) -> serde_json::Value {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn secretary_channel_prompt_notes_post_silently_while_other_channels_push() {
+    for route in 0..3 {
+        let silent = synthetic_prompt_note_on_wire(route, true).await;
+        assert_eq!(silent["flags"].as_u64(), Some(4096), "route {route}");
+        let pushed = synthetic_prompt_note_on_wire(route, false).await;
+        assert_eq!(pushed["flags"].as_u64(), None, "route {route}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn suppressed_prompt_note_p2_allowed_mentions_preserve_body() {
-    let body = synthetic_prompt_note_on_wire(0).await;
+    let body = synthetic_prompt_note_on_wire(0, false).await;
     assert_eq!(
         body["allowed_mentions"]["parse"],
         serde_json::json!(["users"])
@@ -7192,7 +7209,7 @@ async fn suppressed_prompt_note_p2_allowed_mentions_preserve_body() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn passive_loop_note_p2_allowed_mentions_preserve_body() {
-    let body = synthetic_prompt_note_on_wire(1).await;
+    let body = synthetic_prompt_note_on_wire(1, false).await;
     assert_eq!(
         body["allowed_mentions"]["parse"],
         serde_json::json!(["users"])
@@ -7202,7 +7219,7 @@ async fn passive_loop_note_p2_allowed_mentions_preserve_body() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn steer_echo_note_p2_allowed_mentions_preserve_existing_escape() {
-    let body = synthetic_prompt_note_on_wire(2).await;
+    let body = synthetic_prompt_note_on_wire(2, false).await;
     assert_eq!(
         body["allowed_mentions"]["parse"],
         serde_json::json!(["users"])

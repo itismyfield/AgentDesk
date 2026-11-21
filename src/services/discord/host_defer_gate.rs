@@ -251,9 +251,9 @@ pub(super) fn mirror_evict_admitted(
         tracing::warn!(tmux_name, "no runtime for the host check; mirror kept");
         return false;
     };
-    // The pass sees every provider's panes; the name, not the pass, picks the row key.
-    let parsed = crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name);
-    let provider = parsed.map_or_else(|| provider.clone(), |(kind, _)| kind);
+    // The pass sees every provider's panes; the pane's own record, not the pass, picks the row key.
+    let recorded = crate::services::provider::session_source::tmux_session_provider(tmux_name);
+    let provider = recorded.unwrap_or_else(|| provider.clone());
     let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_name);
     let (channel, caller) = (channel.unwrap_or(0), "idle_mirror_evict");
     let gate = async {

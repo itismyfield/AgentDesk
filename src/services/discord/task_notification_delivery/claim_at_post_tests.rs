@@ -43,7 +43,7 @@ impl ResponseChunkTransport for Sink {
     }
 }
 
-async fn owned(channel: u64) -> ResponseDeliveryClaim {
+pub(super) async fn owned(channel: u64) -> ResponseDeliveryClaim {
     let session = format!("AgentDesk-claude-c1a-post-{channel}");
     let turn_key = super::super::durable_response_turn_key(
         channel, "claude", &session, 0, "", None, 4_300, BODY,

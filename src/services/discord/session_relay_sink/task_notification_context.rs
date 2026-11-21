@@ -499,12 +499,13 @@ impl super::SessionBoundDiscordRelaySink {
                 })?;
             task_card_message_id = Some(MessageId::new(rebound.card_message_id()));
             task_response_claim = Some(rebound);
-            record_task_response_sent_bounded(
-                shared.pg_pool.as_ref(),
-                task_response_claim.as_ref().expect("claim checked above"),
-            )
-            .await
-            .map_err(RelaySinkError::Transient)?;
+            claimed
+                .settling(record_task_response_sent_bounded(
+                    shared.pg_pool.as_ref(),
+                    task_response_claim.as_ref().expect("claim checked above"),
+                ))
+                .await
+                .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
             // The client is found before the claim: without one nothing is sent or claimed.

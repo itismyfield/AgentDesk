@@ -3,7 +3,16 @@
 import json
 import re
 
-from .files import InstanceError
+from .files import AGY_CREDENTIAL_NAMES, InstanceError, LIVE_CREDENTIAL_NAMES
+
+TEST_ANTIGRAVITY_APP_ID = "1573471163663785994"
+# Bot roles, channel count, admitted credentials, pinned app IDs and whether `up` may skip admission.
+PROFILES = {
+    "tui-live": {"providers": ("claude", "codex"), "channels": 2, "credentials": LIVE_CREDENTIAL_NAMES,
+                 "pinned": {}, "gated": True, "verified_run": False},
+    "agy-headless": {"providers": ("antigravity",), "channels": 1, "credentials": AGY_CREDENTIAL_NAMES,
+                     "pinned": {"antigravity": TEST_ANTIGRAVITY_APP_ID}, "gated": False, "verified_run": True},
+}
 
 ENV_FLAGS = {
     "ADK_BUSY_INJECT": {"off", "external", "all"},
@@ -37,19 +46,37 @@ def snowflake(value):
     return value
 
 
+def profile_spec(profile):
+    spec = PROFILES.get(profile.get("name")) if isinstance(profile, dict) and isinstance(profile.get("name"), str) else None
+    if spec is None:
+        raise InstanceError("unsupported profile")
+    return spec
+
+
+def spec_for_bots(bots):
+    """Select the profile whose declared bot roles are exactly these keys."""
+    for spec in PROFILES.values():
+        if isinstance(bots, dict) and set(bots) == {*spec["providers"], "driver"}:
+            return spec
+    raise InstanceError("declared bot roles match no profile")
+
+
 def validate_profile(profile):
     if isinstance(profile, dict) and set(profile) == {"schema_version", "name", "bots", "channels"}:
         raise Unevaluable("missing feature declarations")
     exact_keys(profile, {"schema_version", "name", "bots", "channels", "features"})
-    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1 or profile["name"] != "tui-live":
+    spec = profile_spec(profile)
+    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1:
         raise InstanceError("unsupported profile")
-    exact_keys(profile["bots"], {"claude", "codex", "driver"})
+    exact_keys(profile["bots"], {*spec["providers"], "driver"})
     bot_ids = [snowflake(value) for value in profile["bots"].values()]
+    if any(profile["bots"][role] != value for role, value in spec["pinned"].items()):
+        raise InstanceError("profile bot differs from its pinned test application")
     channels = profile["channels"]
-    if not isinstance(channels, list) or len(channels) != 2:
-        raise InstanceError("exactly two test channels required")
+    if not isinstance(channels, list) or len(channels) != spec["channels"]:
+        raise InstanceError("profile test channel count differs")
     channels = [snowflake(value) for value in channels]
-    if len(set(bot_ids + channels)) != 5:
+    if len(set(bot_ids + channels)) != len(bot_ids) + len(channels):
         raise InstanceError("test IDs must be distinct")
     features = profile["features"]
     if not isinstance(features, dict) or set(features) - FEATURE_KEYS:
@@ -96,6 +123,8 @@ def require_preconditions(manifest, witness):
     if not same_json(witness, expected):
         raise Unevaluable("precondition witness mismatch")
     features = manifest["profile"]["features"]
+    if not profile_spec(manifest["profile"])["gated"]:
+        return
     if (not all(features[key] for key in ("tui_writer", "tui_turn", "capacity_aware"))
             or manifest["applied_env"]["ADK_BUSY_INJECT"] == "off"
             or manifest["applied_env"]["ADK_INTAKE_ROUTING_MODE"] != "enforce"

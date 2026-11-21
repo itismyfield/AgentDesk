@@ -45,7 +45,7 @@ pub(super) async fn bound_pane(
     session: &str,
 ) -> Option<HerdrTarget> {
     if *provider != ProviderKind::Claude
-        || crate::config::session_hosts::herdr_endpoint(channel).is_none()
+        || !crate::services::session_host::thread_host::runs_herdr(channel)
     {
         return None;
     }

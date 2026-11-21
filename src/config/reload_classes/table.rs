@@ -30,6 +30,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("discord.dm_default_agent", Live, "`src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM)"),
     row("discord.owner_id", Restart, "`src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings)"),
     row("discord.scheduled_message_required_mention_user_ids", Restart, "`src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config)"),
+    row("discord.secretary_channels", Live, "`src/services/discord/outbound/notification_policy.rs` live_suppresses_push (live snapshot per post)"),
     row("providers", Restart, "`src/services/provider_hosting.rs` install_provider_hosting_config (process-global map)"),
     row("shared_prompt", Live, "`src/services/discord/settings/content.rs` load_shared_prompt_for_profile (agentdesk_config::load_shared_prompt_path reads the validated snapshot)"),
     row("mcp_servers", Restart, "`src/bootstrap.rs` initialize (mcp_config sync_*_mcp_servers write provider configs once)"),

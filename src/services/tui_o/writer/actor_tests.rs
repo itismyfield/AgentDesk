@@ -4,6 +4,8 @@ mod input_notice_composition;
 mod park_unsealed;
 #[path = "recap_tests.rs"]
 mod recap;
+#[path = "restart_notice_actor_tests.rs"]
+mod restart_notice;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[path = "tool_card_actor_tests.rs"]

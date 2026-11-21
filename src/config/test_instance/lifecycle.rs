@@ -185,7 +185,11 @@ struct RunSnapshot {
 fn admit_run(instance: &super::TestInstance, lease: &Witness) -> Result<bool, String> {
     use std::os::fd::FromRawFd;
     let Some(encoded) = std::env::var_os("AGENTDESK_TEST_RUN") else {
-        return Ok(false);
+        return if instance.environment.requires_verified_run() {
+            Err(rejected())
+        } else {
+            Ok(false)
+        };
     };
     let encoded = encoded
         .to_str()
@@ -263,12 +267,7 @@ impl RunSnapshot {
         // The retained FD pins this inode; the initial image digest and current mutation fence
         // bind its bytes without hashing the executable again on every health request.
         peer::verify_current_image(&self.image).map_err(|_| rejected())?;
-        let names = [
-            "claude_bot_token",
-            "codex_bot_token",
-            "announce_bot_token",
-            "notify_bot_token",
-        ];
+        let names = instance.environment.credentials;
         let directory = instance.root.join("credential");
         super::checked_path(&directory)?;
         let metadata = std::fs::symlink_metadata(&directory).map_err(|_| rejected())?;
@@ -516,12 +515,7 @@ impl RunSnapshot {
     fn control_key(&self, instance: &super::TestInstance) -> Result<[u8; 32], String> {
         use std::{io::Read, os::unix::fs::OpenOptionsExt};
         let mut credentials = Vec::new();
-        for name in [
-            "announce_bot_token",
-            "claude_bot_token",
-            "codex_bot_token",
-            "notify_bot_token",
-        ] {
+        for &name in instance.environment.credentials {
             let identity = self
                 .input
                 .identities
