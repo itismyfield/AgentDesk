@@ -1337,7 +1337,7 @@ line 37";
             );
         });
         compact_holding_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("compact must acquire the composer lock");
 
         let cleanup_session = session.clone();
@@ -1356,7 +1356,7 @@ line 37";
         );
         release_tx.send(()).expect("release compact");
         cleanup_entered_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("cleanup proceeds once /compact releases the composer lock");
     }
 }

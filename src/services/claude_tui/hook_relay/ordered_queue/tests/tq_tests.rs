@@ -22,9 +22,6 @@ use crate::services::tui_prompt_dedupe::{
 };
 
 const REPLY_WAIT: Duration = Duration::from_millis(750);
-/// How long a wait for something that must happen polls before failing: a hang detector, not a
-/// bound of the contract, so a slow runner only makes a broken build fail later.
-const LIVENESS: Duration = Duration::from_secs(10);
 
 /// `(request id, hook event, status, detached)` of every request the proxy handed over.
 type Seen = Arc<Mutex<Vec<(String, String, u16, bool)>>>;
@@ -301,13 +298,17 @@ impl Tq {
         })
     }
 
+    /// One entry per request id: a transport retry the receipt ledger answers from its cache is
+    /// the same acceptance, not a second one.
     fn accepted(&self, event: &str) -> Vec<(String, bool)> {
         let seen = self.seen.lock().unwrap();
-        let hits = seen
-            .iter()
-            .filter(|(_, e, status, _)| e == event && *status == 202);
-        hits.map(|(id, _, _, detached)| (id.clone(), *detached))
-            .collect()
+        let mut hits: Vec<(String, bool)> = Vec::new();
+        for (id, _, _, detached) in seen.iter().filter(|(_, e, s, _)| e == event && *s == 202) {
+            if !hits.iter().any(|(known, _)| known == id) {
+                hits.push((id.clone(), *detached));
+            }
+        }
+        hits
     }
 
     fn refused(&self, event: &str) -> usize {

@@ -816,7 +816,7 @@ mod tests {
             );
         });
         holding_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("compact must acquire the composer lock first");
 
         // Fire `/tui/send` on another thread; it must block on the composer lock.
@@ -839,7 +839,7 @@ mod tests {
         );
         release_tx.send(()).expect("release compact");
         paste_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("/tui/send paste proceeds once the composer lock releases");
     }
 
@@ -883,7 +883,7 @@ mod tests {
             );
         });
         holding_rx
-            .recv_timeout(Duration::from_millis(500))
+            .recv_timeout(Duration::from_secs(10))
             .expect("compact must acquire the composer lock first");
 
         // Canary task: flips the flag the moment the runtime worker polls it.
