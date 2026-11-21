@@ -40,7 +40,7 @@ function PhoneRow({
   const value = formatSettingValue(currentValue(item), item, tr);
   const baseline = baselineText(item, tr);
   return (
-    <RowButton selected={selected} className="min-h-14" data-testid={`setting-row-${item.key}`} onClick={() => onOpen(item.key)}>
+    <RowButton selected={selected} aria-current={selected ? "true" : undefined} className="min-h-14" data-testid={`setting-row-${item.key}`} onClick={() => onOpen(item.key)}>
       <span className="min-w-0 flex-1">
         <span className="block text-sm leading-5 break-keep text-[var(--fg)]">{item.label}</span>
         {item.input === "status" ? (
