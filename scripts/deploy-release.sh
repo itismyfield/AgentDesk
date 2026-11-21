@@ -4660,21 +4660,29 @@ _post_deploy_smoke_run_turn_scenario() {
     local relay_log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-${scenario}.log"
     local excerpt="$POST_DEPLOY_SMOKE_TMP_DIR/dcserver-${scenario}.log"
     local idle start_stat start_size="" head_bytes=0 start_head=""
-    local verdict rc=0 judge_rc=0
+    local verdict rc=0 judge_rc=0 streak
     local run_id="${POST_DEPLOY_SMOKE_STAMP}-${scenario}-${cell}"
+    # Consecutive deploys that skipped this cell as not proven idle; PASS/FAIL resets it.
+    local streak_cmd=(python3 "$REPO/scripts/e2e/post_deploy_skip_streak.py" --state "$ADK_REL/runtime/post-deploy-smoke-idle-skips.json" --scenario "$scenario" --cell "$cell")
     # Same idle proof as E-1, read fresh: an earlier phase may have left the cell busy.
     if idle=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py preflight \
         --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --cell "$cell" \
         --channel-id "$channel_id" --queue-runtime-root "$ADK_REL/runtime" --reset-state "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" 2>&1); then :; else
-        rc=$?; if [ "$rc" -eq 4 ]; then _post_deploy_smoke_fail "relay ${scenario} cell=${cell} result=FAIL ${idle}" || true; POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=FAIL"; return 1; fi
+        rc=$?; if [ "$rc" -eq 4 ]; then "${streak_cmd[@]}" evaluated >/dev/null 2>> "$POST_DEPLOY_SMOKE_EVIDENCE" || true; _post_deploy_smoke_fail "relay ${scenario} cell=${cell} result=FAIL ${idle}" || true; POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=FAIL"; return 1; fi
         if [[ "$idle" == "skipped: blocked by E-1 FAIL"* ]]; then
             _post_deploy_smoke_note "relay ${scenario}=${idle}" || return 1
         else
-            _post_deploy_smoke_note "relay ${scenario}=skipped: ${cell} not proven idle (${idle})" || return 1
+            streak=$("${streak_cmd[@]}" skipped 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || streak=unknown
+            _post_deploy_smoke_note "relay ${scenario}=skipped: ${cell} not proven idle (${idle}) consecutive=${streak}" || return 1
+            # Alert only; the deploy outcome stays as before.
+            if [[ "$streak" =~ ^[0-9]+$ ]] && [ "$streak" -ge 2 ]; then
+                _notify_channel "⚠ 배포 스모크 ${scenario}: ${cell} 셀(채널 ${channel_id})이 배포 ${streak}회 연속 idle 미증명으로 건너뛰어졌습니다. 셀 점검이 필요합니다. 마지막 사유: ${idle//$'\n'/ }"
+            fi
         fi
         POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=skipped"
         return 0
     fi
+    "${streak_cmd[@]}" evaluated >/dev/null 2>> "$POST_DEPLOY_SMOKE_EVIDENCE" || true
     start_stat=$(_post_deploy_smoke_log_identity_and_size "$POST_DEPLOY_SMOKE_LOG_PATH" 2>/dev/null) || start_stat=""
     read -r _ start_size <<< "$start_stat" || true
     case "${start_size:-x}" in
