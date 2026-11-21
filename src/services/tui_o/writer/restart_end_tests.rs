@@ -28,7 +28,7 @@ const BOT: u64 = 42;
 const PANE: &str = "fixture-restart-pane";
 const OLD_BODY: &str = "old partial";
 const NEW_BODY: &str = "new answer";
-const NEW_SUMMARY: &str = "-# ⏱️ 7초";
+const NEW_SUMMARY: &str = "-# ⏱️ 7초 (09:01)";
 
 #[derive(Default)]
 struct Port {

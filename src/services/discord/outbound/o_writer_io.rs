@@ -93,6 +93,10 @@ fn refusal(status: Option<u16>) -> Option<u16> {
 }
 
 impl DiscordPort for GatewayPort {
+    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
+        self.owner.as_ref().map(|scope| &scope.pool)
+    }
+
     fn bot_id(&self) -> u64 {
         self.bot_id
     }

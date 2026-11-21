@@ -17,18 +17,7 @@ mod replay_turn_tests;
 mod turn_mode_retry_tests;
 
 pub(super) fn assert_completed_summary(summary: &str) {
-    let shape =
-        regex::Regex::new(concat!(
-            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
-            r"(?: · 📦 (?:100|[1-9]?[0-9])%)?",
-            r"(?: · 5h (?:100|[1-9]?[0-9])% \((?:[01][0-9]|2[0-3]):[0-5][0-9]\))?",
-            r"(?: · 7d (?:100|[1-9]?[0-9])% \((?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) (?:[01][0-9]|2[0-3]):[0-5][0-9]\))?\z"
-        ))
-            .unwrap();
-    assert!(
-        shape.is_match(summary),
-        "unexpected terminal notice: {summary:?}"
-    );
+    crate::services::turn_summary_line::assert_completed_footer(summary);
 }
 
 pub(super) fn assert_body_and_summary(shown: &[String], body: &str, summary: bool) {
