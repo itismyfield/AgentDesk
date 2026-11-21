@@ -2,7 +2,7 @@ use std::future::Future;
 
 // Acquire fixture serialization before creating its executor so contention cannot block runtime progress.
 // Reject the entire runtime context, including spawn_blocking threads, before acquiring the lock.
-pub(crate) fn run<G, F: Future>(acquire: impl FnOnce() -> G, future: F) -> F::Output {
+pub fn run<G, F: Future>(acquire: impl FnOnce() -> G, future: F) -> F::Output {
     assert!(
         tokio::runtime::Handle::try_current().is_err(),
         "serialized async fixtures must start outside a Tokio runtime"

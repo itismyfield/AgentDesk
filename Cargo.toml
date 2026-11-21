@@ -6,7 +6,7 @@ description = "AI agent orchestration platform"
 license = "MIT"
 
 [workspace]
-members = ["crates/adk-base", "crates/adk-store"]
+members = ["crates/adk-base", "crates/adk-store", "crates/adk-test-support"]
 resolver = "3"
 
 [lib]
@@ -126,6 +126,7 @@ plist = "1.8"
 
 [dev-dependencies]
 adk-base = { path = "crates/adk-base", features = ["test-support"] }
+adk-test-support = { path = "crates/adk-test-support" }
 flate2 = "1"
 filetime = "0.2"
 plist = "1.8"

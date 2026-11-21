@@ -292,7 +292,7 @@ pub fn run_from_args() -> Result<()> {
 #[cfg(test)]
 mod test_env_panic_probe;
 #[cfg(test)]
-mod test_support;
+use adk_test_support::test_support;
 
 /// Managed writer lifetime contracts; hosting and ownership admission remain internal.
 pub mod home_runtime {
