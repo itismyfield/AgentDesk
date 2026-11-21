@@ -4,17 +4,14 @@ import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
-import { Skeleton } from "../../kit/free/skeleton-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import type { Agent } from "../../types";
 import AgentPersona from "../AgentPersona";
-import { SETTINGS_CARD_CLASS } from "../settings/SettingsPrimitives";
+import { Cap, CardNote, CardSkeleton, KitCard, RowButton, StatusDot } from "../common/KitPrimitives";
 import { matchesAgent, type AuditState } from "./auditModel";
 import type { AuditSelection } from "./useAuditSelection";
 
 type Tr = (ko: string, en: string) => string;
-
-export const AUDIT_CARD_CLASS = SETTINGS_CARD_CLASS;
 
 interface AuditWorkspaceProps {
   selection: AuditSelection;
@@ -23,12 +20,14 @@ interface AuditWorkspaceProps {
   tr: Tr;
   /** Second line of an agent row: what this tab already knows about the agent. */
   caption: (agent: Agent) => string;
+  /** Optional warning dot when cached tab data flags items to inspect. */
+  warning?: (agent: Agent) => boolean;
   /** The open agent's detail; phones show it instead of the list. */
   children: ReactNode;
 }
 
 /** Agent picker beside the detail on desktop; on phones a list that opens one agent at a time. */
-export function AuditWorkspace({ selection, phone, isKo, tr, caption, children }: AuditWorkspaceProps) {
+export function AuditWorkspace({ selection, phone, isKo, tr, caption, warning, children }: AuditWorkspaceProps) {
   const [query, setQuery] = useState("");
   const { list, agent } = selection;
   if (list.length === 0) {
@@ -45,43 +44,50 @@ export function AuditWorkspace({ selection, phone, isKo, tr, caption, children }
 
   const rows = list.filter((item) => matchesAgent(item, query));
   const picker = (
-    <nav aria-label={tr("에이전트", "Agents")} data-testid="audit-agent-list" className={`${AUDIT_CARD_CLASS} flex flex-col overflow-hidden ${phone ? "" : "sticky top-4 max-h-[calc(100dvh-10rem)]"}`}>
-      <div className="border-b border-[var(--line-soft)] p-2.5">
-        <TextField
-          type="search"
-          size={phone ? "lg" : "sm"}
-          className="pointer-coarse:[--h:44px]!"
-          aria-label={tr("에이전트 찾기", "Find an agent")}
-          placeholder={tr("에이전트 찾기", "Find an agent")}
-          prefix={<Search aria-hidden />}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </div>
-      <ul className="m-0 min-h-0 list-none overflow-y-auto p-0 [&>*+*]:border-t [&>*+*]:border-[var(--line-soft)]">
-        {rows.map((item) => {
-          const current = !phone && item.id === agent?.id;
-          return (
-            <li key={item.id}>
-              <button
-                type="button"
-                aria-current={current ? "true" : undefined}
-                data-testid={`audit-agent-${item.id}`}
-                onClick={() => selection.selectAgent(item.id)}
-                className="flex min-h-14 w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-surface-subtle aria-[current=true]:bg-[color-mix(in_oklab,var(--accent)_9%,transparent)] aria-[current=true]:shadow-[inset_2px_0_0_var(--accent)]"
-              >
-                <AgentPersona agent={item} size={32} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium text-th-text-primary">{localeName(isKo ? "ko" : "en", item)}</span>
-                  <span className="block truncate text-xs text-th-text-muted">{caption(item)}</span>
-                </span>
-                {phone ? <ChevronRight size={16} aria-hidden className="shrink-0 text-th-text-muted" /> : null}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      {rows.length === 0 ? <p className="m-0 px-3 py-4 text-[13px] text-th-text-muted">{tr("맞는 에이전트가 없어요.", "No matching agents.")}</p> : null}
+    <nav
+      aria-label={tr("에이전트", "Agents")}
+      data-testid="audit-agent-list"
+      className={phone ? "min-w-0" : "sticky top-4 flex max-h-[calc(100dvh-10rem)] flex-col"}
+    >
+      <KitCard className="flex min-h-0 flex-col">
+        <div className="border-b border-[var(--line-soft)] px-3 py-2.5">
+          <TextField
+            type="search"
+            size={phone ? "lg" : "sm"}
+            className="pointer-coarse:[--h:44px]!"
+            aria-label={tr("에이전트 찾기", "Find an agent")}
+            placeholder={tr("에이전트 찾기", "Find an agent")}
+            prefix={<Search aria-hidden />}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <ul className="m-0 min-h-0 list-none overflow-y-auto p-0">
+          {rows.map((item) => {
+            const current = !phone && item.id === agent?.id;
+            return (
+              <li key={item.id} className="border-t border-[var(--line-soft)] first:border-t-0">
+                <RowButton
+                  selected={current}
+                  aria-current={current ? "true" : undefined}
+                  data-testid={`audit-agent-${item.id}`}
+                  onClick={() => selection.selectAgent(item.id)}
+                  className={phone ? "min-h-14 py-2.5" : "min-h-12 px-3 py-2.5 sm:px-3"}
+                >
+                  <AgentPersona agent={item} size={32} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm leading-5 font-medium text-[var(--fg)]">{localeName(isKo ? "ko" : "en", item)}</span>
+                    <Cap className="block truncate">{caption(item)}</Cap>
+                  </span>
+                  {!phone && warning?.(item) ? <StatusDot tone="warn" /> : null}
+                  {phone ? <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" /> : null}
+                </RowButton>
+              </li>
+            );
+          })}
+        </ul>
+        {rows.length === 0 ? <CardNote className="border-t-0">{tr("맞는 에이전트가 없어요.", "No matching agents.")}</CardNote> : null}
+      </KitCard>
     </nav>
   );
   if (phone) return picker;
@@ -93,7 +99,7 @@ export function AuditWorkspace({ selection, phone, isKo, tr, caption, children }
   );
 }
 
-/** Detail head both tabs use: back on phones, the agent, a meta line and actions. */
+/** Detail head both tabs use: sticky 56px top bar on phones, inline card header on desktop. */
 export function AuditDetailHeader({ agent, isKo, meta, actions, onBack, phone, tr }: {
   agent: Agent;
   isKo: boolean;
@@ -104,14 +110,32 @@ export function AuditDetailHeader({ agent, isKo, meta, actions, onBack, phone, t
   tr: Tr;
 }) {
   return (
-    // Phones get one 56px bar in the app top bar's row, with the meta on one line; its margins undo PageFrame's padding
-    // and the 4px of its empty phone header.
-    <div className={phone ? "-mx-4 -mt-4 mb-1 flex h-14 sm:-mx-6 min-w-0 items-center gap-1 border-b border-[var(--line-soft)] px-2" : "flex min-w-0 items-center gap-3"} data-testid="audit-detail-head">
-      {onBack ? <IconButton icon={<ArrowLeft />} label={tr("에이전트 목록으로", "Back to agents")} onClick={onBack} data-testid="audit-back" /> : null}
+    // Phones pin one 56px bar at the top of PageFrame's scrollport; negative margins undo PageFrame's padding.
+    <div
+      className={
+        phone
+          ? "sticky top-0 z-20 -mx-4 -mt-4 mb-1 flex h-14 min-w-0 items-center gap-1 border-b border-[var(--line-soft)] bg-[var(--bg)] px-2 sm:-mx-6"
+          : "flex min-w-0 flex-wrap items-center gap-2.5"
+      }
+      data-testid="audit-detail-head"
+    >
+      {onBack ? (
+        <IconButton
+          className={phone ? "min-h-11 min-w-11" : undefined}
+          icon={<ArrowLeft />}
+          label={tr("에이전트 목록으로", "Back to agents")}
+          onClick={onBack}
+          data-testid="audit-back"
+        />
+      ) : null}
       <AgentPersona agent={agent} size={phone ? 32 : 40} />
       <div className={`min-w-0 flex-1 ${phone ? "ml-1.5" : ""}`}>
-        <h2 className={`m-0 truncate font-semibold text-th-text-heading ${phone ? "text-[15px] leading-5" : "text-base"}`}>{localeName(isKo ? "ko" : "en", agent)}</h2>
-        <p className={`m-0 text-xs text-th-text-muted ${phone ? "truncate leading-4" : "leading-5 break-keep"}`} title={phone ? meta : undefined} data-testid="audit-detail-meta">{meta}</p>
+        <h2 className={`m-0 truncate font-semibold text-[var(--fg)] ${phone ? "text-[15px] leading-5" : "text-base leading-6"}`}>
+          {localeName(isKo ? "ko" : "en", agent)}
+        </h2>
+        <Cap className={phone ? "block truncate" : "block leading-5 break-keep"} title={phone ? meta : undefined} data-testid="audit-detail-meta">
+          {meta}
+        </Cap>
       </div>
       <div className={`flex shrink-0 items-center ${phone ? "" : "gap-2"}`}>{actions}</div>
     </div>
@@ -127,9 +151,9 @@ export function AuditRequestState({ state, retrying, onRetry, tr }: {
 }) {
   if (state === "loading") {
     return (
-      <div role="status" aria-label={tr("불러오는 중", "Loading")} className="flex flex-col gap-3 p-4" data-testid="audit-state-loading">
-        {[0, 1, 2].map((row) => <Skeleton key={row} height={14} width={row === 1 ? "60%" : "85%"} />)}
-      </div>
+      <KitCard data-testid="audit-state-loading" className="[&>*]:border-t-0">
+        <CardSkeleton label={tr("불러오는 중", "Loading")} rows={3} />
+      </KitCard>
     );
   }
   const copy = {
@@ -138,12 +162,14 @@ export function AuditRequestState({ state, retrying, onRetry, tr }: {
     error: [<CloudOff aria-hidden />, tr("불러오지 못했어요", "Could not load"), tr("서버 연결을 확인하고 다시 시도해 주세요.", "Check the server connection and try again.")],
   }[state];
   return (
-    <EmptyState
-      icon={copy[0]}
-      title={copy[1]}
-      text={copy[2]}
-      data-testid={`audit-state-${state}`}
-      action={<Button variant="secondary" size="sm" loading={retrying} onClick={onRetry}>{tr("다시 시도", "Try again")}</Button>}
-    />
+    <KitCard pad="md">
+      <EmptyState
+        icon={copy[0]}
+        title={copy[1]}
+        text={copy[2]}
+        data-testid={`audit-state-${state}`}
+        action={<Button variant="secondary" size="sm" loading={retrying} onClick={onRetry}>{tr("다시 시도", "Try again")}</Button>}
+      />
+    </KitCard>
   );
 }
