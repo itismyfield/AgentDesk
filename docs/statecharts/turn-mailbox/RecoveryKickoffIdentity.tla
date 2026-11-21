@@ -7,7 +7,7 @@
 \*   finalizer key is effective_finalizer_turn_id = injected/finalizer/synthetic id (2).
 \*   src/services/discord/inflight/model.rs:1241
 \* Policy "before": recovery kickoff binds optional_message_id(row.user_msg_id).
-\*   src/services/discord/recovery_engine/restore_inflight/kickoff_identity.rs:19
+\*   src/services/discord/recovery_engine/restore_inflight/kickoff_identity.rs:20
 \* Policy "after":  recovery kickoff binds the row's effective finalizer id.
 \* Policy "weak":   rejected alternative, finalizer also releases a held slot whose
 \*   active id is 0 (channel-scoped fallback on a guarded miss).
@@ -58,7 +58,7 @@ Restart ==
     /\ UNCHANGED <<wrong, staleDone>>
 
 \* Pane alive: watcher reattach re-registers with the effective finalizer id.
-\*   src/services/discord/recovery_engine/runtime.rs:193, turn_orchestrator.rs:2045
+\*   recovery_engine/runtime.rs:193,325 (mailbox_try_start_turn_unless_released) -> turn_orchestrator.rs:2006
 Reattach ==
     /\ phase = "down"
     /\ phase' = "recovered" /\ token' = TRUE /\ active' = FinId /\ holder' = "ours"
