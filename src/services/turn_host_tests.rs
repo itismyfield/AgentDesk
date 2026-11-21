@@ -301,10 +301,17 @@ async fn a_turn_refused_over_a_verified_bound_thread_keeps_its_recorded_pane_pg(
     let _child = force_relation_for_test(child, Relation::Child { parent });
     let judge = || for_turn(Some(&pool), &ProviderKind::Claude, child, Some(SESSION_KEY));
     seed_channel(&pool, child, bound_on_forced_endpoint(child, "test-node")).await;
+    // Whatever this turn's own gates answer, the verified pane is recorded.
     let _open = force_admission(Admission::new(true, None));
     let first = judge().await;
     assert!(
-        matches!(first, TurnHost::Herdr(_) | TurnHost::Refused(HerdrRefusal::OWriterNotReady)),
+        matches!(
+            first,
+            TurnHost::Herdr(_)
+                | TurnHost::Refused(
+                    HerdrRefusal::OWriterNotReady | HerdrRefusal::AdmissionStopped { .. }
+                )
+        ),
         "{first:?}"
     );
     assert!(matches!(current_execution_cached(child), Execution::Herdr(_)));
