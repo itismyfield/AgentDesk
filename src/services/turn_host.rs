@@ -88,7 +88,7 @@ impl std::fmt::Display for HerdrRefusal {
 
 /// The sessions row (`None`: no row yet), or why it could not be read; read before any tmux or
 /// Herdr I/O.
-type RowRead = Result<Option<HostedObservation>, String>;
+pub(crate) type RowRead = Result<Option<HostedObservation>, String>;
 
 /// The Herdr execution the row still holds: Pending, Bound or an unreadable record.
 fn herdr_trace(row: &RowRead) -> Option<Option<HostedState>> {
@@ -140,7 +140,7 @@ pub(crate) fn returned(_logical: &str, _nonce: &str) -> bool {
     true
 }
 
-async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
+pub(crate) async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
     let (Some(pool), Some(session_key)) = (pool, session_key) else {
         return Err("no database or session key".into());
     };
@@ -162,13 +162,30 @@ pub(crate) async fn for_turn(
 ) -> TurnHost {
     let host = resolve(pool, provider, channel_id, session_key, true).await;
     // Synchronous readers of a thread's current execution read this final judgement.
-    let judged = match &host {
+    thread_host::record_judged(channel_id, recorded_execution(&host));
+    host
+}
+
+/// What a thread's final judgement records as its current execution: the execution evidence it
+/// verified, never the turn's permission. A thread reaches the configured plan only with its Bound
+/// row already matched to its parent's endpoint and owner, so a refusal there leaves that pane
+/// running; only a refusal on the row itself, or a return, forgets it.
+fn recorded_execution(host: &TurnHost) -> Option<bool> {
+    match host {
         TurnHost::Herdr(_) => Some(true),
         TurnHost::Tmux => Some(false),
-        TurnHost::Return(_) | TurnHost::Refused(_) => None,
-    };
-    thread_host::record_judged(channel_id, judged);
-    host
+        TurnHost::Refused(
+            HerdrRefusal::ProviderUnsupported { .. }
+            | HerdrRefusal::EndpointNotLocal { .. }
+            | HerdrRefusal::AdmissionStopped { .. }
+            | HerdrRefusal::OWriterNotReady
+            | HerdrRefusal::ExecutorNotWired,
+        ) => Some(true),
+        TurnHost::Refused(
+            HerdrRefusal::HostedHerdrUnconfigured { .. } | HerdrRefusal::HostedRowUnreadable { .. },
+        )
+        | TurnHost::Return(_) => None,
+    }
 }
 
 /// Reads the selected host and its current row without admission or output-writer gates.
@@ -237,7 +254,7 @@ async fn resolve(
 }
 
 /// A checked child can keep its current Herdr pane under its parent's configured endpoint.
-fn is_live_thread_endpoint(
+pub(crate) fn is_live_thread_endpoint(
     channel: u64,
     provider: &ProviderKind,
     key: Option<&str>,
@@ -587,4 +604,4 @@ pub(crate) fn launch_endpoint(endpoint: ChannelEndpoint) -> HerdrLaunchEndpoint 
 
 #[cfg(test)]
 #[path = "turn_host_tests.rs"]
-mod tests;
+pub(crate) mod tests;
