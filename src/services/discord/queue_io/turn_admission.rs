@@ -221,8 +221,8 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
     channel_id: ChannelId,
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
-    // `None` when the recovery turn has no anchored user message
-    // (user_msg_id == 0, e.g. a TUI-direct turn).
+    // The recovered row's finalizer key, so its identity-guarded release matches;
+    // `None` leaves the slot without an id.
     user_message_id: Option<MessageId>,
 ) -> RecoveryKickoffResult {
     let Ok(_admission) = crate::services::agent_recovery::admission::admit(
