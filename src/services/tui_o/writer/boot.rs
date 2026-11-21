@@ -148,6 +148,7 @@ impl Trace {
         let provider = match run.provider {
             Some(ShadowProvider::Claude) => "claude",
             Some(ShadowProvider::Codex) => "codex",
+            Some(ShadowProvider::Antigravity) => "antigravity",
             None => "unknown",
         };
         tracing::info!(

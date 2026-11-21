@@ -59,6 +59,8 @@ pub(crate) fn classify_with_version(
     match provider {
         ShadowProvider::Claude => claude(record, identity_version),
         ShadowProvider::Codex => codex(record),
+        // The agy format yields a body only after the committed prefix is verified.
+        ShadowProvider::Antigravity => Vec::new(),
     }
 }
 

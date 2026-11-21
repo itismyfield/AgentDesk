@@ -605,4 +605,67 @@ AgyAcceptedEnds ==
 AgySecondTurnEnds == <>(agy.id = 2 /\ agy.phase = "ended")
 AgyFailedEnds == (Fix = "failed") => <>(agy.phase = "ended" /\ agy.alarm)
 AgyHeadlessKept == (Fix = "headless") => <>(agy.phase = "headlessDone" /\ agy.legacy = 1)
-=============================================================================
+
+\* One verified child and its prior Legacy obligation. Shadow is always record-only.
+\* "cutover" exercises the future permission with the same lifecycle guards.
+OwnerInit ==
+    /\ LegacyIdle /\ QuietLate
+    /\ \E selected \in BOOLEAN :
+       agy = [selected |-> selected, verified |-> FALSE, prior |-> TRUE,
+              boot |-> "starting", generation |-> 1, owners |-> {"legacy"},
+              retired |-> FALSE, late |-> FALSE]
+
+OwnerVerify ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.selected /\ ~agy.verified
+    /\ agy' = [agy EXCEPT !.verified = TRUE]
+
+OwnerLegacyReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.prior
+    /\ agy' = [agy EXCEPT !.prior = FALSE]
+
+OwnerBoot ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.verified /\ agy.boot = "starting"
+    /\ agy' = [agy EXCEPT !.boot = "scanned"]
+
+OwnerAdopt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "scanned" /\ ~agy.prior /\ ~agy.retired
+    /\ (Mut # "noOwner" \/ agy.generation = 1)
+    /\ agy' = [agy EXCEPT !.boot = "ready",
+        !.owners = IF Fix = "shadow" THEN {"legacy"}
+                   ELSE IF Mut = "dualOwner" THEN {"legacy", "o"} ELSE {"o"}]
+
+OwnerRestart ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "ready" /\ agy.generation = 1 /\ ~agy.retired
+    /\ agy' = [agy EXCEPT !.boot = "starting", !.generation = 2,
+                           !.owners = IF Fix = "shadow" THEN {"legacy"} ELSE {}]
+
+OwnerRetire ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "ready" /\ ~agy.retired
+    /\ agy' = [agy EXCEPT !.retired = TRUE, !.owners = {}]
+
+OwnerLateBody ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.retired /\ Mut = "lateBody" /\ ~agy.late
+    /\ agy' = [agy EXCEPT !.late = TRUE]
+
+OwnerRest == UNCHANGED <<agy, vars, lateVars>>
+OwnerNext == OwnerVerify \/ OwnerLegacyReceipt \/ OwnerBoot \/ OwnerAdopt
+             \/ OwnerRestart \/ OwnerRetire \/ OwnerLateBody \/ OwnerRest
+
+AgyOwnerSpec == OwnerInit /\ [][OwnerNext]_agy
+    /\ WF_agy(OwnerVerify) /\ WF_agy(OwnerLegacyReceipt)
+    /\ WF_agy(OwnerBoot) /\ WF_agy(OwnerAdopt)
+
+AgyChildSingleOwner == ~({"legacy", "o"} \subseteq agy.owners)
+AgyRetirementFenced == agy.retired => agy.owners = {} /\ ~agy.late
+AgyShadowRecordOnly == Fix = "shadow" => "o" \notin agy.owners
+AgyRestartResolvesOwner ==
+    []((agy.generation = 2 /\ ~agy.retired) =>
+       <> (agy.retired \/ (agy.boot = "ready" /\ agy.owners # {})))
+====

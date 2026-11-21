@@ -79,6 +79,7 @@ impl Candidate {
         let kind = match run.binding.provider {
             ShadowProvider::Claude => ClaudeTui,
             ShadowProvider::Codex => CodexTui,
+            ShadowProvider::Antigravity => return false,
         };
         let Some(surface) = self.child_surface() else {
             return false;

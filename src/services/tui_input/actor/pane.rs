@@ -201,7 +201,7 @@ pub(crate) fn canonical(provider: ShadowProvider, text: &str) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     match provider {
         ShadowProvider::Claude => text.replace('\t', "    "),
-        ShadowProvider::Codex => text,
+        ShadowProvider::Codex | ShadowProvider::Antigravity => text,
     }
 }
 
@@ -279,6 +279,7 @@ impl Pane for TmuxPane {
         let provider = match self.provider {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
+            ShadowProvider::Antigravity => return None,
         };
         let context =
             crate::services::tui_prompt_dedupe::binding_context::input_context(provider, &nonce)?;
@@ -301,6 +302,7 @@ impl Pane for TmuxPane {
         let provider = match self.provider {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
+            ShadowProvider::Antigravity => return None,
         };
         let context =
             crate::services::tui_prompt_dedupe::binding_context::input_context(provider, &nonce)?;
@@ -332,6 +334,7 @@ impl Pane for TmuxPane {
                     &session, callback,
                 )
             }
+            ShadowProvider::Antigravity => None,
         }
     }
 

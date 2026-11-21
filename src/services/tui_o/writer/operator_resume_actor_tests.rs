@@ -56,6 +56,7 @@ fn native(provider: ShadowProvider, id: &str, text: &str) -> Vec<u8> {
             .concat()
             .into_bytes()
         }
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     }
 }
 
