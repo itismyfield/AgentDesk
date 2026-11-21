@@ -18,6 +18,9 @@ pub(super) async fn handle_component_if_applicable(
     if super::super::herdr_consent::component(ctx, component, data).await? {
         return Ok(true);
     }
+    if crate::services::discord::delegation_card::component(ctx, component, data).await? {
+        return Ok(true);
+    }
     if !is_model_picker_component_custom_id(&component.data.custom_id, component.channel_id) {
         return Ok(false);
     }

@@ -187,18 +187,31 @@ pub async fn final_answer(
     if receipt.terminal_outcome != TerminalOutcome::Completed.as_str() {
         return Ok(None);
     }
-    let record: Option<(Option<String>, Value)> = sqlx::query_as(
-        "SELECT provider, events_json FROM (
-            SELECT provider, events_json, 0 AS tier FROM session_transcripts WHERE turn_id = $1
-            UNION ALL
-            SELECT provider, events_json, 1 AS tier FROM session_transcripts_archive
-             WHERE turn_id = $1
-         ) found ORDER BY tier LIMIT 1",
+    // Live first, so the unindexed archive is read only once retention moved the record; the
+    // events of an unlisted provider are never loaded.
+    let providers: Vec<&str> = FINAL_ANSWER_SOURCES.iter().map(|(name, _)| *name).collect();
+    let read_failed = |error: sqlx::Error| format!("read final answer record failed: {error}");
+    let live: Option<(Option<String>, Option<Value>)> = sqlx::query_as(
+        "SELECT provider, CASE WHEN provider = ANY($2) THEN events_json END
+           FROM session_transcripts WHERE turn_id = $1",
     )
     .bind(&receipt.turn_id)
+    .bind(&providers)
     .fetch_optional(pool)
     .await
-    .map_err(|error| format!("read final answer record failed: {error}"))?;
+    .map_err(read_failed)?;
+    let record = match live {
+        Some((provider, events)) => Some((provider, events.unwrap_or(Value::Null))),
+        None => sqlx::query_as(
+            "SELECT provider, events_json FROM session_transcripts_archive
+              WHERE turn_id = $1 AND provider = ANY($2) ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&receipt.turn_id)
+        .bind(&providers)
+        .fetch_optional(pool)
+        .await
+        .map_err(read_failed)?,
+    };
     let Some((provider, events)) = record else {
         return Ok(None);
     };
