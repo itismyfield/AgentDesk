@@ -1,11 +1,13 @@
+import { ChevronDown } from "lucide-react";
 import { useState } from "react";
 import { updateCampaignNode, type Campaign, type CampaignNode, type CampaignNodeLive } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
-import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
+import { NODE_STATUSES, campaignTaskTitle, safeCampaignLink } from "./campaignModel";
 import { legacyTask } from "./campaignOverviewModel";
-import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
+import { Badge, LABELS, LiveChip, cardStatusLabel, dispatchLabel, formatCampaignTime, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
+import { RecentList, STATUS_CARD, WARN_CARD, useScreenTitle } from "./TaskScreen";
 
 export interface CampaignDraft {
   campaign: Campaign;
@@ -32,6 +34,9 @@ export default function CampaignNodeDetails({
   const [error, setError] = useState<string | null>(null);
   const draft = editing?.node;
   const shown = legacyTask(node, live); // the status and blocker the overview shows
+  const inScreen = useScreenTitle(campaignTaskTitle(node));
+  const pr = safeCampaignLink(node.pr_url);
+  const prNumber = pr && new URL(pr).pathname.match(/\/pull\/(\d+)/)?.[1];
   const patch = (changes: Partial<CampaignNode>) => {
     if (editing) onDraftChange({ ...editing, node: { ...editing.node, ...changes } });
   };
@@ -60,10 +65,7 @@ export default function CampaignNodeDetails({
   };
   return (
     <section className="campaign-node-detail" aria-label={tr("작업 상세", "Task details")}>
-      <div className="campaign-row">
-        <h3>{node.title}</h3>
-        <Badge status={node.status} tr={tr} />
-      </div>
+      {!inScreen && <div className="campaign-row"><h3>{node.title}</h3></div>}
       {draft ? (
         <form
           onSubmit={(event) => {
@@ -178,25 +180,45 @@ export default function CampaignNodeDetails({
         </form>
       ) : (
         <>
-          {/* TaskPhone order: where it stands now, its record by time, what it is for, then links and bookkeeping. */}
+          {/* TaskPhone order: a status card, the progress record where server tasks list stages, evidence, then what it is for. */}
           {campaign.nodes_partial && <p role="status" className="campaign-muted">{tr("세부 내용과 검증 기록을 불러오는 중이에요…", "Loading details and verification records…")}</p>}
-          <div className="grid gap-2">
-            <h4>{tr("지금 상태", "Now")}</h4>
-            <p className="campaign-description">{node.stage || "—"} · {tr(`라운드 ${node.round}`, `round ${node.round}`)}</p>
-            {shown.blocker && <WidgetState kind="stale" title={shown.status === "pending" ? tr("대기 사유", "Waiting on") : tr("막힌 이유", "Blocker")} description={shown.blocker} compact />}
-            {node.post_merge_hold && <WidgetState kind="stale" title={tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")} description={node.post_merge_hold} compact />}
-          </div>
-          <div className="campaign-next">
-            <h4>{tr("다음 행동", "Next action")}</h4>
-            <p>{node.next_action || tr("아직 기록된 다음 행동이 없습니다.", "No next action recorded yet.")}</p>
-          </div>
-          {!!node.evidence_records?.length && (
-            <div>
-              <h4>{tr("단계 기록", "Stage record")}</h4>
-              <ol>
+          <section aria-label={tr("지금 상태", "Now")} className={`${STATUS_CARD} ${shown.attention ? WARN_CARD : ""}`}>
+            <span className="flex flex-wrap items-center gap-2"><Badge status={shown.status} tr={tr} /><LiveChip live={live} tr={tr} /></span>
+            <p className="campaign-description text-[var(--fg)]">{node.stage || "—"} · {tr(`라운드 ${node.round}`, `round ${node.round}`)}</p>
+            {shown.blocker && <p className={shown.attention ? "text-[var(--warn)]" : ""}>{shown.status === "pending" ? tr("대기 사유", "Waiting on") : tr("막힌 이유", "Blocker")}: {shown.blocker}</p>}
+            {node.post_merge_hold && <p className="text-[var(--warn)]">{tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")}: {node.post_merge_hold}</p>}
+            {node.next_action && <p className="campaign-next !rounded-none !bg-transparent !p-0 whitespace-pre-wrap">{tr("다음 행동", "Next action")}: {node.next_action}</p>}
+          </section>
+          {/* A ledger keeps no fixed stages, so this shows only what it recorded. */}
+          <section aria-label={tr("진행 기록", "Progress record")} className="grid min-w-0 gap-2">
+            <h4 className="!mb-0">{tr("진행 기록", "Progress record")}</h4>
+            <dl className="grid text-[13px] [&>div]:flex [&>div]:min-h-8 [&>div]:items-center [&>div]:justify-between [&>div]:gap-3 [&_dt]:shrink-0 [&_dd]:min-w-0 [&_dd]:text-right [&_dd]:text-[var(--fg)]">
+              <div>
+                <dt>{tr("선행 작업", "Dependencies")}</dt>
+                <dd>
+                  {node.dependencies.length
+                    ? node.dependencies.map((id) => campaign.nodes.find((candidate) => candidate.id === id)?.title || id).join(" · ")
+                    : tr("없음", "None")}
+                </dd>
+              </div>
+              {pr && (
+                <div>
+                  <dt>PR</dt>
+                  <dd><a href={pr} target="_blank" rel="noopener noreferrer">{prNumber ? `#${prNumber}` : tr("PR 보기", "View PR")} ↗</a></dd>
+                </div>
+              )}
+              {node.head_sha && (
+                <div>
+                  <dt>{tr("커밋", "Commit")}</dt>
+                  <dd><code title={node.head_sha}>{node.head_sha.slice(0, 7)}</code></dd>
+                </div>
+              )}
+            </dl>
+            {!!node.evidence_records?.length && (
+              <ol aria-label={tr("단계 기록", "Stage record")}>
                 {[...node.evidence_records].sort((a, b) => (Date.parse(a.recorded_at ?? "") || 0) - (Date.parse(b.recorded_at ?? "") || 0)).map((record, index) => (
                   <li key={index}>
-                    {record.recorded_at && <time className="campaign-muted" dateTime={record.recorded_at}>{new Date(record.recorded_at).toLocaleString()} · </time>}
+                    {record.recorded_at && <time className="campaign-muted" dateTime={record.recorded_at}>{formatCampaignTime(record.recorded_at, tr)} · </time>}
                     <strong>{record.summary}</strong>
                     {record.result && <p>{record.result}</p>}
                     {record.command && <code>{record.command}</code>}
@@ -207,8 +229,9 @@ export default function CampaignNodeDetails({
                   </li>
                 ))}
               </ol>
-            </div>
-          )}
+            )}
+          </section>
+          {node.evidence.length > 0 && <RecentList label={tr("검증 근거", "Evidence")} items={node.evidence} tr={tr} />}
           {(node.summary || node.benefit) && (
             <p className="campaign-description">
               {node.summary}
@@ -226,7 +249,14 @@ export default function CampaignNodeDetails({
               </ul>
             </div>
           )}
-          {node.details && <p className="campaign-description">{node.details}</p>}
+          {node.details && (
+            <details className="group min-w-0">
+              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-xs text-[var(--fg-muted)] [&::-webkit-details-marker]:hidden">
+                <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr("작업 설명", "Task notes")}
+              </summary>
+              <p className="campaign-description">{node.details}</p>
+            </details>
+          )}
           {!!node.findings?.length && (
             <div>
               <h4>{tr("발견 사항", "Findings")}</h4>
@@ -237,29 +267,13 @@ export default function CampaignNodeDetails({
               </ul>
             </div>
           )}
-          {node.evidence.length > 0 && (
-            <div>
-              <h4>{tr("검증 근거", "Evidence")}</h4>
-              <ul>
-                {node.evidence.map((evidence, index) => (
-                  <li key={index}>{evidence}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <div className="campaign-actions">
-            {safeCampaignLink(node.issue_url) && (
+          {safeCampaignLink(node.issue_url) && (
+            <div className="campaign-actions">
               <a href={safeCampaignLink(node.issue_url)} target="_blank" rel="noopener noreferrer">
                 {tr("이슈 보기", "View issue")} ↗
               </a>
-            )}
-            {safeCampaignLink(node.pr_url) && (
-              <a href={safeCampaignLink(node.pr_url)} target="_blank" rel="noopener noreferrer">
-                {tr("PR 보기", "View PR")} ↗
-              </a>
-            )}
-            {node.head_sha && <code className="campaign-muted" title={node.head_sha}>Commit {node.head_sha.slice(0, 7)}</code>}
-          </div>
+            </div>
+          )}
           {live && (
             <div className="campaign-live-detail">
               <h4>{tr("실제 실행 상태", "Live execution")}</h4>
@@ -304,15 +318,7 @@ export default function CampaignNodeDetails({
             </div>
             <div>
               <dt>{tr("작업 기록 시각", "Task updated")}</dt>
-              <dd>{node.updated_at ? new Date(node.updated_at).toLocaleString() : "—"}</dd>
-            </div>
-            <div>
-              <dt>{tr("선행 작업", "Dependencies")}</dt>
-              <dd>
-                {node.dependencies.length
-                  ? node.dependencies.map((id) => campaign.nodes.find((candidate) => candidate.id === id)?.title || id).join(" · ")
-                  : tr("없음", "None")}
-              </dd>
+              <dd>{formatCampaignTime(node.updated_at, tr)}</dd>
             </div>
           </dl>
           <div className="campaign-actions">

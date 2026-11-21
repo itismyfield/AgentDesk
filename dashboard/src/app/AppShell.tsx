@@ -28,7 +28,7 @@ import {
 import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
-import { ShellFocusContext } from "./shellFocus";
+import { ShellFocusContext, type ShellFocus } from "./shellFocus";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
@@ -105,9 +105,11 @@ export default function AppShell({
     if (typeof window === "undefined") return false;
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
-  // A page asked for the whole window (the relations editor); phones keep their tab bar.
-  const [focusRequested, setFocusRequested] = useState(false);
-  const focused = focusRequested && !isMobileViewport;
+  // A page asked for the whole desktop window (the relations editor) or for the phone top bar's row (an audit detail).
+  // Phones keep their tab bar either way.
+  const [focusRequest, setFocusRequest] = useState<ShellFocus | null>(null);
+  const focused = focusRequest === "window" && !isMobileViewport;
+  const showTopBar = !focused && !(focusRequest === "topBar" && isMobileViewport);
 
   const unreadCount = notifications.filter(
     (notification) => Date.now() - notification.ts < 60_000,
@@ -315,7 +317,7 @@ export default function AppShell({
       )}
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {!focused && (
+        {showTopBar && (
           <AppTopBar
             wsConnected={wsConnected}
             currentRoute={currentRoute ?? null}
@@ -357,7 +359,7 @@ export default function AppShell({
               />
             }
           >
-            <ShellFocusContext.Provider value={setFocusRequested}>
+            <ShellFocusContext.Provider value={setFocusRequest}>
               <AppShellRoutes
                 ctx={{
                   agents,
