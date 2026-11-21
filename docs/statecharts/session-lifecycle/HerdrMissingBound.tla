@@ -4,36 +4,42 @@ EXTENDS Naturals
 CONSTANTS Policy, Reading, Entry, Restored, RepairFails, LaunchFails, ReplaceNonce,
           Control, RebootMidProof
 VARIABLES row, pane, nonce, captured, retired, phase, mode, input, notices,
-          watching, active, checked, launched, rebooted, controlled, debt, rest, attach
+          watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue, attach
 vars == <<row, pane, nonce, captured, retired, phase, mode, input, notices,
-          watching, active, checked, launched, rebooted, controlled, debt, rest>>
+          watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 allVars == <<vars, attach>>
 
 EffectRace == Entry \in {"effect-idle", "effect-active"}
+RegistrationDeadline == Entry = "registration-deadline"
+RegistrationRace == Entry = "registration" \/ RegistrationDeadline
 NoticeFails == Entry = "notice-retry"
 
 Init ==
-    /\ row = "Bound" /\ pane = (IF EffectRace THEN "Present" ELSE Reading) /\ nonce = 1 /\ captured = 0 /\ retired = 0
+    /\ row = "Bound" /\ pane \in (IF RegistrationDeadline THEN {"Unreadable"}
+                      ELSE IF RegistrationRace THEN {"Busy", "Unknown", "Unreadable", "Foreign"}
+                      ELSE {IF EffectRace THEN "Present" ELSE Reading}) /\ nonce = 1 /\ captured = 0 /\ retired = 0
     /\ phase = IF Entry = "restart" THEN "boot" ELSE "awaiting"
     /\ mode = "boot" /\ input = IF Restored THEN "queued" ELSE "absent"
-    /\ notices = 0 /\ watching = FALSE /\ active = (Entry \in {"running", "effect-active"})
+    /\ notices = 0 /\ watching = FALSE /\ active = (Entry \in {"running", "effect-active", "registration-deadline"})
     /\ checked = FALSE /\ launched = FALSE /\ rebooted = FALSE /\ controlled = FALSE
-    /\ debt = FALSE /\ rest = ~NoticeFails
+    /\ debt = FALSE /\ rest = ~NoticeFails /\ submissions = 0 /\ oldDue = "none"
 
 \* Restart reader reuses the stored endpoint; no replacement pane is adopted.
 Reconnect ==
     /\ phase = "boot" /\ phase' = "inspect" /\ mode' = "boot"
     /\ UNCHANGED <<row, pane, nonce, captured, retired, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* start_idle -> intake_turn -> OwnerTurn::early, including a restored queue front.
 Input ==
     /\ phase = "awaiting" /\ input \in {"absent", "queued"}
     /\ input' = "queued" /\ mode' = "input"
-    /\ phase' = IF EffectRace THEN "early-busy" ELSE IF active THEN "held" ELSE "inspect"
+    /\ phase' = IF EffectRace THEN "early-busy" ELSE IF active THEN "held"
+                 ELSE IF RegistrationRace THEN "registration-failed" ELSE "inspect"
     /\ watching' = (active /\ ~EffectRace)
-    /\ UNCHANGED <<row, pane, nonce, captured, retired, notices, active, checked, launched, rebooted, controlled, debt, rest>>
+    /\ oldDue' = IF RegistrationDeadline THEN "readiness" ELSE oldDue
+    /\ UNCHANGED <<row, pane, nonce, captured, retired, notices, active, checked, launched, rebooted, controlled, debt, rest, submissions>>
 
 \* Before: reconnect refuses Missing; idle starts arm the dead pane's Unknown probe.
 Read ==
@@ -47,7 +53,7 @@ Read ==
     /\ checked' = (pane = "Missing" /\ Policy = "before")
     /\ captured' = nonce
     /\ watching' = (pane \in {"Missing", "Unknown"} /\ Policy = "before" /\ mode = "input")
-    /\ UNCHANGED <<row, pane, nonce, retired, mode, input, notices, active, launched, rebooted, controlled, debt, rest>>
+    /\ UNCHANGED <<row, pane, nonce, retired, mode, input, notices, active, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* A new incarnation between the read and CAS invalidates the old proof.
 Proof ==
@@ -55,7 +61,7 @@ Proof ==
     /\ nonce' = IF ReplaceNonce THEN 2 ELSE nonce
     /\ pane' = IF ReplaceNonce THEN "Present" ELSE pane
     /\ UNCHANGED <<row, captured, retired, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 Retire ==
     /\ phase = "cas"
@@ -65,7 +71,7 @@ Retire ==
           /\ checked' = valid
           /\ phase' = IF mode = "boot" THEN "awaiting"
                        ELSE IF valid THEN "launch" ELSE "refuse"
-    /\ UNCHANGED <<pane, nonce, captured, mode, input, notices, watching, active, launched, rebooted, controlled, debt, rest>>
+    /\ UNCHANGED <<pane, nonce, captured, mode, input, notices, watching, active, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* Only the retired row enters a new launch. Failed normalization is never queued for retry.
 Launch ==
@@ -77,13 +83,13 @@ Launch ==
     /\ pane' = IF LaunchFails THEN pane ELSE "Present"
     /\ nonce' = IF LaunchFails THEN nonce ELSE 2
     /\ launched' = ~LaunchFails
-    /\ UNCHANGED <<captured, retired, mode, notices, watching, active, checked, rebooted, controlled, debt, rest>>
+    /\ UNCHANGED <<captured, retired, mode, notices, watching, active, checked, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 Deliver ==
     /\ phase = "deliver" /\ input = "queued" /\ phase' = "done"
-    /\ input' = "delivered"
+    /\ input' = "delivered" /\ submissions' = submissions + 1
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, oldDue>>
 
 Reject ==
     /\ phase = "refuse" /\ input = "queued"
@@ -92,45 +98,84 @@ Reject ==
     /\ input' = "discarded" /\ watching' = FALSE
     /\ debt' = (NoticeFails /\ Policy # "before-notice")
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, active, checked,
-                    launched, rebooted, controlled, rest>>
+                    launched, rebooted, controlled, rest, submissions, oldDue>>
 
 FirstNoticeFails ==
     /\ phase = "notice-fail" /\ phase' = IF debt THEN "outbox" ELSE "done"
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 RestRecovers ==
     /\ phase = "outbox" /\ ~rest /\ rest' = TRUE
     /\ UNCHANGED <<row, pane, nonce, captured, retired, phase, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt>>
+                    watching, active, checked, launched, rebooted, controlled, debt, submissions, oldDue>>
 
 OutboxPost ==
     /\ phase = "outbox" /\ rest /\ debt
     /\ notices' = notices + 1 /\ debt' = FALSE /\ phase' = "done"
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input,
-                    watching, active, checked, launched, rebooted, controlled, rest>>
+                    watching, active, checked, launched, rebooted, controlled, rest, submissions, oldDue>>
 
 \* An already completed failure or delivered nonce cannot create another notice.
 RepeatFailure ==
     /\ phase = "done" /\ input = "discarded" /\ UNCHANGED vars
 
+\* Busy registration failed with no active mailbox turn. Missing must be observed.
+RegistrationFailed ==
+    /\ phase = "registration-failed" /\ ~active
+    /\ LET refuse == IF pane = "Foreign" THEN Policy # "hold-refusal"
+                      ELSE Policy = "discard-unproven"
+       IN /\ phase' = IF refuse THEN "refuse" ELSE "registration-held"
+          /\ watching' = ~refuse
+          /\ oldDue' = IF ~refuse /\ oldDue = "readiness" /\ Policy # "keep-old-due"
+                        THEN "identity" ELSE oldDue
+    /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices,
+                    active, checked, launched, rebooted, controlled, debt, rest, submissions>>
+
+\* The old timer wakes while the live pane's source still needs to be reobserved.
+OldReadinessTick ==
+    /\ phase = "registration-held" /\ oldDue \in {"readiness", "identity"}
+    /\ oldDue' = "elapsed"
+    /\ LET refuses == oldDue = "readiness"
+       IN /\ phase' = IF refuses THEN "done" ELSE phase
+          /\ input' = IF refuses THEN "discarded" ELSE input
+          /\ notices' = IF refuses THEN notices + 1 ELSE notices
+          /\ watching' = (watching /\ ~refuses)
+    /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, active, checked,
+                    launched, rebooted, controlled, debt, rest, submissions>>
+
+\* The next conclusive pane read either permits the existing Idle path or proves absence.
+RegistrationObservation ==
+    /\ phase = "registration-held" /\ pane \in {"Busy", "Unknown", "Unreadable"}
+    /\ (~RegistrationDeadline \/ oldDue = "elapsed")
+    /\ pane' \in {"Idle", "Missing"}
+    /\ UNCHANGED <<row, nonce, captured, retired, phase, mode, input, notices,
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
+
+RegistrationWake ==
+    /\ phase = "registration-held" /\ watching /\ Policy # "no-registration-wake"
+    /\ pane \in {"Idle", "Missing"} /\ phase' = "inspect" /\ watching' = FALSE
+    /\ oldDue' = "none"
+    /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices,
+                    active, checked, launched, rebooted, controlled, debt, rest, submissions>>
+
 \* Entry 43: the prepared Busy transaction has not captured or written yet.
 EarlyBusy ==
     /\ phase = "early-busy" /\ captured' = nonce /\ phase' = "effect-gate"
     /\ UNCHANGED <<row, pane, nonce, retired, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 LosePane ==
     /\ phase = "effect-gate" /\ phase' = "capture-failed"
     /\ pane' = IF ReplaceNonce THEN "Present" ELSE Reading
     /\ nonce' = IF ReplaceNonce THEN 2 ELSE nonce
     /\ UNCHANGED <<row, captured, retired, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 BusyEffect ==
     /\ phase = "capture-failed" /\ phase' = "effect-held" /\ watching' = TRUE
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices,
-                    active, checked, launched, rebooted, controlled, debt, rest>>
+                    active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* The probe only requests the existing drive; retirement/disposal stays in Read and CAS.
 EffectWatch ==
@@ -139,25 +184,26 @@ EffectWatch ==
        IN /\ watching' = ~ready
           /\ phase' = IF ~ready THEN phase ELSE IF active THEN "held" ELSE "inspect"
     /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices,
-                    active, checked, launched, rebooted, controlled, debt, rest>>
+                    active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* Unknown alone is no absence proof; this control assumes a later readable observation.
 UnknownRecovers ==
     /\ phase = "effect-held" /\ pane = "Unknown" /\ pane' = "Present"
     /\ UNCHANGED <<row, nonce, captured, retired, phase, mode, input, notices,
-                    watching, active, checked, launched, rebooted, controlled, debt, rest>>
+                    watching, active, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* A working turn's temporary hold is retained until its existing turn boundary wake.
 Boundary ==
     /\ phase \in {"held", "effect-held"} /\ active /\ active' = FALSE
-    /\ phase' = "inspect" /\ watching' = FALSE
-    /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices, checked, launched, rebooted, controlled, debt, rest>>
+    /\ phase' = IF RegistrationDeadline THEN "registration-failed" ELSE "inspect"
+    /\ watching' = FALSE
+    /\ UNCHANGED <<row, pane, nonce, captured, retired, mode, input, notices, checked, launched, rebooted, controlled, debt, rest, submissions, oldDue>>
 
 \* A crash loses the in-memory proof, preserving the exact row and already queued input.
 Reboot ==
     /\ RebootMidProof /\ ~rebooted /\ phase = "proof"
     /\ rebooted' = TRUE /\ phase' = "boot" /\ captured' = 0 /\ checked' = FALSE
-    /\ UNCHANGED <<row, pane, nonce, retired, mode, input, notices, watching, active, launched, controlled, debt, rest>>
+    /\ UNCHANGED <<row, pane, nonce, retired, mode, input, notices, watching, active, launched, controlled, debt, rest, submissions, oldDue>>
 
 \* Adjacent explicit controls are acknowledgements, not an automatic kill authority.
 \* Cancel/clear/stop do not retire here; terminate represents its existing ended proof.
@@ -171,7 +217,7 @@ ControlAction ==
           /\ input' = IF removes THEN "discarded" ELSE input
           /\ notices' = IF removes THEN 1 ELSE notices
     /\ watching' = FALSE /\ active' = FALSE
-    /\ UNCHANGED <<pane, nonce, captured, mode, checked, launched, rebooted, debt, rest>>
+    /\ UNCHANGED <<pane, nonce, captured, mode, checked, launched, rebooted, debt, rest, submissions, oldDue>>
 
 \* busy::probe maps the absent execution to Unknown forever in the frozen implementation.
 HeldWatch ==
@@ -180,6 +226,7 @@ HeldWatch ==
 Next == Reconnect \/ Input \/ Read \/ Proof \/ Retire \/ Launch \/ Deliver \/ Reject
         \/ Boundary \/ HeldWatch \/ Reboot \/ ControlAction
         \/ EarlyBusy \/ LosePane \/ BusyEffect \/ EffectWatch \/ UnknownRecovers
+        \/ RegistrationFailed \/ OldReadinessTick \/ RegistrationObservation \/ RegistrationWake
         \/ FirstNoticeFails \/ RestRecovers \/ OutboxPost \/ RepeatFailure
 Spec == Init /\ attach = "off" /\ [][Next /\ UNCHANGED attach]_allVars
         /\ WF_vars(Reconnect) /\ WF_vars(Input) /\ WF_vars(Read)
@@ -187,6 +234,8 @@ Spec == Init /\ attach = "off" /\ [][Next /\ UNCHANGED attach]_allVars
         /\ WF_vars(Reject) /\ WF_vars(Boundary) /\ WF_vars(Reboot) /\ WF_vars(ControlAction)
         /\ WF_vars(EarlyBusy) /\ WF_vars(LosePane) /\ WF_vars(BusyEffect)
         /\ WF_vars(EffectWatch) /\ WF_vars(UnknownRecovers)
+        /\ WF_vars(RegistrationFailed) /\ WF_vars(OldReadinessTick)
+        /\ WF_vars(RegistrationObservation) /\ WF_vars(RegistrationWake)
         /\ WF_vars(FirstNoticeFails) /\ WF_vars(RestRecovers) /\ WF_vars(OutboxPost)
 
 MissingRetired == (checked /\ pane = "Missing" /\ ~RepairFails /\ ~ReplaceNonce) => row # "Bound"
@@ -200,17 +249,22 @@ NoOldDelivery == (input = "delivered" /\ Reading = "Missing" /\ ~ReplaceNonce) =
 NoRetainedRefusal == input # "retained"
 InputResolves == <> (input = "delivered" \/ (input = "discarded" /\ notices = 1))
 ReasonDelivered == [](input = "discarded" => <> (notices = 1))
+RegistrationSafety == submissions <= 1 /\ (input = "discarded" => pane = "Foreign")
+RegistrationResolves == <> (submissions = 1 \/ (pane = "Foreign" /\ input = "discarded"))
 
 \* #8280 boot-to-first-input projection. See the design evidence table.
 \* The historical Missing Bound variables remain fixed in this projection.
 AttachInit ==
     /\ Init
-    /\ \E target \in (IF ReplaceNonce THEN {"idle"} ELSE {"idle", "busy", "dead", "rowOnly"}) :
+    /\ \E target \in (IF Entry = "owner-reattach" THEN {"idle", "busy", "dead", "rowOnly", "shellHeld"}
+                        ELSE IF ReplaceNonce THEN {"idle"} ELSE {"idle", "busy", "dead", "rowOnly"}) :
        attach = [phase |-> "down", target |-> target, initial |-> target,
                  reconciled |-> FALSE, scan |-> FALSE, mirror |-> FALSE, owner |-> FALSE,
                  route |-> "none", changed |-> FALSE, deadWrite |-> FALSE,
                  delivered |-> 0, receipt |-> "none", redrive |-> FALSE,
-                 banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE]
+                 banner |-> FALSE, notice |-> FALSE, reinjected |-> FALSE,
+                 grant |-> "none", front |-> 1, claimed |-> 0, recovery |-> FALSE,
+                 ownerControl |-> "none", submits |-> 0]
 
 Boot ==
     /\ attach.phase = "down"
@@ -317,4 +371,314 @@ EndedResumeShowsRecovery ==
 NoDeadPaneWrite == ~attach.deadWrite
 ExactlyOnce == attach.delivered <= 1 /\ (attach.phase = "done" => attach.delivered = 1)
 FirstInputDelivered == [](attach.phase = "queued" => <>(attach.phase = "done" /\ attach.delivered = 1))
+
+\* The owner projection exercises the existing ticket, grant, reserve and receipt boundary.
+\* The foreground-only shell case keeps its own alive/unreadable provider proof pending.
+OwnerInit ==
+    /\ AttachInit
+    /\ attach.target \in {"idle", "busy", "dead", "rowOnly", "shellHeld"}
+
+OwnerSelect ==
+    /\ attach.phase = "queued" /\ attach.reconciled
+    /\ CASE attach.target = "dead" ->
+             attach' = [attach EXCEPT !.phase = "waiting", !.recovery = TRUE]
+         [] attach.target \in {"rowOnly", "shellHeld"} ->
+             attach' = [attach EXCEPT !.phase = "waiting"]
+         [] attach.target = "busy" ->
+             \/ attach' = [attach EXCEPT !.phase = "waiting"]
+             \/ attach' = [attach EXCEPT !.phase = "granted", !.grant = "busy"]
+         [] OTHER ->
+             attach' = [attach EXCEPT !.phase = "granted", !.grant = "idle"]
+    /\ UNCHANGED vars
+
+OwnerWake ==
+    /\ attach.phase = "waiting" /\ Policy # "owner-no-wake"
+    /\ attach' = [attach EXCEPT !.phase = "queued", !.target = "idle",
+                   !.grant = "none", !.claimed = 0]
+    /\ UNCHANGED vars
+
+OwnerClaim ==
+    /\ attach.phase = "granted" /\ attach.grant \in {"idle", "busy"}
+    /\ attach' = [attach EXCEPT !.phase = "reserved", !.claimed = attach.front]
+    /\ UNCHANGED vars
+
+OwnerCatchUp ==
+    /\ attach.phase \in {"waiting", "granted", "reserved", "unknown", "done"}
+    /\ ~attach.redrive
+    /\ attach' = [attach EXCEPT !.redrive = TRUE]
+    /\ UNCHANGED vars
+
+OwnerInterrupt ==
+    /\ attach.phase = "reserved" /\ attach.ownerControl = "none"
+    /\ Control \in {"death", "stop", "reset"}
+    /\ attach' = [attach EXCEPT !.ownerControl = Control,
+                   !.target = IF Control = "death" THEN "dead" ELSE @]
+    /\ UNCHANGED vars
+
+OwnerRejectBeforeKey ==
+    /\ attach.phase = "reserved" /\ attach.ownerControl \in {"death", "stop", "reset"}
+    /\ Policy # "owner-no-first-key"
+    /\ attach' = [attach EXCEPT !.phase = "waiting", !.ownerControl = "settled",
+                   !.claimed = 0, !.grant = "none"]
+    /\ UNCHANGED vars
+
+OwnerSubmit ==
+    /\ attach.phase = "reserved" /\ attach.claimed = attach.front /\ attach.submits < 2
+    /\ (Control = "none" \/ attach.ownerControl # "none")
+    /\ (attach.ownerControl \in {"none", "settled"} \/ Policy = "owner-no-first-key")
+    /\ \E receipt \in {"confirmed", "unknown"} :
+        attach' = [attach EXCEPT !.phase = IF receipt = "confirmed" THEN "done" ELSE "unknown",
+                   !.submits = @ + 1, !.receipt = receipt,
+                   !.deadWrite = attach.ownerControl \in {"death", "stop", "reset"}]
+    /\ UNCHANGED vars
+
+OwnerReceipt ==
+    /\ attach.phase = "unknown"
+    /\ attach' = [attach EXCEPT !.phase = "done", !.receipt = "confirmed"]
+    /\ UNCHANGED vars
+
+OwnerRepeatUnknown ==
+    /\ Policy = "owner-resend-unknown" /\ attach.phase = "unknown"
+    /\ attach' = [attach EXCEPT !.phase = "reserved"]
+    /\ UNCHANGED vars
+
+OwnerNext ==
+    Boot \/ FirstInput \/ ReconcileIntake \/ ReconnectSource \/ OwnerSelect \/ OwnerWake
+    \/ OwnerClaim \/ OwnerCatchUp \/ OwnerInterrupt \/ OwnerRejectBeforeKey
+    \/ OwnerSubmit \/ OwnerReceipt \/ OwnerRepeatUnknown \/ AttachDone
+
+OwnerAttachSpec ==
+    /\ OwnerInit /\ [][OwnerNext]_allVars
+    /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
+    /\ WF_attach(OwnerSelect) /\ WF_attach(OwnerWake) /\ WF_attach(OwnerClaim)
+    /\ WF_attach(OwnerInterrupt) /\ WF_attach(OwnerRejectBeforeKey)
+    /\ WF_attach(OwnerSubmit) /\ WF_attach(OwnerReceipt)
+
+SameOriginal ==
+    attach.front = 1 /\ (attach.phase \in {"reserved", "unknown", "done"} => attach.claimed = attach.front)
+OwnerExactlyOnce ==
+    attach.submits <= 1 /\ (attach.phase \in {"unknown", "done"} => attach.submits = 1)
+BeforeFirstKey == ~attach.deadWrite
+OwnerDelivers ==
+    [](attach.phase = "queued" => <>(attach.phase = "done" /\ attach.submits = 1))
+
+
+\* The revised parity projection keeps the first input under the original owner.
+ParityTargets ==
+    CASE Control \in {"identity-deadline", "restored-composer-deadline"} -> {"unknown"}
+      [] Control \in {"busy", "unproven", "duplicate", "other-nonce", "headless-race", "pathless-busy"} -> {"busy"}
+      [] Control = "parent-endpoint" -> {"idle", "busy"}
+      [] OTHER -> {"idle", "busy", "dead", "unknown"}
+
+ParityNames ==
+    CASE Control = "duplicate" -> {"duplicate"}
+      [] Control = "other-nonce" -> {"other"}
+      [] Control \in {"busy", "unproven", "headless-race", "identity-deadline", "restored-composer-deadline", "pathless-busy", "parent-endpoint"} -> {"unique"}
+      [] OTHER -> {"unique", "duplicate", "other"}
+
+ParityInit ==
+    /\ Init
+    /\ \E t \in ParityTargets, n \in ParityNames, composer \in {"open", "modal"} :
+       \E unproven \in (IF Control = "unproven" THEN {TRUE}
+                       ELSE IF Control = "all" /\ t = "busy" THEN BOOLEAN ELSE {FALSE}) :
+       \E recovery \in (IF Control = "restored-composer-deadline" /\ composer = "modal"
+                        THEN {"foreground", "background", "lateAdopt"} ELSE {"foreground"}) :
+           attach = [phase |-> IF Control = "restored-composer-deadline" THEN "beforeRestart" ELSE "down",
+                     initial |-> t, target |-> t, name |-> n,
+                     composer |-> composer, unproven |-> unproven, reconciled |-> FALSE,
+                     front |-> 1, claimed |-> 0, route |-> "none", reattached |-> 0,
+                     locationFresh |-> FALSE, lease |-> FALSE, grant |-> "none",
+                     provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none",
+                     elapsed |-> FALSE, sourcePinned |-> FALSE, childEndpoint |-> FALSE,
+                     readiness |-> "none", unitKept |-> TRUE, heldReadopted |-> FALSE,
+                     recovery |-> recovery, stopped |-> FALSE]
+
+ParityIdentityConfirmed(hold) ==
+    IF hold = "suspended" THEN "none" ELSE hold
+
+ParitySaveComposerHold ==
+    /\ attach.phase = "beforeRestart"
+    /\ attach' = [attach EXCEPT !.phase = "down", !.readiness = "active"]
+    /\ UNCHANGED vars
+
+ParityAssess ==
+    /\ attach.phase = "queued" /\ attach.reconciled
+    /\ CASE attach.unproven /\ Policy = "parity-before" ->
+               attach' = [attach EXCEPT !.phase = "discarded"]
+         [] attach.target = "unknown" ->
+               attach' = [attach EXCEPT !.phase = "identityHeld",
+                           !.readiness = IF @ = "active" /\
+                                            (Policy # "parity-keep-old-due" \/ attach.recovery # "foreground")
+                                        THEN "suspended" ELSE @]
+         [] attach.target = "dead" ->
+               attach' = [attach EXCEPT !.phase = "endProved", !.provedEnd = TRUE]
+         [] OTHER ->
+               attach' = [attach EXCEPT !.phase = IF attach.name = "unique"
+                                                    \/ Policy = "parity-trust-name"
+                                                THEN "named" ELSE "exact"]
+    /\ UNCHANGED vars
+
+\* An elapsed identity wait keeps the original, including its unattempted ticket.
+ParityReadoptIdentity ==
+    /\ Control = "restored-composer-deadline" /\ attach.phase = "identityHeld" /\ ~attach.heldReadopted
+    /\ attach' = [attach EXCEPT !.heldReadopted = TRUE]
+    /\ UNCHANGED vars
+
+ParityIdentityDeadline ==
+    /\ Control \in {"identity-deadline", "restored-composer-deadline"}
+    /\ attach.phase = "identityHeld" /\ ~attach.elapsed
+    /\ LET losesUnit == Policy = "parity-discard-identity" \/ attach.readiness = "active"
+       IN attach' = [attach EXCEPT !.elapsed = TRUE,
+                     !.phase = IF losesUnit THEN "discarded" ELSE @,
+                     !.unitKept = ~losesUnit]
+    /\ UNCHANGED vars
+
+ParityObserve ==
+    /\ attach.phase = "identityHeld"
+    /\ attach.recovery = "foreground"
+    /\ (Control \notin {"identity-deadline", "restored-composer-deadline"} \/ attach.elapsed)
+    /\ \E observed \in {"idle", "busy", "dead"} :
+       attach' = [attach EXCEPT !.target = observed, !.phase = "queued"]
+    /\ UNCHANGED vars
+
+ParityBackgroundAttach ==
+    /\ attach.phase = "identityHeld" /\ attach.elapsed /\ attach.recovery # "foreground"
+    /\ attach' = [attach EXCEPT !.target = "idle", !.phase = "backgroundAttached",
+                  !.reattached = 1, !.route = "named", !.locationFresh = TRUE,
+                  !.readiness = IF Policy = "parity-keep-old-due" \/ attach.recovery = "lateAdopt"
+                                THEN @ ELSE ParityIdentityConfirmed(@)]
+    /\ UNCHANGED vars
+
+ParityNativeClaim ==
+    /\ attach.phase = "backgroundAttached"
+    /\ attach' = [attach EXCEPT !.target = "busy", !.phase = "nativeBusy", !.lease = TRUE]
+    /\ UNCHANGED vars
+
+ParityNativeWake ==
+    /\ attach.phase = "nativeBusy"
+    /\ attach' = [attach EXCEPT !.phase = "nativeWake", !.grant = "busy",
+                  !.readiness = IF Policy = "parity-keep-old-due" THEN @ ELSE ParityIdentityConfirmed(@)]
+    /\ UNCHANGED vars
+
+ParityUserControl ==
+    /\ Control = "restored-composer-deadline" /\ attach.phase = "identityHeld" /\ ~attach.stopped
+    /\ \/ attach' = [attach EXCEPT !.stopped = TRUE]
+       \/ attach' = [attach EXCEPT !.phase = "cancelled", !.readiness = "none"]
+    /\ UNCHANGED vars
+
+ParityPinPathless ==
+    /\ Control = "pathless-busy" /\ attach.phase \in {"named", "exact"} /\ ~attach.sourcePinned
+    /\ attach' = [attach EXCEPT !.sourcePinned = TRUE]
+    /\ UNCHANGED vars
+
+ParityResolveChild ==
+    /\ Control = "parent-endpoint" /\ attach.phase \in {"named", "exact"} /\ ~attach.childEndpoint
+    /\ attach' = [attach EXCEPT !.childEndpoint = TRUE]
+    /\ UNCHANGED vars
+
+ParityAttach ==
+    /\ attach.phase \in {"named", "exact"} /\ attach.reattached = 0
+    /\ (Control # "pathless-busy" \/ attach.sourcePinned)
+    /\ (Control # "parent-endpoint" \/ attach.childEndpoint)
+    /\ attach.headlessClaim # "new"
+    /\ attach' = [attach EXCEPT !.phase = "attached", !.route = attach.phase,
+                  !.locationFresh = attach.phase = "named", !.reattached = @ + 1,
+                  !.readiness = ParityIdentityConfirmed(@),
+                  !.lease = attach.target = "busy",
+                  !.grant = IF attach.target = "busy" THEN "busy" ELSE "idle"]
+    /\ UNCHANGED vars
+
+\* The headless claim uses the same channel transition as reattach. The previous Busy
+\* execution takes its existing lease before the new claimant can mint a mailbox turn.
+ParityHeadlessClaim ==
+    /\ Control = "headless-race" /\ attach.target = "busy"
+    /\ attach.phase \in {"named", "exact", "attached", "reserved"}
+    /\ attach.headlessClaim = "none"
+    /\ attach' = [attach EXCEPT !.headlessClaim =
+                     IF Policy = "parity-headless-first" /\ ~attach.lease
+                     THEN "new" ELSE "refused"]
+    /\ UNCHANGED vars
+
+ParityInputRule ==
+    /\ attach.phase \in {"attached", "nativeWake"}
+    /\ attach' = [attach EXCEPT !.phase =
+                     IF attach.composer = "modal" THEN
+                         IF attach.readiness = "suspended" THEN "composerWithoutDue" ELSE "composerHeld"
+                     ELSE IF attach.target = "busy" /\ Policy = "parity-before" THEN "idleOnly"
+                     ELSE "reserved",
+                  !.readiness = IF attach.phase = "nativeWake" /\ attach.readiness = "none"
+                                THEN "active" ELSE @,
+                  !.claimed = attach.front]
+    /\ UNCHANGED vars
+
+ParityComposerClears ==
+    /\ attach.phase = "composerHeld"
+    /\ attach' = [attach EXCEPT !.phase = "attached", !.composer = "open"]
+    /\ UNCHANGED vars
+
+ParityComposerDeadline ==
+    /\ attach.phase = "composerHeld" /\ attach.readiness = "active"
+    /\ attach' = [attach EXCEPT !.phase = "composerRefused"]
+    /\ UNCHANGED vars
+
+ParitySubmit ==
+    /\ attach.phase = "reserved" /\ attach.claimed = attach.front /\ attach.submits < 2
+    /\ \E receipt \in {"confirmed", "unknown"} :
+       attach' = [attach EXCEPT !.phase = IF receipt = "confirmed" THEN "receipt" ELSE "unknown",
+                     !.submits = @ + 1]
+    /\ UNCHANGED vars
+
+ParityObserveReceipt ==
+    /\ attach.phase = "unknown"
+    /\ attach' = [attach EXCEPT !.phase = "receipt"]
+    /\ UNCHANGED vars
+
+ParityResendUnknown ==
+    /\ Policy = "parity-resend-unknown" /\ attach.phase = "unknown" /\ attach.submits = 1
+    /\ attach' = [attach EXCEPT !.phase = "reserved"]
+    /\ UNCHANGED vars
+
+ParityPublishReply ==
+    /\ attach.phase = "receipt"
+    /\ attach' = [attach EXCEPT !.phase = "done"]
+    /\ UNCHANGED vars
+
+ParityReject ==
+    /\ attach.phase = "endProved" /\ attach.provedEnd
+    /\ attach' = [attach EXCEPT !.phase = "rejected", !.readiness = ParityIdentityConfirmed(@)]
+    /\ UNCHANGED vars
+
+ParityNext ==
+    ParitySaveComposerHold \/ Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
+    \/ ParityReadoptIdentity \/ ParityIdentityDeadline \/ ParityPinPathless \/ ParityResolveChild
+    \/ ParityBackgroundAttach \/ ParityNativeClaim \/ ParityNativeWake \/ ParityUserControl
+    \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParityComposerDeadline
+    \/ ParitySubmit \/ ParityObserveReceipt
+    \/ ParityResendUnknown \/ ParityPublishReply \/ ParityReject \/ AttachDone
+
+ParitySpec ==
+    /\ ParityInit /\ [][ParityNext]_allVars
+    /\ WF_attach(ParitySaveComposerHold)
+    /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
+    /\ WF_attach(ParityAssess) /\ WF_attach(ParityObserve) /\ WF_attach(ParityAttach)
+    /\ WF_attach(ParityIdentityDeadline) /\ WF_attach(ParityPinPathless) /\ WF_attach(ParityResolveChild)
+    /\ WF_attach(ParityBackgroundAttach) /\ WF_attach(ParityNativeClaim) /\ WF_attach(ParityNativeWake)
+    /\ WF_attach(ParityInputRule) /\ WF_attach(ParityComposerClears) /\ WF_attach(ParitySubmit)
+    /\ WF_attach(ParityObserveReceipt) /\ WF_attach(ParityPublishReply) /\ WF_attach(ParityReject)
+
+NoLiveDiscard == attach.target \in {"idle", "busy"} => attach.phase # "discarded"
+NoIdentityLoss == attach.phase # "discarded"
+RestoredComposerUnit == attach.unitKept
+NoIdleOnly == attach.phase # "idleOnly"
+NamedOnlyCurrent == attach.route = "named" => attach.name = "unique" /\ attach.locationFresh
+BusyAuthority == attach.grant = "busy" => attach.lease /\ attach.reattached = 1
+NoCompetingClaim == attach.headlessClaim # "new"
+ProvenRejection == attach.phase = "rejected" => attach.provedEnd /\ attach.target = "dead"
+NewComposerEventuallyTimed ==
+    [](attach.phase = "nativeWake" => <>(attach.phase = "composerHeld" /\ attach.readiness = "active"))
+ParityResolves ==
+    [](attach.phase = "queued" => <> ((attach.phase = "done" /\ attach.submits = 1)
+                                  \/ (attach.phase = "rejected" /\ attach.provedEnd)
+                                  \/ attach.phase \in {"cancelled", "composerRefused"}))
+
 ====

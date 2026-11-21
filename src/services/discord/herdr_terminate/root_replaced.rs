@@ -232,6 +232,21 @@ pub(in crate::services::discord) fn local(
     shared: &SharedData,
     record: &HostedExecution,
 ) -> Result<(ProviderKind, ChannelId), String> {
+    local_at(shared, record, false)
+}
+
+pub(in crate::services::discord) fn local_for_continuation(
+    shared: &SharedData,
+    record: &HostedExecution,
+) -> Result<(ProviderKind, ChannelId), String> {
+    local_at(shared, record, true)
+}
+
+fn local_at(
+    shared: &SharedData,
+    record: &HostedExecution,
+    inherits_parent: bool,
+) -> Result<(ProviderKind, ChannelId), String> {
     let owner = &record.owner;
     let provider = ProviderKind::from_str(&owner.provider).ok_or("provider unavailable")?;
     if provider != ProviderKind::Claude && provider != ProviderKind::Codex {
@@ -246,7 +261,8 @@ pub(in crate::services::discord) fn local(
     let node = crate::config::session_hosts::local_node().ok_or("local node unavailable")?;
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
     let endpoint =
-        crate::config::session_hosts::herdr_endpoint(channel).ok_or("endpoint unavailable")?;
+        crate::services::turn_host::bound_herdr_endpoint(channel, record, inherits_parent)
+            .ok_or("endpoint unavailable")?;
     if owner.discord_token_hash != shared.token_hash
         || owner.owner_node != node
         || owner.runtime_root != root.display().to_string()

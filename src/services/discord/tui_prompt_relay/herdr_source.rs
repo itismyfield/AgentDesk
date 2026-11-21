@@ -133,7 +133,11 @@ pub(in crate::services::discord) fn nonce_baseline(
 }
 
 /// Whether execution `nonce`'s own clear Pending awaits its next prompt; no Herdr pane is off unix.
-fn awaits_own_clear(channel: u64, logical: &str, nonce: &str) -> bool {
+pub(in crate::services::discord) fn awaits_own_clear(
+    channel: u64,
+    logical: &str,
+    nonce: &str,
+) -> bool {
     #[cfg(unix)]
     let awaits = crate::services::claude::herdr_turn::awaited_clear(channel, logical, nonce);
     #[cfg(not(unix))]
@@ -286,9 +290,21 @@ async fn bound_after_admit(pool: &PgPool, owner: &HostedOwner, nonce: &str) -> b
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static BEFORE_CODEX_RESTART_SCAN:
+        RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
 /// The binding a restart restores for a Codex source, read from its rollout's current end; no
 /// Herdr pane runs off unix.
 fn codex_restored_binding(logical: &str, source: &SourceId) -> Option<TuiRuntimeBinding> {
+    #[cfg(test)]
+    BEFORE_CODEX_RESTART_SCAN.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
     #[cfg(unix)]
     let binding = super::rehydration::codex_tui_rehydrated_binding_from_rollout_path(
         logical,
@@ -303,16 +319,33 @@ fn codex_restored_binding(logical: &str, source: &SourceId) -> Option<TuiRuntime
     binding
 }
 
+/// Reads a cold source without holding the watcher registry. At publication, any live cursor
+/// for this source takes precedence over the cursor that was prepared here.
+pub(in crate::services::discord) fn prepare_restarted_binding(
+    owner: &HostedOwner,
+    source: &SourceId,
+    live: Option<TuiRuntimeBinding>,
+) -> Option<TuiRuntimeBinding> {
+    match live {
+        Some(live) => live_is(&live, source).then_some(live),
+        None if owner.provider == "codex" => codex_restored_binding(&owner.logical_key, source),
+        None => Some(claude_tui_rehydrated_binding(
+            &source.session_id,
+            &source.path,
+        )),
+    }
+}
+
 pub(in crate::services::discord) fn publish_restarted_binding(
     authority: &TmuxSourceAuthority<'_>,
     owner: &HostedOwner,
     channel: u64,
     source: &SourceId,
+    prepared: TuiRuntimeBinding,
 ) -> Option<Persisted> {
     let codex = owner.provider == "codex";
     let binding = match runtime_binding_for_tmux_session_under_source_authority(authority) {
-        None if codex => codex_restored_binding(&owner.logical_key, source)?,
-        None => claude_tui_rehydrated_binding(&source.session_id, &source.path),
+        None => prepared,
         Some(live) if live_is(&live, source) => live,
         Some(_) => return None,
     };
@@ -363,7 +396,9 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
     };
     // A live binding of this source keeps its unread cursor; another live source is left alone.
     let registered = with_tmux_source_authority(logical, |authority| {
-        publish_restarted_binding(authority, owner, channel, &source)
+        let live = runtime_binding_for_tmux_session_under_source_authority(authority);
+        let prepared = prepare_restarted_binding(owner, &source, live)?;
+        publish_restarted_binding(authority, owner, channel, &source, prepared)
     });
     if !registered.is_some_and(Persisted::published) {
         withhold_herdr_execution(logical, Some(&nonce));

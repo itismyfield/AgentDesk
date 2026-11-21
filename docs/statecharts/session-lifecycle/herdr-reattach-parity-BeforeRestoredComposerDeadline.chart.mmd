@@ -1,0 +1,62 @@
+---
+title: "Herdr 재시작 재부착과 평소 입력 경로"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoIdentityLoss or RestoredComposerUnit
+    lg1: Path to the NewComposerEventuallyTimed or NoIdentityLoss or ParityResolves or RestoredComposerUnit bug
+    lg2: Repeats forever, so NewComposerEventuallyTimed or ParityResolves breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  state "pane identity 미확인" as s0 {
+    state "이름 유일#183;nonce 일치" as s1 {
+      s2: 기존 composer가 입력을 막음
+      s3: dcserver 종료
+      s4: 첫 원본 대기
+      s5: 같은 원본이 큐에 있음
+      s6: identity 보류가 저장된 기한을 중지
+      s7: identity 보류에 옛 기한이 남음
+      s8: 사용자가 대기 입력을 취소
+      s9: 옛 기한이 원본과 followers를 폐기
+      s10: 기한이 지나도 같은 원본 보존
+      s11: 별도 복구가 같은 실행을 재부착
+      s12: 직접 CLI 입력 B가 active turn을 시작
+      s13: A의 watcher가 일반 Busy 진입을 깨움
+      s14: modal에 막힌 A에 새 기한이 없음
+    }
+  }
+  [*] --> s2
+  s2 --> s3: composer 기한과 입력을 저장한 뒤 재시작
+  s2 --> s2: intake reconcile 완료
+  s3 --> s4: dcserver 부팅
+  s4 --> s5: 같은 원본 수락
+  s5 --> s5: intake reconcile 완료
+  s5 --> s6: 현재 pane과 이름을 확인
+  s5 --> s7: 현재 pane과 이름을 확인
+  s6 --> s8: 사용자 제어
+  s6 --> s10: 보류 기준 시각 경과
+  s7 --> s8: 사용자 제어
+  s7 --> s9: 보류 기준 시각 경과
+  s7 --> s7: identity 보류 중 같은 큐 재인수
+  s10 --> s11: 별도 복구가 identity를 확인
+  s10 --> s8: 사용자 제어
+  s11 --> s12: 별도 직접 입력 B 수락
+  s12 --> s13: 같은 실행의 일반 Busy 경로로 재진입
+  s13 --> s14: 평소 입력 규칙 적용
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s9 breaks
+  class s9 bugPath
+  class s9 repeats
+  class s10 bugPath
+  class s11 bugPath
+  class s12 bugPath
+  class s13 bugPath
+  class s14 repeats

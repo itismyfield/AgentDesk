@@ -1653,6 +1653,8 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
     intake.runtime.block_on(async {
         let counts = dispatch::OwnerTurn::probes(CHANNEL);
         let front = intake.front().await;
+        let original = front.1.clone();
+        let ticket = front.0.clone();
         let (entered, resume) =
             discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
                 .await
@@ -1666,7 +1668,7 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
             guard
         };
         let (result, _record) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
-        assert_eq!(result.unwrap(), Ok(()), "the refused idle input is settled");
+        assert!(result.unwrap().is_err_and(|error| error.starts_with("NotSent(")));
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!((after.0 - counts.0, after.1 - counts.1), (1, 0));
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
@@ -1685,18 +1687,14 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
             .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
             .await
             .unwrap();
-        assert_eq!(state["items"], json!([]));
+        assert_eq!(state["items"], json!([original.clone()]));
         assert!(state["head_injection"].is_null());
         assert_eq!(state["retained_inputs"], json!([]));
-        assert!(!held_watch::has_watch(CHANNEL));
-        assert!(
-            !intake
-                .shared
-                .turn_view_reconciler
-                .ops()
-                .iter()
-                .any(|operation| operation.add && operation.emoji == '📬')
-        );
+        assert!(held_watch::has_watch(CHANNEL));
+        let next = intake.mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front())).await.unwrap().unwrap();
+        assert_eq!(next.0, ticket);
+        assert_eq!(next.1.message_id, original.message_id);
+        assert_eq!(next.1.queued_generation, original.queued_generation);
         assert_eq!(
             intake
                 ._api
@@ -1704,11 +1702,29 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
                 .iter()
                 .filter(|call| call.contains("이 입력을 폐기했습니다"))
                 .count(),
-            1
+            0
         );
         assert_eq!(fx.rig.sends().len(), before);
         assert!(heads.lock().unwrap().is_empty());
+
+        missing_input::append_terminal(&started, "i8114-working-message");
+        assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
+        source_input_settled(&intake, &original, &heads).await;
+        wait_for_idle_turn_to_unwind(&intake).await;
+        assert_eq!(fx.rig.sends().len() - before, 2);
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+        let now = chrono::Utc::now().to_rfc3339();
+        append(&started.path, &[
+            json!({"type":"assistant","uuid":uuid(),"sessionId":started.session,"timestamp":now,
+                "apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":"existing native turn completed"}]}}),
+            json!({"type":"system","subtype":"turn_duration","sessionId":started.session,"timestamp":now}),
+        ]);
+        let (_, observed) = held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
+        let verdict = tokio::time::timeout(LIMIT, observed).await.unwrap().unwrap().verdict;
+        assert_eq!(verdict, held_watch::Verdict::Wake);
+        source_input_settled(&intake, &original, &heads).await;
+        assert_eq!(fx.rig.sends().len(), before + 2);
     });
     drop(intake);
     drop(gate);
