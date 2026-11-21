@@ -1087,11 +1087,11 @@ validate_main_script_check_shards() {
 validate_main_script_check_shards
 
 validate_main_lint_and_nextest() {
-  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
+  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" "$RUNNER_MEMORY_STEPS_JSON" "$WSL_RUST_BUILD_RUNNER" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
-main_path, pr_path, nightly_path, memory_json = ARGV
+main_path, pr_path, nightly_path, memory_json, wsl_runner = ARGV
 memory_specs = JSON.parse(memory_json)
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
 pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
@@ -1099,21 +1099,24 @@ nightly_jobs = YAML.load_file(nightly_path).fetch("jobs", {})
 errors = []
 lint_tests_name = "Non-lib tests and doctests"
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-{"lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+# On the WSL runner the GHA caches and swap stay off and rust_build's cache-disabling step runs instead.
+uncached = Array(main_jobs.dig("rust_build", "steps")).find { |step| step.is_a?(Hash) && step["name"] == "Disable remote compiler cache" }
+runner_gated = ->(step) { (step["if"] == "runner.environment == 'github-hosted'" && %w[mozilla-actions/sccache-action@v0.0.10 Swatinem/rust-cache@v2 ./.github/actions/ensure-swap].include?(step["uses"])) || (uncached && step == uncached) }
+{"lint" => "Main lint and non-lib tests"}.each do |job_id, name|
   job = main_jobs[job_id]
   unless job.is_a?(Hash)
     errors << "job #{job_id} is missing"
     next
   end
   errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
-  errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
+  errors << "job #{job_id} must run on the rust_build WSL runner expression" unless job["runs-on"] == wsl_runner
   %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
     next if memory_specs.key?(step["name"])
     label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
     errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
-    errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
+    errors << "#{label} may only set if: always() as a cleanup step or a runner gate" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step)) && !runner_gated.(step)
   end
 end
 lint = main_jobs["lint"]
@@ -1126,7 +1129,7 @@ if lint.is_a?(Hash)
     set -o pipefail
     mkdir -p target/clippy-observation
     cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
-    python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
+    ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
   CLIPPY
   expected_lint = {"name" => "just lint", "shell" => "bash", "run" => expected_lint_run}
   errors << "main Clippy observation must retain exact argv and fail-closed compilation" unless lint_steps.select { |step| step["name"] == "just lint" } == [expected_lint]
@@ -1473,7 +1476,7 @@ if retired_runner_reference?(document) || implicit_retired_reference
   exit 1
 end
 jobs.each do |job_id, job|
-  wsl_build = job_id == "rust_build" && [main_path, pr_path].include?(path)
+  wsl_build = %w[rust_build lint].include?(job_id) && [main_path, pr_path].include?(path)
   next if job.is_a?(Hash) && wsl_build && job["runs-on"] == wsl_rust_build_runner
 
   unless job.is_a?(Hash) && !wsl_build && hosted_runner?(job["runs-on"], job)

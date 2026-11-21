@@ -218,7 +218,7 @@ halves, each by the tool that can actually prove its half:
   attribute inside it are checked against byte-exact whitelists (no cfg parser):
   the gate must be `#[cfg(test)]` or `#[cfg(all(test, unix))]`, and the only
   attribute allowed inside the block is `#[test]`. `unix` is allowed because the
-  only required PR Rust compile is the `lint` job's clippy (`ubuntu-latest`,
+  only required PR Rust compile is the `lint` job's clippy (a Linux runner,
   where `cfg(unix)` is true), so that required job compiles the block; the
   windows lane is advisory/non-required and skipped for relay-only changes, so a
   windows/non-ubuntu gate would run in no required job. The `pause_epoch`
