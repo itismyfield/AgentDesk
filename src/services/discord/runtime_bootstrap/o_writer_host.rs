@@ -526,7 +526,12 @@ pub(super) fn spawn(
     pg_gateway: bool,
 ) {
     if *provider == ProviderKind::Antigravity {
-        install_thread_lookup(shared, provider);
+        // Only a boot-selected agy parent reads its threads; without one nothing is installed.
+        let selected = crate::services::tui_o::cutover::boot_snapshot()
+            .is_some_and(|boot| !boot.agy_channels().is_empty());
+        if selected {
+            install_thread_lookup(shared, provider);
+        }
         return;
     }
     let Some(shadow) = shadow_of(provider) else {
