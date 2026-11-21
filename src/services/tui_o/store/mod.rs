@@ -12,6 +12,7 @@ mod durable;
 pub(crate) mod input_notice_floor;
 pub mod ledger;
 pub(crate) mod restart_end;
+pub(crate) mod restart_notice;
 pub mod rotation;
 pub mod spool;
 pub(crate) mod thread_children;

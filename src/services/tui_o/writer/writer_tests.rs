@@ -1045,6 +1045,8 @@ mod turn_summary_replay;
 mod boundary_pending_health_tests;
 #[path = "codex_launch_cause_tests.rs"]
 mod codex_launch_cause;
+#[path = "restart_notice_tests.rs"]
+mod restart_notice_tests;
 
 #[tokio::test(start_paused = true)]
 async fn a_gateway_return_ends_the_pause_in_process_health() {
