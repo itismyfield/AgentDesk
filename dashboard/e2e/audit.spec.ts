@@ -107,6 +107,7 @@ test("desktop: bound agents, sections by source, copy and the provider key", asy
   await expect(detail(page)).toHaveAttribute("data-state", "ready");
   await expect(page.getByTestId("audit-detail-meta")).toHaveText(/Claude · 11월 17일 오후 05:17 시작 · 현재 세션/);
   await expect(page.getByTestId("audit-summary")).toContainText(/10\s*섹션/);
+  await expect(page.getByRole("region", { name: "프롬프트 요약" })).toHaveCSS("padding", "14px 16px");
   await expect(page.getByTestId("audit-share-bar")).toHaveAttribute("aria-label", /정본 파일 \d+%, 메멘토 \d+%, 런타임 \d+%, 조건부 \d+%/);
   const rows = page.getByTestId("audit-section");
   await expect(rows.nth(0)).toContainText("런타임 문맥 1");

@@ -274,7 +274,8 @@ export function AuditSummaryCard({ detail, label, meta, fetching, onRefresh, act
   }
 
   return (
-    <KitCard as="section" aria-label={label} className="px-4 py-3.5" style={{ gap: 10 }}>
+    // card-clean's unlayered padding beats Tailwind px/py on the root, so the card's own variable sets it.
+    <KitCard as="section" aria-label={label} style={{ gap: 10, "--ui-crdc-pad": "14px 16px" } as CSSProperties}>
       {header}
       {providerSwitch}
       {stats ? (

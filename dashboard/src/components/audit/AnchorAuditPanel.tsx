@@ -335,7 +335,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
             ) : (
               <KitCard>
                 {anchorGroups(visible).map((group) => {
-                  const isGlobalScope = Boolean(group.scope && /모든|default|all/i.test(group.scope));
+                  const isGlobalScope = group.scope === "모든 에이전트";
                   return (
                     <section
                       key={group.scope ?? ""}
@@ -446,7 +446,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
             <aside
               aria-label={tr("선택한 앵커", "Selected anchor")}
               data-testid="audit-anchor-inspector"
-              className="w-full xl:sticky xl:top-4 xl:w-[320px] xl:shrink-0"
+              className="w-full xl:sticky xl:top-4 xl:max-h-[calc(100dvh-2rem)] xl:w-[320px] xl:shrink-0 xl:overflow-y-auto"
             >
               <KitCard>
                 <AnchorDetailSections
