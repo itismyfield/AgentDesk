@@ -112,6 +112,7 @@ export interface TodoItem {
   title: string;
   detail: string;
   to: string;
+  agentId: string | null;
 }
 
 const FAILED_STATUS = /(^|_)failed$/;
@@ -147,6 +148,7 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
       key: `card:${card.id}`,
       title: `${card.github_issue_number ? `#${card.github_issue_number} ` : ""}${cardTitle(card.title)}`,
       to: `/campaigns${queueLocationQuery(card.id)}`,
+      agentId: card.assignee_agent_id ?? card.owner_agent_id ?? null,
     };
     if (needsPerson(card)) {
       items.push({ ...base, tone: "err", chip: tr("판단 필요", "Decide"), detail: card.blocked_reason?.trim() || tr("사람 판단을 기다려요", "Waiting for a decision") });
@@ -164,6 +166,7 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
       title: summary.definition.title,
       detail: displayText(summary.view, tr),
       to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: campaign_id, node: null })}`,
+      agentId: null,
     });
   }
   return items;

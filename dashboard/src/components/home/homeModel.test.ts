@@ -57,7 +57,7 @@ describe("home to-dos", () => {
       cards: [
         card("r", "review", { review_status: "reviewing" }), card("pr", "review", { blocked_reason: "pr:creating" }), card("q", "requested"),
         card("ci", "in_progress", { blocked_reason: "ci:waiting" }), card("rerun", "in_progress", { blocked_reason: "ci:rerunning" }),
-        card("d", "review", { review_status: "dilemma_pending" }), card("b", "in_progress", { blocked_reason: "dependency cycle" }),
+        card("d", "review", { review_status: "dilemma_pending" }), card("b", "in_progress", { blocked_reason: "dependency cycle", assignee_agent_id: "ada" }),
         card("f", "qa_failed"), card("x", "done", { blocked_reason: "old" }),
       ],
       campaigns: [{ definition: { title: "릴레이", goal: "", repository: "adk" }, view: { campaign_id: "relay", display: "needs_inspection", as_of: "", stop_mode: null, failed_count: 0, blocked_count: 0 } }] as ServerCampaignSummary[],
@@ -65,7 +65,8 @@ describe("home to-dos", () => {
       isKo: true,
     });
     expect(items.map((item) => [item.key, item.chip])).toEqual([["card:d", "판단 필요"], ["card:b", "판단 필요"], ["card:f", "실패"], ["campaign:relay", "상태 확인 필요"]]);
-    expect(items[1]).toMatchObject({ title: "#7 card b", detail: "dependency cycle", to: "/campaigns?tab=queue&card=b" });
+    expect(items[1]).toMatchObject({ title: "#7 card b", detail: "dependency cycle", to: "/campaigns?tab=queue&card=b", agentId: "ada" });
+    expect(items[3].agentId).toBeNull();
   });
 
   it("shows the empty state only once every source answered", () => {

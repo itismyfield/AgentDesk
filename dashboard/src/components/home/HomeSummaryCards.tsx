@@ -1,10 +1,12 @@
 import { ChevronRight } from "lucide-react";
-import { useState } from "react";
-import { Link } from "react-router";
+import { useMemo, useState, type CSSProperties } from "react";
+import { Button } from "../../kit/free/button-clean";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
+import {
+  Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, KeyValue, RowButton, RowLink, SectionCard, StatusDot,
+} from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
-import { CardNote, CardSkeleton, Chip, Dot, HeaderLink, HomeCard, Muted, ROW_HOVER, toneText } from "./HomeCard";
 import {
   AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, systemNeedsAttention, todoStatus,
   type HomeAgent, type HomeAgentState, type HomeTone, type SourceState, type TodoItem, type Tr,
@@ -14,20 +16,27 @@ import { loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./us
 // Home's first three sections: what needs a person, how the system is, and who is working.
 
 const TODO_ROWS = 5;
+const FULL_TOUCH_BUTTON_STYLE = {
+  "--aui-button-clean-h": "44px",
+  "--aui-button-clean-muted": "var(--fg-dim)",
+  width: "100%",
+} as CSSProperties;
 
 /** What only a person can move, at the top of home. Each row opens the screen where it is handled. */
-export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
+export function HomeTodoCard({ items, agents, cards, campaigns, tr, className }: {
   items: TodoItem[];
+  agents: Agent[];
   cards: SourceState;
   campaigns: SourceState;
   tr: Tr;
   className?: string;
 }) {
+  const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const total = items.length;
   const hidden = total - TODO_ROWS;
   const status = todoStatus(total, [cards, campaigns]);
   return (
-    <HomeCard
+    <SectionCard
       title={tr("할 일", "To do")}
       count={status === "loading" || (status === "partial" && total === 0) ? null : total}
       countTone={total > 0 ? "warn" : undefined}
@@ -40,25 +49,32 @@ export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
       ) : (
         <>
           {status === "empty" ? <CardNote>{tr("지금 할 일이 없어요.", "Nothing needs you right now.")}</CardNote> : null}
-          <ul className="m-0 list-none p-0">
-            {items.slice(0, TODO_ROWS).map((item) => (
-              <li key={item.key} className="border-t border-[var(--line-soft)]">
-                <Link
-                  to={item.to}
-                  className={`flex min-h-16 items-center gap-3 px-4 py-3 ${ROW_HOVER} focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]`}
-                >
-                  <span className="flex w-[4.75rem] shrink-0 justify-center"><Chip tone={item.tone}>{item.chip}</Chip></span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium" title={item.title}>{item.title}</span>
-                    <Muted className="block truncate">{item.detail}</Muted>
-                  </span>
-                  <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />
-                </Link>
-              </li>
-            ))}
-          </ul>
+          {items.length > 0 ? (
+            <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
+              {items.slice(0, TODO_ROWS).map((item) => {
+                const assignee = item.agentId ? agentById.get(item.agentId) : undefined;
+                return (
+                  <li key={item.key} className="border-t border-[var(--line-soft)] first:border-t-0">
+                    <RowLink to={item.to} className="min-h-16">
+                      <Chip tone={item.tone} className="justify-center sm:min-w-[4.5rem]">{item.chip}</Chip>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm leading-5 font-medium" title={item.title}>{item.title}</span>
+                        <Cap className="mt-0.5 block truncate">{item.detail}</Cap>
+                      </span>
+                      {assignee ? (
+                        <span aria-hidden className="hidden sm:inline-flex">
+                          <AgentPersona agent={assignee} size={24} />
+                        </span>
+                      ) : null}
+                      <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />
+                    </RowLink>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
           {hidden > 0 ? (
-            <div className="border-t border-[var(--line-soft)] px-4 py-1">
+            <div className="border-t border-[var(--line-soft)] px-3 py-3 sm:px-4">
               <HeaderLink to={QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
             </div>
           ) : null}
@@ -66,13 +82,18 @@ export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
           {campaigns === "failed" ? <CardNote>{tr("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", "Campaign summaries did not load, so some to-dos are unknown.")}</CardNote> : null}
         </>
       )}
-    </HomeCard>
+    </SectionCard>
   );
 }
 
 /** Server, Discord bots, Memento, campaign runs and the queue, one dot and value per line. A failed read shows
  * unknown values and when the last answer came, never the last answer itself. */
-export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: { campaigns: Loaded<HomeCampaigns>; onlyWhenOff?: boolean; tr: Tr; className?: string }) {
+export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: {
+  campaigns: Loaded<HomeCampaigns>;
+  onlyWhenOff?: boolean;
+  tr: Tr;
+  className?: string;
+}) {
   const health = usePolled(loadHomeHealth, 30_000);
   const current = health.failed ? null : health.data;
   const rows = buildSystemRows({
@@ -88,20 +109,32 @@ export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: { camp
   const publicOnly = current?.publicOnly;
   const clock = health.at === null ? null : formatClock(health.at);
   return (
-    <HomeCard
+    <SectionCard
       title={tr("시스템", "System")}
-      aside={clock ? <Muted className="tabular-nums">{health.failed ? tr(`마지막 확인 ${clock}`, `Last checked ${clock}`) : tr(`${clock} 확인`, `Checked ${clock}`)}</Muted> : null}
+      aside={clock ? (
+        <Cap className="font-display tabular-nums">
+          {health.failed ? tr(`마지막 확인 ${clock}`, `Last checked ${clock}`) : tr(`${clock} 확인`, `Checked ${clock}`)}
+        </Cap>
+      ) : null}
       testId="home-system"
       className={className}
     >
-      <dl className="m-0 flex flex-col gap-2.5 border-t border-[var(--line-soft)] px-4 py-3.5">
+      <InspSection as="dl" className="gap-2.5">
         {rows.map((row) => (
-          <div key={row.key} data-testid={`home-system-${row.key}`} className="flex min-w-0 items-center gap-3 text-[13px] leading-5">
-            <dt className="flex shrink-0 items-center gap-2 text-[var(--fg-muted)]"><Dot tone={row.tone} />{row.label}</dt>
-            <dd className="m-0 min-w-0 flex-1 truncate text-right" style={{ color: toneText(row.tone) }} title={row.value}>{row.value}</dd>
-          </div>
+          <KeyValue
+            key={row.key}
+            dl
+            data-testid={`home-system-${row.key}`}
+            leading={<StatusDot tone={row.tone} />}
+            label={row.label}
+            tone={row.tone}
+            num={row.key === "queue"}
+            valueTitle={row.value}
+          >
+            {row.value}
+          </KeyValue>
         ))}
-      </dl>
+      </InspSection>
       {publicOnly ? (
         <CardNote>
           {publicOnly === "forbidden"
@@ -109,7 +142,7 @@ export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: { camp
             : tr("자세한 상태를 읽지 못해 요약만 보여요.", "Detailed status did not load; showing the summary.")}
         </CardNote>
       ) : null}
-    </HomeCard>
+    </SectionCard>
   );
 }
 
@@ -120,18 +153,16 @@ const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", backgroun
 /** Desktop shows two rows of four: up to seven agents and the fold, unless more are busy. */
 const DESKTOP_SHOWN = 7;
 
-const CELL = `flex min-h-14 w-full min-w-0 items-center gap-2.5 px-4 py-3 text-left ${ROW_HOVER} focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]`;
-
 function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo: boolean; onOpen: (agent: Agent) => void }) {
   const line = agentLine(entry, tr, isKo);
   return (
-    <button type="button" className={CELL} onClick={() => onOpen(entry.agent)}>
+    <RowButton className="min-h-14 gap-2.5 py-2.5 sm:py-3" onClick={() => onOpen(entry.agent)}>
       <span aria-hidden className="flex"><AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={32} /></span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{agentName(entry.agent, isKo)}</span>
-        <span className="block truncate text-xs text-[var(--fg-muted)]" title={line}>{line}</span>
+        <span className="block truncate text-sm leading-5 font-medium">{agentName(entry.agent, isKo)}</span>
+        <Cap className="mt-0.5 block truncate" title={line}>{line}</Cap>
       </span>
-    </button>
+    </RowButton>
   );
 }
 
@@ -148,12 +179,19 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
   const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, entries.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
   const busy = counts.working + counts.background;
   const legendStates = AGENT_STATES.filter((state) => counts[state] > 0 || (!isMobile && state !== "unknown"));
-  const legend = (
-    <Muted className="flex min-h-11 flex-wrap items-center gap-x-3.5 gap-y-1">
+  const legend = isMobile ? (
+    <Cap className="font-display tabular-nums">
+      {legendStates.map((state) => `${agentStateLabel(state, tr)} ${counts[state]}`).join(" · ")}
+    </Cap>
+  ) : (
+    <Cap className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
       {legendStates.map((state) => (
-        <span key={state} className="flex items-center gap-1.5 tabular-nums"><Dot tone={LEGEND_TONE[state]} />{agentStateLabel(state, tr)} {counts[state]}</span>
+        <span key={state} className="flex items-center gap-1.5 font-display tabular-nums">
+          <StatusDot tone={LEGEND_TONE[state]} />
+          {agentStateLabel(state, tr)} {counts[state]}
+        </span>
       ))}
-    </Muted>
+    </Cap>
   );
 
   const preferred = entries.slice(0, isMobile ? busy : Math.max(DESKTOP_SHOWN, busy));
@@ -165,13 +203,13 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
     : isMobile ? tr(`${rest}명 더 보기`, `Show ${rest} more`) : tr(`나머지 ${rest}명`, `${rest} more`);
 
   return (
-    <HomeCard title={tr("에이전트", "Agents")} count={entries.length} aside={legend} testId="home-agents">
+    <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : entries.length} aside={legend} testId="home-agents">
       {entries.length === 0 ? (
-        <p className="m-0 border-t border-[var(--line-soft)] px-4 py-5 text-sm text-[var(--fg-muted)]">{tr("등록된 에이전트가 없어요.", "No agents yet.")}</p>
+        <CardNote>{tr("등록된 에이전트가 없어요.", "No agents yet.")}</CardNote>
       ) : isMobile ? (
         <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
           {shown.length === 0 ? (
-            <li className="px-4 py-4 text-sm text-[var(--fg-muted)]">
+            <li className="px-3 py-4 text-sm text-[var(--fg-muted)]">
               {counts.unknown > 0 ? tr("세션을 읽지 못해 상태는 확인 불가예요.", "Sessions did not load, so states are unknown.") : tr("모두 쉬는 중이에요.", "Everyone is resting.")}
             </li>
           ) : null}
@@ -181,10 +219,15 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
             </li>
           ))}
           {folds ? (
-            <li className="flex justify-center border-t border-[var(--line-soft)] p-1">
-              <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className={`min-h-11 rounded-[var(--r-md)] px-4 text-sm font-medium text-[var(--fg)] ${ROW_HOVER}`}>
+            <li className="flex justify-center border-t border-[var(--line-soft)] px-3 py-1.5">
+              <Button
+                variant="ghost"
+                aria-expanded={expanded}
+                onClick={() => setExpanded((value) => !value)}
+                style={FULL_TOUCH_BUTTON_STYLE}
+              >
                 {toggleLabel}
-              </button>
+              </Button>
             </li>
           ) : null}
         </ul>
@@ -198,20 +241,26 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
           ))}
           {folds ? (
             <li className="min-w-0 border-r border-b border-[var(--line-soft)]">
-              <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className={`${CELL} text-sm text-[var(--fg-muted)]`}>
+              <RowButton
+                aria-expanded={expanded}
+                onClick={() => setExpanded((value) => !value)}
+                className="min-h-14 gap-2.5 text-sm text-[var(--fg-muted)]"
+              >
                 {expanded ? null : (
                   <span aria-hidden className="flex">
                     {entries.slice(preferred.length, preferred.length + 3).map((entry, index) => (
-                      <span key={entry.agent.id} className={index ? "-ml-1.5" : undefined}><AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={24} /></span>
+                      <span key={entry.agent.id} className={index ? "-ml-1.5" : undefined}>
+                        <AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={24} />
+                      </span>
                     ))}
                   </span>
                 )}
                 <span className="break-keep">{toggleLabel}</span>
-              </button>
+              </RowButton>
             </li>
           ) : null}
         </ul>
       )}
-    </HomeCard>
+    </SectionCard>
   );
 }
