@@ -765,3 +765,54 @@ test("home campaigns: a failed list beside an empty one reads unknown, not empty
   await page.goto("/home");
   await expect(page.getByTestId("home-campaigns")).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.", { timeout: 15_000 });
 });
+
+test.describe("home kit contract at 390px touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("home campaigns: row spacing overrides win, coarse pointer pins todo min-height to 44px, and chip contrast meets 4.5 in dark and light", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "390px touch contract");
+    const routine = (id: string, status: string) => ({
+      id, agent_id: "agent-ada", script_ref: `${id}.js`, name: id, status: "enabled", execution_strategy: "fresh", schedule: "0 9 * * *",
+      next_due_at: null, last_run_at: NOW, last_result: null, checkpoint: null, discord_thread_id: null, timeout_secs: 600, in_flight_run_id: null,
+      last_run: { id: `run-${id}`, routine_id: id, status, started_at: NOW, finished_at: NOW }, created_at: NOW, updated_at: NOW,
+    });
+    for (const theme of ["dark", "light"] as const) {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await page.clock.setFixedTime(new Date(NOW));
+      await mockApi(page, theme);
+      await json(page, /\/api\/kanban-cards(?:\?.*)?$/, { cards: [{
+        id: "c1", title: "차단 카드", description: null, status: "blocked", github_repo: "itismyfield/AgentDesk", owner_agent_id: null,
+        requester_agent_id: null, assignee_agent_id: "agent-ada", parent_card_id: null, latest_dispatch_id: null, sort_order: 0, priority: "high",
+        depth: 0, blocked_reason: "승인 필요", review_notes: null, github_issue_number: 1, github_issue_url: issue(1), metadata_json: null,
+        pipeline_stage_id: null, review_status: null, created_at: 1_790_000_000_000, updated_at: 1_790_000_000_000, started_at: null, requested_at: null, completed_at: null,
+      }] });
+      await json(page, /\/api\/routines(?:\?.*)?$/, { routines: [routine("r-ok", "succeeded"), routine("r-info", "running"), routine("r-warn", "paused"), routine("r-err", "failed")] });
+      await page.goto("/home");
+      await expect(page.getByTestId("home-campaigns").locator("li a").first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("home-todo").locator("li a").first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("home-routines").locator("li")).toHaveCount(4, { timeout: 15_000 });
+      const metrics = await page.evaluate(() => {
+        const linear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        const lum = (cssColor: string) => {
+          const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+          const ctx = canvas.getContext("2d")!; ctx.fillStyle = cssColor; ctx.fillRect(0, 0, 1, 1);
+          const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+          return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        };
+        const ratio = (node: Element) => {
+          const cs = getComputedStyle(node);
+          const [hi, lo] = [lum(cs.color), lum(cs.backgroundColor)].sort((a, b) => b - a);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        const camp = getComputedStyle(document.querySelector('[data-testid="home-campaigns"] li a')!);
+        const todo = getComputedStyle(document.querySelector('[data-testid="home-todo"] li a')!);
+        const chips = Array.from(document.querySelectorAll('[data-testid="home-routines"] li > span:last-child'), ratio);
+        return { paddingTop: camp.paddingTop, rowGap: camp.rowGap, todoMinHeight: todo.minHeight, minChipContrast: Math.min(...chips) };
+      });
+      expect(metrics.paddingTop, theme).toBe("10px");
+      expect(metrics.rowGap, theme).toBe("6px");
+      expect(metrics.todoMinHeight, theme).toBe("44px");
+      expect(metrics.minChipContrast, theme).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
