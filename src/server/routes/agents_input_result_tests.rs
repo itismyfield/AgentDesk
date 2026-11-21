@@ -347,3 +347,236 @@ async fn a_queued_origin_reads_accepted_then_its_owed_receipt_pg() {
     );
     db.drop().await;
 }
+
+/// The body the agy headless codec reports as its terminal `Done`, from a real stream.
+fn agy_done_body(lines: &[Value]) -> String {
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::stream_json_cli::codec::{AgyCodec, StreamJsonCodec};
+    let mut codec = AgyCodec::new();
+    let mut out = Vec::new();
+    for line in lines {
+        out.extend(codec.push_stdout_line(&line.to_string()).unwrap());
+    }
+    out.extend(codec.finish(Some(0), "").unwrap());
+    match out.pop() {
+        Some(StreamMessage::Done { result, .. }) => result,
+        other => panic!("agy stream did not finish: {other:?}"),
+    }
+}
+
+/// The transcript the turn bridge commits for one execution: the `Done` body becomes its single
+/// `result` event, next to the streamed assistant text and tool steps.
+async fn persist_transcript(pool: &sqlx::PgPool, turn_id: &str, provider: &str, results: &[&str]) {
+    use crate::db::session_transcripts::{
+        PersistSessionTranscript, SessionTranscriptEvent, SessionTranscriptEventKind as Kind,
+    };
+    let event = |kind, content: &str, status: Option<&str>| SessionTranscriptEvent {
+        kind,
+        tool_name: None,
+        summary: None,
+        content: content.to_string(),
+        status: status.map(str::to_string),
+        is_error: false,
+    };
+    let mut events = vec![
+        event(Kind::Assistant, "progress note", None),
+        event(Kind::ToolUse, "ls", None),
+    ];
+    events.extend(
+        results
+            .iter()
+            .map(|r| event(Kind::Result, r, Some("success"))),
+    );
+    let channel = turn_id.split(':').nth(1).unwrap();
+    let entry = PersistSessionTranscript {
+        turn_id,
+        session_key: None,
+        channel_id: Some(channel),
+        agent_id: Some("answer-agent"),
+        provider: Some(provider),
+        dispatch_id: None,
+        user_message: "question",
+        assistant_message: "progress note final",
+        events: &events,
+        duration_ms: Some(1),
+        turn_started_at_millis: None,
+    };
+    assert!(
+        crate::db::session_transcripts::persist_turn_db(Some(pool), entry)
+            .await
+            .unwrap()
+    );
+}
+
+async fn commit_receipt(
+    pool: &sqlx::PgPool,
+    turn_id: &str,
+    provider: &str,
+    origin: &str,
+    outcome: crate::db::turns::TerminalOutcome,
+) {
+    let channel = turn_id.split(':').nth(1).unwrap();
+    let ids = vec![origin.to_string()];
+    let receipt = crate::db::turns::TurnReceipt {
+        turn_id,
+        channel_id: channel,
+        agent_id: Some("answer-agent"),
+        provider,
+        session_key: None,
+        started_at: None,
+        consumed_origin_ids: &ids,
+        outcome,
+        confirmed_at: chrono::Utc::now(),
+    };
+    crate::db::turns::record_turn_receipt(pool, &receipt)
+        .await
+        .unwrap();
+}
+
+async fn ask_answer(app: &Router, origin: &str) -> Value {
+    let uri = format!("/agents/answer-agent/input-result?origin_id={origin}");
+    let (status, body) = local_get(app, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+    body
+}
+
+/// A completed agy headless execution reports the exact body its terminal `Done` carried, bound
+/// to that execution's own transcript record; every other end, or no end yet, reports null.
+#[tokio::test(flavor = "current_thread")]
+async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
+    use crate::db::turns::TerminalOutcome;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_340_801_u64;
+    let insert = crate::db::agents::insert_agent_channels_for_tests;
+    insert(&pool, "answer-agent", Some(&channel.to_string()), None).await;
+    let app = router_with(crate::config::Config::default(), Some(pool.clone()));
+    let turn = |message: u64| format!("discord:{channel}:{message}");
+
+    let answer = agy_done_body(&[
+        json!({"event": "init", "init": {"conversation_id": "c0ffee00-0000-4000-8000-000000000001"}}),
+        json!({"event": "step_update", "step_update": {"step_type": "agent_response",
+            "text_delta": "The answer is 42."}}),
+        json!({"event": "result", "result": {"status": "SUCCESS",
+            "conversation_id": "c0ffee00-0000-4000-8000-000000000001"}}),
+    ]);
+    assert_eq!(answer, "The answer is 42.");
+
+    // Not ended yet: the transcript may already hold the body, but no terminal is reported.
+    write_row("claude", channel, &running_row(10, &["G-running"]));
+    persist_transcript(&pool, &turn(10), "antigravity", &[&answer]).await;
+    assert_eq!(ask_answer(&app, "G-running").await["terminal"], Value::Null);
+    std::fs::remove_file(
+        crate::config::runtime_root()
+            .unwrap()
+            .join(format!("runtime/discord_inflight/claude/{channel}.json")),
+    )
+    .unwrap();
+
+    commit_receipt(
+        &pool,
+        &turn(10),
+        "antigravity",
+        "G-running",
+        TerminalOutcome::Completed,
+    )
+    .await;
+    let body = ask_answer(&app, "G-running").await;
+    assert_eq!(body["terminal"]["outcome"], "completed", "{body}");
+    assert_eq!(
+        (
+            &body["terminal"]["final_answer_text"],
+            &body["terminal"]["final_answer_boundary"],
+            &body["terminal"]["final_answer_source"],
+        ),
+        (
+            &json!("The answer is 42."),
+            &json!({"turn_id": turn(10), "result_event_index": 2}),
+            &json!("agy_terminal_result"),
+        ),
+        "{body}"
+    );
+
+    // Cancelled, failed and empty ends report null, never an empty string, even when the
+    // transcript holds a result event.
+    let nulls = json!([null, null, null]);
+    let answer_fields = |body: &Value| {
+        let t = &body["terminal"];
+        json!([
+            t["final_answer_text"],
+            t["final_answer_boundary"],
+            t["final_answer_source"]
+        ])
+    };
+    for (message, origin, outcome) in [
+        (11, "G-cancelled", TerminalOutcome::Cancelled),
+        (12, "G-failed", TerminalOutcome::Failed),
+        (13, "G-empty", TerminalOutcome::Empty),
+    ] {
+        persist_transcript(&pool, &turn(message), "antigravity", &["partial words"]).await;
+        commit_receipt(&pool, &turn(message), "antigravity", origin, outcome).await;
+        let body = ask_answer(&app, origin).await;
+        assert_eq!(body["terminal"]["outcome"], outcome.as_str(), "{body}");
+        assert_eq!(answer_fields(&body), nulls, "{origin}: {body}");
+    }
+
+    // The boundary is the execution's own record: another turn's answer is never borrowed, two
+    // result events are ambiguous, and Claude/Codex wait for their verified final record (#8216).
+    persist_transcript(&pool, &turn(20), "antigravity", &["other turn"]).await;
+    commit_receipt(
+        &pool,
+        &turn(21),
+        "antigravity",
+        "G-no-record",
+        TerminalOutcome::Completed,
+    )
+    .await;
+    persist_transcript(&pool, &turn(22), "antigravity", &["first", "second"]).await;
+    commit_receipt(
+        &pool,
+        &turn(22),
+        "antigravity",
+        "G-two-results",
+        TerminalOutcome::Completed,
+    )
+    .await;
+    persist_transcript(&pool, &turn(23), "claude", &["claude final"]).await;
+    commit_receipt(
+        &pool,
+        &turn(23),
+        "claude",
+        "G-claude",
+        TerminalOutcome::Completed,
+    )
+    .await;
+    for origin in ["G-no-record", "G-two-results", "G-claude"] {
+        let body = ask_answer(&app, origin).await;
+        assert_eq!(body["terminal"]["outcome"], "completed", "{body}");
+        assert_eq!(answer_fields(&body), nulls, "{origin}: {body}");
+    }
+
+    // Retention moves the transcript; the archived record still answers.
+    sqlx::query(
+        "INSERT INTO session_transcripts_archive (id, turn_id, channel_id, provider, events_json)
+         SELECT id, turn_id, channel_id, provider, events_json FROM session_transcripts
+          WHERE turn_id = $1",
+    )
+    .bind(turn(10))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM session_transcripts WHERE turn_id = $1")
+        .bind(turn(10))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body = ask_answer(&app, "G-running").await;
+    assert_eq!(
+        body["terminal"]["final_answer_text"], "The answer is 42.",
+        "{body}"
+    );
+
+    pool.close().await;
+    db.drop().await;
+}
