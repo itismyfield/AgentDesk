@@ -19,6 +19,8 @@ pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,
 };
+mod send_stage;
+pub(crate) use send_stage::SendStage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Adoption {
@@ -42,20 +44,34 @@ impl Adoption {
 }
 
 /// Legacy body sends a candidate let through: `started` moves under the candidate lock as a body
-/// claim passes, `finished` as that send's guard drops.
+/// claim passes, `finished` as that send's guard drops; `stages` follows each one in between.
 #[derive(Debug, Default)]
 struct LegacySends {
     started: AtomicU64,
     finished: AtomicU64,
+    stages: send_stage::OpenSends,
+    thread_body_fence: Mutex<()>,
 }
 
-/// A Legacy body send under way on its channel, held until its transport is done.
+/// A Legacy body send under way on its channel, held until its transport is done; `seq` is its
+/// claim order on that channel.
 #[derive(Debug)]
-pub(crate) struct LegacySend(Arc<LegacySends>);
+pub(crate) struct LegacySend {
+    sends: Arc<LegacySends>,
+    seq: u64,
+}
+
+impl LegacySend {
+    /// Reports how far this send got. Only the drop finishes it, whatever stage it reached.
+    pub(crate) fn reached(&self, stage: SendStage) {
+        self.sends.stages.reach(self.seq, stage);
+    }
+}
 
 impl Drop for LegacySend {
     fn drop(&mut self) {
-        self.0.finished.fetch_add(1, Ordering::SeqCst);
+        self.sends.stages.end(self.seq);
+        self.sends.finished.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -300,6 +316,13 @@ impl Candidate {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    pub(in crate::services::tui_o) fn lock_thread_body(&self) -> MutexGuard<'_, ()> {
+        self.sends
+            .thread_body_fence
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[cfg(test)]
     pub(crate) fn locked_for_test(&self) -> bool {
         matches!(
@@ -342,12 +365,15 @@ impl Candidate {
             .expect("Legacy start hook");
         }
         let send = (!owned).then(|| {
-            self.sends.started.fetch_add(1, Ordering::SeqCst);
-            LegacySend(Arc::clone(&self.sends))
+            let seq = self.sends.started.fetch_add(1, Ordering::SeqCst) + 1;
+            self.sends.stages.begin(seq, origin);
+            let sends = Arc::clone(&self.sends);
+            LegacySend { sends, seq }
         });
         let (started, finished) = self.sends();
+        let (sent, settled) = self.sends.stages.counts();
         let mark = self.turn_mark();
-        tracing::info!(channel, owned, started, finished, ?reason, %origin,
+        tracing::info!(channel, owned, started, finished, sent, settled, ?reason, %origin,
             mark_present = mark.is_some(), mark_order = mark.map(|m| m.order),
             mark_used = mark.is_some_and(|m| m.order == self.baseline_order.load(Ordering::SeqCst)),
             mark_seq = mark.map(|m| m.seq), mark_sends = ?mark.map(|m| m.sends),
@@ -377,6 +403,17 @@ impl Candidate {
         let sends = &self.sends;
         let started = sends.started.load(Ordering::SeqCst);
         (started, sends.finished.load(Ordering::SeqCst))
+    }
+
+    /// For a stuck report: the send counters and the oldest open send's claim order, claiming
+    /// caller, last reported stage and age.
+    pub(crate) fn sends_report(&self) -> String {
+        let (started, finished) = self.sends();
+        let (sent, settled) = self.sends.stages.counts();
+        let oldest = self.sends.stages.oldest();
+        format!(
+            "started={started} sent={sent} settled={settled} finished={finished} oldest_open={oldest}"
+        )
     }
 
     /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided

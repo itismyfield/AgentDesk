@@ -7,11 +7,232 @@ use crate::services::tui_o::channel_policy::Candidate;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::{InitOrigin, OStore};
-use crate::services::tui_o::writer::binding::BindingEvent;
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvent, BindingRecord, BindingTarget,
+};
 use crate::services::tui_o::writer::host::HostIo;
 use crate::services::tui_o::writer::rotation::bound_source;
 
 mod prefix;
+pub(in crate::services::tui_o::writer) mod thread {
+    use sha2::{Digest, Sha256};
+
+    use crate::services::tui_o::cutover::claude_thread::protected_launch;
+    use crate::services::tui_o::shadow::{
+        SourceId,
+        binding_reader::source_id_for,
+        capture::{SourceCapture, same_file},
+    };
+    use crate::services::tui_o::store::{InitSource, spool::source_key};
+    use crate::services::tui_o::writer::{
+        adoption::{self, LegacyEpoch},
+        binding::{BindingEvent, BindingRecord, BindingTarget},
+        historical_hops,
+        rotation::bound_source,
+    };
+    use crate::services::tui_prompt_dedupe::{
+        binding_context::BindingContext,
+        binding_events::{self as p5, claude_fold},
+    };
+
+    use super::super::codex::prefix::{Prefix, PrefixClass, Verdict};
+
+    pub(in crate::services::tui_o::writer) fn is_protected(events: &[BindingEvent]) -> bool {
+        events.first().is_some_and(|event| {
+            !claude_fold::read_thread_resumes(event.channel_id)
+                .is_ok_and(|entries| entries.is_empty())
+        }) || events.iter().any(|event| {
+            !matches!(event.record, BindingRecord::Rejected { .. })
+                && protected_launch(event).is_some()
+        })
+    }
+
+    pub(in crate::services::tui_o::writer) fn plan(
+        events: &[BindingEvent],
+        parent: u64,
+    ) -> Option<((SourceId, u64), Vec<InitSource>)> {
+        let (current, tmux) = adoption::current(events)?;
+        let latest = events
+            .iter()
+            .rev()
+            .find(|event| bound_source(event) == Some(&current))?;
+        let resumes = claude_fold::read_thread_resumes(latest.channel_id).ok()?;
+        let verified = claude_fold::verified_claude_sources(latest.channel_id).ok()?;
+        let hops = historical_hops::fold(events, latest.seq);
+        let mut sources = Vec::<InitSource>::new();
+        let empty = hex::encode(Sha256::digest(b""));
+        for event in events {
+            let scope = protected_launch(event)
+                .filter(|ctx| ctx.claude_thread_writer_parent() == Some(parent));
+            if let Some(scope) = scope.as_ref()
+                && matches!(
+                    &event.record,
+                    BindingRecord::Bound {
+                        new: BindingTarget::Pending { .. },
+                        ..
+                    }
+                )
+                && !verified_launch(&verified, event, scope)
+                && !replaced_without_source(event, scope, events, &verified)
+            {
+                return None;
+            }
+            let Some(source) = bound_source(event) else {
+                continue;
+            };
+            let fresh = scope.is_some_and(|ctx| {
+                ctx.expected_native_session_id.as_deref() == Some(source.session_id.as_str())
+            });
+            let successor = sources.last().is_some_and(|previous| {
+                hops.get(&source_key(&previous.source_id))
+                    .is_some_and(|(_, hop)| {
+                        hop.tmux_session.as_deref() == Some(event.tmux_session.as_str())
+                            && same_file(&hop.source, source)
+                    })
+            });
+            let resume = resumes.iter().find(|entry| {
+                entry.parent == parent
+                    && entry.tmux == event.tmux_session
+                    && same_file(&entry.source, source)
+            });
+            if !fresh && !successor && resume.is_none() {
+                continue;
+            }
+            // A same-file tmux resume need not produce a new P5 record.
+            let confirmed = verified.iter().any(|proof| {
+                claude_fold::names_source(proof, &event.tmux_session, source)
+                    && (!(fresh || successor)
+                        || proof.execution_nonce.as_deref() == Some(&event.execution_nonce))
+            });
+            if !confirmed {
+                return None;
+            }
+            let (delivery_start, prefix_hash) = if fresh || successor {
+                (0, empty.clone())
+            } else {
+                let resume = resume?;
+                (resume.offset, resume.sha256.clone())
+            };
+            if let Some(old) = sources
+                .iter_mut()
+                .find(|old| same_file(&old.source_id, source))
+            {
+                if delivery_start < old.delivery_start {
+                    old.delivery_start = delivery_start;
+                    old.prefix_hash = prefix_hash;
+                }
+            } else {
+                sources.push(InitSource {
+                    source_id: source.clone(),
+                    delivery_start,
+                    prefix_hash,
+                });
+            }
+        }
+        if resumes.iter().any(|entry| {
+            entry.parent == parent
+                && entry.tmux == tmux
+                && !sources
+                    .iter()
+                    .any(|source| same_file(&source.source_id, &entry.source))
+        }) || !sources
+            .last()
+            .is_some_and(|source| same_file(&source.source_id, &current))
+        {
+            return None;
+        }
+        sources
+            .windows(2)
+            .all(|pair| {
+                hops.get(&source_key(&pair[0].source_id))
+                    .is_some_and(|(_, hop)| same_file(&hop.source, &pair[1].source_id))
+            })
+            .then_some(((current, latest.seq), sources))
+    }
+
+    fn verified_launch(
+        proofs: &[p5::BindingEvent],
+        event: &BindingEvent,
+        context: &BindingContext,
+    ) -> bool {
+        proofs.iter().any(|proof| {
+            proof.tmux_session == event.tmux_session
+                && proof.execution_nonce.as_deref() == Some(&event.execution_nonce)
+                && matches!(&proof.new, p5::BindingTarget::Source(source)
+                    | p5::BindingTarget::Resolved { source, .. }
+                    if context.expected_native_session_id.as_deref() == Some(source.session_id.as_str()))
+        })
+    }
+
+    fn replaced_without_source(
+        pending: &BindingEvent,
+        previous: &BindingContext,
+        events: &[BindingEvent],
+        verified: &[p5::BindingEvent],
+    ) -> bool {
+        let BindingRecord::Bound {
+            new:
+                BindingTarget::Pending {
+                    payload_session_id,
+                    payload_transcript_path,
+                },
+            ..
+        } = &pending.record
+        else {
+            return false;
+        };
+        events.iter().any(|next| {
+            next.execution_nonce != pending.execution_nonce
+                && adoption::supersedes(pending, next)
+                && protected_launch(next).is_some_and(|current| {
+                    current.claude_thread_writer_parent() == previous.claude_thread_writer_parent()
+                        && current.provider_root == previous.provider_root
+                        && current.expected_native_session_id != previous.expected_native_session_id
+                        && verified_launch(verified, next, &current)
+                })
+        }) && previous.missing_claude_transcript(payload_session_id, payload_transcript_path)
+    }
+
+    pub(super) fn source(source: &SourceId) -> Verdict {
+        match source_id_for(&source.session_id, &source.path) {
+            Ok(actual) if same_file(&actual, source) => Verdict::Eligible(Prefix {
+                class: PrefixClass::OutputFree,
+                len: 0,
+                sha256: hex::encode(Sha256::digest(b"")),
+                prompt_digest: None,
+                prompt_end: None,
+            }),
+            Ok(_) => Verdict::Refuse("the reserved transcript was replaced".into()),
+            Err(error) => Verdict::Wait(format!("the reserved transcript is unavailable: {error}")),
+        }
+    }
+
+    pub(in crate::services::tui_o::writer) fn verify(sources: &[InitSource]) -> Result<(), String> {
+        for source in sources {
+            SourceCapture::reopen(
+                source.source_id.clone(),
+                source.delivery_start,
+                &source.prefix_hash,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::services::tui_o::writer) fn owns_row(
+        epoch: LegacyEpoch,
+        sources: &[InitSource],
+    ) -> bool {
+        let (Some(turn), Some(delivery)) = (epoch.turn, epoch.delivery) else {
+            return false;
+        };
+        turn.3.is_some_and(|start| {
+            sources.iter().any(|source| {
+                start >= source.delivery_start && delivery.source_path == source.source_id.path
+            })
+        })
+    }
+}
 
 /// Only a transcript bound above `seq` is taken, and only while no Legacy body send started since
 /// `sends` was read; `sends` is read before the binding log so no bind precedes it.
@@ -46,6 +267,19 @@ pub(super) async fn look<I: HostIo>(
     events: &[BindingEvent],
     floor: Floor,
 ) -> Look {
+    let protected_parent = at
+        .candidate
+        .child_surface()
+        .filter(|_| thread::is_protected(events))
+        .map(|surface| surface.parent());
+    let bound = if let Some(parent) = protected_parent {
+        thread::plan(events, parent).map(|(bound, _)| bound)
+    } else {
+        takeover_binding(events, floor.seq)
+    };
+    let Some(bound) = bound else {
+        return Look::Pass("no unique transcript bound since the floor".into());
+    };
     let takeover = Takeover {
         io: at.io,
         channel: at.channel,
@@ -54,28 +288,25 @@ pub(super) async fn look<I: HostIo>(
         candidate: at.candidate,
         gate: at.gate,
         provider: ShadowProvider::Claude,
-        judge: prefix::judge,
+        judge: if protected_parent.is_some() {
+            thread::source
+        } else {
+            prefix::judge
+        },
         origin: InitOrigin::LateClaudeTakeover,
+        protected_parent,
     };
-    let Some(bound) = bound_after(events, floor.seq) else {
-        return Look::Pass("no transcript bound since the floor".into());
-    };
-    // Turn confirmation finds the taken execution again as the transcript's only bind; a source
-    // bound after the floor before it may hold output Legacy has not claimed yet.
-    let binds = events.iter().filter(|e| bound_source(e) == Some(&bound.0));
-    let since = events
-        .iter()
-        .filter(|e| e.seq > floor.seq && bound_source(e).is_some());
-    if binds.count() != 1 || since.count() != 1 {
-        return Look::Pass("the transcript is not the only source bound since the floor".into());
-    }
-    let prefix = match prefix::judge(&bound.0) {
+    let prefix = match (takeover.judge)(&bound.0) {
         Verdict::Eligible(prefix) => prefix,
         Verdict::Wait(detail) => return Look::Wait(detail),
         Verdict::Refuse(detail) => return Look::Pass(detail),
     };
     let at = Baseline {
-        sends: floor.sends,
+        sends: if protected_parent.is_some() {
+            at.candidate.sends()
+        } else {
+            floor.sends
+        },
         seq: floor.seq,
         order: 0,
         turn_mark: false,
@@ -88,6 +319,38 @@ pub(super) async fn look<I: HostIo>(
             Look::Wait(detail)
         }
     }
+}
+
+/// Source verification can confirm a bind without introducing another execution.
+pub(super) fn takeover_binding(events: &[BindingEvent], after: u64) -> Option<(SourceId, u64)> {
+    let (source, _) = bound_after(events, after)?;
+    let mut binds = events.iter().filter(|event| {
+        bound_source(event).is_some_and(|bound| bound == &source || event.seq > after)
+    });
+    let root = binds.next()?;
+    (root.seq > after
+        && bound_source(root) == Some(&source)
+        && !matches!(
+            root.record,
+            BindingRecord::Bound {
+                cause: BindingCause::SameSessionVerified,
+                ..
+            }
+        )
+        && binds.all(|event| confirms(root, event, &source)))
+    .then_some((source, root.seq))
+}
+
+fn confirms(root: &BindingEvent, event: &BindingEvent, source: &SourceId) -> bool {
+    !root.execution_nonce.is_empty()
+        && event.execution_nonce == root.execution_nonce
+        && event.tmux_session == root.tmux_session
+        && event.channel_id == root.channel_id
+        && event.provider == root.provider
+        && matches!(&event.record, BindingRecord::Bound {
+            old: Some(old), new: BindingTarget::Source(new), cause: BindingCause::SameSessionVerified,
+            parent_hint: None, evidence,
+        } if old == source && new == source && !evidence.reclaims)
 }
 
 /// A transcript proved delivered through `len`, by its current pin or frozen receipt scope,

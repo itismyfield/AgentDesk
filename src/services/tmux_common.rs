@@ -5,12 +5,13 @@ mod session_markers;
 #[cfg(test)]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
 pub(crate) use session_markers::{
-    AuthMarkers, advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
-    tmux_session_auth_profile_matches, write_tmux_session_auth_profile,
+    AuthMarkers, advance_claude_session_auth, claude_session_auth,
+    resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
+    write_tmux_session_auth_profile,
 };
 #[cfg(unix)]
 pub(crate) use session_markers::{
-    claude_session_auth, claude_session_auth_matches, write_claude_session_auth,
+    claude_session_auth_matches, write_claude_session_auth,
     write_tmux_runtime_kind_marker_under_fence,
 };
 
@@ -597,7 +598,7 @@ fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool 
         .any(|line| claude_footer::bypass_interrupt(line) == Some(true))
 }
 
-fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
+pub(crate) fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
     let footer = lines
         .iter()
         .rposition(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))

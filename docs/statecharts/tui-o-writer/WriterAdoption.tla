@@ -400,6 +400,7 @@ AgyTurn(id, phase) ==
      deltas |-> 0, terminal |-> "none", spool |-> FALSE,
      prepared |-> FALSE, discarded |-> FALSE, unresolved |-> FALSE,
      remote |-> AgyZero, offset |-> 0, frontier |-> 0, ends |-> 0, effects |-> 0, answers |-> 0,
+     applied |-> 0, releases |-> 0, claims |-> 0, kicked |-> FALSE, receiptRejected |-> FALSE,
      authority |-> TRUE, interrupted |-> FALSE, reconcile |-> FALSE,
      rejected |-> FALSE, retried |-> FALSE,
      legacy |-> 0, alarm |-> FALSE, stale |-> FALSE,
@@ -515,6 +516,11 @@ AgyReceipt ==
     /\ agy.remote[agy.offset + 1] > 0
     /\ agy' = [agy EXCEPT !.prepared = FALSE, !.reconcile = FALSE, !.offset = @ + 1,
                            !.frontier = IF agy.offset < @ THEN @ ELSE agy.offset + 1]
+AgyRejectReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.authority /\ agy.prepared /\ ~agy.receiptRejected
+    /\ agy.remote[agy.offset + 1] > 0
+    /\ agy' = [agy EXCEPT !.authority = FALSE, !.reconcile = TRUE, !.receiptRejected = TRUE]
 AgyNotifyFailure ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "delivery" /\ agy.authority /\ agy.terminal = "failed" /\ ~agy.alarm
@@ -546,6 +552,15 @@ AgyFinish ==
 AgyApplyEnd ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "finishing" /\ agy.authority /\ agy.effects < 3
+    /\ agy.applied = agy.effects
+       \/ (Mut = "doubleRelease" /\ agy.effects = 1 /\ agy.rejected /\ agy.releases = 1)
+    /\ agy' = [agy EXCEPT !.applied = agy.effects + 1,
+                          !.releases = IF agy.effects = 1 THEN @ + 1 ELSE @,
+                          !.kicked = @ \/ agy.effects = 2,
+                          !.claims = IF agy.effects = 2 /\ agy.id < AgyTurnLimit THEN 1 ELSE @]
+AgyAckEnd ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "finishing" /\ agy.authority /\ agy.applied = agy.effects + 1
     /\ agy' = [agy EXCEPT !.effects = @ + 1,
                            !.phase = IF agy.effects = 2 THEN "ended" ELSE @]
 AgyArchive ==
@@ -555,7 +570,7 @@ AgyArchive ==
     /\ agy' = [agy EXCEPT !.spool = FALSE]
 AgyNextInput ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "ended" /\ agy.id < AgyTurnLimit
+    /\ agy.phase = "ended" /\ agy.claims = 1 /\ agy.id < AgyTurnLimit
     /\ agy' = AgyTurn(agy.id + 1, "ready")
 AgyHeadlessAnswer ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -591,8 +606,9 @@ AgyRest == UNCHANGED <<agy, vars, lateVars>>
 AgyNext ==
        \/ AgyLegacyReceipt \/ AgyAdopt \/ AgyReserve \/ AgySpawn \/ AgyAppendDelta
        \/ AgyObserveSuccess \/ AgyAppendDone \/ AgyObserveFailure \/ AgyChildFailed \/ AgyDiscard
-       \/ AgyReadSeal \/ AgyPrepare \/ AgyPost \/ AgyReceipt
-       \/ AgyNotifyFailure \/ AgyLoseAuthority \/ AgyRestore \/ AgyRejectFinish \/ AgyFinish \/ AgyApplyEnd
+       \/ AgyReadSeal \/ AgyPrepare \/ AgyPost \/ AgyReceipt \/ AgyRejectReceipt
+       \/ AgyNotifyFailure \/ AgyLoseAuthority \/ AgyRestore \/ AgyRejectFinish \/ AgyFinish
+       \/ AgyApplyEnd \/ AgyAckEnd
        \/ AgyArchive \/ AgyNextInput \/ AgyHeadlessAnswer \/ AgyLegacyRace \/ AgyBlindRepost
        \/ AgyRepeatDone \/ AgyStaleChild \/ AgyPrematurePost \/ AgyRest
        \/ AgyHttpClaim \/ AgyHttpQueue \/ AgyHttpRestart \/ AgyHttpReplay \/ AgyHttpRefuse
@@ -601,7 +617,8 @@ AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyObserveSuccess \/ AgyObserveFailure)
     /\ WF_agy(AgyAppendDone) /\ WF_agy(AgyReadSeal)
     /\ WF_agy(AgyPrepare) /\ WF_agy(AgyPost) /\ WF_agy(AgyReceipt) /\ WF_agy(AgyRestore)
-    /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
+    /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyAckEnd)
+    /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
     /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
     /\ WF_agy(AgyHttpClaim) /\ WF_agy(AgyHttpQueue) /\ WF_agy(AgyHttpRefuse) /\ WF_agy(AgyHttpReplay)
 
@@ -629,8 +646,10 @@ AgyOffsetMonotone == agy.offset = agy.frontier
 AgyNoPrematureBody == agy.terminal # "done" => agy.remote = AgyZero
 AgyEndOnce ==
     /\ agy.ends <= 1
-    /\ agy.effects > 0 => agy.ends = 1
-    /\ agy.phase = "ended" => agy.effects = 3
+    /\ agy.applied > 0 => agy.ends = 1
+    /\ agy.releases <= 1 /\ agy.claims <= 1
+    /\ agy.kicked => agy.releases = 1
+    /\ agy.phase = "ended" => agy.effects = 3 /\ agy.kicked
 AgyInputIdentity == ~agy.stale
 \* A later id witnesses End of the earlier one independently of spool retirement.
 AgyAcceptedEnds ==
@@ -640,4 +659,67 @@ AgyAcceptedEnds ==
 AgySecondTurnEnds == <>(agy.id = 2 /\ agy.phase = "ended")
 AgyFailedEnds == (Fix = "failed") => <>(agy.phase = "ended" /\ agy.alarm)
 AgyHeadlessKept == (Fix = "headless") => <>(agy.phase = "headlessDone" /\ agy.legacy = 1)
-=============================================================================
+
+\* One verified child and its prior Legacy obligation. Shadow is always record-only.
+\* "cutover" exercises the future permission with the same lifecycle guards.
+OwnerInit ==
+    /\ LegacyIdle /\ QuietLate
+    /\ \E selected \in BOOLEAN :
+       agy = [selected |-> selected, verified |-> FALSE, prior |-> TRUE,
+              boot |-> "starting", generation |-> 1, owners |-> {"legacy"},
+              retired |-> FALSE, late |-> FALSE]
+
+OwnerVerify ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.selected /\ ~agy.verified
+    /\ agy' = [agy EXCEPT !.verified = TRUE]
+
+OwnerLegacyReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.prior
+    /\ agy' = [agy EXCEPT !.prior = FALSE]
+
+OwnerBoot ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.verified /\ agy.boot = "starting"
+    /\ agy' = [agy EXCEPT !.boot = "scanned"]
+
+OwnerAdopt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "scanned" /\ ~agy.prior /\ ~agy.retired
+    /\ (Mut # "noOwner" \/ agy.generation = 1)
+    /\ agy' = [agy EXCEPT !.boot = "ready",
+        !.owners = IF Fix = "shadow" THEN {"legacy"}
+                   ELSE IF Mut = "dualOwner" THEN {"legacy", "o"} ELSE {"o"}]
+
+OwnerRestart ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "ready" /\ agy.generation = 1 /\ ~agy.retired
+    /\ agy' = [agy EXCEPT !.boot = "starting", !.generation = 2,
+                           !.owners = IF Fix = "shadow" THEN {"legacy"} ELSE {}]
+
+OwnerRetire ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "ready" /\ ~agy.retired
+    /\ agy' = [agy EXCEPT !.retired = TRUE, !.owners = {}]
+
+OwnerLateBody ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.retired /\ Mut = "lateBody" /\ ~agy.late
+    /\ agy' = [agy EXCEPT !.late = TRUE]
+
+OwnerRest == UNCHANGED <<agy, vars, lateVars>>
+OwnerNext == OwnerVerify \/ OwnerLegacyReceipt \/ OwnerBoot \/ OwnerAdopt
+             \/ OwnerRestart \/ OwnerRetire \/ OwnerLateBody \/ OwnerRest
+
+AgyOwnerSpec == OwnerInit /\ [][OwnerNext]_agy
+    /\ WF_agy(OwnerVerify) /\ WF_agy(OwnerLegacyReceipt)
+    /\ WF_agy(OwnerBoot) /\ WF_agy(OwnerAdopt)
+
+AgyChildSingleOwner == ~({"legacy", "o"} \subseteq agy.owners)
+AgyRetirementFenced == agy.retired => agy.owners = {} /\ ~agy.late
+AgyShadowRecordOnly == Fix = "shadow" => "o" \notin agy.owners
+AgyRestartResolvesOwner ==
+    []((agy.generation = 2 /\ ~agy.retired) =>
+       <> (agy.retired \/ (agy.boot = "ready" /\ agy.owners # {})))
+====

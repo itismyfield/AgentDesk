@@ -106,6 +106,36 @@ pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
     }
 }
 
+/// A frame whose body is an approved Decision opinion, byte for byte. Only an event read from PG
+/// that approved exactly this text builds one; a source name or request metadata cannot.
+pub struct PreservedFrame(String);
+
+impl PreservedFrame {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The idle frame without the line-ending rewrite, or `None` when the event did not approve `body`.
+pub fn preserved_decision_body(
+    event: &crate::db::decisions::DecisionProvenance,
+    name: &str,
+    body: &str,
+) -> Option<PreservedFrame> {
+    use crate::db::decisions::EventKind;
+    if event.kind() != EventKind::Opinion || !event.approves(body) || body.is_empty() {
+        return None;
+    }
+    let author = event.actor_id().to_string();
+    let prefix = format!("[User: {} (ID: {author})]", author_name(name, &author));
+    let gap = if body.contains(['\n', '\r']) {
+        '\n'
+    } else {
+        ' '
+    };
+    Some(PreservedFrame(format!("{prefix}{gap}{body}")))
+}
+
 pub(crate) fn plain_inject(
     _source: &str,
     author: &str,

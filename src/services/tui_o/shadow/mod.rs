@@ -23,6 +23,7 @@ pub const IDENTITY_VERSION: u32 = 8;
 pub enum ShadowProvider {
     Claude,
     Codex,
+    Antigravity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

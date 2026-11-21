@@ -12,6 +12,8 @@ use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent_dir};
 
 use super::{STORE_DIR_NAME, durable};
 
+pub(crate) mod replay;
+
 pub(crate) const SEGMENT: &str = "0000.jsonl";
 pub(crate) const CHECKPOINT: &str = "committed.json";
 // JSON escaping can expand a single input byte to six bytes.
@@ -54,7 +56,7 @@ impl ImessageSource {
     }
 }
 
-#[derive(Clone, Copy, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Failure {
     Preparation,
@@ -108,19 +110,7 @@ impl AgySpool {
                 "invalid agy spool identity",
             ));
         }
-        if !fs::symlink_metadata(root)?.is_dir() {
-            return Err(io::Error::other(
-                "agy spool runtime root is not a directory",
-            ));
-        }
-        let store = root.join(STORE_DIR_NAME);
-        durable::ensure_dir(&store)?;
-        let destination = store.join(input.destination.to_string());
-        durable::ensure_dir(&destination)?;
-        let agy = destination.join("agy");
-        private_dir(&agy, true)?;
-        let version = agy.join("v1");
-        private_dir(&version, true)?;
+        let version = ensure_version_dir(root, input.destination)?;
 
         // One create-once directory per source. A new mailbox nonce cannot replace its obligation.
         let turn_dir =
@@ -242,6 +232,24 @@ impl AgySpool {
         durable::fault::strike(&self.turn_dir, durable::fault::Step::AgySegmentSync)?;
         self.segment.sync_data()
     }
+}
+
+fn ensure_version_dir(root: &Path, destination_id: u64) -> io::Result<PathBuf> {
+    if !fs::symlink_metadata(root)?.is_dir() {
+        return Err(io::Error::other(
+            "agy spool runtime root is not a directory",
+        ));
+    }
+    let store = root.join(STORE_DIR_NAME);
+    durable::ensure_dir(&store)?;
+    let destination = store.join(destination_id.to_string());
+    durable::ensure_dir(&destination)?;
+    let agy = destination.join("agy");
+    private_dir(&agy, true)?;
+    let version = agy.join("v1");
+    private_dir(&version, true)?;
+
+    Ok(version)
 }
 
 fn retry_sync(mut sync: impl FnMut() -> io::Result<()>) -> io::Result<()> {

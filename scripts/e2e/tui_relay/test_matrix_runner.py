@@ -370,6 +370,7 @@ class CrossChannelMatrix(unittest.TestCase):
     def test_cross_channel_dispatch_is_concurrent_and_asserts_non_leak(self):
         class FakeClient:
             lock = threading.Lock()
+            dispatches = threading.Barrier(2)
             active = 0
             max_active = 0
             sent: list[tuple[str | None, str, str, str]] = []
@@ -403,7 +404,7 @@ class CrossChannelMatrix(unittest.TestCase):
                     cls.sent.append(
                         (self.handoff_to_agent, str(channel_id), channel_kind, content)
                     )
-                threading.Event().wait(0.05)
+                cls.dispatches.wait(timeout=60)
                 with cls.lock:
                     cls.active -= 1
                 return {"id": str(len(cls.sent))}
@@ -462,8 +463,7 @@ class CrossChannelMatrix(unittest.TestCase):
                 pass_index=1,
             )
 
-        self.assertEqual(result["status"], "pass")
-        self.assertTrue(result["ok"])
+        self.assertEqual((result["status"], result["ok"]), ("pass", True))
         self.assertTrue(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "real_live")
         self.assertTrue(result["agent_mode_contract"]["satisfied"])

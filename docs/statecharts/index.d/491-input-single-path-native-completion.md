@@ -1,0 +1,2 @@
+key: 491-input-single-path-native-completion
+| `input-single-path` native completion records (#8148 S1) | Native result → recording step → cleanup | Sixteen before configurations cover ordering, watcher custody, dispatch lookup, an empty startup session map, registry contention and the channel session selector (#8261 regression) | Fifteen fixed scenarios and one baseline comparison. [Entry points and outcomes](input-single-path/native-completion.entrypoints.md) |

@@ -1017,3 +1017,44 @@ async fn u_host_scope_matrix_pg() {
         Scope::Hold(_)
     ));
 }
+
+// A thread has no agent binding, so its scope ends before the boot entry read whatever its
+// parent's policy or its own judged execution is; the absence read stays the configured channel's.
+#[test]
+fn u_thread_scope_ends_at_the_binding_gate() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    use crate::services::session_host::thread_host;
+    let thread = CHANNEL + 7;
+    let (config, owner) = (config(CHANNEL, true), test_owner(thread));
+    let key =
+        adk_session::build_namespaced_session_key(TOKEN, &ProviderKind::Claude, &owner.logical_key);
+    let _child = force_relation_for_test(thread, Relation::Child { parent: CHANNEL });
+    let missing = HostedLookup::Missing;
+    let read = || {
+        scope(
+            &config,
+            &owner,
+            &key,
+            (&missing, &missing),
+            Ok(evidence(&missing, &key, &owner.logical_key)),
+            HostKindMarker::Absent,
+            &Ok(None),
+        )
+    };
+    assert_eq!(read(), Scope::Hold("host_unsupported"));
+    thread_host::record_judged(thread, Some(true));
+    assert_eq!(read(), Scope::Hold("host_unsupported"));
+    thread_host::record_judged(thread, None);
+    // The configured channel itself, with nothing judged in this process, still starts.
+    let own = test_owner(CHANNEL);
+    let first = scope(
+        &config,
+        &own,
+        &key,
+        (&missing, &missing),
+        Ok(evidence(&missing, &key, &own.logical_key)),
+        HostKindMarker::Absent,
+        &Ok(None),
+    );
+    assert_eq!(first, Scope::HerdrFirstCreate);
+}

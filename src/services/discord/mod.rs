@@ -17,6 +17,7 @@ mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
 pub(crate) mod decision_forums;
+pub(crate) mod delegation_card;
 mod delivery_lease_cell;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
@@ -60,7 +61,7 @@ mod placeholder_cleanup;
 mod placeholder_controller;
 mod placeholder_live_events;
 mod placeholder_sweeper;
-mod prompt_builder;
+pub(crate) mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
@@ -257,11 +258,12 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
+pub(crate) use queue_io::decision_drain;
 pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_ingress::{
-    ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
-    installed as input_owner_installed_for_test,
+    ADOPTS as OWNER_ADOPTS_FOR_TEST, Hold as OwnerHoldForTest,
+    execution as owner_execution_for_test, installed as input_owner_installed_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;

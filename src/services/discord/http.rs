@@ -1,3 +1,4 @@
+use super::outbound::notification_policy::scoped_flags;
 use poise::serenity_prelude as serenity;
 use serenity::{
     ChannelId, CreateActionRow, CreateAllowedMentions, CreateMessage, EditMessage, Message,
@@ -163,7 +164,10 @@ pub(in crate::services::discord) async fn dispatch_channel_message(
     super::outbound::raw_output::request(
         channel_id,
         super::outbound::raw_output::Operation::Post,
-        channel_id.send_message(http, message.allowed_mentions(relay_allowed_mentions())),
+        channel_id.send_message(
+            http,
+            scoped_flags(channel_id.get(), message).allowed_mentions(relay_allowed_mentions()),
+        ),
     )
     .await
 }
@@ -182,7 +186,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_nonce(
     super::outbound::raw_output::request(
         channel_id,
         super::outbound::raw_output::Operation::Post,
-        channel_id.send_message(http, message),
+        channel_id.send_message(http, scoped_flags(channel_id.get(), message)),
     )
     .await
 }
@@ -203,7 +207,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
     super::outbound::raw_output::request(
         channel_id,
         super::outbound::raw_output::Operation::Post,
-        channel_id.send_message(http, message),
+        channel_id.send_message(http, scoped_flags(channel_id.get(), message)),
     )
     .await
     .inspect(|message| {
@@ -228,7 +232,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference_an
     super::outbound::raw_output::request(
         channel_id,
         super::outbound::raw_output::Operation::Post,
-        channel_id.send_message(http, message),
+        channel_id.send_message(http, scoped_flags(channel_id.get(), message)),
     )
     .await
 }

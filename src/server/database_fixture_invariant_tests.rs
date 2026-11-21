@@ -37,8 +37,8 @@ mod tests {
 
     /// Fixture sources that select the shared base directly, beyond the four
     /// cluster fixtures above. The bounded constructor inventory below checks
-    /// both lists against direct calls in `src/**/*.rs`, including the real
-    /// fixture in `db::postgres`; that file is not merely a helper definition.
+    /// both lists against direct calls in `src/**/*.rs`, including the fixture
+    /// in `db::postgres::tests`.
     /// `engine::ops::config_ops` delegates base selection through the listed
     /// `dispatch::test_support` and is an explicit exception to direct base-call checks only.
     /// Its source still participates in the address/environment token checks. Target-parser and tunnel contract
@@ -60,7 +60,10 @@ mod tests {
             "db::dispatches::delivery_events",
             include_str!("../db/dispatches/delivery_events.rs"),
         ),
-        ("db::postgres", include_str!("../db/postgres.rs")),
+        (
+            "db::postgres::tests",
+            include_str!("../db/postgres/tests/mod.rs"),
+        ),
         (
             "db::postgres::advisory_lock_tests",
             include_str!("../db/postgres/advisory_lock_tests.rs"),
@@ -139,15 +142,22 @@ mod tests {
         ),
     ];
 
+    const PG_SHARED_BASE_SOURCE: (&str, &str) = ("db::postgres", include_str!("../db/postgres.rs"));
+
     const DELEGATED_FIXTURE_SOURCE: (&str, &str) = (
         "engine::ops::config_ops",
         include_str!("../engine/ops/config_ops.rs"),
     );
 
-    fn address_checked_sources() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    fn shared_base_checked_sources() -> impl Iterator<Item = &'static (&'static str, &'static str)>
+    {
         PG_FIXTURE_SOURCES
             .iter()
-            .chain(std::iter::once(&DELEGATED_FIXTURE_SOURCE))
+            .chain(std::iter::once(&PG_SHARED_BASE_SOURCE))
+    }
+
+    fn address_checked_sources() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+        shared_base_checked_sources().chain(std::iter::once(&DELEGATED_FIXTURE_SOURCE))
     }
 
     /// Assembled at runtime so this file does not itself contain the literal it
@@ -373,7 +383,7 @@ mod tests {
 
     #[test]
     fn fixture_sources_use_the_shared_base_authority() {
-        for (module, source) in PG_FIXTURE_SOURCES {
+        for (module, source) in shared_base_checked_sources() {
             assert!(
                 calls_shared_base(source),
                 "{module} no longer calls the shared fixture-base authority (#5229)"

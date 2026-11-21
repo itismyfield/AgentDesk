@@ -591,4 +591,18 @@ RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
 RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
 SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
 RestartKeepsDurableIdentity == Naming!RestartKeepsDurableIdentity
+
+\* Raw session-key input on the registered row: stop, cleanup, resume and reconcile entry points.
+NamingRawAlias == Naming!RawNext("fixed") /\ UNCHANGED sessionVars
+NamingRawAliasParsed == Naming!RawNext("parse-alias") /\ UNCHANGED sessionVars
+NamingRawAliasProviderDefault == Naming!RawNext("provider-default") /\ UNCHANGED sessionVars
+NamingRawAliasUnnormalized == Naming!RawNext("no-normalize") /\ UNCHANGED sessionVars
+NamingRawAliasGcByAlias == Naming!RawNext("gc-alias") /\ UNCHANGED sessionVars
+RawAliasSpec == NamingInit /\ [][NamingRawAlias]_vars /\ WF_vars(NamingRawAlias)
+RawStopEndsCurrent == Naming!RawStopEndsCurrent
+RawMissNeedsRace == Naming!RawMissNeedsRace
+RawAliasReachesRow == Naming!RawAliasReachesRow
+RawProviderFromRecord == Naming!RawProviderFromRecord
+GcKeepsLive == Naming!GcKeepsLive
+RawSettles == Naming!RawSettles
 ====

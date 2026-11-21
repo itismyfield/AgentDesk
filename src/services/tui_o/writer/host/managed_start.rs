@@ -11,6 +11,7 @@ pub fn start_managed<I: HostIo>(
     let kind = match provider {
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
+        ShadowProvider::Antigravity => return Vec::new(),
     };
     let ours = |(channel, channel_kind, candidate): (u64, _, Option<Candidate>)| {
         Some((

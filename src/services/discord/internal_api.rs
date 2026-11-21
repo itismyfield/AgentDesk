@@ -132,6 +132,17 @@ where
     read_response(response).await
 }
 
+/// `GET /api/agents/{id}/input-result`; the id is a checked delegation worker id.
+pub(super) async fn get_input_result(agent_id: &str, origin_id: &str) -> Result<Value, String> {
+    let path = format!("/api/agents/{agent_id}/input-result");
+    request_query(Method::GET, &path, &[("origin_id", origin_id)]).await
+}
+
+/// `POST /api/agents/{id}/turn/stop`; the id is a checked delegation worker id.
+pub(super) async fn stop_agent_turn(agent_id: &str) -> Result<Value, String> {
+    request_json(Method::POST, &format!("/api/agents/{agent_id}/turn/stop")).await
+}
+
 pub(super) async fn lookup_dispatch_info(dispatch_id: &str) -> Result<Value, String> {
     let mut params = HashMap::new();
     params.insert("dispatch_id".to_string(), dispatch_id.to_string());

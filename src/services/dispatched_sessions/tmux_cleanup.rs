@@ -24,23 +24,13 @@ pub(super) async fn kill_tmux_session_impl(
     reason: &str,
     minimum_idle_minutes: Option<u64>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tmux_name = match tmux_name_from_session_key(session_key) {
-        Some(name) => name,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux"}),
-                ),
-            );
-        }
+    let malformed = || {
+        let error = "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux";
+        (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
     };
-
-    let provider_info =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
-    let provider_name = provider_info
-        .as_ref()
-        .map(|(provider, _)| provider.as_str());
+    if tmux_name_from_session_key(session_key).is_none() {
+        return malformed();
+    }
 
     let Some(pool) = state.pg_pool_ref() else {
         return (
@@ -48,11 +38,9 @@ pub(super) async fn kill_tmux_session_impl(
             Json(json!({"error": "postgres pool unavailable"})),
         );
     };
-    let (active_dispatch_id, _agent_id, _runtime_channel_id, session_provider, owner_instance_id) =
-        match dispatched_sessions_db::load_force_kill_session_pg(pool, session_key, provider_name)
-            .await
-        {
-            Ok(Some(tuple)) => tuple,
+    let (current_key, session) =
+        match dispatched_sessions_db::load_force_kill_session_pg(pool, session_key).await {
+            Ok(Some(selected)) => selected,
             Ok(None) => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -66,6 +54,18 @@ pub(super) async fn kill_tmux_session_impl(
                 );
             }
         };
+    // The request may name an alias; the name, markers, probe and kill follow the row's primary.
+    let session_key = current_key.as_str();
+    let Some(tmux_name) = tmux_name_from_session_key(session_key) else {
+        return malformed();
+    };
+    let (active_dispatch_id, _agent_id, _runtime_channel_id, session_provider, owner_instance_id) =
+        session;
+    let provider = crate::services::provider::session_source::session_provider(
+        session_provider.as_deref(),
+        Some(session_key),
+        &tmux_name,
+    );
 
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(state);
     if let Err(response) = crate::services::session_forwarding::enforce_receiver_fence(
@@ -102,7 +102,8 @@ pub(super) async fn kill_tmux_session_impl(
             }
         }
     }
-    let effective_provider_name = provider_name.or(session_provider.as_deref());
+    let effective_provider_name =
+        (provider.as_ref().map(|provider| provider.as_str())).or(session_provider.as_deref());
 
     // The owner checks the host before its first probe or write, whatever the reason.
     let host = crate::services::tmux_turn_liveness::cleanup_host::confirm_legacy_tmux_key_pg(

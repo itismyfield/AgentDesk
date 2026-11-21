@@ -205,7 +205,9 @@ fn held(hold: &crate::services::claude_tui::input::PreparationHold) -> Completio
     use crate::services::claude_tui::readiness::Unproven;
     match hold.unproven {
         Some(Unproven::Refused) => Completion::Refused(format!("unproven: {hold:?}")),
-        Some(Unproven::Retained) => Completion::NotSent(format!("unproven: {hold:?}")),
+        Some(Unproven::Retained | Unproven::Lost) => {
+            Completion::NotSent(format!("unproven: {hold:?}"))
+        }
         None => Completion::Held(format!("held: {hold:?}")),
     }
 }

@@ -7,10 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "${PYTHON:-python3}" - "$SCRIPT_DIR/../scripts/ci-script-checks.sh" <<'PY'
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -33,10 +35,14 @@ def decode(value, properties=False):
 
 
 class ScriptCheckAnnotations(unittest.TestCase):
-    def run_fixture(self, body, summary="file", initial=""):
+    def run_fixture(self, body, summary="file", initial="", unittest_source=""):
         with tempfile.TemporaryDirectory(prefix="script-check-annotations-") as tmp:
             root = Path(tmp)
             summary_path = root / "summary.md"
+            script_path = root / "ci-script-checks.sh"
+            script_path.write_text(prefix + "\ndeclare -F banner >/dev/null || exit 98\n" + body)
+            if unittest_source:
+                (root / "fixture.py").write_text(textwrap.dedent(unittest_source))
             env = {**os.environ, "PYTHON": sys.executable, "TMPDIR": tmp}
             # Never append expected failures to the enclosing CI step's summary.
             env.pop("GITHUB_STEP_SUMMARY", None)
@@ -52,7 +58,7 @@ class ScriptCheckAnnotations(unittest.TestCase):
             elif summary == "empty":
                 env["GITHUB_STEP_SUMMARY"] = ""
             result = subprocess.run(
-                ["bash", "-c", prefix + "\ndeclare -F banner >/dev/null || exit 98\n" + body],
+                ["bash", str(script_path)],
                 cwd=root, env=env,
                 capture_output=True, text=True, timeout=15,
             )
@@ -104,6 +110,32 @@ class ScriptCheckAnnotations(unittest.TestCase):
                 )
                 self.assert_failure(result, name, status)
                 self.assertEqual(summary, f"FAIL: {name}\n")
+
+    def test_unittest_failures_and_errors_are_reported_once_by_id(self):
+        result, summary = self.run_fixture(
+            'banner "unittest fixture"\n'
+            'echo "ERROR: rejected (ordinary.diagnostic)" >&2\n'
+            'PYTHON_COLORS=1 "$PYTHON" -m unittest fixture\necho UNREACHABLE',
+            unittest_source='''
+                import unittest
+
+                class Example(unittest.TestCase):
+                    def test_subtests(self):
+                        for number in range(2):
+                            with self.subTest(number=number):
+                                self.fail("expected failure")
+
+                    def test_error(self):
+                        raise RuntimeError("expected error")
+            ''',
+        )
+        self.assert_failure(result, "unittest fixture", 1)
+        stderr = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+        self.assertIn("ERROR: test_error (fixture.Example.test_error)", stderr)
+        self.assertIn("FAIL: test_subtests (fixture.Example.test_subtests) (number=0)", stderr)
+        line = "FAILED_TESTS: fixture.Example.test_error fixture.Example.test_subtests"
+        self.assertEqual([row for row in result.stdout.splitlines() if row.startswith("FAILED_TESTS:")], [line])
+        self.assertEqual(summary, f"FAIL: unittest fixture\n{line}\n")
 
     def test_missing_or_unwritable_summary_keeps_original_failure(self):
         for summary_mode in ("unset", "empty", "unwritable"):

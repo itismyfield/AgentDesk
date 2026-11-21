@@ -15,7 +15,9 @@ pub(in crate::services::discord::turn_presence::activity) async fn admitted(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Option<String> {
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get())?;
+    let endpoint =
+        crate::services::session_host::thread_host::current_execution_cached(channel.get())
+            .endpoint()?;
     let token_hash = &shared.token_hash;
     let channel_text = channel.to_string();
     let identity = CanonicalSessionIdentity {

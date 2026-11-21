@@ -1,5 +1,26 @@
 use super::*;
-use crate::services::turn_summary_line::{Outcome, render};
+use crate::services::turn_summary_line::{Footer, Outcome, render as render_footer};
+
+fn render(
+    outcome: Outcome,
+    elapsed_ms: Option<u64>,
+    context_pct: Option<u8>,
+    quota: Option<Quota>,
+) -> String {
+    render_footer(
+        outcome,
+        Footer {
+            elapsed_ms,
+            context_pct,
+            quota,
+            ..Footer::default()
+        },
+    )
+}
+
+fn codex(data: &str, now: DateTime<Utc>) -> Option<Quota> {
+    buckets(data, now, false)
+}
 use serde_json::json;
 
 #[cfg(unix)]
@@ -9,10 +30,13 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
     use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
     use sha2::{Digest, Sha256};
 
-    if isolated_cswap_429_fixture(concat!(
-        module_path!(),
-        "::statusline_quota_reaches_o_summary_when_cswap_usage_is_429"
-    )) {
+    if isolated_cswap_fixture(
+        concat!(
+            module_path!(),
+            "::statusline_quota_reaches_o_summary_when_cswap_usage_is_429"
+        ),
+        true,
+    ) {
         return;
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -77,7 +101,20 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
         })
         .collect::<Vec<_>>();
     let expected = format!(
-        "-# ⏱️ 2초 · 5h 24% ({}) · 7d 61% ({})",
+        "-# ⏱️ 2초 ({})\n-# 5h 24% ({}) · 7d 61% ({})",
+        (started + chrono::Duration::seconds(2))
+            .with_timezone(&chrono_tz::Asia::Seoul)
+            .format(
+                if started.with_timezone(&chrono_tz::Asia::Seoul).date_naive()
+                    == (started + chrono::Duration::seconds(2))
+                        .with_timezone(&chrono_tz::Asia::Seoul)
+                        .date_naive()
+                {
+                    "%H:%M"
+                } else {
+                    "%m/%d %H:%M"
+                }
+            ),
         five_reset
             .with_timezone(&chrono_tz::Asia::Seoul)
             .format("%H:%M"),
@@ -94,7 +131,112 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
 }
 
 #[cfg(unix)]
-fn isolated_cswap_429_fixture(name: &str) -> bool {
+#[test]
+fn restarted_named_claude_does_not_borrow_default_fable() {
+    use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider};
+    use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
+
+    if isolated_cswap_fixture(
+        concat!(
+            module_path!(),
+            "::restarted_named_claude_does_not_borrow_default_fable"
+        ),
+        false,
+    ) {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(CswapService::global().list_accounts("fixture".into(), None))
+        .unwrap();
+    let now = Utc::now();
+    let account = CswapService::global()
+        .cached_accounts_for_summary()
+        .unwrap();
+    assert_eq!(
+        claude(&account, now)
+            .unwrap()
+            .fable_seven_day
+            .unwrap()
+            .percent,
+        87
+    );
+    publish(
+        "claude",
+        "named-a",
+        &json!({"buckets":[
+            {"name":"7d Fable","used":22,"limit":100,"reset":now.timestamp()+604800}
+        ]})
+        .to_string(),
+        now.timestamp(),
+    );
+
+    let session = uuid::Uuid::new_v4().to_string();
+    let root = crate::services::claude_tui::hook_bundle::statusline::record_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    let path = crate::services::claude_tui::hook_bundle::statusline::record_path(&root, &session);
+    std::fs::write(
+        path,
+        json!({
+            "session_id":session, "rate_limits":{
+                "five_hour":{"used_percentage":24,"resets_at":now.timestamp()+18000},
+                "seven_day":{"used_percentage":61,"resets_at":now.timestamp()+604800}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let logical = format!("footer-{}", uuid::Uuid::new_v4());
+    let summarize = |id: &str| {
+        let mut deriver =
+            UnitDeriver::new(7_319_004, ShadowProvider::Claude).with_turn_summary(SummaryInputs {
+                turn_marks: Default::default(),
+                disposed: Default::default(),
+                context_window: None,
+            });
+        let mut derive = |value: Value| {
+            deriver.derive_with_session(
+                &CapturedRecord {
+                    start: 0,
+                    end: 1,
+                    line: serde_json::to_vec(&value).unwrap(),
+                },
+                crate::services::tui_o::shadow::IDENTITY_VERSION,
+                || Some(logical.clone()),
+            )
+        };
+        derive(json!({"type":"user","sessionId":session,
+            "timestamp":now.to_rfc3339(),"message":{"content":"request"}}));
+        derive(json!({"type":"assistant","sessionId":session,
+            "timestamp":now.to_rfc3339(),"uuid":id,"apiBlockIndex":0,
+            "message":{"id":id,"content":[{"type":"text","text":"answer"}]}}));
+        let terminal = derive(json!({"type":"system","subtype":"stop_hook_summary",
+            "sessionId":session,"timestamp":(now+chrono::Duration::seconds(2)).to_rfc3339()}));
+        let [Derived::Piece(footer)] = terminal.as_slice() else {
+            panic!("{terminal:?}")
+        };
+        assert!(
+            footer.payload.contains("\n-# 5h 24% ("),
+            "{}",
+            footer.payload
+        );
+        assert!(footer.payload.contains(" · 7d 61% ("), "{}", footer.payload);
+        footer.payload.clone()
+    };
+    let unknown = summarize("unknown-owner");
+    assert!(!unknown.contains("Fable"), "{unknown}");
+    use crate::services::tmux_common::write_claude_session_auth;
+    write_claude_session_auth(&logical, "successor-session", "named-a").unwrap();
+    assert!(!summarize("different-session").contains("Fable"));
+    write_claude_session_auth(&logical, &session, "named-a").unwrap();
+    let restored = summarize("restored-owner");
+    assert!(restored.contains(" · Fable 7d 22% ("), "{restored}");
+}
+
+#[cfg(unix)]
+fn isolated_cswap_fixture(name: &str, rate_limited: bool) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let name = name
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
@@ -111,12 +253,18 @@ fn isolated_cswap_429_fixture(name: &str) -> bool {
     std::fs::write(&executable, "#!/bin/sh\ncat \"$0.json\"\n").unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let at = Utc::now();
+    let fetched = if rate_limited {
+        at - chrono::Duration::minutes(51)
+    } else {
+        at
+    };
     std::fs::write(executable.with_extension("json"), json!({
         "activeAccountNumber":2,"accounts":[{
             "number":2,"active":true,"usageStatus":"ok",
-            "usageFetchedAt":(at-chrono::Duration::minutes(51)).to_rfc3339(),
+            "usageFetchedAt":fetched.to_rfc3339(),
             "usageError":"429 usage-endpoint budget reached; backing off",
-            "usage":{"fiveHour":{"pct":15,"resetsAt":(at+chrono::Duration::hours(5)).to_rfc3339()}}
+            "usage":{"fiveHour":{"pct":15,"resetsAt":(at+chrono::Duration::hours(5)).to_rfc3339()},
+                "scoped":[{"name":"Fable","pct":87,"resetsAt":(at+chrono::Duration::days(7)).to_rfc3339()}]}
         }]
     }).to_string()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -188,10 +336,10 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
     let line = render(Outcome::Completed, Some(150_000), Some(45), Some(quota));
     assert_eq!(
         line,
-        "-# ⏱️ 2분 30초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 16:00)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00)"
     );
-    assert!(!line.chars().any(char::is_control));
-    assert_eq!(line.lines().count(), 1);
+    assert!(line.lines().all(|part| !part.chars().any(char::is_control)));
+    assert_eq!(line.lines().count(), 2);
     let mut rollover = accounts();
     rollover.accounts[1]
         .usage
@@ -208,7 +356,7 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
             Some(45),
             claude(&rollover, now())
         ),
-        "-# ⏱️ 2분 30초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 08:45)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 08:45)"
     );
 }
 
@@ -304,20 +452,27 @@ fn quota_windows_need_valid_percent_and_a_future_reset() {
         None,
         claude(&response, now()),
     );
-    assert_eq!(line, "-# ⏱️ 1초 · 7d 38% (10/27 16:00)");
+    assert_eq!(line, "-# ⏱️ 1초\n-# 7d 38% (10/27 16:00)");
 }
 
 fn cache() -> RwLock<Cache> {
     RwLock::new(Cache {
         quotas: BTreeMap::from([
-            ("default".into(), (now(), codex(&data(90), now()).unwrap())),
-            ("named".into(), (now(), codex(&data(15), now()).unwrap())),
+            (
+                ("codex".into(), "default".into()),
+                (now(), codex(&data(90), now()).unwrap()),
+            ),
+            (
+                ("codex".into(), "named".into()),
+                (now(), codex(&data(15), now()).unwrap()),
+            ),
         ]),
         profiles: BTreeMap::from([(
             ("codex".into(), 42),
             Selection {
                 at: now(),
                 profile: "named".into(),
+                default_claude_account: None,
             },
         )]),
     })
@@ -383,13 +538,25 @@ fn codex_requires_the_selected_profile_and_a_fresh_cache() {
         None
     );
     cache.write().unwrap().profiles.get_mut(&key).unwrap().at = now();
-    cache.write().unwrap().quotas.remove("named");
+    cache
+        .write()
+        .unwrap()
+        .quotas
+        .remove(&("codex".into(), "named".into()));
     assert_eq!(
         cached_codex(&cache, 42, Selected::Before(now()), now()),
         None
     );
     assert_eq!(
-        snapshot("unsupported", 42, Some(Selected::Before(now())), None),
+        snapshot(
+            "unsupported",
+            42,
+            Some(Selected::Before(now())),
+            None,
+            None,
+            true
+        )
+        .quota,
         None
     );
 }
@@ -416,7 +583,7 @@ fn codex_incomplete_duplicate_and_unrelated_windows_are_not_zero_percent() {
     );
     assert_eq!(
         render(Outcome::Completed, Some(1000), None, quota),
-        "-# ⏱️ 1초 · 5h 0% (11:30)"
+        "-# ⏱️ 1초\n-# 5h 0% (11:30)"
     );
 }
 
@@ -511,11 +678,65 @@ fn recorded_profile_and_collected_quota_reach_the_o_summary_boundary() {
         })
         .collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("-# ⏱️ 2초 · 5h 15% ("), "{lines:?}");
+    assert!(lines[0].starts_with("-# ⏱️ 2초 ("), "{lines:?}");
+    assert!(lines[0].contains("\n-# 5h 15% ("), "{lines:?}");
     assert!(lines[0].contains(" · 7d 38% ("), "{lines:?}");
     publish("codex", &overlay.profile_id, "{}", started.timestamp());
     assert_eq!(
-        snapshot("codex", channel, Some(Selected::Before(started)), None),
+        snapshot(
+            "codex",
+            channel,
+            Some(Selected::Before(started)),
+            None,
+            None,
+            true
+        )
+        .quota,
         None
+    );
+}
+
+#[test]
+fn claude_fable_scoped_window_supplements_the_fresh_session_quota() {
+    let session = claude(&accounts(), now());
+    let mut response = accounts();
+    response.accounts[1].usage.as_mut().unwrap().extra.insert(
+        "scoped".into(),
+        json!([
+            {"name":"Other","pct":87,"resetsAt":"2026-10-27T07:00:00Z"},
+            {"name":"Fable","pct":47.6,"resetsAt":"2026-10-27T23:45:00Z"},
+        ]),
+    );
+    let account = claude(&response, now());
+    assert_eq!(
+        render(
+            Outcome::Completed,
+            Some(1000),
+            None,
+            merge_claude(session, account)
+        ),
+        "-# ⏱️ 1초\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00) · Fable 7d 48% (10/28 08:45)"
+    );
+    response.usage_data_stale = true;
+    assert_eq!(merge_claude(session, claude(&response, now())), session);
+}
+
+#[test]
+fn fable_bucket_is_available_for_claude_profiles_and_ignored_for_codex() {
+    let data = json!({"buckets":[
+        {"name":"7d Fable","used":22,"limit":100,"reset":1793084400_i64}
+    ]})
+    .to_string();
+    assert_eq!(codex(&data, now()), None);
+    assert_eq!(
+        render_footer(
+            Outcome::Completed,
+            Footer {
+                ended: Some(now()),
+                quota: buckets(&data, now(), true),
+                ..Footer::default()
+            }
+        ),
+        "-# ✅ 완료 (09:00)\n-# Fable 7d 22% (10/27 16:00)"
     );
 }

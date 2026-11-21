@@ -1,11 +1,13 @@
 //! Discord side of the O writer: POSTs and history reads through the gateway's shared HTTP client,
 //! and one hold on the channel's shared delivery lease per piece.
 
+mod agy;
+
 use std::future::Future;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, GetMessages, MessageId};
+use serenity::{ChannelId, GetMessages, MessageId};
 
 use super::super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};
@@ -25,6 +27,7 @@ pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+    agy_correlation: Option<agy::Correlation>,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -35,6 +38,7 @@ impl GatewayPort {
             http,
             bot_id,
             owner: None,
+            agy_correlation: None,
             #[cfg(test)]
             repost_base: None,
         }
@@ -93,6 +97,10 @@ fn refusal(status: Option<u16>) -> Option<u16> {
 }
 
 impl DiscordPort for GatewayPort {
+    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
+        self.owner.as_ref().map(|scope| &scope.pool)
+    }
+
     fn bot_id(&self) -> u64 {
         self.bot_id
     }
@@ -103,13 +111,28 @@ impl DiscordPort for GatewayPort {
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let http = Arc::clone(&self.http);
+        let agy = self.agy_correlation.clone();
+        let bot_id = self.bot_id;
         async move {
-            let message = CreateMessage::new()
+            let message = super::notification_policy::scoped_message(channel)
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
+            let message = match &agy {
+                Some(correlation) => correlation.attach(message),
+                None => message,
+            };
             match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
                 .await
             {
+                Ok(message)
+                    if agy.as_ref().is_some_and(|correlation| {
+                        !correlation.matches(&message, channel, bot_id)
+                    }) =>
+                {
+                    PostOutcome::Uncertain(
+                        "agy Discord response lacks exact receipt evidence".into(),
+                    )
+                }
                 Ok(message) => {
                     crate::services::legacy_body_census::transport::record_o_created(
                         channel,
@@ -153,6 +176,22 @@ impl DiscordPort for GatewayPort {
                 .await
                 .unwrap_or_else(PostOutcome::Uncertain)
         }
+    }
+
+    fn post_unit(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        use super::notification_policy as policy;
+        policy::scoped(
+            policy::unit_class(kind),
+            self.post_origin(channel, content, origin),
+        )
     }
 
     fn history_after(
@@ -275,6 +314,46 @@ mod tests {
             leases.try_acquire(7, 5).is_none(),
             "O got in while Legacy held it"
         );
+    }
+
+    #[tokio::test]
+    async fn secretary_channel_tool_cards_post_silently_while_replies_push() {
+        use crate::services::tui_o::repost::io::tests::{Mock, reply};
+        use crate::services::tui_o::shadow::UnitKind;
+        let _live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let mut config = crate::config::Config::default();
+        config.discord.secretary_channels = vec!["72280900".into()];
+        crate::config_live_reload::install(config);
+        let created = serde_json::json!({
+            "id": "9001", "channel_id": "72280900", "content": "x", "timestamp": "2026-11-21T00:00:00+00:00",
+            "author": {"id": "42", "username": "bot", "discriminator": "0001", "avatar": null, "bot": true},
+            "edited_timestamp": null, "tts": false, "mention_everyone": false, "mentions": [],
+            "mention_roles": [], "attachments": [], "embeds": [], "pinned": false, "type": 0
+        })
+        .to_string();
+        let mock = Mock::start(vec![
+            reply("200 OK", &[], &created),
+            reply("200 OK", &[], &created),
+        ])
+        .await;
+        let http = serenity::HttpBuilder::new("fixture-token").proxy(mock.base.clone());
+        let port = GatewayPort::new(Arc::new(http.ratelimiter_disabled(true).build()), 42);
+        for kind in [UnitKind::Tool, UnitKind::Body] {
+            let outcome = port
+                .post_unit(72280900, format!("{kind:?}"), None, kind)
+                .await;
+            assert!(matches!(outcome, PostOutcome::Created(_)), "{kind:?}");
+        }
+        let flags: Vec<_> = mock
+            .requests()
+            .iter()
+            .map(|(_, body)| {
+                serde_json::from_slice::<serde_json::Value>(body).unwrap()["flags"].as_u64()
+            })
+            .collect();
+        assert_eq!(flags, [Some(4096), None]);
     }
 
     #[test]

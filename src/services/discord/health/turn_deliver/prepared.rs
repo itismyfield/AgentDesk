@@ -12,13 +12,24 @@ impl HealthRegistry {
     /// Captures delivery state before admission; only awaiting the returned future can deliver.
     pub(crate) async fn prepare_external_human_input_on(
         &self,
-        mut request: HumanInputRequest,
+        request: HumanInputRequest,
         reply: Option<crate::services::imsg_reply::ReplyObligation>,
         thread: Option<&ThreadTurnRuntime>,
     ) -> Result<
         impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>> + Send + 'static,
         HumanInputError,
     > {
+        let ports = self.live_ports(request, reply, thread).await?;
+        Ok(Self::deliver_prepared(ports))
+    }
+
+    /// The live ports of the runtime that owns the request's channel now, after its preflight.
+    pub(super) async fn live_ports(
+        &self,
+        mut request: HumanInputRequest,
+        reply: Option<crate::services::imsg_reply::ReplyObligation>,
+        thread: Option<&ThreadTurnRuntime>,
+    ) -> Result<LivePorts, HumanInputError> {
         let shared = match thread {
             Some(thread) => thread.shared.clone(),
             None => resolve_direct_channel_shared(self, request.channel_id, &request.provider)
@@ -72,7 +83,14 @@ impl HealthRegistry {
                 return Err(HumanInputError::RuntimeUnavailable(error.clone()));
             }
         }
-        Ok(async move {
+        Ok(ports)
+    }
+
+    fn deliver_prepared(
+        ports: LivePorts,
+    ) -> impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>> + Send + 'static
+    {
+        async move {
             let channel_id = ports.request.channel_id.get();
             let provider = ports.request.provider.clone();
             let source = ports.request.source.clone();
@@ -114,7 +132,7 @@ impl HealthRegistry {
                 "human_input_delivery"
             );
             result
-        })
+        }
     }
 }
 

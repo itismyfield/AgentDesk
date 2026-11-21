@@ -868,16 +868,13 @@ async fn start_reserved_headless_turn_admitted(
     )
     .await;
 
-    // Routine turns execute in a synthetic child channel, while their model is
-    // configured on the real agent channel carried in routine metadata. Resolve
-    // from that parent so provider CLIs receive the configured model explicitly
-    // instead of falling back to a stale/default CLI session configuration.
-    let model_resolution_channel_id =
-        metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
-    let model_for_turn = super::super::super::commands::resolve_model_for_turn(
+    let (model_for_turn, model_for_status) = routine_metadata::models_for_turn(
         shared,
-        model_resolution_channel_id,
+        channel_id,
         &provider,
+        metadata.as_ref(),
+        adk_session_key.as_deref(),
+        session_id.as_deref().filter(|_| !replay_start::retrying()),
     )
     .await;
     let adk_session_name = channel_name.clone();
@@ -889,7 +886,7 @@ async fn start_reserved_headless_turn_admitted(
     post_adk_session_status_with_canonical_identity(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
-        model_for_turn.as_deref(),
+        model_for_status.as_deref(),
         "working",
         &provider,
         Some(&adk_session_info),

@@ -51,10 +51,12 @@ pub(super) async fn post_suppressed_injection_note(
     } else {
         format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt)
     };
-    match super::super::http::dispatch_channel_message(
-        notify_http,
-        channel_id,
-        serenity::CreateMessage::new().content(note),
+    match crate::services::discord::outbound::notification_policy::progress(
+        super::super::http::dispatch_channel_message(
+            notify_http,
+            channel_id,
+            serenity::CreateMessage::new().content(note),
+        ),
     )
     .await
     {
@@ -152,10 +154,12 @@ pub(super) async fn post_passive_prompt_notice(
         }
         None => super::scheduled_prompt::direct_prompt_notice(prompt).await,
     };
-    let posted = super::super::http::dispatch_channel_message(
-        &gate.notify_http,
-        channel,
-        serenity::CreateMessage::new().content(content),
+    let posted = crate::services::discord::outbound::notification_policy::progress(
+        super::super::http::dispatch_channel_message(
+            &gate.notify_http,
+            channel,
+            serenity::CreateMessage::new().content(content),
+        ),
     )
     .await;
     record_prompt_id_after_post(prompt, posted.as_ref().err());
@@ -253,10 +257,12 @@ pub(super) async fn post_steer_echo(
         &prompt.tmux_session_name,
         &prompt.prompt,
     );
-    if let Err(error) = super::super::http::dispatch_channel_message(
-        &http,
-        channel_id,
-        serenity::CreateMessage::new().content(content),
+    if let Err(error) = crate::services::discord::outbound::notification_policy::progress(
+        super::super::http::dispatch_channel_message(
+            &http,
+            channel_id,
+            serenity::CreateMessage::new().content(content),
+        ),
     )
     .await
     {

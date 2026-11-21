@@ -576,7 +576,7 @@ it("copies a definition into an untouched create form but never over a draft bei
   expect(container.textContent).toContain("A new campaign is already being written, so nothing was copied.");
 });
 
-it("opens a selected task's details as a sheet over the page on a narrow screen", async () => {
+it("opens a selected task as its own screen on a narrow screen, and Back returns to the list", async () => {
   const query = (text: string) => ({ matches: text === "(max-width: 899px)", media: text, addEventListener: vi.fn(), removeEventListener: vi.fn() });
   const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
   Object.defineProperty(window, "matchMedia", { configurable: true, value: query });
@@ -586,9 +586,15 @@ it("opens a selected task's details as a sheet over the page on a narrow screen"
     await render();
     expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
     await openTask("C");
-    const sheet = document.querySelector('[role="dialog"][aria-label="Selected task"]');
-    expect(sheet?.querySelector(".campaign-inspector h4")?.textContent).toBe(fixtures.reviewWaiting.definition.nodes.find((node) => node.id === "C")!.title);
+    const screen = () => document.querySelector('[role="dialog"]');
+    expect(screen()?.querySelector("h2")?.textContent).toBe(fixtures.reviewWaiting.definition.nodes.find((node) => node.id === "C")!.title);
+    expect(screen()?.querySelector("header")?.textContent).toContain("Release · #7440");
     expect(container.querySelector(".campaign-inspector")).toBeNull();
+    expect(window.location.search).toBe("?mode=server&campaign=release&node=C");
+    await click(buttonByText("Back to list"));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(screen()).toBeNull();
+    expect(window.location.search).toBe("?mode=server&campaign=release");
   } finally {
     if (original) Object.defineProperty(window, "matchMedia", original); else Reflect.deleteProperty(window, "matchMedia");
   }

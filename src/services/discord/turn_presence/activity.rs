@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(all(test, unix))]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use poise::serenity_prelude::ChannelId;
 
@@ -20,6 +22,7 @@ mod claude_activity;
 pub(in crate::services::discord) mod notice_identity;
 use notice_identity::{NoticeObservation, progress};
 mod effort_restart;
+pub(in crate::services::discord) mod native_input;
 
 /// New bytes one effect-point poll may read before it answers `catching_up`.
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
@@ -959,7 +962,7 @@ fn read_tail(mut reader: tail::TailReader, key: &Key, ports: &dyn Ports) -> (Out
         return (Outcome::Halted, None);
     }
     let through = reader.facts.observation_progress().0;
-    let grown = modified_at(&reader.facts).map(|at| (through, at));
+    let grown = native_input::modified_at(&reader.facts).map(|at| (through, at));
     (Outcome::Tail(Box::new(reader)), grown)
 }
 
@@ -1002,20 +1005,9 @@ fn read_from(
             break;
         }
     }
-    let grown = modified_at(&facts).map(|at| (through, at));
+    let grown = native_input::modified_at(&facts).map(|at| (through, at));
     let facts = Box::new(facts);
     (Outcome::Source { facts, from_start }, grown)
-}
-
-/// The file's last write as a monotonic instant, so a restart does not read an old turn as fresh.
-fn modified_at(facts: &InputFacts) -> Option<Instant> {
-    let modified = std::fs::metadata(&facts.binding().source.path)
-        .and_then(|meta| meta.modified())
-        .ok()?;
-    let age = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default();
-    Instant::now().checked_sub(age)
 }
 
 struct LivePorts {
@@ -1055,6 +1047,7 @@ impl Ports for LivePorts {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return SessionLiveness::Unknown,
         };
         self.scoped(|| {
             let row = crate::services::discord::inflight::load_inflight_state_read_only_result(

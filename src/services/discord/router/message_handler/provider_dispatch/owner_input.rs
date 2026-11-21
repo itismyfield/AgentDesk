@@ -25,6 +25,8 @@ use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
+mod native_input;
+use native_input::submit;
 
 mod busy_turn;
 #[path = "../intake_turn/owned_busy.rs"]
@@ -32,6 +34,7 @@ pub(in crate::services::discord) mod owned_busy;
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
+    native: Option<native_input::Producer>,
     mailbox: ChannelMailboxHandle,
     execution: Execution,
     origin: InputOrigin,
@@ -122,6 +125,7 @@ impl Registration {
             ids => ids.iter().map(u64::to_string).collect(),
         };
         Ok(Self {
+            native: None,
             mailbox,
             execution: Execution::LocalTui,
             origin,
@@ -737,31 +741,8 @@ pub(in crate::services::discord) async fn admit_start(
     .await
 }
 
-/// A restarted owner re-adopts the channel's V2 queue, settles a head whose window passed,
-/// projects history and posts owed notices, then wakes its drive.
 pub(in crate::services::discord) async fn recover(shared: &Shared, channel: ChannelId) {
-    use crate::services::discord::queue_io::input_owner::recovery;
-    use crate::services::tui_input::human_frame::history::v2::Registry;
-    let persistence = crate::services::discord::queue_dispatch::persistence_context;
-    let queue = crate::services::turn_orchestrator::v2_queue;
-    let queue = queue(&persistence(shared, &shared.provider, channel), channel);
-    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let recovered = match (queue, Registry::runtime()) {
-        (Ok(queue), Ok(history)) => {
-            let at = (shared.provider.as_str(), channel.get(), now);
-            let pool = shared.pg_pool.as_ref();
-            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    };
-    match recovered {
-        Ok(_) => {
-            claude_handoff::recover(shared.clone(), channel);
-            crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;
-            wake(shared, channel);
-        }
-        Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
-    }
+    native_input::recover(shared, channel).await;
 }
 
 #[path = "owner_input_start_wait.rs"]
@@ -777,6 +758,10 @@ enum Wait {
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
 /// or the pane the start would take runs a native turn, cannot be read or cannot be named yet.
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    if !crate::services::discord::turn_finalizer::native_prepare::boot_ready(shared, channel).await
+    {
+        return Wait::Event;
+    }
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
     let (provider, id) = (&shared.provider, channel.get());
@@ -1293,6 +1278,7 @@ pub(super) fn execute_owned(
     let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
         Ok(mut owner) => as_restart(restart, || {
+            owner.native = native_input::for_front(&turn, &claim, true);
             owner.recovery = recovery;
             execute_front(turn, sender, claim, owner, settled)
         }),
@@ -1443,6 +1429,10 @@ pub(super) fn execute_front(
     owner: Registration,
     settled: Settled,
 ) -> Result<(), String> {
+    let mut owner = owner;
+    if owner.native.is_none() {
+        owner.native = native_input::for_front(&turn, &claim, false);
+    }
     let reply = reply_once(Some(settled));
     let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim)
         .with_recovery(owner.recovery.clone());
@@ -1569,20 +1559,6 @@ fn take_owned(
     Some(Taken::Done(result))
 }
 
-/// Submits on the owner's pump from the driver's blocking thread, for the granted front if any.
-fn submit(
-    (mailbox, clock): (&ChannelMailboxHandle, Clock),
-    front: Option<FrontClaim>,
-    prepared: PreparedPayload,
-    leaf: effect::Leaf,
-) -> Result<(), String> {
-    let submitted = pump::submit_front(mailbox, front, prepared, clock, leaf);
-    match tokio::runtime::Handle::current().block_on(submitted)? {
-        Completion::Submitted => Ok(()),
-        other => Err(format!("{other:?}")),
-    }
-}
-
 /// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
 /// submit as the effect, and refuses any lineage but `wanted` before reserving.
 fn created(
@@ -1610,7 +1586,7 @@ fn created(
             attempt,
         };
         let leaf = effect::created(submit_created, writer);
-        let result = submit((&r.mailbox, r.clock), front, prepared, leaf);
+        let result = submit((&r.mailbox, r.clock), front, prepared, leaf, r.native);
         reply(&result);
         result
     })
@@ -1750,7 +1726,7 @@ fn run(
         sources: r.sources,
         attempt: r.attempt,
     };
-    submit((&r.mailbox, r.clock), front, prepared, leaf)
+    submit((&r.mailbox, r.clock), front, prepared, leaf, r.native)
 }
 
 /// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key

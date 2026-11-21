@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::tui_o::channel_policy::BootChannels;
 use crate::services::tui_o::cutover::test_override;
 
 fn shared() -> Arc<SharedData> {
@@ -45,4 +46,15 @@ async fn execution_without_shadow_does_not_install_a_lookup() {
     let _lookups = test_override::force_channel_lookups();
     spawn_execution(&shared(), &ProviderKind::Antigravity, None);
     assert!(test_override::channel_lookup_providers().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_with_a_selected_agy_channel_installs_its_lookup() {
+    let config = serde_json::json!({"server": {}, "agents": [{"id": "agy", "name": "AGY",
+        "channels": {"agy": {"id": "41"}}}]});
+    let config = serde_json::from_value(config).unwrap();
+    let _boot = test_override::force_boot(BootChannels::validate(&config).unwrap());
+    let _lookups = test_override::force_channel_lookups();
+    spawn(&shared(), &ProviderKind::Antigravity, None, false);
+    assert_eq!(test_override::channel_lookup_providers(), ["antigravity"]);
 }

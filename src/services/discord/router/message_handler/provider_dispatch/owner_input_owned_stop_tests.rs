@@ -565,7 +565,7 @@ async fn live_root_before_runtime_ready(name: &str, id: u64, conflicting_source:
     assert!(crate::services::claude_tui::input::revalidate_native_pin(
         &pin
     ));
-    let mut row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, id).unwrap();
+    let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, id).unwrap();
     assert_eq!(row.turn_nonce.as_deref(), token.turn_nonce());
     assert_eq!(
         row.runtime_kind,
@@ -591,6 +591,16 @@ async fn live_root_before_runtime_ready(name: &str, id: u64, conflicting_source:
         crate::services::tui_turn_state::TuiTurnState::Streaming
     );
     if conflicting_source {
+        // The live bridge persists last_offset as it tails the line above; rewrite its row, not the older snapshot.
+        let tailed = fs::metadata(&rig.intake.transcript).unwrap().len();
+        wait(
+            "the live bridge persists the tailed transcript offset",
+            || {
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, id)
+                    .is_some_and(|live| live.last_offset == tailed)
+            },
+        );
+        let mut row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, id).unwrap();
         row.output_path = Some(
             rig.intake
                 .renderer
@@ -1212,11 +1222,12 @@ async fn a_restarted_spinner_with_a_modal_receives_no_escape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_open_but_submitted_durable_source_does_not_invent_streaming() {
+async fn an_open_but_submitted_durable_source_under_live_turn_chrome_receives_escape() {
+    // A live spinner outranks the submitted tail, so the stop follows the screen.
     restarted_variant(
-        "an_open_but_submitted_durable_source_does_not_invent_streaming",
+        "an_open_but_submitted_durable_source_under_live_turn_chrome_receives_escape",
         true,
-        0,
+        1,
         None,
         None,
         true,

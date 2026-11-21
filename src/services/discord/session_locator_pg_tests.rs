@@ -223,6 +223,48 @@ with os.fdopen(fd) as stream:
             .output()
             .unwrap()
     }
+    /// Starts one more session on the isolated server, with `marker` as its creation identity.
+    pub(crate) fn start(&mut self, name: &str, marker: Option<&str>) {
+        self._sessions.names.push(name.to_string());
+        let mut args = vec!["new-session", "-d", "-s", name];
+        args.extend(marker.iter().flat_map(|marker| ["-e", *marker]));
+        args.push("cat");
+        assert!(self.raw(&args).status.success());
+    }
+    /// The key to ask with: the current primary, or the alias the promotion kept for the row.
+    pub(crate) fn asked(&self, alias: bool) -> &str {
+        if alias { &self.old } else { &self.key }
+    }
+    /// Every session left on the isolated server besides the keeper.
+    pub(crate) fn others(&self) -> Vec<String> {
+        let listed = self.raw(&["list-sessions", "-F", "#{session_name}"]);
+        let names = String::from_utf8_lossy(&listed.stdout).into_owned();
+        let kept = |name: &&str| !name.starts_with("s2-keeper-");
+        names.lines().filter(kept).map(String::from).collect()
+    }
+    pub(crate) async fn status(&self) -> String {
+        sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1")
+            .bind(self.id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+    pub(crate) fn app_state(&self) -> crate::app_state::AppState {
+        let mut config = crate::config::Config::default();
+        config.policies.hot_reload = false;
+        config.policies.dir = self.root.path().join("policies");
+        std::fs::create_dir_all(&config.policies.dir).unwrap();
+        let broadcast = crate::server::ws::new_broadcast();
+        crate::app_state::AppState {
+            pg_pool: Some(self.pool.clone()),
+            engine: crate::engine::PolicyEngine::new(&config).unwrap(),
+            config: Arc::new(config),
+            batch_buffer: crate::server::ws::spawn_batch_flusher(broadcast.clone()),
+            broadcast_tx: broadcast,
+            health_registry: Some(self.registry.clone()),
+            cluster_instance_id: None,
+        }
+    }
     pub(crate) fn present(&self) -> bool {
         self.raw(&["has-session", "-t", &format!("={}", self.name)])
             .status
@@ -393,36 +435,28 @@ async fn key_promotion_created_incarnation_and_candidate_seams_pg() {
 
 #[tokio::test]
 async fn key_promotion_current_primary_force_kill_has_physical_effect_pg() {
-    let rig = PromotionRig::new(81190302).await;
-    let before = rig.queue().await;
-    let mut config = crate::config::Config::default();
-    config.policies.hot_reload = false;
-    config.policies.dir = rig.root.path().join("policies");
-    std::fs::create_dir_all(&config.policies.dir).unwrap();
-    let broadcast = crate::server::ws::new_broadcast();
-    let state = crate::app_state::AppState {
-        pg_pool: Some(rig.pool.clone()),
-        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
-        config: Arc::new(config),
-        batch_buffer: crate::server::ws::spawn_batch_flusher(broadcast.clone()),
-        broadcast_tx: broadcast,
-        health_registry: Some(rig.registry.clone()),
-        cluster_instance_id: None,
-    };
-    let result = crate::services::dispatched_sessions::force_kill_session_impl_with_reason(
-        &state,
-        &rig.key,
-        false,
-        "manual: isolated current primary",
-    )
-    .await;
-    assert_eq!(result.0, axum::http::StatusCode::OK, "{:?}", result.1);
-    assert!(
-        !rig.present(),
-        "current primary must kill the actual new session"
-    );
-    rig.assert_queue(&before).await;
-    rig.finish().await;
+    // Asked by the current primary or by the kept alias, the stop ends the one live session.
+    for (channel, alias) in [(81190302, false), (81190312, true)] {
+        let rig = PromotionRig::new(channel).await;
+        let before = rig.queue().await;
+        let state = rig.app_state();
+        let result = crate::services::dispatched_sessions::force_kill_session_impl_with_reason(
+            &state,
+            rig.asked(alias),
+            false,
+            "manual: isolated stop",
+        )
+        .await;
+        assert_eq!(result.0, axum::http::StatusCode::OK, "{:?}", result.1);
+        assert!(
+            rig.others().is_empty(),
+            "alias={alias}: the new session must end and none may start: {:?}",
+            rig.others()
+        );
+        assert_eq!(rig.status().await, "disconnected", "alias={alias}");
+        rig.assert_queue(&before).await;
+        rig.finish().await;
+    }
 }
 
 #[tokio::test]

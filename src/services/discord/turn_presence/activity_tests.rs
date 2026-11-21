@@ -490,6 +490,7 @@ fn presence_requires_live_host_without_changing_existing_open_or_closed_judgment
         let (open, _) = match provider {
             ShadowProvider::Claude => claude(&dir.join("open"), &[prompt("A")]),
             ShadowProvider::Codex => codex_probe(&dir, &[codex("task_started", "A")]),
+            ShadowProvider::Antigravity => unreachable!("pane fixture"),
         };
         assert_eq!(open.settle(), (Activity::Busy, "open"));
         assert_eq!(open.ask_presence(), (Activity::Busy, "open"));
@@ -501,6 +502,7 @@ fn presence_requires_live_host_without_changing_existing_open_or_closed_judgment
                 &closed_dir,
                 &[codex("task_started", "A"), codex("task_complete", "A")],
             ),
+            ShadowProvider::Antigravity => unreachable!("pane fixture"),
         };
         assert_eq!(closed.settle(), (Activity::Idle, "closed"));
         for (liveness, reason) in [
@@ -1930,3 +1932,6 @@ pub(super) fn resumed_notice_observations(
     let boundary = strict_reading(&probe).notice_observation();
     (resumed, jobs, boundary)
 }
+
+#[path = "activity_tests/native_input_tests.rs"]
+mod native_input_tests;

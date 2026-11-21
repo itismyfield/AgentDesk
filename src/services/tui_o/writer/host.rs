@@ -26,6 +26,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
+pub(crate) mod agy_host;
 mod child_retirement;
 mod first_init;
 mod fresh_input;
@@ -33,10 +34,18 @@ mod managed_start;
 mod missing;
 mod recover;
 mod transition;
+pub(crate) use super::actor::native_input::RepostTurn;
+use super::actor::native_input::{hold, stopped, unless_stopped};
 pub use activation_io::{Custody, FencedFacts};
 pub(crate) use child_retirement::{ChildStores, keep_stoppable};
 pub(crate) use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
+/// Only pane writers enter the native turn retirement callback.
+pub enum PaneAdoptionProvider {
+    Claude,
+    Codex,
+}
+
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
     type Port: DiscordPort;
@@ -65,6 +74,13 @@ pub trait HostIo: Send + Sync + 'static {
         _provider: ShadowProvider,
     ) -> impl Future<Output = Option<super::ProducerObservation>> + Send {
         std::future::ready(Some(super::ProducerObservation::default()))
+    }
+    fn native_inputs(
+        &self,
+        _channel: u64,
+        _provider: ShadowProvider,
+    ) -> Option<super::actor::native_input::NativePort> {
+        None
     }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
@@ -100,7 +116,15 @@ pub trait HostIo: Send + Sync + 'static {
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
     /// Called once a first activation committed the channel, before it is ready for intake.
-    fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
+    fn adopted(&self, channel: u64, provider: ShadowProvider) {
+        let pane = match provider {
+            ShadowProvider::Claude => PaneAdoptionProvider::Claude,
+            ShadowProvider::Codex => PaneAdoptionProvider::Codex,
+            ShadowProvider::Antigravity => return,
+        };
+        self.pane_adopted(channel, pane);
+    }
+    fn pane_adopted(&self, _channel: u64, _provider: PaneAdoptionProvider) {}
     /// The writer can drain retained inputs now; called after publishing readiness.
     fn input_ready(&self, channel: u64, provider: ShadowProvider) {
         let _ = (channel, provider);
@@ -110,12 +134,6 @@ pub trait HostIo: Send + Sync + 'static {
         None
     }
 }
-/// A host's re-post turn for one channel writer.
-pub(crate) type RepostTurn<I> = Box<
-    dyn crate::services::tui_o::repost::runner::RepostHook<
-            ChannelWriter<<I as HostIo>::Port, <I as HostIo>::Lease, <I as HostIo>::Alarms>,
-        >,
->;
 
 /// Channels reserved by a host claim, and those whose actor is ready to take work.
 #[derive(Default)]
@@ -526,30 +544,6 @@ impl ManagedWriterHandle {
 pub use managed_start::start_managed;
 
 /// Resolves once the writer is told to stop; a detached writer, whose sender is gone, never is.
-async fn stopped(mut stop: watch::Receiver<bool>) {
-    if stop.wait_for(|stop| *stop).await.is_err() {
-        std::future::pending::<()>().await;
-    }
-}
-
-/// `step`'s output, or `None` once the writer was told to stop first.
-async fn unless_stopped<T>(
-    stop: &watch::Receiver<bool>,
-    step: impl Future<Output = T>,
-) -> Option<T> {
-    tokio::select! {
-        biased;
-        () = stopped(stop.clone()) => None,
-        output = step => Some(output),
-    }
-}
-
-fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
-    tracing::error!(channel, detail, "[tui_o] writer host held the channel");
-    let detail = format!("writer host: {detail}");
-    alarms.raise(channel, WriterAlarm::Halted { detail });
-}
-
 /// A channel not adopted before its first `init` stays Legacy's for this process.
 pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
@@ -769,8 +763,18 @@ impl<I: HostIo> Hosted<'_, I> {
             .filter(|boot| boot.dormant(channel))
             .map(|_| ReaderConfig { dormant: true });
         let suspension = writer.suspension.clone();
-        let spawn =
-            || actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
+        let native = self.io.native_inputs(channel, self.provider);
+        let spawn = || {
+            actor::native_input::spawn_native(
+                &config,
+                readers,
+                writer,
+                self.provider,
+                bindings,
+                watches,
+                native,
+            )
+        };
         let (ports, spawned) = self.spawn_ports(suspension, spawn);
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());

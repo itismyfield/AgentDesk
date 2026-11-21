@@ -1,5 +1,5 @@
-//! A first input whose idle source proves no boundary ends retained with a resend ask, or refused
-//! for good once its transcript moved; a running turn waits, an older launch proves its terminal.
+//! A first input whose quiet idle source proves no boundary ends retained with a resend ask; one
+//! that saw the session's own turn waits for its end, as a running turn does.
 use super::tests::{NONCE, bound_target};
 use super::*;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
@@ -53,12 +53,17 @@ fn a_restarted_resume_with_its_recorded_start_takes_its_input_once() {
 }
 
 #[test]
-fn a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg() {
-    owner_outcome(&[(Case::Continuing, 816_106)]);
+fn a_restarted_idle_source_retains_with_one_resend_notice_pg() {
+    owner_outcome(&[(Case::Restarted, 816_106)]);
 }
 
 #[test]
-fn a_wait_whose_transcript_moved_once_ends_refused_for_good_with_one_notice_pg() {
+fn a_restart_during_a_continuing_turn_holds_the_front_and_delivers_after_it() {
+    owner_outcome(&[(Case::Continuing, 816_107)]);
+}
+
+#[test]
+fn a_wait_whose_transcript_moved_holds_across_a_restart_and_delivers_after_the_turn() {
     owner_outcome(&[(Moved, 821_711)]);
 }
 
@@ -222,10 +227,15 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "runtime/discord_pending_queue/moved/{channel}.json"
         ));
         let fixture = match case {
-            Moved => runtime.block_on(merged_unit(&mailbox, queue.clone(), attempt, channel)),
+            Moved => runtime.block_on(merged_unit(
+                &mailbox,
+                queue.clone(),
+                attempt.clone(),
+                channel,
+            )),
             _ => runtime.block_on(mailbox.v2_cold_fixture(
                 root.path().join("unproven.json"),
-                attempt,
+                attempt.clone(),
                 "one original".into(),
                 channel,
             )),
@@ -336,25 +346,62 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "{case:?}: {result:?}"
         );
         assert!(rig.sends().is_empty(), "{case:?}: no key reaches the pane");
-        if case == Case::Continuing {
-            assert!(
-                matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven"))
-            );
-        }
         let snapshot = read();
         assert!(snapshot["head_injection"].is_null(), "{case:?}: {snapshot}");
         let (items, retained) = (
             snapshot["items"].as_array().unwrap(),
             snapshot["retained_inputs"].as_array().unwrap(),
         );
-        if matches!(case, Case::Running | MovedRunning | MovedFenced | MovedBusy) {
-            assert_eq!(items.len(), 1, "{case:?}: the original stays in front");
+        if matches!(case, Case::Running | MovedRunning | MovedFenced | MovedBusy)
+            || matches!(case, Case::Continuing | Moved)
+        {
+            let unit = if case == Moved { 2 } else { 1 };
+            assert_eq!(items.len(), unit, "{case:?}: the original stays in front");
             assert!(retained.is_empty(), "{case:?}: nothing is retained");
+            let refused = snapshot["refused_inputs"].as_array().map_or(0, Vec::len);
+            assert_eq!(refused, 0, "{case:?}: nothing is refused");
             assert!(held_watch::armed(channel), "{case:?}: its watch is left");
-        } else if case == Moved {
-            drop((mailbox, registry));
-            runtime.block_on(refused_for_good(queue, channel));
-            assert!(rig.sends().is_empty(), "{case:?}: still no key");
+            if matches!(case, Case::Continuing | Moved) {
+                let (_, target) = bound_target(&rig, &logical, 1);
+                let second = Attached {
+                    nonce: NONCE.into(),
+                    session_id: native.clone(),
+                    transcript: path.clone(),
+                    target,
+                    bound: true,
+                    awaiting_clear: false,
+                    physical: None,
+                };
+                let (mailbox, _registry) = match case {
+                    Moved => {
+                        drop((mailbox, registry));
+                        runtime.block_on(restarted(queue, channel, unit))
+                    }
+                    _ => (mailbox, registry),
+                };
+                // The own turn ends after the restart's first look: its Stop proves the source.
+                readiness::tests::daemon_restart(&logical);
+                assert!(readiness::observe(&logical, Some(&path)).is_none());
+                let at = chrono::Utc::now();
+                rows(&[
+                    json!({"type":"assistant","timestamp":at,"message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+                    json!({"type":"system","subtype":"turn_duration","timestamp":at}),
+                ]);
+                rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
+                    "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ \n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
+                    "revision":3,"truncated":false}}));
+                let session = logical.clone();
+                let again = (channel, attempt.clone(), case == Moved);
+                let result = runtime.block_on(delivered(&mailbox, again, move |frame| {
+                    let (sender, _receiver) = std::sync::mpsc::channel();
+                    write(&session, None, second, &frame, &sender, None).map(drop)
+                }));
+                assert_eq!(result, effect::Completion::Submitted, "{case:?}");
+                assert_eq!(rig.sends().len(), 2, "{case:?}: one paste and one Enter");
+                let left =
+                    runtime.block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()));
+                assert_eq!(left.unwrap()["items"], json!([]), "{case:?}");
+            }
         } else {
             assert!(items.is_empty(), "{case:?}: the front is released");
             assert_eq!(retained.len(), 1, "{case:?}: {snapshot}");
@@ -367,7 +414,8 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "{case:?}: one resend ask is owed"
             );
             assert!(!held_watch::armed(channel), "{case:?}: no look resends it");
-            let notice_db = (case == Case::Continuing).then(|| {
+            // Only the `_pg` test's channel checks the actual outbox enqueue.
+            let notice_db = (channel == 816_106).then(|| {
                 runtime.block_on(async {
                     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
                     let pool = db.connect_and_migrate().await;
@@ -457,116 +505,119 @@ async fn merged_unit(
         .await
 }
 
-/// The refusal as a restarted owner finds it: nothing returns to the queue before or after its
-/// notice reached the outbox, no body is kept, a retried ticket admits nothing, one notice posts.
-async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
+/// The owner a restart recovers from the queue file still fronts the held unit, refused nothing.
+async fn restarted(
+    queue: std::path::PathBuf,
+    channel: u64,
+    unit: usize,
+) -> (
+    crate::services::turn_orchestrator::ChannelMailboxHandle,
+    crate::services::turn_orchestrator::ChannelMailboxRegistry,
+) {
     use crate::services::discord::owner_recovery_for_test::recover;
     use crate::services::tui_input::human_frame::history::v2::Registry;
-    use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
-    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
-    let history = || Registry::at(queue.with_extension("history"));
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let history = Registry::at(queue.with_extension("history"));
     let at = ("claude", channel, 20_000);
-    let restart = || {
-        let registry = ChannelMailboxRegistry::default();
-        let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
-        (registry, mailbox)
-    };
-    // Restarted before the notice reached the outbox.
-    let (registry, mailbox) = restart();
-    let recovered = recover(
-        &mailbox,
-        (queue.clone(), "moved".into()),
-        history(),
-        None,
-        at,
-    )
-    .await;
-    assert_eq!(recovered, Ok(0));
-    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
-    let snapshot = snapshot.await.unwrap();
-    assert!(
-        snapshot["items"].as_array().unwrap().is_empty(),
-        "a refused input never returns to the queue: {snapshot}"
-    );
-    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
-    let refused = snapshot["refused_inputs"].as_array().unwrap();
-    assert_eq!(refused.len(), 1, "{snapshot}");
-    assert_eq!(refused[0]["members"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        refused[0]["notice"],
-        json!({"kind":"readiness_unproven","enqueued":false})
-    );
-    let raw = snapshot.to_string();
-    assert!(
-        MERGED.iter().all(|(_, body)| !raw.contains(body)),
-        "no body is kept: {snapshot}"
-    );
-    // Owed its notice and fenced: no legacy claim takes a source, another ticket admits none.
-    let source = merged(channel, 1).message_id;
-    let fenced = mailbox.v2_request(move |slot| {
-        let owner = slot.as_ref().ok_or("no owner")?;
-        let order = crate::services::turn_orchestrator::TurnAdmissionOrder::Immediate;
-        Ok((
-            owner.snapshot.holds_input(),
-            owner.blocks_claim(source, order),
-        ))
-    });
-    assert_eq!(fenced.await, Ok((true, true)));
-    let other = mailbox.v2_admit_ticket(merged(channel, 1), "moved-other".into());
-    assert_eq!(format!("{:?}", other.await), "Err(SourceAlreadyKnown)");
-    // The notice reached the outbox, then the daemon restarted before the owner marked it.
-    ChannelMailboxHandle::v2_notice(&pool, "claude", channel, "moved", &refused[0])
+    recover(&mailbox, (queue, "moved".into()), history, None, at)
         .await
         .unwrap();
-    drop((mailbox, registry));
-    let (_registry, mailbox) = restart();
-    let restored = (queue.clone(), "moved".into());
-    let recovered = recover(&mailbox, restored, history(), Some(&pool), at).await;
-    assert_eq!(recovered, Ok(1), "the restart retries only the notice");
-    let retried = mailbox.v2_admit_ticket(merged(channel, 0), MERGED[0].0.into());
-    assert_eq!(
-        retried.await.map(|admitted| format!("{admitted:?}")),
-        Ok("Duplicate".into()),
-        "the same ticket admits nothing again"
-    );
     let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
     let snapshot = snapshot.await.unwrap();
-    assert!(
-        snapshot["items"].as_array().unwrap().is_empty(),
+    assert_eq!(
+        snapshot["items"].as_array().unwrap().len(),
+        unit,
         "{snapshot}"
     );
-    assert_eq!(snapshot["refused_inputs"][0]["notice"]["enqueued"], true);
-    let posts: Vec<(String,)> =
-        sqlx::query_as("SELECT content FROM message_outbox WHERE target = $1")
-            .bind(format!("channel:{channel}"))
-            .fetch_all(&pool)
-            .await
-            .unwrap();
     assert_eq!(
-        posts.len(),
-        1,
-        "one merged refusal owes one notice: {posts:?}"
+        snapshot["refused_inputs"].as_array().map_or(0, Vec::len),
+        0,
+        "{snapshot}"
     );
-    assert!(posts[0].0.contains("증거를 확보하지 못해"), "{posts:?}");
-    assert!(!posts[0].0.contains("원문을 보관했습니다"), "{posts:?}");
-    // Told, the file owes nothing more; a day later the record is forgotten.
-    let day = chrono::Utc::now().timestamp_millis() as u64 + 86_400_001;
-    let later = mailbox.v2_request(move |slot| {
+    (mailbox, registry)
+}
+
+/// The held front's next attempt: woken once by its watch, or granted by the boot drive after a
+/// restart (`boot`, a merged unit); it reserves the same unit again and writes through `submit`.
+async fn delivered(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    (channel, attempt, boot): (u64, Value, bool),
+    submit: impl FnOnce(String) -> Result<(), guarded_outcome::SubmissionError> + Send + 'static,
+) -> effect::Completion {
+    use crate::services::discord::owner_drive_for_test as drive;
+    if !boot {
+        let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let message = snapshot.await.unwrap()["items"][0]["message_id"]
+            .as_u64()
+            .unwrap();
+        let (woken, wake) = tokio::sync::oneshot::channel();
+        let woken = Arc::new(std::sync::Mutex::new(Some(woken)));
+        let drive = Arc::new(drive::Drive {
+            mailbox: mailbox.clone(),
+            channel,
+            handoff: Arc::new(move |_| {
+                woken.lock().unwrap().take().map(|woken| woken.send(()));
+                Box::pin(async { Err("observed the owner wake".into()) })
+            }),
+            settled: None,
+        });
+        let (_, observed) = held_watch::watch_observed(drive, message);
+        assert_eq!(observed.await.unwrap().verdict, held_watch::Verdict::Wake);
+        tokio::time::timeout(Duration::from_secs(5), wake)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let writer = format!("{}#{PANE}", attempt["target"]["root"].as_str().unwrap());
+    let mut attempt = attempt;
+    attempt["nonce"] = format!("{}-again", attempt["nonce"].as_str().unwrap()).into();
+    let reserved = mailbox.v2_request(move |slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
-        let owed = owner.snapshot.holds_input();
-        owner.tick(day)?;
-        Ok((owed, owner.snapshot.refused_inputs.len()))
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        if boot {
+            let body = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
+                Some((String::new(), item.text.clone()))
+            };
+            return owner.reserve_unit(attempt, body).map(drop);
+        }
+        let payload = json!({"frame":"one original","digest":"fixture","attribution":{}});
+        let payload = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        owner.reserve(attempt, payload).map(drop)
     });
-    assert_eq!(later.await, Ok((false, 0)));
-    pool.close().await;
-    db.drop().await;
+    reserved.await.unwrap();
+    let leaf = effect::created(
+        Box::new(move |frame| guarded_outcome::capture_preparation(|| submit(frame))),
+        Some(writer),
+    );
+    effect::run(mailbox, Arc::new(|| 10_001), leaf)
+        .await
+        .unwrap()
 }
 
 // A launch older than the restart, held by a person's draft, is woken by the
 // restart-aware watch once the draft clears, and submits the original exactly once.
 #[test]
 fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
+    held_front_wakes_once_cleared(None, true);
+}
+
+// A permission prompt over the composer holds at once as a dialog; dismissing it wakes the front.
+#[test]
+fn a_front_held_by_a_permission_dialog_wakes_once_it_is_dismissed() {
+    held_front_wakes_once_cleared(Some(DIALOG), true);
+}
+
+// With no readiness proof the first look still reads the dialog; the front wakes once a finished
+// turn proves the source and the dialog is gone.
+#[test]
+fn a_dialog_over_an_unproven_front_holds_and_wakes_once_proven_and_dismissed() {
+    held_front_wakes_once_cleared(Some(DIALOG), false);
+}
+
+const DIALOG: &str = " Bash command · from the adk-lane agent\n Recapture shots\n │ node capture.mjs\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agen…";
+
+fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
     use crate::services::discord::owner_drive_for_test as drive;
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
@@ -574,24 +625,32 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     let logical = format!("i8161-draft-{}", uuid::Uuid::new_v4().simple());
-    let channel = 816_110u64;
+    let channel = 816_110 + u64::from(dialog.is_some()) + u64::from(!proven);
     let native = uuid::Uuid::new_v4().to_string();
     let projects = root.path().join("projects");
     let path = projects.join("workspace").join(format!("{native}.jsonl"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let old = chrono::Utc::now() - chrono::Duration::hours(6);
-    {
+    let append = |rows: &[serde_json::Value]| {
         use std::io::Write;
-        let mut file = std::fs::File::create(&path).unwrap();
-        for row in [
-            json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
-            json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
-            json!({"type":"system","subtype":"turn_duration","timestamp":old}),
-        ] {
-            let mut row = row;
+        let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+            .open(&path)
+            .unwrap();
+        for row in rows {
+            let mut row = row.clone();
             row["sessionId"] = json!(native);
             writeln!(file, "{row}").unwrap();
         }
+    };
+    append(&[
+        json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
+        json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":old}),
+    ]);
+    if !proven {
+        append(&[
+            json!({"type":"user","timestamp":chrono::Utc::now(),"message":{"role":"user","content":"current prompt"}}),
+        ]);
     }
     let context: binding_context::BindingContext = serde_json::from_value(json!({
         "schema":1,"provider":"claude","created_at":old,"execution_nonce":NONCE,
@@ -650,7 +709,12 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
         "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ {draft}\n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
         "revision":1,"truncated":false}})
     };
-    rig.answer("pane.read", screen("a person's draft"));
+    let held_screen = match dialog {
+        Some(text) => json!({"type":"pane_read","read":{"pane_id":PANE,
+            "source":"recent_unwrapped","text":text,"revision":1,"truncated":false}}),
+        None => screen("a person's draft"),
+    };
+    rig.answer("pane.read", held_screen);
     let attached = |target: HerdrTarget| Attached {
         nonce: NONCE.into(),
         session_id: native.clone(),
@@ -677,7 +741,16 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
         .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
         .unwrap();
     assert!(matches!(held, effect::Completion::NotSent(_)), "{held:?}");
-    assert!(rig.sends().is_empty(), "the draft takes no key");
+    if dialog.is_some() {
+        let refusal = format!("{held:?}");
+        let hold = crate::services::discord::OwnerHoldForTest::from_refusal(&refusal);
+        assert!(refusal.contains("Waits(Modal)") && refusal.contains("modal: true"));
+        assert!(
+            hold.unwrap().notice().contains("승인 창 응답 대기"),
+            "{held:?}"
+        );
+    }
+    assert!(rig.sends().is_empty(), "the hold takes no key");
     let snapshot = runtime
         .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
         .unwrap();
@@ -688,6 +761,14 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
     );
     assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
     let message = snapshot["items"][0]["message_id"].as_u64().unwrap();
+    if !proven {
+        assert!(readiness::observe_restored(&logical, Some(&path)).is_none());
+        let at = chrono::Utc::now();
+        append(&[
+            json!({"type":"assistant","timestamp":at,"message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+            json!({"type":"system","subtype":"turn_duration","timestamp":at}),
+        ]);
+    }
     rig.answer("pane.read", screen(""));
     let (completed, completion) = tokio::sync::oneshot::channel();
     let completed = Arc::new(std::sync::Mutex::new(Some(completed)));

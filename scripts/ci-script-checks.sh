@@ -1,6 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_failed_tests() {
+  local failed
+  failed=$(awk '
+    { gsub(/\033\[[0-9;]*m/, "") }
+    length(previous) == 70 && previous !~ /[^=]/ &&
+    /^(FAIL|ERROR): [[:alnum:]_]+ \([[:alnum:]_]+(\.[[:alnum:]_]+)*\)( \(|$)/ {
+      id = $3
+      gsub(/[()]/, "", id)
+      if ($2 ~ /^(setUp|tearDown)(Class|Module)$/) id = id "." $2
+      if (id ~ /\./ && !seen[id]++) ids = ids (ids ? " " : "") id
+    }
+    { previous = $0 }
+    END { if (ids) print "FAILED_TESTS: " ids }
+  ' "$1") || return 0
+  if [ -n "$failed" ]; then
+    printf '%s\n' "$failed" || true
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      printf '%s\n' "$failed" >> "$GITHUB_STEP_SUMMARY" || true
+    fi
+  fi
+}
+
+# Keep the unittest command lines intact for callers that extract their modules.
+# The child keeps its original traps and stdout; wait for tee before reading the log.
+capture_script_check_stderr() {
+  script_check_stderr=$(mktemp "${TMPDIR:-/tmp}/agentdesk-script-checks.XXXXXX")
+  trap 'rm -f -- "$script_check_stderr"' EXIT
+  local -a stages
+  if SCRIPT_CHECK_CAPTURE_PARENT=$$ "$BASH" "${BASH_SOURCE[0]}" "$@" 2>&1 >&3 3>&- |
+      tee "$script_check_stderr" >&2 3>&-; then
+    return 0
+  else
+    stages=("${PIPESTATUS[@]}")
+  fi
+  if [ "${stages[0]}" -ne 0 ]; then
+    report_failed_tests "$script_check_stderr"
+    return "${stages[0]}"
+  fi
+  return "${stages[1]}"
+}
+
+if [ "${SCRIPT_CHECK_CAPTURE_PARENT:-}" != "$PPID" ]; then
+  capture_script_check_stderr "$@" 3>&1
+  exit
+fi
+unset SCRIPT_CHECK_CAPTURE_PARENT
+
 PYTHON="${PYTHON:-python3}"
 
 python_probe_error() {
@@ -579,6 +626,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tests.test_continuous_catalog \
   scripts.e2e.tests.test_continuous_runner \
   scripts.e2e.tests.test_continuous_release_host \
+  scripts.e2e.tests.test_agy_cell \
   tests.test_e2e_continuous_manifest \
   scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_restart_queued_inputs \
@@ -593,7 +641,7 @@ if run_check guards "Relay-authority named-target floor contract (#5071)"; then
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 fi
 
-if run_check contracts "User feature map generation contract"; then
+if run_check contracts "User feature map source contract"; then
 feature_map_base="${TEST_LANE_BASELINE_REF:-${GFP_BASE_SHA:-}}"
 if [ -z "$feature_map_base" ]; then
   if [ -n "${CI:-}${GITHUB_ACTIONS:-}${GFP_EVENT_NAME:-}${GITHUB_EVENT_NAME:-}" ]; then
@@ -602,7 +650,15 @@ if [ -z "$feature_map_base" ]; then
   fi
   feature_map_base=origin/main
 fi
-"$PYTHON" scripts/generate_user_feature_map.py --check --base-ref "$feature_map_base"
+if [ "${GITHUB_ACTIONS:-}" = true ] || [ -n "${GENERATED_ARTIFACT_REPORT_DIR:-}" ]; then
+  "$PYTHON" -m scripts.ci.user_feature_map_report --base-ref "$feature_map_base" \
+    --output-dir "${GENERATED_ARTIFACT_REPORT_DIR:?}/user-feature-map"
+else
+  "$PYTHON" scripts/generate_user_feature_map.py --validate --base-ref "$feature_map_base"
+fi
+fi
+
+if run_check contracts "User feature map generation contract"; then
 "$PYTHON" -m unittest tests.test_generate_user_feature_map
 fi
 
@@ -623,8 +679,11 @@ if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
 fi
 
-if run_check contracts "Statechart index drift"; then
+if run_check contracts "Statechart index source contract"; then
 "$PYTHON" scripts/ci/statechart_index.py --check
+if [ "${GITHUB_ACTIONS:-}" = true ] || [ -n "${GENERATED_ARTIFACT_REPORT_DIR:-}" ]; then
+  "$PYTHON" -m scripts.ci.statechart_index_report "${GENERATED_ARTIFACT_REPORT_DIR:?}/statechart-index"
+fi
 fi
 
 if run_check contracts "Statechart index generator tests"; then

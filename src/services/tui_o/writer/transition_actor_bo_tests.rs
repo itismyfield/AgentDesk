@@ -55,6 +55,7 @@ where
             prefix_hash: hex::encode(Sha256::digest([])),
         }],
         ShadowProvider::Claude => Vec::new(),
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     });
     harness.gate.acquired();
     let (host, stopping) = watch::channel(false);

@@ -8,10 +8,12 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::pieces::{Derived, PieceWork};
+use crate::services::codex_tui::rollout_index::summary_context;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::turn_summary_line::{Outcome, quota, render};
+use crate::services::turn_summary_line::{Footer, Model, Outcome, quota, render};
 
 pub const TURN_SUMMARY_OPEN: &str = "turn_summary_open";
+pub(super) const TURN_SUMMARY_SUFFIX: &str = "#turn_end";
 
 pub struct SummaryInputs {
     pub turn_marks: BTreeSet<String>,
@@ -33,6 +35,7 @@ pub(super) struct TurnSummaryRun {
     source: Option<PathBuf>,
     parked: HashMap<PathBuf, Turn>,
     current_source: Option<PathBuf>,
+    pending_codex_model: Option<(String, summary_context::CodexModel)>,
 }
 
 struct Turn {
@@ -43,6 +46,8 @@ struct Turn {
     first: Option<UnitKey>,
     eligible: bool,
     used: Option<u128>,
+    context_window: Option<u64>,
+    codex_model: Option<summary_context::CodexModel>,
     failed: bool,
 }
 
@@ -55,11 +60,15 @@ impl TurnSummaryRun {
             source: None,
             parked: HashMap::new(),
             current_source: None,
+            pending_codex_model: None,
         }
     }
 
     /// Records that follow come from the transcript at `path` until the next call.
     pub(super) fn enter(&mut self, path: &Path) {
+        if self.current_source.as_deref() != Some(path) {
+            self.pending_codex_model = None;
+        }
         self.current_source = Some(path.to_owned());
         if self.provider != ShadowProvider::Claude || self.source.as_deref() == Some(path) {
             return;
@@ -80,6 +89,11 @@ impl TurnSummaryRun {
     }
 
     fn open(&mut self, value: &Value, id: Option<String>) {
+        let codex_model = self
+            .pending_codex_model
+            .take()
+            .filter(|(candidate, _)| id.as_ref() == Some(candidate))
+            .map(|(_, model)| model);
         self.open = Some(Turn {
             source: self.current_source.clone(),
             id,
@@ -91,6 +105,10 @@ impl TurnSummaryRun {
             first: None,
             eligible: false,
             used: None,
+            context_window: value
+                .pointer("/payload/model_context_window")
+                .and_then(Value::as_u64),
+            codex_model,
             failed: false,
         });
     }
@@ -104,6 +122,9 @@ impl TurnSummaryRun {
             self.open = None;
         }
         self.parked.remove(path);
+        if self.current_source.as_deref() == Some(path) {
+            self.pending_codex_model = None;
+        }
     }
 
     pub(super) fn prompt(&mut self, value: &Value) {
@@ -159,12 +180,55 @@ impl TurnSummaryRun {
     }
 
     pub(super) fn observe(&mut self, value: &Value) {
-        if self.provider == ShadowProvider::Codex
-            && let Some(turn) = &mut self.open
+        if self.provider != ShadowProvider::Codex {
+            return;
+        }
+        if let Some((id, model, effort)) = summary_context::context(value)
+            && (model.is_some() || effort.is_some())
         {
-            if value.pointer("/payload/type").and_then(Value::as_str) == Some("error") {
-                turn.failed = true;
+            let model = summary_context::CodexModel {
+                model: model.map(str::to_owned),
+                effort: effort.map(str::to_owned),
+            };
+            if let Some(turn) = &mut self.open
+                && turn.id.as_deref() == Some(id)
+                && turn.source == self.current_source
+            {
+                if let Some(existing) = &mut turn.codex_model {
+                    existing.model = model.model.or(existing.model.take());
+                    existing.effort = model.effort.or(existing.effort.take());
+                } else {
+                    turn.codex_model = Some(model);
+                }
+            } else {
+                self.pending_codex_model = Some((id.to_owned(), model));
             }
+        }
+        let Some(turn) = &mut self.open else {
+            return;
+        };
+        match value.pointer("/payload/type").and_then(Value::as_str) {
+            Some("error") => turn.failed = true,
+            Some("token_count") if turn.source == self.current_source => {
+                let payload = &value["payload"];
+                if payload["turn_id"]
+                    .as_str()
+                    .is_some_and(|id| turn.id.as_deref() != Some(id))
+                {
+                    return;
+                }
+                let info = &payload["info"];
+                if let Some(input) = info["last_token_usage"]["input_tokens"].as_u64() {
+                    turn.used = Some(u128::from(input));
+                }
+                if let Some(window) = info["model_context_window"]
+                    .as_u64()
+                    .filter(|window| *window > 0)
+                {
+                    turn.context_window = Some(window);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -194,7 +258,12 @@ impl TurnSummaryRun {
         }]
     }
 
-    pub(super) fn close(&mut self, value: &Value, id: Option<&str>) -> Vec<Derived> {
+    pub(super) fn close(
+        &mut self,
+        value: &Value,
+        id: Option<&str>,
+        logical_session: impl Fn() -> Option<String>,
+    ) -> Vec<Derived> {
         if self.provider == ShadowProvider::Codex
             && self.open.as_ref().is_some_and(|turn| {
                 turn.id
@@ -216,6 +285,7 @@ impl TurnSummaryRun {
             ShadowProvider::Codex => {
                 value.pointer("/payload/type").and_then(Value::as_str) == Some("turn_aborted")
             }
+            ShadowProvider::Antigravity => return Vec::new(),
         };
         let failed = turn.failed
             || value.get("is_error") == Some(&Value::Bool(true))
@@ -229,37 +299,68 @@ impl TurnSummaryRun {
         } else {
             Outcome::Completed
         };
-        let elapsed = turn.started.zip(timestamp(value)).and_then(|(start, end)| {
-            if end < start {
-                return None;
-            }
+        let ended = timestamp(value).filter(|end| turn.started.is_none_or(|start| start <= *end));
+        let elapsed = turn.started.zip(ended).and_then(|(start, end)| {
             u64::try_from(end.signed_duration_since(start).num_milliseconds()).ok()
         });
         let percent = turn
             .used
-            .zip(self.inputs.context_window.filter(|window| *window > 0))
+            .zip(
+                turn.context_window
+                    .or(self.inputs.context_window)
+                    .filter(|window| *window > 0),
+            )
             .map(|(used, window)| {
                 ((used.min(u128::from(window)) * 100) / u128::from(window)) as u8
             });
         key.kind = UnitKind::Tool;
-        key.native_key.push_str("#turn_end");
+        key.native_key.push_str(TURN_SUMMARY_SUFFIX);
         let provider = match self.provider {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
+            ShadowProvider::Antigravity => "antigravity",
         };
-        let quota = quota::snapshot(
+        let session_id = turn
+            .session_id
+            .as_deref()
+            .or_else(|| value.get("sessionId").and_then(Value::as_str));
+        let logical_session = (self.provider == ShadowProvider::Claude
+            && outcome == Outcome::Completed
+            && session_id.is_some())
+        .then(logical_session)
+        .flatten();
+        let snapshot = quota::snapshot(
             provider,
             key.channel_id,
             turn.started.map(quota::Selected::Before),
-            turn.session_id
-                .as_deref()
-                .or_else(|| value.get("sessionId").and_then(Value::as_str)),
+            session_id,
+            logical_session.as_deref(),
+            outcome == Outcome::Completed,
         );
+        let model = if let Some(codex) = &turn.codex_model {
+            Model {
+                name: codex.model.as_deref(),
+                effort: codex.effort.as_deref(),
+                fast: false,
+            }
+        } else {
+            snapshot.model_between(turn.started.zip(ended))
+        };
         vec![Derived::Piece(PieceWork {
             output_origin: None,
             unit_key: key,
             index: 0,
-            payload: render(outcome, elapsed, percent, quota),
+            payload: render(
+                outcome,
+                Footer {
+                    elapsed_ms: elapsed,
+                    started: turn.started,
+                    ended,
+                    model,
+                    context_pct: percent,
+                    quota: snapshot.quota,
+                },
+            ),
             notice_origin: None,
         })]
     }

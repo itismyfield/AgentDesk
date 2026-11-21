@@ -1,5 +1,10 @@
 //! Persisted turn and queue recovery shared by Gateway and REST worker runtimes.
 use super::*;
+#[path = "native_input.rs"]
+mod native_input;
+pub(super) use native_input::prepare_native_boot;
+
+mod agy_shadow;
 
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
@@ -28,6 +33,7 @@ pub(super) async fn restore_queued_and_inflight_work(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
+    agy_shadow::observe(http, provider).await;
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
     #[cfg(unix)]
     {
@@ -325,3 +331,14 @@ mod draft_tests;
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_consent_tests.rs"]
 mod consent_tests;
+
+/// Opens intake only after this active runtime restored its queues and inflight work.
+pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+    mark_reconcile_complete(shared);
+    #[cfg(unix)]
+    for channel in
+        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
+    {
+        super::super::session_transition::wake_installed_owner(shared, channel).await;
+    }
+}

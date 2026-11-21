@@ -65,6 +65,7 @@ impl ToolCardRun {
                 .filter(|block| block["type"] == "tool_use")
                 .collect(),
             ShadowProvider::Codex => value.get("payload").into_iter().collect(),
+            ShadowProvider::Antigravity => Vec::new(),
         };
         blocks
             .into_iter()

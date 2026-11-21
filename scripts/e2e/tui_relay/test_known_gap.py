@@ -677,3 +677,58 @@ class HerdrScopedGapRepairs(unittest.TestCase):
         self.assertEqual(result['status'], 'fail', result)
         self.assertIn('AFTER_CLEAR', result['reason'])
         self.assertNotIn('known_gaps', result)
+
+
+class HerdrStopCases(unittest.TestCase):
+    def run_e54(self, *, late=False, follow=True, notice=None, destructive=True, early_done=False, **gates):
+        from unittest.mock import Mock
+        from tui_relay import herdr, herdr_stop as stop
+        scenario = driver.yaml.safe_load((Path(__file__).resolve().parents[3] / 'tests/e2e/tui_relay/scenarios/E-54-discord-stop-active-and-idle.yaml').read_text())
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=destructive, final_refetches=1, **gates)
+        rows, sends, setups = [], [], iter(range(100, 2000, 200))
+        setup, client = [], Mock()
+        client.send_control.side_effect = lambda *a: {'id': str(setup.append(next(setups)) or setup[-1])}
+        def add(text):
+            rows.append({'id': str(setup[-1] + 1 + len(rows)), 'content': text,
+                         'author': {'id': assertions.provider_bot_id('claude'), 'bot': True}})
+        def send(channel, text):
+            sends.append(text)
+            if 'probe.' in text:
+                rows.clear()
+                add(text.split('First output ')[1].split(']')[0].replace('{run_id}', 'run') + ']')
+                if early_done and 'S15C' in text:  # The relay posted the whole hold turn at once.
+                    add('[E2E:S15C:run:HOLD_DONE]')
+            elif text == '!stop':
+                add(stop.STOPPING + ' 턴은 provider가 유지해요.')
+            elif text.startswith('!stop'):
+                add(stop.NO_ACTIVE)
+                if late:
+                    add(stop.LATE)
+            elif notice:
+                add(notice)
+            if 'FOLLOW' in text and follow:
+                add(text.split('exactly ')[1].replace('{run_id}', 'run'))
+            return {'id': '450'}
+        client.send.side_effect = send
+        client.wait_for_message.side_effect = lambda channel, **k: (next((r for r in rows if k['predicate'](r)), None), list(rows))
+        client.fetch_messages.side_effect = lambda *a, **k: list(rows)
+        with patch.object(herdr, 'observe', return_value={'herdr': {}}), patch.object(herdr.time, 'sleep'), \
+             patch.object(driver, 'tmux', None), patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
+            result = driver.run_scenario(scenario, args=args, client=client, run_id='run')
+        self.assertEqual(sends.count('!stop'), int(destructive))
+        return result, [case['status'] for case in result['subcases']], result['subcases'][-1].get('raw_text_counts')
+
+    def test_stop_cases_judge_late_output_and_busy_input_on_herdr(self):
+        result, statuses, _ = self.run_e54()
+        self.assertEqual((statuses, result['status']), (['pass', 'unexpected_pass'], 'unexpected_pass'), result)
+        self.assertEqual(self.run_e54(late=True)[1][0], 'fail')
+        dropped = '⚠️ 이 입력은 ... 전달하지 않고 종료했습니다. 원문은 보관하지 않으며 자동으로 다시 보내지 않습니다.'
+        _, statuses, counts = self.run_e54(follow=False, notice=dropped)
+        self.assertEqual((statuses[1], counts['전달하지 않'], counts['원문은 보관하지 않']), ('known_gap', 1, 1))
+        self.assertEqual(self.run_e54(notice=dropped)[1][1], 'fail')
+        self.assertEqual(self.run_e54(destructive=False)[0]['status'], 'skipped')
+        self.assertEqual(self.run_e54(destructive=False, required_coverage_class='live')[0]['status'], 'fail')
+        result, statuses, _ = self.run_e54(early_done=True)
+        self.assertEqual((statuses[1], result['subcases'][1].get('known_gaps')), ('fail', None), result)
+        self.assertIn('inconclusive', result['subcases'][1]['reason'])

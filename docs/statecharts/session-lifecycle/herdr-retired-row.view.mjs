@@ -6,7 +6,7 @@ export const state = v => {
   const b = ({alive: "reader 살아 있음", exiting: "reader 종료 중", final: "reader 마무리", gone: "reader 없음"})[v.bridge];
   const p = ({busy: "presence busy", unknown: "presence unknown", idle: "presence idle"})[v.pres];
   const ph = ({run: "턴 진행", postlude: "force postlude 전", liveend: "row end 정리 전", done: "취소·row end 끝"})[v.phase];
-  const t = (v.ended ? " · 한때 끝남" : "") + (v.refused ? " · 새 턴 거절됨" : "") + (v.turns ? " · 새 턴 시작 뒤" : "") + (v.restarts ? " · 재시작 뒤" : "");
+  const t = (v.ended ? " · 한때 끝남" : "") + (v.refused ? " · 새 턴 거절됨" : "") + (v.turns ? " · 새 턴 시작 뒤" : "") + (v.restarts ? " · 재시작 뒤" : "") + (v.lost ? " · reader 행 상실" : "") + (v.lostWrite ? " · 상실 뒤 씀" : "") + (v.oldOverNew ? " · 새 턴 행 덮음" : "");
   return `${ph} · ${e} · ${r}(${n}) · ${b} · ${p}${v.fresh ? "" : " · heartbeat 오래됨"}${t}`;
 };
 export const step = a => ({Retire: "terminate·row end 퇴역", ForcePostlude: "force postlude disconnect", LiveEnd: "live row end 정리", Heartbeat: "reader 30초 working", BridgeExit: "루프 끝 TURN_ACTIVE", BridgeFinal: "terminal IDLE(또는 생략)", StaleTick: "300초 경과", Sweep: "stale sweep idle", Install: "새 실행 Pending 설치", NewTurn: "새 nonce 턴 시작", NewTurnEnd: "새 턴 IDLE", Restart: "dcserver 재시작", PresenceStale: "600초 정체 → unknown"})[a] ?? a;

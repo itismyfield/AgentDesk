@@ -13,6 +13,7 @@ use crate::services::codex_tui::canary::CANARY_TMUX;
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_bootstrap_base, o_writer_ready};
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::thread_host::{self, PolicyHost};
 use crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap;
 
 #[derive(Debug)]
@@ -159,7 +160,15 @@ pub(crate) async fn for_turn(
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
-    resolve(pool, provider, channel_id, session_key, true).await
+    let host = resolve(pool, provider, channel_id, session_key, true).await;
+    // Synchronous readers of a thread's current execution read this final judgement.
+    let judged = match &host {
+        TurnHost::Herdr(_) => Some(true),
+        TurnHost::Tmux => Some(false),
+        TurnHost::Return(_) | TurnHost::Refused(_) => None,
+    };
+    thread_host::record_judged(channel_id, judged);
+    host
 }
 
 /// Reads the selected host and its current row without admission or output-writer gates.
@@ -264,10 +273,8 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
-    let policy = crate::services::session_host::surface_policy::policy_channel(channel_id);
-    if !session_hosts::has_herdr_endpoint(channel_id)
-        && (policy == channel_id || !session_hosts::has_herdr_endpoint(policy))
-    {
+    // An unknown policy is judged below rather than passed as tmux.
+    if matches!(thread_host::parent_policy(channel_id), PolicyHost::Tmux) {
         return None;
     }
     let session_key = session_key().await;

@@ -57,6 +57,7 @@ pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay
 mod relay_dead_reattach;
 mod relay_progress;
 mod routine_process;
+mod routine_reset;
 pub(crate) use super::queue_io::input_owner::closed::repair_cleared_row;
 pub(crate) use routine_process::cancel_routine_process_turn;
 mod channel_home_seed;
@@ -130,6 +131,7 @@ pub(crate) use transcript_binding_stall::attach_o_stall_reasons;
 pub(crate) use transcript_binding_stall::o_verdict_for_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) use turn_deliver::CodexLedger;
+pub(crate) use turn_deliver::decision_target;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,

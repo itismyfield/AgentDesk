@@ -48,6 +48,7 @@ pub mod monitoring;
 pub mod onboarding;
 pub mod pipeline;
 pub mod pr_summary;
+mod prompt_audit;
 pub mod prompt_manifest_retention;
 pub mod provider_auth_profiles;
 pub mod provider_cli_api;

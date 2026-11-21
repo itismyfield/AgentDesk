@@ -40,6 +40,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
 
 use super::SharedData;
+#[cfg(unix)]
+pub(crate) use super::commands::stop::run_herdr_agent_stop;
 /// A live Herdr turn's non-forced cancel, run as its `/stop`.
 pub(crate) use super::commands::stop::run_herdr_cancel;
 

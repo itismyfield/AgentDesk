@@ -955,7 +955,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
         self.assertEqual(mutation["needs"], "changes")
         self.assertEqual(mutation["runs-on"], "ubuntu-latest")
-        self.assertEqual(mutation["timeout-minutes"], 60)
+        self.assertEqual(mutation["timeout-minutes"], 80)
         self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
@@ -974,7 +974,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"        shell: bash\n"
-            r"        timeout-minutes: 60\n"
+            r"        timeout-minutes: 75\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
@@ -2140,7 +2140,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 helper, encoding="utf-8"
             )
             (root / "scripts/ci").mkdir()
-            for helper in ("nextest_required.py", "cargo_test_filters.py"):
+            for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
+                           "main_script_check_shards.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
@@ -2625,7 +2626,7 @@ jobs:
             ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
-            ("job timeout leading zero is not decimal 60", mutations, "    timeout-minutes: 60\n", "    timeout-minutes: 074\n"),
+            ("job timeout octal alias is not decimal 80", mutations, "    timeout-minutes: 80\n", "    timeout-minutes: 0120\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):

@@ -103,6 +103,12 @@ pub struct AgentHandoffBody {
     pub source: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Accepted-input id the execution's receipt names, as on turn/start.
+    #[serde(default)]
+    pub origin_id: Option<String>,
+    /// A delegation: the server mints the origin and reports back to the requester's channel.
+    #[serde(default)]
+    pub delegation: Option<bool>,
 }
 
 fn pg_required_error() -> AppError {
@@ -670,6 +676,12 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "prompt is required"})),
         );
     }
+    let declared = (body.source.as_deref(), body.metadata.as_ref());
+    if let Some(refused) =
+        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
+    {
+        return refused;
+    }
     let metadata = match super::agents_turn_target::start_metadata(body.metadata, body.origin_id) {
         Ok(metadata) => metadata,
         Err(response) => {
@@ -1069,6 +1081,12 @@ pub async fn agent_handoff(
     axum::extract::Path(to_agent_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<AgentHandoffBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let declared = (body.source.as_deref(), body.metadata.as_ref());
+    if let Some(refused) =
+        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
+    {
+        return refused;
+    }
     let notice = super::imessage_input_notice::notice_line(body.source.as_deref(), &body.prompt);
     let Some(pool) = state.pg_pool_ref() else {
         super::imessage_input_notice::not_echoed(
@@ -1107,6 +1125,24 @@ pub async fn agent_handoff(
         }
     };
 
+    let (metadata, delegation) = match crate::services::agents::delegation::handoff_origin(
+        pool,
+        &body.from_agent_id,
+        &to_agent_id,
+        body.delegation == Some(true),
+        body.origin_id.as_deref(),
+        body.metadata,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err((status, error)) => {
+            super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "handoff", error);
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+            return (status, Json(json!({"ok": false, "error": error})));
+        }
+    };
+
     match crate::services::discord::agent_handoff::start_agent_handoff_turn(
         registry,
         pool,
@@ -1117,7 +1153,7 @@ pub async fn agent_handoff(
         body.prefix.unwrap_or(true),
         body.expect_reply,
         body.source,
-        body.metadata,
+        metadata,
     )
     .await
     {
@@ -1129,7 +1165,17 @@ pub async fn agent_handoff(
                 notice.as_deref(),
             )
             .await;
-            (StatusCode::OK, Json(response.to_value()))
+            let mut value = response.to_value();
+            if let Some(delegation) = delegation {
+                use crate::services::discord::delegation_card::post_accept_card;
+                let card = post_accept_card(registry, &delegation, response.channel_id_num).await;
+                value["origin_id"] = json!(delegation.origin.id());
+                value["accept_card"] = match card {
+                    Ok(message_id) => json!({"message_id": message_id.to_string()}),
+                    Err(error) => json!({"error": error}),
+                };
+            }
+            (StatusCode::OK, Json(value))
         }
         Err(error) => {
             super::imessage_input_notice::not_echoed(

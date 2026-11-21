@@ -39,6 +39,22 @@ def profile():
     }
 
 
+def agy_profile():
+    value = profile()
+    value.update(name="agy-headless", bots={"antigravity": "1573471163663785994", "driver": "900003"}, channels=["900004"])
+    value["features"]["env"]["ADK_BUSY_INJECT_DISCORD_CHANNELS"] = ["900004"]
+    return value
+
+
+def agy_login(home):
+    cli, login = home / "agy-bin/agy", home / ".adk/dev/agy-login"
+    cli.parent.mkdir(exist_ok=True)
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o700)
+    login.mkdir(mode=0o700, exist_ok=True)
+    return {"mode": "dedicated_home", "login_home": str(login), "cli": str(cli)}
+
+
 def short_temporary_directory(prefix="d-"):
     return tempfile.TemporaryDirectory(prefix=prefix, dir="/private/tmp" if sys.platform == "darwin" else "/tmp")
 
@@ -89,6 +105,38 @@ class InstanceDeclarationTests(unittest.TestCase):
         return prepare(self.base, self.instance_id, self.worktree,
                        selected if selected is not None else profile(),
                        ambient if ambient is not None else {}, **ports)
+
+    def test_agy_profile_declares_one_pipe_agent_run_from_its_login_home(self):
+        login = agy_login(self.home)
+        manifest = self.prepare(agy_profile(), agy_login=login)
+        root = self.base / self.instance_id
+        config, org = read_json(root / "config/agentdesk.yaml"), read_json(root / "config/org.yaml")
+        self.assertEqual((list(config["discord"]["bots"]), config["agents"][0]["channels"]["antigravity"]["runtime"]),
+                         (["antigravity"], "pipe"))
+        self.assertEqual(org["provider_auth_profiles"],
+                         {"test-antigravity": {"provider": "antigravity", "home": login["login_home"], "env": {}}})
+        environment = child_environment(manifest, {})
+        self.assertEqual((environment["AGENTDESK_AGY_PATH"], environment["HOME"]), (login["cli"], str(root / "home")))
+        self.assertEqual(validate(self.base, self.instance_id, {}), manifest)
+
+    def test_agy_declaration_refuses_foreign_app_or_login_and_an_mcp_login_home(self):
+        from scripts.dev_instance.config import BlockedAgyLogin
+        login = agy_login(self.home)
+        foreign = agy_profile()
+        foreign["bots"]["antigravity"] = "900009"
+        for selected, binding in [(foreign, login), (agy_profile(), None), (profile(), login),
+                                  (agy_profile(), {**login, "login_home": str(self.home)})]:
+            with self.subTest(name=selected["name"], binding=binding):
+                with self.assertRaises(InstanceError):
+                    self.prepare(selected, agy_login=binding)
+                self.assertFalse((self.base / self.instance_id).exists())
+        manifest = self.prepare(agy_profile(), agy_login=login)
+        (Path(login["login_home"]) / ".gemini/config").mkdir(parents=True)
+        (Path(login["login_home"]) / ".gemini/config/mcp_config.json").write_text('{"mcpServers":{"memento":{}}}')
+        with self.assertRaises(BlockedAgyLogin):
+            child_environment(manifest, {})
+        result = self.cli("validate", "--instance", self.instance_id)
+        self.assertEqual((result.returncode, json.loads(result.stdout)["status"]), (4, "BLOCKED"))
 
     def cli(self, *args):
         return subprocess.run(

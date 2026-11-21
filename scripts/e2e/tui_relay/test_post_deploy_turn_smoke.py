@@ -17,7 +17,6 @@ import re
 import tempfile
 import itertools
 import sys
-import time
 import unittest
 import yaml
 from argparse import Namespace
@@ -615,7 +614,7 @@ class StepTimings(unittest.TestCase):
 class GatewayReadyTest(unittest.TestCase):
     def setUp(self):
         self.details = []
-        self.read_delay = 0.0
+        self.now = self.read_duration = 0.0
         self.calls = {"detail": 0, "read": 0}
         self.writer_states = [[{"provider": "claude", "channel_id": "222", "accepts": True,
                                 "hold_reason": None}]]
@@ -654,17 +653,13 @@ class GatewayReadyTest(unittest.TestCase):
                     self.reply(payload)
                 elif self.path.startswith("/api/discord/channels/222/messages?"):
                     fixture.calls["read"] += 1
-                    time.sleep(fixture.read_delay)
-                    try:
-                        self.reply([])
-                    except (BrokenPipeError, ConnectionResetError):
-                        if not fixture.read_delay:
-                            raise
+                    fixture.advance(fixture.read_duration)
+                    self.reply([])
                 else:
                     self.send_error(404)
 
         self.server = Server(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         self.addCleanup(lambda: self.assertEqual(self.server_errors, []))
         self.addCleanup(self.server.server_close)
@@ -672,10 +667,14 @@ class GatewayReadyTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
+    def advance(self, seconds):
+        self.now += seconds
+
     def wait(self, deadline_s):
         with redirect_stdout(io.StringIO()):
             return turn_smoke.wait_gateway_ready(base_url=self.base_url, cell="claude-tui", channel_id="222",
-                                                 deadline_s=deadline_s, interval_s=0.01)
+                                                 deadline_s=deadline_s, interval_s=1,
+                                                 clock=lambda: self.now, sleep=self.advance)
 
     def test_ready_only_after_recovery_connection_and_a_channel_read(self):
         self.details = [(False, False), (True, False), (True, True)]
@@ -685,7 +684,7 @@ class GatewayReadyTest(unittest.TestCase):
 
     def test_a_gateway_that_never_connects_is_not_ready_at_the_deadline(self):
         self.details = [(True, False)]
-        ready, detail = self.wait(0.3)
+        ready, detail = self.wait(3)
         self.assertFalse(ready)
         self.assertIn("gateway not connected: claude", detail)
         self.assertEqual(self.calls["read"], 0)
@@ -708,17 +707,17 @@ class GatewayReadyTest(unittest.TestCase):
                               ([dict(own, accepts="true")], "not accepting")]:
             with self.subTest(state=state):
                 self.writer_states = [state]
-                accepted, detail = self.wait(0.05)
+                accepted, detail = self.wait(3)
                 self.assertFalse(accepted, detail)
                 self.assertIn(reason, detail)
         self.assertEqual(self.calls["read"], 0)
 
     def test_a_channel_read_that_outlasts_the_deadline_is_not_ready(self):
         self.details = [(True, True)]
-        self.read_delay = 1.5
-        ready, detail = self.wait(0.5)
-        self.assertFalse(ready, detail)
-        self.assertGreaterEqual(self.calls["read"], 1)
+        self.read_duration = 15
+        ready, detail = self.wait(10)
+        self.assertEqual((ready, self.calls["read"]), (False, 1), detail)
+        self.assertIn("Discord read answered after the deadline", detail)
 
     def test_ready_only_after_the_deadline_is_not_ready(self):
         clock, timeouts = [0.0], []
@@ -767,16 +766,18 @@ class GatewayReadyTest(unittest.TestCase):
     def test_cli_exits_1_with_one_fail_line_when_not_ready(self):
         self.details = [(False, False)]
         output = io.StringIO()
-        with redirect_stdout(output):
+        wait = turn_smoke.wait_gateway_ready
+        with redirect_stdout(output), patch.object(turn_smoke, "wait_gateway_ready",
+                side_effect=lambda **kwargs: wait(**kwargs, clock=lambda: self.now, sleep=self.advance)):
             rc = turn_smoke.main(["gateway-ready", "--base-url", self.base_url, "--cell", "claude-tui",
-                                  "--channel-id", "222", "--deadline-s", "0.3"])
+                                  "--channel-id", "222", "--deadline-s", "3"])
         self.assertEqual(rc, 1)
         lines = output.getvalue().splitlines()
         self.assertEqual([line for line in lines if line.startswith("gateway-ready FAIL")], [lines[-1]])
         self.assertIn("startup recovery not finished", lines[-1])
 
 
-# Copied from the 11-02 09:52 deploy smoke's claude E2E pending-queue file: drained, settled metadata only.
+# The saved pending queue is drained and retains only settled metadata.
 QUEUE_V2_SETTLED = FIXTURES / "saved/pending-queue-v2-settled-20261102T0952.json"
 
 
@@ -938,7 +939,7 @@ class CellResetTest(unittest.TestCase):
                     self.reply({"error": "unexpected fixture POST"}, 404)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(thread.join)
@@ -1175,7 +1176,7 @@ class CellResetTest(unittest.TestCase):
         functions = "\n".join(name + "() {\n" + deploy.split(name + "() {\n", 1)[1].split("\n}\n", 1)[0]
                               + "\n}" for name in names)
         release = self.root / "release"
-        (release / "config").mkdir(parents=True)
+        (release / "config").mkdir(parents=True, exist_ok=True)
         (release / "config/agentdesk.yaml").write_bytes(self.config.read_bytes())
         (self.root / "detail.json").write_text(json.dumps({"mailboxes": [
             {"provider": "claude", "channel_id": "222", "has_cancel_token": True,
@@ -1183,7 +1184,7 @@ class CellResetTest(unittest.TestCase):
         (self.root / "sessions.json").write_text(json.dumps({"sessions": [
             {"provider": "claude", "channel_id": "222", "status": "active"}]}))
         (self.root / "health.json").write_text('{"cluster_standby": false}')
-        (release / "logs").mkdir()
+        (release / "logs").mkdir(exist_ok=True)
         (release / "logs/dcserver.stdout.log").write_text("fixture\n")
         (self.root / "fake_driver.py").write_text('''import argparse, json, sys
 from pathlib import Path
@@ -1216,6 +1217,7 @@ POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096; POST_DEPLOY_SMOKE_TURN_COVERAGE=''
 POST_DEPLOY_SMOKE_GATEWAY_READY_S=120; POST_DEPLOY_SMOKE_RELAY_PATH=''
 _post_deploy_smoke_note() { printf '%s\\n' "$1"; }
 _post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
+_notify_channel() { printf 'NOTIFY: %s\\n' "$1"; }
 _post_deploy_smoke_resolve_cluster_standby() { printf false; }
 _post_deploy_smoke_resolve_health_module() { printf true; }
 _post_deploy_smoke_log_identity_and_size() { printf 'fixture 0\\n'; }
@@ -1244,7 +1246,7 @@ exit "$rc"
 """
         return subprocess.run(["bash", "-c", script, "fixture", str(ROOT), str(self.root),
                                str(self.server.server_port), "all" if run_all else "e1"],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=120)
 
     def test_deploy_resets_both_cells_before_first_idle_guard(self):
         with patch.dict(os.environ, {"AGENTDESK_CONFIG": str(self.root / "ambient-unused.yaml")}):
@@ -1290,6 +1292,24 @@ exit "$rc"
         self.assertIn("relay E-51=skipped: codex-tui not proven idle (writer not ready: "
                       f"target writer codex:333 not accepting: {hold})", result.stdout)
 
+    def test_second_consecutive_not_proven_idle_skip_alerts_until_an_evaluated_run(self):
+        reason = "writer not ready: target writer codex:333 not accepting: held"
+        alert = (f"NOTIFY: ⚠ 배포 스모크 E-51: codex-tui 셀(채널 333)이 배포 2회 연속 idle 미증명으로 건너뛰어졌습니다. "
+                 f"셀 점검이 필요합니다. 마지막 사유: {reason}")
+        for ready, alerts, streak in ((False, [], 1), (False, [alert], 2), (True, [], None), (False, [], 1)):
+            self.writers = [] if ready else [{"provider": "codex", "channel_id": "333", "accepts": False,
+                                              "hold_reason": "held"}]
+            out = self.deploy_round_trip(run_all=True).stdout
+            self.assertEqual([line for line in out.splitlines() if line.startswith("NOTIFY: ")], alerts, out)
+            self.assertIn(f"E-51=pass" if ready else f"not proven idle ({reason}) consecutive={streak}", out)
+
+    def test_skip_blocked_by_e1_fail_is_not_counted(self):
+        self.change_on_release = True
+        for _ in range(2):
+            out = self.deploy_round_trip(run_all=True).stdout
+            self.assertIn("relay E-50=skipped: blocked by E-1 FAIL", out)
+            self.assertNotIn("NOTIFY: ", out)
+
     def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
         with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
             held = path.read_bytes()
@@ -1315,7 +1335,6 @@ exit "$rc"
     def test_normal_preflight_never_mutates(self):
         self.assertEqual(self.preflight(), 1)
         self.assertEqual(self.mutations(), [])
-
 
 
 OLD = "00000000-0000-4000-8000-000000000001"

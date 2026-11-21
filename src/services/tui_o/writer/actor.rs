@@ -137,42 +137,8 @@ impl Default for Owing {
     }
 }
 
-/// Publishes [`Unsettled`] and [`Owing`]; `None` keeps legacy readers without cleanup policy.
-pub fn spawn_projecting<P, L, A, B>(
-    config: &WriterConfig,
-    readers: Option<ReaderConfig>,
-    writer: ChannelWriter<P, L, A>,
-    provider: ShadowProvider,
-    bindings: Arc<B>,
-    (stop, resumed, unsettled, owing): (
-        watch::Receiver<bool>,
-        watch::Sender<bool>,
-        Unsettled,
-        Owing,
-    ),
-) -> Option<JoinHandle<Option<StopCause>>>
-where
-    P: DiscordPort,
-    L: DeliveryLease + 'static,
-    A: AlarmSink + 'static,
-    B: BindingEvents,
-{
-    let run = || {
-        let commands = codex_submission::take_spawn_receiver();
-        let transitions = transition_port::take_spawn_receiver();
-        let projections = (unsettled, owing);
-        tokio::spawn(run_publishing(
-            writer,
-            provider,
-            bindings,
-            (stop, resumed),
-            projections,
-            (None, readers, config.producer_absent),
-            (commands, transitions),
-        ))
-    };
-    config.enabled.then(run)
-}
+pub use native_input::spawn_projecting;
+pub mod native_input;
 
 struct Actor<P, L, A, B> {
     replay_deferred: bool,
@@ -238,7 +204,7 @@ where
         bindings,
         (stop, resumed),
         projections,
-        (None, None, false),
+        (None, None, false, None),
         (None, None),
     )
     .await
@@ -251,10 +217,11 @@ async fn run_publishing<P, L, A, B>(
     bindings: Arc<B>,
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
-    (utc, readers, producer_absent): (
+    (utc, readers, producer_absent, _native): (
         Option<chrono::DateTime<chrono::Utc>>,
         Option<ReaderConfig>,
         bool,
+        Option<native_input::NativePort>,
     ),
     (mut commands, transitions): (
         Option<codex_submission::Receiver>,
@@ -272,7 +239,8 @@ where
         fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
         .with_suspension(writer.suspension.clone())
-        .with_producer_absent(producer_absent);
+        .with_producer_absent(producer_absent)
+        .with_native_inputs(_native.is_some());
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
@@ -327,9 +295,20 @@ where
     let progress = super::progress::Publisher::new(actor.writer.channel());
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
-        if actor.rescope() {
-            sources_resumed = false;
-            resumed.send_replace(false);
+        match actor.rescope() {
+            fresh_resume::Rescope::Changed => {
+                sources_resumed = false;
+                resumed.send_replace(false);
+            }
+            fresh_resume::Rescope::Busy => {
+                // Later source reads can take the same lock, so defer the whole poll.
+                tokio::select! {
+                    () = tokio::time::sleep(POLL_INTERVAL) => {},
+                    changed = stop.changed() => if changed.is_err() { break },
+                }
+                continue;
+            }
+            fresh_resume::Rescope::Unchanged => {}
         }
         if actor.writer.is_stopped() {
             break;
@@ -411,6 +390,10 @@ where
         if !actor.writer.has_local_retry() {
             actor.deliver_owed(&progress).await;
         }
+        // A restart-cut episode's one notice goes after this poll's owed pieces.
+        if sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry() {
+            actor.writer.deliver_restart_notices().await;
+        }
         if let Some(drain) = drain {
             let prepared = actor
                 .writer
@@ -446,6 +429,10 @@ where
         } else {
             Vec::new()
         };
+        #[cfg(unix)]
+        if let Some(port) = &_native {
+            actor.sources.offer_native(port).await;
+        }
         actor.prepare_notices(&fresh).await;
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
@@ -458,7 +445,7 @@ where
         }
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
         let channel = actor.writer.channel();
-        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        let herdr = crate::services::session_host::thread_host::runs_herdr(channel);
         if herdr {
             unsettled.send_replace(actor.unsettled());
         }
@@ -515,7 +502,7 @@ where
         bindings,
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
-        (Some(utc), None, false),
+        (Some(utc), None, false, None),
         (None, None),
     )
     .await
@@ -525,7 +512,7 @@ mod fresh_resume;
 mod notice_settlement;
 mod notice_work;
 #[cfg(test)]
-pub(crate) use fresh_resume::work_for_tests;
+pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;

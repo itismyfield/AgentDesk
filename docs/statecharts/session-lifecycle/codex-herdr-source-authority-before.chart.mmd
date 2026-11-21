@@ -1,0 +1,49 @@
+---
+title: "Codex Herdr first input and runtime progress"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDatabaseUnderPaneLocks or NoSchedulerLockWait
+    lg1: Breaks NoSchedulerLockWait in some cases
+    lg2: Path to the LaunchSettles or NoDatabaseUnderPaneLocks or NoSchedulerLockWait or RuntimeKeepsTicking bug
+    lg3: Repeats forever, so LaunchSettles or RuntimeKeepsTicking breaks
+  }
+  class lg0 breaks
+  class lg1 mayBreak
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Codex pane started
+  s1: Listing order locked
+  s2: Pane ownership locked
+  s3: Writer waiting on pane ownership
+  s4: Database lookup holds both pane locks
+  s5: No worker driving the pending database lookup or timer
+  s6: First input admitted
+  s7: First input refused
+  [*] --> s0
+  s0 --> s0: intake discovery observes the pane
+  s0 --> s1: enter the listing order
+  s1 --> s2: take pane ownership
+  s2 --> s3: writer waits for the pane
+  s2 --> s4: check the Pending execution
+  s1 --> s1: pane starts another execution
+  s3 --> s5: check the Pending execution
+  s4 --> s2: database responds
+  s4 --> s5: writer waits for the pane
+  s2 --> s6: admit the first input
+  s2 --> s7: refuse the changed execution
+  s3 --> s6: admit the first input
+  s3 --> s7: refuse the changed execution
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath
+  class s5 breaks
+  class s5 repeats
+  class s6 mayBreak
+  class s7 mayBreak

@@ -310,8 +310,9 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         .iter()
         .filter(|request| request["method"] == "pane.read")
         .count();
+    // The unproven first look reads once for an open dialog; admission reads once more.
     assert_eq!(
-        reads, 1,
+        reads, 2,
         "terminal_signal_admits_while_old_busy_chrome_is_visible"
     );
 }
@@ -538,9 +539,9 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
         json!({"type":"system","subtype":"turn_duration","timestamp":old}),
     ];
     let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
-    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
+    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven, Waits};
     // `None` is admitted; a refusal names what the budget's end saw; a running screen over
-    // unchanged idle bytes ends Unproven, as a wait whose transcript never moved reads no screen.
+    // unchanged idle bytes is the session's own turn and waits for its end.
     let cases = [
         ("idle", true, pane("✻ Baked for 2s", ""), None),
         ("stale MCP auth banner", true, pane(mcp, ""), None),
@@ -564,13 +565,13 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
             "MCP banner + hook running",
             true,
             pane(&format!("{mcp}\n{HOOK_RUNNING}"), ""),
-            Some(Unproven(readiness::Unproven::Retained)),
+            Some(Waits(readiness::WaitCause::OwnTurn)),
         ),
         (
             "MCP banner + turn starting",
             true,
             pane(&format!("{mcp}\n{TURN_STARTING}"), ""),
-            Some(Unproven(readiness::Unproven::Retained)),
+            Some(Waits(readiness::WaitCause::OwnTurn)),
         ),
         (
             "new incarnation",
@@ -673,5 +674,145 @@ fn restored_screen_reads_marker_draft_modal_and_busy_but_not_a_stale_auth_banner
         ("no composer", "✻ Baked for 2s".to_string()),
     ] {
         assert!(!restored_screen_idle(&screen), "{name}");
+    }
+}
+
+/// A wait that ends names its open cause; an older launch's lost source settles. The dialog, a
+/// background agent's permission prompt over the composer, holds at once as a dialog.
+#[test]
+fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
+    use crate::services::claude_tui::host_input::InputRefusal::{Unproven, Waits};
+    use crate::services::claude_tui::readiness::{self, WaitCause};
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding, binding_context};
+    use serde_json::json;
+    let dialog = "─────────────────────────────────────────────\n Bash command · from the adk-lane agent\n Recapture r3 shots on final build\n │ cd /tmp/dashboard && node capture.mjs\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agen…";
+    let old = chrono::Utc::now() - chrono::Duration::hours(6);
+    // (name, launched before this run, binding kept, screen, expected refusal)
+    let cases = [
+        (
+            "dialog over a proven source",
+            true,
+            true,
+            dialog.to_string(),
+            Some(Waits(WaitCause::Modal)),
+        ),
+        (
+            "an answer naming Esc to cancel over an empty composer",
+            true,
+            true,
+            pane("Press \u{1b}[1mEsc\u{1b}[0m to cancel the operation.", ""),
+            None,
+        ),
+        (
+            "older launch lost its source",
+            true,
+            false,
+            pane("✻ Baked for 2s", ""),
+            Some(Unproven(readiness::Unproven::Lost)),
+        ),
+        (
+            "this run's launch has no source yet",
+            false,
+            false,
+            pane("✻ Baked for 2s", ""),
+            Some(Waits(WaitCause::NoSource)),
+        ),
+    ];
+    for (name, older, bound, screen, refused) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        readiness::initialize();
+        let created_at = if older { old } else { chrono::Utc::now() };
+        let rig = HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let logical = format!("i8161-s0-{}", uuid::Uuid::new_v4().simple());
+        let native = uuid::Uuid::new_v4().to_string();
+        let projects = root.path().join("projects");
+        let path = projects.join("workspace").join(format!("{native}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let write = |rows: &[serde_json::Value]| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for row in rows {
+                let mut row = row.clone();
+                row["sessionId"] = json!(native);
+                writeln!(file, "{row}").unwrap();
+            }
+        };
+        let turn = |at: chrono::DateTime<chrono::Utc>| {
+            [
+                json!({"type":"user","timestamp":at,"message":{"role":"user","content":"<task-notification>"}}),
+                json!({"type":"assistant","timestamp":at,"message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+                json!({"type":"system","subtype":"stop_hook_summary","timestamp":at}),
+                json!({"type":"system","subtype":"turn_duration","timestamp":at}),
+            ]
+        };
+        write(&turn(old));
+        let context: binding_context::BindingContext = serde_json::from_value(json!({
+            "schema":1,"provider":"claude","created_at":created_at,"execution_nonce":NONCE,
+            "tmux_session":logical,"channel_id":1,"owner_runtime_root":"test","host":null,
+            "expected_native_session_id":native,"launch_mode":"resume","provider_root":projects
+        }))
+        .unwrap();
+        let launch = binding_context::PreparedIncarnation::create(context).unwrap();
+        rig.run_provider(&launch.path, false);
+        for (marker, value) in [("host_kind", "herdr"), ("spawn_nonce", NONCE)] {
+            let marker = crate::services::tmux_common::session_temp_path(&logical, marker);
+            std::fs::write(marker, value).unwrap();
+        }
+        let (_owner, target) = bound_target(&rig, &logical);
+        readiness::tests::daemon_restart(&logical);
+        if bound {
+            tui_prompt_dedupe::register_tmux_runtime_binding(
+                &logical,
+                TuiRuntimeBinding {
+                    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some(native.clone()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            // The restart floor is set; an internal turn after it proves the source again.
+            assert!(
+                readiness::observe(&logical, Some(&path)).is_none(),
+                "{name}: floor"
+            );
+            write(&turn(chrono::Utc::now()));
+            assert!(
+                readiness::observe(&logical, Some(&path)).is_some(),
+                "{name}: proven"
+            );
+        }
+        rig.answer("pane.read", json!({"type":"pane_read", "read":{"pane_id":PANE,"source":"recent_unwrapped","text":screen,"revision":1,"truncated":false}}));
+        let plan = [
+            TuiInputAction::PasteBuffer("one original".into()),
+            TuiInputAction::Enter,
+        ];
+        READY_WAIT_FOR_TESTS.with(|wait| wait.set(Some(Duration::from_millis(600))));
+        let result = run_ready(&logical, &path, &target, &plan, None);
+        READY_WAIT_FOR_TESTS.with(|wait| wait.set(None));
+        let Some(refused) = refused else {
+            assert_eq!(result, InputRun::Applied, "{name}");
+            assert_eq!(rig.sends().len(), 2, "{name}: one paste and one Enter");
+            tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+            continue;
+        };
+        assert_eq!(result, InputRun::Refused(refused), "{name}");
+        assert!(rig.sends().is_empty(), "{name}: no key");
+        // The hold detail names the cause the operator log never could.
+        if let InputRun::Refused(Waits(cause)) = result {
+            assert!(
+                format!("{result:?}").contains(&format!("{cause:?}")),
+                "{name}"
+            );
+        }
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
     }
 }

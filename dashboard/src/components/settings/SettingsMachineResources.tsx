@@ -1,8 +1,8 @@
 import { Cpu, Gpu, HardDrive, MemoryStick, Network } from "lucide-react";
 import type { ReactNode } from "react";
 import type { MachineResources } from "../../api/machineResources";
+import { Chip, Num, Well } from "../common/KitPrimitives";
 import type { SettingsTr } from "./SettingsPanelTypes";
-import { SettingsBadge } from "./SettingsPrimitives";
 import { MachineSparkline, metricColors, readings, recentResources, type TrendColor } from "./MachineSparkline";
 
 const BYTES_PER_KIB = 1024;
@@ -25,16 +25,24 @@ export const RESOURCE_HIGH_PERCENT = 90;
 
 function Meter({ value, label, tr }: { value: number | null; label: string; tr: SettingsTr }) {
   const high = value != null && value >= RESOURCE_HIGH_PERCENT;
-  return <div className="flex items-center gap-2 text-sm tabular-nums" role={value == null ? undefined : "meter"} aria-label={label}
-    aria-valuemin={value == null ? undefined : 0} aria-valuemax={value == null ? undefined : 100}
-    aria-valuenow={value ?? undefined} aria-valuetext={value == null ? undefined : `${value.toFixed(1)}%${high ? tr(" (높음)", " (high)") : ""}`}
-    data-level={high ? "high" : "normal"}>
-    <span className="sr-only">{label}: </span>
-    <span className={high ? "font-semibold text-[var(--th-badge-amber-text)]" : undefined}>
-      {value == null ? tr("미확인", "Unknown") : `${value.toFixed(1)}%`}
-    </span>
-    {high ? <SettingsBadge tone="warn">{tr("높음", "High")}</SettingsBadge> : null}
-  </div>;
+  return (
+    <div
+      className="flex items-center gap-2 text-sm tabular-nums"
+      role={value == null ? undefined : "meter"}
+      aria-label={label}
+      aria-valuemin={value == null ? undefined : 0}
+      aria-valuemax={value == null ? undefined : 100}
+      aria-valuenow={value ?? undefined}
+      aria-valuetext={value == null ? undefined : `${value.toFixed(1)}%${high ? tr(" (높음)", " (high)") : ""}`}
+      data-level={high ? "high" : "normal"}
+    >
+      <span className="sr-only">{label}: </span>
+      <Num className={high ? "font-semibold text-[var(--warn)]" : undefined}>
+        {value == null ? tr("미확인", "Unknown") : `${value.toFixed(1)}%`}
+      </Num>
+      {high ? <Chip tone="warn">{tr("높음", "High")}</Chip> : null}
+    </div>
+  );
 }
 
 /** "Available" only adds information when it differs from total minus used (e.g. reclaimable cache). */
@@ -48,81 +56,140 @@ export function meaningfulAvailableBytes(memory: MachineResources["memory"] | nu
 function Resource({ icon, title, color, trend, children }: {
   icon: ReactNode; title: string; color: TrendColor; trend: ReactNode; children: ReactNode;
 }) {
-  return <div className="grid min-w-0 grid-cols-[88px_minmax(0,1fr)] items-center gap-3 py-3 sm:grid-cols-[104px_minmax(0,1fr)]"
-    data-hardware-kind={color}>
-    <div className="min-w-0">{trend}</div>
-    <div className="min-w-0 space-y-1">
-      <h5 className="flex items-center gap-2 text-[13px] font-medium"><span style={{ color: metricColors[color] }}>{icon}</span>{title}</h5>
-      {children}
+  return (
+    <div
+      className="grid min-w-0 grid-cols-[88px_minmax(0,1fr)] items-center gap-3 py-3 sm:grid-cols-[104px_minmax(0,1fr)]"
+      data-hardware-kind={color}
+    >
+      <div className="min-w-0">{trend}</div>
+      <div className="min-w-0 space-y-1">
+        <h5 className="m-0 flex items-center gap-2 text-[13px] font-medium"><span style={{ color: metricColors[color] }}>{icon}</span>{title}</h5>
+        {children}
+      </div>
     </div>
-  </div>;
+  );
 }
 
 export function SettingsMachineResources({ resources, history = [], stale, now, tr }: {
   resources: MachineResources | null | undefined; history?: MachineResources[]; stale: boolean; now: number; tr: SettingsTr;
 }) {
-  if (!resources) return <p className="mt-4 rounded-[var(--r-sm)] bg-[var(--bg-1)] p-3 text-[13px] text-th-text-muted shadow-[inset_0_0_0_0.5px_var(--line)]">
-    {tr("하드웨어 정보를 기다리는 중입니다.", "Waiting for hardware information.")}
-  </p>;
+  if (!resources) {
+    return (
+      <Well className="mt-4 rounded-[var(--r-sm)] p-3 text-[13px] text-[var(--fg-muted)]">
+        {tr("하드웨어 정보를 기다리는 중입니다.", "Waiting for hardware information.")}
+      </Well>
+    );
+  }
   const current = !stale && resources.observed_at_ms <= now + CLOCK_SKEW_TOLERANCE_MS && resources.expires_at_ms > now;
   const { cpu, memory, disks, gpus, network } = resources;
   const samples = recentResources(history, resources, now);
-  const trend = (color: TrendColor, label: string, select: (sample: MachineResources) => number | null | undefined,
-    secondary?: (sample: MachineResources) => number | null | undefined) => <MachineSparkline
-    values={readings(samples, select)} secondary={secondary && readings(samples, secondary)}
-    color={color} label={label} stale={!current} now={now} tr={tr} />;
-  return <section className="mt-4 pt-4 text-th-text-primary shadow-[inset_0_0.5px_0_var(--line)]" aria-label={tr("하드웨어 및 사용량", "Hardware and utilization")}>
-    <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs text-th-text-muted">
-      <h4 className="text-[13px] font-medium text-th-text-primary">{tr("하드웨어 및 사용량", "Hardware and utilization")}</h4>
-      <span>{tr("최근 15분 추이", "Last 15 minutes")}</span>
-    </div>
-    <p className="text-[11px] text-th-text-muted">{current ? tr("측정", "Sampled") : tr("측정 정보 만료", "Sample expired")}: {new Date(resources.observed_at_ms).toLocaleTimeString(tr("ko-KR", "en-US"))}</p>
-    <div className="[&>*+*]:shadow-[inset_0_0.5px_0_var(--line)]">
-      <Resource icon={<Cpu size={15} aria-hidden />} title="CPU" color="cpu"
-        trend={trend("cpu", "CPU", sample => sample.cpu.usage_percent)}>
-        <p className="break-words text-xs text-th-text-muted">{cpu.model || tr("모델 미확인", "Model unknown")}</p>
-        <p className="text-[11px] text-th-text-muted">{cpu.physical_cores == null ? "" : tr(`${cpu.physical_cores}코어 · `, `${cpu.physical_cores} cores · `)}{tr(`${cpu.logical_cores} 논리 프로세서`, `${cpu.logical_cores} logical processors`)}</p>
-        <Meter value={current ? cpu.usage_percent : null} label={tr("CPU 사용률", "CPU utilization")} tr={tr} />
-      </Resource>
-      <Resource icon={<MemoryStick size={15} aria-hidden />} title={tr("메모리", "Memory")} color="memory"
-        trend={trend("memory", tr("메모리", "Memory"), sample => percentage(sample.memory?.used_bytes, sample.memory?.total_bytes))}>
-        <p className="text-sm tabular-nums">{resourceBytes(current ? memory?.used_bytes : null)} / {resourceBytes(memory?.total_bytes)}</p>
-        <Meter value={current ? percentage(memory?.used_bytes, memory?.total_bytes) : null} label={tr("메모리 사용률", "Memory utilization")} tr={tr} />
-        {current && meaningfulAvailableBytes(memory) != null ? <p className="text-[11px] text-th-text-muted">
-          {tr("바로 쓸 수 있는 메모리", "Available")}: {resourceBytes(meaningfulAvailableBytes(memory))}
-        </p> : null}
-      </Resource>
-      {disks.length === 0 && <p className="py-3 text-xs text-th-text-muted">{tr("디스크 정보 미확인", "Disk information unavailable")}</p>}
-      {disks.map((disk, index) => <Resource key={disk.mount_point} icon={<HardDrive size={15} aria-hidden />}
-        title={`${tr("디스크", "Disk")} ${index} (${disk.mount_point})`} color="disk"
-        trend={trend("disk", disk.mount_point, sample => {
-          const prior = sample.disks.find(item => item.mount_point === disk.mount_point);
-          return percentage(prior?.used_bytes, prior?.total_bytes);
-        })}>
-        <p className="break-words text-xs text-th-text-muted">{disk.kind === "disk" ? disk.name : disk.kind}</p>
-        <p className="text-sm tabular-nums">{resourceBytes(current ? disk.used_bytes : null)} / {resourceBytes(disk.total_bytes)}</p>
-        <Meter value={current ? percentage(disk.used_bytes, disk.total_bytes) : null} label={tr("디스크 공간 사용률", "Disk space utilization")} tr={tr} />
-      </Resource>)}
-      <Resource icon={<Network size={15} aria-hidden />} title={network?.wired ? tr("이더넷", "Ethernet") : tr("네트워크", "Network")} color="network"
-        trend={trend("network", network?.interface ?? tr("네트워크", "Network"),
-          sample => sample.network?.interface === network?.interface ? sample.network?.received_bytes_per_sec : null,
-          sample => sample.network?.interface === network?.interface ? sample.network?.transmitted_bytes_per_sec : null)}>
-        {network ? <>
-          <p className="break-words text-xs text-th-text-muted">{network.interface}</p>
-          <p className="text-xs tabular-nums"><span style={{ color: metricColors.network }}>●</span> {tr("받기", "Receive")}: {resourceBytes(current ? network.received_bytes_per_sec : null)}/s</p>
-          <p className="text-xs tabular-nums"><span style={{ color: metricColors.networkOut }}>●</span> {tr("보내기", "Send")}: {resourceBytes(current ? network.transmitted_bytes_per_sec : null)}/s</p>
-        </> : <p className="text-xs text-th-text-muted">{tr("활성 네트워크를 확인하는 중입니다.", "Waiting for active network data.")}</p>}
-      </Resource>
-      {gpus.length === 0 && <p className="py-3 text-xs text-th-text-muted">{tr("GPU 정보 미확인", "GPU information unavailable")}</p>}
-      {gpus.map((gpu, index) => {
-        const ordinal = gpus.slice(0, index).filter(item => item.name === gpu.name).length;
-        return <Resource key={`${gpu.name}-${ordinal}`} icon={<Gpu size={15} aria-hidden />} title={`GPU ${index}`} color="gpu"
-          trend={trend("gpu", gpu.name, sample => sample.gpus.filter(item => item.name === gpu.name)[ordinal]?.usage_percent)}>
-          <p className="break-words text-xs text-th-text-muted">{gpu.name}</p>
-          <Meter value={current ? gpu.usage_percent : null} label={tr("GPU 사용률", "GPU utilization")} tr={tr} />
-          <p className="text-xs text-th-text-muted tabular-nums">{gpu.shared_memory ? tr("공유 메모리 사용", "Shared memory used") : "VRAM"}: {resourceBytes(current ? gpu.memory_used_bytes : null)}{!gpu.shared_memory && ` / ${resourceBytes(gpu.memory_total_bytes)}`}</p>
-        </Resource>;
-      })}
-    </div>
-  </section>;
+  const trend = (
+    color: TrendColor,
+    label: string,
+    select: (sample: MachineResources) => number | null | undefined,
+    secondary?: (sample: MachineResources) => number | null | undefined,
+  ) => (
+    <MachineSparkline
+      values={readings(samples, select)}
+      secondary={secondary && readings(samples, secondary)}
+      color={color}
+      label={label}
+      stale={!current}
+      now={now}
+      tr={tr}
+    />
+  );
+  return (
+    <section className="mt-4 border-t border-[var(--line-soft)] pt-4 text-[var(--fg)]" aria-label={tr("하드웨어 및 사용량", "Hardware and utilization")}>
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--fg-muted)]">
+        <h4 className="m-0 text-[13px] font-medium text-[var(--fg)]">{tr("하드웨어 및 사용량", "Hardware and utilization")}</h4>
+        <span>{tr("최근 15분 추이", "Last 15 minutes")}</span>
+      </div>
+      <p className="m-0 text-[11px] text-[var(--fg-muted)]">
+        {current ? tr("측정", "Sampled") : tr("측정 정보 만료", "Sample expired")}: {new Date(resources.observed_at_ms).toLocaleTimeString(tr("ko-KR", "en-US"))}
+      </p>
+      <div className="[&>*+*]:border-t [&>*+*]:border-[var(--line-soft)]">
+        <Resource icon={<Cpu size={15} aria-hidden />} title="CPU" color="cpu" trend={trend("cpu", "CPU", (sample) => sample.cpu.usage_percent)}>
+          <p className="m-0 break-words text-xs text-[var(--fg-muted)]">{cpu.model || tr("모델 미확인", "Model unknown")}</p>
+          <p className="m-0 text-[11px] text-[var(--fg-muted)]">
+            {cpu.physical_cores == null ? "" : tr(`${cpu.physical_cores}코어 · `, `${cpu.physical_cores} cores · `)}
+            {tr(`${cpu.logical_cores} 논리 프로세서`, `${cpu.logical_cores} logical processors`)}
+          </p>
+          <Meter value={current ? cpu.usage_percent : null} label={tr("CPU 사용률", "CPU utilization")} tr={tr} />
+        </Resource>
+        <Resource
+          icon={<MemoryStick size={15} aria-hidden />}
+          title={tr("메모리", "Memory")}
+          color="memory"
+          trend={trend("memory", tr("메모리", "Memory"), (sample) => percentage(sample.memory?.used_bytes, sample.memory?.total_bytes))}
+        >
+          <p className="m-0 font-display text-sm tabular-nums">{resourceBytes(current ? memory?.used_bytes : null)} / {resourceBytes(memory?.total_bytes)}</p>
+          <Meter value={current ? percentage(memory?.used_bytes, memory?.total_bytes) : null} label={tr("메모리 사용률", "Memory utilization")} tr={tr} />
+          {current && meaningfulAvailableBytes(memory) != null ? (
+            <p className="m-0 text-[11px] text-[var(--fg-muted)]">
+              {tr("바로 쓸 수 있는 메모리", "Available")}: {resourceBytes(meaningfulAvailableBytes(memory))}
+            </p>
+          ) : null}
+        </Resource>
+        {disks.length === 0 ? <p className="m-0 py-3 text-xs text-[var(--fg-muted)]">{tr("디스크 정보 미확인", "Disk information unavailable")}</p> : null}
+        {disks.map((disk, index) => (
+          <Resource
+            key={disk.mount_point}
+            icon={<HardDrive size={15} aria-hidden />}
+            title={`${tr("디스크", "Disk")} ${index} (${disk.mount_point})`}
+            color="disk"
+            trend={trend("disk", disk.mount_point, (sample) => {
+              const prior = sample.disks.find((item) => item.mount_point === disk.mount_point);
+              return percentage(prior?.used_bytes, prior?.total_bytes);
+            })}
+          >
+            <p className="m-0 break-words text-xs text-[var(--fg-muted)]">{disk.kind === "disk" ? disk.name : disk.kind}</p>
+            <p className="m-0 font-display text-sm tabular-nums">{resourceBytes(current ? disk.used_bytes : null)} / {resourceBytes(disk.total_bytes)}</p>
+            <Meter value={current ? percentage(disk.used_bytes, disk.total_bytes) : null} label={tr("디스크 공간 사용률", "Disk space utilization")} tr={tr} />
+          </Resource>
+        ))}
+        <Resource
+          icon={<Network size={15} aria-hidden />}
+          title={network?.wired ? tr("이더넷", "Ethernet") : tr("네트워크", "Network")}
+          color="network"
+          trend={trend(
+            "network",
+            network?.interface ?? tr("네트워크", "Network"),
+            (sample) => (sample.network?.interface === network?.interface ? sample.network?.received_bytes_per_sec : null),
+            (sample) => (sample.network?.interface === network?.interface ? sample.network?.transmitted_bytes_per_sec : null),
+          )}
+        >
+          {network ? (
+            <>
+              <p className="m-0 break-words text-xs text-[var(--fg-muted)]">{network.interface}</p>
+              <p className="m-0 font-display text-xs tabular-nums"><span style={{ color: metricColors.network }}>●</span> {tr("받기", "Receive")}: {resourceBytes(current ? network.received_bytes_per_sec : null)}/s</p>
+              <p className="m-0 font-display text-xs tabular-nums"><span style={{ color: metricColors.networkOut }}>●</span> {tr("보내기", "Send")}: {resourceBytes(current ? network.transmitted_bytes_per_sec : null)}/s</p>
+            </>
+          ) : (
+            <p className="m-0 text-xs text-[var(--fg-muted)]">{tr("활성 네트워크를 확인하는 중입니다.", "Waiting for active network data.")}</p>
+          )}
+        </Resource>
+        {gpus.length === 0 ? <p className="m-0 py-3 text-xs text-[var(--fg-muted)]">{tr("GPU 정보 미확인", "GPU information unavailable")}</p> : null}
+        {gpus.map((gpu, index) => {
+          const ordinal = gpus.slice(0, index).filter((item) => item.name === gpu.name).length;
+          return (
+            <Resource
+              key={`${gpu.name}-${ordinal}`}
+              icon={<Gpu size={15} aria-hidden />}
+              title={`GPU ${index}`}
+              color="gpu"
+              trend={trend("gpu", gpu.name, (sample) => sample.gpus.filter((item) => item.name === gpu.name)[ordinal]?.usage_percent)}
+            >
+              <p className="m-0 break-words text-xs text-[var(--fg-muted)]">{gpu.name}</p>
+              <Meter value={current ? gpu.usage_percent : null} label={tr("GPU 사용률", "GPU utilization")} tr={tr} />
+              <p className="m-0 font-display text-xs tabular-nums text-[var(--fg-muted)]">
+                {gpu.shared_memory ? tr("공유 메모리 사용", "Shared memory used") : "VRAM"}: {resourceBytes(current ? gpu.memory_used_bytes : null)}
+                {!gpu.shared_memory && ` / ${resourceBytes(gpu.memory_total_bytes)}`}
+              </p>
+            </Resource>
+          );
+        })}
+      </div>
+    </section>
+  );
 }

@@ -108,8 +108,12 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
+#[cfg(all(test, unix))]
+pub(crate) use queued_head::BindingIntent;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;
+#[cfg(unix)]
+pub(crate) use queued_head::PreKeyPin;
 pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{
@@ -1404,6 +1408,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<policy_close::PolicyMailboxOutcome>,
     },
     ClaimPolicyTail(policy_close::tail::TailClaim),
+    ControlCustody(Box<policy_close::InstallCustody>),
     #[cfg(test)]
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
@@ -1539,6 +1544,7 @@ const PENDING_USER_DISPATCH_MAX_YIELDS: u32 = 5;
 
 #[derive(Default)]
 struct ChannelMailboxState {
+    control_custody: Option<Arc<dyn policy_close::ControlCustody>>,
     cancel_token: Option<Arc<CancelToken>>,
     active_request_owner: Option<UserId>,
     active_user_message_id: Option<MessageId>,
@@ -2384,6 +2390,16 @@ fn input_mailbox_step(
             let _ = reply.send(cancel_result);
         }
         ChannelMailboxMsg::FinishTurn { persistence, reply } => {
+            if let Err(error) = policy_close::admit_control(&state, channel_id, false) {
+                let _ = reply.send(FinishTurnResult {
+                    removed_token: None,
+                    has_pending: false,
+                    mailbox_online: true,
+                    queue_exit_events: vec![],
+                    persistence_error: Some(error),
+                });
+                return state;
+            }
             state.last_persistence = Some(persistence.clone());
             let finished_user_message_id = state.active_user_message_id;
             let _ = reply.send(finalize_turn_state(
@@ -2433,7 +2449,9 @@ fn input_mailbox_step(
         ChannelMailboxMsg::ReleaseWitnessedEpisode(request) => {
             witnessed_release::answer(&mut state, channel_id, *request);
         }
-        msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
+        msg @ (ChannelMailboxMsg::PolicyClose { .. }
+        | ChannelMailboxMsg::ClaimPolicyTail(_)
+        | ChannelMailboxMsg::ControlCustody(_)) => {
             policy_close::answer(&mut state, channel_id, msg, own_recovery_done);
         }
         #[cfg(test)]
@@ -2448,31 +2466,7 @@ fn input_mailbox_step(
             mark_turn_finished_signal_done(channel_id);
         }
         ChannelMailboxMsg::FinishCancelledTurn { reply } => {
-            let should_finish = state
-                .cancel_token
-                .as_ref()
-                .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
-            if should_finish {
-                let persistence = state.last_persistence.clone();
-                let _ = reply.send(finalize_turn_state(
-                    &mut state,
-                    channel_id,
-                    persistence.as_ref(),
-                    false,
-                ));
-                mark_turn_finished_signal_done(channel_id);
-            } else {
-                let _ = reply.send(FinishTurnResult {
-                    removed_token: None,
-                    has_pending: state
-                        .intervention_queue
-                        .iter()
-                        .any(|item| item.mode == InterventionMode::Soft),
-                    mailbox_online: true,
-                    queue_exit_events: Vec::new(),
-                    persistence_error: None,
-                });
-            }
+            episode_identity::finish_cancelled(&mut state, channel_id, reply);
         }
         ChannelMailboxMsg::Clear {
             persistence,

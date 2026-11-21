@@ -4,7 +4,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use sqlx::Row;
 
-use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::provider::ProviderKind;
 
 use super::SharedData;
 
@@ -288,13 +288,9 @@ pub(super) async fn start_restart_handoff_from_state(
     };
     // O posts this channel's TUI body, so the handoff notice keeps only its marker.
     // A held destination identity keeps the inflight for retry, like a failed notice.
-    let kind = (state.channel_id == channel_id.get())
-        .then_some(state.runtime_kind)
-        .flatten();
+    let body = state.tui_body_claim(channel_id.get());
     let target = restart_handoff_notice_target(&state);
-    let Ok(o_owns_body) =
-        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id.get(), kind)
-    else {
+    let Ok(o_owns_body) = body.peek_o_owns_tui_output_for_channel() else {
         return false;
     };
     let stale_text =
@@ -304,8 +300,7 @@ pub(super) async fn start_restart_handoff_from_state(
             let current_msg_id = serenity::MessageId::new(current_msg_id);
             forget_completion_footer_for_restart_handoff(channel_id, current_msg_id);
             // Only a notice carrying the saved body claims the channel, as it is sent.
-            let claim = (!o_owns_body && !best_response.trim().is_empty())
-                .then(|| crate::services::tui_o::cutover::BodyClaim::new(channel_id.get(), kind));
+            let claim = (!o_owns_body && !best_response.trim().is_empty()).then_some(body);
             let replace = || {
                 let text = &stale_text;
                 crate::services::discord::outbound::body_census::BodySource::inherited().observe(
@@ -487,23 +482,17 @@ async fn release_relinquished_turn_mailbox(
     }
 }
 
+/// `provider_kind` is the dead session's watcher's own: the session is gone by now, so its tmux
+/// marker cannot be asked and its name says nothing.
 pub(super) async fn resume_aborted_restart_turn(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
+    provider_kind: &ProviderKind,
     tmux_session_name: &str,
     output_path: &str,
 ) -> bool {
-    let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
-    else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",
-            tmux_session_name
-        );
-        return false;
-    };
-    let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
+    let Some(state) = super::inflight::load_inflight_state(provider_kind, channel_id.get()) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         // #3014: there is no persisted inflight turn to hand off, but the pane
         // may have died *mid-turn while Discord inputs were queued*. Without
@@ -544,7 +533,7 @@ pub(super) async fn resume_aborted_restart_turn(
             );
             super::queue_io::schedule_deferred_idle_queue_kickoff(
                 shared.clone(),
-                provider_kind,
+                provider_kind.clone(),
                 channel_id,
                 "watcher_death_backlog_recovery",
             );
@@ -589,7 +578,7 @@ pub(super) async fn resume_aborted_restart_turn(
         channel_id,
         http,
         shared,
-        &provider_kind,
+        provider_kind,
         state,
         &best_response,
     )

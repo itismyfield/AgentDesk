@@ -471,10 +471,12 @@ pub(super) async fn update_streaming_status_tick(
                     .observe(
                         BodySite::WatcherStreaming,
                         BodyOffer::NonBody,
-                        crate::services::discord::http::send_channel_message(
-                            &http,
-                            channel_id,
-                            &panel_seed,
+                        crate::services::discord::outbound::notification_policy::progress(
+                            crate::services::discord::http::send_channel_message(
+                                &http,
+                                channel_id,
+                                &panel_seed,
+                            ),
                         ),
                     )
                     .await
@@ -714,17 +716,16 @@ pub(super) async fn update_streaming_status_tick(
 
         // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
         // write that shows unsent assistant text claims the channel, as it is sent.
-        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-            channel_id.get(),
-            Some(&tmux_session_name),
-        )
-        .unwrap_or(true)
+        let body_claim = BodyClaim::tmux(channel_id.get(), Some(&tmux_session_name))
+            .for_turn(first_nonce.as_deref())
+            .for_source(Some(&output_path));
+        if body_claim
+            .peek_o_owns_tui_output_for_channel()
+            .unwrap_or(true)
         {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
         }
-        let body_claim = BodyClaim::tmux(channel_id.get(), Some(&tmux_session_name))
-            .for_turn(first_nonce.as_deref());
         let banner_identity = turn_identity_for_panel.as_ref();
         let banner_user_msg_id = banner_identity
             .map(|identity| identity.user_msg_id)
@@ -819,10 +820,12 @@ pub(super) async fn update_streaming_status_tick(
                         .observe(
                             BodySite::WatcherStreaming,
                             BodyOffer::NonBody,
-                            crate::services::discord::http::send_channel_message(
-                                &http,
-                                channel_id,
-                                visible_status,
+                            crate::services::discord::outbound::notification_policy::progress(
+                                crate::services::discord::http::send_channel_message(
+                                    &http,
+                                    channel_id,
+                                    visible_status,
+                                ),
                             ),
                         )
                         .await

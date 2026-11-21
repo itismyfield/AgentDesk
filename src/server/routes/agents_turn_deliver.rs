@@ -107,6 +107,15 @@ fn bad_request(error: &str) -> RouteResponse {
     failure(StatusCode::BAD_REQUEST, error)
 }
 
+/// A request cannot name the Decision source itself: only an approved PG event delivers under it.
+pub(super) fn refuse_decision_source(
+    source: Option<&str>,
+    metadata: Option<&Value>,
+) -> Option<RouteResponse> {
+    use crate::services::discord::decision_drain::{SOURCE_REFUSED, self_declared};
+    self_declared(source, metadata).then(|| bad_request(SOURCE_REFUSED))
+}
+
 /// Only a canonical positive decimal snowflake is accepted, so no alternate
 /// spelling can alias an allowed id.
 fn parse_author_id(raw: &str) -> Option<u64> {
@@ -150,6 +159,9 @@ pub async fn deliver_turn_input(
         return bad_request("invalid_author_id");
     };
     let source = non_empty(body.source).unwrap_or_else(|| "external".to_string());
+    if let Some(refused) = refuse_decision_source(Some(&source), None) {
+        return refused;
+    }
     if source.len() > MAX_SOURCE_LEN {
         return bad_request("source_too_long");
     }

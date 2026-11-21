@@ -116,6 +116,37 @@ pub(crate) fn restored_screen_idle(pane: &str) -> bool {
         && !screen::tmux_capture_indicates_claude_tui_busy(&plain)
 }
 
+/// A dialog open at the bottom of the pane, a permission prompt among them: a question, at least
+/// two numbered choices from `1.`, then its `Esc to cancel` footer with no composer below it.
+pub(crate) fn dialog_open(pane: &str) -> bool {
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(pane);
+    let lines: Vec<&str> = (plain.lines().map(str::trim))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let footer = lines
+        .iter()
+        .rposition(|line| line.to_ascii_lowercase().contains("esc to cancel"));
+    let Some(footer) = footer.filter(|at| lines.len() - at <= 2) else {
+        return false;
+    };
+    let above = &lines[footer.saturating_sub(12)..footer];
+    let Some(question) = above.iter().rposition(|line| line.ends_with('?')) else {
+        return false;
+    };
+    // The numbers each choice line opens with, a `❯` cursor aside.
+    let numbers: Vec<&str> = (above[question + 1..].iter())
+        .filter_map(|line| {
+            let line = line.trim_start_matches('\u{276f}').trim_start();
+            let (number, rest) = line.split_once(". ")?;
+            (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && !rest.is_empty())
+                .then_some(number)
+        })
+        .collect();
+    numbers.len() >= 2
+        && numbers[0] == "1"
+        && !(lines[footer + 1..].iter()).any(|line| line.starts_with('\u{276f}'))
+}
+
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
 pub(crate) fn run_ready(
     session: &str,
@@ -142,15 +173,27 @@ pub(crate) fn when_idle(
     send: impl FnOnce() -> InputRun,
 ) -> InputRun {
     use crate::services::claude_tui::readiness::{self, Expiry};
-    let mut watched = readiness::watched(session, Some(path));
+    let mut watched = readiness::watched(session, Some(path)).settling_lost_source();
     let mut budget = composer_ready_wait();
+    let (dialog, mut first) = (std::cell::Cell::new(false), true);
     // A budget that ends on a transcript that only moved runs the same wait in short windows.
     let proof = loop {
         let stop = wait_for(cancel, budget, || {
-            let Some(proof) = readiness::observe_restored(session, Some(path)) else {
+            let proof = readiness::observe_restored(session, Some(path));
+            // Without a proof only the first look reads the screen, for a dialog already open.
+            if proof.is_none() && !std::mem::take(&mut first) {
+                return ControlFlow::Continue(());
+            }
+            let Some(pane) = capture() else {
                 return ControlFlow::Continue(());
             };
-            let Some(pane) = capture() else {
+            first = false;
+            // A covered composer reads Unread and would wait out the budget.
+            if dialog_open(&pane) {
+                dialog.set(true);
+                return ControlFlow::Break(None);
+            }
+            let Some(proof) = proof else {
                 return ControlFlow::Continue(());
             };
             if !readiness::empty_draft(&pane) {
@@ -178,10 +221,23 @@ pub(crate) fn when_idle(
         if !matches!(stop, Err(WaitStop::TimedOut)) {
             break stop;
         }
+        // A dialog opened during the wait holds before any settlement.
+        if capture().is_some_and(|pane| dialog_open(&pane)) {
+            dialog.set(true);
+            break Ok(None);
+        }
         match watched.expired(&mut capture) {
             Expiry::Requiet => budget = budget.min(readiness::WINDOW),
+            Expiry::Unproven(end) if own_turn(end, &mut capture) => {
+                let cause = readiness::WaitCause::OwnTurn;
+                tracing::info!(session, ?end, ?cause, "herdr composer readiness wait held");
+                return InputRun::Refused(InputRefusal::Waits(cause));
+            }
             Expiry::Unproven(end) => return InputRun::Refused(InputRefusal::Unproven(end)),
-            Expiry::Waits => return InputRun::Refused(InputRefusal::Unknown),
+            Expiry::Waits(cause) => {
+                tracing::info!(session, ?cause, "herdr composer readiness wait held");
+                return InputRun::Refused(InputRefusal::Waits(cause));
+            }
         }
     };
     match proof {
@@ -202,7 +258,29 @@ pub(crate) fn when_idle(
             result
         }
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
+        Ok(None) if dialog.get() => {
+            let cause = readiness::WaitCause::Modal;
+            tracing::info!(session, ?cause, "herdr composer held under a dialog");
+            InputRun::Refused(InputRefusal::Waits(cause))
+        }
         _ => InputRun::Refused(InputRefusal::Unknown),
+    }
+}
+
+/// Whether an unproven wait saw the session's own turn: its transcript moved, or its screen shows a
+/// turn over unchanged bytes. The front then waits for that turn's end instead of ending.
+fn own_turn(
+    end: crate::services::claude_tui::readiness::Unproven,
+    capture: impl FnOnce() -> Option<String>,
+) -> bool {
+    use crate::services::claude_tui::readiness::Unproven;
+    match end {
+        Unproven::Refused => true,
+        Unproven::Retained => capture().is_some_and(|pane| {
+            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&pane);
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain)
+        }),
+        Unproven::Lost => false,
     }
 }
 

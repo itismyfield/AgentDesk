@@ -9,6 +9,8 @@ pub(crate) mod actor;
 mod attempt;
 pub(crate) mod claude_handoff;
 pub(crate) mod clear;
+#[cfg(unix)]
+mod cold_source;
 mod commit;
 pub(crate) mod control;
 mod effort_continue;
@@ -65,15 +67,26 @@ fn is_front(a: &Front, b: &Front) -> bool {
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
 impl ChannelMailboxHandle {
-    /// An absent context is Discord; a stored headless iMessage is also a person's input.
+    /// An absent context is Discord; a stored headless iMessage or Decision input is also a person's.
     pub(crate) fn person_input(context: Option<&serde_json::Value>) -> bool {
         context.is_none_or(|context| {
             context["origin"] == "imessage"
                 || (context["origin"] == "headless"
-                    && context["source"] == "imessage"
+                    && (context["source"] == "imessage" || Self::decision_input(context))
                     && context["metadata"].get("routine_id").is_none()
                     && context["metadata"].get("scheduled_message_id").is_none())
         })
+    }
+
+    /// A headless context under the Decision source whose origin names an event. Every request
+    /// entry refuses that source, so only the Decision delivery of an approved event stores one.
+    pub(crate) fn decision_input(context: &serde_json::Value) -> bool {
+        context["origin"] == "headless"
+            && context["source"] == crate::db::decisions::SOURCE
+            && context
+                .pointer("/metadata/human_input/origin_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|origin| crate::db::decisions::event_of_origin(origin).is_some())
     }
 }
 
@@ -179,6 +192,7 @@ impl Owner {
                 readiness_holds: vec![],
                 refused_fronts: vec![],
                 terminal_identities: vec![],
+                source_bindings: Vec::new(),
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
                 unfinished_handoff: None,

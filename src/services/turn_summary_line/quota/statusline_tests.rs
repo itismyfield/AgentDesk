@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::turn_summary_line::quota::tests::{accounts, now};
-use crate::services::turn_summary_line::{Outcome, render};
+use crate::services::turn_summary_line::{Footer, Outcome, render};
 use serde_json::json;
 
 fn record(root: &Path, session: &str, value: &Value, at: DateTime<Utc>) {
@@ -21,11 +21,18 @@ fn value(session: &str) -> Value {
     }})
 }
 
+fn session_quota(root: &Path, session: Option<&str>, at: DateTime<Utc>) -> Option<Quota> {
+    read(root, session?, at)?.quota(at)
+}
+
 fn fallback(root: &Path, session: Option<&str>, at: DateTime<Utc>) -> Option<Quota> {
     let mut response = accounts();
     response.fetched_at = at;
     response.accounts[1].usage_fetched_at = Some(at.to_rfc3339());
-    with_fallback(root, session, at, || super::super::claude(&response, at))
+    super::super::merge_claude(
+        session_quota(root, session, at),
+        super::super::claude(&response, at),
+    )
 }
 
 #[test]
@@ -35,11 +42,14 @@ fn stdin_epoch_limits_render_percentages_and_kst_resets() {
     assert_eq!(
         render(
             Outcome::Completed,
-            Some(1000),
-            None,
-            fallback(root.path(), Some("session-a"), now())
+            Footer {
+                elapsed_ms: Some(1000),
+                ended: Some(now()),
+                quota: fallback(root.path(), Some("session-a"), now()),
+                ..Footer::default()
+            },
         ),
-        "-# ⏱️ 1초 · 5h 24% (11:30) · 7d 61% (10/27 16:00)"
+        "-# ⏱️ 1초 (09:00)\n-# 5h 24% (11:30) · 7d 61% (10/27 16:00)"
     );
 }
 
@@ -56,7 +66,7 @@ fn mismatched_session_is_rejected_before_cswap_fallback() {
         15,
         "foreign session must use cswap, never its 24 percent"
     );
-    assert_eq!(read(root.path(), "session-a", now()), None);
+    assert_eq!(session_quota(root.path(), Some("session-a"), now()), None);
 }
 
 #[test]
@@ -86,9 +96,9 @@ fn fifteen_minutes_is_inclusive_and_stale_records_use_cswap() {
         "expired record must use cswap's 15 percent"
     );
     assert_eq!(
-        read(
+        session_quota(
             root.path(),
-            "session-a",
+            Some("session-a"),
             now() - chrono::Duration::milliseconds(1)
         ),
         None
@@ -107,7 +117,7 @@ fn missing_legacy_malformed_and_empty_records_preserve_cswap_or_omit_quota() {
                 .percent,
             15
         );
-        assert_eq!(with_fallback(root.path(), session, now(), || None), None);
+        assert_eq!(session_quota(root.path(), session, now()), None);
     }
     for malformed in [
         json!({}),
@@ -117,7 +127,11 @@ fn missing_legacy_malformed_and_empty_records_preserve_cswap_or_omit_quota() {
             "used_percentage":101,"resets_at":now().timestamp()+9000}}}),
     ] {
         record(root.path(), "session-a", &malformed, now());
-        assert_eq!(read(root.path(), "session-a", now()), None, "{malformed}");
+        assert_eq!(
+            session_quota(root.path(), Some("session-a"), now()),
+            None,
+            "{malformed}"
+        );
         assert_eq!(
             fallback(root.path(), Some("session-a"), now())
                 .unwrap()
@@ -129,7 +143,7 @@ fn missing_legacy_malformed_and_empty_records_preserve_cswap_or_omit_quota() {
     }
     std::fs::write(record_path(root.path(), "session-a"), b"{incomplete").unwrap();
     assert_eq!(
-        with_fallback(root.path(), Some("session-a"), Utc::now(), || None),
+        session_quota(root.path(), Some("session-a"), Utc::now()),
         None
     );
 }
@@ -141,7 +155,7 @@ fn zero_is_real_only_with_a_valid_future_window_and_one_window_can_survive() {
     data["rate_limits"]["five_hour"]["used_percentage"] = json!(0);
     data["rate_limits"]["seven_day"]["resets_at"] = json!(now().timestamp());
     record(root.path(), "session-a", &data, now());
-    let quota = read(root.path(), "session-a", now()).unwrap();
+    let quota = session_quota(root.path(), Some("session-a"), now()).unwrap();
     assert_eq!(quota.five_hour.unwrap().percent, 0);
     assert_eq!(quota.seven_day, None);
     data["rate_limits"]["five_hour"]
@@ -149,5 +163,31 @@ fn zero_is_real_only_with_a_valid_future_window_and_one_window_can_survive() {
         .unwrap()
         .remove("used_percentage");
     record(root.path(), "session-a", &data, now());
-    assert_eq!(read(root.path(), "session-a", now()), None);
+    assert_eq!(session_quota(root.path(), Some("session-a"), now()), None);
+}
+
+#[test]
+fn model_effort_and_fast_are_read_without_quota() {
+    let root = tempfile::tempdir().unwrap();
+    let mut value = json!({
+        "session_id": "session-a",
+        "model": {"display_name": " Opus 5.5 ", "id": "claude-opus-5-5"},
+        "effort": {"level": "ultracode"},
+        "fast_mode": true
+    });
+    record(root.path(), "session-a", &value, now());
+    let snapshot = read(root.path(), "session-a", now()).unwrap();
+    assert_eq!(snapshot.model(), Some("Opus 5.5"));
+    assert_eq!(snapshot.effort(), Some("ultra"));
+    assert!(snapshot.fast());
+    assert_eq!(snapshot.quota(now()), None);
+
+    value["model"]["display_name"] = json!("Opus\nfooter");
+    value["effort"]["level"] = json!(" ");
+    value["fast_mode"] = json!(null);
+    record(root.path(), "session-a", &value, now());
+    let snapshot = read(root.path(), "session-a", now()).unwrap();
+    assert_eq!(snapshot.model(), Some("claude-opus-5-5"));
+    assert_eq!(snapshot.effort(), None);
+    assert!(!snapshot.fast());
 }

@@ -14,6 +14,7 @@ use super::store::{
 use super::{ResponseDeliveryClaim, content_hash, response_chunk_nonce_for_generation};
 use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::{SharedData, rate_limit_wait};
+use crate::services::tui_o::channel_policy::SendStage;
 use crate::services::tui_o::cutover::{
     BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send_held_at,
 };
@@ -246,10 +247,12 @@ impl<T> ClaimAtPost<'_, T> {
     }
 
     /// The send's own result, unless O owned the channel or the identity was held at a post.
+    /// The whole response's transport is back by now, so the claimed send reports it.
     pub(in crate::services::discord) fn settle<R>(
         &self,
         sent: R,
     ) -> Result<BodySend<R>, IdentityError> {
+        self.reached(SendStage::SentUnsettled);
         match *self
             .state
             .lock()
@@ -258,6 +261,27 @@ impl<T> ClaimAtPost<'_, T> {
             PostClaim::Refused(None) => Ok(BodySend::OwnedByO),
             PostClaim::Refused(Some(error)) => Err(error),
             PostClaim::Open | PostClaim::Claimed => Ok(BodySend::Sent(sent)),
+        }
+    }
+
+    /// Runs the sent response's follow-up settlement under the claimed send, which reports it
+    /// done whatever it returned; the send still finishes only when this transport drops.
+    pub(in crate::services::discord) async fn settling<R>(
+        &self,
+        settlement: impl std::future::Future<Output = R>,
+    ) -> R {
+        let settled = settlement.await;
+        self.reached(SendStage::SettledUndropped);
+        settled
+    }
+
+    fn reached(&self, stage: SendStage) {
+        let held = self
+            .held
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(held) = held.as_ref() {
+            held.reached(stage);
         }
     }
 
@@ -806,3 +830,6 @@ mod tests {
 #[cfg(test)]
 #[path = "claim_at_post_tests.rs"]
 mod claim_at_post_tests;
+#[cfg(test)]
+#[path = "send_stage_tests.rs"]
+mod send_stage_tests;

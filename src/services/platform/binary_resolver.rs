@@ -888,6 +888,10 @@ pub fn probe_resolved_binary_version(
     } else {
         let mut command = Command::new(binary_path);
         apply_binary_resolution(&mut command, resolution);
+        if crate::config::test_instance::environment::configure_child_command(&mut command).is_err()
+        {
+            return (None, Some("test_instance_launch_rejected".into()));
+        }
         command
     };
     command.arg("--version");

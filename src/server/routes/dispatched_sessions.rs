@@ -171,6 +171,11 @@ pub async fn reconcile_stale_turn(
     let pool = state.pg_pool.as_ref().ok_or_else(|| {
         AppError::internal("Postgres pool unavailable").with_code(ErrorCode::Database)
     })?;
+    // An alias names the row; the reconcile and the mailbox release follow its current primary.
+    let session_key =
+        crate::services::dispatched_sessions::current_session_key_pg(pool, &session_key)
+            .await
+            .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
     let outcome =
         crate::services::stale_turn_reconciler::reconcile_stale_turn_by_key_pg(pool, &session_key)
             .await

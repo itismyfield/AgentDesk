@@ -234,6 +234,7 @@ fn rerender_fixture(
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin),
+        || None,
     );
     let mut pending = actor.deriver.take_notice_evidence();
     assert_eq!(pending.len(), 1);
@@ -328,6 +329,7 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
             &next.record.source,
             crate::services::tui_o::shadow::IDENTITY_VERSION,
             Ok(*next.origin.clone().unwrap()),
+            || None,
         );
         actor.owed = derived.into();
         assert_eq!(
@@ -383,6 +385,7 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
         &next.record.source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(*next.origin.clone().unwrap()),
+        || None,
     );
     actor.persist_notice_evidence();
     let bytes = std::fs::read_to_string(notice_ledger(runtime.path())).unwrap();

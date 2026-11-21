@@ -66,34 +66,13 @@ mod scoped;
 pub(crate) mod transition;
 use fork_lineage::Lineage;
 pub use owe::Owe;
+use owe::Reader;
 
 /// How a record names a native key: as the unit itself or as an announcement of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Seen {
     Sealed,
     Announced,
-}
-
-struct Reader {
-    source: SourceId,
-    /// `None` once a retired source's watch has ended or its file is gone.
-    capture: Option<SourceCapture>,
-    /// A batch the full spool refused; it is retried before the source is read again.
-    pending: Option<CaptureBatch>,
-    captured_any: bool,
-    /// Last length seen and since when it held after the successor's first record.
-    quiet: Option<(u64, Instant)>,
-    rotated_at: Option<Instant>,
-    growth_alarmed: bool,
-    /// Set while retired: the source is only stat-watched until then.
-    watch_until: Option<Instant>,
-    /// The old source's length at its rotation; its successor waits until it is read and spooled.
-    drain_to: Option<u64>,
-    dormant: Option<Instant>,
-    idle: Option<(Fingerprint, Instant)>,
-    observation: Option<CleanupWitness>,
-    persisted_at: Option<SystemTime>,
-    parked: bool,
 }
 
 struct Validation {
@@ -105,38 +84,9 @@ struct Validation {
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl Reader {
-    fn new(source: SourceId, capture: Option<SourceCapture>) -> Self {
-        Self {
-            source,
-            capture,
-            pending: None,
-            captured_any: false,
-            quiet: None,
-            rotated_at: None,
-            growth_alarmed: false,
-            watch_until: None,
-            drain_to: None,
-            dormant: None,
-            idle: None,
-            observation: None,
-            persisted_at: None,
-            parked: false,
-        }
-    }
-
-    fn reading(&self) -> bool {
-        self.capture.is_some() && self.watch_until.is_none()
-    }
-
-    fn backlog_end(&self) -> Option<u64> {
-        let capture = self.capture.as_ref().filter(|_| self.watch_until.is_none());
-        capture.and_then(|capture| capture.file_len().ok())
-    }
-}
-
 pub struct Sources<B> {
     pub(crate) replayed: super::ReplaySummary,
+    native: Option<owe::NativeSources>,
     channel: u64,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -254,6 +204,7 @@ fn proving_session(event: &BindingEvent) -> Option<&str> {
             )
         }
         ShadowProvider::Codex => *cause == BindingCause::Clear,
+        ShadowProvider::Antigravity => false,
     };
     leaves.then(|| match new {
         BindingTarget::Source(source) => source.session_id.as_str(),
@@ -317,6 +268,7 @@ impl<B: BindingEvents> Sources<B> {
     pub fn new(channel: u64, provider: ShadowProvider, bindings: Arc<B>) -> Self {
         let notice = bindings.subscribe(channel);
         Self {
+            native: None,
             channel,
             provider,
             bindings,
@@ -698,7 +650,8 @@ impl<B: BindingEvents> Sources<B> {
             None => {
                 let attached = writer.store().attach_source(&new);
                 let attached = attached.map_err(halted("attach"))?;
-                let opened = SourceCapture::reopen(new.clone(), 0, &attached.prefix_hash);
+                let opened =
+                    owe::open_native(&mut self.native, self.channel, self.provider, &attached);
                 // A new source already gone names itself Missing, so its host waits for it.
                 let capture = opened.map_err(|error| {
                     let detail = format!("bound source: {error}");
@@ -778,7 +731,10 @@ impl<B: BindingEvents> Sources<B> {
         if reader.capture.is_none() {
             let cursor = writer.store().cursor(source).cloned();
             let cursor = cursor.ok_or_else(|| halt("retired source lost its cursor"))?;
-            reader.capture = Some(reopen(&cursor).map_err(|failed| failed.halt_at(source))?);
+            reader.capture = Some(
+                owe::reopen_native(&mut self.native, self.channel, self.provider, &cursor)
+                    .map_err(|failed| failed.halt_at(source))?,
+            );
         }
         Ok(())
     }
