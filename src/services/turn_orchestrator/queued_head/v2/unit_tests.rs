@@ -531,8 +531,14 @@ fn an_idle_effort_resume_is_closed_once_by_its_own_operation() {
         Some("retired-nonce")
     );
     assert!(!owner.cancel_effort("another-op").unwrap());
-    assert!(owner.cancel_effort("idle-op").unwrap(), "a failed end closes the owed resume");
-    assert!(!owner.cancel_effort("idle-op").unwrap(), "nothing is left to close");
+    assert!(
+        owner.cancel_effort("idle-op").unwrap(),
+        "a failed end closes the owed resume"
+    );
+    assert!(
+        !owner.cancel_effort("idle-op").unwrap(),
+        "nothing is left to close"
+    );
     drop(owner);
     let restored = Owner::adopt(path(channel), "unit".into()).unwrap();
     assert!(restored.snapshot.effort_restart.unwrap().cancelled);
@@ -549,7 +555,9 @@ async fn clear_closes_an_idle_effort_resume_so_the_next_launch_starts_fresh() {
     handle
         .v2_request(|slot| {
             let owner = slot.as_mut().unwrap();
-            owner.prepare_effort(Some(idle_effort("idle-clear")), 821_731, 5).map(drop)
+            owner
+                .prepare_effort(Some(idle_effort("idle-clear")), 821_731, 5)
+                .map(drop)
         })
         .await
         .unwrap();
@@ -561,5 +569,9 @@ async fn clear_closes_an_idle_effort_resume_so_the_next_launch_starts_fresh() {
         })
         .await
         .unwrap();
-    assert_eq!(cancelled, Some(true), "a clear leaves no resume of the old thread");
+    assert_eq!(
+        cancelled,
+        Some(true),
+        "a clear leaves no resume of the old thread"
+    );
 }

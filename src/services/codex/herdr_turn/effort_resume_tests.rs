@@ -130,7 +130,11 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
         "the pane argv carries the saved level: {args:?}"
     );
     let unset = super::super::launch_options(&turn(None));
-    assert_eq!(unset.reasoning_effort.as_deref(), Some("low"), "no saved level keeps the default");
+    assert_eq!(
+        unset.reasoning_effort.as_deref(),
+        Some("low"),
+        "no saved level keeps the default"
+    );
     assert_ne!(
         super::super::kept_options("n", &chosen),
         super::super::kept_options("n", &unset),

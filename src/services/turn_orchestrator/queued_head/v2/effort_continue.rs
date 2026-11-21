@@ -113,9 +113,8 @@ impl Owner {
         Ok(intent)
     }
 
-    /// Closes `operation`'s unsubmitted continuation and its barrier in one commit, or the resume
-    /// an intent with no continuation owes. `false` when the stored intent is another operation's
-    /// or has nothing left to close.
+    /// Closes `operation`'s unsubmitted continuation and barrier, or an idle intent's owed resume, in
+    /// one commit; `false` when the stored intent is another operation's or has nothing left to close.
     pub(crate) fn cancel_effort(&mut self, operation: &str) -> Result<bool, String> {
         self.recover()?;
         let mut next = self.snapshot.clone();

@@ -1,6 +1,5 @@
-//! `/effort` on a Herdr Codex pane: the exact execution ends and the level is saved under the
-//! same held exclusion, so the next launch, from that retired row, resumes its thread with it.
-//! A cut turn is owed one continuation, as on tmux; the Claude pane takes the level in place.
+//! `/effort` on a Herdr Codex pane: the exact execution ends and the level is saved under its held
+//! exclusion; the next launch from that retired row resumes the thread, owing a cut turn one continuation.
 use std::sync::Arc;
 
 use futures::FutureExt;
