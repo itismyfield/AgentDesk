@@ -25,6 +25,8 @@ pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+    /// Posts carry Discord's silent flag (secretary-channel progress and quiet-hour notices).
+    silent: bool,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -35,6 +37,7 @@ impl GatewayPort {
             http,
             bot_id,
             owner: None,
+            silent: false,
             #[cfg(test)]
             repost_base: None,
         }
@@ -92,14 +95,17 @@ fn refusal(status: Option<u16>) -> Option<u16> {
     status.filter(|status| matches!(status, 400 | 403 | 404))
 }
 
-impl GatewayPort {
-    fn post_flagged(
+impl DiscordPort for GatewayPort {
+    fn bot_id(&self) -> u64 {
+        self.bot_id
+    }
+
+    fn post(
         &self,
         channel: u64,
         content: String,
-        silent: bool,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        let http = Arc::clone(&self.http);
+        let (http, silent) = (Arc::clone(&self.http), self.silent);
         async move {
             let message = super::notification_policy::silence(CreateMessage::new(), silent)
                 .content(content)
@@ -122,46 +128,6 @@ impl GatewayPort {
             }
         }
     }
-}
-
-/// Runs `request` only under the execution owner guard for `content`.
-async fn guarded(
-    scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
-    channel: u64,
-    content: String,
-    origin: Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
-    request: impl Future<Output = PostOutcome> + Send + 'static,
-) -> PostOutcome {
-    use crate::services::cluster::intake_router_hook::owner_record::output;
-    let guard = match output::acquire(
-        scope.as_ref(),
-        &channel.to_string(),
-        &content,
-        origin.as_ref(),
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(error) => return PostOutcome::Withheld(error.to_string()),
-    };
-    guard
-        .run(request)
-        .await
-        .unwrap_or_else(PostOutcome::Uncertain)
-}
-
-impl DiscordPort for GatewayPort {
-    fn bot_id(&self) -> u64 {
-        self.bot_id
-    }
-
-    fn post(
-        &self,
-        channel: u64,
-        content: String,
-    ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        self.post_flagged(channel, content, false)
-    }
 
     fn post_origin(
         &self,
@@ -171,8 +137,25 @@ impl DiscordPort for GatewayPort {
             crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
         >,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        let request = self.post(channel, content.clone());
-        guarded(self.owner.clone(), channel, content, origin, request)
+        let (scope, request) = (self.owner.clone(), self.post(channel, content.clone()));
+        async move {
+            use crate::services::cluster::intake_router_hook::owner_record::output;
+            let guard = match output::acquire(
+                scope.as_ref(),
+                &channel.to_string(),
+                &content,
+                origin.as_ref(),
+            )
+            .await
+            {
+                Ok(guard) => guard,
+                Err(error) => return PostOutcome::Withheld(error.to_string()),
+            };
+            guard
+                .run(request)
+                .await
+                .unwrap_or_else(PostOutcome::Uncertain)
+        }
     }
 
     fn post_unit(
@@ -185,9 +168,15 @@ impl DiscordPort for GatewayPort {
         kind: crate::services::tui_o::shadow::UnitKind,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         use super::notification_policy as policy;
-        let silent = policy::live_suppresses_push(channel, policy::unit_class(kind));
-        let request = self.post_flagged(channel, content.clone(), silent);
-        guarded(self.owner.clone(), channel, content, origin, request)
+        let port = GatewayPort {
+            http: Arc::clone(&self.http),
+            bot_id: self.bot_id,
+            owner: self.owner.clone(),
+            silent: policy::live_suppresses_push(channel, policy::unit_class(kind)),
+            #[cfg(test)]
+            repost_base: self.repost_base.clone(),
+        };
+        port.post_origin(channel, content, origin)
     }
 
     fn history_after(

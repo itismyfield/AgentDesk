@@ -1,7 +1,7 @@
 //! Push policy for `discord.secretary_channels`: suppressed posts are still delivered with the
 //! silent flag; progress never pushes, unrequested notices stay silent in KST quiet hours.
 
-use chrono::{DateTime, FixedOffset, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use poise::serenity_prelude::{CreateMessage, MessageFlags};
 
 use crate::services::tui_o::shadow::UnitKind;
@@ -9,8 +9,8 @@ use crate::services::tui_o::shadow::UnitKind;
 /// Korea has no daylight saving time, so a fixed +09:00 offset is exact.
 const KST_OFFSET_SECS: i32 = 9 * 60 * 60;
 /// Quiet hours run from 23:00 (inclusive) to 06:00 (exclusive) KST.
-const QUIET_START_HOUR: u32 = 23;
-const QUIET_END_HOUR: u32 = 6;
+const QUIET_START_HOUR: i64 = 23;
+const QUIET_END_HOUR: i64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoticeClass {
@@ -58,8 +58,7 @@ pub(crate) fn unit_class(kind: UnitKind) -> NoticeClass {
 }
 
 pub(crate) fn in_quiet_hours(now: DateTime<Utc>) -> bool {
-    let offset = FixedOffset::east_opt(KST_OFFSET_SECS).expect("KST offset is valid");
-    let hour = now.with_timezone(&offset).hour();
+    let hour = (now.timestamp() + i64::from(KST_OFFSET_SECS)).rem_euclid(86_400) / 3_600;
     hour >= QUIET_START_HOUR || hour < QUIET_END_HOUR
 }
 
@@ -115,7 +114,7 @@ pub(crate) fn silence(message: CreateMessage, suppress_push: bool) -> CreateMess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{FixedOffset, TimeZone};
 
     fn kst(hour: u32, minute: u32) -> DateTime<Utc> {
         FixedOffset::east_opt(KST_OFFSET_SECS)
