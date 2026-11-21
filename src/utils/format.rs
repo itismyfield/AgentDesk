@@ -1,3 +1,5 @@
+use super::home_path::expand_user_path;
+
 // === UTF-8 safe string slicing utilities ===
 
 /// Byte index를 가장 가까운 char boundary로 내림
@@ -76,10 +78,10 @@ fn has_expandable_tilde_prefix(path: &str) -> bool {
 /// `~`, `~/...`, `~\...` 경로를 홈 디렉토리로 확장해 문자열로 반환한다.
 /// 그 외 경로는 공백을 포함해 원본 문자열을 그대로 보존한다.
 pub fn expand_tilde_string(path: &str) -> String {
-    if has_expandable_tilde_prefix(path) {
-        if let Some(expanded) = crate::runtime_layout::expand_user_path(path) {
-            return expanded.to_string_lossy().into_owned();
-        }
+    if has_expandable_tilde_prefix(path)
+        && let Some(expanded) = expand_user_path(path)
+    {
+        return expanded.to_string_lossy().into_owned();
     }
     path.to_string()
 }
@@ -87,10 +89,10 @@ pub fn expand_tilde_string(path: &str) -> String {
 /// `~`, `~/...`, `~\...` 경로를 홈 디렉토리로 확장한다.
 /// `~user/...` 형태는 확장하지 않고 그대로 반환한다.
 pub fn expand_tilde_path(path: &str) -> std::path::PathBuf {
-    if has_expandable_tilde_prefix(path) {
-        if let Some(expanded) = crate::runtime_layout::expand_user_path(path) {
-            return expanded;
-        }
+    if has_expandable_tilde_prefix(path)
+        && let Some(expanded) = expand_user_path(path)
+    {
+        return expanded;
     }
     std::path::PathBuf::from(path)
 }

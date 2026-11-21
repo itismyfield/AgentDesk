@@ -1,28 +1,28 @@
 /// Normalized provider and raw channel identity shared by storage and routing.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnerIdentity {
+pub struct OwnerIdentity {
     provider: String,
     raw_channel_id: String,
 }
 
 impl OwnerIdentity {
-    pub(crate) fn new(provider: &str, raw_channel_id: &str) -> Self {
+    pub fn new(provider: &str, raw_channel_id: &str) -> Self {
         Self {
             provider: provider.trim().to_lowercase(),
             raw_channel_id: raw_channel_id.trim().to_string(),
         }
     }
 
-    pub(crate) fn provider(&self) -> &str {
+    pub fn provider(&self) -> &str {
         &self.provider
     }
 
-    pub(crate) fn raw_channel_id(&self) -> &str {
+    pub fn raw_channel_id(&self) -> &str {
         &self.raw_channel_id
     }
 
     /// Stable cross-process key from the normalized UTF-8 components.
-    pub(crate) fn advisory_key(&self) -> i64 {
+    pub fn advisory_key(&self) -> i64 {
         advisory_lock_key(&self.provider, &self.raw_channel_id)
     }
 }

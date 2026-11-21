@@ -1,7 +1,7 @@
 //! Session-key values and parsing for legacy and namespaced wire formats.
 
-pub(crate) mod managed;
-pub(crate) mod naming;
+pub mod managed;
+pub mod naming;
 
 use crate::domain::provider::ProviderKind;
 
@@ -75,6 +75,12 @@ impl SessionIdentity {
             tmux_name: tmux_name.to_string(),
             namespaced,
         })
+    }
+
+    /// Render back to the legacy `host:tmux` form.
+    #[cfg(test)]
+    pub fn legacy_key(&self) -> String {
+        format!("{}:{}", self.host, self.tmux_name)
     }
 }
 
