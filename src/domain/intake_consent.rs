@@ -7,14 +7,14 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod decision;
-pub(crate) use decision::{
+pub use decision::{
     HoldInput, IntentResolution, Marker, PREFIX, REARM_PREFIX, RearmMarker, is_unresolved, marker,
     permits_custody,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct IntentRef {
+pub struct IntentRef {
     pub store: String,
     pub id: String,
     pub provider: String,
@@ -23,7 +23,7 @@ pub(crate) struct IntentRef {
     pub fifo: u64,
 }
 
-pub(crate) struct PayloadProjection<'a> {
+pub struct PayloadProjection<'a> {
     pub id: i64,
     pub target_instance_id: &'a str,
     pub forwarded_by_instance_id: &'a str,
@@ -53,7 +53,7 @@ pub(crate) struct PayloadProjection<'a> {
 }
 
 impl PayloadProjection<'_> {
-    pub(crate) fn digest(&self) -> Result<String, String> {
+    pub fn digest(&self) -> Result<String, String> {
         let fields = serde_json::json!([
             self.id,
             self.target_instance_id,
@@ -90,7 +90,7 @@ impl PayloadProjection<'_> {
     }
 }
 
-pub(crate) struct RowProjection<'a> {
+pub struct RowProjection<'a> {
     pub id: i64,
     pub provider: &'a str,
     pub channel_id: &'a str,

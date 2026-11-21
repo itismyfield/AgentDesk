@@ -1,12 +1,12 @@
 //! Normalized overrides retain an explicit `default` and keep each source separate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ProfileOverrides<'a> {
+pub struct ProfileOverrides<'a> {
     pub channel: Option<&'a str>,
     pub agent: Option<&'a str>,
 }
 
 impl<'a> ProfileOverrides<'a> {
-    pub(crate) fn new(channel: Option<&'a str>, agent: Option<&'a str>) -> Self {
+    pub fn new(channel: Option<&'a str>, agent: Option<&'a str>) -> Self {
         let normalize =
             |value: Option<&'a str>| value.map(str::trim).filter(|value| !value.is_empty());
         Self {

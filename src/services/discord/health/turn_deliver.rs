@@ -44,17 +44,6 @@ pub struct HumanInputRequest {
     pub channel_name_hint: Option<String>,
 }
 
-impl HumanInputError {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::AuthorNotAllowed => "author_not_allowed",
-            Self::RuntimeUnavailable(_) => "runtime_unavailable",
-            Self::QueueRefused(_) => "queue_refused",
-            Self::InvalidTarget(_) => "invalid_target",
-        }
-    }
-}
-
 /// Stricter than Discord intake auth: an explicit owner is required and
 /// `allow_all_users` is never honored for remote input.
 pub(crate) fn author_allowed_for_human_input(

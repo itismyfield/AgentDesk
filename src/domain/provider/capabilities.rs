@@ -14,4 +14,4 @@ pub struct ProviderDefaultBehavior {
 }
 
 /// Last-resort Codex context window when the adapter cannot use its cache.
-pub(crate) const CODEX_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+pub const CODEX_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;

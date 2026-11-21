@@ -34,7 +34,7 @@ fn valid_github_owner_or_repo_segment(segment: &str) -> bool {
         && segment != ".."
 }
 
-pub(crate) fn normalize_github_repo_id(raw: &str) -> Option<String> {
+pub fn normalize_github_repo_id(raw: &str) -> Option<String> {
     let segments = github_path_segments(raw)?;
     let owner = segments.first()?.trim();
     let repo = segments.get(1)?.trim().trim_end_matches(".git");
@@ -44,7 +44,7 @@ pub(crate) fn normalize_github_repo_id(raw: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-pub(crate) fn normalize_optional_github_repo_id(raw: Option<String>) -> Option<String> {
+pub fn normalize_optional_github_repo_id(raw: Option<String>) -> Option<String> {
     let trimmed = raw.map(|value| value.trim().to_string())?;
     if trimmed.is_empty() {
         return None;
@@ -72,7 +72,7 @@ pub(crate) fn build_github_issue_url(repo_id: &str, issue_number: i64) -> Option
     ))
 }
 
-pub(crate) fn normalize_github_issue_url(raw: &str) -> Option<String> {
+pub fn normalize_github_issue_url(raw: &str) -> Option<String> {
     let segments = github_path_segments(raw)?;
     let repo_id = normalize_github_repo_id(raw)?;
     let issue_number = issue_number_from_segments(&segments)?;
@@ -81,7 +81,7 @@ pub(crate) fn normalize_github_issue_url(raw: &str) -> Option<String> {
     ))
 }
 
-pub(crate) fn normalize_optional_github_issue_url(
+pub fn normalize_optional_github_issue_url(
     raw_issue_url: Option<String>,
     repo_id: Option<&str>,
     issue_number: Option<i64>,

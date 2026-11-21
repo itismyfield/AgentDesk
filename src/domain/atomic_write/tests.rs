@@ -5,10 +5,10 @@ thread_local! {
     static FAILURE: RefCell<Option<(PathBuf, Stage, i32)>> = const { RefCell::new(None) };
 }
 
-pub(crate) struct FaultGuard;
+pub struct FaultGuard;
 
 impl FaultGuard {
-    pub(crate) fn new(path: &Path, stage: Stage, errno: i32) -> Self {
+    pub fn new(path: &Path, stage: Stage, errno: i32) -> Self {
         FAILURE.with(|failure| {
             assert!(
                 failure

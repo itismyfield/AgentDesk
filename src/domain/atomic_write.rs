@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub enum Stage {
     CreateDir,
     CreateTemp,
     Write,
@@ -14,7 +14,7 @@ pub(crate) enum Stage {
 }
 
 impl Stage {
-    pub(crate) fn prefix(self) -> &'static str {
+    pub fn prefix(self) -> &'static str {
         match self {
             Self::CreateDir => "create_dir_all",
             Self::CreateTemp => "create_tmp",
@@ -31,24 +31,24 @@ impl Stage {
 
 /// A failed stage never published the prepared bytes; the original I/O error is owned.
 #[derive(Debug)]
-pub(crate) struct NotPublished {
-    pub(crate) stage: Stage,
-    pub(crate) error: io::Error,
+pub struct NotPublished {
+    pub stage: Stage,
+    pub error: io::Error,
 }
 
 /// Rename succeeded. This says nothing about parent-directory durability.
 #[derive(Debug)]
-pub(crate) struct Published;
+pub struct Published;
 
 /// Holds the synced temp file open across the caller's observation and rename.
 #[derive(Debug)]
-pub(crate) struct PreparedWrite<'a> {
+pub struct PreparedWrite<'a> {
     target: &'a Path,
     temp: PathBuf,
     file: fs::File,
 }
 
-pub(crate) fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a>, NotPublished> {
+pub fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a>, NotPublished> {
     if let Some(parent) = path.parent() {
         #[cfg(test)]
         tests::inject(path, Stage::CreateDir).map_err(|error| Stage::CreateDir.failed(error))?;
@@ -82,7 +82,7 @@ pub(crate) fn prepare<'a>(path: &'a Path, data: &str) -> Result<PreparedWrite<'a
 
 impl PreparedWrite<'_> {
     /// Only rename publishes the whole file; parent sync is deliberately separate.
-    pub(crate) fn publish(self) -> Result<Published, NotPublished> {
+    pub fn publish(self) -> Result<Published, NotPublished> {
         #[cfg(test)]
         tests::inject(self.target, Stage::Rename).map_err(|error| Stage::Rename.failed(error))?;
         #[cfg(test)]
@@ -97,7 +97,7 @@ impl PreparedWrite<'_> {
 }
 
 #[cfg(test)]
-pub(crate) mod rename_fault {
+pub mod rename_fault {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -106,16 +106,16 @@ pub(crate) mod rename_fault {
     static ARMED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
     /// Fails the next rename onto its path; records that path's renames until dropped.
-    pub(crate) struct Armed(PathBuf);
+    pub struct Armed(PathBuf);
 
     impl Armed {
-        pub(crate) fn new(path: &Path) -> Self {
+        pub fn new(path: &Path) -> Self {
             let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
             armed.push((path.to_path_buf(), true, 0, Vec::new()));
             Self(path.to_path_buf())
         }
         /// Renames attempted onto the path since arming and the errors they returned.
-        pub(crate) fn evidence(&self) -> (usize, Vec<String>) {
+        pub fn evidence(&self) -> (usize, Vec<String>) {
             let armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
             armed
                 .iter()
@@ -134,7 +134,7 @@ pub(crate) mod rename_fault {
         }
     }
 
-    pub(crate) fn before(path: &Path, tmp: &Path) {
+    pub fn before(path: &Path, tmp: &Path) {
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = armed.iter_mut().find(|entry| entry.0 == path) {
             entry.2 += 1;
@@ -144,7 +144,7 @@ pub(crate) mod rename_fault {
         }
     }
 
-    pub(crate) fn after(path: &Path, renamed: &std::io::Result<()>) {
+    pub fn after(path: &Path, renamed: &std::io::Result<()>) {
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(entry), Err(error)) = (armed.iter_mut().find(|entry| entry.0 == path), renamed)
         {
@@ -153,4 +153,4 @@ pub(crate) mod rename_fault {
     }
 }
 #[cfg(test)]
-pub(crate) mod tests;
+pub mod tests;
