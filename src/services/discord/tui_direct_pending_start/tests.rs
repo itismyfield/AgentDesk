@@ -1928,11 +1928,38 @@ fn stale_foreign_same_identity_revival_blocks_destructive_cancel() {
             revived.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             write_inflight_fixture(&root_path, &provider_for_task, &revived);
         });
+        // The skip warning names the channel's open Legacy body send and the stage it reached.
+        use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        use crate::services::tui_o::cutover;
+        let _candidates = cutover::test_override::force_candidates(&[(channel_id, ClaudeTui)]);
+        let open = cutover::o_owns_tui_output_for_channel_reserving(channel_id, Some(ClaudeTui));
+        let open = open
+            .unwrap()
+            .send
+            .expect("Legacy sends on a pending channel");
+        let log = tempfile::NamedTempFile::new().unwrap();
+        crate::logging::test_capture::pin_callsite_interest();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log.reopen().unwrap());
+        let tracing = tracing::subscriber::set_default(subscriber.finish());
 
         assert!(
             !demote_stale_foreign_inflight_if_current(&shared, &rec).await,
             "same identity with refreshed updated_at is revival evidence, not death evidence"
         );
+        drop(tracing);
+        let warned = std::fs::read_to_string(log.path()).unwrap();
+        let skip = warned
+            .lines()
+            .find(|line| line.contains("(#4030)"))
+            .expect(&warned);
+        let stage = concat!("finished=0 oldest_open=seq=1,origin=", file!());
+        assert!(
+            skip.contains(stage) && skip.contains("stage=before_send"),
+            "{skip}"
+        );
+        drop(open);
         revival.await.expect("revival task");
         let current = super::super::inflight::load_inflight_state(&provider, channel_id)
             .expect("revived inflight must remain");
