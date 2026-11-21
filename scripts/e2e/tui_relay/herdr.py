@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, channel_reset, clear_fresh_session, health_readiness, herdr_stop, http_auth, known_gap, preflight_evidence, restart_guard
+from . import assertions, channel_reset, clear_fresh_session, discord, health_readiness, herdr_stop, http_auth, known_gap, preflight_evidence, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -503,8 +503,12 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 if raw and (row.get("author") or {}).get("bot"):
                     return row.get("content", "")
                 return assertions.relay_body(row) if author is None else assertions.author_relay_body(row, author)
-            found, rows = client.wait_for_message(
-                args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
+            try:
+                found, rows = client.wait_for_message(
+                    args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
+            except discord.FetchTransportTimeout as error:
+                ingest(error.observed)
+                raise
             ingest(rows)
             if not found:
                 gap_failure = bool(gap_token and gap_token["marker"] == marker and scenario["id"] != "E-18")
@@ -616,8 +620,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             elif "wait_for_raw_discord_text" in step:
                 marker = step["wait_for_raw_discord_text"]
                 deadline = time.monotonic() + float(step.get("timeout_s", 30))
+                retry = discord.TransportRetry()
                 while True:
-                    rows = client.fetch_messages(args.channel_id, after_id=after_id, limit=100)
+                    rows = retry.fetch(lambda: client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
+                    if rows is None:
+                        if time.monotonic() >= deadline:
+                            retry.raise_if_unobserved([])
+                        time.sleep(1)
+                        continue
                     ingest(rows)
                     refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
                     if refusal:

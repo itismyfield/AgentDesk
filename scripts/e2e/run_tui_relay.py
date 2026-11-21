@@ -3208,8 +3208,12 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
         (body := assertions.relay_body(message) if author_id is None
          else assertions.author_relay_body(message, author_id)) is not None and needle in body
     )
+    retry = discord.TransportRetry()
     while time.monotonic() < deadline:
-        messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        messages = retry.fetch(lambda: client.fetch_messages(channel_id, after_id=after_id, limit=100))
+        if messages is None:
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+            continue
         matched: dict[str, Any] | None = None
         for message in sorted(messages, key=lambda m: int(m.get("id", "0"))):
             mid = str(message.get("id") or "")
@@ -3242,6 +3246,7 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
             f"[wait_for_message] timeout label={debug_label!r} "
             f"after_id={after_id!r} observed_total={len(observed)}"
         )
+    retry.raise_if_unobserved(observed)
     return None, observed
 
 
@@ -4123,20 +4128,27 @@ def run_one_cell(
             needle = str(step["wait_for_discord_text"]).replace("{run_id}", run_id)
             author_id = (assertions.provider_bot_id(cell_provider(cell))
                          if step.get("relay_author") == "provider" else None)
-            found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
-                author_id=author_id,
-                client=client,
-                channel_id=channel_id,
-                cell=cell,
-                after_id=after_id,
-                needle=str(needle),
-                prompt=last_sent_prompt,
-                thread_channel_id=(
-                    channel_id if scenario.get("requires_thread_channel") else None
-                ),
-                timeout_s=float(step.get("timeout_s", 240)),
-                debug_label=f"{scenario.get('id')}::{cell}::wait_for_text:{needle[:32]}",
-            )
+            try:
+                found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
+                    author_id=author_id,
+                    client=client,
+                    channel_id=channel_id,
+                    cell=cell,
+                    after_id=after_id,
+                    needle=str(needle),
+                    prompt=last_sent_prompt,
+                    thread_channel_id=(
+                        channel_id if scenario.get("requires_thread_channel") else None
+                    ),
+                    timeout_s=float(step.get("timeout_s", 240)),
+                    debug_label=f"{scenario.get('id')}::{cell}::wait_for_text:{needle[:32]}",
+                )
+            except discord.FetchTransportTimeout as error:
+                # Keep what the earlier lookups saw; the failure itself stays unobserved, not undelivered.
+                _ingest_observed(error.observed)
+                _record_marker_counts(record, window, marker_targets)
+                _update_record_window_snapshot(record, window)
+                raise
             _ingest_observed(observed)
             _record_marker_counts(record, window, marker_targets)
             if not found:

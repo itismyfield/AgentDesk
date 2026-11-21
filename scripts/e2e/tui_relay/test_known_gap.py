@@ -671,7 +671,12 @@ class HerdrScopedGapRepairs(unittest.TestCase):
                     rows.append(row); return row, rows
             return None, rows
         client.send.side_effect = send; client.wait_for_message.side_effect = wait
-        client.fetch_messages.side_effect = lambda *a, **k: rows
+        stalls = [TimeoutError('timed out')]
+        def fetch(*_a, **_k):  # The clear-ack lookup times out once and is retried.
+            if stalls and any(r['id'] == '104' for r in rows):
+                raise stalls.pop()
+            return rows
+        client.fetch_messages.side_effect = fetch
         with patch.object(herdr, 'observe', return_value={'herdr': {}}), patch.object(herdr.time, 'sleep'):
             result = driver.run_scenario(scenario, args=args, client=client, run_id='run')
         self.assertEqual(result['status'], 'fail', result)
