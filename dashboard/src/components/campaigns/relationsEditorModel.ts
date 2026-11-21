@@ -201,7 +201,7 @@ export function adoptLatest(latest: Campaign, edits: Edits, conflicts: Conflict[
 
 export const warnBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
 
-/** Unsaved edits and ties kept for this tab's session when the editor goes away without a decision (rail, palette,
+/** Unsaved edits and ties kept for this tab's session when the editor goes away without a decision (palette, shortcut,
  * another page). They live only in memory, so while any is kept a reload or close asks first, whatever page the tab shows. */
 type KeptDraft = { base: Campaign; edits: Edits; ties: TieDrafts };
 const kept = new Map<string, KeptDraft>();

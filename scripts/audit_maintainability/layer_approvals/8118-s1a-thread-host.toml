@@ -1,0 +1,7 @@
+schema_version = 1
+issue = 8118
+summary = "#8118 S1a: tui_prompt_dedupe::hosted_source의 herdr_evidence가 boot 설정(config::session_hosts) 대신 thread_host의 현재 실행 판정을 읽는다. base의 hosted_source → config::session_hosts 역방향 1건이 사라지고 같은 호출 자리가 thread_host로 대상만 바뀐 것이며, 새 호출 자리는 없다"
+# move = [ { section = "reverse_dependencies", old_id = "<base id>", new_id = "<head id>", reason = "..." } ]
+increase = [
+  { section = "reverse_dependencies", id = "87acd18af190b83ce88529dd5bdd0dbb6c978644065dd9be7ee7a2eb2444c24d", source = "src/lib.rs::crate::services::tui_prompt_dedupe::hosted_source", target = "src/lib.rs::crate::services::session_host::thread_host", kind = "path", max_count = 1, reason = "accepted-debt" },
+]

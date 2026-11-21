@@ -1073,6 +1073,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
             let turn = StreamingTurn {
                 pool: None,
                 registration_origin: None,
+                agy_foreground: None,
                 shared: None,
                 provider: &provider,
                 prompt: "question",

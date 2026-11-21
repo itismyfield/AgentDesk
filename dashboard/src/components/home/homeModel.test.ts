@@ -5,7 +5,7 @@ import type { ServerCampaignDocument, ServerCampaignSummary } from "../../api/se
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, todoStatus,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, systemNeedsAttention, todoStatus,
   type HomeHealth,
 } from "./homeModel";
 
@@ -57,7 +57,7 @@ describe("home to-dos", () => {
       cards: [
         card("r", "review", { review_status: "reviewing" }), card("pr", "review", { blocked_reason: "pr:creating" }), card("q", "requested"),
         card("ci", "in_progress", { blocked_reason: "ci:waiting" }), card("rerun", "in_progress", { blocked_reason: "ci:rerunning" }),
-        card("d", "review", { review_status: "dilemma_pending" }), card("b", "in_progress", { blocked_reason: "dependency cycle" }),
+        card("d", "review", { review_status: "dilemma_pending" }), card("b", "in_progress", { blocked_reason: "dependency cycle", assignee_agent_id: "ada" }),
         card("f", "qa_failed"), card("x", "done", { blocked_reason: "old" }),
       ],
       campaigns: [{ definition: { title: "릴레이", goal: "", repository: "adk" }, view: { campaign_id: "relay", display: "needs_inspection", as_of: "", stop_mode: null, failed_count: 0, blocked_count: 0 } }] as ServerCampaignSummary[],
@@ -65,7 +65,8 @@ describe("home to-dos", () => {
       isKo: true,
     });
     expect(items.map((item) => [item.key, item.chip])).toEqual([["card:d", "판단 필요"], ["card:b", "판단 필요"], ["card:f", "실패"], ["campaign:relay", "상태 확인 필요"]]);
-    expect(items[1]).toMatchObject({ title: "#7 card b", detail: "dependency cycle", to: "/campaigns?tab=queue&card=b" });
+    expect(items[1]).toMatchObject({ title: "#7 card b", detail: "dependency cycle", to: "/campaigns?tab=queue&card=b", agentId: "ada" });
+    expect(items[3].agentId).toBeNull();
   });
 
   it("shows the empty state only once every source answered", () => {
@@ -97,6 +98,14 @@ describe("home system", () => {
     expect(rows.map((row) => row.value)).toEqual(["정상 · 2시간째", "1/2개 연결", "확인 불가", "확인 불가", "0건"]);
     const blind = buildSystemRows({ health: { ...health, mailbox_observation_failures: [{ channel_id: "1" }] }, healthFailed: false, legacy: null, documents: [], tr });
     expect(blind.at(-1)?.value).toBe("확인 불가");
+  });
+
+  it("needs attention for an off or unknown line but not for Memento's standing unknown", () => {
+    const rows = (patch: Partial<HomeHealth>, legacy: Campaign[] | null = []) =>
+      buildSystemRows({ health: { status: "healthy", queue_depth: 0, providers: [{ connected: true }], ...patch } as HomeHealth, healthFailed: false, legacy, documents: [], tr });
+    expect(systemNeedsAttention(rows({}), tr)).toBe(false);
+    expect(systemNeedsAttention(rows({ queue_depth: 1 }), tr)).toBe(true);
+    expect(systemNeedsAttention(rows({}, null), tr)).toBe(true);
   });
 });
 

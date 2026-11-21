@@ -7,8 +7,8 @@ use crate::services::claude_tui::activity::{
 pub(super) const UNPROVEN: &str = "UnprovenInteractiveState";
 pub(super) fn applies(session: &str) -> bool {
     matches!(
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(session),
-        Some((crate::services::provider::ProviderKind::Claude, _))
+        crate::services::provider::session_source::tmux_session_provider(session),
+        Some(crate::services::provider::ProviderKind::Claude)
     )
 }
 pub(super) fn preserved(session: &str) -> super::IdlePreserved {

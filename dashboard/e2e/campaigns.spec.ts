@@ -20,6 +20,7 @@ const CAMPAIGNS = [
     node("i7272", "#7272 무중단 재시작 체크포인트를 단계마다 남기고 실패한 단계부터 다시 이어가기", {
       status: "running", stage: "review: 재시작 프로토콜 리뷰 2회차", issue_url: issue(7272), assignee: "agent-ada", round: 2, session_id: "01a180b1-e645",
       summary: "dcserver 재시작 뒤에도 마지막 체크포인트에서 이어 갑니다.", benefit: "배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.", pr_url: "https://github.com/itismyfield/AgentDesk/pull/8240",
+      evidence: [1, 2, 3, 4, 5].map((n) => `${n} 체크포인트 시험 ${n}회차 통과`.repeat(n === 5 ? 12 : 1)),
       evidence_records: [
         { summary: "리뷰 2회차 시작", command: null, result: null, head_sha: null, recorded_at: "2026-11-18T07:40:00.000Z", references: [] },
         { summary: "설계 리뷰 CLEAN", command: null, result: "P0·P1 없음", head_sha: "60aac7044", recorded_at: "2026-11-18T06:10:00.000Z", references: [] },
@@ -171,7 +172,7 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
   expect(await page.evaluate(() => window.localStorage.getItem("agentdesk.dashboard.active-campaign"))).toBe(JSON.stringify("release-train"));
 });
 
-test("campaign tab: a task opens in the pinned pane on wide screens and in a sheet on phones", async ({ page }, testInfo) => {
+test("campaign tab: a task opens in the pinned pane on wide screens and as its own screen on phones", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
   const pane = page.getByRole("complementary", { name: "선택 작업" });
@@ -181,9 +182,14 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
   await expect(page).toHaveURL(/[?&]node=i7272/);
   await expect(card).toHaveAttribute("aria-current", "true");
   const detail = page.locator(".campaign-node-detail");
-  await expect(detail.getByRole("heading", { name: /무중단 재시작/ })).toBeVisible();
-  // TaskPhone order: the stage record reads oldest first.
+  await expect(page.getByRole("heading", { name: /무중단 재시작/ })).toBeVisible();
+  // TaskPhone order: the stage record reads oldest first; only the newest three evidence lines show at first.
   await expect(detail.locator("ol > li")).toHaveText([/설계 리뷰 CLEAN/, /리뷰 2회차 시작/]);
+  const evidence = detail.getByRole("region", { name: "검증 근거" });
+  await expect(evidence.locator("li")).toHaveText([/^5 /, /^4 /, /^3 /]);
+  await evidence.getByRole("button", { name: "2개 더 보기" }).click();
+  await expect(evidence.locator("li")).toHaveCount(5);
+  await expectNoHorizontalOverflow(page);
   if (testInfo.project.name === "desktop") {
     const box = (await pane.boundingBox())!;
     expect(box.x + box.width).toBeGreaterThan(1440 - 4);
@@ -191,23 +197,45 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
     // Non-modal: the overview beside it still works.
     await panel.locator('[data-task-id="i7336"]').click();
     await expect(pane.getByRole("heading", { name: /꺼진 맥의 채널 메시지/ })).toBeVisible();
+    await page.getByRole("button", { name: "상세 닫기" }).click();
   } else {
-    const sheet = page.getByRole("dialog", { name: "선택 작업" });
-    await expect(sheet).toBeVisible();
-    const box = (await sheet.boundingBox())!;
-    expect(box.y + box.height).toBeGreaterThan(844 - 12);
+    const screen = page.getByRole("dialog", { name: /무중단 재시작/ });
+    expect(await screen.boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 844 });
+    await expect(screen.locator("header")).toContainText("열린 이슈 DAG · #7272");
+    // The browser's Back leaves the task, not the page; the screen's own back button does the same.
+    await page.goBack();
+    await expect(screen).toHaveCount(0);
+    await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+    await card.click();
+    await page.getByRole("button", { name: "목록으로" }).click();
   }
-  await expectNoHorizontalOverflow(page);
-  await page.getByRole("button", { name: "상세 닫기" }).click();
   await expect(detail).toHaveCount(0);
   await expect(page).not.toHaveURL(/[?&]node=/);
   await expect(pane).toHaveCount(0);
 });
 
-test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }) => {
+test("phone: a quick second tap on back, or a reload with the task open, still leaves one Back to the page before", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "Phone task screen");
+  await mockApi(page);
+  await page.goto("/home");
+  await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
+  const card = page.locator('[data-task-id="i7272"]');
+  const back = page.getByRole("button", { name: "목록으로" });
+  await card.click();
+  await back.dblclick();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await card.click();
+  await page.reload();
+  await back.click();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/home$/);
+});
+
+test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
-  const closeButton = page.getByRole("button", { name: "상세 닫기" });
+  const closeButton = page.getByRole("button", { name: testInfo.project.name === "desktop" ? "상세 닫기" : "목록으로" });
   const escape = async () => { await closeButton.focus(); await page.keyboard.press("Escape"); }; // a docked pane takes Escape from inside
   const card = panel.locator('[data-task-id="i7272"]');
   await card.click();
@@ -270,8 +298,13 @@ test("server campaign: a waiting approval and blocked work lead, and approving s
   await expect(panel.locator(".campaign-recent-heading")).toHaveText("최근 이벤트 · 2");
   await expectNoHorizontalOverflow(page);
   await gate.locator('[data-task-id="C"]').click();
+  // Stages before the server's current one are done; the current one says how long the gate has waited.
+  const stages = page.getByRole("region", { name: "단계" });
+  await expect(stages.locator("li")).toHaveText([/요구사항/, /^끝남설계$/, /설계 리뷰/, /구현/, /리뷰/, /착지승인 대기 23분/, /main 확인 · 최종 확인 · 완료/]);
+  await expect(stages.locator('[aria-current="step"]')).toContainText("착지");
   await page.getByRole("button", { name: "승인 검토" }).click();
   const sheet = page.getByRole("dialog", { name: "착지 승인" });
+  await expect(sheet).toContainText("11월 18일 오후 04:37"); // the dashboard's language in KST, whatever the browser's locale
   await expect(sheet.getByRole("button", { name: "승인", exact: true })).toBeDisabled();
   await sheet.getByRole("button", { name: "나중에" }).click();
   await expect(sheet).toHaveCount(0);
@@ -307,9 +340,10 @@ test.describe("touch at 390px", () => {
     expect(await tab.evaluate(small)).toEqual([]);
     expect(await tab.evaluate(tiny)).toEqual([]);
 
-    // The task sheet and its edit form follow the same rule.
+    // The task screen and its edit form follow the same rule.
     await page.locator('[data-task-id="i7272"]').click();
-    const sheet = page.getByRole("dialog", { name: "선택 작업" });
+    const sheet = page.getByRole("dialog", { name: /무중단 재시작/ });
+    expect(await sheet.evaluate(small)).toEqual([]);
     await expect(sheet.locator(".campaign-node-detail")).toBeVisible();
     await sheet.getByRole("button", { name: "작업 수정" }).click();
     await expect(sheet.locator("form")).toBeVisible();
@@ -406,15 +440,19 @@ test("stage board: ledger columns keep each task's own status, live work adds a 
   await expect(board).toContainText("10 작업5 진행 중3 대기0 승인 대기0 실패2 막힘");
   const phone = testInfo.project.name === "mobile";
   expect(await columnNames(page)).toEqual(phone ? ["진행 중", "막힘", "실패", "대기", "완료", "건너뜀"] : ["대기", "진행 중", "막힘", "실패", "완료", "건너뜀"]);
-  if (phone) expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
+  if (phone) {
+    expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
+    // Group headers are kit rows; the board's element rules must not draw a box around them.
+    expect(await page.locator(".campaign-board section > button[aria-expanded]").evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).borderTopWidth))).toEqual(Array(6).fill("0px"));
+  }
   for (const [column, id, chip] of [["막힘", "i7336", "막힘"], ["실패", "i7350", "실패"]]) {
     const card = board.getByRole("region", { name: column }).locator(`[data-board-card="${id}"]`);
-    await expect(card.locator(".aui-badge-clean").first()).toHaveText(chip);
+    await expect(card.locator("[data-status-chip]")).toHaveText(chip);
     await expect(card.locator(".campaign-live")).toHaveText("리뷰 진행 중");
   }
   // A running task with a blocker keeps its own column and word; only its frame and reason say it is stuck.
   const stuck = board.getByRole("region", { name: "진행 중" }).locator('[data-board-card="i7360"]');
-  await expect(stuck.locator(".aui-badge-clean").first()).toHaveText("진행 중");
+  await expect(stuck.locator("[data-status-chip]")).toHaveText("진행 중");
   await expect(stuck).toContainText("막힘: 외부 확인");
   const done = board.getByRole("region", { name: "완료" });
   await done.getByRole("button", phone ? { name: /^완료/ } : { name: "최근 1개 보기" }).click();
@@ -463,7 +501,7 @@ test("stage board: a server campaign keeps the nine stages on wide screens, lead
   await expect(card("A")).toContainText("계열 1 · 수리 차수 3");
   if (!phone) {
     await expect(card("D")).toContainText("계열 1 · 수리 차수 1");
-    await expect(card("F").locator(".aui-badge-clean").first()).toHaveText("사용자 중단");
+    await expect(card("F").locator("[data-status-chip]")).toHaveText("사용자 중단");
     // Finished server tasks have no completion order or time, so the first page claims no recency.
     await expect(board.getByRole("region", { name: "완료" }).getByRole("button", { name: "1개 보기" })).toBeVisible();
   }
@@ -517,6 +555,13 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   const editor = page.locator(".campaign-relations-editor");
   const task = (id: string) => editor.locator(`.react-flow__node[data-id="${id}"]`);
   await expect(editor.locator(".react-flow__node")).toHaveCount(3);
+  // The editor fills the window: no rail or top bar, so the first Tab lands on its way back.
+  await expect(page.getByTestId("app-sidebar-nav")).toHaveCount(0);
+  await expect(page.getByTestId("topbar")).toHaveCount(0);
+  expect(await editor.boundingBox()).toEqual({ x: 0, y: 0, width: 1440, height: 900 });
+  await page.keyboard.press("Tab");
+  await expect(editor.getByRole("button", { name: "캠페인", exact: true })).toBeFocused();
+  await expect(editor.getByRole("complementary", { name: "범위 요약" })).toContainText("그룹 · Gateway");
   await task("i7401").click();
   await expect(editor.getByRole("complementary")).toContainText("완료 · 바꿀 수 없음");
   await expect(editor.getByLabel("선행 추가")).toHaveCount(0);
@@ -529,6 +574,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(save).toBeDisabled();
   await editor.getByRole("button", { name: /^선행 #7272 .+ 빼기$/ }).click();
   await expect(editor.getByText("저장 안 됨 · 선행 2")).toBeVisible();
+  // With nothing chosen the column lists what changed, and a row opens its task.
+  await editor.locator("[data-editor-canvas]").click({ position: { x: 40, y: 300 } });
+  const changed = editor.getByRole("complementary", { name: "범위 요약" }).getByRole("button");
+  await expect(changed).toHaveText([/^#7402 .+선행$/, /^#7272 .+선행$/]);
+  await changed.first().click();
+  await expect(editor.getByRole("complementary")).toContainText("#7402 · Gateway");
   await save.click();
   await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
   expect(puts.map((body) => body.expected_revision)).toEqual([7, 8]);
@@ -546,11 +597,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(dialog).toBeVisible();
   await expect(page).toHaveURL(/edit=relations/);
   await dialog.getByRole("button", { name: "계속 편집" }).click();
-  await page.getByRole("tab", { name: "대기열" }).click();
+  await editor.getByRole("button", { name: "캠페인", exact: true }).click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "버리고 나가기" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page).not.toHaveURL(/edit=relations/);
+  await expect(page.getByTestId("app-sidebar-nav")).toBeVisible();
 });
 
 test("relations editor: phones get no way in, a direct link only shows relations, and another campaign picked there opens no editor once widened", async ({ page }, testInfo) => {
@@ -636,7 +688,8 @@ test("relations editor: cable ties bundle lines, move on the grid and untie with
 
 test("relations editor: below 1280px a double-click on a line where the inspector opens ties it, and a single click opens the inspector once no second click comes", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
-  await page.setViewportSize({ width: 1100, height: 900 });
+  // The canvas spans the whole window now, so a narrow one keeps the line under the overlay.
+  await page.setViewportSize({ width: 920, height: 900 });
   const { calls, editor, tie, lines, pointOn } = await openLinkedEditor(page);
   const canvas = (await editor.locator("[data-editor-canvas]").boundingBox())!;
   // A point of #7402 → #7272 inside the 320px the overlay inspector covers.
@@ -659,7 +712,8 @@ test("relations editor: a draft kept while another page shows asks before a relo
   const [panel, editor, asked] = [page.locator(".campaigns-panel"), page.locator(".campaign-relations-editor"), [] as string[]];
   const open = async (name: string) => { await panel.getByRole("tab", { name: "관계도" }).click(); await panel.getByRole("button", { name, exact: true }).click(); };
   const reload = async (home = true) => {
-    if (home) await page.getByRole("link", { name: "홈" }).click();
+    // The full-window editor has no rail, so the home page is reached with its shortcut.
+    if (home) { await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur()); await page.keyboard.press("Alt+1"); await expect(page).toHaveURL(/\/home/); }
     page.once("dialog", (dialog) => { asked.push(dialog.type()); void dialog.dismiss(); });
     await page.reload({ timeout: 5_000 }).catch(() => undefined);
   };
@@ -714,4 +768,55 @@ test("home campaigns: a failed list beside an empty one reads unknown, not empty
   await json(page, /\/api\/campaigns\?.*$/, { campaigns: [], live: {}, limit: 100, offset: 0 });
   await page.goto("/home");
   await expect(page.getByTestId("home-campaigns")).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.", { timeout: 15_000 });
+});
+
+test.describe("home kit contract at 390px touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("home campaigns: row spacing overrides win, coarse pointer pins todo min-height to 44px, and chip contrast meets 4.5 in dark and light", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "390px touch contract");
+    const routine = (id: string, status: string) => ({
+      id, agent_id: "agent-ada", script_ref: `${id}.js`, name: id, status: "enabled", execution_strategy: "fresh", schedule: "0 9 * * *",
+      next_due_at: null, last_run_at: NOW, last_result: null, checkpoint: null, discord_thread_id: null, timeout_secs: 600, in_flight_run_id: null,
+      last_run: { id: `run-${id}`, routine_id: id, status, started_at: NOW, finished_at: NOW }, created_at: NOW, updated_at: NOW,
+    });
+    for (const theme of ["dark", "light"] as const) {
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await page.clock.setFixedTime(new Date(NOW));
+      await mockApi(page, theme);
+      await json(page, /\/api\/kanban-cards(?:\?.*)?$/, { cards: [{
+        id: "c1", title: "차단 카드", description: null, status: "blocked", github_repo: "itismyfield/AgentDesk", owner_agent_id: null,
+        requester_agent_id: null, assignee_agent_id: "agent-ada", parent_card_id: null, latest_dispatch_id: null, sort_order: 0, priority: "high",
+        depth: 0, blocked_reason: "승인 필요", review_notes: null, github_issue_number: 1, github_issue_url: issue(1), metadata_json: null,
+        pipeline_stage_id: null, review_status: null, created_at: 1_790_000_000_000, updated_at: 1_790_000_000_000, started_at: null, requested_at: null, completed_at: null,
+      }] });
+      await json(page, /\/api\/routines(?:\?.*)?$/, { routines: [routine("r-ok", "succeeded"), routine("r-info", "running"), routine("r-warn", "paused"), routine("r-err", "failed")] });
+      await page.goto("/home");
+      await expect(page.getByTestId("home-campaigns").locator("li a").first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("home-todo").locator("li a").first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("home-routines").locator("li")).toHaveCount(4, { timeout: 15_000 });
+      const metrics = await page.evaluate(() => {
+        const linear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        const lum = (cssColor: string) => {
+          const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+          const ctx = canvas.getContext("2d")!; ctx.fillStyle = cssColor; ctx.fillRect(0, 0, 1, 1);
+          const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+          return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        };
+        const ratio = (node: Element) => {
+          const cs = getComputedStyle(node);
+          const [hi, lo] = [lum(cs.color), lum(cs.backgroundColor)].sort((a, b) => b - a);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        const camp = getComputedStyle(document.querySelector('[data-testid="home-campaigns"] li a')!);
+        const todo = getComputedStyle(document.querySelector('[data-testid="home-todo"] li a')!);
+        const chips = Array.from(document.querySelectorAll('[data-testid="home-routines"] li > span:last-child'), ratio);
+        return { paddingTop: camp.paddingTop, rowGap: camp.rowGap, todoMinHeight: todo.minHeight, minChipContrast: Math.min(...chips) };
+      });
+      expect(metrics.paddingTop, theme).toBe("10px");
+      expect(metrics.rowGap, theme).toBe("6px");
+      expect(metrics.todoMinHeight, theme).toBe("44px");
+      expect(metrics.minChipContrast, theme).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 });

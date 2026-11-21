@@ -390,6 +390,10 @@ where
         if !actor.writer.has_local_retry() {
             actor.deliver_owed(&progress).await;
         }
+        // A restart-cut episode's one notice goes after this poll's owed pieces.
+        if sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry() {
+            actor.writer.deliver_restart_notices().await;
+        }
         if let Some(drain) = drain {
             let prepared = actor
                 .writer
@@ -441,7 +445,7 @@ where
         }
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
         let channel = actor.writer.channel();
-        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        let herdr = crate::services::session_host::thread_host::runs_herdr(channel);
         if herdr {
             unsettled.send_replace(actor.unsettled());
         }

@@ -45,6 +45,7 @@ seconds with content comparison, independently of native filesystem notification
 | `discord.dm_default_agent` | live | `src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM) |
 | `discord.owner_id` | restart | `src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings) |
 | `discord.scheduled_message_required_mention_user_ids` | restart | `src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config) |
+| `discord.secretary_channels` | live | `src/services/discord/outbound/notification_policy.rs` live_suppresses_push (live snapshot per post) |
 | `providers` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config (process-global map) |
 | `shared_prompt` | live | `src/services/discord/settings/content.rs` load_shared_prompt_for_profile (agentdesk_config::load_shared_prompt_path reads the validated snapshot) |
 | `mcp_servers` | restart | `src/bootstrap.rs` initialize (mcp_config sync_*_mcp_servers write provider configs once) |

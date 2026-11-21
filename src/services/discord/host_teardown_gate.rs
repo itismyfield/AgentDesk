@@ -191,13 +191,17 @@ fn keyed_lookup_teardown(
     )
 }
 
-/// The provider a stored row names, or with none the one its tmux name records. It only
-/// fills the gate's provider: the row, marker and inflight evidence still decide.
-pub(crate) fn row_provider(stored: Option<&str>, tmux_name: &str) -> Option<ProviderKind> {
+/// The provider a stored row names, else its key's, else its tmux session's. It only fills
+/// the gate's provider: the row, marker and inflight evidence still decide.
+pub(crate) fn row_provider(
+    stored: Option<&str>,
+    session_key: &str,
+    tmux_name: &str,
+) -> Option<ProviderKind> {
+    use crate::services::provider::session_source::session_provider;
     match stored.filter(|value| !value.trim().is_empty()) {
         Some(stored) => ProviderKind::from_str(stored),
-        None => crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
-            .map(|(provider, _)| provider),
+        None => session_provider(None, Some(session_key), tmux_name),
     }
 }
 
@@ -211,7 +215,7 @@ pub(crate) async fn row_gate(
     tmux_name: &str,
     caller: &str,
 ) -> (ChannelTeardown, HostedLookup) {
-    let Some(provider) = row_provider(stored_provider, tmux_name) else {
+    let Some(provider) = row_provider(stored_provider, session_key, tmux_name) else {
         let unknown = HostedLookup::Unknown("provider unknown".into());
         return (ChannelTeardown::Kept, unknown);
     };
@@ -310,3 +314,26 @@ pub(crate) fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id:
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+mod row_provider_tests {
+    use super::{ProviderKind, row_provider};
+
+    /// A row with no stored provider answers from its namespaced key: its session is not alive
+    /// and its name is not a legacy one, so nothing else could say.
+    #[test]
+    fn a_namespaced_key_names_the_provider_of_a_dead_new_name_session() {
+        let name = "스마트홈-cc-i8119-gate";
+        let key = format!("codex/hash/host:{name}");
+        assert_eq!(row_provider(None, &key, name), Some(ProviderKind::Codex));
+        assert_eq!(
+            row_provider(Some(" "), &key, name),
+            Some(ProviderKind::Codex)
+        );
+        assert_eq!(
+            row_provider(Some("claude"), &key, name),
+            Some(ProviderKind::Claude)
+        );
+        assert_eq!(row_provider(None, &format!("host:{name}"), name), None);
+    }
+}

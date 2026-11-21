@@ -34,13 +34,19 @@ async function mount(initial: DefinitionDraft) {
   await act(async () => root.render(<Harness initial={initial} />));
 }
 function field(label: string, index = 0) {
-  return [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(`[aria-label="${label}"]`)][index];
+  return [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(`[aria-label="${label}"]`)][index];
 }
-async function type(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) {
+async function type(element: HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement, value: string) {
+  if (element instanceof HTMLButtonElement) {
+    await act(async () => { element.click(); });
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent === value)!;
+    await act(async () => { option.click(); });
+    return;
+  }
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "value")!.set!;
     setter.call(element, value);
-    element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+    element.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
 async function press(text: string) {
@@ -83,7 +89,7 @@ it("creates a two-task definition with acceptance and a dependency from the mini
   await press("Add acceptance");
   await type(field("Acceptance ID"), "main");
   await type(field("Acceptance description"), "In main");
-  await type(field("Verification"), "main");
+  await type(field("Verification"), "In main");
   await press("Add task");
   await type(field("Task ID", 1), "B");
   await type(field("Task title", 1), "Follow-up");

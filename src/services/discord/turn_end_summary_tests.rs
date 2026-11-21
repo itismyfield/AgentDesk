@@ -151,7 +151,7 @@ async fn captured_claude_session_quota_reaches_the_legacy_summary() {
         &path,
         serde_json::json!({"session_id":session,"rate_limits":{
             "five_hour":{"used_percentage":24,"resets_at":now.timestamp()+18000}
-        }})
+        },"model":{"display_name":"Opus 4.6"},"effort":{"level":"high"},"fast_mode":true})
         .to_string(),
     )
     .unwrap();
@@ -183,7 +183,11 @@ async fn captured_claude_session_quota_reaches_the_legacy_summary() {
     let posts = gateway.posts();
     let _ = std::fs::remove_file(path);
     assert_eq!(posts.len(), 1);
-    assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 24% ("), "{posts:?}");
+    assert!(posts[0].starts_with("-# ⏱️ 1초 ("), "{posts:?}");
+    assert!(
+        posts[0].contains(" · Opus 4.6 (high, fast)\n-# 5h 24% ("),
+        "{posts:?}"
+    );
 }
 
 #[tokio::test]
@@ -221,7 +225,7 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
     post_live(&gateway, &ProviderKind::Codex, summary).await;
     let posts = gateway.posts();
     assert_eq!(posts.len(), 1);
-    assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 15% ("), "{posts:?}");
+    assert!(posts[0].contains("\n-# 5h 15% ("), "{posts:?}");
     assert!(posts[0].contains(" · 7d 38% ("), "{posts:?}");
     let mut contended_state = row(channel, 2, "quota-contended");
     contended_state.started_at = state.started_at.clone();
@@ -239,7 +243,9 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
         delivered.is_some(),
         "Legacy summary waited for the quota writer"
     );
-    assert_eq!(gateway.posts()[1], "-# ⏱️ 1초");
+    let posts = gateway.posts();
+    assert!(posts[1].starts_with("-# ⏱️ 1초 ("));
+    assert_eq!(posts[1].lines().count(), 1);
 }
 
 #[test]
@@ -539,7 +545,7 @@ async fn watcher_native_outcome_stops_at_the_consumed_turn_before_followup_error
 fn future_watcher_start_is_omitted_before_submillisecond_duration_truncation() {
     let at = chrono::DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
         .unwrap()
-        .naive_utc();
+        .with_timezone(&Utc);
     assert_eq!(
         elapsed_since(at + chrono::Duration::nanoseconds(1), at),
         None

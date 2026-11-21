@@ -204,9 +204,15 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
         );
     }
     if attempt_restart_handoff {
-        let _ =
-            resume_aborted_restart_turn(channel_id, http, shared, tmux_session_name, output_path)
-                .await;
+        let _ = resume_aborted_restart_turn(
+            channel_id,
+            http,
+            shared,
+            watcher_provider,
+            tmux_session_name,
+            output_path,
+        )
+        .await;
     }
     cancel_induced_candidate && (stopped_in_range || current_execution_cancel_observed)
 }

@@ -1,16 +1,21 @@
+import { TONE_COLOR, type DotTone } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 
-export function notificationColor(type: Notification["type"]): string {
+export function notificationTone(type: Notification["type"]): DotTone {
   switch (type) {
     case "success":
-      return "#34d399";
+      return "ok";
     case "warning":
-      return "#fbbf24";
+      return "warn";
     case "error":
-      return "#f87171";
+      return "err";
     default:
-      return "#60a5fa";
+      return "info";
   }
+}
+
+export function notificationColor(type: Notification["type"]): string {
+  return TONE_COLOR[notificationTone(type)];
 }
 
 export function formatRelativeTime(timestamp: number, isKo: boolean): string {

@@ -1083,15 +1083,14 @@ async fn start_reserved_headless_turn_admitted(
     // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
     let cache_ttl_minutes =
         super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
-    let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
-        provider: provider.as_str().to_string(),
-        agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
-        channel_id: Some(channel_id.get().to_string()),
-        session_key: adk_session_key.clone(),
-        tmux_session: tmux_session_name.clone(),
-        channel_name: channel_name.clone(),
-        execution_mode: Some("discord_turn".to_string()),
-    };
+    let provider_execution_context = super::provider_isolation::execution_context(
+        &provider,
+        role_binding.as_ref(),
+        channel_id.get(),
+        adk_session_key.clone(),
+        tmux_session_name.clone(),
+        channel_name.clone(),
+    );
     #[cfg(test)]
     let seen = (&provider_execution_context, &current_path, source);
     #[cfg(test)]
@@ -1132,6 +1131,7 @@ async fn start_reserved_headless_turn_admitted(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
                                 registration_origin: canonical_registration.then_some(false),
+                                agy_foreground: None,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

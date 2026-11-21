@@ -27,10 +27,11 @@ pub(super) async fn herdr_force_kill(
     let hosted = prepared.hosted.as_ref()?;
     let record = herdr_execution(hosted.hosted.as_ref(), &hosted.identity)?;
     let provider = ProviderKind::from_str(&record.owner.provider);
-    let named = prepared.provider_info.as_ref();
-    let chosen = hosted.session_key == prepared.session_key
+    let named = prepared.provider.as_ref();
+    // Only a request that named the row's own primary reaches the terminate service.
+    let chosen = hosted.session_key == prepared.requested_key
         && (prepared.runtime_channel_id.as_deref()).is_none_or(|c| c == record.owner.channel_id)
-        && named.is_none_or(|(named, _)| Some(named) == provider.as_ref())
+        && named.is_none_or(|named| Some(named) == provider.as_ref())
         && matches!(provider, Some(ProviderKind::Claude | ProviderKind::Codex));
     if !chosen {
         return None;
@@ -38,7 +39,7 @@ pub(super) async fn herdr_force_kill(
     let registry = state.health_registry.as_deref()?;
     #[cfg(test)]
     crate::services::discord::herdr_terminate::run_before_selection_probe().await;
-    let (key, dispatch) = (prepared.session_key, prepared.active_dispatch_id.clone());
+    let (key, dispatch) = (prepared.requested_key, prepared.active_dispatch_id.clone());
     let input = KillInput {
         state: state.clone(),
         pool: prepared.pool.clone(),

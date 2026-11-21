@@ -12,7 +12,10 @@ from pathlib import Path
 
 CREDENTIAL_NAMES = frozenset({"claude_bot_token", "codex_bot_token", "driver_bot_token"})
 LIVE_CREDENTIAL_NAMES = frozenset({"claude_bot_token", "codex_bot_token", "announce_bot_token", "notify_bot_token"})
-STORED_CREDENTIAL_NAMES = CREDENTIAL_NAMES | LIVE_CREDENTIAL_NAMES
+AGY_CREDENTIAL_NAMES = frozenset({"antigravity_bot_token", "announce_bot_token", "notify_bot_token"})
+# Each live profile admits exactly one of these credential sets.
+ADMISSION_NAME_SETS = (LIVE_CREDENTIAL_NAMES, AGY_CREDENTIAL_NAMES)
+STORED_CREDENTIAL_NAMES = CREDENTIAL_NAMES | LIVE_CREDENTIAL_NAMES | AGY_CREDENTIAL_NAMES
 LAYOUT_DIRS = (
     "config", "runtime", "data", "logs", "outputs", "policies", "workspaces",
     "credential", "postgres", "postgres/data", "postgres/socket",

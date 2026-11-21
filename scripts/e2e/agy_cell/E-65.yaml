@@ -1,0 +1,29 @@
+id: E-65
+title: agy headless 짧은 답·긴 답 분할·연속 턴(시험 instance 전용)
+agent_mode: real_live
+coverage_class: live
+cells: [agy-headless]
+isolation: required
+notes: |
+  scripts/e2e/agy_cell 전용 명세다. 시험 instance(agy-headless 프로필) 안에서만 돈다.
+  Test-Announce 평문 입력, Test-Antigravity 본문 귀속. 판정은 scripts/e2e/agy_cell/judge.py.
+admission_s: 120
+preflight_s: 30
+judge_s: 30
+poll_s: 1.0
+footer_prefix: "-# ⏱️"
+turns:
+  - name: T1
+    kind: short
+    prompt: "도구 없이 이 문자열만 답해: AGY-{run}-T1"
+    marker: "AGY-{run}-T1"
+    timeout_s: 60
+  - name: L
+    kind: long
+    prompt: "도구·마크다운 없이 START-{run} 한 줄, 다음 줄에 01부터 55까지 NN과 공백과 0123456789를 8번 반복한 문자열을 한 줄씩, 마지막 줄 END-{run}. 설명은 빼."
+    timeout_s: 180
+  - name: T2
+    kind: short
+    prompt: "도구 없이 이 문자열만 답해: AGY-{run}-T2"
+    marker: "AGY-{run}-T2"
+    timeout_s: 60

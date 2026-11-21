@@ -63,6 +63,10 @@ export interface Agent {
   discord_channel_id?: string | null;
   discord_channel_id_alt?: string | null;
   discord_channel_id_codex?: string | null;
+  /** Raw binding columns as /api/agents returns them; the server resolves providers from these. */
+  discord_channel_cc?: string | null;
+  discord_channel_cdx?: string | null;
+  discord_channel_alt?: string | null;
   created_at: number;
 }
 

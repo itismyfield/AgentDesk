@@ -76,7 +76,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         return busy;
     }
     // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
-    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+    if crate::services::session_host::thread_host::runs_herdr(channel_id.get()) {
         return false;
     }
 

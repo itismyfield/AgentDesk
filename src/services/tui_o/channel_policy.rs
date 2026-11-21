@@ -18,7 +18,7 @@ mod adoption;
 mod children;
 pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
-    LateBoundary, LegacyRun, LegacySend, Site, first_nonce_id, first_prompt_digest,
+    LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
 #[cfg(test)]
 pub(crate) use adoption::{
@@ -665,6 +665,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     crate::services::session_host::surface_policy::install_policy_channel(
         super::cutover::policy_channel,
     );
+    crate::services::session_host::surface_policy::install_relation(super::cutover::relation);
     let candidate = BootChannels::validate(config)?;
     let installed = match BOOT.get() {
         Some(installed) => installed,

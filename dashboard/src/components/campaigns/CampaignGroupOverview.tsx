@@ -2,6 +2,7 @@ import { useMemo, useSyncExternalStore } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
+import { MeterBar } from "../common/KitPrimitives";
 import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
 import { campaignGroup, groupCampaignNodes } from "./campaignModel";
 import { TIE_WIDTH, tieHeight, tieSlots } from "./campaignTieGeometry";
@@ -73,12 +74,13 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
         label: <div style={{ display: "grid", gap: 8, textAlign: "left", fontSize: 12 }}>
           <strong title={label} style={{ overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", fontSize: 14 }}>{label}</strong>
           <div className="campaign-row"><span>{tr(`작업 ${total}개`, `${total} tasks`)}</span><span>{counts.completed}/{total} · {percent}%</span></div>
-          <progress value={percent} max={100} aria-label={tr(`${label} 완료율`, `${label} completion`)} style={{ width: "100%", height: 6, accentColor: "var(--th-accent-info)" }} />
+          <progress value={percent} max={100} aria-label={tr(`${label} 완료율`, `${label} completion`)} className="sr-only" />
+          <MeterBar ratio={percent / 100} tone="ok" />
           <div className="campaign-row"><span>{tr(`진행 ${counts.running}`, `${counts.running} running`)}</span><span>{tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)}</span></div>
           <small className="campaign-muted">{tr(`그룹 내부 연결 ${group.internalDependencies}개`, `${group.internalDependencies} internal dependencies`)}</small>
         </div>,
       },
-      style: { width: GROUP_WIDTH, minHeight: GROUP_HEIGHT, padding: 14, border: `1px solid ${counts.blocked ? "#d97706" : "var(--th-border)"}`, borderRadius: 10, background: "var(--th-card-bg)", color: "var(--th-text-primary)", cursor: "pointer" },
+      style: { width: GROUP_WIDTH, minHeight: GROUP_HEIGHT, padding: 14, border: `1px solid ${counts.blocked ? "var(--warn)" : "var(--line-soft)"}`, borderRadius: 14, background: "var(--bg-2)", color: "var(--fg)", cursor: "pointer" },
     };
   });
   shownTies.forEach((tie, index) => graphNodes.push({

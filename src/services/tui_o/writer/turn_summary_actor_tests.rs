@@ -73,7 +73,7 @@ async fn resumed_summary(provider: ShadowProvider, channel: u64) {
     append(&path, &native(end));
     polls(2).await;
     halt(stop, task).await;
-    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초"]);
+    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초 (09:00)"]);
     let key = UnitKey {
         channel_id: channel,
         provider,
@@ -89,7 +89,7 @@ async fn resumed_summary(provider: ShadowProvider, channel: u64) {
     let (stop, task) = spawn_with(harness.writer(), provider, bindings);
     polls(3).await;
     halt(stop, task).await;
-    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초"]);
+    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초 (09:00)"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -183,7 +183,7 @@ async fn after_boot_a_turn_left_open_in_another_transcript_keeps_the_first_turns
     halt(stop, task).await;
     assert_eq!(
         harness.port.posts(),
-        ["stale answer", "live answer", "-# ⏱️ 7초"]
+        ["stale answer", "live answer", "-# ⏱️ 7초 (00:55)"]
     );
     let events = crate::services::tui_o::writer::boot::events();
     assert!(
