@@ -220,9 +220,19 @@ impl Rig {
                 presence: None,
             });
         let mut raw_options = focused.map_or(json!([]), |(parameter, value)| {
-            json!([
-                {"type": 3, "name": parameter, "value": value, "focused": autocomplete}
-            ])
+            let choice = command_tree
+                .last()
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|arg| arg.name == parameter)
+                .and_then(|arg| arg.choices.iter().position(|choice| choice.name == value));
+            match choice {
+                Some(choice) => json!([{"type": 4, "name": parameter, "value": choice}]),
+                None => {
+                    json!([{"type": 3, "name": parameter, "value": value, "focused": autocomplete}])
+                }
+            }
         });
         if let Some(child) = child_name {
             raw_options = json!([{"type": 1, "name": child, "options": raw_options}]);
@@ -313,7 +323,7 @@ impl Rig {
             );
             let allowed = result.is_ok();
             assert!(
-                matches!(name, "cancel-queued" | "effort")
+                matches!(name, "cancel-queued" | "effort" | "usage-footer")
                     || self.writes.lock().unwrap().is_empty(),
                 "unexpected non-callback HTTP write"
             );
@@ -322,15 +332,17 @@ impl Rig {
     }
 }
 
+fn fixture_runtime_root(path: &std::path::Path) -> crate::config::TestEnvVarGuard {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", path)
+}
+
 fn isolated(work: impl std::future::Future<Output = ()>) {
     let root = tempfile::tempdir().unwrap();
     let _live = crate::config_live_reload::test_live_guard(
         crate::config::test_env_lock::acquire_shared_test_env_lock(),
     );
-    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
+    let _root = fixture_runtime_root(root.path());
     crate::config_live_reload::install(crate::config::Config::default());
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -705,7 +717,7 @@ fn autocomplete_busy_cache_returns_empty_before_discord_deadline() {
 #[test]
 fn registered_choices_cover_every_fixed_slash_parameter() {
     let commands = run_bot_build_slash_commands();
-    assert_eq!(commands.len(), 24);
+    assert_eq!(commands.len(), 25);
     let inspect = commands.iter().find(|c| c.name == "adk").unwrap();
     assert_eq!(inspect.subcommands.len(), 1);
     for (command, parameter, expected) in [
@@ -737,6 +749,29 @@ fn registered_choices_cover_every_fixed_slash_parameter() {
         assert!(names.len() <= 25 && names.iter().all(|name| name.chars().count() <= 100));
     }
 }
+
+#[test]
+fn usage_footer_registers_optional_on_off_choices() {
+    let command = run_bot_build_slash_commands()
+        .into_iter()
+        .find(|command| command.name == "usage-footer")
+        .expect("usage-footer slash command must be registered");
+    let registered = serde_json::to_value(command.create_as_slash_command().unwrap()).unwrap();
+    let options = registered["options"].as_array().unwrap();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0]["name"], "action");
+    assert_ne!(options[0]["required"], true);
+    let choices: Vec<_> = options[0]["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|choice| choice["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(choices, ["on", "off"]);
+}
+
+#[path = "slash_command_tests/usage_footer_tests.rs"]
+mod usage_footer_tests;
 
 const EFFORT_LEVELS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 

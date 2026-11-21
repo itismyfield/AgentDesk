@@ -161,7 +161,7 @@ fn claude_first_idle_emits_one_summary_after_the_card_and_final_body() {
             "before",
             "-# ▸ Bash  cargo check  ✗",
             "after",
-            "-# ⏱️ 7분 14초 · 📦 45%"
+            "-# ⏱️ 7분 14초 (09:07) · 📦 45%"
         ]
     );
     assert_eq!(summaries(&work).len(), 1);
@@ -181,16 +181,16 @@ fn claude_interrupt_closes_a_nonempty_turn_as_cancelled_once() {
     derive.derive(&body("answer", "partial", Some(START)));
     let work = derive.derive(&interrupt(Some("2026-10-19T00:00:05.000Z")));
     assert_eq!(summaries(&work).len(), 1);
-    assert_eq!(summaries(&work)[0].payload, "-# ⏹ 중단 · 5초");
+    assert_eq!(summaries(&work)[0].payload, "-# ⏹ 중단 · 5초 (09:00)");
     assert!(derive.derive(&idle("turn_duration", Some(END))).is_empty());
 }
 
 #[test]
 fn claude_last_assistant_controls_api_failure_and_recovery() {
     for (errors, expected) in [
-        (vec![true], "-# ⚠️ 오류 · 5초"),
-        (vec![true, false], "-# ⏱️ 5초"),
-        (vec![false, true], "-# ⚠️ 오류 · 5초"),
+        (vec![true], "-# ⚠️ 오류 · 5초 (09:00)"),
+        (vec![true, false], "-# ⏱️ 5초 (09:00)"),
+        (vec![false, true], "-# ⚠️ 오류 · 5초 (09:00)"),
     ] {
         let mut derive = enabled(ShadowProvider::Claude, inputs(None));
         derive.derive(&prompt(Some(START)));
@@ -257,7 +257,7 @@ fn autonomous_claude_turn_uses_the_first_assistant_timestamp() {
     assert_eq!(marks(&opening).len(), 1);
     let work = derive.derive(&idle("stop_hook_summary", Some("2026-10-19T00:02:03.000Z")));
     assert_eq!(summaries(&work).len(), 1);
-    assert_eq!(summaries(&work)[0].payload, "-# ⏱️ 1분 3초");
+    assert_eq!(summaries(&work)[0].payload, "-# ⏱️ 1분 3초 (09:02)");
 }
 
 #[test]
@@ -292,19 +292,23 @@ fn scratch_derivation_has_no_summary_or_marks_and_preserves_body_bytes() {
 
 #[test]
 fn missing_invalid_or_negative_timestamps_never_use_duration_metadata() {
-    for (start, end) in [
-        (None, Some(END)),
-        (Some(START), None),
-        (Some("not-a-timestamp"), Some(END)),
-        (Some(END), Some(START)),
-        (Some(START), Some("2026-10-18T23:59:59.999999999Z")),
+    for (start, end, expected) in [
+        (None, Some(END), "-# ✅ 완료 (09:07)"),
+        (Some(START), None, "-# ✅ 완료"),
+        (Some("not-a-timestamp"), Some(END), "-# ✅ 완료 (09:07)"),
+        (Some(END), Some(START), "-# ✅ 완료"),
+        (
+            Some(START),
+            Some("2026-10-18T23:59:59.999999999Z"),
+            "-# ✅ 완료",
+        ),
     ] {
         let mut derive = enabled(ShadowProvider::Claude, inputs(None));
         derive.derive(&prompt(start));
         derive.derive(&body("answer", "answer", Some(START)));
         let work = derive.derive(&idle("turn_duration", end));
         assert_eq!(summaries(&work).len(), 1);
-        assert_eq!(summaries(&work)[0].payload, "-# ✅ 완료");
+        assert_eq!(summaries(&work)[0].payload, expected);
     }
 }
 
@@ -428,7 +432,11 @@ fn codex_native_turn_emits_card_body_and_one_summary_without_claiming_tool_succe
             .iter()
             .map(|piece| piece.payload.as_str())
             .collect::<Vec<_>>(),
-        vec!["-# ▸ Bash  cargo check  ·", "codex answer", "-# ⏱️ 1분 2초"]
+        vec![
+            "-# ▸ Bash  cargo check  ·",
+            "codex answer",
+            "-# ⏱️ 1분 2초 (09:01)"
+        ]
     );
     assert_eq!(marks(&work).len(), 1);
     assert_eq!(marks(&work)[0].native_key, "native-tool#turn");
@@ -455,7 +463,7 @@ fn codex_named_abort_closes_only_its_matching_turn_and_never_duplicates() {
         Some("2026-10-19T00:00:05.000Z"),
     ));
     assert_eq!(summaries(&work).len(), 1);
-    assert_eq!(summaries(&work)[0].payload, "-# ⏹ 중단 · 5초");
+    assert_eq!(summaries(&work)[0].payload, "-# ⏹ 중단 · 5초 (09:00)");
     assert!(
         derive
             .derive(&event("task_complete", Some("ours"), Some(END)))
@@ -482,8 +490,8 @@ fn codex_unnamed_abort_does_not_close_or_cancel_the_active_turn() {
 #[test]
 fn codex_native_error_is_failed_but_a_named_abort_still_takes_precedence() {
     for (terminal, expected) in [
-        ("task_complete", "-# ⚠️ 오류 · 5초"),
-        ("turn_aborted", "-# ⏹ 중단 · 5초"),
+        ("task_complete", "-# ⚠️ 오류 · 5초 (09:00)"),
+        ("turn_aborted", "-# ⏹ 중단 · 5초 (09:00)"),
     ] {
         let mut derive = enabled(ShadowProvider::Codex, inputs(None));
         derive.derive(&event("task_started", Some("ours"), Some(START)));
@@ -502,4 +510,34 @@ fn codex_native_error_is_failed_but_a_named_abort_still_takes_precedence() {
                 .contains("PRIVATE_PROVIDER_ERROR")
         );
     }
+}
+
+#[test]
+fn codex_footer_uses_matching_rollout_settings_and_kst_end_date() {
+    let mut derive = enabled(ShadowProvider::Codex, inputs(None));
+    derive.derive(&record(json!({"type":"turn_context","payload":{
+        "turn_id":"ours","model":"gpt-6.2-sol","effort":"ultra"
+    }})));
+    derive.derive(&record(
+        json!({"type":"event_msg","timestamp":"2026-12-31T14:59:57Z",
+            "payload":{"type":"task_started","turn_id":"ours","model_context_window":1000}
+        }),
+    ));
+    derive.derive(&record(json!({"type":"turn_context","payload":{
+        "turn_id":"later","model":"foreign","effort":"low"
+    }})));
+    derive.derive(&record(json!({"type":"event_msg","payload":{
+        "type":"token_count","info":{"last_token_usage":{"input_tokens":420,
+        "cached_input_tokens":100,"output_tokens":500}}
+    }})));
+    derive.derive(&codex_body("ours-answer"));
+    let work = derive.derive(&event(
+        "task_complete",
+        Some("ours"),
+        Some("2026-12-31T15:00:01Z"),
+    ));
+    assert_eq!(
+        summaries(&work)[0].payload,
+        "-# ⏱️ 4초 (01/01 00:00) · gpt-6.2-sol (ultra) · 📦 42%"
+    );
 }
