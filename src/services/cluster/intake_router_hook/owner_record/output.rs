@@ -120,6 +120,13 @@ impl Scope {
 }
 
 impl Artifact {
+    /// Fresh footer projection can remove its quota line before preparation.
+    pub(crate) fn retain_payload_prefix(&mut self, original: &str, prefix: &str) {
+        if original.starts_with(prefix) && self.payload_hash == hash(original) {
+            self.payload_hash = hash(prefix);
+        }
+    }
+
     pub(crate) fn provider(&self) -> &str {
         &self.origin.provider
     }
@@ -205,7 +212,6 @@ pub(crate) async fn acquire_unstamped(
     let mut identities = [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::OpenCode,
         ProviderKind::Qwen,
         ProviderKind::Grok,

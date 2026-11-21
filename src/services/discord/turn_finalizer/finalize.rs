@@ -50,6 +50,7 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
 ) -> FinalizeOutcome {
     let release = (released, active_debited);
     let witness = super::episode::RuntimeWitness {
+        native_prepared_before: None,
         probed_tmux: None,
         claim_snapshot: submit_snapshot,
     };

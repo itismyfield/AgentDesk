@@ -19,6 +19,13 @@ impl AgentChannelBindings {
         self.provider.as_deref().and_then(ProviderKind::from_str)
     }
 
+    /// A configured provider that was removed; it must not fall back to the default provider.
+    pub(crate) fn retired_provider(&self) -> Option<&'static str> {
+        self.provider
+            .as_deref()
+            .and_then(crate::domain::provider::retired_provider_id)
+    }
+
     pub(crate) fn resolved_primary_provider_kind_with_provider(
         &self,
         primary: Option<ProviderKind>,
@@ -37,7 +44,7 @@ impl AgentChannelBindings {
             .find(|provider| self.provider_specific_channel(provider).is_some())
     }
 
-    fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
+    pub(crate) fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
@@ -150,16 +157,14 @@ mod tests {
     }
 
     #[test]
-    fn resolved_primary_provider_preserves_gemini_primary_binding() {
+    fn retired_gemini_binding_is_refused_with_reason_instead_of_default_provider() {
         let bindings = binding("gemini", "1470000000000000001");
 
+        assert_eq!(bindings.resolved_primary_provider_kind(), None);
+        let error = bindings.require_primary_provider("gm-agent").unwrap_err();
         assert_eq!(
-            bindings.resolved_primary_provider_kind(),
-            Some(ProviderKind::Gemini)
-        );
-        assert_eq!(
-            bindings.primary_channel().as_deref(),
-            Some("1470000000000000001")
+            error.to_string(),
+            "agent gm-agent provider 'gemini' is retired; its binding does not run"
         );
     }
 
@@ -217,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_primary_provider_does_not_treat_claude_fallback_as_gemini() {
+    fn retired_gemini_binding_does_not_fall_back_to_its_claude_counterpart() {
         let bindings = AgentChannelBindings {
             provider: Some("gemini".to_string()),
             discord_channel_id: Some("1470000000000000003".to_string()),
@@ -225,14 +230,7 @@ mod tests {
             ..AgentChannelBindings::default()
         };
 
-        assert_eq!(
-            bindings.resolved_primary_provider_kind(),
-            Some(ProviderKind::Claude)
-        );
-        assert_eq!(
-            bindings.primary_channel().as_deref(),
-            Some("1470000000000000003")
-        );
+        assert_eq!(bindings.resolved_primary_provider_kind(), None);
     }
 
     #[test]

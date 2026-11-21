@@ -188,7 +188,14 @@ async fn legacy_handoff_after_rowless_snapshot_schedules_backlog_kickoff() {
         let session = format!("AgentDesk-codex-retirement-await-{channel}");
         let operation = HELD.scope(
             held.clone(),
-            super::resume_aborted_restart_turn(channel_id, &discord.http, &shared, &session, ""),
+            super::resume_aborted_restart_turn(
+                channel_id,
+                &discord.http,
+                &shared,
+                &ProviderKind::Codex,
+                &session,
+                "",
+            ),
         );
         tokio::pin!(operation);
         tokio::select! {

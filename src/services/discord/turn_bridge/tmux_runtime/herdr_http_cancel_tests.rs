@@ -36,6 +36,42 @@ async fn cancel(case: &Case, force: bool, forwarded: bool) -> (StatusCode, Value
     cancel_on(case, case.channel.get(), force, forwarded).await
 }
 
+async fn stop_agent(case: &Case, agent: &str) -> (StatusCode, Value) {
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    registry
+        .register(case.provider.as_str().into(), case.shared.clone())
+        .await;
+    let mut config = crate::config::Config::default();
+    config.server.auth_token = Some(AUTH.into());
+    let pool = case.shared.pg_pool.clone();
+    let app = crate::server::routes::cancel_route_test_app(config, pool, Some(registry), NODE_ID);
+    let bearer = format!("Bearer {AUTH}");
+    let uri = format!("/agents/{agent}/turn/stop");
+    let headers = [("authorization", bearer.as_str())];
+    crate::server::routes::cancel_route_test_post(&app, &uri, &headers, "{}").await
+}
+
+async fn bind_agent(case: &Case, pool: &sqlx::PgPool, agent: &str) {
+    sqlx::query("INSERT INTO agents (id, name, provider) VALUES ($1, $1, $2)")
+        .bind(agent)
+        .bind(case.provider.as_str())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET agent_id = $1, thread_channel_id = $2, last_heartbeat = NOW(), active_turn_nonce = $3 WHERE channel_id = $2")
+        .bind(agent)
+        .bind(case.channel.to_string())
+        .bind(case.token.turn_nonce())
+        .execute(pool)
+        .await
+        .unwrap();
+    if case.provider == ProviderKind::Claude {
+        let state = case.token.herdr_interrupt_state().unwrap();
+        let start = HerdrTurnStart::at_end_of(&case.record.execution_nonce, &case.path, None);
+        assert!(state.record_turn_start(start));
+    }
+}
+
 /// The holder fields and completion claims a Herdr cancel answers with.
 fn claims(answer: &Value) -> Value {
     let keys = [
@@ -90,6 +126,125 @@ async fn row(case: &Case) -> (String, Option<String>) {
 
 fn active_row() -> (String, Option<String>) {
     ("turn_active".into(), Some("dispatch-http".into()))
+}
+
+#[test]
+fn herdr_agent_stop_keeps_the_selected_turn_and_queue_until_end_pg() {
+    with_live(1010, true, |pool, root, runtime, provider, n| {
+        let case = live(pool, root, runtime, provider, n);
+        let _registry = case.rig.registry_on_this_thread();
+        let agent = format!("agent-herdr-stop-{n}");
+        runtime.block_on(bind_agent(&case, pool, &agent));
+        let mailbox = case.shared.mailbox(case.channel);
+        let author = UserId::new(7);
+        let message = MessageId::new(case.channel.get() + 2);
+        use crate::services::turn_orchestrator::{
+            Intervention, InterventionMode, QueuePersistenceContext,
+        };
+        let persistence =
+            QueuePersistenceContext::new(&case.provider, &case.shared.token_hash, None);
+        runtime.block_on(mailbox.replace_queue(
+            vec![Intervention {
+                author_id: author,
+                author_is_bot: false,
+                message_id: message,
+                queued_generation: 1,
+                source_message_ids: vec![message],
+                source_message_queued_generations: vec![],
+                source_text_segments: vec![],
+                text: "sentinel".into(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Default::default(),
+            }],
+            persistence,
+        ));
+
+        let (status, answer) = runtime.block_on(stop_agent(&case, &agent));
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["status"], "stopping", "{answer}");
+        assert_eq!(answer["delivery"], "sent", "{answer}");
+        let (_, repeated) = runtime.block_on(stop_agent(&case, &agent));
+        assert_eq!(repeated["intent"], "already_recorded", "{repeated}");
+        assert_eq!((case.escapes(), intent(&case.token)), (1, true));
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        let snapshot = runtime.block_on(mailbox.snapshot());
+        assert!(
+            snapshot
+                .cancel_token
+                .is_some_and(|t| Arc::ptr_eq(&t, &case.token))
+        );
+        assert_eq!(snapshot.intervention_queue[0].message_id, message);
+        assert_eq!(runtime.block_on(row(&case)), active_row());
+    });
+}
+
+#[test]
+fn herdr_agent_stop_refuses_a_successor_of_the_selected_turn_pg() {
+    with_live(1030, true, |pool, root, runtime, provider, n| {
+        let case = live(pool, root, runtime, provider, n);
+        let _registry = case.rig.registry_on_this_thread();
+        let agent = format!("agent-herdr-stop-{n}");
+        runtime.block_on(bind_agent(&case, pool, &agent));
+        let next = successor(&case);
+        if case.provider == ProviderKind::Claude {
+            let state = next.herdr_interrupt_state().unwrap();
+            let start = HerdrTurnStart::at_end_of(&case.record.execution_nonce, &case.path, None);
+            assert!(state.record_turn_start(start));
+        }
+        let (shared, provider, channel) =
+            (case.shared.clone(), case.provider.clone(), case.channel);
+        let started = next.clone();
+        let step = async move {
+            crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
+            let start = crate::services::discord::mailbox_try_start_turn;
+            let message = MessageId::new(channel.get() + 2);
+            assert!(start(&shared, channel, started, UserId::new(7), message).await);
+        };
+        AFTER_HERDR_JUDGE.with_borrow_mut(|after| *after = Some(Box::pin(step)));
+        let (status, answer) = runtime.block_on(stop_agent(&case, &agent));
+        assert!(
+            AFTER_HERDR_JUDGE.with_borrow_mut(Option::take).is_none(),
+            "successor starts after the route's selection"
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(
+            (case.escapes(), intent(&next), intent(&case.token)),
+            (0, false, false)
+        );
+        assert_eq!(runtime.block_on(row(&case)), active_row());
+    });
+}
+
+#[test]
+fn herdr_agent_stop_refuses_delivery_after_agent_detaches_pg() {
+    with_live(1050, true, |pool, root, runtime, provider, n| {
+        let case = live(pool, root, runtime, provider, n);
+        let _registry = case.rig.registry_on_this_thread();
+        let agent = format!("agent-herdr-stop-{n}");
+        runtime.block_on(bind_agent(&case, pool, &agent));
+        let (pool, channel) = (pool.clone(), case.channel.to_string());
+        let step = async move {
+            sqlx::query("UPDATE sessions SET agent_id = NULL WHERE channel_id = $1")
+                .bind(channel)
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        AFTER_HERDR_INTENT.with_borrow_mut(|after| *after = Some(Box::pin(step)));
+        let (status, answer) = runtime.block_on(stop_agent(&case, &agent));
+        assert!(AFTER_HERDR_INTENT.with_borrow_mut(Option::take).is_none());
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["intent"], "recorded", "{answer}");
+        assert_eq!(answer["delivery"], "not_sent", "{answer}");
+        assert_eq!(answer["reason"], "identity", "{answer}");
+        assert_eq!(case.escapes(), 0);
+        assert!(current_token(&case, runtime).is_some_and(|t| Arc::ptr_eq(&t, &case.token)));
+        assert_eq!(runtime.block_on(row(&case)), active_row());
+    });
 }
 
 fn intent(token: &CancelToken) -> bool {

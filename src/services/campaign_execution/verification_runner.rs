@@ -680,9 +680,16 @@ pub fn adk_phase_command(
     let (program, argv) = match kind {
         PhaseKind::Archive => (
             "cargo".into(),
-            ["nextest", "archive", "--lib", "--archive-file", &archive]
-                .map(String::from)
-                .to_vec(),
+            [
+                "nextest",
+                "archive",
+                "--lib",
+                "--workspace",
+                "--archive-file",
+                &archive,
+            ]
+            .map(String::from)
+            .to_vec(),
         ),
         PhaseKind::List => (
             "cargo".into(),

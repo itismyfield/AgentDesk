@@ -499,8 +499,38 @@ fn a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg() {
         );
         assert_eq!(fx.row(), Some(HostedState::Retired));
         assert!(!token.is_completion_cleanup() && !token.cancelled.load(Ordering::SeqCst));
+        let at_settle = Arc::new(Mutex::new(None));
+        let (shared, channel, held, seen) = (
+            live.shared.clone(),
+            live.channel,
+            token.clone(),
+            at_settle.clone(),
+        );
+        let _hooked = discord::recovery_engine::herdr_row_end::tests::on_while(
+            "live_before_settle",
+            move || {
+                let (shared, held, seen) = (shared.clone(), held.clone(), seen.clone());
+                Box::pin(async move {
+                    let sql = "SELECT status FROM sessions WHERE channel_id = $1";
+                    let status =
+                        sqlx::query_scalar::<_, String>(sql).bind(channel.get().to_string());
+                    let status = status
+                        .fetch_one(shared.pg_pool.as_ref().unwrap())
+                        .await
+                        .unwrap();
+                    let active = shared.mailbox_peek(channel).unwrap().cancel_token().await;
+                    let holds = active
+                        .ok()
+                        .flatten()
+                        .is_some_and(|active| Arc::ptr_eq(&active, &held));
+                    *seen.lock().unwrap() = Some((status, holds));
+                })
+            },
+        );
         live.route();
         live.pass_and_wait_for_end(Duration::from_secs(15));
+        let disconnected_before_settle = Some(("disconnected".to_string(), true));
+        assert_eq!(*at_settle.lock().unwrap(), disconnected_before_settle);
         let ended = (
             live.texts(),
             live.row().is_none(),

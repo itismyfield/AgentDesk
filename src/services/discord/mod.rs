@@ -17,6 +17,7 @@ mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
 pub(crate) mod decision_forums;
+pub(crate) mod delegation_card;
 mod delivery_lease_cell;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
@@ -260,8 +261,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_ingress::{
-    ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
-    installed as input_owner_installed_for_test,
+    ADOPTS as OWNER_ADOPTS_FOR_TEST, Hold as OwnerHoldForTest,
+    execution as owner_execution_for_test, installed as input_owner_installed_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;
@@ -631,7 +632,6 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::OpenCode,
         ProviderKind::Qwen,
     ]
@@ -1452,7 +1452,6 @@ fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<Stri
     [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::Qwen,
     ]
     .into_iter()

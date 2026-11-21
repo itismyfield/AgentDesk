@@ -1,22 +1,8 @@
 import { Check, Plus, RefreshCw, Terminal } from "lucide-react";
-import {
-  RATE_LIMIT_GAUGE_TRACK_STYLE,
-  rateLimitFillStyle,
-  rateLimitFillWidth,
-} from "../common/rateLimitGauge";
-import { getProviderLevelColors } from "../../app/providerTheme";
-import { providerDisplayName, usageBucketLabel } from "./SettingsCopy";
 import { ActionMenu } from "../common/ActionMenu";
-import {
-  SETTINGS_CARD_CLASS,
-  SETTINGS_TRAY_CLASS,
-  SettingsAction,
-  SettingsBadge,
-  SettingsCard,
-  SettingsNotice,
-  SettingsSkeletonRows,
-  SettingsStatusMessage,
-} from "./SettingsPrimitives";
+import { Cap, CardNote, CardSkeleton, Chip, KitCard, MeterBar, Num, Well } from "../common/KitPrimitives";
+import { providerDisplayName, usageBucketLabel } from "./SettingsCopy";
+import { SettingsAction, SettingsNotice } from "./SettingsPrimitives";
 import {
   accountIsDefault,
   extraAccountCount,
@@ -44,19 +30,21 @@ export function SettingsProvidersPanel({ accounts, warningPct, dangerPct, tr }: 
   return (
     <div className="space-y-4" data-testid="settings-providers-panel">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-[14rem] flex-1 space-y-1 text-xs leading-5 break-keep text-th-text-muted">
-          <p>
+        <div className="min-w-[14rem] flex-1 space-y-1 text-xs leading-5 break-keep text-[var(--fg-muted)]">
+          <p className="m-0">
             {tr(
               `추가 계정 ${extras}개가 연결돼 있어요. 추가 계정 로그인을 지원하는 서비스만 보여요.`,
               `${extras} additional ${extras === 1 ? "account is" : "accounts are"} connected. Only services that support extra sign-ins are listed.`,
             )}
           </p>
-          {providers.some((provider) => provider.id === "codex") ? <p>
-            {tr(
-              "같은 Codex 계정을 기본 계정과 추가 계정에 함께 로그인하면 서로 로그인이 풀릴 수 있어요. 추가 계정에는 다른 계정을 쓰세요.",
-              "Signing the same Codex account into both the default and an extra slot can sign both out. Use a different account for extras.",
-            )}
-          </p> : null}
+          {providers.some((provider) => provider.id === "codex") ? (
+            <p className="m-0">
+              {tr(
+                "같은 Codex 계정을 기본 계정과 추가 계정에 함께 로그인하면 서로 로그인이 풀릴 수 있어요. 추가 계정에는 다른 계정을 쓰세요.",
+                "Signing the same Codex account into both the default and an extra slot can sign both out. Use a different account for extras.",
+              )}
+            </p>
+          ) : null}
         </div>
         <SettingsAction
           onClick={accounts.reload}
@@ -67,41 +55,49 @@ export function SettingsProvidersPanel({ accounts, warningPct, dangerPct, tr }: 
         </SettingsAction>
       </div>
 
-      {error ? (
-        <SettingsNotice role="alert" tone="warn">{error}</SettingsNotice>
-      ) : null}
+      {error ? <SettingsNotice role="alert" tone="warn">{error}</SettingsNotice> : null}
 
       {pendingLogin ? (
-        <div
-          className={`${SETTINGS_CARD_CLASS} px-4 py-3 text-[13px] shadow-[0_0_0_0.5px_color-mix(in_oklch,var(--accent)_55%,transparent)]`}
+        <KitCard
+          pad="md"
+          style={{ borderColor: "color-mix(in oklch, var(--accent) 55%, var(--line-soft))", gap: 0 }}
           data-testid="settings-providers-login-pending"
         >
-          <div className="flex items-center gap-2 font-medium text-th-text-primary">
+          <div className="flex items-center gap-2 text-[13px] font-medium text-[var(--fg)]">
             <Terminal size={14} aria-hidden className="text-[var(--accent)]" />
             {tr(
               `${providerDisplayName(pendingLogin.providerId)} 추가 계정 로그인 중`,
               `Signing in an additional ${providerDisplayName(pendingLogin.providerId)} account`,
             )}
           </div>
-          <p className="mt-1.5 text-xs leading-5 break-keep text-th-text-muted">
+          <p className="m-0 mt-1.5 text-xs leading-5 break-keep text-[var(--fg-muted)]">
             {tr(
               "대시보드에서는 로그인 창을 열 수 없어요. 터미널에서 아래 명령으로 접속해 로그인을 마친 뒤 '로그인 완료 확인'을 눌러 주세요.",
               "Sign-in can't run inside the dashboard. Attach with the command below in a terminal, finish signing in, then press “Check sign-in”.",
             )}
           </p>
-          <pre className={`mt-2 overflow-x-auto px-3 py-2 font-mono text-[11px] leading-5 ${SETTINGS_TRAY_CLASS}`}>
-            {pendingLogin.attach}
-          </pre>
-          <SettingsAction className="mt-3" onClick={() => void accounts.completeLogin()} data-testid="settings-providers-login-complete">
+          <Well className="mt-2 overflow-x-auto rounded-[var(--r-sm)] px-3 py-2 font-mono text-[11px] leading-5">
+            <pre className="m-0 font-inherit">{pendingLogin.attach}</pre>
+          </Well>
+          <SettingsAction className="mt-3 self-start" onClick={() => void accounts.completeLogin()} data-testid="settings-providers-login-complete">
             {tr("로그인 완료 확인", "Check sign-in")}
           </SettingsAction>
-        </div>
+        </KitCard>
       ) : null}
 
       {loading && providers.length === 0 ? (
-        <SettingsCard><SettingsSkeletonRows label={tr("AI 계정을 불러오는 중…", "Loading AI accounts…")} /></SettingsCard>
+        <KitCard>
+          <CardSkeleton label={tr("AI 계정을 불러오는 중…", "Loading AI accounts…")} />
+        </KitCard>
       ) : providers.length === 0 && !error ? (
-        <SettingsCard><SettingsStatusMessage>{tr("표시할 계정이 없어요. 터미널에서 각 AI 도구에 로그인했는지 확인한 뒤 다시 불러와 주세요.", "No accounts to show. Check that each AI tool is signed in, then reload.")}</SettingsStatusMessage></SettingsCard>
+        <KitCard>
+          <CardNote className="border-t-0">
+            {tr(
+              "표시할 계정이 없어요. 터미널에서 각 AI 도구에 로그인했는지 확인한 뒤 다시 불러와 주세요.",
+              "No accounts to show. Check that each AI tool is signed in, then reload.",
+            )}
+          </CardNote>
+        </KitCard>
       ) : (
         <div className="grid gap-3">
           {providers.map((provider) => (
@@ -120,7 +116,13 @@ export function SettingsProvidersPanel({ accounts, warningPct, dangerPct, tr }: 
   );
 }
 
-function ProviderCard({ provider, accounts, warningPct, dangerPct, tr }: {
+function ProviderCard({
+  provider,
+  accounts,
+  warningPct,
+  dangerPct,
+  tr,
+}: {
   provider: ProviderAuthProvider;
   accounts: ProviderAccounts;
   warningPct: number;
@@ -131,11 +133,7 @@ function ProviderCard({ provider, accounts, warningPct, dangerPct, tr }: {
   const starting = accounts.startingProviderId === provider.id;
   const accountCount = (provider.accounts ?? []).length;
   return (
-    <section
-      className={`${SETTINGS_CARD_CLASS} [&>*+*]:shadow-[inset_0_0.5px_0_var(--line)]`}
-      data-testid={`settings-provider-${provider.id}`}
-      aria-label={name}
-    >
+    <KitCard as="section" data-testid={`settings-provider-${provider.id}`} aria-label={name}>
       <div className="flex flex-wrap items-center gap-3 px-4 py-3">
         <span
           aria-hidden
@@ -146,12 +144,12 @@ function ProviderCard({ provider, accounts, warningPct, dangerPct, tr }: {
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <h4 className="text-[13px] font-medium leading-5 text-th-text-primary">{name}</h4>
-            <SettingsBadge>{tr(`계정 ${accountCount}개`, `${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}</SettingsBadge>
+            <h4 className="m-0 text-sm leading-5 font-medium text-[var(--fg)]">{name}</h4>
+            <Chip>{tr(`계정 ${accountCount}개`, `${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}</Chip>
           </div>
-          <p className="text-[11px] leading-4 text-th-text-muted [overflow-wrap:anywhere]">
+          <Cap className="mt-0.5 block [overflow-wrap:anywhere]">
             {tr("기본 로그인 위치", "Default sign-in folder")}: {provider.default_home}
-          </p>
+          </Cap>
         </div>
         <SettingsAction
           onClick={() => void accounts.addAccount(provider.id)}
@@ -176,11 +174,21 @@ function ProviderCard({ provider, accounts, warningPct, dangerPct, tr }: {
           tr={tr}
         />
       ))}
-    </section>
+    </KitCard>
   );
 }
 
-function AccountRow({ providerName, account, isPrimary, removing, onRemove, onSetPrimary, warningPct, dangerPct, tr }: {
+function AccountRow({
+  providerName,
+  account,
+  isPrimary,
+  removing,
+  onRemove,
+  onSetPrimary,
+  warningPct,
+  dangerPct,
+  tr,
+}: {
   providerName: string;
   account: ProviderAuthAccount;
   isPrimary: boolean;
@@ -194,9 +202,9 @@ function AccountRow({ providerName, account, isPrimary, removing, onRemove, onSe
   const isDefault = accountIsDefault(account);
   const buckets = account.usage?.buckets ?? [];
   return (
-    <div className="px-4 py-3" data-testid={`settings-provider-account-${account.id}`}>
+    <div className="border-t border-[var(--line-soft)] px-4 py-3" data-testid={`settings-provider-account-${account.id}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0 text-[13px] font-medium leading-5 text-th-text-primary [overflow-wrap:anywhere]">
+        <div className="min-w-0 text-[13px] leading-5 font-medium text-[var(--fg)] [overflow-wrap:anywhere]">
           {isDefault ? tr("기본 로그인", "Default sign-in") : account.id}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -213,44 +221,46 @@ function AccountRow({ providerName, account, isPrimary, removing, onRemove, onSe
           {isDefault ? null : (
             <ActionMenu
               label={tr(`${account.id} 계정 메뉴`, `${account.id} account menu`)}
-              items={[{
-                key: "unlink",
-                label: removing ? tr("해제 중…", "Unlinking…") : tr("연결 해제", "Unlink"),
-                danger: true,
-                disabled: removing,
-                onSelect: onRemove,
-                confirm: {
-                  title: tr(`${providerName} “${account.id}” 계정 연결을 해제할까요?`, `Unlink ${providerName} “${account.id}”?`),
-                  description: tr("저장된 로그인 정보 폴더는 그대로 남아요.", "Its saved sign-in folder is kept."),
-                  confirmLabel: tr("연결 해제", "Unlink"),
-                  cancelLabel: tr("취소", "Cancel"),
+              items={[
+                {
+                  key: "unlink",
+                  label: removing ? tr("해제 중…", "Unlinking…") : tr("연결 해제", "Unlink"),
+                  danger: true,
+                  disabled: removing,
+                  onSelect: onRemove,
+                  confirm: {
+                    title: tr(`${providerName} “${account.id}” 계정 연결을 해제할까요?`, `Unlink ${providerName} “${account.id}”?`),
+                    description: tr("저장된 로그인 정보 폴더는 그대로 남아요.", "Its saved sign-in folder is kept."),
+                    confirmLabel: tr("연결 해제", "Unlink"),
+                    cancelLabel: tr("취소", "Cancel"),
+                  },
                 },
-              }]}
+              ]}
             />
           )}
         </div>
       </div>
-      <p className="mt-0.5 font-mono text-[11px] leading-4 text-th-text-muted [overflow-wrap:anywhere]">{account.home}</p>
+      <Cap className="mt-0.5 block font-mono leading-[18px] [overflow-wrap:anywhere]">{account.home}</Cap>
       {(account.bound_agents ?? []).length > 0 ? (
-        <p className="mt-1 text-[11px] leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+        <Cap className="mt-1 block leading-5 [overflow-wrap:anywhere]">
           {tr("이 계정을 쓰는 에이전트", "Agents using this account")}: {(account.bound_agents ?? []).join(", ")}
-        </p>
+        </Cap>
       ) : null}
       {(account.bound_channels ?? []).length > 0 ? (
-        <p className="mt-1 text-[11px] leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+        <Cap className="mt-1 block leading-5 [overflow-wrap:anywhere]">
           {tr("이 계정을 쓰는 채널", "Channels using this account")}: {(account.bound_channels ?? []).join(", ")}
-        </p>
+        </Cap>
       ) : null}
       {account.usage?.unsupported ? (
-        <p className="mt-2 text-xs leading-5 break-keep text-th-text-muted">
+        <p className="m-0 mt-2 text-xs leading-5 break-keep text-[var(--fg-muted)]">
           {tr(`${providerName} 사용량은 아직 볼 수 없어요.`, `${providerName} usage is not available yet.`)}
         </p>
       ) : buckets.length > 0 ? (
         <div className="mt-2.5 space-y-2.5">
           {account.usage?.stale ? (
-            <p className="text-[11px] leading-5 break-keep text-th-text-muted">
+            <Cap className="block leading-5 break-keep">
               {tr("사용량 정보가 오래됐어요. 곧 다시 받아요.", "Usage data is out of date and will refresh soon.")}
-            </p>
+            </Cap>
           ) : null}
           {buckets.map((bucket, index) => (
             <UsageBar
@@ -275,7 +285,12 @@ function formatReset(reset: number | undefined, tr: Tr): string | null {
   return tr(`${text}에 초기화`, `Resets ${text}`);
 }
 
-function UsageBar({ bucket, warningPct, dangerPct, tr }: {
+function UsageBar({
+  bucket,
+  warningPct,
+  dangerPct,
+  tr,
+}: {
   bucket: ProviderAuthUsageBucket;
   warningPct: number;
   dangerPct: number;
@@ -284,20 +299,18 @@ function UsageBar({ bucket, warningPct, dangerPct, tr }: {
   const percent = usageBarPercent(bucket);
   const label = usageBucketLabel(bucket.label ?? bucket.name ?? "", tr) || tr("사용량", "Usage");
   const level = percent !== null && percent >= dangerPct ? "danger" : percent !== null && percent >= warningPct ? "warning" : "normal";
-  const colors = getProviderLevelColors("codex", level);
+  const tone = level === "danger" ? "err" : level === "warning" ? "warn" : "accent";
   const reset = formatReset(bucket.reset, tr);
   return (
     <div className="min-w-0" data-testid="settings-provider-usage-bar" data-level={level}>
-      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-2 text-[11px]">
-        <span className="break-keep text-th-text-secondary">{label}</span>
-        <span className="tabular-nums text-th-text-primary">
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-2 text-xs leading-4">
+        <span className="break-keep text-[var(--fg-dim)]">{label}</span>
+        <Num className="text-[var(--fg)]">
           {percent === null ? tr("확인 안 됨", "Unknown") : tr(`${percent}% 사용`, `${percent}% used`)}
-          {reset ? <span className="ml-2 text-th-text-muted">{reset}</span> : null}
-        </span>
+          {reset ? <span className="ml-2 font-sans text-[var(--fg-muted)]">{reset}</span> : null}
+        </Num>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full" style={RATE_LIMIT_GAUGE_TRACK_STYLE}>
-        <div className="h-full rounded-full" style={{ width: rateLimitFillWidth(percent), ...rateLimitFillStyle(colors.bar, colors.glow, 6) }} />
-      </div>
+      <MeterBar ratio={(percent ?? 0) / 100} tone={tone} />
     </div>
   );
 }

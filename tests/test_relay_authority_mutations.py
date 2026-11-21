@@ -1010,12 +1010,15 @@ class NightlyMutationBackstopTests(unittest.TestCase):
         pr = jobs[PR_WORKFLOW][MUTATION_JOB]
         for key in ("if", "needs", "continue-on-error"):
             self.assertNotIn(key, nightly)
+        self.assertEqual(nightly["timeout-minutes"], pr["timeout-minutes"])
         self.assertEqual(nightly["strategy"], pr["strategy"])
         for key in ("RELAY_AUTHORITY_MUTATION_SHARD_INDEX", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"):
             self.assertEqual(nightly["env"][key], pr["env"][key])
         self.assertEqual(*([s.get("with") for s in job["steps"] if "ensure-swap" in s.get("uses", "")] for job in (nightly, pr)))
         runs = [step for step in nightly["steps"] if step.get("run", "").strip() == "bash " + MUTATION_SCRIPT.as_posix()]
         self.assertEqual(len(runs), 1)
+        pr_run = next(step for step in pr["steps"] if step.get("run") == runs[0]["run"])
+        self.assertEqual(runs[0]["timeout-minutes"], pr_run["timeout-minutes"])
         for step in nightly["steps"]:
             with self.subTest(step=step.get("name") or step.get("uses")):
                 self.assertFalse(step.get("continue-on-error"))

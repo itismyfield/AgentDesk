@@ -26,7 +26,7 @@ pub(super) async fn host(
     .await
     {
         Some(refusal) => Err(HumanInputError::InvalidTarget(refusal.to_string())),
-        None => Ok(crate::config::session_hosts::has_herdr_endpoint(
+        None => Ok(crate::services::session_host::thread_host::runs_herdr(
             channel.get(),
         )),
     }

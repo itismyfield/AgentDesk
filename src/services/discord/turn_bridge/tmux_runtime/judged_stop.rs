@@ -100,7 +100,6 @@ impl ChannelStop {
                 let providers = [
                     ProviderKind::Claude,
                     ProviderKind::Codex,
-                    ProviderKind::Gemini,
                     ProviderKind::Qwen,
                 ];
                 providers
@@ -353,6 +352,46 @@ pub(in crate::services::discord) async fn begin_user_stop(
 }
 
 impl ChannelStop {
+    /// Matches the row's turn nonce before handing the captured token to the actor's CAS.
+    #[cfg(unix)]
+    pub(in crate::services::discord) async fn herdr_agent_stop(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        expected: &crate::services::agents::turn::AgentHerdrStop,
+    ) -> Option<CommandStop> {
+        #[cfg(test)]
+        if let Some(step) = AFTER_HERDR_JUDGE.with_borrow_mut(Option::take) {
+            step.await;
+        }
+
+        let nonce = expected.turn_nonce.as_deref()?;
+        let mailbox = shared.mailbox_peek(channel)?;
+        let token = mailbox.cancel_token().await.ok()??;
+        let state = token.herdr_interrupt_state()?;
+        if token.turn_nonce() != Some(nonce)
+            || state.owner != expected.execution.owner
+            || !state
+                .turn_start
+                .get()
+                .is_some_and(|start| start.execution_nonce == expected.execution.execution_nonce)
+        {
+            return None;
+        }
+        let pool = shared.pg_pool.as_ref()?;
+        if !expected.still_assigned(pool).await
+            || !shared
+                .mailbox_peek(channel)
+                .is_some_and(|current| current.same_actor(&mailbox))
+        {
+            return None;
+        }
+        let stop = super::codex_stop_delivery::herdr_command_stop_on_row;
+        Some(CommandStop::Herdr(
+            stop(shared, provider, channel, &token, "/stop", Some(expected)).await,
+        ))
+    }
+
     /// A user stop judged once: only a live Herdr turn takes its `/stop`, on the token judged
     /// here; any other turn is left to the caller with nothing done.
     pub(in crate::services::discord) async fn herdr_user_stop(

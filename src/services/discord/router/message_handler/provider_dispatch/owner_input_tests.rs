@@ -319,6 +319,7 @@ impl Rig {
                 "expected_transcript":null,"binding_watermark":null})
         };
         Registration {
+            native: None,
             mailbox: self.mailbox.clone(),
             execution,
             origin: InputOrigin::Discord,
@@ -355,6 +356,7 @@ impl Rig {
         let turn = StreamingTurn {
             pool: self.pool.get(),
             registration_origin: None,
+            agy_foreground: None,
             shared: None,
             provider,
             prompt: PROMPT,
@@ -1040,7 +1042,7 @@ fn owner_refusals_before_a_pane_need_no_session() {
             "remote_placement",
         ),
         (
-            ProviderKind::Gemini,
+            ProviderKind::OpenCode,
             target::Phase::Busy,
             Execution::LocalTui,
             "provider_unsupported",
@@ -1060,6 +1062,7 @@ fn owner_refusals_before_a_pane_need_no_session() {
 /// the launch will create.
 fn prepared_before_launch(rig: &Rig) -> Registration {
     Registration {
+        native: None,
         mailbox: rig.mailbox.clone(),
         execution: Execution::LocalTui,
         origin: InputOrigin::Discord,

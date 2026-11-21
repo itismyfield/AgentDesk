@@ -239,22 +239,28 @@ fn generated_session_settings_install_the_executable_wrapper() {
     );
     let record = record_path(&record_dir(), &config.session_id);
     let exists = record.exists();
-    let quota = crate::services::turn_summary_line::quota::snapshot(
+    use crate::services::turn_summary_line::{Footer, Outcome, quota, render};
+    let snapshot = quota::snapshot(
         "claude",
         7_319_003,
         None,
         Some(config.session_id.as_str()),
-    );
-    let line = crate::services::turn_summary_line::render(
-        crate::services::turn_summary_line::Outcome::Completed,
-        Some(1000),
         None,
-        quota,
+        true,
+    );
+    let line = render(
+        Outcome::Completed,
+        Footer {
+            elapsed_ms: Some(1000),
+            model: snapshot.model(),
+            quota: snapshot.quota,
+            ..Footer::default()
+        },
     );
     let _ = std::fs::remove_file(record);
     assert!(output.status.success());
     assert_eq!(output.stdout, b"user status");
-    assert!(line.starts_with("-# ⏱️ 1초 · 5h 24% ("), "{line}");
+    assert!(line.starts_with("-# ⏱️ 1초\n-# 5h 24% ("), "{line}");
     assert!(
         exists,
         "the session --settings command must record its stdin"

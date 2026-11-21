@@ -110,7 +110,6 @@ mod tests {
         let historical = [
             ("-cc", "claude"),
             ("-cdx", "codex"),
-            ("-gm", "gemini"),
             ("-oc", "opencode"),
             ("-qw", "qwen"),
             ("-gx", "grok"),
@@ -124,7 +123,7 @@ mod tests {
             );
         }
         for channel in [
-            "dev-gem", "dev-cop", "dev-api", "dev-CC", "dev-cc ", "dev", "",
+            "dev-gm", "dev-gem", "dev-cop", "dev-api", "dev-CC", "dev-cc ", "dev", "",
         ] {
             assert_eq!(
                 config.provider_from_channel_suffix(channel),
@@ -142,17 +141,17 @@ mod tests {
     #[test]
     fn onboarding_routing_add_override_delete_and_longest_match() {
         let config = parse(
-            "provider_suffix_map: {'-gem': gemini, '-cc': codex, '-gm': null, ' LONG-CC ': qwen}\ndefault_provider: grok",
+            "provider_suffix_map: {'-gem': grok, '-cc': codex, '-qw': null, ' LONG-CC ': qwen}\ndefault_provider: grok",
         );
         assert_eq!(
             config.provider_from_channel_suffix("dev-gem"),
-            Some("gemini".into())
+            Some("grok".into())
         );
         assert_eq!(
             config.provider_from_channel_suffix("dev-cc"),
             Some("codex".into())
         );
-        assert_eq!(config.provider_from_channel_suffix("dev-gm"), None);
+        assert_eq!(config.provider_from_channel_suffix("dev-qw"), None);
         assert_eq!(
             config.provider_from_channel_suffix("dev-long-cc"),
             Some("qwen".into())
@@ -222,17 +221,17 @@ mod tests {
         // snapshot so this regression cannot contaminate parallel unit tests.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
-        std::fs::write(&path, "server: {}\nonboarding:\n  provider_suffix_map: {'-gem': gemini, '-cc': codex, '-gm': null}\n  default_provider: qwen\n").unwrap();
+        std::fs::write(&path, "server: {}\nonboarding:\n  provider_suffix_map: {'-gem': grok, '-cc': codex, '-qw': null}\n  default_provider: qwen\n").unwrap();
         crate::config_live_reload::install(crate::config::load_from_path(&path).unwrap());
         assert_eq!(
             ProviderKind::from_channel_suffix("dev-gem"),
-            Some(ProviderKind::Gemini)
+            Some(ProviderKind::Grok)
         );
         assert_eq!(
             ProviderKind::from_channel_suffix("dev-cc"),
             Some(ProviderKind::Codex)
         );
-        assert_eq!(ProviderKind::from_channel_suffix("dev-gm"), None);
+        assert_eq!(ProviderKind::from_channel_suffix("dev-qw"), None);
         assert_eq!(
             ProviderKind::default_channel_provider(),
             Some(ProviderKind::Qwen)
@@ -241,7 +240,7 @@ mod tests {
             ProviderKind::resolve_channel_provider(Some("dev"), None),
             Some(ProviderKind::Qwen)
         );
-        assert!(ProviderKind::Gemini.is_channel_supported(Some("dev-gem"), false, None));
+        assert!(ProviderKind::Grok.is_channel_supported(Some("dev-gem"), false, None));
         assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false, None));
         assert_eq!(
             ProviderKind::resolve_channel_provider(Some("dev-gem"), Some(&ProviderKind::Claude)),

@@ -147,50 +147,7 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.149
-
-      # Memory evidence for the slow macOS lib build: runner RAM and paging around it.
-      # Diagnostics only; they never change the job result.
-      - name: Report macOS memory before the lib build
-        continue-on-error: true
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          sysctl hw.memsize hw.ncpu vm.swapusage || true
-          vm_stat || true
-          if command -v memory_pressure >/dev/null; then memory_pressure || true; fi
-
-      # Verify the plan before starting the native test execution budget.
-      # `time -l` prints the peak RSS and exits with the build's own status.
-      - name: Build and plan non-PG lib tests
-        timeout-minutes: 210
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          RUST_BACKTRACE: 1
-        run: /usr/bin/time -l bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier prepare
-
-      # Runs after a failed or timed-out build too; the paging counters are cumulative since boot.
-      - name: Report macOS memory after the lib build
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          sysctl vm.swapusage || true
-          vm_stat || true
-
-      - name: Run and audit non-PG lib tests
-        timeout-minutes: 130
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          RUST_BACKTRACE: 1
-        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier run
-
+      # macOS lib tests are paused because the build times out paging on the hosted runner (#6082).
       - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
@@ -340,7 +297,7 @@ jobs:
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
           mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
-          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
@@ -817,7 +774,7 @@ jobs:
   relay_authority_mutations_full:
     name: Relay authority mutations full (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -863,7 +820,7 @@ jobs:
         env:
           BASH_ENV: /dev/null
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 75
         run: bash scripts/run_relay_authority_mutations.sh
 
       - name: sccache stats

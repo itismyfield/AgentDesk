@@ -48,11 +48,7 @@ pub(in crate::services) fn scan_skills(
                 }
             }
         }
-        ProviderKind::Codex
-        | ProviderKind::Gemini
-        | ProviderKind::OpenCode
-        | ProviderKind::Qwen
-        | ProviderKind::Grok => {
+        ProviderKind::Codex | ProviderKind::OpenCode | ProviderKind::Qwen | ProviderKind::Grok => {
             scan_directory_skills(
                 collect_provider_skill_roots(provider, project_path),
                 &mut seen,
@@ -160,7 +156,6 @@ fn provider_supports_directory_skills(provider: &ProviderKind) -> bool {
         provider,
         ProviderKind::Claude
             | ProviderKind::Codex
-            | ProviderKind::Gemini
             | ProviderKind::OpenCode
             | ProviderKind::Qwen
             | ProviderKind::Grok
@@ -171,7 +166,6 @@ fn provider_home_skill_dir(provider: &ProviderKind, home: &Path) -> Option<std::
     match provider {
         ProviderKind::Claude => Some(home.join(".claude").join("commands")),
         ProviderKind::Codex => Some(home.join(".codex").join("skills")),
-        ProviderKind::Gemini => Some(home.join(".gemini").join("skills")),
         ProviderKind::OpenCode => Some(home.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(home.join(".qwen").join("skills")),
         ProviderKind::Grok => Some(home.join(".grok").join("skills")),
@@ -187,7 +181,6 @@ fn provider_project_skill_dir(
     match provider {
         ProviderKind::Claude => Some(project_root.join(".claude").join("commands")),
         ProviderKind::Codex => Some(project_root.join(".codex").join("skills")),
-        ProviderKind::Gemini => Some(project_root.join(".gemini").join("skills")),
         ProviderKind::OpenCode => Some(project_root.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(project_root.join(".qwen").join("skills")),
         ProviderKind::Grok => Some(project_root.join(".grok").join("skills")),

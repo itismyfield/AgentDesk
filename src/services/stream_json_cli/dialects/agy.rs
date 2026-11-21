@@ -9,10 +9,35 @@ use crate::services::platform::probe_provider_binary_version;
 use crate::services::stream_json_cli::codec::AgyCodec;
 use crate::services::stream_json_cli::policy::ToolPolicy;
 use crate::services::stream_json_cli::request::ProviderTurnRequest;
-use crate::services::stream_json_cli::runner::{PreparedCommand, run_prepared};
+use crate::services::stream_json_cli::runner::{
+    PreparedCommand, run_prepared, run_prepared_recorded,
+};
 use crate::services::stream_json_cli::session::parse_strict_uuid;
+use crate::services::tui_o::store::agy_spool::{AgySpool, Failure};
 
 pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> Result<(), String> {
+    let prepared = prepare_for_execution(&request)?;
+    run_prepared(prepared, sender, request.timeout, request.cancel)
+}
+
+pub(crate) fn execute_recorded(
+    request: ProviderTurnRequest,
+    sender: Sender<StreamMessage>,
+    spool: &mut AgySpool,
+) -> Result<(), String> {
+    let prepared = match prepare_for_execution(&request) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Err(storage) = spool.fail(Failure::Preparation) {
+                tracing::warn!(%storage, "agy preparation failure could not be recorded");
+            }
+            return Err(error);
+        }
+    };
+    run_prepared_recorded(prepared, sender, request.timeout, request.cancel, spool)
+}
+
+fn prepare_for_execution(request: &ProviderTurnRequest) -> Result<PreparedCommand, String> {
     match request.tool_policy.effective_for_stream_json() {
         ToolPolicy::ProviderDefault => {}
         ToolPolicy::ReadOnly | ToolPolicy::AllowListed(_) => {
@@ -21,9 +46,9 @@ pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> R
             );
         }
     }
-    let prepared = prepare(&request)?;
-    run_prepared(prepared, sender, request.timeout, request.cancel)
+    prepare(request)
 }
+
 pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
     let composed = compose_envelope(
         request.system_prompt.as_deref().unwrap_or(""),

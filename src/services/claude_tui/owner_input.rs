@@ -22,6 +22,7 @@ struct Scope {
     channel: u64,
     commit: Commit,
     approve: Approve,
+    readiness_deadline: Option<std::time::Instant>,
     pin: Pin,
     hold: Hold,
     allowed: AtomicBool,
@@ -52,6 +53,14 @@ pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
             .unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 }
+pub(crate) fn key_attempted() -> Option<bool> {
+    Some(current()?.keyed.load(Ordering::SeqCst))
+}
+
+pub(crate) fn readiness_deadline() -> Option<std::time::Instant> {
+    current()?.readiness_deadline
+}
+
 pub(crate) fn active() -> bool {
     current().is_some()
 }
@@ -228,6 +237,7 @@ pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
 }
 pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
+    keyed();
     send()
 }
 #[cfg(unix)]
@@ -460,7 +470,15 @@ pub(crate) fn capture_scope<R>(
     run: impl FnOnce() -> R,
 ) -> (R, Option<NotSentProof>) {
     let approve: Approve = Arc::new(|| Ok(()));
-    capture_owner_scope(provider, target, channel, (commit, approve), pin, hold, run)
+    capture_owner_scope(
+        provider,
+        target,
+        channel,
+        (commit, approve, None),
+        pin,
+        hold,
+        run,
+    )
 }
 
 /// As `capture_scope`, with the owner asked to approve the first key before any C-s.
@@ -469,7 +487,7 @@ pub(crate) fn capture_owner_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,
-    (commit, approve): (Commit, Approve),
+    (commit, approve, readiness_deadline): (Commit, Approve, Option<std::time::Instant>),
     pin: Pin,
     hold: Hold,
     run: impl FnOnce() -> R,
@@ -486,6 +504,7 @@ pub(crate) fn capture_owner_scope<R>(
         channel,
         commit,
         approve,
+        readiness_deadline,
         pin,
         hold,
         allowed: AtomicBool::new(false),

@@ -25,6 +25,16 @@ pub(super) fn take_after_send() -> Option<Box<dyn FnOnce() + Send>> {
 type Step = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 static BEFORE_LATE_STOP: Mutex<Option<Step>> = Mutex::new(None);
 
+thread_local! {
+    static AFTER_HERDR_INTENT: std::cell::RefCell<Option<Step>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) async fn after_herdr_intent() {
+    if let Some(step) = AFTER_HERDR_INTENT.with_borrow_mut(Option::take) {
+        step.await;
+    }
+}
+
 /// Runs the step a test placed between a stop's first Pending and its late arming.
 pub(super) async fn before_late_stop() {
     let step = BEFORE_LATE_STOP.lock().unwrap().take();
@@ -745,6 +755,8 @@ fn herdr_user_stop_reads_a_long_turn_and_never_calls_an_unread_turn_idle() {
         } else {
             let reply = json!({"type":"assistant","message":{"content":[]}});
             std::fs::write(&case.path, format!("{reply}\n")).unwrap();
+            // Without the interrupt footer the unread turn is neither stopped nor called idle.
+            case.screen(false);
             assert_eq!(
                 user_stop(case, runtime, "!stop"),
                 HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved))

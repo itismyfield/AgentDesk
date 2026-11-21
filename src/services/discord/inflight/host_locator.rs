@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::InflightTurnState;
 use crate::services::session_host::{HostKind, HostedRuntimeLocator};
+use crate::services::tui_o::cutover::{BodyClaim, claude_thread};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::services::discord) enum PersistedHostLocator {
@@ -82,13 +84,37 @@ impl<'de> Deserialize<'de> for PersistedHostLocator {
     }
 }
 
+impl InflightTurnState {
+    #[track_caller]
+    pub(in crate::services::discord) fn tui_body_claim(
+        &self,
+        destination: u64,
+    ) -> BodyClaim<'static> {
+        if self.channel_id != destination {
+            return BodyClaim::new(destination, None);
+        }
+        let session = self.tmux_session_name.as_deref();
+        let kind = if self.runtime_kind_unknown_on_disk {
+            None
+        } else {
+            self.runtime_kind.or_else(|| {
+                claude_thread::restored_kind(destination, session, self.session_id.as_deref())
+            })
+        };
+        BodyClaim::new(destination, kind)
+            .for_turn(self.turn_nonce.as_deref())
+            .for_source(self.output_path.as_deref())
+            .for_tmux_session(session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use super::super::save_store::save_inflight_state_in_root;
-    use super::super::{InflightTurnState, inflight_state_path, load_inflight_states_from_root};
+    use super::super::{inflight_state_path, load_inflight_states_from_root};
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::provider::ProviderKind;

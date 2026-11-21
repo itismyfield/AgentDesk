@@ -64,9 +64,6 @@ const CLAUDE_AUTH_CHECK: &[&str] = &["claude", "auth", "status"];
 const CODEX_AUTH_PATHS: &[&str] = &["~/.codex/auth.json"];
 const CODEX_AUTH_ENV: &[&str] = &["OPENAI_API_KEY"];
 const CODEX_AUTH_CHECK: &[&str] = &["codex", "auth", "status"];
-const GEMINI_AUTH_PATHS: &[&str] = &["~/.gemini/oauth_creds.json"];
-const GEMINI_AUTH_ENV: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY"];
-const GEMINI_AUTH_CHECK: &[&str] = &["gemini", "auth", "status"];
 // opencode stores `opencode auth login` credentials in the XDG data dir and
 // accepts per-provider apiKey entries in opencode.json; both are observable
 // credential sources (XDG_DATA_HOME/XDG_CONFIG_HOME overrides handled in
@@ -122,21 +119,13 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
     ProviderRegistryEntry::from_descriptor(
         provider_catalog()[2],
         ProviderAuthSpec {
-            credential_paths: GEMINI_AUTH_PATHS,
-            env_keys: GEMINI_AUTH_ENV,
-            auth_check_argv: Some(GEMINI_AUTH_CHECK),
-        },
-    ),
-    ProviderRegistryEntry::from_descriptor(
-        provider_catalog()[3],
-        ProviderAuthSpec {
             credential_paths: OPENCODE_AUTH_PATHS,
             env_keys: OPENCODE_AUTH_ENV,
             auth_check_argv: Some(OPENCODE_AUTH_CHECK),
         },
     ),
     ProviderRegistryEntry::from_descriptor(
-        provider_catalog()[4],
+        provider_catalog()[3],
         ProviderAuthSpec {
             credential_paths: QWEN_AUTH_PATHS,
             env_keys: QWEN_AUTH_ENV,
@@ -144,7 +133,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
     ),
     ProviderRegistryEntry::from_descriptor(
-        provider_catalog()[5],
+        provider_catalog()[4],
         ProviderAuthSpec {
             credential_paths: GROK_AUTH_PATHS,
             env_keys: GROK_AUTH_ENV,
@@ -152,7 +141,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
     ),
     ProviderRegistryEntry::from_descriptor(
-        provider_catalog()[6],
+        provider_catalog()[5],
         ProviderAuthSpec {
             credential_paths: &[],
             env_keys: &[],
@@ -183,7 +172,6 @@ pub(super) fn resolve_kind_runtime_path(kind: &ProviderKind) -> Option<String> {
             crate::services::platform::resolve_provider_binary("claude").resolved_path
         }
         ProviderKind::Codex => crate::services::codex::resolve_codex_path(),
-        ProviderKind::Gemini => crate::services::gemini::resolve_gemini_path(),
         ProviderKind::OpenCode => crate::services::opencode::resolve_opencode_path(),
         ProviderKind::Qwen => crate::services::qwen::resolve_qwen_path(),
         ProviderKind::Grok => crate::services::stream_json_cli::dialects::grok::resolve_grok_path(),
@@ -203,7 +191,6 @@ impl ProviderRegistryEntry {
         Some(match self.id {
             "claude" => ProviderKind::Claude,
             "codex" => ProviderKind::Codex,
-            "gemini" => ProviderKind::Gemini,
             "opencode" => ProviderKind::OpenCode,
             "qwen" => ProviderKind::Qwen,
             "grok" => ProviderKind::Grok,

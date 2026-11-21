@@ -2,7 +2,9 @@ use super::*;
 use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
+use crate::services::tui_prompt_dedupe::binding_events;
 use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use std::io::Write;
 
 #[test]
 fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
@@ -12,7 +14,26 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_with(&fx, &launcher, || {
+        let started = fx.start_provider(&launcher, true)?;
+        assert!(wait_for(&fx.finished, "the first prompt", || fx
+            .rig
+            .sends()
+            .len()
+            == 2));
+        assert!(!started.path.exists());
+        let nonce = launcher.nonces.lock().unwrap()[0].clone();
+        let (pin, history) =
+            binding_events::claude_history(CHANNEL, fx.logical(), Some(&nonce)).unwrap();
+        assert!(
+            pin.is_none(),
+            "a launch registration alone cannot pin a transcript"
+        );
+        assert!(history.complete && history.current.is_none());
+        assert_eq!(history.awaiting.unwrap().session, started.session);
+        fx.answer_with_submit_before_transcript(&started);
+        Some(started)
+    });
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let _registry = fx.rig.registry_on_this_thread();
@@ -20,7 +41,16 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
     let _gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
         CHANNEL,
     );
-    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
+    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Verified);
+    let compaction_tail = || {
+        tail()
+            .into_iter()
+            .map(|mut record| {
+                record["sessionId"] = json!(started.session);
+                record
+            })
+            .collect::<Vec<_>>()
+    };
     append(
         &started.path,
         &[
@@ -33,6 +63,8 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
                     "content":[{"type":"text","text":"working"}]}}),
         ],
     );
+    // Compaction metadata alone leaves this verified source unsettled.
+    append(&started.path, &compaction_tail());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
@@ -93,15 +125,16 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
         let mut end = end_turn();
         end["sessionId"] = json!(started.session);
         end["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
-        append(&started.path, &[end]);
-        let records: Vec<_> = tail()
-            .into_iter()
-            .map(|mut record| {
-                record["sessionId"] = json!(started.session);
-                record
-            })
-            .collect();
-        append(&started.path, &records);
+        let completed = std::iter::once(end)
+            .chain(compaction_tail())
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&started.path)
+            .unwrap()
+            .write_all(completed.as_bytes())
+            .unwrap();
         let look = tokio::time::timeout(LIMIT, observed)
             .await
             .unwrap()
@@ -130,7 +163,7 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
                 assert_eq!(head["attempt"]["target"]["execution_nonce"], nonce);
             }
         }
-        idle_turn_unwound(&intake).await;
+        idle_turn_unwound(&intake, original.message_id).await;
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     });
 }

@@ -19,6 +19,7 @@ pub(crate) struct ClaudeHandoffJournal {
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod cold_source;
 pub(crate) mod effort_restart;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +38,8 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) refused_fronts: Vec<RefusedFront>,
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_bindings: Vec<cold_source::BindingIntent>,
     #[serde(default)]
     pub(crate) namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,7 +210,7 @@ pub(crate) struct RefusedInput {
 }
 
 /// One original a refused unit carried: its sources and the digest of its canonical body.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RefusedMember {
     pub(crate) identity: QueueIdentity,
     pub(crate) fingerprint: String,
@@ -268,6 +271,9 @@ pub(crate) struct ReadinessHold {
     pub(crate) cause: String,
     pub(crate) started_at_ms: u64,
     pub(crate) due_at_ms: u64,
+    /// The first held unit in queue order, including the front. Legacy holds cover the front only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) members: Option<Vec<RefusedMember>>,
 }
 
 impl ReadinessHold {

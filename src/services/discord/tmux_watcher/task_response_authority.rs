@@ -450,11 +450,12 @@ pub(super) async fn apply_watcher_task_response(
                         };
                         match send_result {
                             Ok(_) => {
-                                let sent_state = task_delivery::record_task_response_sent_bounded(
-                                    shared.pg_pool.as_ref(),
-                                    &claim,
-                                )
-                                .await;
+                                let sent_state = claimed
+                                    .settling(task_delivery::record_task_response_sent_bounded(
+                                        shared.pg_pool.as_ref(),
+                                        &claim,
+                                    ))
+                                    .await;
                                 heartbeat.stop();
                                 match sent_state {
                                     Ok(()) => {

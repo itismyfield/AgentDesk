@@ -151,7 +151,7 @@ impl Capture {
             started_at: *started_at,
             system_prompt: prompt.clone(),
             anchor_count: i64::try_from(anchors.len()).unwrap_or(i64::MAX),
-            anchors: Some(Json(anchors.to_vec())),
+            anchors: serde_json::to_value(anchors).ok().map(Json),
         };
         state.saved = true;
         Some(snapshot)

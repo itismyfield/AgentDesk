@@ -40,6 +40,7 @@ pub(super) fn release_active_turn_anchor(
 pub(super) fn detach_active_turn_anchor(
     state: &mut ChannelMailboxState,
 ) -> (Option<Arc<CancelToken>>, Option<Instant>) {
+    state.control_custody = None;
     let removed_token = state.cancel_token.take();
     let held = state
         .turn_started_instant
@@ -360,7 +361,7 @@ mod lease_release_identity_tests {
             );
             let cleared = handle
                 .clear(QueuePersistenceContext::new(
-                    &ProviderKind::Gemini,
+                    &ProviderKind::OpenCode,
                     "l1-clear",
                     None,
                 ))
@@ -373,7 +374,7 @@ mod lease_release_identity_tests {
             "the Clear arm must name the channel it retires: {logs}"
         );
         assert!(
-            logs.contains("provider=\"gemini\""),
+            logs.contains("provider=\"opencode\""),
             "the Clear arm carries the provider its message named: {logs}"
         );
         assert!(

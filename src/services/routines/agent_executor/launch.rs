@@ -1,5 +1,6 @@
 //! Reservation, durable attempt metadata, and provider launch for agent-backed routines.
 use super::*;
+use crate::services::routines::provider_choice::AgentProviderChannels;
 
 impl RoutineAgentExecutor {
     pub(super) async fn start_turn(
@@ -27,23 +28,20 @@ impl RoutineAgentExecutor {
             ));
         };
 
-        let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, agent_id)
-            .await
-            .map_err(|error| anyhow!("load agent bindings for {agent_id}: {error}"))?
-            .ok_or_else(|| anyhow!("agent {agent_id} not found"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        // The claim pins the explicit choice; an override never falls back to another provider.
+        let choice = store.run_provider_choice(&claimed.run_id).await?;
+        let route = AgentProviderChannels::load(&self.pool, agent_id)
+            .await?
+            .route(agent_id, &choice)?;
+        let provider = route.provider.clone();
         let headless = surface::headless(store, &claimed.run_id).await?;
         let execution_mode = match headless {
             true => surface::headless_backend(&provider, dm_user_id)?,
-            false => execution_mode,
+            false => execution_mode.for_provider(&provider),
         };
         execution_mode.ensure_provider(&provider)?;
         start_deferral::ensure_provider_registered(registry, &provider).await?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
+        let primary_channel = route.channel.clone();
         let Some(channel_id_num) =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
@@ -162,6 +160,10 @@ impl RoutineAgentExecutor {
         if headless {
             surface::mark_headless(&mut metadata);
         }
+        if let Some(model) = route.model.as_deref() {
+            metadata["model"] = json!(model);
+            result_json["model"] = json!(model);
+        }
         let metadata = Some(metadata);
         let process = execution_mode == execution::AgentExecutionMode::Process;
         let channel_name_hint = dm_user_id_num.is_none().then(|| primary_channel.clone());
@@ -209,9 +211,8 @@ impl RoutineAgentExecutor {
             )
             .await
         } else {
-            // #5: the agent's REAL primary channel/alias is the workspace hint so
-            // `resolve_workspace` resolves alias/by-name routine agents; the
-            // synthetic session name rides the tmux label (#3463 name-first).
+            // The selected provider channel resolves the workspace; the synthetic label
+            // keeps this routine's session separate.
             start_reserved_headless_agent_turn_with_owner_channel(
                 registry,
                 channel_id,

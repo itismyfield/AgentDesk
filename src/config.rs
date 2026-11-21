@@ -26,6 +26,7 @@ pub mod config_path;
 pub(crate) mod disk_write;
 mod peer_filter;
 pub mod reload_classes;
+pub(crate) mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
 pub use config_path::resolved_config_path;
@@ -217,6 +218,9 @@ pub struct DiscordConfig {
         skip_serializing_if = "decisions::DecisionsConfig::is_default"
     )]
     pub decisions: decisions::DecisionsConfig,
+    /// Secretary channel ids whose progress posts and quiet-hour notices skip the push.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secretary_channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

@@ -37,12 +37,14 @@ pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr:
     stale_resume::stream_error_has_stale_resume_error(message, stderr)
 }
 
+pub(in crate::services::discord) mod native_input;
 mod status_panel;
 mod stream_loop;
 #[cfg(test)]
 pub(crate) use stream_loop::types::terminal_prepare_test::{
     TERMINAL_PREPARE_TEST_HOOK, TerminalPrepareTestHook,
 };
+mod session_row_writer;
 mod stream_receiver;
 mod stream_tick;
 mod streaming_edit_text;
@@ -68,10 +70,7 @@ use super::turn_view_reconciler::{
     note_intake_turn_failed_via_shared as tv_fail, note_intake_turn_stopped_via_shared as tv_stop,
 };
 use super::*;
-use crate::db::session_observability::{
-    BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
-    mark_session_tool_use_pg,
-};
+use crate::db::session_observability::{BackgroundChildSpawn, close_background_child_pg};
 use crate::db::session_transcripts::ChannelClearFence;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
@@ -100,6 +99,8 @@ pub(super) use cancel_finalize_policy::{
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
     should_record_final_turn_transcript, should_suppress_headless_delivery_for_cancel,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_guard::RuntimeDatabase;
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
     fail_dispatch_tmux_session_died, fail_dispatch_with_retry, guard_review_dispatch_completion,
@@ -162,7 +163,9 @@ use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
-use completion_guard::complete_work_dispatch_on_turn_end;
+pub(in crate::services::discord) use completion_guard::complete_work_dispatch_on_turn_end;
+#[cfg(unix)]
+pub(in crate::services::discord) use completion_postlude::native_completion_scope;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use current_message_anchor::{
     cleanup_unbound_bridge_anchor, detached_current_msg_id_from_durable,
@@ -192,9 +195,8 @@ pub(super) use retry_state::spawn_retry_with_history_with_release;
 use retry_state::{
     AutoRetry, bridge_confirmed_response_sent_offset_seed,
     bridge_should_reclaim_relay_from_missing_watcher, clear_local_session_state,
-    handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
-    sync_terminal_error_delivery_state_for_bridge_owner,
+    reset_session_for_auto_retry, rewind_and_persist_delivery_on_reclaim,
+    sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use sqlx::Row;
@@ -384,7 +386,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         };
         let mut terminal_session_reset_required = false;
         let mut recovery_retry = false;
-        let mut last_adk_heartbeat = std::time::Instant::now();
+        let mut session_row_writer = session_row_writer::SessionRowWriter::new();
         let mut pending_stream_messages: VecDeque<StreamMessage> = VecDeque::new();
         // #3084: pair tool_result → tool_use by provider tool-use id when the
         // backend supplies one. A long-running Task subagent returns its result
@@ -636,7 +638,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 session_handshake_seen: &mut session_handshake_seen,
                 terminal_session_reset_required: &mut terminal_session_reset_required,
                 recovery_retry: &mut recovery_retry,
-                last_adk_heartbeat: &mut last_adk_heartbeat,
+                session_row_writer: &mut session_row_writer,
                 pending_stream_messages: &mut pending_stream_messages,
                 pending_status_tool_results: &mut pending_status_tool_results,
                 pending_status_tool_results_by_id: &mut pending_status_tool_results_by_id,
@@ -674,8 +676,12 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         .await;
         let busy_attempt_cost = turn_start.elapsed();
         match stream_loop_output.outcome {
-            stream_loop::StreamLoopOutcome::Completed => {}
-            stream_loop::StreamLoopOutcome::AuthorityLost => {
+            stream_loop::StreamLoopOutcome::Completed if !native_input::enabled() || !native_input::neutral_exit(&shared_owned, &provider, &inflight_state, &cancel_token).await => {}
+            _ => {
+                #[cfg(all(test, unix))]
+                if stream_loop_output.outcome != stream_loop::StreamLoopOutcome::AuthorityLost {
+                    inflight::o_seed_observation::record_event(&provider, channel_id.get(), "bridge_native_exit");
+                }
                 completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
                 return;
@@ -708,6 +714,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 turn_id: turn_id.clone(),
                 current_msg_id,
                 entry_was_rowless,
+                session_row_released: session_row_writer.released(),
                 synthetic_actor: is_external_input_tui_direct.then(|| cancel_token.clone()),
                 codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range.clone(),
                 cancelled,

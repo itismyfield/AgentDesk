@@ -31,16 +31,7 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
     queued_recovery::restore_queued_and_inflight_work(http, shared, provider).await
 }
 
-/// Opens intake only after this active runtime restored its queues and inflight work.
-pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
-    mark_reconcile_complete(shared);
-    #[cfg(unix)]
-    for channel in
-        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
-    {
-        super::session_transition::wake_installed_owner(shared, channel).await;
-    }
-}
+pub(in crate::services::discord) use queued_recovery::complete_active_reconcile;
 
 mod recovery_flush;
 mod relay_dlq_redelivery;
@@ -305,7 +296,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // passes here after the generation is allocated and before any mint surface.
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
     // doctor handles only health-registered runtimes, which register after their reaper.
-    super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
+    if !queued_recovery::prepare_native_boot(&shared, &provider).await {
+        return;
+    }
     // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
     let tui_o =
         crate::services::tui_o::shadow::tap::TuiOConfig::or_default(boot_config.tui_o.as_ref());

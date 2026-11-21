@@ -291,6 +291,10 @@ struct LeaseFixture {
 impl LeaseFixture {
     fn new(locked: bool) -> Self {
         let (temporary, root) = fixture::fixture();
+        Self::with_root(temporary, root, locked)
+    }
+
+    fn with_root(temporary: tempfile::TempDir, root: PathBuf, locked: bool) -> Self {
         let parent = root.parent().unwrap();
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(std::fs::metadata(parent).unwrap().mode() & 0o7777, 0o700);
@@ -765,6 +769,28 @@ fn lease_admission_provider_exec_outlives_owner_without_holding_lease() {
         1
     );
     fixture.assert_sentinel();
+}
+
+#[test]
+fn agy_lease_without_a_verified_run_is_refused() {
+    let name = concat!(
+        module_path!(),
+        "::agy_lease_without_a_verified_run_is_refused"
+    );
+    if std::env::var(MODE).as_deref() == Ok("agy-no-run") {
+        let _env = initialized_scope();
+        assert!(
+            admit_dcserver().is_err(),
+            "agy started without a verified identity run"
+        );
+        return;
+    }
+    let (temporary, root, _home) = instance::agy_cell::tests::agy_fixture();
+    let fixture = LeaseFixture::with_root(temporary, root, true);
+    fixture::assert_single_test_passed(
+        &finish(fixture.spawn(name, "agy-no-run", Some(&fixture.witness), true)),
+        selector(name),
+    );
 }
 
 #[test]

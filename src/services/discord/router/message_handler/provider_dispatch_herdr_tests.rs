@@ -511,8 +511,16 @@ impl Fixture {
         self.answer_after(started, 0);
     }
 
+    fn answer_with_submit_before_transcript(&self, started: &Started) {
+        self.answer_with_submit_order(started, 0, true);
+    }
+
     /// `answer` for a later turn on the same rig, whose earlier turns made `earlier` pane writes.
     fn answer_after(&self, started: &Started, earlier: usize) {
+        self.answer_with_submit_order(started, earlier, false);
+    }
+
+    fn answer_with_submit_order(&self, started: &Started, earlier: usize, submit_first: bool) {
         if !wait_for(&self.finished, "the prompt", || {
             self.rig.sends().len() == earlier + 2
         }) {
@@ -521,10 +529,16 @@ impl Fixture {
         let session = &started.session;
         let user = json!({"type": "user", "sessionId": session, "timestamp": chrono::Utc::now().to_rfc3339(),
             "message": {"role": "user", "content": "질문"}});
-        append(&started.path, &[user]);
         let payload =
             json!({"session_id": session, "prompt": "질문", "transcript_path": started.path});
-        assert_eq!(started.hook(self, "UserPromptSubmit", &payload), 202);
+        let submit = || assert_eq!(started.hook(self, "UserPromptSubmit", &payload), 202);
+        if submit_first {
+            submit();
+        }
+        append(&started.path, &[user]);
+        if !submit_first {
+            submit();
+        }
         let answer = json!({"type": "assistant", "sessionId": session, "message": {
             "role": "assistant", "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "답"}]}});
@@ -1346,6 +1360,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let turn = StreamingTurn {
         pool: None,
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: "question",

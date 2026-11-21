@@ -10,6 +10,8 @@ use tower::ServiceExt;
 
 #[path = "provider_dispatch_herdr_internal_start_tests.rs"]
 mod internal_start;
+#[path = "provider_dispatch_herdr_native_work_tests.rs"]
+mod native_work;
 #[path = "provider_dispatch_herdr_http_start_tests/thread_ingress_tests.rs"]
 mod thread_ingress;
 
@@ -109,13 +111,17 @@ async fn call_target(
 }
 
 fn finish_answer(path: &Path, session: &str, n: usize) {
+    answer_with_body(path, session, &format!("HTTP session answered {n}"));
+}
+
+fn answer_with_body(path: &Path, session: &str, body: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     append(
         path,
         &[
             json!({"type":"assistant","uuid":uuid(),"sessionId":session,"timestamp":now,
             "apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant",
-            "content":[{"type":"text","text":format!("HTTP session answered {n}")}],"stop_reason":"end_turn"}}),
+            "content":[{"type":"text","text":body}],"stop_reason":"end_turn"}}),
             json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}),
         ],
     );
@@ -200,8 +206,17 @@ async fn completed(intake: &Intake, answers: usize) {
             ChannelId::new(CHANNEL),
         )
         .await;
+        let history =
+            crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+        let native: Vec<_> = history
+            .native_classification_registrations()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.ticket.channel_id == CHANNEL)
+            .map(|r| history.native_settlement(&r.namespace, &r.ticket))
+            .collect();
         panic!(
-            "{error}: row={:?}, O={:?}, bridge={:?}, state={state}, activity={activity:?}, drives={:?}, {}",
+            "{error}: row={:?}, O={:?}, bridge={:?}, state={state}, activity={activity:?}, native={native:?}, drives={:?}, {}",
             inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL),
             intake.posts.to(CHANNEL),
             intake.mock.written_texts(),
@@ -509,6 +524,26 @@ fn external_herdr_http_machine_waits_for_its_own_turn_pg() {
         finish_answer(&started.path, &started.session, 1);
         completed(&intake, 2).await;
         assert_eq!(fx.rig.sends().len(), before + 4);
+        for (response, expected) in [
+            (&first.1, "HTTP session answered 1"),
+            (&response.1, "HTTP session answered 2"),
+        ] {
+            let turn = response["turn_id"].as_str().unwrap();
+            let answers: Vec<String> = sqlx::query_scalar(
+                "SELECT assistant_message FROM session_transcripts WHERE turn_id = $1",
+            )
+            .bind(turn)
+            .fetch_all(&fx.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                answers
+                    .iter()
+                    .map(|answer| answer.trim())
+                    .collect::<Vec<_>>(),
+                [expected]
+            );
+        }
         let heads = heads.lock().unwrap();
         assert_eq!(heads.len(), 4);
         let nonce = heads[2]["attempt"]["nonce"].as_str().unwrap();
@@ -573,7 +608,18 @@ fn external_herdr_http_person_joins_busy_at_early_and_late_boundaries_pg() {
                 .await
                 .unwrap();
                 if late {
-                    idle_turn_unwound(&intake).await;
+                    idle_turn_unwound(
+                        &intake,
+                        response.1["turn_id"]
+                            .as_str()
+                            .unwrap()
+                            .rsplit(':')
+                            .next()
+                            .unwrap()
+                            .parse()
+                            .unwrap(),
+                    )
+                    .await;
                 }
                 tokio::time::timeout(LIMIT, async {
                     while heads.lock().unwrap().len() != 2 {
@@ -862,11 +908,13 @@ fn internal_herdr_routine_owner_reaches_its_legacy_refusal_pg() {
     internal_snapshot_start("routine");
 }
 
-fn execution_gone(terminal: Option<bool>) {
-    let tag = match terminal {
-        None => "missing",
-        Some(false) => "raw",
-        Some(true) => "flushed",
+/// `foreign` hands the channel's hosted record to another execution before the raw closer lands.
+fn execution_gone(terminal: Option<bool>, foreign: bool) {
+    let tag = match (terminal, foreign) {
+        (None, _) => "missing",
+        (Some(false), false) => "raw",
+        (Some(false), true) => "foreign",
+        (Some(true), _) => "flushed",
     };
     let fx = Fixture::new(&format!("http-execution-gone-{tag}"), None);
     let hooks = terminal
@@ -894,16 +942,24 @@ fn execution_gone(terminal: Option<bool>) {
         ExpectedPin::Verified,
         Arc::default(),
         (terminal.is_none(), None),
+        None,
     );
     let (path, session) = (started.path.clone(), started.session.clone());
+    let pasted = Mutex::new(String::new());
     fx.rig.on_send(move |params| {
+        if let Some(text) = params["text"].as_str().filter(|text| !text.is_empty()) {
+            *pasted.lock().unwrap() = text
+                .trim_start_matches("\u{1b}[200~")
+                .trim_end_matches("\u{1b}[201~")
+                .into();
+        }
         // The native Enter writes a user row; the later shell launch command does not.
         if params["keys"] == json!(["enter"]) && params["text"].as_str().is_none_or(str::is_empty) {
             append(
                 &path,
                 &[json!({"type":"user","uuid":uuid(),"sessionId":session,
                 "timestamp":chrono::Utc::now().to_rfc3339(),
-                "message":{"role":"user","content":INPUT}})],
+                "message":{"role":"user","content":pasted.lock().unwrap().clone()}})],
             );
         }
     });
@@ -930,20 +986,30 @@ fn execution_gone(terminal: Option<bool>) {
         let flush = terminal.map(|newline| {
             let path = started.path.clone();
             let session = started.session.clone();
+            let pool = fx.pool.clone();
             let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
             discord::recovery_engine::herdr_row_end::tests::on_while("live_after_end", move || {
-                if !once.swap(true, Ordering::SeqCst) {
+                let first = !once.swap(true, Ordering::SeqCst);
+                let (path, session, pool) = (path.clone(), session.clone(), pool.clone());
+                Box::pin(async move {
+                    if !first { return; }
+                    if foreign {
+                        sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(jsonb_set(hosted_execution,
+                            '{execution_nonce}', '\"successor\"'), '{source_ref,execution_nonce}', '\"successor\"'),
+                            '{expected,binding_nonce}', '\"successor\"') WHERE channel_id=$1")
+                            .bind(CHANNEL.to_string()).execute(&pool).await.unwrap();
+                    }
                     let now = chrono::Utc::now().to_rfc3339();
-                    append(&path, &[json!({"type":"assistant","uuid":uuid(),"sessionId":session,
+                    let answer = json!({"type":"assistant","uuid":uuid(),"sessionId":session,
                         "timestamp":now,"apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant",
-                        "content":[{"type":"text","text":"HTTP session answered after E"}],"stop_reason":"end_turn"}})]);
-                    let record = json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}).to_string();
+                        "content":[{"type":"text","text":"HTTP session answered after E"}],"stop_reason":"end_turn"}});
+                    let record = json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now});
+                    // One write, so the poll that reads the answer also holds the closer.
+                    let end = if newline { "\n" } else { "" };
                     let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
                     use std::io::Write;
-                    file.write_all(record.as_bytes()).unwrap();
-                    if newline { file.write_all(b"\n").unwrap(); }
-                }
-                Box::pin(async {})
+                    file.write_all(format!("{answer}\n{record}{end}").as_bytes()).unwrap();
+                })
             })
         });
         let notice = super::super::live_end::LiveEnd::notice();
@@ -1063,7 +1129,23 @@ fn execution_gone(terminal: Option<bool>) {
             fallback.assert_none();
             return;
         }
+        if foreign {
+            // The poll that posts the answer already offered the closer; another execution's end
+            // proves nothing for this one, so only the completed record settles it.
+            tokio::time::timeout(LIMIT, async {
+                while !intake.posts.to(CHANNEL).iter().any(|text| text.contains("answered after E")) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the answer is read with its closer");
+            assert!(native_results().is_empty(), "no raw closer result from a foreign end");
+            let mut file = std::fs::OpenOptions::new().append(true).open(&started.path).unwrap();
+            std::io::Write::write_all(&mut file, b"\n").unwrap();
+        }
         completed(&intake, usize::from(terminal.is_some())).await;
+        if foreign {
+            let results = native_results();
+            assert!(results.len() == 1 && results[0]["native_proof"]["raw"].is_null(), "{results:?}");
+        }
         for trial in 0..2 {
             discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
             tokio::time::sleep(Duration::from_millis(10 + trial)).await;
@@ -1082,14 +1164,37 @@ fn execution_gone(terminal: Option<bool>) {
 
 #[test]
 fn external_herdr_http_execution_gone_without_terminal_settles_once_pg() {
-    execution_gone(None);
+    execution_gone(None, false);
 }
 
 #[test]
 fn external_herdr_http_execution_gone_yields_a_flushed_terminal_pg() {
     for newline in [false, true] {
-        execution_gone(Some(newline));
+        execution_gone(Some(newline), false);
     }
+}
+
+#[test]
+fn external_herdr_http_raw_closer_needs_its_own_execution_end_pg() {
+    execution_gone(Some(false), true);
+}
+
+/// Native results saved for this channel's inputs.
+fn native_results() -> Vec<serde_json::Map<String, Value>> {
+    let history =
+        crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+    let registrations = history.native_classification_registrations().unwrap();
+    registrations
+        .iter()
+        .filter(|r| r.ticket.channel_id == CHANNEL)
+        .filter_map(|r| {
+            history
+                .native_settlement(&r.namespace, &r.ticket)
+                .unwrap()
+                .outcome
+                .map(|o| o.extra)
+        })
+        .collect()
 }
 
 #[test]
@@ -1103,12 +1208,17 @@ fn external_herdr_http_turn_mode_aborted_terminal_settles_without_synthetic_repl
     let confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
     let intake = Intake::new(&fx, &started);
     let (path, session) = (started.path.clone(), started.session.clone());
+    let pasted = Mutex::new(String::new());
     fx.rig.on_send(move |params| {
+        if let Some(text) = params["text"].as_str().filter(|text| !text.is_empty()) {
+            *pasted.lock().unwrap() = text.trim_start_matches("\u{1b}[200~")
+                .trim_end_matches("\u{1b}[201~").into();
+        }
         if params["keys"] == json!(["enter"]) {
             append(&path, &[
                 json!({"type":"user","uuid":uuid(),"sessionId":session,
                     "timestamp":chrono::Utc::now().to_rfc3339(),
-                    "message":{"role":"user","content":INPUT}}),
+                    "message":{"role":"user","content":pasted.lock().unwrap().clone()}}),
                 json!({"type":"user","uuid":uuid(),"sessionId":session,
                     "message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}),
             ]);
@@ -1149,7 +1259,7 @@ fn external_herdr_http_machine_unknown_keeps_custody_and_wakes_on_idle_pg() {
     use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
     let fx = Fixture::new("http-machine-unknown", None);
     let launcher = Arc::new(Launcher::default());
-    let (_, started) = reconnect::launch(&fx, &launcher);
+    let (_, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     let registry = fx.rig.registry_on_this_thread();
     let admission = open_admission();
@@ -1384,15 +1494,15 @@ impl crate::services::tui_o::writer::DiscordPort for GatedPosts {
 }
 
 struct OutputHost {
-    base: Arc<TestHost>,
+    base: Arc<SourceHost>,
     port: Arc<GatedPosts>,
 }
 
 impl host::HostIo for OutputHost {
     type Port = GatedPosts;
-    type Lease = <TestHost as host::HostIo>::Lease;
-    type Alarms = <TestHost as host::HostIo>::Alarms;
-    type Bindings = <TestHost as host::HostIo>::Bindings;
+    type Lease = <SourceHost as host::HostIo>::Lease;
+    type Alarms = <SourceHost as host::HostIo>::Alarms;
+    type Bindings = <SourceHost as host::HostIo>::Bindings;
     fn port(&self) -> impl std::future::Future<Output = Arc<GatedPosts>> + Send {
         std::future::ready(self.port.clone())
     }
@@ -1404,6 +1514,13 @@ impl host::HostIo for OutputHost {
     }
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
         self.base.bindings(channel, provider)
+    }
+    fn native_inputs(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::actor::native_input::NativePort> {
+        self.base.native_inputs(channel, provider)
     }
     fn activation_facts(
         &self,
@@ -1440,11 +1557,11 @@ impl host::HostIo for OutputHost {
 }
 
 pub(super) fn start_writer(
-    parts: HostParts<TestHost>,
+    parts: HostParts<SourceHost>,
     output_gate: Arc<OutputGate>,
 ) -> Vec<ManagedWriterHandle> {
     let port = Arc::new(GatedPosts {
-        base: parts.io.posts.clone(),
+        base: parts.io.io.posts.clone(),
         gate: output_gate,
     });
     let parts = HostParts {
@@ -1558,13 +1675,17 @@ fn external_herdr_http_reply_before_and_after_terminal_pg() {
                     {
                         tokio::task::yield_now().await;
                     }
-                    let row =
-                        inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
-                            .unwrap();
-                    assert!(
-                        row.tui_terminal_kind.is_none(),
-                        "O publishes before terminal admission"
-                    );
+                    if let Some(row) = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL) {
+                        assert!(row.tui_terminal_kind.is_none(), "O publishes before terminal admission");
+                    } else {
+                        let history = crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+                        let registration = history.native_classification_registrations().unwrap().into_iter()
+                            .find(|r| r.ticket.channel_id == CHANNEL && r.ticket.owning_episode.is_some()).unwrap();
+                        let saved = history.native_settlement(&registration.namespace, &registration.ticket).unwrap();
+                        assert!(saved.cleanup_complete, "native cleanup must account for the missing row: {saved:?}");
+                        assert_eq!(saved.outcome.unwrap().disposition,
+                            crate::services::tui_input::human_frame::history::v2::native::Disposition::Executed);
+                    }
                 })
                 .await;
                 release.send(()).unwrap_or(());

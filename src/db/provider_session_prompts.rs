@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool, types::Json};
 
-use crate::domain::memory::AnchorRecord;
-
 #[derive(Clone, FromRow)]
 pub struct SessionPrompt {
     pub provider: String,
@@ -12,7 +10,8 @@ pub struct SessionPrompt {
     pub started_at: DateTime<Utc>,
     pub system_prompt: String,
     pub anchor_count: i64,
-    pub anchors: Option<Json<Vec<AnchorRecord>>>,
+    /// Structured anchor records as raw JSON; the caller owns their shape.
+    pub anchors: Option<Json<serde_json::Value>>,
 }
 
 pub async fn fetch(
@@ -34,7 +33,7 @@ pub async fn fetch_latest_session_id(
         .bind(provider).bind(channel).fetch_optional(pool).await
 }
 
-pub(crate) async fn fetch_latest(
+pub async fn fetch_latest(
     pool: &PgPool,
     provider: &str,
     channel: &str,

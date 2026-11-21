@@ -35,6 +35,10 @@ pub(super) async fn handle_stream_content_message(
     ctx: StreamContentArmContext<'_>,
     state: StreamContentArmState<'_>,
 ) -> StreamContentArmOutcome {
+    if matches!(message, StreamContentArmMessage::Text { .. } | StreamContentArmMessage::Done { .. })
+        && super::super::native_input::enabled() && super::super::native_input::reject_legacy_body(ctx.shared_owned, ctx.provider, state.inflight_state, ctx.cancel_token, state.full_response).await {
+        return StreamContentArmOutcome::ContinueDraining;
+    }
     let shared_owned = Arc::clone(ctx.shared_owned);
     let gateway = Arc::clone(ctx.gateway);
     let channel_id = ctx.channel_id;
@@ -55,10 +59,10 @@ pub(super) async fn handle_stream_content_message(
     let mut prev_tool_status = state.prev_tool_status.take();
     let mut last_tool_name = state.last_tool_name.take();
     let mut last_tool_summary = state.last_tool_summary.take();
-    let mut any_tool_used = *state.any_tool_used;
+    let any_tool_used = *state.any_tool_used;
     let mut has_post_tool_text = *state.has_post_tool_text;
     let mut response_sent_offset = *state.response_sent_offset;
-    let mut last_edit_text = std::mem::take(state.last_edit_text);
+    let last_edit_text = std::mem::take(state.last_edit_text);
     let mut new_session_id = state.new_session_id.take();
     let mut new_raw_provider_session_id = state.new_raw_provider_session_id.take();
     let inflight_state = &mut *state.inflight_state;
@@ -134,27 +138,6 @@ pub(super) async fn handle_stream_content_message(
     }
 
     match message {
-        StreamContentArmMessage::RetryBoundary => {
-                            if provider == ProviderKind::Gemini
-                                && handle_gemini_retry_boundary(
-                                    &mut full_response,
-                                    &mut current_tool_line,
-                                    &mut prev_tool_status,
-                                    &mut last_tool_name,
-                                    &mut last_tool_summary,
-                                    &mut any_tool_used,
-                                    &mut has_post_tool_text,
-                                    &mut response_sent_offset,
-                                    &mut last_edit_text,
-                                    &mut new_session_id,
-                                    &mut new_raw_provider_session_id,
-                                    inflight_state,
-                                )
-                            {
-                                transcript_events.clear();
-                                state_dirty = true;
-                            }
-                        }
         StreamContentArmMessage::Init {
                             session_id: sid,
                             raw_session_id,

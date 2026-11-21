@@ -82,6 +82,8 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         reviews: BTreeMap::new(),
         landings: BTreeMap::new(),
         merges: BTreeMap::new(),
+        deployments: BTreeMap::new(),
+        acceptance_checks: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),

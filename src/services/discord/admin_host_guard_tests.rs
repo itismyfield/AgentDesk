@@ -32,6 +32,8 @@ pub(crate) struct Recorder {
 
 /// A recorder answer for one request, ahead of its default message body.
 type Answer = Arc<dyn Fn(&Method, &str) -> Option<serde_json::Value> + Send + Sync>;
+pub(crate) type StatusAnswer =
+    Arc<dyn Fn(&Method, &Uri) -> Option<(StatusCode, serde_json::Value)> + Send + Sync>;
 
 impl Recorder {
     pub(crate) async fn start() -> Self {
@@ -39,6 +41,13 @@ impl Recorder {
     }
 
     pub(crate) async fn start_with(answer: Answer) -> Self {
+        Self::start_with_status(Arc::new(move |method, uri| {
+            answer(method, uri.path()).map(|body| (StatusCode::OK, body))
+        }))
+        .await
+    }
+
+    pub(crate) async fn start_with_status(answer: StatusAnswer) -> Self {
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
         let recorded = calls.clone();
         let app = axum::Router::new().fallback(axum::routing::any(
@@ -51,8 +60,8 @@ impl Recorder {
                     if method == Method::DELETE {
                         return StatusCode::NO_CONTENT.into_response();
                     }
-                    if let Some(answer) = answer(&method, uri.path()) {
-                        return axum::Json(answer).into_response();
+                    if let Some((status, body)) = answer(&method, &uri) {
+                        return (status, axum::Json(body)).into_response();
                     }
                     axum::Json(serde_json::json!({
                         "id": "900001", "channel_id": "1", "content": "",
@@ -100,6 +109,7 @@ pub(crate) fn api_child(test: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
+    let test = test.strip_prefix("agentdesk::").unwrap_or(test);
     let exe = std::env::current_exe().expect("test binary");
     let output = std::process::Command::new(exe)
         .args(["--exact", test, "--nocapture"])
@@ -1048,7 +1058,7 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_resets_it_without_tm
     let shared = shared_on(&pool).await;
     let api = Recorder::start().await;
     crate::services::discord::internal_api::init(api.port, None);
-    let (provider, http) = (ProviderKind::Gemini, Arc::new(Http::new("")));
+    let (provider, http) = (ProviderKind::OpenCode, Arc::new(Http::new("")));
     assert!(!provider.uses_managed_tmux_backend());
     let channel = ChannelId::new(1_479_671_302_387_077_000);
     let _hosts = crate::config::session_hosts::force_for_test(

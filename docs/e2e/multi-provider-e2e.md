@@ -257,10 +257,10 @@ Remaining exact gaps:
 
 The handwritten [feature rows](../user-feature-map.rows.yaml) define user-visible
 contracts and explicit applicable combinations. The generator combines them
-with scenario claims to produce the [feature map](../user-feature-map.md) and
-[coverage JSON](../generated/user-feature-coverage.json). Both outputs are
-generated; their counts describe supported live specifications, not execution
-PASS or result freshness.
+with scenario claims to produce the [feature map](../user-feature-map.md).
+Download the full coverage JSON and change summary from the `user-feature-map-*`
+artifact in PR and main contracts runs. Counts describe supported live specifications.
+Execution results and freshness are recorded in E2E reports.
 
 ```yaml
 feature_coverage:
@@ -382,18 +382,18 @@ reason cannot authorize a later reduction. An unresolved base
 is an error. Only a valid base without the rows file is initial bootstrap, and
 the current feature/applicable inventory must still be nonempty.
 
-Regenerate and verify from the repository root with Python 3.11+ and PyYAML:
+Validate inputs or render local review outputs with Python 3.11+ and PyYAML.
 
 ```bash
-python3 scripts/generate_user_feature_map.py --write --base-ref origin/main
-python3 scripts/generate_user_feature_map.py --check --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --validate --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --output-dir target/user-feature-map --base-ref origin/main
 ```
 
-CI passes `TEST_LANE_BASELINE_REF`/`GFP_BASE_SHA` explicitly. Static checks use
-a valid local `origin/main` when CI selection context is absent. The generator
-checks source hashes and exact output bytes; handwritten edits to either
-generated output fail. This adds static integrity checks without scheduling
-live execution or a new live merge-blocking gate.
+The local JSON is `target/user-feature-map/user-feature-coverage.json`.
+CI uses `TEST_LANE_BASELINE_REF` or `GFP_BASE_SHA` for deletion approvals. Reports
+compare the PR merge base or the previous main push SHA with the candidate.
+Landing refreshes the committed Markdown with `--write` and checks its bytes
+with `--check`.
 
 ## Driver
 

@@ -568,9 +568,9 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | model for turn | discord/commands/config.rs:293-305,329-335 | default일 때 provider runtime_model, 그 외 명시 모델 |
 | Codex default | domain/provider/catalog/rows.rs:38-65 | runtime_model=None, 기본 모델명 코드에 고정되어 있지 않음 |
 | -m 생성 | codex.rs:432-436 | 명시 모델이 있을 때만 -m 전달 |
-| Codex catalog | discord/model_catalog.rs:99-154 | fallback은 과거 gpt-5.x 목록이며 지원 effort 정보 없음 |
-| dynamic catalog | discord/model_catalog.rs:232-244,444-482 | cache schema는 slug/display_name/visibility만 읽어 effort 정보를 버림 |
-| default resolver | discord/model_catalog.rs:782-789 | Codex default model을 해석하지 않고 None |
+| Codex catalog | discord/model_catalog.rs:98-153 | fallback은 과거 gpt-5.x 목록이며 지원 effort 정보 없음 |
+| dynamic catalog | discord/model_catalog.rs:173-185,324-362 | cache schema는 slug/display_name/visibility만 읽어 effort 정보를 버림 |
+| default resolver | discord/model_catalog.rs:554-561 | Codex default model을 해석하지 않고 None |
 
 운영 설정 금지 아래 특정 운영 채널이 Astra/Sol인지 확정할 수 없다. 코드가 모델을 고정하지 않으므로 실제 채널 모델 지원을 `모두 ultra 지원`으로 판정하면 안 된다. 변경 command는 turn과 같은 effective_model_snapshot을 고정하고 해당 모델의 provider-native 지원 목록을 받아 교집합을 만든다. 명시 모델/지원 metadata가 없거나 default alias가 정확히 해석되지 않으면 ultra를 거절하고 현재 모델을 유지한다. 기존 catalog cache parser에 `supported_reasoning_levels`를 보존하는 child helper를 추가하는 방법이 작지만, cache가 해당 launch account의 것인지와 absent metadata 정책은 구현 시험으로 고정해야 한다. 모델 capability를 주어진 slug 목록으로 추측하거나 `max`까지 전 모델 공통이라고 가정하지 않는다.
 

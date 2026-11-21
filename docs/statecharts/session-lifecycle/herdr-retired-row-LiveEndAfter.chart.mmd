@@ -4,23 +4,23 @@ title: "Herdr 실행 퇴역 뒤 세션 행 status"
 stateDiagram-v2
   s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
   s1: row end 정리 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
-  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; 한때 끝남
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
   s3: row end 정리 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
-  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
-  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; 한때 끝남
-  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; 한때 끝남
-  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
-  s8: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
-  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남
-  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남
-  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; 한때 끝남
-  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
-  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
-  s14: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
-  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남
-  s16: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남
-  s17: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
-  s18: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s8: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 종료 중 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s14: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 마무리 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s16: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s17: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s18: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
   [*] --> s0
   s0 --> s1: terminate#183;row end 퇴역
   s1 --> s2: live row end 정리

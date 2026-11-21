@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, channel_reset, clear_fresh_session, health_readiness, http_auth, known_gap, restart_guard
+from . import assertions, channel_reset, clear_fresh_session, health_readiness, herdr_stop, http_auth, known_gap, preflight_evidence, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -80,15 +80,25 @@ def send_key_sequence(keys, *, agent_workspace, agent, key_interval_s=0.0, herdr
             "key_interval_s": key_interval_s}
 
 
+def add_degraded_reason_arguments(parser):
+    parser.add_argument(
+        "--herdr-allowed-degraded-reason", action="append", metavar="PATTERN",
+        help="Waive a Herdr detail degraded reason (exact or trailing-* prefix). Repeatable. "
+             "Herdr and target-channel reasons are never waived.")
+    parser.add_argument(
+        "--herdr-foreign-degraded-only", action="store_true",
+        help="Require same-response evidence that each waived reason belongs to another channel.")
+
+
 def validate_arguments(parser, args):
     allowed = args.herdr_allowed_degraded_reason or []
-    if allowed and not args.cell.endswith("-herdr"):
+    if (allowed or getattr(args, "herdr_foreign_degraded_only", False)) and not args.cell.endswith("-herdr"):
         parser.error("--herdr-allowed-degraded-reason applies only to Herdr cells")
     if any(pattern.strip() in ("", "*") for pattern in allowed):
         parser.error("--herdr-allowed-degraded-reason must name a reason or prefix; empty or bare '*' waives everything")
 
 
-def detail_ready(driver, http_status, payload, *, allowed, channel):
+def detail_ready(driver, http_status, payload, *, allowed, channel, foreign_only=False):
     """Return the degraded reasons waived by the operator allowlist; raise unless detail health is ready."""
     if not allowed:
         if (http_status != 200 or payload.get("status") != "healthy"
@@ -109,6 +119,15 @@ def detail_ready(driver, http_status, payload, *, allowed, channel):
             or ("degraded" in payload and payload["degraded"] is not (state == "degraded"))
             or healthy == bool(reasons)):
         raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+    if foreign_only:
+        patterns = tuple(allowed)
+        blocked = sorted({
+            (code, scope) for reason, code, scope in health_readiness.classify_degraded_reasons(payload, channel)
+            if scope != "foreign" or reason is None or not driver._health_reason_allowed(reason, patterns)
+        })
+        if blocked:
+            raise assertions.AssertionError(f"Herdr detail degraded_reasons not waived: {blocked}")
+        return reasons
     error = health_readiness.unknown_error(payload, channel)
     if error:
         raise assertions.AssertionError(f"Herdr detail degraded_reasons never_waived: {error}")
@@ -133,7 +152,8 @@ def waiver_summary(args, observations):
     # Derived from the union, so observations recorded before the marker existed are still marked.
     return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
             "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored,
-            "ignored_degraded_reasons_unattributed": unattributed(ignored)}
+            "ignored_degraded_reasons_unattributed": [] if getattr(args, "herdr_foreign_degraded_only", False)
+            else unattributed(ignored)}
 
 
 def report_waiver(args, result):
@@ -216,16 +236,19 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
     operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
     allowed = operator if waivable else []
+    foreign_only = getattr(args, "herdr_foreign_degraded_only", False)
     # Waiver metadata precedes the request so refused or failed requests still record it.
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "readiness": {"degraded_reason_waiver": ("unused" if waivable else "withheld") if operator else "none",
                               "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": [],
                               "ignored_degraded_reasons_unattributed": []}}
+    stage, status, payload = "health_read", None, None
     try:
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
         status, payload = driver._read_api_json(args.base_url, "/api/health/detail", timeout=5)
+        stage = "detail_readiness"
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
@@ -233,17 +256,20 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "boot_incarnation") if k in payload}
-        ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
+        ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id,
+                               foreign_only=foreign_only)
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
-                                         ignored_degraded_reasons_unattributed=unattributed(ignored))
+                                         ignored_degraded_reasons_unattributed=[] if foreign_only else unattributed(ignored))
             if any(health_readiness.unknown_family(r) for r in ignored):
                 evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
+        stage = "herdr_readiness"
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
         clean_turn(block)
         reconnect_counts(block)
+        stage = "herdr_status"
         proc = subprocess.run([getattr(args, "herdr_status_bin", "agentdesk"), "herdr", "status"],
                               capture_output=True, text=True, check=True, timeout=30)
         current = json.loads(proc.stdout)
@@ -257,6 +283,9 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     except Exception as error:
         evidence["readiness"]["error"] = str(error)
         error.herdr_observation = evidence
+        if getattr(args, "capture_preflight_failure", False):
+            error.herdr_preflight_failure = preflight_evidence.capture(stage, payload, channel=args.channel_id,
+                                                                      http_status=status)
         raise
 
 
@@ -318,11 +347,13 @@ def merge_cases(driver, scenario, args, result, cases):
 
 
 def run(driver, scenario, args, client, run_id, result):
-    if not scenario.get("herdr_text_stop"):
+    composite = (_run_text_stop if scenario.get("herdr_text_stop")
+                 else _run_stop_cases if scenario.get("herdr_stop_cases") else None)
+    if composite is None:
         return _run(driver, scenario, args, client, run_id, result)
     cases = []
     try:
-        return _run_text_stop(driver, scenario, args, client, run_id, result, cases)
+        return composite(driver, scenario, args, client, run_id, result, cases)
     except driver.PhaseDeadlineExpired:
         # The phase handler reads only this dict, so carry the subcases' evidence up.
         merge_cases(driver, scenario, args, result, cases)
@@ -348,12 +379,29 @@ def _run_text_stop(driver, scenario, args, client, run_id, result, cases):
                            {"text_present": "[E2E:E18S:NEXT]"}, {"no_duplicate_content": True}]}
     cases.append(copy.deepcopy(result))
     cases[-1]["id"] = text["id"]
-    stop = cases[-1] = _run(driver, text, args, client, run_id, cases[-1])
+    cases[-1] = _run(driver, text, args, client, run_id, cases[-1])
+    return _finish(driver, scenario, args, result, cases)
+
+
+def _run_stop_cases(driver, scenario, args, client, run_id, result, cases):
+    for case in herdr_stop.cases():
+        cases.append(copy.deepcopy(result))
+        cases[-1]["id"] = case["id"]
+        done = cases[-1] = _run(driver, case, args, client, run_id, cases[-1])
+        if done["status"] == "skipped" or (done["status"] == "fail" and not done.get("real_provider_contacted")):
+            break
+        if not args.dry_run and done["status"] != "pass":
+            time.sleep(case.get("settle_s", 0))  # A failed stop may leave the hold running into the next case.
+    return _finish(driver, scenario, args, result, cases)
+
+
+def _finish(driver, scenario, args, result, cases):
     merge_cases(driver, scenario, args, result, cases)
     result["herdr_readiness_waiver"] = waiver_summary(args, result["herdr_observations"])
-    result["status"] = next((s for s in ("fail", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
-                             if s in {http["status"], stop["status"]}), "pass")
-    result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in (http, stop))
+    statuses = {case["status"] for case in cases}
+    result["status"] = next((s for s in ("fail", "skipped", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
+                             if s in statuses), "pass")
+    result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in cases)
     return result
 
 
@@ -503,7 +551,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 is_clear = prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]
                 if is_clear:
                     first_response, prompt_count = False, -1
-                elif profile and profile["issue"] == "#5340 P10-2" and prompt_count and first_response:
+                elif profile and profile["issue"] in ("#5340 P10-2", herdr_stop.GAP) and prompt_count and first_response:
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step.get("body_marker")
                     open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
                 window.mark_prompt_sent()
@@ -576,7 +624,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 driver._ack_send(entry, client.send(args.channel_id, "!stop"))  # The same normal Discord transport as prompts.
                 driver.post_send_sleep(step)
                 open_gap(step_index)
-                ack = "중지하고 있어요..."
+                options = step["send_text_stop"] if isinstance(step["send_text_stop"], dict) else {}
+                ack = options.get("ack", "중지하고 있어요...")
                 refused = "이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요."
                 found, rows = client.wait_for_message(args.channel_id,
                     predicate=lambda r: bool((r.get("author") or {}).get("bot")) and any(t in r.get("content", "") for t in (ack, refused)),
@@ -697,6 +746,10 @@ def _run_checked(driver, scenario, args, client, run_id, result):
         driver._update_record_window_snapshot(result, window)
         result["track_marker_prompts"] = scenario["id"] in {"E-50", "E-51"}
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])
+        if scenario.get("report_raw_text_counts"):
+            raw = assertions._raw_assertion_messages(window)
+            result["raw_text_counts"] = {text: sum(text in (r.get("content") or "") for r in raw)
+                                         for text in scenario["report_raw_text_counts"]}
         driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=False)
         driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=False)
     return result

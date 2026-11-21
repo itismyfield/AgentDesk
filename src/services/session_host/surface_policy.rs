@@ -13,6 +13,57 @@ pub(crate) fn policy_channel(channel: u64) -> u64 {
     POLICY_CHANNEL.get().map_or(channel, |read| read(channel))
 }
 
+/// What the boot view holds for a thread: its checked parent, or a child it could not resolve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Relation {
+    NotChild,
+    Child {
+        parent: u64,
+    },
+    /// A held or conflicting child: its parent is not known, so it reads as neither host.
+    Unresolved,
+}
+
+static RELATION: std::sync::OnceLock<fn(u64) -> Relation> = std::sync::OnceLock::new();
+
+/// Installs the boot policy's read of a thread's relation, beside [`install_policy_channel`].
+pub(crate) fn install_relation(read: fn(u64) -> Relation) {
+    let _ = RELATION.set(read);
+}
+
+pub(crate) fn relation(channel: u64) -> Relation {
+    #[cfg(test)]
+    if let Some(forced) = FORCED_RELATIONS.with(|forced| forced.borrow().get(&channel).copied()) {
+        return forced;
+    }
+    RELATION
+        .get()
+        .map_or(Relation::NotChild, |read| read(channel))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_RELATIONS: std::cell::RefCell<std::collections::BTreeMap<u64, Relation>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// This thread's relation of `channel` until dropped, for a judgement no boot view is built for.
+#[cfg(test)]
+pub(crate) struct ForcedRelation(u64);
+
+#[cfg(test)]
+pub(crate) fn force_relation_for_test(channel: u64, relation: Relation) -> ForcedRelation {
+    FORCED_RELATIONS.with(|forced| forced.borrow_mut().insert(channel, relation));
+    ForcedRelation(channel)
+}
+
+#[cfg(test)]
+impl Drop for ForcedRelation {
+    fn drop(&mut self) {
+        FORCED_RELATIONS.with(|forced| forced.borrow_mut().remove(&self.0));
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSurface {
     destination: u64,

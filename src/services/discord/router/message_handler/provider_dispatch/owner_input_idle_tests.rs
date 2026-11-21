@@ -797,10 +797,13 @@ fn busy_hold_case(
         BUSY,
     );
     let id = ChannelId::new(channel);
-    let (mut shared, mock) = (
-        crate::services::discord::make_shared_data_for_tests(),
-        discord_mock::DiscordMockState::new(),
-    );
+    let (mut shared, mock) = {
+        let _runtime = rig.runtime.enter();
+        (
+            crate::services::discord::make_shared_data_for_tests(),
+            discord_mock::DiscordMockState::new(),
+        )
+    };
     Arc::get_mut(&mut shared).unwrap().mailboxes = rig._registry.clone();
     shared.restart.reconcile_done.store(
         hold != Some(Hold::RestartRecovery),
@@ -1245,6 +1248,7 @@ fn idle_turn(
     let turn = StreamingTurn {
         pool: None,
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: &front.1.text,
@@ -2996,6 +3000,7 @@ pub(crate) fn claimed_root_recovery_launch(
         ids => ids.iter().map(u64::to_string).collect(),
     };
     let registration = Registration {
+        native: None,
         mailbox,
         execution: Execution::LocalTui,
         origin,
@@ -3029,3 +3034,6 @@ mod busy_gate;
 
 #[path = "owner_input_idle_tests/restart_gate_tests.rs"]
 mod restart_gate;
+
+#[path = "owner_input_idle_tests/metadata_hold.rs"]
+mod metadata_hold;

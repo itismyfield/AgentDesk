@@ -12,8 +12,8 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 95
-- Platform and third-party variables: 41
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
+- Platform and third-party variables: 39
 
 ## AgentDesk variables
 
@@ -104,6 +104,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_STALE_REPLAY_CHANNELS` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STALE_REPLAY_V1` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_TEST_AGY_LOGIN` | `src/config/test_instance/agy_cell.rs` |  |
 | `AGENTDESK_TEST_LEASE` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_MANIFEST` | `src/config/test_instance.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
@@ -130,8 +131,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
 | `GEMINI_API_KEY` | `src/services/decision_gate/runtime/key_initial_env.rs` | # Safety Call only before the binary starts threads or children. |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |
 | `GROK_BIN_DIR` | `src/services/platform/binary_resolver/grok.rs` |  |
 | `GROK_HOME` | `src/services/platform/binary_resolver/grok.rs` |  |

@@ -335,6 +335,7 @@ pub(super) async fn finish_admitted_local(
         Option<OwnerTurn>,
     ),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    discord_message: Option<serenity::MessageId>,
 ) -> Result<IntakeExecution, Error> {
     intake_turn::handle_text_message(
         deps,
@@ -342,7 +343,7 @@ pub(super) async fn finish_admitted_local(
         request,
         queued,
         preloaded_uploads,
-        false,
+        (false, discord_message),
     )
     .await
 }

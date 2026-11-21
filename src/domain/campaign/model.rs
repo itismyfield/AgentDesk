@@ -8,6 +8,7 @@ use super::decision_item::{ApprovalBinding, ApprovalBook, ApprovalRecord, ForumA
 use super::definition::{
     AcceptanceCondition, DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition,
 };
+use super::deployment::{AcceptanceCheck, AcceptanceFact, DeployFact, DeployJob};
 use super::evidence::{EvidenceDecision, EvidenceEnvelope};
 use super::evidence_gate::{StageAssessment, Verdict};
 use super::execution_pin::ExecutionPin;
@@ -297,6 +298,11 @@ pub struct Run {
     pub landings: BTreeMap<String, Landing>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub merges: BTreeMap<String, MergeJob>,
+    // One deployment per landed node, and the owning agent's operational checks by condition ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deployments: BTreeMap<String, DeployJob>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acceptance_checks: BTreeMap<String, BTreeMap<String, AcceptanceCheck>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fences: BTreeMap<String, NodeFence>,
     // The one seal of each Work attempt's output, keyed by attempt ID.
@@ -539,6 +545,14 @@ pub enum Command {
     RecordLanding {
         node_id: String,
         fact: Box<LandingFact>,
+    },
+    RecordDeployment {
+        node_id: String,
+        fact: Box<DeployFact>,
+    },
+    RecordAcceptance {
+        node_id: String,
+        fact: Box<AcceptanceFact>,
     },
     RecordReview {
         action_id: String,

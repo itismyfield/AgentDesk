@@ -1,0 +1,42 @@
+---
+title: "Herdr Claude cold launch and first queue attempt"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks FirstTurnQueueEligible
+    lg1: Path to the FirstTurnQueueEligible bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Execution launched
+  s1: Launch SessionStart observed
+  s2: Pending after SessionStart
+  s3: Both launch hooks observed before transcript
+  s4: Turn ended before transcript creation
+  s5: First transcript record written
+  s6: First turn Bound without verified pin
+  s7: Turn ended, row Bound
+  s8: Turn ended early, row Bound
+  s9: Queue attempt held for missing source pin
+  [*] --> s0
+  s0 --> s1: SessionStart arrives
+  s1 --> s2: attach to the launched pane
+  s2 --> s3: UserPromptSubmit arrives
+  s2 --> s4: turn ends before the transcript exists
+  s3 --> s4: turn ends before the transcript exists
+  s3 --> s5: Claude writes the first record
+  s5 --> s6: first progress becomes observable
+  s6 --> s7: turn finishes and hands off
+  s6 --> s8: read ends before handoff
+  s6 --> s9: queue attempts busy injection
+  s9 --> s7: turn finishes and hands off
+  s9 --> s8: read ends before handoff
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s9 breaks
+  class s9 bugPath

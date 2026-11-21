@@ -74,7 +74,7 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 
 | 경로 | file:line | 재평가 창과의 관계 |
 |---|---|---|
-| CancelToken 취소 | `readiness/wait.rs:17-19`, `composer.rs:53-55`, `:66-68`, `src/services/provider.rs:616-618` | `cancel_requested`는 `token.cancelled`만 읽는다. Herdr 첫 입력은 `turn.cancel`을 넘긴다(`first_input.rs:55`, `:170`). tmux owner의 유휴 leaf는 토큰을 넘기지 않으므로(`effect.rs:201-203`) 그 대기는 예산과 제출 fence로만 끝난다. 창도 같은 루프라 같은 지점에서 끝난다 |
+| CancelToken 취소 | `readiness/wait.rs:17-19`, `composer.rs:53-55`, `:66-68`, `src/services/provider.rs:591-593` | `cancel_requested`는 `token.cancelled`만 읽는다. Herdr 첫 입력은 `turn.cancel`을 넘긴다(`first_input.rs:55`, `:170`). tmux owner의 유휴 leaf는 토큰을 넘기지 않으므로(`effect.rs:201-203`) 그 대기는 예산과 제출 fence로만 끝난다. 창도 같은 루프라 같은 지점에서 끝난다 |
 | tmux stop(제출 fence) | `readiness/wait.rs:20-22`, `src/services/claude_tui/submission_fence.rs:90-92`, `effect.rs:205-208` | 창의 매 반복이 같은 fence를 먼저 읽는다. 창이 새 키 경로를 만들지 않는다 |
 | Herdr 사용자 `/stop` | `src/services/turn_orchestrator/herdr_user_stop.rs:53-75` | `user_stop` 의도만 기록하고 `token.cancelled`를 세우지 않는다. 그래서 대기도 창도 `/stop`으로 바로 끝나지 않고 예산과 창(최대 +6초)을 다 쓴다. 키 없이 끝난 입력은 `FinishedUntouched`로 기록되어(`src/services/provider/herdr_before_start.rs:115-128`, `:287-294`) 기존 stop 종결을 탄다. 이 설계는 그 계약을 바꾸지 않고 대기 상한만 늘린다 |
 | Herdr Terminate | `src/services/discord/herdr_terminate.rs:535-540`(물리 실행의 `termination_fence`), `:603-619`(닫기·retire·종결) | tmux의 `submission_fence::refusal()`과 다른 경로이고 대기 루프는 이 fence를 읽지 않는다. 창은 키를 보내지 않으며, 창 안에서 증거가 오면 첫 대기와 같은 예약·현재성 확인(`composer.rs:169-180`)을 지난다. 창 도중 Terminate가 겹치는 순서는 시험하지 않았다(§8) |

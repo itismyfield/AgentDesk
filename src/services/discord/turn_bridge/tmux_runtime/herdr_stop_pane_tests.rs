@@ -344,7 +344,7 @@ fn herdr_claude_idle_refusal_logs_its_judged_inputs_once() {
 }
 
 // A Claude tool call trailed by the session records Claude writes mid-turn stops from the
-// production screen; the screen still fences idle and draft panes, and a finished turn stays idle.
+// production screen; the screen fences idle and draft panes, and decides over a finished tail too.
 #[test]
 fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
     let probe = include_str!(
@@ -406,14 +406,7 @@ fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
                 0,
                 Some("Streaming"),
             ),
-            (
-                "finished turn",
-                probe,
-                &finished,
-                idle(),
-                0,
-                Some("Unknown"),
-            ),
+            ("finished tail", probe, &finished, sent(), 1, None),
         ];
         let (mut observed, mut expected) = (Vec::new(), Vec::new());
         for (n, (name, screen, records, reply, escapes, structured)) in rows.into_iter().enumerate()
@@ -451,6 +444,82 @@ fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
                 (reply, escapes, plain_read()),
                 structured.into_iter().collect(),
             ));
+        }
+        assert_eq!(observed, expected);
+    });
+}
+
+// A live screen decides whatever the transcript reads or leaves unread. An idle screen gets no
+// Escape though its text carries the chrome's words; an unread turn needs the interrupt offer.
+#[test]
+fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript() {
+    let live =
+        include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.328-code-mode-tool.txt");
+    let footer = include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.311-c2-busy.txt");
+    assert_eq!(claude_tui_stop_pane_evidence(live), (true, true, false));
+    let unread = HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved)).reply();
+    let reply =
+        |blocks: serde_json::Value| json!({"type":"assistant","message":{"content":blocks}});
+    let returned = [
+        reply(json!([{"type":"tool_use","id":"t1","name":"REPL","input":{}}])),
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"started"}]}}),
+    ];
+    let mode =
+        json!({"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s1"});
+    let marked = [returned[0].clone(), returned[1].clone(), mode];
+    let long = [reply(
+        json!([{"type":"text","text":"x".repeat(300 * 1024)}]),
+    )];
+    let ended = [
+        long[0].clone(),
+        json!({"type":"system","subtype":"turn_duration"}),
+    ];
+    let idle_pane = claude_capture!("idle");
+    let asked = claude_capture!("submitted").replace(
+        "Reply with the single word OK.",
+        "[User: tester (ID: 1)] Summarize the current work.",
+    );
+    let said = |text: &str| idle_pane.replacen("\n─", &format!("\n⏺ {text}\n─"), 1);
+    let quoted = said("It shows esc to interrupt over the current work.");
+    let frame = said("It shows:\n  ✻ Thinking… (3s · esc to interrupt)");
+    with_pool(|pool, root, runtime| {
+        let rows: [(&str, &str, &[serde_json::Value], &str, usize); 11] = [
+            ("returned tool, live", live, &returned, sent(), 1),
+            ("metadata after it, live", live, &marked, sent(), 1),
+            ("ended tail, live", live, &ended[1..], sent(), 1),
+            ("returned tool, idle", idle_pane, &returned, idle(), 0),
+            ("asked for the words", &asked, &returned, idle(), 0),
+            ("quoted words", &quoted, &returned, idle(), 0),
+            ("quoted frame", &frame, &ended[1..], idle(), 0),
+            ("unread, footer", footer, &long, sent(), 1),
+            (
+                "unread, spinner",
+                claude_capture!("thinking"),
+                &long,
+                unread,
+                0,
+            ),
+            ("unread, ended", footer, &ended, sent(), 1),
+            ("unread, quoted words", &quoted, &long, unread, 0),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (n, (name, screen, records, reply, escapes)) in rows.into_iter().enumerate() {
+            let (logs, _capture) = capture_stop_events();
+            let seen = stop_after(
+                pool,
+                root,
+                runtime,
+                ProviderKind::Claude,
+                760 + n as u64,
+                screen,
+                records,
+            );
+            let named = logs.lock().unwrap().iter().any(|event| {
+                event.contains("herdr_stop_unobserved")
+                    && event.contains(&format!("{:?}", "unread=\"turn_identity\""))
+            });
+            observed.push((name, seen.0, seen.1, named));
+            expected.push((name, reply, escapes, reply == unread));
         }
         assert_eq!(observed, expected);
     });

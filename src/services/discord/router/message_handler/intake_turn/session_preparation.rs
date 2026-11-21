@@ -82,6 +82,21 @@ pub(in crate::services::discord) async fn restore(
             *state.reason = "session_key_unavailable";
         }
     }
+    // A pane rotation whose settle pass has not run yet still decides the session this turn resumes.
+    #[cfg(unix)]
+    if let Some(tmux) = state
+        .tmux
+        .filter(|_| matches!(provider, ProviderKind::Claude))
+    {
+        let follow = super::super::super::super::tui_prompt_relay::follow_pending_rotation_selector;
+        if let Some(new) = follow(shared, channel_id, tmux).await
+            && state.session_id.as_deref() != Some(new.as_str())
+        {
+            *state.session_id = Some(new);
+            *state.memento_context_loaded = false;
+            *state.reason = "claude_session_rotation_followed";
+        }
+    }
 }
 
 #[cfg(test)]

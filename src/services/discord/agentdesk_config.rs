@@ -458,6 +458,14 @@ pub(super) fn collect_agent_bot_names() -> HashSet<String> {
                 .provider
                 .as_deref()
                 .map(|value| value.trim().to_ascii_lowercase());
+            // A retired provider bot stays down rather than launching as the default provider.
+            if normalized_provider
+                .as_deref()
+                .and_then(crate::domain::provider::retired_provider_id)
+                .is_some()
+            {
+                return None;
+            }
             let normalized_agent = bot
                 .agent
                 .as_deref()

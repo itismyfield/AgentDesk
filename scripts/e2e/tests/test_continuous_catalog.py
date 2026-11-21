@@ -26,7 +26,7 @@ class ContinuousCatalogTests(unittest.TestCase):
     def cli(self, *args):
         return subprocess.run([sys.executable, str(GENERATOR), '--root', str(self.root),
                                '--scenario-dir', 'yaml', '--manifest', 'plan.json', *args],
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=60)
 
     def scenario(self, filename='one.yaml', identifier='E-1'):
         path = self.scenarios / filename

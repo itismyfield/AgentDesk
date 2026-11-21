@@ -516,12 +516,14 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
     redacted
 }
 
-#[path = "redact/registered.rs"]
-mod registered;
-pub(crate) use registered::with_registered_secret_ranges;
-
 pub(crate) fn contains_registered_secret(input: &str) -> bool {
-    with_registered_secret_ranges(input, |ranges| ranges.next().is_some())
+    let secrets = match KNOWN_SECRETS.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && input.contains(secret.as_str()))
 }
 
 #[cfg(test)]

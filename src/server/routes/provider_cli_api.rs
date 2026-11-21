@@ -23,7 +23,7 @@ use crate::services::provider_cli::{
 use super::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
 
-const ALL_PROVIDERS: &[&str] = &["codex", "claude", "gemini", "qwen"];
+const ALL_PROVIDERS: &[&str] = &["codex", "claude", "qwen"];
 
 /// GET /api/provider-cli — current registry channels + migration states.
 pub async fn get_provider_cli_status(

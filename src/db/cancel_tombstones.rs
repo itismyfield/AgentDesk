@@ -112,11 +112,11 @@ pub async fn consume_cancel_tombstone(
         let id: i64 = row.try_get("id")?;
         let stop_offset: Option<i64> = row.try_get("stop_output_offset")?;
 
-        if let (Some(stop), Some(current)) = (stop_offset, current_output_offset) {
-            if current > stop.saturating_add(CANCEL_TEARDOWN_GRACE_BYTES) {
-                // Follow-up turn output already past the cancel boundary.
-                continue;
-            }
+        if let (Some(stop), Some(current)) = (stop_offset, current_output_offset)
+            && current > stop.saturating_add(CANCEL_TEARDOWN_GRACE_BYTES)
+        {
+            // Follow-up turn output already past the cancel boundary.
+            continue;
         }
         suppress_ids.push(id);
     }

@@ -61,7 +61,7 @@ pub(crate) fn herdr_evidence(
         return Err("synthetic hosted execution is unreadable");
     }
     Ok(
-        crate::config::session_hosts::herdr_endpoint(channel).is_some()
+        crate::services::session_host::thread_host::runs_herdr(channel)
             || super::herdr_execution_listed(logical)
             || marker == HostKindMarker::Known(HostKind::Herdr)
             || matches!(record, Some(HostedRecord::Known(row)) if row.state != HostedState::Retired),

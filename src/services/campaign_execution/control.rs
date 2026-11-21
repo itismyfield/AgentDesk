@@ -750,6 +750,18 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 None => return Ok(unchanged(state)),
             }
         }
+        Command::RecordDeployment { node_id, fact } => {
+            match super::deploy_policy::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
+        Command::RecordAcceptance { node_id, fact } => {
+            match super::final_acceptance::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
         Command::SealCandidate { .. }
         | Command::BindVerificationSubject { .. }
         | Command::BindVerificationInput { .. }

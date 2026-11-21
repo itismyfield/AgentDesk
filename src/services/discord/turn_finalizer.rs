@@ -36,6 +36,9 @@ use super::SharedData;
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
 mod actor_state;
+#[cfg(unix)]
+pub(in crate::services::discord) mod native_prepare;
+use actor_state::{panic_payload_summary, resolve_ledger_key};
 pub(in crate::services::discord) mod cleanup;
 mod completion_admission;
 mod completion_admission_actor;
@@ -183,20 +186,6 @@ pub(in crate::services::discord) struct LedgerKey {
     pub(in crate::services::discord) channel_id: ChannelId,
     pub(in crate::services::discord) generation: u64,
     pub(in crate::services::discord) user_msg_id: u64,
-}
-
-/// Resolve a submission to the ledger entry it acts on. A real `user_msg_id`
-/// uses its exact key (a stale terminal of a finalized turn matches the
-/// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
-/// terminal collapses per `resolve_channel_only` (never prematurely finalizing
-/// a queued follow-up).
-fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
-    resolve_channel_only(
-        key,
-        ledger
-            .iter()
-            .map(|(lk, entry)| (lk, entry.phase == Phase::Finalized)),
-    )
 }
 
 /// #3016 S1 (read-only): does the channel's `generation` have a live
@@ -595,19 +584,6 @@ impl TurnFinalizer {
     }
 }
 
-/// #3866: render a caught panic payload for the actor's error log without
-/// re-panicking. `catch_unwind` yields `Box<dyn Any + Send>`; the common
-/// payloads are `&'static str` and `String`.
-fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "non-string panic payload".to_string()
-}
-
 /// The single owning task. Owns the ledger and a NON-owning cached handle to
 /// `SharedData`, and drives the reconcile timer in the same task via `select!`
 /// so the deadline-armed gate-timeout finalize fires deterministically (no
@@ -629,68 +605,16 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
             maybe_msg = rx.recv() => {
                 let Some(msg) = maybe_msg else { break };
                 match msg {
-                    FinalizeMsg::Start {
-                        key,
-                        recovery_lease,
-                        provider,
-                        relay_owner,
-                        completion_admission_plan,
-                        shared,
-                    } => {
-                        // #3016 phase-5a: prime the reconcile cache from the very
-                        // FIRST register so a FRESH actor whose first watcher-owned
-                        // turn never submits its own terminal still gets the
-                        // far-backstop tick. `is_none()` guard: the `Terminal` arm
-                        // stays authoritative (always overwrites with the live Arc);
-                        // a dead `Weak` here just skips reconcile harmlessly until a
-                        // live submission re-primes it.
-                        if cached_shared.is_none() {
-                            cached_shared = Some(shared.clone());
-                        }
-                        // #3016 phase-5a: a watcher-owned handoff arms the FAR
-                        // backstop so a never-terminated turn is visible to the
-                        // reconciler. `get_or_insert`: set ONCE — a repeat `Start`
-                        // must never push an armed deadline forward (the EPIC's
-                        // never-finalizing bug, mirrored from the gate-timeout arm).
-                        let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
-                        // A `Start` consumes only pre-ledger edges for its exact
-                        // generation. Older generation authority remains isolated
-                        // until TTL GC instead of pre-settling the current turn.
-                        let exact_key = key.exact_key();
-                        let pending = take_exact_pending_completion_admission(
-                            &mut pending_admission,
-                            exact_key,
-                        );
-                        let deadline = arm_watcher_backstop
-                            .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP);
-                        let (lease, plan) = (recovery_lease, completion_admission_plan);
-                        let entry = ledger.entry(exact_key).or_insert_with(|| {
-                            LedgerEntry::registered(
-                                key, provider.clone(), relay_owner, lease, plan, deadline,
-                            )
-                        });
-                        if entry.phase != Phase::Finalized {
-                            entry.relay_owner = relay_owner;
-                            entry.provider = provider;
-                            entry.turn_key = key;
-                            entry
-                                .completion_admission
-                                .update_plan(completion_admission_plan);
-                            apply_pending_completion_admission(entry, pending);
-                            if arm_watcher_backstop {
-                                entry.watcher_backstop_deadline.get_or_insert_with(|| {
-                                    Instant::now() + WATCHER_REGISTER_BACKSTOP
-                                });
-                            }
-                            if let Some(shared) = shared.upgrade() {
-                                publish_claimed_queue_eligible(&shared, entry);
-                            }
-                        } else if let Some(pending) = pending {
-                            apply_pending_completion_admission(entry, Some(pending));
-                            if let Some(shared) = shared.upgrade() {
-                                publish_claimed_queue_eligible(&shared, entry);
-                            }
-                        }
+                    msg @ FinalizeMsg::Start { .. } => {
+                        actor_state::handle_start(msg, &mut ledger, &mut pending_admission, &mut cached_shared);
+                    }
+                    #[cfg(unix)]
+                    msg @ (FinalizeMsg::NativeAbstain { .. } | FinalizeMsg::NativeRemember { .. } | FinalizeMsg::NativeInputs { .. } | FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. } | FinalizeMsg::NativeSettled { .. } | FinalizeMsg::NativeBoot { .. } | FinalizeMsg::NativeBootReady { .. }) => {
+                        native_prepare::handle(msg, &mut ledger).await;
+                    }
+                    #[cfg(unix)]
+                    FinalizeMsg::Native { work, history, shared, ack } => {
+                        actor_state::handle_native(*work, history, shared, ack, &mut ledger).await;
                     }
                     msg @ (FinalizeMsg::MailboxReleased { .. }
                     | FinalizeMsg::TerminalProjectionSettled { .. }
@@ -722,7 +646,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // resolves the ack as `AlreadyFinalized` so the submitter
                         // does not hang, and the loop survives to finalize the next
                         // turn.
-                        let outcome = match AssertUnwindSafe(handle_terminal(
+                        let outcome = match actor_state::contain_panic(handle_terminal(
                             &mut ledger,
                             &mut pending_admission,
                             key,
@@ -732,18 +656,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             evidence,
                             &shared,
                         ))
-                        .catch_unwind()
                         .await
                         {
                             Ok(outcome) => outcome,
-                            Err(payload) => {
-                                tracing::error!(
-                                    panic = %panic_payload_summary(payload.as_ref()),
-                                    "TurnFinalizer handle_terminal panicked; actor loop \
-                                     contained the panic and stays alive (#3866)"
-                                );
-                                FinalizeOutcome::AlreadyFinalized
-                            }
+                            Err(_) => FinalizeOutcome::AlreadyFinalized,
                         };
                         let _ = ack.send(outcome);
                     }
@@ -4833,7 +4749,7 @@ pub(super) mod tests {
     }
 
     /// #3277 verify-3 (MINOR): a watcher-owned turn on a non-JSONL runtime
-    /// (Gemini → `CompletionSignal::Unknown`) keeps the generous 1800s
+    /// (OpenCode → `CompletionSignal::Unknown`) keeps the generous 1800s
     /// at-deadline behavior — the fast path never pulls its deadline in, so it
     /// stays Pending through the whole fast-path window.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -4849,7 +4765,7 @@ pub(super) mod tests {
                 .restore_active_turn(active_token, UserId::new(7), MessageId::new(160))
                 .await;
 
-            // Live watcher; Gemini has no structured JSONL turn state, so the
+            // Live watcher; OpenCode has no structured JSONL turn state, so the
             // transcript path is never read (signal = Unknown immediately).
             let session = format!("3277-nonjsonl-{}", std::process::id());
             shared.tmux_watchers.insert(
@@ -4859,7 +4775,7 @@ pub(super) mod tests {
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 160, 0);
-            fin.register_start(k, ProviderKind::Gemini, RelayOwnerKind::Watcher, &shared);
+            fin.register_start(k, ProviderKind::OpenCode, RelayOwnerKind::Watcher, &shared);
 
             tokio::time::sleep(FAST_PATH_WINDOW).await;
             tokio::task::yield_now().await;
@@ -4871,7 +4787,7 @@ pub(super) mod tests {
             let outcome = fin
                 .submit_terminal(
                     k,
-                    ProviderKind::Gemini,
+                    ProviderKind::OpenCode,
                     TerminalEvent::Complete,
                     FinalizeContext::watcher(),
                     shared.clone(),

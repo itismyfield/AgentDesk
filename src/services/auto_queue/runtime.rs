@@ -120,14 +120,12 @@ async fn build_slot_clear_target_pg(
         let provider_name = provider
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
-                session_key.as_deref().and_then(|key| {
-                    tmux_name_from_session_key(key).and_then(|tmux_name| {
-                        crate::services::provider::parse_provider_and_channel_from_tmux_name(
-                            &tmux_name,
-                        )
-                        .map(|(provider, _)| provider.as_str().to_string())
-                    })
-                })
+                // A row without a provider reads its own key; a new-format tail names none.
+                crate::domain::session_identity::naming::recorded_provider(
+                    None,
+                    session_key.as_deref(),
+                )
+                .map(|provider| provider.as_str().to_string())
             });
         let Some(provider_name) = provider_name else {
             continue;

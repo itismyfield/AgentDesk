@@ -445,6 +445,7 @@ it("does not call a dispatch running when no session is working on it", async ()
 });
 
 it.each(["pending", "completed"])("shows the working implementation on a pending node when the latest consultation is %s", async (dispatchStatus) => {
+  vi.stubEnv("TZ", "America/New_York"); // times still read in KST
   const linked = {
     ...campaign,
     nodes: [{ ...campaign.nodes[0], status: "pending" as const }],
@@ -478,10 +479,11 @@ it.each(["pending", "completed"])("shows the working implementation on a pending
   expect(detail.textContent).toContain("Running dispatch");
   expect(detail.textContent).toContain("Implementation running");
   expect(detail.textContent).toContain("Working");
-  expect(detail.textContent).toContain(new Date(live.working_session_seen_at).toLocaleString());
+  expect(detail.textContent).toContain("Sep 29, 09:00 PM"); // the dashboard's language, in KST
   expect(detail.textContent).not.toContain("Consultation running");
   expect(detail.textContent).not.toContain("Idle");
-  expect(detail.textContent).not.toContain(new Date(live.session_seen_at).toLocaleString());
+  expect(detail.textContent).not.toContain("Sep 27");
+  vi.unstubAllEnvs();
 });
 
 it("reads the campaign list once and then polls only the shown campaign, and none while the page is hidden", async () => {

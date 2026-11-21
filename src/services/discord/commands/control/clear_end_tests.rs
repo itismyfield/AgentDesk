@@ -15,6 +15,7 @@ use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::tui_o::store::{clear_end, codex_end};
 
 const OLD_SESSION: &str = "provider-session-before-clear";
 const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
@@ -31,15 +32,14 @@ async fn clear(shared: &Arc<SharedData>, provider: &ProviderKind, channel: Chann
     clear.await.expect("a clear always commits").reply()
 }
 
-/// The provider session the next launch would resume from PostgreSQL.
-async fn stored_selector(pool: &sqlx::PgPool, key: &str) -> Option<String> {
-    let query = "SELECT claude_session_id FROM sessions WHERE session_key = $1";
-    let row: Option<Option<String>> = sqlx::query_scalar(query)
+async fn stored_selectors(pool: &sqlx::PgPool, key: &str) -> (Option<String>, Option<String>) {
+    let query =
+        "SELECT claude_session_id, raw_provider_session_id FROM sessions WHERE session_key = $1";
+    sqlx::query_as(query)
         .bind(key)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
-        .expect("read the stored selector");
-    row.flatten()
+        .expect("read both selectors from the session row")
 }
 
 /// A channel's managed session: its fake tmux, a live process and a stored provider session.
@@ -118,7 +118,7 @@ impl Drop for Managed {
 // process end, and neither memory nor PostgreSQL keeps the session a next launch would resume.
 #[tokio::test]
 async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::TestRuntimeRootGuard::new();
     let (db, pool) = postgres().await;
     let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
@@ -128,6 +128,18 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
         let channel = ChannelId::new(1_479_671_305_341_100_000 + n as u64);
         let name = format!("adk-clear-end-{n}-{}", uuid::Uuid::new_v4().simple());
         let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+        let raw_session = "raw-provider-session-before-clear";
+        sqlx::query("UPDATE sessions SET raw_provider_session_id = $2 WHERE session_key = $1")
+            .bind(&managed.key)
+            .bind(raw_session)
+            .execute(&pool)
+            .await
+            .expect("seed the raw selector");
+        assert_eq!(
+            stored_selectors(&pool, &managed.key).await,
+            (Some(OLD_SESSION.into()), Some(raw_session.into())),
+            "{provider:?}: both selectors are present before clear"
+        );
         let token = Arc::new(CancelToken::new());
         let start = crate::services::discord::mailbox_try_start_turn;
         let turn = MessageId::new(channel.get() + 9);
@@ -135,6 +147,11 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
         crate::services::discord::increment_global_active(&shared, "cleared turn");
         seed_backlog(&shared, &provider, channel).await;
         managed.fake.take_calls();
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&managed.tmux)
+                .is_none(),
+            "{provider:?}: no native source is available to record"
+        );
 
         let reply = clear(&shared, &provider, channel).await;
 
@@ -149,12 +166,20 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
             (None, true),
             "{provider:?}"
         );
-        assert_eq!(
-            stored_selector(&pool, &managed.key).await,
-            None,
-            "{provider:?}: nothing to resume"
-        );
+        let (legacy, raw) = stored_selectors(&pool, &managed.key).await;
+        assert_eq!(legacy, None, "{provider:?}: legacy selector cleared");
+        assert_eq!(raw, None, "{provider:?}: raw selector cleared");
         assert!(managed.ended(), "{provider:?}: the process and tmux end");
+        assert!(
+            clear_end::read(root.path(), channel.get())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            codex_end::read(root.path(), channel.get())
+                .unwrap()
+                .is_empty()
+        );
     }
     pool.close().await;
     db.drop().await;

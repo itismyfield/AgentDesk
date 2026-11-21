@@ -19,7 +19,7 @@ pub(crate) struct RestartDcserverArgs {
     /// Discord channel ID for restart completion report
     #[arg(long)]
     pub(crate) report_channel_id: Option<u64>,
-    /// Provider for restart report (claude, codex, gemini, opencode, or qwen)
+    /// Provider for restart report (claude, codex, opencode, or qwen)
     #[arg(long, value_enum)]
     pub(crate) report_provider: Option<ReportProvider>,
     /// Existing message ID to edit for restart report

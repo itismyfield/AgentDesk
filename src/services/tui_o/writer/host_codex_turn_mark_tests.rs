@@ -433,6 +433,7 @@ async fn body_claim_logs_distinguish_previous_and_current_turns_without_body_con
     assert!(
         claims[0].contains("owned=false")
             && claims[0].contains("started=1 finished=0")
+            && claims[0].contains("sent=0 settled=0")
             && claims[0].contains("mark_present=false"),
         "{}",
         claims[0]
@@ -440,6 +441,7 @@ async fn body_claim_logs_distinguish_previous_and_current_turns_without_body_con
     assert!(
         claims[1].contains("owned=false")
             && claims[1].contains("started=2 finished=1")
+            && claims[1].contains("sent=1 settled=0")
             && claims[1].contains("mark_present=true"),
         "{}",
         claims[1]
@@ -447,6 +449,7 @@ async fn body_claim_logs_distinguish_previous_and_current_turns_without_body_con
     assert!(
         claims[2].contains("owned=true")
             && claims[2].contains("started=2 finished=2")
+            && claims[2].contains("sent=2 settled=0")
             && claims[2].contains("mark_present=true"),
         "{}",
         claims[2]

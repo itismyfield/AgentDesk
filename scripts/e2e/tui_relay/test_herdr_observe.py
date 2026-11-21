@@ -9,9 +9,9 @@ import time
 import unittest
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,7 +20,6 @@ from tui_relay import herdr, herdr_restart, http_auth
 
 real_run_scenario = driver.run_scenario
 real_boot_clock = herdr_restart.boot_clock
-# A supported boot clock name; the restart tests drive its readings through a patched boot_clock.
 CLOCK = "CLOCK_MONOTONIC"
 
 
@@ -983,9 +982,10 @@ class RestartObserveOnly(unittest.TestCase):
         self.assertEqual(acquire.call_count, 4)
         self.assertEqual(held, [f"claude-herdr-{self.args.run_id}"])
 
-    def test_held_cell_lease_refuses_before_observation_or_client(self):
+    @patch.object(time, "time", return_value=1001)
+    def test_held_cell_lease_refuses_before_observation_or_client(self, _clock):
         self.marked()
-        self.lease_file.write_text(f"claude-tui-other|{time.time()}\n")
+        self.lease_file.write_text("claude-tui-other|1000\n")
         self.http.reset_mock()
         self.assert_refused("existing lease")
         self.http.assert_not_called()

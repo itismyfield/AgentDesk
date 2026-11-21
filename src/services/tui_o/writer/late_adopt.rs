@@ -192,9 +192,22 @@ async fn attempt<I: HostIo>(
                 }),
                 |rebased| rebased.floor.clone(),
             );
-            let looked = match &floor {
-                Ok(floor) => claude::look(&at, &events, *floor).await,
-                Err(detail) => {
+            let reserved =
+                candidate.child_surface().is_some() && claude::thread::is_protected(&events);
+            let looked = match (&floor, reserved) {
+                (Ok(floor), _) => claude::look(&at, &events, *floor).await,
+                (Err(_), true) => {
+                    claude::look(
+                        &at,
+                        &events,
+                        claude::Floor {
+                            seq: boundary.takeover_after,
+                            sends,
+                        },
+                    )
+                    .await
+                }
+                (Err(detail), false) => {
                     claude::Look::Pass(format!("old source completion unproven: {detail}"))
                 }
             };
@@ -232,6 +245,10 @@ async fn attempt<I: HostIo>(
                     }
                 }
             }
+            if reserved {
+                wake.wait().await;
+                continue;
+            }
             short = 0;
             let (bound, owed) = match rebased.take() {
                 Some(rebased) => (Some(rebased.new), rebased.owed),
@@ -264,6 +281,7 @@ async fn attempt<I: HostIo>(
                         rebased = Some(next);
                         continue;
                     }
+                    Retried::ReservedClaude => continue,
                 }
             }
             let no_bound_source = first_bound(&events).is_none()

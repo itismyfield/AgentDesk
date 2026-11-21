@@ -12,7 +12,7 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::host::{
-    self, HostParts, ManagedWriterHandle,
+    self, Custody, FencedFacts, HostIo, HostParts, ManagedWriterHandle,
     test_io::{Alarms, Posts, TestHost},
 };
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, OwnerFront, PendingQueueItem};
@@ -69,6 +69,70 @@ impl Drop for ScopedTmuxPath {
     fn drop(&mut self) {
         drop(self.0.take());
         crate::services::platform::tmux::invalidate_availability_cache();
+    }
+}
+
+struct SourceHost {
+    io: Arc<TestHost>,
+    shared: Arc<SharedData>,
+}
+
+impl HostIo for SourceHost {
+    type Port = <TestHost as HostIo>::Port;
+    type Lease = <TestHost as HostIo>::Lease;
+    type Alarms = <TestHost as HostIo>::Alarms;
+    type Bindings = crate::services::tui_o::writer::binding::ChannelBindingLog;
+
+    fn port(&self) -> impl std::future::Future<Output = Arc<Self::Port>> + Send {
+        self.io.port()
+    }
+    fn lease(&self) -> Self::Lease {
+        self.io.lease()
+    }
+    fn alarms(&self) -> Self::Alarms {
+        self.io.alarms()
+    }
+    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
+        Arc::new(Self::Bindings::new(channel, provider))
+    }
+    fn native_inputs(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::actor::native_input::NativePort> {
+        Some(discord::turn_finalizer::native_prepare::supply_port(
+            channel,
+            self.shared.clone(),
+            self.bindings(channel, provider),
+        ))
+    }
+    fn activation_facts(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl std::future::Future<
+        Output = Result<crate::services::tui_o::writer::activation::ActivationFacts, String>,
+    > + Send {
+        self.io.activation_facts(channel, provider)
+    }
+    fn intake_fence(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl std::future::Future<Output = Result<FencedFacts, String>> + Send {
+        self.io.intake_fence(channel, provider)
+    }
+    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
+        self.io.local_custody(channel, provider)
+    }
+    fn legacy(&self) -> Arc<dyn LegacyView> {
+        self.io.legacy()
+    }
+    fn legacy_busy(&self, channel: u64) -> impl std::future::Future<Output = bool> + Send {
+        self.io.legacy_busy(channel)
+    }
+    fn relaying(&self, channel: u64) -> bool {
+        self.io.relaying(channel)
     }
 }
 
@@ -205,6 +269,14 @@ fn assert_idle_source(
 
 impl Intake {
     fn new(fx: &Fixture, started: &Started) -> Self {
+        Self::with_engine(fx, started, None)
+    }
+
+    fn with_engine(
+        fx: &Fixture,
+        started: &Started,
+        engine: Option<crate::engine::PolicyEngine>,
+    ) -> Self {
         assert_eq!(
             started.hook(
                 fx,
@@ -214,7 +286,14 @@ impl Intake {
             202,
             "the first native terminal's authentic Stop verifies the completed registration"
         );
-        Self::with_expected_pin(fx, started, ExpectedPin::Verified)
+        Self::with_launch(
+            fx,
+            started,
+            ExpectedPin::Verified,
+            Arc::default(),
+            (false, None),
+            engine,
+        )
     }
 
     fn new_thread(fx: &Fixture, started: &Started, parent: u64) -> Self {
@@ -232,6 +311,7 @@ impl Intake {
             ExpectedPin::Verified,
             Arc::default(),
             (false, Some(parent)),
+            None,
         )
     }
 
@@ -245,7 +325,7 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
     ) -> Self {
-        Self::with_launch(fx, started, expected, output_gate, (false, None))
+        Self::with_launch(fx, started, expected, output_gate, (false, None), None)
     }
 
     fn with_launch(
@@ -254,7 +334,36 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
         (launch, thread_parent): (bool, Option<u64>),
+        engine: Option<crate::engine::PolicyEngine>,
     ) -> Self {
+        let generation = discord::runtime_store::generation_path().unwrap();
+        std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+        std::fs::write(generation, "1").unwrap();
+        // The bootstrap transcript has the identities native Claude rows carry before O reopens it.
+        let records = std::fs::read_to_string(&started.path).unwrap();
+        let records: Vec<_> = records
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let mut row: Value = serde_json::from_str(line).unwrap();
+                let identity = format!("fixture-bootstrap-{}-{index}", started.session);
+                if matches!(row["type"].as_str(), Some("user" | "assistant"))
+                    && row["uuid"].is_null()
+                {
+                    row["uuid"] = json!(identity);
+                }
+                if row["type"] == "assistant" {
+                    if row["apiBlockIndex"].is_null() {
+                        row["apiBlockIndex"] = json!(0);
+                    }
+                    if row["message"]["id"].is_null() {
+                        row["message"]["id"] = json!(identity);
+                    }
+                }
+                serde_json::to_string(&row).unwrap()
+            })
+            .collect();
+        std::fs::write(&started.path, records.join("\n") + "\n").unwrap();
         let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
         let configured_channel = thread_parent.unwrap_or(CHANNEL);
@@ -363,8 +472,10 @@ impl Intake {
             std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
             std::fs::write(generation, "1").unwrap();
             own.provider = ProviderKind::Claude;
+            own.restart.current_generation = discord::runtime_store::process_generation();
             own.token_hash = TOKEN.into();
             own.api_port = api.port;
+            own.policy.engine = engine;
             shared.settings.write().await.provider = ProviderKind::Claude;
             shared.restart.reconcile_done.store(true, Ordering::Release);
             shared.http.cached_serenity_ctx.set(ctx).unwrap();
@@ -404,7 +515,7 @@ impl Intake {
             let alarms = io.alarms.clone();
             let posts = io.posts.clone();
             let parts = HostParts {
-                io,
+                io: Arc::new(SourceHost { io, shared: shared.clone() }),
                 runtime_root: Some(crate::config::runtime_root().unwrap()),
                 gate: gate.clone(),
                 readiness: host::process_readiness(),
@@ -1035,7 +1146,7 @@ fn assert_idle_tmux_queries(logical: &str) {
     );
 }
 
-async fn idle_turn_unwound(intake: &Intake) {
+async fn wait_for_idle_turn_to_unwind(intake: &Intake) {
     let finished = tokio::time::timeout(LIMIT, async {
         while intake.mailbox.has_active_turn().await != Ok(false) {
             tokio::task::yield_now().await;
@@ -1057,6 +1168,53 @@ async fn idle_turn_unwound(intake: &Intake) {
     }
 }
 
+async fn idle_turn_unwound(intake: &Intake, message: u64) {
+    let mut completions =
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+            &intake.shared,
+        );
+    wait_for_idle_turn_to_unwind(intake).await;
+    use crate::services::tui_input::human_frame::history::v2::{Registry, native::Disposition};
+    let settlement = crate::test_support::wait::await_within(
+        async {
+            loop {
+                let history = Registry::runtime().unwrap();
+                if let Some(input) = history
+                    .native_classification_registrations()
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| {
+                        r.ticket.channel_id == CHANNEL
+                            && r.ticket.key["identity"]["primary"] == message
+                    })
+                {
+                    let settlement = history
+                        .native_settlement(&input.namespace, &input.ticket)
+                        .unwrap();
+                    if settlement.cleanup_complete {
+                        break settlement;
+                    }
+                }
+                completions
+                    .recv()
+                    .await
+                    .expect("native completion bus remains open");
+            }
+        },
+        crate::test_support::wait::WAIT_CAP,
+    )
+    .await;
+    assert_eq!(
+        settlement.outcome.unwrap().disposition,
+        Disposition::Executed
+    );
+    assert!(inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).is_none());
+    assert_eq!(
+        intake.shared.restart.global_active.load(Ordering::SeqCst),
+        0
+    );
+}
+
 #[test]
 fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
     use crate::services::claude_tui::host_input::busy::BusyState;
@@ -1070,7 +1228,7 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();
@@ -1366,7 +1524,7 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();
@@ -1440,7 +1598,7 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
         );
         assert!(history.complete && history.awaiting.is_none());
         assert!(history.current.unwrap().pin.is_none());
-        idle_turn_unwound(&intake).await;
+        idle_turn_unwound(&intake, MESSAGE).await;
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
         assert_eq!(
             crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
@@ -1467,7 +1625,7 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (nonce, started) = reconnect::launch(&fx, &launcher);
+    let (nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     assert_eq!(before, 2);
     let registry = fx.rig.registry_on_this_thread();

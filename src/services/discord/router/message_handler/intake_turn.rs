@@ -52,7 +52,7 @@ mod intake_outbox_state_builder_tests {
                     Option<super::super::OwnerTurn>,
                 ),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-                bool,
+                (bool, Option<MessageId>),
             ) -> F,
         ) -> usize {
             std::mem::size_of::<F>()
@@ -164,7 +164,7 @@ pub(super) async fn handle_text_message(
     request: IntakeRequest,
     (_queued_drain, queued, owner): (bool, Option<adk_thread::Route>, Option<super::OwnerTurn>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    durable_reply_context: bool,
+    (durable_reply_context, discord_message): (bool, Option<MessageId>),
 ) -> Result<IntakeExecution, Error> {
     // Keep the intake body on the heap so worker and local caller frames stay small.
     Box::pin(async move {
@@ -644,7 +644,9 @@ pub(super) async fn handle_text_message(
             return Ok(IntakeExecution::Executed);
         };
         let channel_id = route.target;
-        let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
+        let dispatch_runtime::DispatchRuntime {
+            final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt, pinned,
+        } =
             dispatch_runtime::prepare_post_redirect_dispatch_runtime(
                 http,
                 shared,
@@ -1418,16 +1420,10 @@ pub(super) async fn handle_text_message(
         // Claude keeps SAK in the system prompt for prefix-cache stability.
         // Non-Claude providers receive SAK in the user context instead.
         let sak_for_system = memory_injection_plan.sak_for_system_prompt();
-        let current_task_context = active_dispatch_info.as_ref().map(|info| {
-            super::super::super::prompt_builder::CurrentTaskContext {
-                dispatch_id: active_dispatch_id_for_prompt.as_deref(),
-                card_id: info.card_id.as_deref(),
-                dispatch_title: info.dispatch_title.as_deref(),
-                dispatch_context: info.context.as_deref(),
-                card_title: info.card_title.as_deref(),
-                github_issue_url: info.github_issue_url.as_deref(),
-            }
-        });
+        let (current_task_context, prompt_dispatch_type) = dispatch_runtime::prompt_task(
+            active_dispatch_id_for_prompt.as_deref(), active_dispatch_info.as_ref(),
+            pinned.is_some(), dispatch_type_str.as_deref(),
+        );
         let recovery_context_for_manifest =
             session_retry_context
                 .as_ref()
@@ -1445,7 +1441,7 @@ pub(super) async fn handle_text_message(
             role_binding.as_ref(),
             reply_to_user_message,
             PromptProfiles::foreground(dispatch_profile),
-            dispatch_type_str.as_deref(),
+            prompt_dispatch_type,
             current_task_context.as_ref(),
             sak_for_system,
             None,
@@ -1522,17 +1518,7 @@ pub(super) async fn handle_text_message(
         );
         let adk_thread_channel_id =
             adk_thread::resolve_channel_id(adk_session_name.as_deref(), shared, channel_id);
-        // #222: DB-based dispatch lookup takes priority over text parsing.
-        // In unified threads, user_text may contain a stale DISPATCH: prefix
-        // from a previous dispatch in the same thread. DB lookup uses the
-        // thread→card→dispatch link which is always current.
-        let looked_up_dispatch = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-            shared.api_port,
-            channel_id.get(),
-        )
-        .await
-        .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
-        let dispatch_id = dispatch_runtime::unheld_dispatch(shared, channel_id, looked_up_dispatch).await;
+        let dispatch_id = dispatch_runtime::row_dispatch(shared, channel_id, user_text, pinned).await;
         post_adk_session_status_for_channel(
             shared,
             channel_id,
@@ -1981,7 +1967,8 @@ pub(super) async fn handle_text_message(
             }
         };
         inflight_create_log::record_turn_start_origin(shared, &provider, channel_id, &inflight_state).await;
-        let create = |state: &mut InflightTurnState| save_intake_inflight(codex_seed.as_ref(), state);
+        let mut inflight_saved = false;
+        let create = context::track_inflight_create(&mut inflight_saved, |state| save_intake_inflight(codex_seed.as_ref(), state));
         let admitted = super::foreign_row::admit(shared, &provider, &mut inflight_state, &cancel_token, create).await;
         if !matches!(admitted, Ok(true)) {
             // The recovery read guard is released before the delete waits on Discord.
@@ -2087,15 +2074,8 @@ pub(super) async fn handle_text_message(
         let cache_ttl_minutes =
             super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
         let registration_origin = Some(dispatch_id.is_some());
-        let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
-            provider: provider.as_str().to_string(),
-            agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
-            channel_id: Some(channel_id.get().to_string()),
-            session_key: adk_session_key.clone(),
-            tmux_session: tmux_session_name.clone(),
-            channel_name: channel_name.clone(),
-            execution_mode: Some("discord_turn".to_string()),
-        };
+        let agy_foreground = super::provider_dispatch::AgyForeground::from_claim(discord_message, turn_kind, inflight_saved, &inflight_state, &cancel_token);
+        let provider_execution_context = super::provider_isolation::execution_context(&provider, role_binding.as_ref(), channel_id.get(), adk_session_key.clone(), tmux_session_name.clone(), channel_name.clone());
         let dispatch_type_for_mcp = dispatch_type_str.clone();
         // Run the provider in a blocking thread
         let provider_for_blocking = provider.clone();
@@ -2136,6 +2116,7 @@ pub(super) async fn handle_text_message(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
                                 registration_origin,
+                                agy_foreground,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

@@ -9,6 +9,8 @@ pub(crate) mod actor;
 mod attempt;
 pub(crate) mod claude_handoff;
 pub(crate) mod clear;
+#[cfg(unix)]
+mod cold_source;
 mod commit;
 pub(crate) mod control;
 mod effort_continue;
@@ -179,6 +181,7 @@ impl Owner {
                 readiness_holds: vec![],
                 refused_fronts: vec![],
                 terminal_identities: vec![],
+                source_bindings: Vec::new(),
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
                 unfinished_handoff: None,
@@ -273,6 +276,11 @@ impl Owner {
             next.unfinished_handoff = None;
         }
         let original = next.items.first().ok_or("empty queue")?.clone();
+        if let Some(hold) = next.readiness_hold(&original)
+            && hold.matching_followers(payload.followers.iter()).count() != payload.followers.len()
+        {
+            return Err("retry includes members outside its readiness hold".into());
+        }
         let identity = sources::identity(&original);
         let key = AttemptRef {
             identity: identity.clone(),
@@ -432,12 +440,13 @@ impl Owner {
         let head = soft(head.clone(), now, instant);
         let merges =
             |item: &&PendingQueueItem| head.merges_with(&soft((*item).clone(), now, instant));
-        items
-            .take(people)
-            .take_while(merges)
-            .take_while(|item| self.retry_member(self.snapshot.items.first().expect("front"), item))
-            .cloned()
-            .collect()
+        let candidates = items.take(people).take_while(merges).take_while(|item| {
+            self.retry_member(self.snapshot.items.first().expect("front"), item)
+        });
+        match self.front_hold() {
+            Some(hold) => hold.matching_followers(candidates).cloned().collect(),
+            None => candidates.cloned().collect(),
+        }
     }
 
     /// Lets one owner claim presenting exactly this front start a turn.

@@ -20,6 +20,7 @@ const CAMPAIGNS = [
     node("i7272", "#7272 무중단 재시작 체크포인트를 단계마다 남기고 실패한 단계부터 다시 이어가기", {
       status: "running", stage: "review: 재시작 프로토콜 리뷰 2회차", issue_url: issue(7272), assignee: "agent-ada", round: 2, session_id: "01a180b1-e645",
       summary: "dcserver 재시작 뒤에도 마지막 체크포인트에서 이어 갑니다.", benefit: "배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.", pr_url: "https://github.com/itismyfield/AgentDesk/pull/8240",
+      evidence: [1, 2, 3, 4, 5].map((n) => `${n} 체크포인트 시험 ${n}회차 통과`.repeat(n === 5 ? 12 : 1)),
       evidence_records: [
         { summary: "리뷰 2회차 시작", command: null, result: null, head_sha: null, recorded_at: "2026-11-18T07:40:00.000Z", references: [] },
         { summary: "설계 리뷰 CLEAN", command: null, result: "P0·P1 없음", head_sha: "60aac7044", recorded_at: "2026-11-18T06:10:00.000Z", references: [] },
@@ -171,7 +172,7 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
   expect(await page.evaluate(() => window.localStorage.getItem("agentdesk.dashboard.active-campaign"))).toBe(JSON.stringify("release-train"));
 });
 
-test("campaign tab: a task opens in the pinned pane on wide screens and in a sheet on phones", async ({ page }, testInfo) => {
+test("campaign tab: a task opens in the pinned pane on wide screens and as its own screen on phones", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
   const pane = page.getByRole("complementary", { name: "선택 작업" });
@@ -181,9 +182,14 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
   await expect(page).toHaveURL(/[?&]node=i7272/);
   await expect(card).toHaveAttribute("aria-current", "true");
   const detail = page.locator(".campaign-node-detail");
-  await expect(detail.getByRole("heading", { name: /무중단 재시작/ })).toBeVisible();
-  // TaskPhone order: the stage record reads oldest first.
+  await expect(page.getByRole("heading", { name: /무중단 재시작/ })).toBeVisible();
+  // TaskPhone order: the stage record reads oldest first; only the newest three evidence lines show at first.
   await expect(detail.locator("ol > li")).toHaveText([/설계 리뷰 CLEAN/, /리뷰 2회차 시작/]);
+  const evidence = detail.getByRole("region", { name: "검증 근거" });
+  await expect(evidence.locator("li")).toHaveText([/^5 /, /^4 /, /^3 /]);
+  await evidence.getByRole("button", { name: "2개 더 보기" }).click();
+  await expect(evidence.locator("li")).toHaveCount(5);
+  await expectNoHorizontalOverflow(page);
   if (testInfo.project.name === "desktop") {
     const box = (await pane.boundingBox())!;
     expect(box.x + box.width).toBeGreaterThan(1440 - 4);
@@ -191,23 +197,45 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
     // Non-modal: the overview beside it still works.
     await panel.locator('[data-task-id="i7336"]').click();
     await expect(pane.getByRole("heading", { name: /꺼진 맥의 채널 메시지/ })).toBeVisible();
+    await page.getByRole("button", { name: "상세 닫기" }).click();
   } else {
-    const sheet = page.getByRole("dialog", { name: "선택 작업" });
-    await expect(sheet).toBeVisible();
-    const box = (await sheet.boundingBox())!;
-    expect(box.y + box.height).toBeGreaterThan(844 - 12);
+    const screen = page.getByRole("dialog", { name: /무중단 재시작/ });
+    expect(await screen.boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 844 });
+    await expect(screen.locator("header")).toContainText("열린 이슈 DAG · #7272");
+    // The browser's Back leaves the task, not the page; the screen's own back button does the same.
+    await page.goBack();
+    await expect(screen).toHaveCount(0);
+    await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+    await card.click();
+    await page.getByRole("button", { name: "목록으로" }).click();
   }
-  await expectNoHorizontalOverflow(page);
-  await page.getByRole("button", { name: "상세 닫기" }).click();
   await expect(detail).toHaveCount(0);
   await expect(page).not.toHaveURL(/[?&]node=/);
   await expect(pane).toHaveCount(0);
 });
 
-test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }) => {
+test("phone: a quick second tap on back, or a reload with the task open, still leaves one Back to the page before", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "Phone task screen");
+  await mockApi(page);
+  await page.goto("/home");
+  await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
+  const card = page.locator('[data-task-id="i7272"]');
+  const back = page.getByRole("button", { name: "목록으로" });
+  await card.click();
+  await back.dblclick();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await card.click();
+  await page.reload();
+  await back.click();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/home$/);
+});
+
+test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
-  const closeButton = page.getByRole("button", { name: "상세 닫기" });
+  const closeButton = page.getByRole("button", { name: testInfo.project.name === "desktop" ? "상세 닫기" : "목록으로" });
   const escape = async () => { await closeButton.focus(); await page.keyboard.press("Escape"); }; // a docked pane takes Escape from inside
   const card = panel.locator('[data-task-id="i7272"]');
   await card.click();
@@ -270,8 +298,13 @@ test("server campaign: a waiting approval and blocked work lead, and approving s
   await expect(panel.locator(".campaign-recent-heading")).toHaveText("최근 이벤트 · 2");
   await expectNoHorizontalOverflow(page);
   await gate.locator('[data-task-id="C"]').click();
+  // Stages before the server's current one are done; the current one says how long the gate has waited.
+  const stages = page.getByRole("region", { name: "단계" });
+  await expect(stages.locator("li")).toHaveText([/요구사항/, /^끝남설계$/, /설계 리뷰/, /구현/, /리뷰/, /착지승인 대기 23분/, /main 확인 · 최종 확인 · 완료/]);
+  await expect(stages.locator('[aria-current="step"]')).toContainText("착지");
   await page.getByRole("button", { name: "승인 검토" }).click();
   const sheet = page.getByRole("dialog", { name: "착지 승인" });
+  await expect(sheet).toContainText("11월 18일 오후 04:37"); // the dashboard's language in KST, whatever the browser's locale
   await expect(sheet.getByRole("button", { name: "승인", exact: true })).toBeDisabled();
   await sheet.getByRole("button", { name: "나중에" }).click();
   await expect(sheet).toHaveCount(0);
@@ -307,9 +340,10 @@ test.describe("touch at 390px", () => {
     expect(await tab.evaluate(small)).toEqual([]);
     expect(await tab.evaluate(tiny)).toEqual([]);
 
-    // The task sheet and its edit form follow the same rule.
+    // The task screen and its edit form follow the same rule.
     await page.locator('[data-task-id="i7272"]').click();
-    const sheet = page.getByRole("dialog", { name: "선택 작업" });
+    const sheet = page.getByRole("dialog", { name: /무중단 재시작/ });
+    expect(await sheet.evaluate(small)).toEqual([]);
     await expect(sheet.locator(".campaign-node-detail")).toBeVisible();
     await sheet.getByRole("button", { name: "작업 수정" }).click();
     await expect(sheet.locator("form")).toBeVisible();
@@ -517,6 +551,13 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   const editor = page.locator(".campaign-relations-editor");
   const task = (id: string) => editor.locator(`.react-flow__node[data-id="${id}"]`);
   await expect(editor.locator(".react-flow__node")).toHaveCount(3);
+  // The editor fills the window: no rail or top bar, so the first Tab lands on its way back.
+  await expect(page.getByTestId("app-sidebar-nav")).toHaveCount(0);
+  await expect(page.getByTestId("topbar")).toHaveCount(0);
+  expect(await editor.boundingBox()).toEqual({ x: 0, y: 0, width: 1440, height: 900 });
+  await page.keyboard.press("Tab");
+  await expect(editor.getByRole("button", { name: "캠페인", exact: true })).toBeFocused();
+  await expect(editor.getByRole("complementary", { name: "범위 요약" })).toContainText("그룹 · Gateway");
   await task("i7401").click();
   await expect(editor.getByRole("complementary")).toContainText("완료 · 바꿀 수 없음");
   await expect(editor.getByLabel("선행 추가")).toHaveCount(0);
@@ -529,6 +570,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(save).toBeDisabled();
   await editor.getByRole("button", { name: /^선행 #7272 .+ 빼기$/ }).click();
   await expect(editor.getByText("저장 안 됨 · 선행 2")).toBeVisible();
+  // With nothing chosen the column lists what changed, and a row opens its task.
+  await editor.locator("[data-editor-canvas]").click({ position: { x: 40, y: 300 } });
+  const changed = editor.getByRole("complementary", { name: "범위 요약" }).getByRole("button");
+  await expect(changed).toHaveText([/^#7402 .+선행$/, /^#7272 .+선행$/]);
+  await changed.first().click();
+  await expect(editor.getByRole("complementary")).toContainText("#7402 · Gateway");
   await save.click();
   await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
   expect(puts.map((body) => body.expected_revision)).toEqual([7, 8]);
@@ -546,11 +593,12 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(dialog).toBeVisible();
   await expect(page).toHaveURL(/edit=relations/);
   await dialog.getByRole("button", { name: "계속 편집" }).click();
-  await page.getByRole("tab", { name: "대기열" }).click();
+  await editor.getByRole("button", { name: "캠페인", exact: true }).click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "버리고 나가기" }).click();
   await expect(editor).toHaveCount(0);
   await expect(page).not.toHaveURL(/edit=relations/);
+  await expect(page.getByTestId("app-sidebar-nav")).toBeVisible();
 });
 
 test("relations editor: phones get no way in, a direct link only shows relations, and another campaign picked there opens no editor once widened", async ({ page }, testInfo) => {
@@ -636,7 +684,8 @@ test("relations editor: cable ties bundle lines, move on the grid and untie with
 
 test("relations editor: below 1280px a double-click on a line where the inspector opens ties it, and a single click opens the inspector once no second click comes", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
-  await page.setViewportSize({ width: 1100, height: 900 });
+  // The canvas spans the whole window now, so a narrow one keeps the line under the overlay.
+  await page.setViewportSize({ width: 920, height: 900 });
   const { calls, editor, tie, lines, pointOn } = await openLinkedEditor(page);
   const canvas = (await editor.locator("[data-editor-canvas]").boundingBox())!;
   // A point of #7402 → #7272 inside the 320px the overlay inspector covers.
@@ -659,7 +708,8 @@ test("relations editor: a draft kept while another page shows asks before a relo
   const [panel, editor, asked] = [page.locator(".campaigns-panel"), page.locator(".campaign-relations-editor"), [] as string[]];
   const open = async (name: string) => { await panel.getByRole("tab", { name: "관계도" }).click(); await panel.getByRole("button", { name, exact: true }).click(); };
   const reload = async (home = true) => {
-    if (home) await page.getByRole("link", { name: "홈" }).click();
+    // The full-window editor has no rail, so the home page is reached with its shortcut.
+    if (home) { await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur()); await page.keyboard.press("Alt+1"); await expect(page).toHaveURL(/\/home/); }
     page.once("dialog", (dialog) => { asked.push(dialog.type()); void dialog.dismiss(); });
     await page.reload({ timeout: 5_000 }).catch(() => undefined);
   };

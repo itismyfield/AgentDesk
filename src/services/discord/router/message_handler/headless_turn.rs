@@ -868,16 +868,13 @@ async fn start_reserved_headless_turn_admitted(
     )
     .await;
 
-    // Routine turns execute in a synthetic child channel, while their model is
-    // configured on the real agent channel carried in routine metadata. Resolve
-    // from that parent so provider CLIs receive the configured model explicitly
-    // instead of falling back to a stale/default CLI session configuration.
-    let model_resolution_channel_id =
-        metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
-    let model_for_turn = super::super::super::commands::resolve_model_for_turn(
+    let (model_for_turn, model_for_status) = routine_metadata::models_for_turn(
         shared,
-        model_resolution_channel_id,
+        channel_id,
         &provider,
+        metadata.as_ref(),
+        adk_session_key.as_deref(),
+        session_id.as_deref().filter(|_| !replay_start::retrying()),
     )
     .await;
     let adk_session_name = channel_name.clone();
@@ -889,7 +886,7 @@ async fn start_reserved_headless_turn_admitted(
     post_adk_session_status_with_canonical_identity(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
-        model_for_turn.as_deref(),
+        model_for_status.as_deref(),
         "working",
         &provider,
         Some(&adk_session_info),
@@ -1086,15 +1083,14 @@ async fn start_reserved_headless_turn_admitted(
     // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
     let cache_ttl_minutes =
         super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
-    let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
-        provider: provider.as_str().to_string(),
-        agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
-        channel_id: Some(channel_id.get().to_string()),
-        session_key: adk_session_key.clone(),
-        tmux_session: tmux_session_name.clone(),
-        channel_name: channel_name.clone(),
-        execution_mode: Some("discord_turn".to_string()),
-    };
+    let provider_execution_context = super::provider_isolation::execution_context(
+        &provider,
+        role_binding.as_ref(),
+        channel_id.get(),
+        adk_session_key.clone(),
+        tmux_session_name.clone(),
+        channel_name.clone(),
+    );
     #[cfg(test)]
     let seen = (&provider_execution_context, &current_path, source);
     #[cfg(test)]
@@ -1135,6 +1131,7 @@ async fn start_reserved_headless_turn_admitted(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
                                 registration_origin: canonical_registration.then_some(false),
+                                agy_foreground: None,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

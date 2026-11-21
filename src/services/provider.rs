@@ -17,6 +17,7 @@ mod registry;
 mod runtime;
 pub(crate) mod session_probe;
 pub(crate) mod session_prompt;
+pub(crate) mod session_source;
 pub(crate) use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
@@ -35,31 +36,6 @@ pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior,
 pub use runtime::{ProviderRuntimeExt, ProviderRuntimeProbe};
 
 pub use crate::domain::session_identity::naming::parse_provider_and_channel_from_tmux_name;
-
-pub fn compose_structured_turn_prompt(
-    prompt: &str,
-    system_prompt: Option<&str>,
-    _allowed_tools: Option<&[String]>,
-) -> String {
-    let mut sections = Vec::new();
-
-    if let Some(system_prompt) = system_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!(
-            "[Authoritative Instructions]\n{}\n\nThese instructions are authoritative for this turn. Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them.",
-            system_prompt
-        ));
-    }
-
-    if sections.is_empty() {
-        return prompt.to_string();
-    }
-
-    sections.push(format!("[User Request]\n{}", prompt));
-    sections.join("\n\n")
-}
 
 pub fn should_omit_repeated_system_prompt(
     provider: &ProviderKind,
@@ -135,7 +111,6 @@ mod prompt_reuse_tests {
             ProviderKind::Qwen.managed_tmux_wrapper_subcommand(),
             Some("qwen-tmux-wrapper")
         );
-        assert_eq!(ProviderKind::Gemini.managed_tmux_wrapper_subcommand(), None);
         assert_eq!(
             ProviderKind::OpenCode.managed_tmux_wrapper_subcommand(),
             None
@@ -706,10 +681,6 @@ pub(crate) fn tmux_capture_indicates_ready_for_input(
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
-        ProviderReadinessAdapter::Gemini => {
-            crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
-                || tmux_capture_contains_wrapper_ready_marker(capture, provider)
-        }
         ProviderReadinessAdapter::OpenCode => {
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
@@ -962,70 +933,6 @@ pub fn followup_result_from_read_output_result(
             error: session_died_error,
         },
     )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamAttemptFailure {
-    pub message: String,
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-}
-
-impl StreamAttemptFailure {
-    pub fn with_message(mut self, message: String) -> Self {
-        self.message = message;
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamAttemptResult {
-    Completed,
-    RetrySession(StreamAttemptFailure),
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamFinalState {
-    Done {
-        result: String,
-        session_id: Option<String>,
-    },
-    Error(StreamAttemptFailure),
-    RetrySession(StreamAttemptFailure),
-}
-
-pub fn run_retrying_stream_attempts<F, G>(
-    provider_name: &str,
-    mut resume_selector: Option<String>,
-    max_session_retries: usize,
-    mut execute_attempt: F,
-    mut on_retry_exhausted: G,
-) -> Result<(), String>
-where
-    F: FnMut(Option<String>) -> Result<StreamAttemptResult, String>,
-    G: FnMut(StreamAttemptFailure),
-{
-    for attempt in 0..=max_session_retries {
-        match execute_attempt(resume_selector.clone())? {
-            StreamAttemptResult::Completed | StreamAttemptResult::Cancelled => return Ok(()),
-            StreamAttemptResult::RetrySession(failure) => {
-                if attempt < max_session_retries {
-                    resume_selector = None;
-                    continue;
-                }
-                let exhausted_message = format!(
-                    "{} session could not be recovered after retry: {}",
-                    provider_name, failure.message
-                );
-                on_retry_exhausted(failure.with_message(exhausted_message));
-                return Ok(());
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Read Codex model context_window from the local CLI cache file.

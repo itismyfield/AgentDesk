@@ -232,31 +232,29 @@ pub(crate) async fn dispatch_resume_previous(
         );
     };
 
-    let provider_info =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
-    let provider_name = provider_info
-        .as_ref()
-        .map(|(provider, _)| provider.as_str());
-
     // Resolve the runtime channel + owning node exactly like force-kill so
     // cross-node requests forward to the owner instead of rebinding a row this
     // node does not run.
+    let (current_key, session) = match load_force_kill_session_pg(pool, session_key).await {
+        Ok(Some(selected)) => selected,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "session not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    // An alias names the row; the rebind and its teardown follow the row's current primary.
+    let session_key = current_key.as_str();
+    let tmux_name = tmux_name_from_session_key(session_key).unwrap_or(tmux_name);
     let (_active_dispatch_id, _agent_id, runtime_channel_id, session_provider, owner_instance_id) =
-        match load_force_kill_session_pg(pool, session_key, provider_name).await {
-            Ok(Some(tuple)) => tuple,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "session not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
+        session;
 
     let is_forwarded =
         request_headers.is_some_and(crate::services::session_forwarding::is_forwarded_request);
@@ -297,10 +295,11 @@ pub(crate) async fn dispatch_resume_previous(
         }
     }
 
-    let provider = provider_info
-        .as_ref()
-        .map(|(provider, _)| provider.clone())
-        .or_else(|| session_provider.as_deref().and_then(ProviderKind::from_str));
+    let provider = crate::services::provider::session_source::session_provider(
+        session_provider.as_deref(),
+        Some(session_key),
+        &tmux_name,
+    );
     let channel_id = runtime_channel_id
         .as_deref()
         .and_then(|id| id.parse::<u64>().ok())

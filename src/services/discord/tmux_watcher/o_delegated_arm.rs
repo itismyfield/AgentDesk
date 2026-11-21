@@ -85,22 +85,23 @@ pub(super) async fn consume_delegated_terminal(
     Ok(())
 }
 
-/// The claim a direct terminal body sends under, taken at each arm's own transport; a task
-/// response claims inside its own send instead.
-pub(super) fn direct_body_claim(
-    claims: bool,
+/// Use the same source for the ownership read and the later transport claim.
+pub(super) fn watcher_body<'a>(
     channel: ChannelId,
-    session: &str,
-) -> Option<crate::services::tui_o::cutover::BodyClaim<'_>> {
-    claims.then(|| crate::services::tui_o::cutover::BodyClaim::tmux(channel.get(), Some(session)))
+    session: &'a str,
+    source: &str,
+    inflight: Option<&InflightTurnState>,
+) -> crate::services::tui_o::cutover::BodyClaim<'a> {
+    let nonce = inflight
+        .filter(|row| row.output_path.as_deref() == Some(source))
+        .and_then(|row| row.turn_nonce.as_deref());
+    crate::services::tui_o::cutover::BodyClaim::tmux(channel.get(), Some(session))
+        .for_turn(nonce)
+        .for_source(Some(source))
 }
 
-/// Whether O took (or holds) the channel since the watcher's peek, so nothing Legacy sent counts.
-pub(super) fn o_took_channel(channel: ChannelId, session: &str) -> bool {
-    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-        channel.get(),
-        Some(session),
-    ) != Ok(false)
+pub(super) fn o_took_channel(claim: crate::services::tui_o::cutover::BodyClaim<'_>) -> bool {
+    claim.peek_o_owns_tui_output_for_channel() != Ok(false)
 }
 
 pub(super) async fn dispatch_collected(

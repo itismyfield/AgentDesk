@@ -45,12 +45,12 @@ mocked/local checks do not execute the live specifications.
 
 The [handwritten feature rows](../../../../docs/user-feature-map.rows.yaml) and
 scenario YAMLs are inputs to the [generated feature map](../../../../docs/user-feature-map.md)
-and [coverage JSON](../../../../docs/generated/user-feature-coverage.json).
-Edit the inputs, then regenerate both outputs from the repository root:
+and [coverage JSON artifact](../../../../docs/e2e/multi-provider-e2e.md#user-feature-coverage-metadata).
+Edit the inputs and validate them from the repository root.
 
 ```bash
-python3 scripts/generate_user_feature_map.py --write --base-ref origin/main
-python3 scripts/generate_user_feature_map.py --check --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --validate --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --output-dir target/user-feature-map --base-ref origin/main
 ```
 
 `feature_coverage.schema: 1` contains `claims` keyed by `feature_id`, explicit
@@ -190,6 +190,16 @@ python3 scripts/e2e/run_multi_provider_matrix.py \
   --queue-runtime-root "$E2E_RUNTIME_ROOT" \
   --output out/e2e/tui_relay/manual-matrix --dry-run
 ```
+
+`E-54` also lists `claude-herdr`. A Herdr cell does not run its tmux steps but
+the cases in [`herdr_stop.py`](../../../../scripts/e2e/tui_relay/herdr_stop.py):
+`E-54-AB` stops a hold with `!stop`, sends an idle `!stop` 15s later whose single
+no-active-turn reply is the early-idle witness, and requires the late sentinel to
+stay absent past the hold. `E-54-C` sends a follow-up during a hold; it must be
+delivered with no not-delivered or not-kept notice, and remains a known gap
+(`known_gap.herdr_profile`) until then. Run it with `--cell claude-herdr`,
+`--herdr-endpoint` and the destructive opt-in. Without that opt-in the scenario is
+skipped and the coverage gate reports `coverage_class_actual=unsupported-known-gap`.
 
 Inspect each selected YAML's prerequisites and acceptance criteria before live
 execution. In particular, `E-36` needs exclusive `--filter E-36`,

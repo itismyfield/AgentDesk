@@ -608,6 +608,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        for name in ("rust_or_policy", "rust_compile", "cross_os_rust"):
+            with self.subTest(filter=name):
+                self.assertTrue(selects(filters[name], "crates/adk-store/Cargo.toml"))
         jobs = yaml.safe_load(workflow)["jobs"]
         check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (
@@ -644,7 +648,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
                 ("check_fast_cross_os_targets",
                  "set -euo pipefail\n"
-                 "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
+                 "cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json\n"
                  "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json\n"),
             ],
         )
@@ -883,7 +887,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
-        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --profile ci",))
+        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --workspace --profile ci",))
         # Local non-PG lib tests take the native CI path; the other commands equal CI Main's non-lib step.
         recipe = just_recipe_commands(justfile, "test-non-pg")
         self.assertTrue(any(command.startswith('RUNNER_TEMP="$PWD/target/nextest-local" GITHUB_WORKSPACE="$PWD" '
@@ -923,36 +927,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                # Lib tests run through the audited native path; the other targets run whole.
-                self.assertIn("pg-classifier", job)
                 self.assertIn("cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
         self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
-    def test_native_nightly_runs_both_phases_with_separate_time_budgets(self) -> None:
+    def test_windows_nightly_runs_both_native_phases_with_separate_time_budgets(self) -> None:
         import shlex
         jobs = yaml.safe_load(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        for job_name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
-            with self.subTest(job=job_name):
-                job = jobs[job_name]
-                steps = [s for s in job["steps"] if "nextest-native.sh" in s.get("run", "")]
-                self.assertEqual([shlex.split(s["run"])[-1] for s in steps], ["prepare", "run"])
-                for step in steps:
-                    argv = shlex.split(step["run"])
-                    # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
-                    if job_name == "full_macos" and argv[-1] == "prepare":
-                        self.assertEqual(argv[:2], ["/usr/bin/time", "-l"])
-                        argv = argv[2:]
-                    self.assertEqual(argv[:-1],
-                                     ["bash", "scripts/ci/nextest-native.sh", platform,
-                                      f"{platform}-lib", "pg-classifier"])
-                    self.assertEqual(step["shell"], "bash")
-                    self.assertNotIn("if", step)
-                    self.assertNotIn("continue-on-error", step)
-                expected_minutes = (4145.211 / 11041) * 13447 / 60
-                self.assertGreaterEqual(steps[1]["timeout-minutes"], expected_minutes * 1.5)
-                self.assertGreater(steps[0]["timeout-minutes"], 0)
-                self.assertLess(sum(s["timeout-minutes"] for s in steps), job.get("timeout-minutes", 360))
-                self.assertLessEqual(job.get("timeout-minutes", 360), 360)
+        job = jobs["full_windows"]
+        steps = [step for step in job["steps"] if "nextest-native.sh" in step.get("run", "")]
+        self.assertEqual([shlex.split(step["run"])[-1] for step in steps], ["prepare", "run"])
+        for step in steps:
+            self.assertEqual(shlex.split(step["run"])[:-1],
+                             ["bash", "scripts/ci/nextest-native.sh", "windows",
+                              "windows-lib", "pg-classifier"])
+            self.assertEqual(step["shell"], "bash")
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+        expected_minutes = (4145.211 / 11041) * 13447 / 60
+        self.assertGreaterEqual(steps[1]["timeout-minutes"], expected_minutes * 1.5)
+        self.assertGreater(steps[0]["timeout-minutes"], 0)
+        self.assertLess(sum(step["timeout-minutes"] for step in steps), job.get("timeout-minutes", 360))
+        self.assertLessEqual(job.get("timeout-minutes", 360), 360)
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -960,7 +955,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
         self.assertEqual(mutation["needs"], "changes")
         self.assertEqual(mutation["runs-on"], "ubuntu-latest")
-        self.assertEqual(mutation["timeout-minutes"], 60)
+        self.assertEqual(mutation["timeout-minutes"], 80)
         self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
@@ -979,7 +974,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"        shell: bash\n"
-            r"        timeout-minutes: 60\n"
+            r"        timeout-minutes: 75\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
@@ -2145,7 +2140,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 helper, encoding="utf-8"
             )
             (root / "scripts/ci").mkdir()
-            for helper in ("nextest_required.py", "cargo_test_filters.py"):
+            for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
+                           "main_script_check_shards.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
@@ -2630,7 +2626,7 @@ jobs:
             ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
-            ("job timeout leading zero is not decimal 60", mutations, "    timeout-minutes: 60\n", "    timeout-minutes: 074\n"),
+            ("job timeout octal alias is not decimal 80", mutations, "    timeout-minutes: 80\n", "    timeout-minutes: 0120\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):

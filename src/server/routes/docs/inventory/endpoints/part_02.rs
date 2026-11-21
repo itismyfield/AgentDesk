@@ -444,7 +444,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             (
                 "provider",
                 body_param("string", true, "Provider for the agent channel")
-                    .with_enum(&["claude", "codex", "gemini", "opencode", "qwen"]),
+                    .with_enum(&["claude", "codex", "opencode", "qwen"]),
             ),
             (
                 "prompt_template_path",
@@ -486,7 +486,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             400,
             json!({"body": {"agent_id": "x", "channel_id": "1473922824350601297", "provider": "unknown", "prompt_template_path": "config/agents/_shared.prompt.md"}}),
-            json!({"error": "provider must be one of claude|codex|gemini|opencode|qwen"}),
+            json!({"error": "provider must be one of claude|codex|opencode|qwen"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/setup -H 'Content-Type: application/json' -d '{\"agent_id\":\"project-agentdesk\",\"channel_id\":\"1473922824350601297\",\"provider\":\"codex\",\"prompt_template_path\":\"config/agents/_shared.prompt.md\",\"dry_run\":true}'"),
         ep(
@@ -573,6 +573,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             (
                 "metadata",
                 body_param("object", false, "Optional trigger metadata injected into the turn context"),
+            ),
+            (
+                "origin_id",
+                body_param("string", false, "Accepted-input id the execution's receipt names, as on turn/start (not allowed with delegation=true)"),
+            ),
+            (
+                "delegation",
+                body_param("boolean", false, "Delegation: the server mints origin_id (dlg:<requester channel>:<nonce>:<target>) and returns it, posts an accept card with [상태]/[중단] in the requester's primary channel (accept_card.message_id or accept_card.error), and stages one result card there through message_outbox once the execution's terminal receipt commits. 404 delegation_requester_not_found, 422 delegation_requester_has_no_channel, 400 origin_id_conflict").with_default(false),
             ),
         ])
         .with_example(

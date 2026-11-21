@@ -14,6 +14,8 @@ use crate::services::discord::settings::RoleBinding;
 use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
+#[cfg(test)]
+pub(crate) use memento::with_memento_test_endpoint;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_snapshot,
     resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,

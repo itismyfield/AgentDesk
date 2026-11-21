@@ -150,7 +150,7 @@ impl Case {
         fx.owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let launcher = Arc::new(Launcher::default());
-        let (nonce, started) = launch(&fx, &launcher);
+        let (nonce, started) = launch_pinless(&fx, &launcher);
         assert!(started.path.exists());
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -169,9 +169,10 @@ impl Case {
         location.socket_addr = endpoint.socket_path.display().to_string();
         location.named_session = endpoint.herdr_session;
         fx.store(&record);
-        let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
-            fx.pool.clone(),
-        ));
+        let mut shared = {
+            let _runtime = fx.rt.enter();
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()))
+        };
         Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.into();
         shared.restart.reconcile_done.store(true, Ordering::Release);
         crate::services::tui_prompt_dedupe::reset_state_for_tests();

@@ -297,6 +297,22 @@ pub(super) fn finish_turn_if_matches(
         reply(unchanged, Vec::new());
         return;
     }
+    if let Err(error) = super::policy_close::admit_control(state, channel_id, preserve_queue) {
+        reply(
+            FinishTurnResult {
+                removed_token: None,
+                has_pending: state
+                    .intervention_queue
+                    .iter()
+                    .any(|i| i.mode == InterventionMode::Soft),
+                mailbox_online: true,
+                queue_exit_events: vec![],
+                persistence_error: Some(error),
+            },
+            vec![],
+        );
+        return;
+    }
     let withdrawn = before_release.map_or_else(Vec::new, |step| step.withdraw());
     state.last_persistence = Some(persistence.clone());
     let finished_user_message_id = state.active_user_message_id;
@@ -421,6 +437,11 @@ pub(super) fn finish_turn_if_token(
         let queue = &state.intervention_queue;
         let has_pending = queue.iter().any(|item| item.mode == InterventionMode::Soft);
         let _ = reply.send(TokenFinish::TokenMismatch { has_pending });
+        return;
+    }
+    if let Err(error) = super::policy_close::admit_control(state, channel_id, false) {
+        tracing::warn!(%channel_id, %error, "native control retained its turn");
+        let _ = reply.send(TokenFinish::Unavailable);
         return;
     }
     state.last_persistence = Some(persistence.clone());
@@ -692,5 +713,49 @@ mod tests {
             )
             .await;
         assert!(result.removed_token.is_some());
+    }
+}
+
+pub(super) fn finish_cancelled(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    reply: oneshot::Sender<FinishTurnResult>,
+) {
+    let should_finish = state
+        .cancel_token
+        .as_ref()
+        .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    if should_finish
+        && let Err(error) = super::policy_close::admit_control(state, channel_id, false)
+    {
+        let _ = reply.send(FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: true,
+            queue_exit_events: vec![],
+            persistence_error: Some(error),
+        });
+        return;
+    }
+    if should_finish {
+        let persistence = state.last_persistence.clone();
+        let _ = reply.send(finalize_turn_state(
+            state,
+            channel_id,
+            persistence.as_ref(),
+            false,
+        ));
+        mark_turn_finished_signal_done(channel_id);
+    } else {
+        let _ = reply.send(FinishTurnResult {
+            removed_token: None,
+            has_pending: state
+                .intervention_queue
+                .iter()
+                .any(|item| item.mode == InterventionMode::Soft),
+            mailbox_online: true,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        });
     }
 }

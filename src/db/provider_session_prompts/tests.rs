@@ -3,7 +3,7 @@ use super::*;
 
 const MIGRATION: &str = concat!(
     include_str!("../../../migrations/postgres/0148_provider_session_system_prompts.sql"),
-    include_str!("../../../migrations/postgres/0198_provider_session_prompt_anchors.sql")
+    include_str!("../../../migrations/postgres/0199_provider_session_prompt_anchors.sql")
 );
 
 fn test_channel() -> String {

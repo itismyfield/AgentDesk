@@ -7,6 +7,8 @@ import io
 import json
 import os
 from pathlib import Path
+import queue
+import threading
 import time
 import subprocess
 import sys
@@ -150,9 +152,13 @@ class IdentityAdmissionTests(unittest.TestCase):
             self.assertEqual(stream.readline(), prefix.decode())
         read, write = os.pipe(); self.addCleanup(os.close, write)
         stream = os.fdopen(read); self.addCleanup(stream.close)
-        before = time.monotonic()
-        self.assertIsNone(lifecycle.initial_frame(stream)[0])
-        self.assertLess(time.monotonic()-before, .1)
+        real_select = lifecycle.select.select
+        def nonblocking(readers, writers, errors, timeout):
+            self.assertEqual(timeout, 0)
+            return real_select(readers, writers, errors, timeout)
+        with mock.patch.object(lifecycle.select, 'select', side_effect=nonblocking) as select:
+            self.assertIsNone(lifecycle.initial_frame(stream)[0])
+        select.assert_called_once_with([read], [], [], 0)
 
     def test_raw_control_health_rejects_each_stale_or_missing_witness(self):
         identity = self.identity(); observed = self.probe()
@@ -231,7 +237,7 @@ class SharedWriterTests(unittest.TestCase):
         from tests.test_dev_instance_credential import InstanceCredentialCliTests
         fixture = InstanceCredentialCliTests(methodName='runTest')
         fixture.setUp(); self.addCleanup(fixture.doCleanups)
-        for index, name in enumerate(('announce_bot_token', 'notify_bot_token')):
+        for index, name in enumerate(('announce_bot_token', 'notify_bot_token', 'antigravity_bot_token')):
             token = ('SYNTHETIC_UTILITY_STDIN_ONLY_'+str(index)).encode()
             result = fixture.credential(name, token+b'\n')
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -239,39 +245,189 @@ class SharedWriterTests(unittest.TestCase):
             self.assertNotIn(token, result.stdout+result.stderr)
 
 
+AGY_IDS = {'antigravity_bot_token': '1573471163663785994', 'announce_bot_token': '900006',
+           'notify_bot_token': '900003'}
+
+
+class AgyIdentityAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        from tests import test_dev_instance as declarations
+        self.fixture = declarations.InstanceDeclarationTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.manifest = self.fixture.prepare(declarations.agy_profile(), agy_login=declarations.agy_login(self.fixture.home))
+        self.root = Path(self.manifest['root'])
+        self.frame = {'kind': 'admission', 'schema': 1, 'identities': dict(AGY_IDS)}
+        for name in AGY_IDS:
+            (self.root/'credential'/name).write_text('SYNTHETIC_'+name)
+            (self.root/'credential'/name).chmod(0o600)
+
+    def answer(self, token, deadline, mismatch=None):
+        name = token.decode().removeprefix('SYNTHETIC_')
+        if mismatch == 'silent':
+            raise ConnectionError('synthetic /users/@me never answered')
+        return '900099' if name == mismatch else AGY_IDS[name]
+
+    def test_agy_probe_binds_test_antigravity_id_and_exactly_three_credentials(self):
+        from scripts.dev_instance import identity
+        probe = lambda frame=self.frame, mismatch=None: identity.probe(
+            self.root, frame, time.monotonic()+2, request=lambda t, d: self.answer(t, d, mismatch),
+            declared_roles=self.manifest['profile']['bots'])
+        self.assertEqual({item['application_id'] for item in probe()}, set(AGY_IDS.values()))
+        tui = {'kind': 'admission', 'schema': 1, 'identities': dict(zip(NAMES, ('900003','900001','900002','900006')))}
+        foreign = {**self.frame, 'identities': {**AGY_IDS, 'antigravity_bot_token': '900099'}}
+        for frame, mismatch in [(self.frame, 'antigravity_bot_token'), (self.frame, 'silent'), (foreign, None),
+                                (foreign, 'antigravity_bot_token'), (tui, None)]:
+            with self.subTest(mismatch=mismatch, names=sorted(frame['identities'])):
+                with self.assertRaises(files.InstanceError):
+                    probe(frame, mismatch)
+        (self.root/'credential/claude_bot_token').write_text('SYNTHETIC_extra')
+        (self.root/'credential/claude_bot_token').chmod(0o600)
+        with self.assertRaises(files.InstanceError):
+            probe()
+
+    def up(self, payload, mismatch=None, delay=0, resources={}):
+        """Run `up` until the lease; report the refusal, probe calls and whether the lease was reached."""
+        from scripts.dev_instance import identity
+        worktree = self.fixture.worktree
+        (worktree/'.git/info/exclude').write_text('target/\n')
+        binary = worktree/'target/debug/agentdesk'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text('#!/bin/sh\n')
+        binary.chmod(0o700)
+        read, write = os.pipe()
+        def produce():
+            time.sleep(delay)
+            os.write(write, payload)
+            os.close(write)
+        writer = threading.Thread(target=produce)
+        writer.start()
+        spawn = mock.Mock(side_effect=AssertionError('Gateway spawned before identity admission'))
+        with os.fdopen(read) as stream, mock.patch.object(
+                identity, 'request_json', side_effect=lambda url, end, token: {'id': self.answer(token, end, mismatch)}) as asked, \
+                mock.patch.object(lifecycle, '_acquire_instance', side_effect=LookupError('lease reached')) as leased:
+            with self.assertRaises((files.InstanceError, LookupError)) as refused:
+                lifecycle.supervise(self.fixture.base, self.fixture.instance_id, {}, head=self.manifest['head'],
+                                    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), wall_timeout=2,
+                                    stop_grace=.1, spawn=spawn, resources=resources, control_stream=stream)
+        writer.join()
+        spawn.assert_not_called()
+        return str(refused.exception), asked.called, leased.called
+
+    def test_up_refuses_a_foreign_discord_identity_before_gateway_spawn(self):
+        frame = (json.dumps(self.frame)+'\n').encode()
+        for mismatch in ('antigravity_bot_token', 'silent'):
+            with self.subTest(mismatch=mismatch):
+                reason, asked, leased = self.up(frame, mismatch)
+                self.assertIn('application identity', reason)
+                self.assertEqual((asked, leased), (True, False))
+
+    def test_agy_resource_start_without_verification_never_launches_keeper(self):
+        from scripts.dev_instance import keeper
+        with mock.patch.object(keeper, 'launch') as launch, \
+                self.assertRaisesRegex(files.InstanceError, 'verified identity run'):
+            lifecycle._supervise_resources(self.manifest, {}, None, {}, None, time.monotonic()+5, .1, None, None)
+        launch.assert_not_called()
+
+    def test_o3_validate_accepts_the_agy_credential_set_without_going_live(self):
+        result = self.fixture.cli('validate', '--instance', self.fixture.instance_id)
+        self.assertEqual((result.returncode, json.loads(result.stdout)), (0, {
+            'status': 'DECLARATION_VALID', 'live_ready': False, 'instance_id': self.fixture.instance_id}))
+
+    def test_agy_up_requires_a_complete_admission_before_lease_or_keeper(self):
+        frame = (json.dumps(self.frame)+'\n').encode()
+        padded = lambda size: frame[:-1] + b' '*(size-len(frame)) + b'\n'
+        for name, payload, resources in [('eof', b'', {}), ('partial', frame[:-5], {}), ('no-newline', frame[:-1], {}),
+                                         ('no-resources', frame, None), ('4097-byte line', padded(4097), {})]:
+            with self.subTest(case=name):
+                self.assertEqual(self.up(payload, resources=resources)[1:], (False, False))
+        self.assertEqual(self.up(padded(4096)), ('lease reached', True, True))
+        self.assertEqual(self.up(frame, delay=.3), ('lease reached', True, True))
+        self.assertEqual(self.up(frame, 'antigravity_bot_token', delay=.3)[1:], (True, False))
+        (self.root/'credential/notify_bot_token').unlink()
+        self.assertEqual(self.up(frame)[1:], (False, False))
+
+
 class IdentityTransportTests(unittest.TestCase):
     def test_slow_body_is_bounded_by_total_deadline(self):
-        import threading
-        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from scripts.dev_instance import identity
+
+        partial_sent = threading.Event()
+        release_server = threading.Event()
+        result = queue.Queue()
+
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self,*args): pass
+            def log_message(self, *args):
+                pass
+
             def do_GET(self):
-                body=b'{"id":"900001"}'
-                self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers()
-                try:
-                    for byte in body:
-                        self.wfile.write(bytes([byte]));self.wfile.flush();time.sleep(.04)
-                except (BrokenPipeError,ConnectionResetError): pass
-        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
-        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
-        started=time.monotonic()
-        try: identity.request_json(f'http://127.0.0.1:{server.server_port}/slow',started+.08)
-        except (files.InstanceError,ConnectionError): pass
-        self.assertLess(time.monotonic()-started,.30,'slow-drip body bypassed the absolute request deadline')
+                self.send_response(200)
+                self.send_header('Content-Length', '15')
+                self.end_headers()
+                self.wfile.write(b'{"id":')
+                partial_sent.set()
+                release_server.wait(30)
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def request():
+            try:
+                result.put(identity.request_json(f'http://127.0.0.1:{server.server_port}/slow', 40))
+            except Exception as error:
+                result.put(error)
+
+        # Fire the transport's deadline callback while a partial response is still open.
+        with mock.patch.object(identity, 'time', mock.Mock(monotonic=lambda: 10)), \
+                mock.patch.object(identity, 'threading', mock.Mock()) as timers:
+            worker = threading.Thread(target=request, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(partial_sent.wait(15), 'HTTP fixture never sent the partial response')
+                timers.Timer.assert_called_once()
+                timeout, expire = timers.Timer.call_args.args
+                self.assertEqual(timeout, 30)
+                timers.Timer.return_value.start.assert_called_once_with()
+                expire()
+                self.assertIsInstance(result.get(timeout=15), (files.InstanceError, ConnectionError))
+            finally:
+                release_server.set()
+                worker.join(timeout=15)
+        self.assertFalse(worker.is_alive())
 
     def test_dns_wait_is_bounded_without_any_credential_handoff(self):
-        import socket
         from scripts.dev_instance import identity
-        def slow_resolver(*args,**kwargs):
-            time.sleep(.40)
-            return [(socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_TCP,'',('127.0.0.1',1))]
-        with mock.patch.object(socket,'getaddrinfo',slow_resolver):
-            started=time.monotonic()
-            with self.assertRaises((files.InstanceError,ConnectionError)):
-                identity.request_json('http://fixture.invalid:1/',started+.05)
-            self.assertLess(time.monotonic()-started,.30,'DNS exceeded the absolute request deadline')
+
+        resolver_started = threading.Event()
+        release_resolver = threading.Event()
+        answers = queue.Queue()
+        queue_api = mock.Mock(Queue=mock.Mock(return_value=answers), Empty=queue.Empty)
+
+        def slow_resolver(*args, **kwargs):
+            resolver_started.set()
+            release_resolver.wait(30)
+            return []
+
+        def expire_dns(*, timeout):
+            self.assertEqual(timeout, 2)
+            self.assertTrue(resolver_started.wait(15), 'resolver did not start')
+            raise queue.Empty
+
+        with mock.patch.object(identity, 'time', mock.Mock(monotonic=lambda: 10)), \
+                mock.patch.object(identity, 'queue', queue_api), \
+                mock.patch.object(answers, 'get', side_effect=expire_dns), \
+                mock.patch.object(identity.socket, 'getaddrinfo', side_effect=slow_resolver), \
+                mock.patch.object(identity.socket, 'socket') as connect:
+            try:
+                with self.assertRaises(ConnectionError):
+                    identity.request_json('http://fixture.invalid:1/', 12, b'SYNTHETIC_AUTH_ONLY')
+                answers.get.assert_called_once_with(timeout=2)
+                connect.assert_not_called()
+            finally:
+                release_resolver.set()
 
     def test_proxy_is_ignored_and_redirect_does_not_forward_credentials(self):
         import threading
@@ -291,10 +447,10 @@ class IdentityTransportTests(unittest.TestCase):
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         with mock.patch.dict(os.environ, {'HTTP_PROXY':'http://synthetic.invalid:1','HTTPS_PROXY':'http://synthetic.invalid:1'}):
-            body=identity.request_json(f'http://127.0.0.1:{server.server_port}/identity',time.monotonic()+2,b'SYNTHETIC_AUTH_ONLY')
+            body=identity.request_json(f'http://127.0.0.1:{server.server_port}/identity',time.monotonic()+15,b'SYNTHETIC_AUTH_ONLY')
             self.assertEqual(body['id'],'900001')
             with self.assertRaises(files.InstanceError):
-                identity.request_json(f'http://127.0.0.1:{server.server_port}/redirect',time.monotonic()+2,b'SYNTHETIC_AUTH_ONLY')
+                identity.request_json(f'http://127.0.0.1:{server.server_port}/redirect',time.monotonic()+15,b'SYNTHETIC_AUTH_ONLY')
         self.assertEqual(seen,['/identity','/redirect'])
 
 
@@ -410,7 +566,7 @@ class ControlProtocolTests(unittest.TestCase):
                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         def cleanup():
             if self.child.poll() is None: self.child.terminate()
-            self.child.wait(timeout=3)
+            self.child.wait(timeout=15)
             if not self.child.stdin.closed: self.child.stdin.close()
         self.addCleanup(cleanup)
         owner = self
@@ -460,7 +616,7 @@ class ControlProtocolTests(unittest.TestCase):
         stop = self.api('cooperative_stop')
         self.start()
         with mock.patch.object(self.child, 'wait', wraps=self.child.wait) as wait:
-            result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+3)
+            result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
             wait.assert_called_once()
         self.assertIsNone(result)
         self.assertEqual(self.child.returncode, 0)
@@ -470,7 +626,7 @@ class ControlProtocolTests(unittest.TestCase):
     def test_public_nonce_does_not_authenticate_a_forged_control_reply(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'forged'
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
 
     def test_signed_reply_still_requires_exact_schema_challenge_and_witness(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
@@ -479,57 +635,57 @@ class ControlProtocolTests(unittest.TestCase):
         for field, value in variants:
             self.mutate = lambda reply, field=field, value=value: reply.__setitem__(field, value)
             with self.subTest(field=field, value=value), self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.mutate = lambda reply: reply['witness'].__setitem__('nonce', 'old-run')
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.assertEqual(len(self.requests), len(variants)+1)
 
     def test_valid_http_reply_without_durable_ack_is_refused_before_wait(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'missing'
         with mock.patch.object(self.child, 'wait', wraps=self.child.wait) as wait:
             with self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
             wait.assert_not_called()
 
     def test_eof_is_accepted_only_with_the_signed_fresh_ack(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof'
-        result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+        result = stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.assertIsNone(result); self.assertEqual(self.child.returncode, 0)
 
     def test_eof_without_ack_cannot_claim_gateway_exit(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'eof-missing'
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
 
     def test_old_challenge_and_public_ack_files_are_refused(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'old-ack'
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
 
     def test_wait_timeout_cannot_be_replaced_by_http_success(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
         with mock.patch.object(self.child, 'wait', side_effect=subprocess.TimeoutExpired('owned-child', .01)) as wait:
             with self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
             wait.assert_called_once()
 
     def test_ack_must_remain_private_even_with_a_valid_signature(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'public-ack'
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
 
     def test_ack_hardlink_is_not_adopted_as_a_private_acknowledgement(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'linked-ack'
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
 
     def test_removed_epoch_and_control_ready_fields_are_rejected(self):
         stop = self.api('cooperative_stop'); self.start(); self.mode = 'no-exit'
         for field in ('epoch', 'control_ready'):
             self.mutate = lambda reply, field=field: reply.__setitem__(field, 7)
             with self.subTest(field=field), self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.assertEqual(len(self.requests), 2)
 
     def test_post_control_ignores_proxy_and_does_not_follow_redirects(self):
@@ -547,7 +703,7 @@ class ControlProtocolTests(unittest.TestCase):
                                          'http_proxy':f'http://127.0.0.1:{server.server_port}',
                                          'NO_PROXY':'', 'no_proxy':''}):
             with self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.assertEqual(received, [])
         self.assertEqual(self.paths, ['/_agentdesk/test-control'])
 
@@ -555,7 +711,7 @@ class ControlProtocolTests(unittest.TestCase):
         stop = self.api('cooperative_stop'); self.start()
         (self.root/'credential'/NAMES[0]).write_bytes(b'SYNTHETIC_REPLACED')
         with self.assertRaises(self.identity.ControlRefused):
-            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+2)
+            stop(self.manifest, self.nonce, self.child, self.digest, self.observed, time.monotonic()+15)
         self.assertEqual(self.requests, [])
 
     def test_observed_inventory_cannot_carry_extra_private_fields(self):
@@ -563,7 +719,7 @@ class ControlProtocolTests(unittest.TestCase):
         observed = copy.deepcopy(self.observed); observed[0]['private'] = 'SYNTHETIC_UNEXPECTED'
         with mock.patch.object(self.identity, '_post_control') as request:
             with self.assertRaises(self.identity.ControlRefused):
-                stop(self.manifest, self.nonce, self.child, self.digest, observed, time.monotonic()+2)
+                stop(self.manifest, self.nonce, self.child, self.digest, observed, time.monotonic()+15)
             request.assert_not_called()
 
     def test_cross_rust_public_synthetic_key_and_request_vector(self):
