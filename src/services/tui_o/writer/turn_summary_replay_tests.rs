@@ -530,12 +530,15 @@ async fn unprepared_replay_uses_model_only_from_its_own_turn_interval() {
     let root = record_dir();
     std::fs::create_dir_all(&root).unwrap();
     let now = Utc::now();
-    let started = now - chrono::Duration::seconds(8);
-    let ended = now - chrono::Duration::seconds(4);
-    for (id, observed_at) in [
-        ("later-statusline", now - chrono::Duration::seconds(2)),
-        ("in-turn-statusline", now - chrono::Duration::seconds(6)),
+    let started = now - chrono::Duration::seconds(90);
+    let ended = now - chrono::Duration::seconds(80);
+    // A live summary reads the record its status line rewrote just after the turn ended.
+    for (id, after_start, owned) in [
+        ("later-statusline", 88, false),
+        ("settled-statusline", 13, true),
+        ("in-turn-statusline", 5, true),
     ] {
+        let observed_at = started + chrono::Duration::seconds(after_start);
         let session = uuid::Uuid::new_v4().to_string();
         let rows = records(id, 0);
         let rows = std::array::from_fn::<_, 3, _>(|i| {
@@ -582,7 +585,7 @@ async fn unprepared_replay_uses_model_only_from_its_own_turn_interval() {
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             footer.payload.contains("Opus 4.6 (high, fast)"),
-            (started..=ended).contains(&observed_at),
+            owned,
             "{}",
             footer.payload
         );

@@ -10,6 +10,9 @@ use crate::services::cswap::{ClaudeAccountsResponse, ClaudeAccountsStatus, Cswap
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
 
 const MAX_AGE_SECONDS: i64 = 15 * 60;
+/// The status line re-renders every few seconds, so the record a live summary reads was usually
+/// written just after the turn ended; a replay long after the turn still gets no model.
+const STATUSLINE_SETTLE: chrono::Duration = chrono::Duration::seconds(60);
 
 mod statusline;
 
@@ -209,7 +212,7 @@ pub(crate) fn record_launch(
 }
 
 pub(crate) fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64) {
-    if provider != "codex" && (provider != "claude" || profile == "default") {
+    if provider != "codex" && provider != "claude" {
         return;
     }
     let Some(fetched) = DateTime::from_timestamp(fetched_at, 0) else {
@@ -265,6 +268,7 @@ fn cached_claude(
     selection: Option<Selected>,
     session_id: &str,
     logical_session: &str,
+    session: Option<Quota>,
     now: DateTime<Utc>,
 ) -> Option<Quota> {
     // The binding names the wrapper, and its auth marker must name this native session.
@@ -274,23 +278,46 @@ fn cached_claude(
     if profile != "default" {
         return profile_quota(&cache, "claude", &profile, now);
     }
-    let selected = cache.profiles.get(&("claude".to_string(), channel))?;
-    if selected.profile != profile || !selected.allows(selection?, now) {
-        return None;
-    }
-    let account = selected.default_claude_account?;
+    let witnessed = profile_quota(&cache, "claude", "default", now)
+        .filter(|account| same_account(session, account));
+    let account = cache
+        .profiles
+        .get(&("claude".to_string(), channel))
+        .filter(|selected| {
+            selected.profile == profile
+                && selection.is_some_and(|selection| selected.allows(selection, now))
+        })
+        .and_then(|selected| selected.default_claude_account);
     drop(cache);
-    let response = CswapService::global().cached_accounts_for_summary()?;
-    (response.active_account_number == Some(account)).then(|| claude(&response, now))?
+    account
+        .and_then(|account| {
+            let response = CswapService::global().cached_accounts_for_summary()?;
+            (response.active_account_number == Some(account)).then(|| claude(&response, now))?
+        })
+        .or(witnessed)
+}
+
+/// The default home's usage counts only when the session's own 7d window resets with it, since
+/// that window is per account and a switched account would show another reset.
+fn same_account(session: Option<Quota>, account: &Quota) -> bool {
+    session
+        .and_then(|session| session.seven_day)
+        .zip(account.seven_day)
+        .is_some_and(|(session, account)| (session.reset - account.reset).num_seconds().abs() <= 60)
 }
 
 fn merge_claude(session: Option<Quota>, account: Option<Quota>) -> Option<Quota> {
-    if let Some(mut session) = session {
-        session.fable_seven_day = account.and_then(|quota| quota.fable_seven_day);
-        Some(session)
-    } else {
-        account
-    }
+    let Some(mut session) = session else {
+        return account;
+    };
+    session.five_hour = session
+        .five_hour
+        .or(account.and_then(|quota| quota.five_hour));
+    session.seven_day = session
+        .seven_day
+        .or(account.and_then(|quota| quota.seven_day));
+    session.fable_seven_day = account.and_then(|quota| quota.fable_seven_day);
+    Some(session)
 }
 
 pub(crate) struct Snapshot {
@@ -314,7 +341,9 @@ impl Snapshot {
             .statusline
             .as_ref()
             .zip(turn)
-            .is_some_and(|(record, (start, end))| (start..=end).contains(&record.observed_at()))
+            .is_some_and(|(record, (start, end))| {
+                (start..=end + STATUSLINE_SETTLE).contains(&record.observed_at())
+            })
         {
             self.model()
         } else {
@@ -345,14 +374,15 @@ pub(crate) fn snapshot(
     };
     let quota = if show_quota {
         match provider {
-            "claude" => merge_claude(
-                statusline.as_ref().and_then(|record| record.quota(now)),
-                session_id
+            "claude" => {
+                let own = statusline.as_ref().and_then(|record| record.quota(now));
+                let account = session_id
                     .zip(logical_session)
                     .and_then(|(session, logical)| {
-                        cached_claude(channel, selection, session, logical, now)
-                    }),
-            ),
+                        cached_claude(channel, selection, session, logical, own, now)
+                    });
+                merge_claude(own, account)
+            }
             "codex" => {
                 selection.and_then(|selection| cached_codex(&CACHE, channel, selection, now))
             }
