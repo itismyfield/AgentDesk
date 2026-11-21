@@ -75,6 +75,13 @@ const SESSION_STATUSES: Record<string, [string, string]> = {
   disconnected: ["연결 끊김", "Disconnected"],
   aborted: ["중단됨", "Aborted"],
 };
+/** A timestamp in the dashboard's language and Korean time ("11월 18일 오후 04:37"); an unreadable value stays as given. */
+export function formatCampaignTime(value: string | null | undefined, tr: Tr): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value
+    : date.toLocaleString(tr("ko-KR", "en-US"), { timeZone: "Asia/Seoul", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
 const label = (labels: Record<string, [string, string]>, value: string | null, tr: Tr) => (value ? (labels[value] ? tr(...labels[value]) : value) : null);
 export function cardStatusLabel(status: string, tr: Tr) {
   const column = COLUMN_DEFS.find((def) => def.status === status);
@@ -91,7 +98,7 @@ export function sessionLabel(live: CampaignNodeLive, tr: Tr) {
   const status = working ? live.working_session_status : live.session_status;
   const seenAt = working ? live.working_session_seen_at : live.session_seen_at;
   if (!status) return tr("잡은 세션 없음", "No session on it");
-  const seen = seenAt ? new Date(seenAt).toLocaleString() : null;
+  const seen = seenAt ? formatCampaignTime(seenAt, tr) : null;
   return [label(SESSION_STATUSES, status, tr), seen && tr(`마지막 신호 ${seen}`, `last seen ${seen}`)].filter(Boolean).join(" · ");
 }
 export function queueLabel(live: CampaignNodeLive, tr: Tr) {
