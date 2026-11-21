@@ -539,9 +539,9 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
         json!({"type":"system","subtype":"turn_duration","timestamp":old}),
     ];
     let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
-    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
+    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven, Waits};
     // `None` is admitted; a refusal names what the budget's end saw; a running screen over
-    // unchanged idle bytes ends Unproven, as a wait whose transcript never moved reads no screen.
+    // unchanged idle bytes is the session's own turn and waits for its end.
     let cases = [
         ("idle", true, pane("✻ Baked for 2s", ""), None),
         ("stale MCP auth banner", true, pane(mcp, ""), None),
@@ -565,13 +565,13 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
             "MCP banner + hook running",
             true,
             pane(&format!("{mcp}\n{HOOK_RUNNING}"), ""),
-            Some(Unproven(readiness::Unproven::Retained)),
+            Some(Waits(readiness::WaitCause::OwnTurn)),
         ),
         (
             "MCP banner + turn starting",
             true,
             pane(&format!("{mcp}\n{TURN_STARTING}"), ""),
-            Some(Unproven(readiness::Unproven::Retained)),
+            Some(Waits(readiness::WaitCause::OwnTurn)),
         ),
         (
             "new incarnation",
@@ -708,7 +708,7 @@ fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
             true,
             false,
             pane("✻ Baked for 2s", ""),
-            Some(Unproven(readiness::Unproven::Retained)),
+            Some(Unproven(readiness::Unproven::Lost)),
         ),
         (
             "this run's launch has no source yet",
