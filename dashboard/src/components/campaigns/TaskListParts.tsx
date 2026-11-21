@@ -2,6 +2,7 @@ import { ChevronDown, Folder, PanelRight } from "lucide-react";
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { EmptyState } from "../../kit/free/empty-state-clean";
+import { ROW_HOVER_CLASS, SELECTED_ROW_STYLE, cn } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 
 // Shared by the campaign and queue tabs: the kit task-list layout (group rows, task rows, a pinned detail pane).
@@ -80,7 +81,7 @@ export function DetailDockPane({ dock, label, empty }: {
 }) {
   const { frame, id, setHost } = dock;
   return frame && createPortal(<aside ref={setHost} id={id} aria-label={label}
-    className="fixed z-10 flex flex-col overflow-hidden border-l border-[var(--line)] bg-[var(--th-card-bg,var(--bg-1))] shadow-[var(--shadow-sm)]"
+    className="fixed z-10 flex flex-col overflow-hidden border-l border-[var(--line-soft)] bg-[var(--bg-1)] shadow-[var(--shadow-sm)]"
     style={{ top: frame.top, bottom: frame.bottom, right: frame.right, width: frame.width }}>
     {empty && <div className="grid flex-1 place-items-center p-6">
       <EmptyState bare icon={<PanelRight aria-hidden />} title={empty.title} text={empty.text} />
@@ -127,10 +128,9 @@ export function TaskRow({ marker, number, title, fullTitle, meta, note, flags, t
     flags?: ReactNode; trailing?: ReactNode; selected: boolean; action?: ReactNode; buttonRef?: Ref<HTMLButtonElement>;
     numberClassName?: string; textClassName?: string;
   }) {
-  return <div className={`flex min-w-0 items-center gap-1 rounded-[var(--r-sm)] pr-1.5 transition-colors motion-reduce:transition-none ${selected
-    ? "bg-[var(--accent-soft)]" : "hover:bg-[color-mix(in_oklch,var(--fg)_5%,transparent)]"}`}>
+  return <div className={cn("flex min-w-0 items-center gap-1 rounded-[var(--r-sm)] pr-1.5 motion-reduce:transition-none", !selected && ROW_HOVER_CLASS)} style={selected ? SELECTED_ROW_STYLE : undefined}>
     <button ref={buttonRef} type="button" data-list-nav title={fullTitle ?? title} {...button}
-      className={`!m-0 flex min-w-0 flex-1 gap-3 !rounded-[var(--r-sm)] !border-0 !bg-transparent !px-3 !py-2 text-left !text-[13px] leading-5 text-[var(--fg)] @max-[35rem]/tasks:items-start @max-[35rem]/tasks:!px-2.5 ${note ? "items-start" : "items-center"} ${className}`}>
+      className={cn("!m-0 flex min-w-0 flex-1 gap-3 !rounded-[var(--r-sm)] !border-0 !bg-transparent !px-3 !py-2 text-left !text-[13px] leading-5 text-[var(--fg)] @max-[35rem]/tasks:items-start @max-[35rem]/tasks:!px-2.5", note ? "items-start" : "items-center", className)}>
       <span className={`flex shrink-0 ${note ? "mt-[3px]" : `@max-[35rem]/tasks:mt-[3px]`}`}>{marker}</span>
       <span className="grid min-w-0 flex-1 gap-1">
         <span className={`flex min-w-0 items-baseline gap-2.5 @max-[35rem]/tasks:flex-col @max-[35rem]/tasks:gap-0.5 ${textClassName}`}>

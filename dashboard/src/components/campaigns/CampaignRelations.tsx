@@ -2,8 +2,9 @@ import { ArrowRight } from "lucide-react";
 import { useId, useState } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { Button } from "../../kit/free/button-clean";
+import { Select } from "../../kit/free/select-clean";
+import { Cap, KitCard, RowButton, Well } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
-import { Select } from "../common/Select";
 import CampaignGroupOverview from "./CampaignGroupOverview";
 import { campaignRawEdges, rawEdgeId } from "./campaignGraphRouting";
 import CampaignNeighborhood from "./CampaignNeighborhood";
@@ -24,16 +25,15 @@ function TieLines({ campaign, tr }: { campaign: Campaign; tr: Tr }) {
   return <ul aria-label={tr("케이블타이", "Cable ties")} className="m-0 grid list-none gap-1.5 p-0">{ties.map(({ id, edges }) => {
     const from = [...new Set(edges.map(([dep]) => dep))], to = [...new Set(edges.map(([, next]) => next))];
     const more = from.length - 1;
-    return <li key={id} className="flex min-w-0 items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2.5">
+    return <li key={id}><Well className="flex items-center gap-3 px-3 py-2.5">
       <i aria-hidden className="size-4 shrink-0 rounded-full border-2 border-[var(--fg-muted)]" />
       <span className="grid min-w-0 flex-1 gap-0.5">
-        {/* A long title gives way first, so the count of other tasks stays in sight. */}
         <strong className="flex min-w-0 gap-1 text-sm font-medium text-[var(--fg)]"><span className="truncate">{tr(`묶음 ${edges.length} · ${title(from[0])}`, `Bundle of ${edges.length} · ${title(from[0])}`)}</span>
           {more > 0 && <>{" "}<span className="shrink-0">{tr(`외 ${more}`, `and ${more} more`)}</span></>}</strong>
-        <span className="flex min-w-0 items-center gap-1 text-xs text-[var(--fg-muted)]"><ArrowRight aria-hidden className="size-3 shrink-0" /><span className="sr-only">{tr("이어지는 작업", "Leads to")}</span><span className="truncate">{to.map(title).join(" · ")}</span></span>
+        <Cap className="flex min-w-0 items-center gap-1"><ArrowRight aria-hidden className="size-3 shrink-0" /><span className="sr-only">{tr("이어지는 작업", "Leads to")}</span><span className="truncate">{to.map(title).join(" · ")}</span></Cap>
       </span>
-      <span className="shrink-0 text-xs text-[var(--fg-muted)]">{tr("보기만", "View only")}</span>
-    </li>;
+      <Cap className="shrink-0">{tr("보기만", "View only")}</Cap>
+    </Well></li>;
   })}</ul>;
 }
 
@@ -54,23 +54,27 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
     : { kind: "group", key: group ?? campaignGroup(campaign.nodes.find((node) => node.dependencies.length) ?? campaign.nodes[0]) };
   return <div className="campaign-relations grid min-w-0 gap-3">
     <div className="flex min-w-0 flex-wrap items-end gap-3">
-      <label className="campaign-node-picker min-w-0 flex-1">{tr("연결을 볼 작업", "Task to inspect")}<Select value={selectedId ?? ""} onChange={(event) => onOpen(event.target.value || null)}>
-        <option value="" disabled>{tr("작업을 선택하세요", "Select a task")}</option>
-        {campaign.nodes.map((node) => <option key={node.id} value={node.id}>{node.title}</option>)}
-      </Select></label>
+      <div className="campaign-node-picker min-w-0 flex-1">
+        <Select label={tr("연결을 볼 작업", "Task to inspect")} aria-label={tr("연결을 볼 작업", "Task to inspect")} size="lg"
+          placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
+          options={campaign.nodes.map((node) => ({ value: node.id, label: node.title }))}
+          onChange={(value) => onOpen(value || null)} />
+      </div>
       {onEdit && <div className="flex items-center gap-2">
         {kept && <span className="text-xs text-[var(--warn)]">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</span>}
         <Button variant="secondary" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>
       </div>}
     </div>
     {selected ? <>
-      <div><Button variant="secondary" onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button></div>
+      <div><Button variant="secondary" size="sm" onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button></div>
       <CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} />
     </> : <>{phone && <TieLines campaign={campaign} tr={tr} />}<CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} tr={tr} onSelectGroup={setGroup} /></>}
-    {group !== null && <div className="grid min-w-0 gap-0.5">
-      <TaskGroupHeading open controls={listId} label={group || tr("미분류", "Ungrouped")} count={members.length} onToggle={() => setGroup(null)} />
-      <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => <button key={node.id} type="button" data-node-id={node.id} data-task-id={node.id} aria-current={node.id === selectedId || undefined} onClick={() => onOpen(node.id)}
-        className="campaign-task-row !m-0 w-full min-w-0 truncate !rounded-[var(--r-sm)] !border-0 !bg-transparent !px-3 !py-2 text-left !text-[13px] hover:!bg-[color-mix(in_oklch,var(--fg)_5%,transparent)]">{node.title}</button>)}</div>
-    </div>}
+    {group !== null && <KitCard pad="none">
+      <div className="grid min-w-0 gap-0.5 p-1.5">
+        <TaskGroupHeading open controls={listId} label={group || tr("미분류", "Ungrouped")} count={members.length} onToggle={() => setGroup(null)} />
+        <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => <RowButton key={node.id} data-node-id={node.id} data-task-id={node.id} selected={node.id === selectedId} onClick={() => onOpen(node.id)}
+          className="campaign-task-row rounded-[var(--r-sm)] py-2 text-[13px]"><span className="min-w-0 truncate">{node.title}</span></RowButton>)}</div>
+      </div>
+    </KitCard>}
   </div>;
 }

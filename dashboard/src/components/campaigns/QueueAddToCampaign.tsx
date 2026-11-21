@@ -4,6 +4,7 @@ import type { KanbanCard } from "../../types";
 import { buildGitHubIssueUrl } from "../agent-manager/kanban-utils";
 import { Button } from "../../kit/free/button-clean";
 import { Select } from "../../kit/free/select-clean";
+import { Eyebrow, Well } from "../common/KitPrimitives";
 import type { Tr } from "./campaignPresentation";
 import { campaignNodeFromCard } from "./campaignQueueModel";
 
@@ -33,12 +34,12 @@ export default function QueueAddToCampaign({ card, campaigns, tr, onAdded }: {
       setState({ kind: "error", text: cause instanceof Error ? cause.message : tr("캠페인에 넣지 못했습니다.", "Could not add it to the campaign.") });
     }
   };
-  return <section aria-label={tr("캠페인에 넣기", "Put into a campaign")} className="grid gap-2 rounded-lg border border-th-border-subtle p-3">
-    <h4 className="text-sm font-medium text-th-text-heading">{tr("캠페인에 넣기", "Put into a campaign")}</h4>
+  return <Well as="section" aria-label={tr("캠페인에 넣기", "Put into a campaign")} className="grid gap-2 p-3">
+    <Eyebrow>{tr("캠페인에 넣기", "Put into a campaign")}</Eyebrow>
     {issueUrl ? <>
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1 basis-56">
-          <Select aria-label={tr("넣을 캠페인", "Campaign to add to")} value={target} onChange={(value) => setTarget(value)}
+          <Select aria-label={tr("넣을 캠페인", "Campaign to add to")} size="lg" value={target} onChange={(value) => setTarget(value)}
             options={open.map((campaign) => ({ value: campaign.id, label: campaign.title }))} />
         </div>
         <Button variant="secondary" disabled={!chosen || state.kind === "done"} loading={state.kind === "saving"} onClick={() => void add()} className="shrink-0">
@@ -48,5 +49,5 @@ export default function QueueAddToCampaign({ card, campaigns, tr, onAdded }: {
       {chosen?.auto_queue && chosen.status === "active" && <p className="text-xs text-th-text-muted">{tr("이 캠페인은 자동 진행이 켜져 있어, 선행 작업이 없으면 바로 실행될 수 있습니다.", "Auto-run is on for this campaign, so the task may start right away.")}</p>}
       {state.text && <p role={state.kind === "error" ? "alert" : "status"} className={`text-xs ${state.kind === "error" ? "text-[var(--th-accent-danger)]" : "text-th-text-secondary"}`}>{state.text}</p>}
     </> : <p className="text-xs text-th-text-muted">{tr("GitHub 이슈가 연결된 카드만 캠페인에 넣을 수 있습니다.", "Only cards linked to a GitHub issue can go into a campaign.")}</p>}
-  </section>;
+  </Well>;
 }

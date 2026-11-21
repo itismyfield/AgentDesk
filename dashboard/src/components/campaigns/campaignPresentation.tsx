@@ -1,13 +1,13 @@
 import type { CampaignNodeLive } from "../../api/campaigns";
-import { Badge as KitBadge, type BadgeTone } from "../../kit/free/badge-clean";
 import { COLUMN_DEFS } from "../agent-manager/kanban-utils";
+import { Chip, type ChipTone } from "../common/KitPrimitives";
 import { liveIsWorking } from "./campaignModel";
 
 export type Tr = (ko: string, en: string) => string;
 
 /** The campaign page's element styles (campaigns.css) and touch sizes, for the page and for details it opens in a
  * drawer or sheet outside it. Inputs read at 16px below the mobile boundary so phones do not zoom. */
-export const CAMPAIGN_SCOPE = "campaigns-panel text-th-text-primary [&_[data-widget-state]]:!rounded-lg [&_button:not([class^=aui])]:min-h-11 [&_button:not([class^=aui])]:min-w-11 [&_input:not([type=checkbox]):not([class^=aui])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:not([class^=aui]):has(input[type=checkbox])]:min-h-11 max-[899px]:[&_input:not([type=checkbox]):not([class^=aui])]:!text-base max-[899px]:[&_select]:!text-base max-[899px]:[&_textarea:not([class^=aui])]:!text-base [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h3]:[word-break:keep-all] [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]";
+export const CAMPAIGN_SCOPE = "campaigns-panel text-th-text-primary [&_[data-widget-state]]:!rounded-[var(--r-md)] [&_button:not([class^=aui])]:min-h-11 [&_button:not([class^=aui])]:min-w-11 [&_input:not([type=checkbox]):not([type=radio]):not([class^=aui])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:not([class^=aui]):has(input[type=checkbox])]:min-h-11 max-[899px]:[&_input:not([type=checkbox]):not([type=radio])]:!text-base max-[899px]:[&_select]:!text-base max-[899px]:[&_textarea]:!text-base [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h3]:[word-break:keep-all] [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]";
 export const LABELS: Record<string, [string, string]> = {
   planned: ["계획됨", "Planned"],
   active: ["활성", "Active"],
@@ -29,15 +29,15 @@ export const COLORS: Record<string, string> = {
   pending: "#94a3b8",
 };
 // Ledger and server statuses share one tone scale: working, done, waiting on someone, failed.
-const STATUS_TONES: Record<string, BadgeTone> = {
+export const STATUS_TONES: Record<string, ChipTone> = {
   active: "info", running: "info", assigned: "info", verifying: "info",
-  completed: "success", succeeded: "success", complete: "success",
-  blocked: "warning", paused: "warning", waiting: "warning", stopping: "warning", unable_to_progress: "warning", needs_inspection: "warning", interrupted: "warning",
-  failed: "danger",
+  completed: "ok", succeeded: "ok", complete: "ok",
+  blocked: "warn", paused: "warn", waiting: "warn", stopping: "warn", unable_to_progress: "warn", needs_inspection: "warn", interrupted: "warn",
+  failed: "err",
 };
-/** A status as a kit badge: tone and dot by status (a live dot while running), the words given or the ledger label. */
+/** A status as a v3 pill chip: tone and status dot by status, with the given label or ledger word. */
 export function Badge({ status, tr, label, title }: { status: string; tr: Tr; label?: string; title?: string }) {
-  return <KitBadge tone={STATUS_TONES[status] ?? "neutral"} dot live={status === "running"} title={title}>{label ?? (LABELS[status] ? tr(...LABELS[status]) : status)}</KitBadge>;
+  return <Chip tone={STATUS_TONES[status] ?? "neutral"} dot title={title}>{label ?? (LABELS[status] ? tr(...LABELS[status]) : status)}</Chip>;
 }
 
 const DISPATCH_TYPES: Record<string, [string, string]> = {
@@ -121,5 +121,5 @@ export function LiveChip({ live, tr }: { live: CampaignNodeLive | undefined; tr:
       : live.queue_status === "pending"
         ? queueLabel(live, tr)
         : `${tr("카드", "Card")} ${cardStatusLabel(live.card_status, tr)}`;
-  return <KitBadge className="campaign-live max-w-full" tone={working ? "info" : "neutral"} live={working} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</KitBadge>;
+  return <Chip className="campaign-live max-w-full" tone={working ? "info" : "neutral"} dot={working} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</Chip>;
 }
