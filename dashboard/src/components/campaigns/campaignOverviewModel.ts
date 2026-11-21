@@ -50,7 +50,7 @@ export function serverEntry(summary: ServerCampaignSummary, doc: ServerCampaignD
   const nodes = doc?.view.nodes ?? [];
   const done = doc ? nodes.filter((node) => node.runtime.disposition === "complete").length : null;
   const at = nodes.length ? Math.min(...nodes.map(({ runtime }) => runtime.stage === "complete" ? TRACK_STAGES.length : TRACK_STAGES.indexOf(runtime.stage))) : null;
-  const head: TrackSegment = view.display === "unable_to_progress" || view.failed_count > 0 ? "fail" : view.display === "waiting" ? "wait" : view.display === "prepared" ? "todo" : "now";
+  const head: TrackSegment = view.display === "unable_to_progress" || view.failed_count > 0 ? "fail" : view.display === "waiting" || view.display === "stopping" || view.display === "stopped" || view.display === "needs_inspection" ? "wait" : view.display === "prepared" ? "todo" : "now";
   return {
     key: entryKey("server", view.campaign_id), kind: "server", id: view.campaign_id, title: definition.title, description: definition.goal,
     repo: definition.repository, bucket: serverBucket(view.display), status: view.display, statusLabel: tr(...DISPLAY_LABELS[view.display]),

@@ -180,20 +180,20 @@ export function Row({
   );
 }
 
+/** A caller that passes `aria-current` at all (even `undefined`) owns it; otherwise `selected` means the current row. */
+function currentFor<T>(props: object, own: T, selected: boolean): T | "true" | undefined {
+  return "aria-current" in props ? own : selected ? "true" : undefined;
+}
+
 /** Interactive router-link row with 44px minimum height and focus ring inside the row edge. */
-export function RowLink({
-  selected = false,
-  "aria-current": ariaCurrent,
-  className,
-  style,
-  ...rest
-}: LinkProps & { selected?: boolean }) {
+export function RowLink(props: LinkProps & { selected?: boolean }) {
+  const { selected = false, "aria-current": ariaCurrent, className, style, ...rest } = props;
   return (
     <Link
       {...rest}
-      aria-current={ariaCurrent ?? (selected ? "true" : undefined)}
+      aria-current={currentFor(props, ariaCurrent, selected)}
       className={cn(
-        "flex min-h-11 w-full min-w-0 items-center gap-3 px-3 py-3 sm:px-4",
+        "flex min-h-11 w-full min-w-0 items-center gap-3 border-0 bg-transparent px-3 py-3 sm:px-4",
         ROW_HOVER_CLASS,
         "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]",
         className,
@@ -204,21 +204,15 @@ export function RowLink({
 }
 
 /** Interactive button row with 44px minimum height and optional selected accent bar. */
-export function RowButton({
-  selected = false,
-  "aria-current": ariaCurrent,
-  type = "button",
-  className,
-  style,
-  ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { selected?: boolean }) {
+export function RowButton(props: ButtonHTMLAttributes<HTMLButtonElement> & { selected?: boolean }) {
+  const { selected = false, "aria-current": ariaCurrent, type = "button", className, style, ...rest } = props;
   return (
     <button
       {...rest}
       type={type}
-      aria-current={ariaCurrent ?? (selected ? "true" : undefined)}
+      aria-current={currentFor(props, ariaCurrent, selected)}
       className={cn(
-        "flex min-h-11 w-full min-w-0 items-center gap-3 px-3 py-3 text-left sm:px-4",
+        "flex min-h-11 w-full min-w-0 items-center gap-3 border-0 bg-transparent px-3 py-3 text-left sm:px-4",
         ROW_HOVER_CLASS,
         "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]",
         className,

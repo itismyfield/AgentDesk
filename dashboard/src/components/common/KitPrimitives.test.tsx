@@ -25,11 +25,12 @@ it("marks selected RowLink and RowButton with aria-current unless the caller set
     <RowLink to="/c" selected aria-current="page">C</RowLink>
     <RowButton selected>D</RowButton>
     <RowButton>E</RowButton>
+    <RowButton selected aria-current={undefined}>F</RowButton>
   </MemoryRouter>));
   const links = container.querySelectorAll("a");
   const buttons = container.querySelectorAll("button");
   expect([links[0].getAttribute("aria-current"), links[1].getAttribute("aria-current"), links[2].getAttribute("aria-current")]).toEqual(["true", null, "page"]);
-  expect([buttons[0].getAttribute("aria-current"), buttons[1].getAttribute("aria-current")]).toEqual(["true", null]);
+  expect([...buttons].map((button) => button.getAttribute("aria-current"))).toEqual(["true", null, null]);
   expect(links[0].className.split(/\s+/)).toEqual(expect.arrayContaining(["gap-1.5", "py-2.5"]));
   expect(links[0].className.split(/\s+/)).not.toEqual(expect.arrayContaining(["gap-3", "py-3"]));
 });

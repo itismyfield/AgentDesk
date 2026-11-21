@@ -2,7 +2,7 @@ import { useState } from "react";
 import { SERVER_CAMPAIGN_STAGES, serverCampaignProfile, type ServerCampaignDocument } from "../../api/serverCampaigns";
 import { Button } from "../../kit/free/button-clean";
 import { TextArea } from "../../kit/free/text-area-clean";
-import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RuleItem, StatusDot, Well } from "../common/KitPrimitives";
+import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RuleItem, Well } from "../common/KitPrimitives";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
@@ -105,7 +105,6 @@ export function ServerTaskDetails({ document, nodeId, gate, connection, busy, on
     <Well className="overflow-hidden">
       <ul className="m-0 list-none p-0">
         {facts.map(([label, value]) => <Row as="li" key={label} density="sm" className="min-h-11">
-          <StatusDot tone="ok" />
           <span className="min-w-0 flex-1">{label}</span>
           <Cap className="shrink-0 font-display tabular-nums">{value}</Cap>
         </Row>)}
