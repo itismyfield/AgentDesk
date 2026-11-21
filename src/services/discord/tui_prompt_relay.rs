@@ -25,7 +25,8 @@ use tracing::Instrument;
 mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
-    format_system_continuation_note, injected_prompt_suppresses_user_turn_lifecycle,
+    format_ssh_direct_prompt_notification, format_system_continuation_note,
+    injected_prompt_suppresses_user_turn_lifecycle,
 };
 #[cfg(test)]
 use self::injected_prompt_policy::{
