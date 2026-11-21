@@ -1,0 +1,423 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks EndedTurnNotSelectable or LostReaderNeverWrites or NewTurnRowNotOverwritten or NoRevival
+    lg1: Path to the EndedTurnNotSelectable or LostReaderNeverWrites or NewTurnRowNotOverwritten or NoRevival bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s1: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s2: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; reader 행 상실
+  s3: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s5: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; reader 행 상실
+  s6: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
+  s7: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; reader 행 상실
+  s8: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 상실 뒤 씀
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s11: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s12: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s14: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s16: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s17: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 상실 뒤 씀
+  s18: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s19: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; reader 행 상실
+  s20: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; reader 행 상실 #183; 상실 뒤 씀
+  s21: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 상실 뒤 씀
+  s22: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s23: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s24: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s25: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s26: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 상실 뒤 씀
+  s27: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s28: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s29: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s30: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s31: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s32: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s33: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 상실 뒤 씀
+  s34: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s35: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 상실 뒤 씀
+  s36: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; 상실 뒤 씀
+  s37: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s38: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s39: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s40: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; reader 행 상실 #183; 상실 뒤 씀
+  s41: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; reader 행 상실 #183; 상실 뒤 씀
+  s42: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s43: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s44: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s45: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s46: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 상실 뒤 씀
+  s47: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s48: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 상실 뒤 씀
+  s49: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s50: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s51: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s52: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s53: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; 상실 뒤 씀
+  s54: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s55: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; 상실 뒤 씀
+  s56: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s57: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s58: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s59: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s60: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s61: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s62: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s63: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; reader 행 상실 #183; 상실 뒤 씀
+  s64: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s65: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실
+  s66: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s67: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s68: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 상실 뒤 씀
+  s69: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s70: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s71: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s72: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s73: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s74: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s75: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s76: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s77: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s78: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s79: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s80: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s81: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s82: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s83: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s84: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s85: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀
+  s86: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s87: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s88: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s89: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s90: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s91: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s92: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s93: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실 #183; 상실 뒤 씀
+  s94: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀
+  s95: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  s96: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤 #183; reader 행 상실 #183; 상실 뒤 씀 #183; 새 턴 행 덮음
+  [*] --> s0
+  s0 --> s1: terminate#183;row end 퇴역
+  s0 --> s2: terminate#183;row end 퇴역
+  s1 --> s2: NextPreflight
+  s1 --> s3: force postlude disconnect
+  s1 --> s6: 600초 정체 #8594; unknown
+  s1 --> s8: reader 30초 working or ToolUse
+  s2 --> s4: force postlude disconnect
+  s2 --> s5: 300초 경과
+  s2 --> s7: 600초 정체 #8594; unknown
+  s3 --> s4: NextPreflight
+  s3 --> s9: 300초 경과
+  s3 --> s11: 새 실행 Pending 설치
+  s3 --> s13: 600초 정체 #8594; unknown
+  s3 --> s15: 새 nonce 턴 시작
+  s3 --> s17: ToolUse
+  s4 --> s10: 300초 경과
+  s4 --> s12: 새 실행 Pending 설치
+  s4 --> s14: 600초 정체 #8594; unknown
+  s4 --> s16: 새 nonce 턴 시작
+  s5 --> s10: force postlude disconnect
+  s5 --> s18: stale sweep idle
+  s5 --> s19: 600초 정체 #8594; unknown
+  s6 --> s7: NextPreflight
+  s6 --> s13: force postlude disconnect
+  s6 --> s21: reader 30초 working or ToolUse
+  s7 --> s14: force postlude disconnect
+  s7 --> s19: 300초 경과
+  s8 --> s17: force postlude disconnect
+  s8 --> s20: NextPreflight
+  s8 --> s21: 600초 정체 #8594; unknown
+  s9 --> s10: NextPreflight
+  s9 --> s15: 새 nonce 턴 시작
+  s9 --> s22: 새 실행 Pending 설치
+  s9 --> s24: 600초 정체 #8594; unknown
+  s9 --> s26: ToolUse
+  s10 --> s16: 새 nonce 턴 시작
+  s10 --> s23: 새 실행 Pending 설치
+  s10 --> s25: 600초 정체 #8594; unknown
+  s11 --> s12: NextPreflight
+  s11 --> s27: 600초 정체 #8594; unknown
+  s11 --> s29: 새 nonce 턴 시작
+  s11 --> s33: ToolUse
+  s11 --> s35: reader 30초 working
+  s12 --> s23: 300초 경과
+  s12 --> s28: 600초 정체 #8594; unknown
+  s12 --> s30: 새 nonce 턴 시작
+  s13 --> s14: NextPreflight
+  s13 --> s15: 새 nonce 턴 시작
+  s13 --> s24: 300초 경과
+  s13 --> s27: 새 실행 Pending 설치
+  s13 --> s36: ToolUse
+  s14 --> s16: 새 nonce 턴 시작
+  s14 --> s25: 300초 경과
+  s14 --> s28: 새 실행 Pending 설치
+  s15 --> s16: NextPreflight
+  s15 --> s29: 새 실행 Pending 설치
+  s15 --> s31: 새 턴 IDLE
+  s15 --> s38: reader 30초 working or ToolUse
+  s16 --> s30: 새 실행 Pending 설치
+  s16 --> s32: 새 턴 IDLE
+  s17 --> s26: 300초 경과
+  s17 --> s33: 새 실행 Pending 설치
+  s17 --> s34: NextPreflight
+  s17 --> s36: 600초 정체 #8594; unknown
+  s17 --> s37: 새 nonce 턴 시작
+  s18 --> s10: force postlude disconnect
+  s18 --> s39: 600초 정체 #8594; unknown
+  s19 --> s25: force postlude disconnect
+  s19 --> s39: stale sweep idle
+  s20 --> s34: force postlude disconnect
+  s20 --> s40: 300초 경과
+  s20 --> s41: 600초 정체 #8594; unknown
+  s21 --> s36: force postlude disconnect
+  s21 --> s41: NextPreflight
+  s22 --> s23: NextPreflight
+  s22 --> s29: 새 nonce 턴 시작
+  s22 --> s35: reader 30초 working
+  s22 --> s42: 600초 정체 #8594; unknown
+  s22 --> s46: ToolUse
+  s23 --> s30: 새 nonce 턴 시작
+  s23 --> s43: 600초 정체 #8594; unknown
+  s24 --> s15: 새 nonce 턴 시작
+  s24 --> s25: NextPreflight
+  s24 --> s42: 새 실행 Pending 설치
+  s24 --> s48: ToolUse
+  s25 --> s16: 새 nonce 턴 시작
+  s25 --> s43: 새 실행 Pending 설치
+  s26 --> s37: 새 nonce 턴 시작
+  s26 --> s46: 새 실행 Pending 설치
+  s26 --> s47: NextPreflight
+  s26 --> s48: 600초 정체 #8594; unknown
+  s27 --> s28: NextPreflight
+  s27 --> s29: 새 nonce 턴 시작
+  s27 --> s53: ToolUse
+  s27 --> s55: reader 30초 working
+  s28 --> s30: 새 nonce 턴 시작
+  s28 --> s43: 300초 경과
+  s29 --> s30: NextPreflight
+  s29 --> s49: 새 턴 IDLE
+  s29 --> s59: reader 30초 working or ToolUse
+  s30 --> s50: 새 턴 IDLE
+  s31 --> s32: NextPreflight
+  s31 --> s44: 300초 경과
+  s31 --> s49: 새 실행 Pending 설치
+  s31 --> s61: ToolUse
+  s32 --> s45: 300초 경과
+  s32 --> s50: 새 실행 Pending 설치
+  s33 --> s35: reader 30초 working
+  s33 --> s51: NextPreflight
+  s33 --> s53: 600초 정체 #8594; unknown
+  s33 --> s56: 새 nonce 턴 시작
+  s34 --> s47: 300초 경과
+  s34 --> s51: 새 실행 Pending 설치
+  s34 --> s54: 600초 정체 #8594; unknown
+  s34 --> s57: 새 nonce 턴 시작
+  s35 --> s52: NextPreflight
+  s35 --> s55: 600초 정체 #8594; unknown
+  s35 --> s56: 새 nonce 턴 시작
+  s36 --> s37: 새 nonce 턴 시작
+  s36 --> s48: 300초 경과
+  s36 --> s53: 새 실행 Pending 설치
+  s36 --> s54: NextPreflight
+  s37 --> s38: reader 30초 working or ToolUse
+  s37 --> s56: 새 실행 Pending 설치
+  s37 --> s57: NextPreflight
+  s37 --> s58: 새 턴 IDLE
+  s38 --> s59: 새 실행 Pending 설치
+  s38 --> s60: NextPreflight
+  s38 --> s61: 새 턴 IDLE
+  s39 --> s25: force postlude disconnect
+  s40 --> s47: force postlude disconnect
+  s40 --> s62: stale sweep idle
+  s40 --> s63: 600초 정체 #8594; unknown
+  s41 --> s54: force postlude disconnect
+  s41 --> s63: 300초 경과
+  s42 --> s29: 새 nonce 턴 시작
+  s42 --> s43: NextPreflight
+  s42 --> s55: reader 30초 working
+  s42 --> s68: ToolUse
+  s43 --> s30: 새 nonce 턴 시작
+  s44 --> s45: NextPreflight
+  s44 --> s64: 새 실행 Pending 설치
+  s44 --> s71: ToolUse
+  s45 --> s65: 새 실행 Pending 설치
+  s46 --> s35: reader 30초 working
+  s46 --> s56: 새 nonce 턴 시작
+  s46 --> s66: NextPreflight
+  s46 --> s68: 600초 정체 #8594; unknown
+  s47 --> s57: 새 nonce 턴 시작
+  s47 --> s66: 새 실행 Pending 설치
+  s47 --> s69: 600초 정체 #8594; unknown
+  s48 --> s37: 새 nonce 턴 시작
+  s48 --> s68: 새 실행 Pending 설치
+  s48 --> s69: NextPreflight
+  s49 --> s50: NextPreflight
+  s49 --> s80: reader 30초 working or ToolUse
+  s50 --> s65: 300초 경과
+  s51 --> s66: 300초 경과
+  s51 --> s72: 600초 정체 #8594; unknown
+  s51 --> s74: 새 nonce 턴 시작
+  s52 --> s67: 300초 경과
+  s52 --> s73: 600초 정체 #8594; unknown
+  s52 --> s74: 새 nonce 턴 시작
+  s53 --> s55: reader 30초 working
+  s53 --> s56: 새 nonce 턴 시작
+  s53 --> s72: NextPreflight
+  s54 --> s57: 새 nonce 턴 시작
+  s54 --> s69: 300초 경과
+  s54 --> s72: 새 실행 Pending 설치
+  s55 --> s56: 새 nonce 턴 시작
+  s55 --> s73: NextPreflight
+  s56 --> s59: reader 30초 working or ToolUse
+  s56 --> s74: NextPreflight
+  s56 --> s75: 새 턴 IDLE
+  s57 --> s74: 새 실행 Pending 설치
+  s57 --> s76: 새 턴 IDLE
+  s58 --> s61: ToolUse
+  s58 --> s70: 300초 경과
+  s58 --> s75: 새 실행 Pending 설치
+  s58 --> s76: NextPreflight
+  s59 --> s77: NextPreflight
+  s59 --> s78: 새 턴 IDLE
+  s60 --> s77: 새 실행 Pending 설치
+  s60 --> s79: 새 턴 IDLE
+  s61 --> s71: 300초 경과
+  s61 --> s78: 새 실행 Pending 설치
+  s61 --> s79: NextPreflight
+  s62 --> s47: force postlude disconnect
+  s62 --> s81: 600초 정체 #8594; unknown
+  s63 --> s69: force postlude disconnect
+  s63 --> s81: stale sweep idle
+  s64 --> s65: NextPreflight
+  s64 --> s80: reader 30초 working
+  s64 --> s89: ToolUse
+  s66 --> s74: 새 nonce 턴 시작
+  s66 --> s83: 600초 정체 #8594; unknown
+  s67 --> s74: 새 nonce 턴 시작
+  s67 --> s82: stale sweep idle
+  s67 --> s84: 600초 정체 #8594; unknown
+  s68 --> s55: reader 30초 working
+  s68 --> s56: 새 nonce 턴 시작
+  s68 --> s83: NextPreflight
+  s69 --> s57: 새 nonce 턴 시작
+  s69 --> s83: 새 실행 Pending 설치
+  s70 --> s71: ToolUse
+  s70 --> s85: 새 실행 Pending 설치
+  s70 --> s86: NextPreflight
+  s71 --> s87: 새 실행 Pending 설치
+  s71 --> s88: NextPreflight
+  s72 --> s74: 새 nonce 턴 시작
+  s72 --> s83: 300초 경과
+  s73 --> s74: 새 nonce 턴 시작
+  s73 --> s84: 300초 경과
+  s74 --> s90: 새 턴 IDLE
+  s75 --> s80: reader 30초 working or ToolUse
+  s75 --> s90: NextPreflight
+  s76 --> s86: 300초 경과
+  s76 --> s90: 새 실행 Pending 설치
+  s77 --> s91: 새 턴 IDLE
+  s78 --> s80: reader 30초 working or ToolUse
+  s78 --> s91: NextPreflight
+  s79 --> s88: 300초 경과
+  s79 --> s91: 새 실행 Pending 설치
+  s80 --> s92: NextPreflight
+  s81 --> s69: force postlude disconnect
+  s82 --> s74: 새 nonce 턴 시작
+  s82 --> s93: 600초 정체 #8594; unknown
+  s83 --> s74: 새 nonce 턴 시작
+  s84 --> s74: 새 nonce 턴 시작
+  s84 --> s93: stale sweep idle
+  s85 --> s80: reader 30초 working
+  s85 --> s89: ToolUse
+  s85 --> s94: NextPreflight
+  s86 --> s94: 새 실행 Pending 설치
+  s87 --> s80: reader 30초 working
+  s87 --> s89: ToolUse
+  s87 --> s95: NextPreflight
+  s88 --> s95: 새 실행 Pending 설치
+  s89 --> s80: reader 30초 working
+  s89 --> s87: stale sweep idle
+  s89 --> s96: NextPreflight
+  s90 --> s94: 300초 경과
+  s91 --> s95: 300초 경과
+  s92 --> s96: 300초 경과
+  s93 --> s74: 새 nonce 턴 시작
+  s96 --> s95: stale sweep idle
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s8 breaks
+  class s8 bugPath
+  class s11 bugPath
+  class s15 bugPath
+  class s17 breaks
+  class s20 breaks
+  class s21 breaks
+  class s26 breaks
+  class s33 breaks
+  class s34 breaks
+  class s35 breaks
+  class s35 bugPath
+  class s36 breaks
+  class s37 breaks
+  class s38 breaks
+  class s38 bugPath
+  class s40 breaks
+  class s41 breaks
+  class s46 breaks
+  class s47 breaks
+  class s48 breaks
+  class s51 breaks
+  class s52 breaks
+  class s53 breaks
+  class s54 breaks
+  class s55 breaks
+  class s56 breaks
+  class s57 breaks
+  class s58 breaks
+  class s59 breaks
+  class s60 breaks
+  class s61 breaks
+  class s62 breaks
+  class s63 breaks
+  class s66 breaks
+  class s67 breaks
+  class s68 breaks
+  class s69 breaks
+  class s70 breaks
+  class s71 breaks
+  class s72 breaks
+  class s73 breaks
+  class s74 breaks
+  class s75 breaks
+  class s76 breaks
+  class s77 breaks
+  class s78 breaks
+  class s79 breaks
+  class s80 breaks
+  class s81 breaks
+  class s82 breaks
+  class s83 breaks
+  class s84 breaks
+  class s85 breaks
+  class s86 breaks
+  class s87 breaks
+  class s88 breaks
+  class s89 breaks
+  class s90 breaks
+  class s91 breaks
+  class s92 breaks
+  class s93 breaks
+  class s94 breaks
+  class s95 breaks
+  class s96 breaks

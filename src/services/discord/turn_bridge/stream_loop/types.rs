@@ -490,7 +490,8 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
     pub(in crate::services::discord::turn_bridge) session_handshake_seen: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) terminal_session_reset_required: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) recovery_retry: &'a mut bool,
-    pub(in crate::services::discord::turn_bridge) last_adk_heartbeat: &'a mut std::time::Instant,
+    pub(in crate::services::discord::turn_bridge) session_row_writer:
+        &'a mut crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter,
     pub(in crate::services::discord::turn_bridge) pending_stream_messages:
         &'a mut VecDeque<StreamMessage>,
     pub(in crate::services::discord::turn_bridge) pending_status_tool_results:

@@ -47,6 +47,7 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::ReleaseWitnessedEpisode(_)
         | M::PolicyClose { .. }
         | M::ClaimPolicyTail(_)
+        | M::ControlCustody(_)
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)

@@ -6,11 +6,18 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use sqlx::PgPool;
 
 /// Live config whose database section points the runtime pool at the test database.
-struct RuntimeDatabase {
+pub(in crate::services::discord) struct RuntimeDatabase {
     _live: crate::config_live_reload::TestLiveGuard,
 }
 
 impl RuntimeDatabase {
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn after_env_lock() -> Self {
+        Self {
+            _live: crate::config_live_reload::test_live_guard_after_shared_test_env_lock(),
+        }
+    }
+
     /// Takes the shared test-env lock, so it must run before the test database is created.
     fn lock() -> Self {
         Self {
@@ -20,7 +27,7 @@ impl RuntimeDatabase {
         }
     }
 
-    fn install(&self, database_url: &str) {
+    pub(in crate::services::discord) fn install(&self, database_url: &str) {
         let url = url::Url::parse(database_url).unwrap();
         let mut config = crate::config::Config::default();
         config.database.enabled = true;

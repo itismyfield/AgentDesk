@@ -102,6 +102,7 @@ fn key(shared: &SharedData, channel: ChannelId, nonce: Option<&str>) -> TurnKey 
 
 fn probed() -> Option<RuntimeWitness<'static>> {
     Some(RuntimeWitness {
+        native_prepared_before: None,
         probed_tmux: Some(TMUX),
         claim_snapshot: None,
     })
@@ -170,6 +171,7 @@ async fn drift_retirement_requires_every_proof_axis() {
             let mut snapshot = SyntheticClaimSnapshot::from_row(&row);
             let witness = match witness {
                 Witness::Probed(name) => RuntimeWitness {
+                    native_prepared_before: None,
                     probed_tmux: Some(name),
                     claim_snapshot: None,
                 },
@@ -179,6 +181,7 @@ async fn drift_retirement_requires_every_proof_axis() {
                         snapshot.started_at = started_at.to_string();
                     }
                     RuntimeWitness {
+                        native_prepared_before: None,
                         probed_tmux: None,
                         claim_snapshot: Some(&snapshot),
                     }

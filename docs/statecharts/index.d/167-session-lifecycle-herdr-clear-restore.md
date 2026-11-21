@@ -1,0 +1,2 @@
+key: 167-session-lifecycle-herdr-clear-restore
+| `session-lifecycle` (Herdr clear records and restored workspaces, #8128) | `cd9951d3ca` | Main gaps, clear gated on record data, skipped record, omitted wake, stale close, and missing restore proof facets are expected RED. | Clear ends the exact authorized target independently of record availability. Restore cleanup requires atomic lineage, inactivity and no-work evidence. Two GREEN and nine expected RED configs. [Report](session-lifecycle/herdr-clear-restore.report.md). |

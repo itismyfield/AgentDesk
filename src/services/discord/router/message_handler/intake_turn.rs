@@ -644,7 +644,9 @@ pub(super) async fn handle_text_message(
             return Ok(IntakeExecution::Executed);
         };
         let channel_id = route.target;
-        let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
+        let dispatch_runtime::DispatchRuntime {
+            final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt, pinned,
+        } =
             dispatch_runtime::prepare_post_redirect_dispatch_runtime(
                 http,
                 shared,
@@ -1429,16 +1431,10 @@ pub(super) async fn handle_text_message(
         // Claude keeps SAK in the system prompt for prefix-cache stability.
         // Non-Claude providers receive SAK in the user context instead.
         let sak_for_system = memory_injection_plan.sak_for_system_prompt();
-        let current_task_context = active_dispatch_info.as_ref().map(|info| {
-            super::super::super::prompt_builder::CurrentTaskContext {
-                dispatch_id: active_dispatch_id_for_prompt.as_deref(),
-                card_id: info.card_id.as_deref(),
-                dispatch_title: info.dispatch_title.as_deref(),
-                dispatch_context: info.context.as_deref(),
-                card_title: info.card_title.as_deref(),
-                github_issue_url: info.github_issue_url.as_deref(),
-            }
-        });
+        let (current_task_context, prompt_dispatch_type) = dispatch_runtime::prompt_task(
+            active_dispatch_id_for_prompt.as_deref(), active_dispatch_info.as_ref(),
+            pinned.is_some(), dispatch_type_str.as_deref(),
+        );
         let recovery_context_for_manifest =
             session_retry_context
                 .as_ref()
@@ -1456,7 +1452,7 @@ pub(super) async fn handle_text_message(
             role_binding.as_ref(),
             reply_to_user_message,
             PromptProfiles::foreground(dispatch_profile),
-            dispatch_type_str.as_deref(),
+            prompt_dispatch_type,
             current_task_context.as_ref(),
             sak_for_system,
             None,
@@ -1533,17 +1529,7 @@ pub(super) async fn handle_text_message(
         );
         let adk_thread_channel_id =
             adk_thread::resolve_channel_id(adk_session_name.as_deref(), shared, channel_id);
-        // #222: DB-based dispatch lookup takes priority over text parsing.
-        // In unified threads, user_text may contain a stale DISPATCH: prefix
-        // from a previous dispatch in the same thread. DB lookup uses the
-        // thread→card→dispatch link which is always current.
-        let looked_up_dispatch = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-            shared.api_port,
-            channel_id.get(),
-        )
-        .await
-        .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
-        let dispatch_id = dispatch_runtime::unheld_dispatch(shared, channel_id, looked_up_dispatch).await;
+        let dispatch_id = dispatch_runtime::row_dispatch(shared, channel_id, user_text, pinned).await;
         post_adk_session_status_for_channel(
             shared,
             channel_id,

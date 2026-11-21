@@ -43,6 +43,31 @@ pub(super) async fn current_row_typed(
     .await
 }
 
+/// A durable ordinary identity can vouch for its current key and its own promoted aliases.
+#[cfg(unix)]
+pub(super) async fn owns_completion_key(
+    pool: &PgPool,
+    hash: &str,
+    provider: &ProviderKind,
+    channel: u64,
+    key: &str,
+) -> Result<Option<bool>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT session_key = $4 OR EXISTS (
+             SELECT 1 FROM session_key_aliases
+             WHERE session_id = sessions.id AND session_key = $4
+         )
+         FROM sessions WHERE identity_kind = 'discord_channel'
+             AND provider = $1 AND discord_token_hash = $2 AND channel_id = $3",
+    )
+    .bind(provider.as_str())
+    .bind(hash)
+    .bind(channel.to_string())
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Both wire formats refer to the one stored actual name; all read evidence must converge.
 pub(super) fn candidates(
     pool: Option<&PgPool>,

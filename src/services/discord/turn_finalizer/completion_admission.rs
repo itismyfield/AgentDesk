@@ -9,6 +9,8 @@ pub(in crate::services::discord) enum CompletionAdmissionPlan {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CompletionAdmission {
+    #[cfg(unix)]
+    pub(super) native_input: Option<bool>,
     pub(super) plan: CompletionAdmissionPlan,
     pub(super) mailbox_released: bool,
     pub(super) operator_released: bool,
@@ -22,6 +24,8 @@ pub(super) struct CompletionAdmission {
 impl CompletionAdmission {
     pub(super) fn new(plan: CompletionAdmissionPlan) -> Self {
         Self {
+            #[cfg(unix)]
+            native_input: None,
             plan,
             mailbox_released: false,
             operator_released: false,
@@ -61,6 +65,10 @@ impl CompletionAdmission {
 
     /// Whether the next claim would publish; it changes nothing.
     pub(super) fn claimable(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(settled) = self.native_input {
+            return settled && self.mailbox_released && !self.queue_eligible_published;
+        }
         let barrier_satisfied = self.mailbox_released
             && match self.plan {
                 CompletionAdmissionPlan::Immediate => true,

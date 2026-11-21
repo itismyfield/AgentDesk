@@ -62,7 +62,7 @@ fn checked_observation_distinguishes_absence_from_history_failures() {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     for bytes in [
         b"{broken".as_slice(),
-        br#"{"version":3,"live":[],"passive":[]}"#,
+        br#"{"version":4,"live":[],"passive":[]}"#,
         br#"{"version":2,"live":7,"passive":[]}"#,
     ] {
         std::fs::write(&file, bytes).unwrap();

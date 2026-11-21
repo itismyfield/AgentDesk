@@ -31,6 +31,7 @@ pub(super) struct TerminalCommitEpilogueLocals<'a> {
     pub(super) relay_suppressed: bool,
     pub(super) has_assistant_response: bool,
     pub(super) receipt_kept: bool,
+    pub(super) native_held: (bool, bool),
     pub(super) completion_is_stale_for_newer_turn: bool,
     pub(super) anchor_cleanup_is_stale_for_newer_turn: bool,
     pub(super) inflight_state: &'a Option<InflightTurnState>,
@@ -148,6 +149,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         relay_suppressed,
         has_assistant_response,
         receipt_kept,
+        native_held: (pin_held, late_held),
         completion_is_stale_for_newer_turn,
         anchor_cleanup_is_stale_for_newer_turn,
         inflight_state,
@@ -257,8 +259,9 @@ pub(super) async fn run_terminal_commit_epilogue(
         // matching identity permits an atomic clear, but does not make this
         // older terminal its owner. Keep the same id-0-inclusive stale veto
         // already used for this row's history, anchor and FINISHED marker.
-        let committed_row_cleanup_allowed =
-            !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn;
+        let committed_row_cleanup_allowed = !late_held
+            && !completion_is_stale_for_newer_turn
+            && !anchor_cleanup_is_stale_for_newer_turn;
         let pinned_committed_clear_identity = if committed_row_cleanup_allowed {
             inflight_state
                 .as_ref()
@@ -403,10 +406,12 @@ pub(super) async fn run_terminal_commit_epilogue(
         // sibling (#3142) already used by the anchor-cleanup branch above; the
         // FINISHED stamp is the same kind of committed-output branch, so it takes
         // the same guard.
-        if readopted_finish_mark_allowed(
-            completion_is_stale_for_newer_turn,
-            anchor_cleanup_is_stale_for_newer_turn,
-        ) && let Some(committed) = inflight_state.as_ref()
+        if !late_held
+            && readopted_finish_mark_allowed(
+                completion_is_stale_for_newer_turn,
+                anchor_cleanup_is_stale_for_newer_turn,
+            )
+            && let Some(committed) = inflight_state.as_ref()
         {
             shared.mark_readopted_mailbox_owner_finished_for_episode(
                 provider_kind,
@@ -430,7 +435,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         // wait, after the pre-relay snapshot was taken. This pass then clears that
         // row, so it must also finish that row's exact mailbox episode.
         let (restored_finalizer_turn_id, finalizer_claim_row) = committed_finalize_target(
-            inflight_before_relay.as_ref(),
+            inflight_before_relay.as_ref().filter(|_| !pin_held),
             committed_cleared_row,
             &tmux_session_name,
             current_offset,

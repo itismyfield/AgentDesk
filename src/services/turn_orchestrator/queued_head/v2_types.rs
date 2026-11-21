@@ -19,6 +19,7 @@ pub(crate) struct ClaudeHandoffJournal {
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod cold_source;
 pub(crate) mod effort_restart;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +38,8 @@ pub(crate) struct SnapshotV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) refused_fronts: Vec<RefusedFront>,
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_bindings: Vec<cold_source::BindingIntent>,
     #[serde(default)]
     pub(crate) namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

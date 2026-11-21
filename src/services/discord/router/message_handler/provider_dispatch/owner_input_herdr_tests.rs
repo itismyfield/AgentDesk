@@ -170,6 +170,7 @@ impl HerdrOwner {
     ) -> scope::LaunchHook {
         let nonce = format!("{:032x}", self.channel);
         let registration = Registration {
+            native: None,
             mailbox: self.mailbox.clone(),
             execution: Execution::LocalTui,
             origin: InputOrigin::Discord,

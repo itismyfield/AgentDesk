@@ -60,6 +60,28 @@ fn path_b_records_the_late_row_else_only_the_pin_of_this_committed_range() {
     assert_eq!(select(None, Some(&synthetic)), None);
 }
 
+#[test]
+fn path_b_work_custody_requires_a_structured_id_on_the_held_row() {
+    let mut prefix = row(100, 10);
+    prefix.user_text = "DISPATCH: prefix-only".into();
+    let mut explicit = row(200, 10);
+    explicit.dispatch_id = Some("native-work".into());
+    for (pin_held, late_held) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert!(!native_owns_work(
+            (pin_held, Some(&prefix)),
+            (late_held, Some(&prefix))
+        ));
+        assert_eq!(
+            native_owns_work((pin_held, Some(&explicit)), (late_held, Some(&prefix))),
+            pin_held
+        );
+        assert_eq!(
+            native_owns_work((pin_held, Some(&prefix)), (late_held, Some(&explicit))),
+            late_held
+        );
+    }
+}
+
 async fn create_pool() -> (
     crate::dispatch::test_support::DispatchPostgresTestDb,
     sqlx::PgPool,
@@ -96,6 +118,7 @@ async fn persist(pool: &sqlx::PgPool, record: &PathBRecord<'_>, fallback_called:
                 channel_effects: crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
                 completion_range: ("", 0),
                 settle_pin: None,
+                native_held: (false, false),
             },
             || {
                 fallback_called.store(true, Ordering::SeqCst);
@@ -245,6 +268,7 @@ async fn path_b_settles_only_the_scheduled_turn_that_owns_the_committed_range_pg
                         channel_effects: ChannelEffects::Suppressed,
                         completion_range: (TMUX, 100),
                         settle_pin: pin.as_ref(),
+                        native_held: (false, false),
                     },
                     || async { None },
                 )
@@ -296,6 +320,54 @@ async fn path_b_settles_only_the_scheduled_turn_that_owns_the_committed_range_pg
         "a suppressed completion writes no channel transcript"
     );
 
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_b_checks_native_custody_on_the_pin_and_late_rows_separately_pg() {
+    use crate::services::discord::scheduled_turn::ChannelEffects;
+    use crate::services::scheduled_messages::turn_completion::tests::{
+        launch_agent_delivery, stored_outcome,
+    };
+    let (db, pool) = create_pool().await;
+    for (index, pin_held) in [true, false].into_iter().enumerate() {
+        let turn = format!("custody-pin-{index}");
+        launch_agent_delivery(&pool, &turn, &turn, false, "fail").await;
+        let pin = marked(1_420_000_000_000_000_021, 10, Some(&turn));
+        let late = marked(1_420_000_000_000_000_022 + index as u64, 50, None);
+        settle_committed_range(Some(&pool), (&pin, pin_held), (TMUX, 100), "NO_REPLY", &[]).await;
+        PathBRecord::select(Some(&late), Some(&pin), TMUX, 100)
+            .unwrap()
+            .persist_transcript(
+                PathBTranscript {
+                    pool: Some(&pool),
+                    channel_id: ChannelId::new(CHANNEL),
+                    provider: &ProviderKind::Claude,
+                    agent_id: None,
+                    assistant_message: "watcher body",
+                    events: &[],
+                    channel_effects: ChannelEffects::Allowed,
+                    completion_range: (TMUX, 100),
+                    settle_pin: Some(&pin),
+                    native_held: (pin_held, !pin_held),
+                },
+                || async { None },
+            )
+            .await;
+        let body: Option<String> = sqlx::query_scalar(
+            "SELECT assistant_message FROM session_transcripts WHERE turn_id = $1",
+        )
+        .bind(format!("discord:{CHANNEL}:{}", late.user_msg_id))
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(body.as_deref(), pin_held.then_some("watcher body"));
+        assert_eq!(
+            stored_outcome(&pool, &turn).await.as_deref(),
+            (!pin_held).then_some("no_reply")
+        );
+    }
     pool.close().await;
     db.drop().await;
 }
