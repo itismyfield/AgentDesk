@@ -388,7 +388,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 
 | 소유 seam / 좌표 | 이름을 포함하는 값·판정 | 이름 변경시 끊기는 대조 | 이중 판독·live 보존 방법 |
 |---|---|---|---|
-| `src/domain/session_identity.rs:25`, `:32`, `:82`; `src/services/discord/session_identity.rs:3` | legacy `host:<actual_name>` 및 namespaced `provider/hash/host:<actual_name>`의 tail; legacy 역직렬화 | 옛 primary를 남기면 parser는 죽은 이름을 정확히 읽음 | parser 문법은 이미 양쪽 이름을 읽지만, 그 안전성은 S2 primary 승격 불변식에 달림. wire 문법은 유지하고 actual_name을 불투명 locator로 취급. 새 이름에서 provider·thread 역추정 금지 |
+| `src/domain/session_identity.rs:25`, `:32`, `:82`, `:88`; `src/services/discord/session_identity.rs:3` | legacy `host:<actual_name>` 및 namespaced `provider/hash/host:<actual_name>`의 tail; legacy 역직렬화 | 옛 primary를 남기면 parser는 죽은 이름을 정확히 읽음 | parser 문법은 이미 양쪽 이름을 읽지만, 그 안전성은 S2 primary 승격 불변식에 달림. wire 문법은 유지하고 actual_name을 불투명 locator로 취급. 새 이름에서 provider·thread 역추정 금지 |
 | `src/services/discord/adk_session.rs:59`, `:84`, `:135`, `:150`, `:155` | 채널 basis→build_tmux_session_name→namespaced/legacy key 후보 2개 | generator를 먼저 바꾸면 follow-up에서 기존 행과 다른 key 생성 | canonical `(provider, token_hash, channel_id)`로 기존 actual key를 먼저 찾고 그 실제 이름을 반환. absence를 확인한 새 생성에만 새 이름. 후보 2개는 **동일 actual name의 key wire 2종**이며 old/new name 지원과 다름 |
 | `src/services/discord/host_key_derivation.rs:105`, `:117`, `:141` | canonical row의 실제 session_key→name; 다중 행/실패 Conflict/Unknown | 생성한 이름으로 덮으면 host·live locator 상실 | 이미 존재하는 canonical row resolver를 재사용. live old는 그대로, 자연 재생성 후 A로 갱신된 primary key/name을 이후 launch/reattach/stop까지 보존 |
 | `src/db/dispatched_sessions/canonical_identity.rs:33`, `:265`, `:287`, `:297`, `:320`, `:396`, `:469`, `:492`, `:825` | canonical identity `(kind, provider, discord_token_hash, channel_id)`, exact primary·alias 및 ID pin | exact direct SQL만 쓰는 소비자는 alias를 못 봄; name collision을 동일 채널로 잘못 합칠 위험 | main에 identity/alias 해법 이미 있음. exact→alias→canonical 증거가 **한 sessions.id**로 수렴할 때만 사용. divergence/foreign owner는 fail closed. 기존 live 행 primary key/name 변경·무조건 alias 새 생성 금지. 자연 재생성 등록 때 S2에서 primary=new / old alias=same row / outcome=new를 같은 transaction으로 승격 |
@@ -459,7 +459,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 
 | ID | file:line | 현재 무엇을 읽고 무엇을 결정하는가 | r2 처분 |
 |---|---|---|---|
-| K01 | `domain/session_identity.rs:81` | legacy/namespaced key의 마지막 `:` 꼬리를 tmux name으로 추출 | **자동(A)**. 문법 parser는 유지. 새 primary tail이 현재 물리 이름이므로 opaque tail로 해석해도 맞음. |
+| K01 | `domain/session_identity.rs:88` | legacy/namespaced key의 마지막 `:` 꼬리를 tmux name으로 추출 | **자동(A)**. 문법 parser는 유지. 새 primary tail이 현재 물리 이름이므로 opaque tail로 해석해도 맞음. |
 | K02 | `engine/ops/timeouts_ops/host_repair.rs:74` | 정책이 받은 key의 tmux name으로 host target/evidence를 만듦 | 일반 policy SELECT primary는 **자동(A)**. explicit alias 입력 경계는 **S3**에서 기존 locator resolver 결과 primary로 정규화한 뒤 probe/kill. |
 | K03 | `server/routes/agents_crud.rs:1032` | dashboard listing의 row/session key→name→restart gate local tmux 판정 | **자동(A)**. S9에서 출력 primary가 신형이고 실제 중지로 신형 세션이 사라지는 회귀를 추가. |
 | K04 | `server/routes/dispatched_sessions.rs:192` | stale-turn reconcile 후 요청 key 꼬리로 mailbox foreground release | 현재 listing primary 요청은 **자동(A)**. **S3**에서 old-alias 요청을 reconcile이 선택한 current primary로 변환한 뒤 release, 이름을 raw 요청에서 다시 만들지 않음. |
@@ -974,7 +974,7 @@ HashedV2 basename = "adk-v2-" + lowercase_hex(SHA256(domain, runtime, host, exac
 - Herdr `HostedOwner.logical_key`는 namespaced key 전체가 아니다. `discord/router/message_handler/provider_dispatch.rs:648-664`은 SessionIdentity로 parse한 뒤 **tmux_name tail**을 logical_key에 넣는다. `herdr_launch.rs:393,742,772`의 fence/context/host marker는 그 tail을 사용하므로 현재 운영 producer가 만든 legacy Herdr artifact도 `AgentDesk-` class다.
 - tmux·process wrapper의 실제 production 생성은 기존 provider builder를 경유한다. `claude/process_session_launch.rs:119`, `codex/process_session_launch.rs:117`, `qwen/session_lifecycle.rs:396`의 SessionConfig는 이미 선택된 session_name을 전달한다. process 모드라는 이유로 namespaced `provider/token/host:` 전체를 artifact key로 바꾸면 안 된다.
 - generic `session_temp_path(&str, ext)` 자체는 임의 문자열을 허용한다. 따라서 **모든 임의 non-prefix 옛 파일 경로까지 byte-identical라고 쓰면 틀린다.** 기존 main이 제공한 managed `AgentDesk-*` 이름의 live compatibility를 보장하고, 사용자/외부 non-prefix 세션은 S1 소유 관문에서 조작하지 않는 범위다. 외부에서 임의 non-prefix raw artifact를 이미 만들었다는 운영 가정은 이번 금지 범위상 조회하지 않았다.
-- 소문자 `agentdesk-claude-channel-*`는 `domain/session_identity.rs:125-139`의 key parsing 호환 fixture와 API inventory 예제에서 확인했다. 현재 production managed builder로 생성하는 경로는 확인되지 않았다. lower-case parser fixture가 있다는 사실만으로 과거 운영 artifact가 있었다고 단정하거나 old files를 지우지 않는다. 구현에서 새 legacy writer가 발견되면 추가 frozen class 또는 별도 호환 계약을 잡고 활성화 전에 해결한다.
+- 소문자 `agentdesk-claude-channel-*`는 `domain/session_identity.rs:131-145`의 key parsing 호환 fixture와 API inventory 예제에서 확인했다. 현재 production managed builder로 생성하는 경로는 확인되지 않았다. lower-case parser fixture가 있다는 사실만으로 과거 운영 artifact가 있었다고 단정하거나 old files를 지우지 않는다. 구현에서 새 legacy writer가 발견되면 추가 frozen class 또는 별도 호환 계약을 잡고 활성화 전에 해결한다.
 
 ## formatter만 함께 바꾸면 되는 이유
 
