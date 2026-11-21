@@ -162,9 +162,15 @@ test("phone: list, detail with five sections, back by button and by browser", as
   await mockApi(page);
   await page.goto("/audit");
   await expect(detail(page)).toHaveCount(0);
+  await expect(page.getByTestId("audit-tabs")).toBeVisible();
   await page.getByTestId("audit-agent-adk-dashboard").click();
   await expect(page).toHaveURL(/agent=adk-dashboard/);
   await expect(page.getByTestId("audit-section")).toHaveCount(5);
+  // The detail opens on its 56px head: no page tabs, and the provider switch names the provider instead of the meta.
+  await expect(page.getByTestId("audit-tabs")).toHaveCount(0);
+  expect((await page.getByTestId("audit-detail-head").boundingBox())?.height).toBe(56);
+  await expect(page.getByTestId("audit-detail-meta")).toHaveText("11월 17일 오후 05:17 시작 · 현재 세션");
+  await expect(page.getByTestId("audit-provider")).toBeVisible();
   await page.getByRole("button", { name: "섹션 5개 더 보기" }).click();
   await expect(page.getByTestId("audit-section")).toHaveCount(10);
   await page.getByTestId("audit-back").click();
@@ -236,8 +242,10 @@ test("phone anchors: five rows, then the rest", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "phone layout");
   await mockApi(page);
   await page.goto("/audit?tab=anchors");
+  await expect(page.getByRole("tab", { name: "메멘토 앵커" })).toHaveAttribute("aria-selected", "true");
   await page.getByTestId("audit-agent-adk-dashboard").click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(5);
+  await expect(page.getByTestId("audit-tabs")).toHaveCount(0);
   await page.getByRole("button", { name: "3개 더 보기" }).click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(8);
   const width = await page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth));

@@ -5,7 +5,7 @@ import type { ServerCampaignDocument, ServerCampaignSummary } from "../../api/se
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, todoStatus,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, systemNeedsAttention, todoStatus,
   type HomeHealth,
 } from "./homeModel";
 
@@ -97,6 +97,14 @@ describe("home system", () => {
     expect(rows.map((row) => row.value)).toEqual(["정상 · 2시간째", "1/2개 연결", "확인 불가", "확인 불가", "0건"]);
     const blind = buildSystemRows({ health: { ...health, mailbox_observation_failures: [{ channel_id: "1" }] }, healthFailed: false, legacy: null, documents: [], tr });
     expect(blind.at(-1)?.value).toBe("확인 불가");
+  });
+
+  it("needs attention for an off or unknown line but not for Memento's standing unknown", () => {
+    const rows = (patch: Partial<HomeHealth>, legacy: Campaign[] | null = []) =>
+      buildSystemRows({ health: { status: "healthy", queue_depth: 0, providers: [{ connected: true }], ...patch } as HomeHealth, healthFailed: false, legacy, documents: [], tr });
+    expect(systemNeedsAttention(rows({}), tr)).toBe(false);
+    expect(systemNeedsAttention(rows({ queue_depth: 1 }), tr)).toBe(true);
+    expect(systemNeedsAttention(rows({}, null), tr)).toBe(true);
   });
 });
 

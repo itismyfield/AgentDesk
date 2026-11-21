@@ -6,7 +6,7 @@ import AgentPersona, { type PersonaState } from "../AgentPersona";
 import { formatClock } from "../dashboard/routineModel";
 import { CardNote, CardSkeleton, Chip, Dot, HeaderLink, HomeCard, Muted, ROW_HOVER, toneText } from "./HomeCard";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, todoStatus,
+  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, systemNeedsAttention, todoStatus,
   type HomeAgent, type HomeAgentState, type HomeTone, type SourceState, type TodoItem, type Tr,
 } from "./homeModel";
 import { loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
@@ -72,7 +72,7 @@ export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
 
 /** Server, Discord bots, Memento, campaign runs and the queue, one dot and value per line. A failed read shows
  * unknown values and when the last answer came, never the last answer itself. */
-export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded<HomeCampaigns>; tr: Tr; className?: string }) {
+export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: { campaigns: Loaded<HomeCampaigns>; onlyWhenOff?: boolean; tr: Tr; className?: string }) {
   const health = usePolled(loadHomeHealth, 30_000);
   const current = health.failed ? null : health.data;
   const rows = buildSystemRows({
@@ -82,6 +82,9 @@ export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded
     documents: campaigns.failed ? [] : campaigns.data?.documents ?? [],
     tr,
   });
+  // Phones keep this card for trouble only, judged once both reads have answered.
+  const settled = (health.data !== null || health.failed) && (campaigns.data !== null || campaigns.failed);
+  if (onlyWhenOff && !(settled && systemNeedsAttention(rows, tr))) return null;
   const publicOnly = current?.publicOnly;
   const clock = health.at === null ? null : formatClock(health.at);
   return (

@@ -26,6 +26,8 @@ export default function AuditPageView({ isKo, agents, isMobileViewport }: AuditP
     { value: "anchors" as const, label: tr("메멘토 앵커", "Memento anchors") },
   ];
   const active = tabs.find((item) => item.value === tab) ?? tabs[0];
+  // A phone detail leaves the tabs to the list and the prompt's anchor link, so its head starts the page.
+  const showTabs = !(isMobileViewport && agent);
   const detail = agent && provider ? {
     agent,
     provider,
@@ -42,7 +44,7 @@ export default function AuditPageView({ isKo, agents, isMobileViewport }: AuditP
       testId="audit-page"
       title={tr("감사", "Audit")}
       description={tr("에이전트가 받은 시스템 프롬프트와 메멘토 앵커를 봐요.", "Review the system prompts and Memento anchors agents received.")}
-      actions={
+      actions={showTabs ? (
         // The kit control is an inline-size container, so its slot needs a definite width.
         <div className="w-full sm:w-80" data-testid="audit-tabs">
           <SegmentedControl<AuditTab>
@@ -55,9 +57,9 @@ export default function AuditPageView({ isKo, agents, isMobileViewport }: AuditP
             options={tabs.map(({ value, label }) => ({ value, label, controls: panelId }))}
           />
         </div>
-      }
+      ) : null}
     >
-      <section id={panelId} role="tabpanel" aria-label={active.label} data-testid={`audit-panel-${active.value}`}>
+      <section id={panelId} role={showTabs ? "tabpanel" : undefined} aria-label={active.label} data-testid={`audit-panel-${active.value}`}>
         <AuditWorkspace selection={selection} phone={isMobileViewport} isKo={isKo} tr={tr} caption={tab === "prompts" ? promptCaption : anchorCaption}>
           {detail && tab === "prompts" ? (
             <PromptAuditDetail key={`${detail.agent.id}:${detail.provider}`} {...detail} onOpenAnchors={() => selection.selectTab("anchors")} />

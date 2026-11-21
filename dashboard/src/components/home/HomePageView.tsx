@@ -48,7 +48,7 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
             tr={tr}
             className="flex-[2_1_32.5rem]"
           />
-          <HomeSystemCard campaigns={campaigns} tr={tr} className="flex-[1_1_18.75rem]" />
+          <HomeSystemCard campaigns={campaigns} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
         </div>
         <HomeAgentsCard entries={entries} isMobile={isMobileViewport} tr={tr} isKo={isKo} onOpenAgent={onOpenAgent} />
         <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">

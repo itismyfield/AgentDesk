@@ -254,6 +254,12 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
   ];
 }
 
+/** A line reads off (warn, err) or unknown. Memento is left out: home has no source for it, so it is always unknown. */
+export function systemNeedsAttention(rows: SystemRow[], tr: Tr): boolean {
+  const unknown = tr("확인 불가", "Unknown");
+  return rows.some((row) => row.key !== "memento" && (row.tone === "warn" || row.tone === "err" || row.value === unknown));
+}
+
 // ── Campaigns ──
 
 export type StageSegment = "done" | "now" | "fail" | "todo";
