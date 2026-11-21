@@ -444,6 +444,7 @@ src/
 │   │   ├── candidate_seal.rs
 │   │   ├── decision_item.rs
 │   │   ├── definition.rs
+│   │   ├── deployment.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
@@ -1038,8 +1039,12 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_executor.rs
+│   │   ├── deploy_executor_tests.rs
 │   │   ├── deploy_observe.rs
 │   │   ├── deploy_observe_tests.rs
+│   │   ├── deploy_policy.rs
+│   │   ├── deploy_policy_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -1049,6 +1054,8 @@ src/
 │   │   ├── execution_pin_tests.rs
 │   │   ├── failure_budget.rs
 │   │   ├── failure_budget_tests.rs
+│   │   ├── final_acceptance.rs
+│   │   ├── final_acceptance_tests.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── host_identity.rs

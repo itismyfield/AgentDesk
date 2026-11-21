@@ -31,6 +31,13 @@ pub enum EffectAuthority {
         node_epoch: u64,
         run_control_version: u64,
     },
+    // Held by the approved deployment of a landed node; no attempt is open at that point.
+    Deployment {
+        action_id: String,
+        binding_digest: Digest,
+        node_epoch: u64,
+        run_control_version: u64,
+    },
 }
 
 impl EffectAuthority {
@@ -47,6 +54,11 @@ impl EffectAuthority {
                 ..
             }
             | Self::Landing {
+                run_control_version,
+                node_epoch,
+                ..
+            }
+            | Self::Deployment {
                 run_control_version,
                 node_epoch,
                 ..
@@ -86,6 +98,16 @@ impl EffectAuthority {
                 ..
             } => {
                 effect.kind == ActionKind::CreatePr
+                    && effect.phase.is_none()
+                    && (action_id, binding_digest)
+                        == (&effect.action_id, &effect.origin_binding_digest)
+            }
+            Self::Deployment {
+                action_id,
+                binding_digest,
+                ..
+            } => {
+                effect.kind == ActionKind::Deploy
                     && effect.phase.is_none()
                     && (action_id, binding_digest)
                         == (&effect.action_id, &effect.origin_binding_digest)
