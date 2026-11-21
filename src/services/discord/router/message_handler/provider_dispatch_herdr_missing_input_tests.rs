@@ -338,7 +338,7 @@ fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
         assert!(crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path)).is_some());
         let state = super::source_input_settled(&intake, &original, &heads).await;
         assert_eq!(state["items"], json!([]));
-        super::idle_turn_unwound(&intake).await;
+        super::wait_for_idle_turn_to_unwind(&intake).await;
         let sends = fx.rig.sends();
         assert_eq!(sends.len() - before, 2, "one paste and one Enter");
         assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
@@ -471,7 +471,7 @@ fn an_old_readiness_due_cannot_discard_a_front_reobserving_a_live_pane_pg() {
                 .is_some()
         );
         super::source_input_settled(&intake, &original, &heads).await;
-        super::idle_turn_unwound(&intake).await;
+        super::wait_for_idle_turn_to_unwind(&intake).await;
         let sends = fx.rig.sends();
         assert_eq!(sends.len() - before, 2);
         assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
