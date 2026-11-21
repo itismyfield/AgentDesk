@@ -25,8 +25,7 @@ use tracing::Instrument;
 mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
-    format_ssh_direct_prompt_notification, format_system_continuation_note,
-    injected_prompt_suppresses_user_turn_lifecycle,
+    format_system_continuation_note, injected_prompt_suppresses_user_turn_lifecycle,
 };
 #[cfg(test)]
 use self::injected_prompt_policy::{
@@ -49,31 +48,19 @@ use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
-/// Shares the live human-only policy and renderer with transcript projections.
-pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
-    input_notice_memo::content(prompt, |prompt| {
-        let decision = relay_observed_prompt_injected_prompt_decision(prompt);
-        (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
-            .then(|| input_notice_line(prompt))
-    })
-}
+mod input_notice;
 #[cfg(test)]
-pub(crate) use input_notice_memo::RUNS as INPUT_NOTICE_RUNS;
+pub(crate) use self::input_notice::INPUT_NOTICE_RUNS;
+pub(crate) use self::input_notice::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 
-/// The same notice for a scheduled-task fire the writer read off its own row.
-pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {
-    input_notice_content(prompt).map(|_| {
-        injected_prompt_policy::format_direct_prompt_notification(
-            InjectedPromptClass::ScheduledPrompt,
-            "claude",
-            "",
-            prompt,
-        )
-    })
-}
-
-pub(crate) fn input_notice_line(text: &str) -> String {
-    format_ssh_direct_prompt_notification("claude", "", text)
+/// Routes dedupe's binding publications to the observer wake, beside the health registry.
+pub(crate) fn install_observer_publication() {
+    #[cfg(unix)]
+    crate::services::tui_prompt_dedupe::observer_publication::install(
+        rehydration::observer_binding_published,
+    );
 }
 
 mod idle_tail_state;

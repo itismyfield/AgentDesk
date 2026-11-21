@@ -624,7 +624,7 @@ fn restore_under_source_authority(
                     && persisted == Some(Persisted::Logged)
                     && pending_seq(channel_id, tmux_session, session).is_none()
                 {
-                    crate::services::discord::observer_binding_published(
+                    super::observer_publication::binding_published(
                         tmux_session.to_owned(),
                         held.clone(),
                     );

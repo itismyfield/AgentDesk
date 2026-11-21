@@ -285,7 +285,7 @@ impl Candidate<'_> {
                             && binding_events::pending_seq(p.channel_id, tmux, payload).is_none()
                     })
                 {
-                    crate::services::discord::observer_binding_published(
+                    crate::services::tui_prompt_dedupe::observer_publication::binding_published(
                         tmux.to_owned(),
                         self.bound.clone(),
                     );
