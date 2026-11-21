@@ -125,31 +125,29 @@ impl GatewayPort {
 }
 
 /// Runs `request` only under the execution owner guard for `content`.
-fn guarded(
+async fn guarded(
     scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
     channel: u64,
     content: String,
     origin: Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     request: impl Future<Output = PostOutcome> + Send + 'static,
-) -> impl Future<Output = PostOutcome> + Send + 'static {
-    async move {
-        use crate::services::cluster::intake_router_hook::owner_record::output;
-        let guard = match output::acquire(
-            scope.as_ref(),
-            &channel.to_string(),
-            &content,
-            origin.as_ref(),
-        )
+) -> PostOutcome {
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let guard = match output::acquire(
+        scope.as_ref(),
+        &channel.to_string(),
+        &content,
+        origin.as_ref(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(error) => return PostOutcome::Withheld(error.to_string()),
+    };
+    guard
+        .run(request)
         .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return PostOutcome::Withheld(error.to_string()),
-        };
-        guard
-            .run(request)
-            .await
-            .unwrap_or_else(PostOutcome::Uncertain)
-    }
+        .unwrap_or_else(PostOutcome::Uncertain)
 }
 
 impl DiscordPort for GatewayPort {
