@@ -61,6 +61,10 @@ AgentDesk의 HTTP 경계부터 재입장까지는 고정 소스에서 확인했�
 | 활성 대상의 writer/증거 저장 불가 | 인수 전에는 503. 이미 인수한 의무는 그 owner에 보존하며 재요청에 pending/unknown을 구분한다. |
 | 준비된 writer + 인증된 iMessage | 내구 origin, exact queue/turn bind, inflight nonce와 스풀 `open`을 순서대로 확인한다. 진입의 선택 세대와 producer 직전 세대를 대조한다. 조각 1b의 sink는 기록용이다. 게시 소유권 전환은 조각 4에서 검증한다. |
 
+watcher는 `PERSON_DISCORD`에 매핑되지 않은 발신자의 `409 imessage_deliver_required`를 받으면 start 재시도를 종료하고, 원본 GUID로 추적하는 사용자 가시 실패 알림을 내구 큐에 맡긴다. 알림 인수에 실패하면 작업을 보류하며 `gave_up`으로 종결하지 않는다. 이 watcher 분기 적용과 수용 확인은 활성화 조건이다.
+
+idle agy의 deliver는 현재 start 분기에서 새 턴을 연다. busy 상태는 주입 가능한 TUI에서 pane으로 입력을 보내며, busy agy는 내구 큐에서 다음 턴을 기다린다. main `d97f7b9d655e4b0c8d83bb89e192968a5ea0f504`의 `src/services/discord/health/turn_deliver/inject.rs:406–410`은 Claude/Codex만 주입 대상으로 인정하며 `src/services/stream_json_cli/runner.rs:73`은 agy 실행에 stdin을 연결하지 않는다.
+
 조각 4의 활성화 확인은 비서 watcher의 직접 start/409→deliver, 등록 답장→실제 destination, queue drain, 재시작에 걸친 원본 귀속을 포함한다. 2xx나 입력 echo만 확인한 입력은 소비 집계에서 제외한다. 기존 row의 삭제·일괄 변경이나 reply 만료·송신 권한 확대는 배선 범위 밖이다.
 
 ## 상태 차트와 검증

@@ -6,8 +6,8 @@ use sqlx::PgPool;
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::{
-    HealthRegistry, end_turn, inject_hook, queue_texts, register_inject_runtime_for_provider,
-    seed_external_turn_row_for_tests, start_without_gateway,
+    HealthRegistry, InjectPane, end_turn, inject_hook, queue_texts,
+    register_inject_runtime_for_provider, seed_external_turn_row_for_tests, start_without_gateway,
 };
 use crate::services::imsg_reply::agy_input::{self, SELECTED_WRITER, WriterGate, WriterSelection};
 use crate::services::provider::ProviderKind;
@@ -30,14 +30,19 @@ struct Fixture {
 
 impl Fixture {
     async fn new(destination: u64) -> Self {
+        Self::with_provider(destination, ProviderKind::Antigravity).await
+    }
+
+    async fn with_provider(destination: u64, provider: ProviderKind) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
-             VALUES ($1, $1, 'antigravity', $2)",
+             VALUES ($1, $1, $2, $3)",
         )
         .bind(AGENT)
+        .bind(provider.as_str())
         .bind(destination.to_string())
         .execute(&pool)
         .await
@@ -47,7 +52,7 @@ impl Fixture {
             &registry,
             &[destination],
             Some(pool.clone()),
-            ProviderKind::Antigravity,
+            provider,
         )
         .await;
         let app = router(Some(pool.clone()), Some(registry));
@@ -85,6 +90,19 @@ impl Fixture {
             .await
     }
 
+    async fn watcher_start(&self, input: &Value) -> (StatusCode, Value) {
+        let start = json!({
+            "prompt": input["text"], "channel_id": input["channel_id"],
+            "provider": input["provider"], "source": input["source"],
+        });
+        post(
+            &self.app,
+            &format!("/agents/{AGENT}/turn/start"),
+            &start.to_string(),
+        )
+        .await
+    }
+
     async fn origin_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM imsg_reply_obligations")
             .fetch_one(&self.pool)
@@ -111,19 +129,8 @@ fn assistant_input(destination: u64) -> Value {
 async fn s1b_activated_legacy_watcher_start_409_delivers_the_same_original_once_pg() {
     let fixture = Fixture::new(7_896_450).await;
     let input = assistant_input(fixture.destination);
-    let start = json!({
-        "prompt": input["text"], "channel_id": input["channel_id"], "provider": input["provider"],
-        "source": input["source"],
-    });
     let answer = SELECTED_WRITER
-        .scope(
-            fixture.selection(),
-            post(
-                &fixture.app,
-                &format!("/agents/{AGENT}/turn/start"),
-                &start.to_string(),
-            ),
-        )
+        .scope(fixture.selection(), fixture.watcher_start(&input))
         .await;
     assert_eq!(answer.0, StatusCode::CONFLICT, "{}", answer.1);
     assert_eq!(answer.1["error"], "imessage_deliver_required");
@@ -158,6 +165,7 @@ async fn s1b_activated_legacy_watcher_start_409_delivers_the_same_original_once_
     assert_eq!(racing.1["error"], "admission_pending");
     assert_eq!(first.0, StatusCode::OK, "{}", first.1);
     assert_eq!(first.1["delivery"], "queued", "{}", first.1);
+    assert_eq!(first.1["reason"], "external_turn_active");
     assert_eq!(
         fixture
             .request_with_gate(input.clone(), WriterGate::unready(fixture.destination))
@@ -226,7 +234,7 @@ async fn s1b_activated_legacy_watcher_start_409_delivers_the_same_original_once_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn s1b_activated_direct_start_binds_the_actual_execution_id_pg() {
+async fn s1b_watcher_409_deliver_starts_idle_agy_and_binds_execution_id_pg() {
     let fixture = Fixture::new(7_896_452).await;
     let _gateway = fixture
         .shared
@@ -234,6 +242,14 @@ async fn s1b_activated_direct_start_binds_the_actual_execution_id_pg() {
         .await;
     let _started = start_without_gateway(fixture.destination);
     let input = assistant_input(fixture.destination);
+    let start = SELECTED_WRITER
+        .scope(fixture.selection(), fixture.watcher_start(&input))
+        .await;
+    assert_eq!(start.0, StatusCode::CONFLICT);
+    assert_eq!(start.1["error"], "imessage_deliver_required");
+    assert!(inject_hook::starts_seen(fixture.destination).is_empty());
+    assert_eq!(fixture.origin_count().await, 0);
+
     let answer = fixture.request(input.clone()).await;
     assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
     assert_eq!(answer.1["delivery"], "started");
@@ -248,8 +264,45 @@ async fn s1b_activated_direct_start_binds_the_actual_execution_id_pg() {
         }]
     );
     assert_eq!(fixture.request(input).await, answer);
+    assert!(
+        queue_texts(&fixture.shared, fixture.destination)
+            .await
+            .is_empty()
+    );
     assert_eq!(fixture.origin_count().await, 1);
     end_turn(&fixture.shared, fixture.destination).await;
+    fixture.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s1b_watcher_409_deliver_injects_once_into_busy_claude_pane_pg() {
+    let fixture = Fixture::with_provider(7_896_453, ProviderKind::Claude).await;
+    let pane = InjectPane::new(fixture.destination, "external");
+    let mut input = assistant_input(fixture.destination);
+    input["provider"] = json!("claude");
+
+    let start = fixture.watcher_start(&input).await;
+    assert_eq!(start.0, StatusCode::CONFLICT, "{}", start.1);
+    assert_eq!(start.1["reason"], "external_turn_active");
+    assert_eq!(fixture.origin_count().await, 0);
+    assert!(pane.records().is_empty());
+
+    let body = input.to_string();
+    let request = || ADMISSION_ENABLED_FOR_TEST.scope(false, deliver(&fixture.app, AGENT, &body));
+    let response = request().await;
+    assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+    assert_eq!(response.1["delivery"], "injected");
+    assert_eq!(pane.records().len(), 1);
+    assert!(pane.transcript_recorded_the_paste());
+    assert_eq!(request().await, response);
+    assert_eq!(pane.records().len(), 1);
+    assert!(
+        queue_texts(&fixture.shared, fixture.destination)
+            .await
+            .is_empty()
+    );
+    assert_eq!(fixture.origin_count().await, 1);
+    drop(pane);
     fixture.finish().await;
 }
 
