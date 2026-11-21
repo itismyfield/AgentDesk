@@ -2903,6 +2903,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
 │   │   │   ├── retired_metadata.rs
+│   │   │   ├── send_stage_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
@@ -4501,7 +4502,8 @@ src/
 │   │   │   │   ├── child_run.rs
 │   │   │   │   ├── child_run_tests.rs
 │   │   │   │   ├── first_turn.rs
-│   │   │   │   └── first_turn_tests.rs
+│   │   │   │   ├── first_turn_tests.rs
+│   │   │   │   └── send_stage.rs
 │   │   │   ├── children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
