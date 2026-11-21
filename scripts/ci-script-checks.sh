@@ -444,6 +444,11 @@ if run_check guards "External toolchain draft/approval/smoke tests (#4555)"; the
 "$PYTHON" -m unittest tests.test_toolchain_update
 fi
 
+# Crate-split slices use equiv_check.py as their gate; its fixtures run git only, no cargo.
+if run_check guards "Crate split equivalence check tests"; then
+"$PYTHON" -m unittest tests.test_crate_split_equiv_check
+fi
+
 if run_check guards "await_holding_lock ratchet guard"; then
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet
