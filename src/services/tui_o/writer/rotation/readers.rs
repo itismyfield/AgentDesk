@@ -802,6 +802,12 @@ impl<B: BindingEvents> Sources<B> {
         if self.provider != ShadowProvider::Codex {
             return HashMap::new();
         }
+        // Herdr channels never capture a Codex end, so silence is their only retirement evidence.
+        let silence = if crate::config::session_hosts::has_herdr_endpoint(self.channel) {
+            HERDR_UNPROVEN_SILENCE
+        } else {
+            RETIRED_WATCH
+        };
         let now = Instant::now();
         self.readers
             .iter()
@@ -814,7 +820,7 @@ impl<B: BindingEvents> Sources<B> {
                     && now - *since >= RETIRE_QUIET
                     && wall_now
                         .duration_since(fingerprint.modified)
-                        .is_ok_and(|age| age >= RETIRED_WATCH)
+                        .is_ok_and(|age| age >= silence)
                     && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint)
                 {
                     Some((source_key(&reader.source), fingerprint.clone()))
