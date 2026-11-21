@@ -1668,7 +1668,11 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
             guard
         };
         let (result, _record) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
-        assert!(result.unwrap().is_err_and(|error| error.starts_with("NotSent(")));
+        assert!(
+            result
+                .unwrap()
+                .is_err_and(|error| error.starts_with("NotSent("))
+        );
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!((after.0 - counts.0, after.1 - counts.1), (1, 0));
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
@@ -1691,7 +1695,12 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
         assert!(state["head_injection"].is_null());
         assert_eq!(state["retained_inputs"], json!([]));
         assert!(held_watch::has_watch(CHANNEL));
-        let next = intake.mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front())).await.unwrap().unwrap();
+        let next = intake
+            .mailbox
+            .v2_request(|slot| Ok(slot.as_ref().unwrap().front()))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(next.0, ticket);
         assert_eq!(next.1.message_id, original.message_id);
         assert_eq!(next.1.queued_generation, original.queued_generation);
@@ -1707,24 +1716,28 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
         assert_eq!(fx.rig.sends().len(), before);
         assert!(heads.lock().unwrap().is_empty());
 
+        // The watch wakes once, on the first look after the idle proof; earlier looks keep it.
+        let observe =
+            || held_watch::watch_observed(source_retry_drive(&intake), original.message_id).1;
+        let mut observed = observe();
         missing_input::append_terminal(&started, "i8114-working-message");
         assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
+        let verdict = tokio::time::timeout(LIMIT, async {
+            loop {
+                let look = observed.await.unwrap().verdict;
+                if look != held_watch::Verdict::Keep {
+                    break look;
+                }
+                observed = observe();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(verdict, held_watch::Verdict::Wake);
         source_input_settled(&intake, &original, &heads).await;
         wait_for_idle_turn_to_unwind(&intake).await;
         assert_eq!(fx.rig.sends().len() - before, 2);
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
-        let now = chrono::Utc::now().to_rfc3339();
-        append(&started.path, &[
-            json!({"type":"assistant","uuid":uuid(),"sessionId":started.session,"timestamp":now,
-                "apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant","stop_reason":"end_turn",
-                    "content":[{"type":"text","text":"existing native turn completed"}]}}),
-            json!({"type":"system","subtype":"turn_duration","sessionId":started.session,"timestamp":now}),
-        ]);
-        let (_, observed) = held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
-        let verdict = tokio::time::timeout(LIMIT, observed).await.unwrap().unwrap().verdict;
-        assert_eq!(verdict, held_watch::Verdict::Wake);
-        source_input_settled(&intake, &original, &heads).await;
-        assert_eq!(fx.rig.sends().len(), before + 2);
     });
     drop(intake);
     drop(gate);
