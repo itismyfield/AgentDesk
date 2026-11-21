@@ -1935,3 +1935,8 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+turn-mailbox/RecoveryKickoffIdentityAfterReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityAfterZero.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeZero.cfg	RecoveryKickoffIdentity	-	MailboxEventuallyReleased
+turn-mailbox/RecoveryKickoffIdentityWeakZero.cfg	RecoveryKickoffIdentity	NoWrongRelease	-
