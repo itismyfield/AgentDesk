@@ -44,11 +44,12 @@ export function useCachedCaptions<T, K extends readonly unknown[]>(
   };
 }
 
-/** Provider, session start (KST) and where the copy came from; `saved` names the copy when no session is live. */
-export function sessionMeta(provider: AuditProvider, startedAt: string | null | undefined, origin: AuditOrigin | undefined, saved: string, isKo: boolean, tr: Tr): string {
+/** Provider, session start (KST) and where the copy came from; `saved` names the copy when no session is live.
+ * A phone with the provider switch leaves the provider to it, so the line fits its one row. */
+export function sessionMeta({ provider, providers, phone, isKo, tr }: AuditDetailProps, startedAt: string | null | undefined, origin: AuditOrigin | undefined, saved: string): string {
   const started = startedAt ? formatTranscriptTimestamp(startedAt, isKo) : null;
   return [
-    getProviderLabel(provider),
+    phone && providers.length > 1 ? null : getProviderLabel(provider),
     started ? tr(`${started} 시작`, `started ${started}`) : null,
     origin === "current_session" ? tr("현재 세션", "Current session") : origin === "latest_saved" ? `${tr("세션 없음", "No session")} · ${saved}` : null,
   ].filter(Boolean).join(" · ");
@@ -94,6 +95,7 @@ export function AuditSummaryCard({ detail, label, meta, fetching, onRefresh, act
         isKo={isKo}
         meta={meta}
         onBack={onBack}
+        phone={phone}
         tr={tr}
         actions={(
           <>
@@ -108,7 +110,7 @@ export function AuditSummaryCard({ detail, label, meta, fetching, onRefresh, act
         )}
       />
       {providers.length > 1 ? (
-        <div className={phone ? "w-full" : "w-48"} data-testid="audit-provider">
+        <div className="w-48" data-testid="audit-provider">
           <SegmentedControl<AuditProvider>
             variant="tray"
             size="sm"

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, CloudOff, FileQuestion, Search, Unplug } from "lucide-react";
+import { ArrowLeft, ChevronRight, CloudOff, FileQuestion, Search, Unplug } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
@@ -94,23 +94,25 @@ export function AuditWorkspace({ selection, phone, isKo, tr, caption, children }
 }
 
 /** Detail head both tabs use: back on phones, the agent, a meta line and actions. */
-export function AuditDetailHeader({ agent, isKo, meta, actions, onBack, tr }: {
+export function AuditDetailHeader({ agent, isKo, meta, actions, onBack, phone, tr }: {
   agent: Agent;
   isKo: boolean;
-  meta: ReactNode;
+  meta: string;
   actions: ReactNode;
   onBack?: () => void;
+  phone: boolean;
   tr: Tr;
 }) {
   return (
-    <div className="flex min-w-0 items-center gap-3">
-      {onBack ? <IconButton icon={<ChevronLeft />} label={tr("에이전트 목록으로", "Back to agents")} className="-ml-2" onClick={onBack} data-testid="audit-back" /> : null}
-      <AgentPersona agent={agent} size={40} />
-      <div className="min-w-0 flex-1">
-        <h2 className="m-0 truncate text-base font-semibold text-th-text-heading">{localeName(isKo ? "ko" : "en", agent)}</h2>
-        <p className="m-0 text-xs leading-5 break-keep text-th-text-muted" data-testid="audit-detail-meta">{meta}</p>
+    // Phones get one 56px bar across the page (its margins undo PageFrame's padding), with the meta on one line.
+    <div className={phone ? "-mx-4 -mt-3 mb-1 flex h-14 sm:-mx-6 sm:-mt-4 min-w-0 items-center gap-1 border-b border-[var(--line-soft)] px-2" : "flex min-w-0 items-center gap-3"} data-testid="audit-detail-head">
+      {onBack ? <IconButton icon={<ArrowLeft />} label={tr("에이전트 목록으로", "Back to agents")} onClick={onBack} data-testid="audit-back" /> : null}
+      <AgentPersona agent={agent} size={phone ? 32 : 40} />
+      <div className={`min-w-0 flex-1 ${phone ? "ml-1.5" : ""}`}>
+        <h2 className={`m-0 truncate font-semibold text-th-text-heading ${phone ? "text-[15px] leading-5" : "text-base"}`}>{localeName(isKo ? "ko" : "en", agent)}</h2>
+        <p className={`m-0 text-xs text-th-text-muted ${phone ? "truncate leading-4" : "leading-5 break-keep"}`} title={phone ? meta : undefined} data-testid="audit-detail-meta">{meta}</p>
       </div>
-      <div className="flex shrink-0 items-center gap-2">{actions}</div>
+      <div className={`flex shrink-0 items-center ${phone ? "" : "gap-2"}`}>{actions}</div>
     </div>
   );
 }

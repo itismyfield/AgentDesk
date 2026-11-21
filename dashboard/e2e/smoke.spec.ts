@@ -1650,6 +1650,18 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("home-system")).toContainText("마지막 확인");
   });
 
+  test("home: phones show the system card only while a line is off or unknown, desktop always", async ({ page }, testInfo) => {
+    let queue = 2;
+    await page.clock.install();
+    await mockHomeSources(page);
+    await page.route(/\/api\/health(?:\/detail)?$/, (route) => route.fulfill({ json: { status: "healthy", queue_depth: queue, providers: [{ connected: true }] } }));
+    await page.goto("/home");
+    await expect(page.getByTestId("home-system-queue")).toContainText("2건", { timeout: 15000 });
+    queue = 0;
+    await page.clock.runFor(30_000);
+    await expect(page.getByTestId("home-system")).toHaveCount(testInfo.project.name === "mobile" ? 0 : 1, { timeout: 15000 });
+  });
+
   test("home: usage marks Gemini's limit-only buckets unmeasured and keeps the settings link without the rule", async ({ page }) => {
     await mockHomeSources(page);
     await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [

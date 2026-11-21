@@ -71,7 +71,7 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
       <AuditSummaryCard
         detail={detail}
         label={tr("프롬프트 요약", "Prompt summary")}
-        meta={sessionMeta(provider, data?.session_started_at, data?.origin, tr("최근 저장본", "latest saved copy"), isKo, tr)}
+        meta={sessionMeta(detail, data?.session_started_at, data?.origin, tr("최근 저장본", "latest saved copy"))}
         fetching={query.isFetching}
         onRefresh={retry}
         actions={phone ? (

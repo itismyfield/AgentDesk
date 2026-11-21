@@ -159,7 +159,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
       <AuditSummaryCard
         detail={detail}
         label={tr("앵커 요약", "Anchor summary")}
-        meta={sessionMeta(provider, read?.session_started_at, state === "ready" ? read?.source : undefined, tr("세션 사본", "session copy"), isKo, tr)}
+        meta={sessionMeta(detail, read?.session_started_at, state === "ready" ? read?.source : undefined, tr("세션 사본", "session copy"))}
         fetching={query.isFetching}
         onRefresh={retry}
         stats={state === "ready" ? [
