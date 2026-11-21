@@ -176,7 +176,8 @@ RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy /\ Mutant # "UnprovenD
                       !.armed = Mutant # "IdentityUntimed"]
 \* The screen may turn idle before the due; the held watch's next look wakes the Idle start, which
 \* ends the identity hold before its key (intake_turn/owned_busy.rs:136,338). For the restart repro
-\* the binding comes back and the same probe proves the idle pane (host_input/busy.rs:196).
+\* a terminal-direct turn is observed, its history and binding come back (busy/herdr.rs:335,344),
+\* and the same probe proves the idle pane (host_input/busy.rs:196).
 RHIdleScreen == /\ Scenario \in {"no-holder-busy-idle", "idle-unresolved"}
                 /\ r.phase = "held" /\ ~r.screen
                 /\ r.age < 5
