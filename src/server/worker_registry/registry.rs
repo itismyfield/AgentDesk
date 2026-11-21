@@ -244,6 +244,16 @@ impl SupervisedWorkerRegistry {
                 });
                 Ok(None)
             }
+            ServerWorkerId::DelegationResultCards => {
+                let Some(pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                self.register_leader_tokio(spec, move || {
+                    crate::services::agents::delegation::result_card_loop(pool.clone())
+                });
+                Ok(None)
+            }
             ServerWorkerId::ScheduledMessages => {
                 let Some(smsg_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(spec, "postgres pool unavailable");
