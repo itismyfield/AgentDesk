@@ -1,5 +1,6 @@
 import { useCallback, useId } from "react";
 import { PageFrame } from "../../app/PageFrame";
+import { useShellFocus } from "../../app/shellFocus";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import type { Agent } from "../../types";
 import { AnchorAuditDetail, useAnchorCaptions } from "./AnchorAuditPanel";
@@ -26,8 +27,9 @@ export default function AuditPageView({ isKo, agents, isMobileViewport }: AuditP
     { value: "anchors" as const, label: tr("메멘토 앵커", "Memento anchors") },
   ];
   const active = tabs.find((item) => item.value === tab) ?? tabs[0];
-  // A phone detail leaves the tabs to the list and the prompt's anchor link, so its head starts the page.
+  // A phone detail leaves the tabs to the list and the prompt's anchor link, and its head takes the app top bar's row.
   const showTabs = !(isMobileViewport && agent);
+  useShellFocus(!showTabs, "topBar");
   const detail = agent && provider ? {
     agent,
     provider,
