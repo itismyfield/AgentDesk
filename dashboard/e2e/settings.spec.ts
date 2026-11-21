@@ -438,6 +438,8 @@ test.describe("settings catalog", () => {
     const inspector = page.getByTestId("settings-inspector");
     await expect(inspector).toContainText("바로 · 재시작해도 유지");
     await row(page, "max_review_rounds").locator("input").fill("10");
+    await expect(bar).toHaveCSS("position", "sticky");
+    await expect(bar).toBeInViewport();
     await expect(bar).toContainText("최대 리뷰 라운드 30 → 10 · 저장하면 바로 적용돼요");
     await expect(inspector).toContainText("고칠 값10");
     await row(page, "maxEntryRetries").locator("input").fill("");
