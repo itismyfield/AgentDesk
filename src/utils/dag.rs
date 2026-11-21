@@ -54,7 +54,7 @@ pub fn validate_dependencies<'a>(
 }
 
 // Iterative DFS returns the actual back-edge path without recursing on long graphs.
-pub(crate) fn find_cycle(edges: &[Vec<usize>]) -> Option<Vec<usize>> {
+pub fn find_cycle(edges: &[Vec<usize>]) -> Option<Vec<usize>> {
     let mut color = vec![0; edges.len()];
     for root in 0..edges.len() {
         if color[root] != 0 {
