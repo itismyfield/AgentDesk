@@ -22,17 +22,18 @@ pub(crate) enum PolicyHost {
 
 /// The boot entry of `channel` itself, else of the parent a resolved child follows.
 pub(crate) fn parent_policy(channel: u64) -> PolicyHost {
-    let own = |endpoint| PolicyHost::Herdr {
-        endpoint,
-        via_parent: None,
-    };
-    if let Some(endpoint) = session_hosts::herdr_endpoint(channel) {
-        return own(endpoint);
+    // The one raw boot read of this judgement.
+    let boot = |channel: u64| session_hosts::herdr_endpoint(channel);
+    if let Some(endpoint) = boot(channel) {
+        return PolicyHost::Herdr {
+            endpoint,
+            via_parent: None,
+        };
     }
     match relation(channel) {
         Relation::NotChild => PolicyHost::Tmux,
         Relation::Unresolved => PolicyHost::Unknown("thread parent unresolved"),
-        Relation::Child { parent } => match session_hosts::herdr_endpoint(parent) {
+        Relation::Child { parent } => match boot(parent) {
             Some(endpoint) => PolicyHost::Herdr {
                 endpoint,
                 via_parent: Some(parent),
