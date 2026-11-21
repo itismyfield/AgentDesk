@@ -114,7 +114,9 @@ pub(super) fn proactive_memory_guidance_with(
                 current_path,
                 &exists,
             ) {
-                "\n- full memory policy: `docs/memory-scope.md`; read it before broad memory cleanup or scope changes."
+                "\n- full memory policy: `docs/memory-scope.md` (read before broad cleanup or scope changes). \
+                 For calls with a `workspace` field, use `workspace=agentdesk` when targeting the AgentDesk workspace. \
+                 Follow the scope hints. Omit `workspace` for global writes. Never use `AgentDesk` as `workspace` or `agentId`."
             } else {
                 ""
             };

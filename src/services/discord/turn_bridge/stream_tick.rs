@@ -110,7 +110,8 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) pending_long_running_retarget_after_state_save:
         &'a mut PendingLongRunningRetargetAfterStateSave,
     pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) last_adk_heartbeat: &'a mut std::time::Instant,
+    pub(super) session_row_writer:
+        &'a mut crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter,
     pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
 }
 
@@ -179,7 +180,7 @@ pub(super) async fn run_bridge_stream_tick(
     let mut pending_long_running_retarget_after_state_save =
         state.pending_long_running_retarget_after_state_save.take();
     let mut long_running_placeholder_active = state.long_running_placeholder_active.take();
-    let mut last_adk_heartbeat = *state.last_adk_heartbeat;
+    let mut session_row_writer = *state.session_row_writer;
     let mut last_inflight_long_run_heartbeat = *state.last_inflight_long_run_heartbeat;
 
     macro_rules! tick_context {
@@ -244,6 +245,7 @@ pub(super) async fn run_bridge_stream_tick(
                 bridge_created_response_placeholder_msg_id:
                     &mut *bridge_created_response_placeholder_msg_id,
                 bridge_spans: &mut *bridge_spans,
+                session_row_writer: &mut session_row_writer,
             }
         };
     }
@@ -293,7 +295,7 @@ pub(super) async fn run_bridge_stream_tick(
             *state.pending_long_running_retarget_after_state_save =
                 pending_long_running_retarget_after_state_save;
             *state.long_running_placeholder_active = long_running_placeholder_active;
-            *state.last_adk_heartbeat = last_adk_heartbeat;
+            *state.session_row_writer = session_row_writer;
             *state.last_inflight_long_run_heartbeat = last_inflight_long_run_heartbeat;
         }};
     }
@@ -562,6 +564,7 @@ pub(super) async fn run_bridge_stream_tick(
             "turn_bridge::stream_tick::dirty_flush",
         )
         .await;
+        session_row_writer.observe(flush_outcome);
         state_dirty = dirty_after_guarded_save(flush_outcome);
         if flush_outcome == GuardedSaveOutcome::Saved {
             reconcile_tick_runtime_from_inflight!(current_msg_id_before_flush);
@@ -660,7 +663,7 @@ pub(super) async fn run_bridge_stream_tick(
         }
     }
 
-    if last_adk_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+    if session_row_writer.heartbeat_due() {
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
@@ -681,7 +684,7 @@ pub(super) async fn run_bridge_stream_tick(
             shared_owned.api_port,
         )
         .await;
-        last_adk_heartbeat = std::time::Instant::now();
+        session_row_writer.heartbeat_posted();
     }
 
     // codex round-8 P1: keep `placeholder_sweeper` from abandoning a
@@ -726,6 +729,9 @@ pub(super) mod provider_output_guard_tests {
         /// When set, every send or edit is checked against the watched adoption as it is made.
         pub(in crate::services::discord::turn_bridge) check:
             Option<crate::services::tui_o::channel_policy::BodyCheck>,
+        /// When set, every edit first clears this provider/channel's inflight row.
+        pub(in crate::services::discord::turn_bridge) clear_row_on_edit:
+            Option<(ProviderKind, u64)>,
     }
 
     impl CapturingGateway {
@@ -758,6 +764,9 @@ pub(super) mod provider_output_guard_tests {
             content: &'a str,
         ) -> GatewayFuture<'a, Result<(), String>> {
             self.observe(channel_id, SinkOp::Patch, content);
+            if let Some((provider, channel)) = &self.clear_row_on_edit {
+                crate::services::discord::inflight::clear_inflight_state(provider, *channel);
+            }
             self.edits
                 .lock()
                 .expect("edits lock")

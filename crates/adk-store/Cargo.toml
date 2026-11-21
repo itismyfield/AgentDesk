@@ -1,0 +1,21 @@
+[package]
+name = "adk-store"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "../../src/db/adk_store_lib.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "derive", "chrono", "json", "uuid"] }
+serde_json = "1"
+uuid = "1"
+
+[dev-dependencies]
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }

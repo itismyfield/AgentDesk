@@ -45,12 +45,12 @@ mocked/local checks do not execute the live specifications.
 
 The [handwritten feature rows](../../../../docs/user-feature-map.rows.yaml) and
 scenario YAMLs are inputs to the [generated feature map](../../../../docs/user-feature-map.md)
-and [coverage JSON](../../../../docs/generated/user-feature-coverage.json).
-Edit the inputs, then regenerate both outputs from the repository root:
+and [coverage JSON artifact](../../../../docs/e2e/multi-provider-e2e.md#user-feature-coverage-metadata).
+Edit the inputs and validate them from the repository root.
 
 ```bash
-python3 scripts/generate_user_feature_map.py --write --base-ref origin/main
-python3 scripts/generate_user_feature_map.py --check --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --validate --base-ref origin/main
+python3 scripts/generate_user_feature_map.py --output-dir target/user-feature-map --base-ref origin/main
 ```
 
 `feature_coverage.schema: 1` contains `claims` keyed by `feature_id`, explicit

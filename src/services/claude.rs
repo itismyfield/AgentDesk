@@ -6,7 +6,7 @@ mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
 #[cfg(unix)]
-mod tui_session_launch;
+pub(crate) mod tui_session_launch;
 #[cfg(unix)]
 use tui_session_launch::prepare_and_create_claude_tui_session;
 
@@ -1736,10 +1736,7 @@ fn execute_streaming_local_tui_tmux(
         crate::services::claude_tui::composer_lock::session_turn_lock(tmux_session_name);
     let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
     let _receipt_end = guarded_outcome::seal_on_exit(tmux_session_name);
-    debug_log(&format!(
-        "Claude TUI session turn lock acquired: {}",
-        tmux_session_name
-    ));
+    tui_session_launch::record_locked_turn(tmux_session_name);
 
     let session_id = profile_matches.then_some(session_id).flatten();
     let working_dir_path = std::path::Path::new(working_dir);
@@ -1803,7 +1800,7 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
         working_dir,
         working_dir_path,
-        &resolved_session_id,
+        (&resolved_session_id, Some(&transcript_path)),
         system_prompt,
         launch,
         hook_endpoint,

@@ -34,6 +34,7 @@ import run_tui_relay as cell_driver  # noqa: E402
 from post_deploy_relay_continuity import (  # noqa: E402
     SmokeConfigError, _channel_id_from_config, channel_is_herdr, load_channel_id_from_config,
 )
+from tui_relay import preflight_evidence  # noqa: E402
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # platform/tmux.rs log_kill_request; the session token ends at the first space.
@@ -365,13 +366,17 @@ def _cell_guard(args: argparse.Namespace) -> int:
 
 def preflight_busy_reasons(
     *, base_url: str, cell: str, channel_id: str, runtime_root: Path | None = None,
-    herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk",
+    herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk", capture_failure: bool = False,
+    herdr_allowed_degraded_reason: list[str] | None = None, herdr_foreign_degraded_only: bool = False,
 ) -> list[str]:
     """Busy reasons for the cell; an absent mailbox is idle, as the E-1 guard treats it."""
 
     if cell_driver.cell_runtime(cell) == "herdr":
         args = argparse.Namespace(base_url=base_url, cell=cell, channel_id=channel_id,
-                                  herdr_endpoint=herdr_endpoint, herdr_status_bin=herdr_status_bin)
+                                  herdr_endpoint=herdr_endpoint, herdr_status_bin=herdr_status_bin,
+                                  herdr_allowed_degraded_reason=herdr_allowed_degraded_reason,
+                                  herdr_foreign_degraded_only=herdr_foreign_degraded_only,
+                                  capture_preflight_failure=capture_failure)
         cell_driver.herdr.observe(cell_driver, args, cold=True)
         return []
     if runtime_root is None:
@@ -394,6 +399,15 @@ def preflight_busy_reasons(
         )
     )
     return busy
+
+
+def _preflight_failed(args, rc, text, *, stage, detail=None, observation=None):
+    if args.failure_json:
+        observation = observation or preflight_evidence.capture(stage, detail, channel=args.channel_id)
+        print(json.dumps(observation))
+    else:
+        print(text)
+    return rc
 
 
 def _load_report(path: Path) -> dict[str, Any] | None:
@@ -599,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("--herdr-endpoint")
     pre.add_argument("--herdr-status-bin", default="agentdesk")
     pre.add_argument("--reset-state")
+    pre.add_argument("--failure-json", action="store_true")
+    cell_driver.herdr.add_degraded_reason_arguments(pre)
     jud = sub.add_parser("judge")
     jud.add_argument("--config")
     jud.add_argument("--run-id")
@@ -610,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
     jud.add_argument("--log-excerpt", default="")
     jud.add_argument("--driver-rc", type=int, required=True)
     args = parser.parse_args(argv)
+    if args.command == "preflight":
+        cell_driver.herdr.validate_arguments(pre, args)
 
     if args.command == "cell-guard":
         return _cell_guard(args)
@@ -633,13 +651,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "reset-status" or (args.command == "preflight" and args.reset_state):
         rc, detail = reset_status(Path(args.reset_state), args.cell, args.channel_id)
-        if rc or args.command == "reset-status":
+        if args.command == "reset-status":
             print(detail)
             return rc
+        if rc:
+            return _preflight_failed(args, rc, detail, stage="reset_state")
 
     if args.command == "preflight":
+        detail = None
         try:
-            writer = writer_not_ready(cell_driver._read_health_detail(args.base_url),  # noqa: SLF001
+            detail = cell_driver._read_health_detail(args.base_url)  # noqa: SLF001
+            writer = writer_not_ready(detail,
                                       provider=cell_driver.cell_provider(args.cell), channel_id=args.channel_id)
             busy = preflight_busy_reasons(
                 base_url=args.base_url,
@@ -647,17 +669,20 @@ def main(argv: list[str] | None = None) -> int:
                 channel_id=args.channel_id,
                 runtime_root=Path(args.queue_runtime_root) if args.queue_runtime_root else None,
                 herdr_endpoint=args.herdr_endpoint, herdr_status_bin=args.herdr_status_bin,
+                capture_failure=args.failure_json,
+                herdr_allowed_degraded_reason=args.herdr_allowed_degraded_reason,
+                herdr_foreign_degraded_only=args.herdr_foreign_degraded_only,
             )
         except Exception as error:  # noqa: BLE001 - any unreadable snapshot is "not proven idle"
-            print(f"unreadable: {type(error).__name__}: {error}")
-            return 2
+            return _preflight_failed(args, 2, f"unreadable: {type(error).__name__}: {error}",
+                                     stage="health_read" if detail is None else "preflight", detail=detail,
+                                     observation=getattr(error, "herdr_preflight_failure", None))
         # A refusing writer is the cause even when its held input also leaves the queue busy.
         if writer:
-            print("writer not ready: " + "; ".join([writer, *busy]))
-            return 1
+            return _preflight_failed(args, 1, "writer not ready: " + "; ".join([writer, *busy]),
+                                     stage="writer_not_ready", detail=detail)
         if busy:
-            print("busy: " + "; ".join(busy))
-            return 1
+            return _preflight_failed(args, 1, "busy: " + "; ".join(busy), stage="busy", detail=detail)
         print("idle")
         return 0
 

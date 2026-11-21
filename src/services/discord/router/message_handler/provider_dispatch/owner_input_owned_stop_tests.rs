@@ -1212,11 +1212,12 @@ async fn a_restarted_spinner_with_a_modal_receives_no_escape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_open_but_submitted_durable_source_does_not_invent_streaming() {
+async fn an_open_but_submitted_durable_source_under_live_turn_chrome_receives_escape() {
+    // A live spinner outranks the submitted tail, so the stop follows the screen.
     restarted_variant(
-        "an_open_but_submitted_durable_source_does_not_invent_streaming",
+        "an_open_but_submitted_durable_source_under_live_turn_chrome_receives_escape",
         true,
-        0,
+        1,
         None,
         None,
         true,

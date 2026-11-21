@@ -597,7 +597,7 @@ fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool 
         .any(|line| claude_footer::bypass_interrupt(line) == Some(true))
 }
 
-fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
+pub(crate) fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
     let footer = lines
         .iter()
         .rposition(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
