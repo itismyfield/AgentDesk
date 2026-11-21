@@ -357,6 +357,16 @@ fn identity_unresolved_idle_front(name: &str, resolves: bool) {
             settles_at_due(&fx, &intake, &original, before, &heads).await;
             return;
         }
+        // A terminal-direct turn ends in the pane; observing it brings the binding back.
+        let now = chrono::Utc::now().to_rfc3339();
+        append(
+            &started.path,
+            &[
+                json!({"type":"user","uuid":uuid(),"sessionId":started.session,"timestamp":now,
+                "message":{"role":"user","content":"typed in the pane"}}),
+            ],
+        );
+        missing_input::append_terminal(&started, "terminal-direct-turn");
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(fx.logical(), tui);
         let snapshot = source_input_settled(&intake, &original, &heads).await;
         assert!(snapshot["refused_fronts"].is_null() && snapshot["refused_inputs"].is_null());
@@ -368,9 +378,10 @@ fn identity_unresolved_idle_front(name: &str, resolves: bool) {
     });
 }
 
-/// Once the binding is back, the held watch's next read proves the idle pane and sends once.
+/// A terminal-direct turn resolves the identity; the held watch's next read then sends once.
 #[test]
-fn an_idle_pane_with_unresolved_identity_after_restart_is_delivered_once_when_resolved_pg() {
+fn an_idle_pane_with_unresolved_identity_after_restart_is_delivered_once_after_a_terminal_turn_pg()
+{
     identity_unresolved_idle_front("restart-identity-idle-resolved", true);
 }
 
