@@ -11,6 +11,7 @@ pub(crate) mod file_sync;
 pub(crate) use adk_base::domain::fix_safety;
 pub(crate) use adk_base::domain::host_observation;
 pub(crate) mod human_input;
+#[cfg(unix)]
 pub(crate) use adk_base::domain::intake_consent;
 pub(crate) use adk_base::domain::intake_identity;
 pub(crate) use adk_base::domain::lifecycle;
