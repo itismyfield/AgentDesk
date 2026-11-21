@@ -214,6 +214,24 @@ test("campaign tab: a task opens in the pinned pane on wide screens and as its o
   await expect(pane).toHaveCount(0);
 });
 
+test("phone: a quick second tap on back, or a reload with the task open, still leaves one Back to the page before", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "Phone task screen");
+  await mockApi(page);
+  await page.goto("/home");
+  await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
+  const card = page.locator('[data-task-id="i7272"]');
+  const back = page.getByRole("button", { name: "목록으로" });
+  await card.click();
+  await back.dblclick();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await card.click();
+  await page.reload();
+  await back.click();
+  await expect(page).toHaveURL(/\/campaigns\?mode=legacy&campaign=open-issues-dag$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/home$/);
+});
+
 test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");

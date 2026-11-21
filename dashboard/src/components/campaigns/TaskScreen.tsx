@@ -6,6 +6,7 @@ import { IconButton } from "../../kit/free/icon-button-clean";
 import { useReturnFocus } from "../common/overlay/useReturnFocus";
 import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 
+const TASK_ENTRY = "campaignTaskScreen";
 // The task detail fills it in, so the screen's top bar can carry a title and number only the detail knows.
 const ScreenTitle = createContext<((title: string, label: string | null) => void) | null>(null);
 
@@ -26,13 +27,20 @@ export function TaskScreen({ campaign, label, onClose, tr, children }: { campaig
   const returnFocus = useReturnFocus(true);
   const close = useRef(onClose);
   close.current = onClose;
+  const closing = useRef(false);
   useEffect(() => {
-    window.history.pushState(window.history.state, "", window.location.href);
+    // The entry this screen pushed keeps a mark, so a reload with the task open does not push a second one.
+    if (!window.history.state?.[TASK_ENTRY]) window.history.pushState({ ...window.history.state, [TASK_ENTRY]: true }, "", window.location.href);
     const onPop = () => close.current();
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  const back = () => window.history.back();
+  // One Back per close: a quick second tap would otherwise leave the page as well.
+  const back = () => {
+    if (closing.current) return;
+    closing.current = true;
+    window.history.back();
+  };
   const copy = () => void globalThis.navigator?.clipboard?.writeText(window.location.href).then(() => {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
