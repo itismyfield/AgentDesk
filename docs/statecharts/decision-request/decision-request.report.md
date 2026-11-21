@@ -112,7 +112,7 @@ owner의 쓰기·drain 안내·재시작 requeue·부팅이 모두 그 함수를
 | Observe | `decision_drain.rs:178`(쓰기 Ok, owner settled, completed receipt) | 같은 origin의 receipt만 전달 증거. 시작 응답은 아님 |
 | CloseUnknown | `decision_drain.rs:197` | 미확인 쓰기·이전 process의 journal·미완료 receipt → unknown_closed, 원본 안내 0 |
 | CloseAbandoned / Crash+Boot(resolving·normalizing) | `decision_drain.rs:177`, 부팅 `:278` recover_before·`:298` recover_boot·`:310` spawn, 호출 `runtime_bootstrap/spawns.rs:216` | 이전 process가 남긴 resolving·normalizing → `interrupted_before_delivery` |
-| RefusalFinal·NormalizeFailure·AbsentAfterNormalize의 실행권 종결 → Finalize | `decision_drain.rs:118` fail: `src/db/decisions.rs:212` close(fence) → `queued_head/v2/decision.rs:56` discard_decision → closing→failed | fence 먼저, 정확한 원본만 제거, 그 원본의 안내 의무를 지움. fence 뒤 crash는 `:176`(Closing)이 부팅에서 마무리 |
+| RefusalFinal·NormalizeFailure·AbsentAfterNormalize의 실행권 종결 → Finalize | `decision_drain.rs:118` fail: `src/db/decisions.rs:212` close(fence) → `queued_head/v2/decision.rs:56` discard_decision → closing→failed | fence 먼저, 정확한 원본만 제거, 그 원본의 안내 의무를 지움. fence 뒤 crash는 `decision_drain.rs:176`(Closing)이 부팅에서 마무리 |
 | OwnerPending(신규) | `decision_target.rs:103` close_admitted(:133, :135) → `decision_drain.rs:138` | owner 수용 응답이 pending/거절이면 fence 후 그 원본 제거. 2a의 "failed만 기록"을 대체 |
 | NoFailureQueue 유지(재시작 requeue·안내) | `input_owner/recovery.rs:21`, `input_owner/notice.rs:15`, `:116` → settle_channel `decision_drain.rs:264` | requeue_known_not_sent·안내 drain 전에 실패 원본 제거 |
 | WakeFailed(대조) | `decision_drain.rs:236` begin_write 거절 → 원본 제거, 쓰기 0 | 닫힌 event는 wake·재시작 뒤에도 쓰지 않음 |
