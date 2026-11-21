@@ -3251,6 +3251,7 @@ src/
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice.rs
 │   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
@@ -5035,6 +5036,7 @@ src/
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
 │   │   ├── observation.rs
+│   │   ├── observer_publication.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
 │   │   ├── pending_renumber_tests.rs
