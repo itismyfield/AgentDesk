@@ -23,10 +23,10 @@ one `/effort` request, one possibly running turn A, a later user U, an optional 
 |---|---|
 | `ClaudeApply` | `tui_passthrough.rs:99` → `herdr_settings.rs:236` (unchanged ready-pane overlay) |
 | `CodexRequest` | `tui_passthrough.rs:94`; `effort_restart/herdr.rs:91-99` (Pending refused, Retired/vacant save only) |
-| `Prepare` | `effort_restart/herdr.rs:136-186` (expected row, live thread, captured turn, owner intent before any end) |
-| `TerminateOk` | `effort_restart/herdr.rs:220` exact terminate; postlude saves the level under the held exclusion; gate released at `:229` |
-| `TerminateFails` | `effort_restart/herdr.rs:223` cancels the intent, nothing saved |
-| `Admit` | `effort_restart/herdr.rs:237` → `tmux.rs` `advance` |
+| `Prepare` | `effort_restart/herdr.rs:154-204` (expected row, live thread, captured turn, owner intent before any end) |
+| `TerminateOk` | `effort_restart/herdr.rs:219` exact terminate; postlude (`:121-133`) saves the level under the held exclusion; gate released at `:235` |
+| `TerminateFails` | `effort_restart/herdr.rs:229` cancels the intent, nothing saved |
+| `Admit` | `effort_restart/herdr.rs:243` → `tmux.rs` `advance` |
 | `Launch` | `herdr_turn.rs:212,260` → `restart_intent.rs:61-75` |
 | `Recover` | `effort_restart/recovery.rs:50-58` |
 | `Clear` | `queued_head/v2/clear.rs:221` |

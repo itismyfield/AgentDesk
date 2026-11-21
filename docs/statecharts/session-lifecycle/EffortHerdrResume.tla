@@ -24,7 +24,7 @@ CONSTANTS
 VARIABLES
     cmd,       \* "idle" | "gated" | "prepared" | "done" | "refused"
     row,       \* "bound_old" | "pending_old" | "retired_old" | "bound_new"
-    gate,      \* the restart gate excludes owner delivery (H:128, released H:229)
+    gate,      \* the restart gate excludes owner delivery (H:146, released H:235)
     saved,     \* channel setting: "old" | "new"
     paneLevel, \* level the live old pane was launched with or applied: "old" | "new"
     intent,    \* "none" | "idle" | "withC" | "cancelled"
@@ -68,7 +68,7 @@ CodexRequest ==
               cmd' = "gated" /\ gate' = TRUE /\ UNCHANGED saved
     /\ UNCHANGED <<row, paneLevel, intent, c, turn, launched, newLevel, rejected, stuck, cleared, users>>
 
-\* H:136-186: expected row, live thread, captured turn, then the intent before anything ends.
+\* H:154-204: expected row, live thread, captured turn, then the intent before anything ends.
 Prepare ==
     /\ cmd = "gated"
     /\ cmd' = "prepared"
@@ -77,21 +77,21 @@ Prepare ==
     /\ saved' = IF Mut = "save_first" THEN "new" ELSE saved
     /\ UNCHANGED <<row, gate, paneLevel, turn, launched, newLevel, rejected, stuck, cleared, users>>
 
-\* H:220 exact terminate; postlude H:214 saves under the held exclusion; H:229 releases the gate.
+\* H:219 exact terminate; postlude H:121-133 saves under the held exclusion; H:235 releases the gate.
 TerminateOk ==
     /\ cmd = "prepared"
     /\ row' = "retired_old" /\ saved' = "new" /\ gate' = FALSE /\ cmd' = "done"
     /\ turn' = IF turn = "running" THEN "cut" ELSE turn
     /\ UNCHANGED <<paneLevel, intent, c, launched, newLevel, rejected, stuck, cleared, users>>
 
-\* H:223: nothing ended, the turn keeps running and owes nothing; the level stays unsaved.
+\* H:229: nothing ended, the turn keeps running and owes nothing; the level stays unsaved.
 TerminateFails ==
     /\ cmd = "prepared"
     /\ cmd' = "refused" /\ gate' = FALSE
     /\ intent' = "cancelled" /\ c' = IF c = "pending" THEN "none" ELSE c
     /\ UNCHANGED <<row, saved, paneLevel, turn, launched, newLevel, rejected, stuck, cleared, users>>
 
-\* H:237 -> tmux.rs advance: the cut turn's one continuation is admitted at the front.
+\* H:243 -> tmux.rs advance: the cut turn's one continuation is admitted at the front.
 Admit ==
     /\ cmd = "done" /\ c = "pending" /\ intent = "withC" /\ row = "retired_old"
     /\ c' = "admitted"
