@@ -1,6 +1,7 @@
 import type { ServerCampaignView } from "../../api/serverCampaigns";
-import type { Tr } from "./campaignPresentation";
+import { Button } from "../../kit/free/button-clean";
 import { ActionMenu } from "../common/ActionMenu";
+import type { Tr } from "./campaignPresentation";
 import {
   COMMAND_LABELS, STAGE_LABELS, commandAvailability, rejectionText, stopPhase,
   type CommandName, type Connection, type StopIntent,
@@ -15,13 +16,14 @@ const PHASES = {
   stopped: ["중단됨", "Stopped"],
 } satisfies Record<NonNullable<ReturnType<typeof stopPhase>>, [string, string]>;
 
-/** One server command as a button; a refused or unavailable command says why. */
+/** One server command as a kit button; a refused or unavailable command says why. */
 export function CommandButton({ view, command, connection, busy, onCommand, tr }: {
   view: ServerCampaignView; command: ControlCommand; connection: Connection; busy: boolean; onCommand: () => void; tr: Tr;
 }) {
   const { enabled, reason } = commandAvailability(view, command, connection);
+  const variant = command === "start" || command === "resume" ? "primary" : "secondary";
   return <span className="campaign-server-command">
-    <button type="button" disabled={!enabled || busy} onClick={onCommand}>{tr(...COMMAND_LABELS[command])}</button>
+    <Button variant={variant} size="sm" disabled={!enabled || busy} onClick={onCommand}>{tr(...COMMAND_LABELS[command])}</Button>
     {reason && <small>{rejectionText(reason, tr)}</small>}
   </span>;
 }
@@ -63,9 +65,9 @@ export default function ServerCampaignControls({ view, connection, stopIntent, b
         {" · "}{tr(`미대사 외부 동작 ${view.unreconciled_actions.length}개`, `${view.unreconciled_actions.length} unreconciled actions`)}
       </p>
       {phase && <p role="status">{tr(...PHASES[phase])}</p>}
-      {pendingStop?.status === "unconfirmed" && <p role="status" className="campaign-filter-note">
-        {tr("요청 결과 확인 중 · 같은 요청을 다시 보내도 한 번만 적용됩니다.", "Checking the request result · resending the same request applies it once.")}
-        {" "}<button type="button" disabled={busy} onClick={() => onCommand(pendingStop.command.mode === "immediate" ? "stop_immediate" : "stop_finish_stage")}>{tr("같은 요청 다시 보내기", "Resend the same request")}</button>
+      {pendingStop?.status === "unconfirmed" && <p role="status" className="campaign-filter-note flex flex-wrap items-center gap-2">
+        <span>{tr("요청 결과 확인 중 · 같은 요청을 다시 보내도 한 번만 적용됩니다.", "Checking the request result · resending the same request applies it once.")}</span>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => onCommand(pendingStop.command.mode === "immediate" ? "stop_immediate" : "stop_finish_stage")}>{tr("같은 요청 다시 보내기", "Resend the same request")}</Button>
       </p>}
     </div>
     {error && <p role="alert" className="campaign-filter-note">{error}</p>}

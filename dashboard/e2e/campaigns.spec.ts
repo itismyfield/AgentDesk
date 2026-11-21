@@ -443,12 +443,12 @@ test("stage board: ledger columns keep each task's own status, live work adds a 
   if (phone) expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
   for (const [column, id, chip] of [["막힘", "i7336", "막힘"], ["실패", "i7350", "실패"]]) {
     const card = board.getByRole("region", { name: column }).locator(`[data-board-card="${id}"]`);
-    await expect(card.locator(".aui-badge-clean").first()).toHaveText(chip);
+    await expect(card.locator("[data-status-chip]")).toHaveText(chip);
     await expect(card.locator(".campaign-live")).toHaveText("리뷰 진행 중");
   }
   // A running task with a blocker keeps its own column and word; only its frame and reason say it is stuck.
   const stuck = board.getByRole("region", { name: "진행 중" }).locator('[data-board-card="i7360"]');
-  await expect(stuck.locator(".aui-badge-clean").first()).toHaveText("진행 중");
+  await expect(stuck.locator("[data-status-chip]")).toHaveText("진행 중");
   await expect(stuck).toContainText("막힘: 외부 확인");
   const done = board.getByRole("region", { name: "완료" });
   await done.getByRole("button", phone ? { name: /^완료/ } : { name: "최근 1개 보기" }).click();
@@ -497,7 +497,7 @@ test("stage board: a server campaign keeps the nine stages on wide screens, lead
   await expect(card("A")).toContainText("계열 1 · 수리 차수 3");
   if (!phone) {
     await expect(card("D")).toContainText("계열 1 · 수리 차수 1");
-    await expect(card("F").locator(".aui-badge-clean").first()).toHaveText("사용자 중단");
+    await expect(card("F").locator("[data-status-chip]")).toHaveText("사용자 중단");
     // Finished server tasks have no completion order or time, so the first page claims no recency.
     await expect(board.getByRole("region", { name: "완료" }).getByRole("button", { name: "1개 보기" })).toBeVisible();
   }
