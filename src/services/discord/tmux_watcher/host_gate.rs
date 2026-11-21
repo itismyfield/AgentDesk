@@ -151,7 +151,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn admits_automatic_k
     action: &str,
 ) -> bool {
     let configured = crate::services::discord::admin_host_guard::configured_refusal;
-    configured(channel_id.get()).is_none()
+    configured(shared, provider, channel_id.get()).await.is_none()
         && admits_teardown(shared, provider, channel_id, name, action).await
 }
 

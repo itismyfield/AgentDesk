@@ -267,19 +267,21 @@ async fn normal_end(
 ) -> Response {
     let transition = Some(transition);
     #[cfg(unix)]
-    let claude = super::clear_end_record::capture_for(
-        &shared.provider,
-        row.raw_channel_id.parse().unwrap(),
-        owner,
-        &transition,
-    );
+    let channel: u64 = row.raw_channel_id.parse().unwrap();
     #[cfg(unix)]
-    let codex = super::codex_end_record::capture_for(
+    let herdr = crate::services::discord::admin_host_guard::host_decision_of(
+        shared,
         &shared.provider,
-        row.raw_channel_id.parse().unwrap(),
-        owner,
-        &transition,
-    );
+        channel,
+    )
+    .await
+    .is_herdr();
+    #[cfg(unix)]
+    let claude =
+        super::clear_end_record::capture_for(&shared.provider, (channel, herdr), owner, &transition);
+    #[cfg(unix)]
+    let codex =
+        super::codex_end_record::capture_for(&shared.provider, (channel, herdr), owner, &transition);
     #[cfg(unix)]
     let fence =
         match crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::try_acquire(owner)

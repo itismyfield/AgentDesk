@@ -28,6 +28,7 @@ mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
 pub(crate) mod surface_policy;
+pub(crate) mod host_decision;
 pub(crate) mod thread_host;
 #[cfg(all(test, unix))]
 pub(crate) use herdr_registry::HerdrRegistry;

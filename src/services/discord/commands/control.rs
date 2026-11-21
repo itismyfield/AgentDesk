@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 
-use super::super::admin_host_guard::ManagedReset;
+use super::super::admin_host_guard::{ManagedReset, host_decision_of};
+use super::config::claude_local_tui_relaunch_applies as relaunch_applies;
+use crate::services::session_host::host_decision::HostDecision;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::queue_io::{mailbox_cancel_all_waiting, mailbox_cancel_queued_primary_message};
 use cancel_queued::autocomplete_cancel_queued;
@@ -240,8 +242,13 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         .contains(&channel_id);
     let mut relaunch_pending =
         matches!(provider, ProviderKind::Claude) && relaunch_pending_for(shared, channel_id).await;
-    let applies = super::config::claude_local_tui_relaunch_applies(provider, channel_id);
-    if relaunch_pending && !applies && herdr_channel(channel_id) {
+    // The host is read only for a pending change it decides.
+    let host = match fast_mode_reset_pending || relaunch_pending {
+        true => Some(host_decision_of(shared, provider, channel_id.get()).await),
+        false => None,
+    };
+    let applies = host.as_ref().is_some_and(|host| relaunch_applies(provider, channel_id, host));
+    if relaunch_pending && !applies && host.as_ref().is_some_and(HostDecision::is_herdr) {
         // A channel moved to Herdr is not restarted; its next launch takes the saved setting.
         release_relaunch_pending(shared, channel_id).await;
         relaunch::say(http, channel_id, relaunch::HERDR_NOTICE.to_string()).await;
@@ -390,7 +397,8 @@ async fn relaunch_on_fast_drift(
     channel_id: serenity::ChannelId,
     fast_mode_channel_id: serenity::ChannelId,
 ) -> Option<ManagedReset> {
-    if !super::config::claude_local_tui_relaunch_applies(provider, channel_id) {
+    let host = host_decision_of(shared, provider, channel_id.get()).await;
+    if !relaunch_applies(provider, channel_id, &host) {
         return None;
     }
     let desired = super::config::channel_fast_mode_setting(shared, fast_mode_channel_id).await;
@@ -496,9 +504,6 @@ pub(super) async fn release_relaunch_pending(
     }
 }
 
-fn herdr_channel(channel_id: serenity::ChannelId) -> bool {
-    crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
-}
 
 /// Lets a newly saved setting of `channel`, or of a channel sharing it, retry a relaunch whose
 /// kills failed.

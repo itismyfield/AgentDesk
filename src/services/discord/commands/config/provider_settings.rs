@@ -114,8 +114,20 @@ impl SharedData {
     ) -> io::Result<()> {
         let local =
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-        if let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel_id.get()) {
-            reject_foreign_owner(&local, &[endpoint.execution_node])?;
+        // The node of the execution this channel's setting reaches: a thread's own execution,
+        // never its parent's policy alone.
+        use crate::services::session_host::host_decision::{HoldReason, HostDecision};
+        let host = super::super::super::admin_host_guard::host_decision_of;
+        match host(self, provider, channel_id.get()).await {
+            HostDecision::Herdr { execution_node, .. } => {
+                reject_foreign_owner(&local, &[execution_node])?;
+            }
+            HostDecision::Tmux | HostDecision::Hold(HoldReason::RelationUnresolved) => {}
+            HostDecision::Hold(reason) => {
+                return Err(io::Error::other(format!(
+                    "실행 호스트를 확인하지 못해 설정 변경을 거절합니다({reason})"
+                )));
+            }
         }
         if let Some(pool) = self.pg_pool.as_ref() {
             use crate::services::cluster::intake_router_hook::{
@@ -178,16 +190,17 @@ fn reject_foreign_owner(local: &str, owners: &[String]) -> io::Result<()> {
 }
 
 /// Whether a Claude launch setting reaches this channel by restarting its local tmux TUI on the
-/// same session; a Herdr channel and the non-TUI drivers keep their own paths.
+/// same session; a Herdr host, an undecided host and the non-TUI drivers keep their own paths.
 pub(in crate::services::discord) fn claude_local_tui_relaunch_applies(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
+    host: &crate::services::session_host::host_decision::HostDecision,
 ) -> bool {
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Claude)
-        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+        && *host == crate::services::session_host::host_decision::HostDecision::Tmux
         && resolve_provider_session_selection_with_channel(provider, true, Some(channel_id.get()))
             .driver
             == ProviderSessionDriver::TuiHosting
@@ -202,6 +215,8 @@ pub(in crate::services::discord) async fn update_channel_model_override(
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel_id).await?;
     let (channel_name, cwd) = super::effort::session_facts(shared, channel_id).await;
+    let host = super::super::super::admin_host_guard::host_decision_of;
+    let host = host(shared, provider, channel_id.get()).await;
     let mut settings = shared.settings.write().await;
     let current = shared
         .overrides
@@ -226,7 +241,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     let next = (model.as_deref(), cwd.as_deref());
     super::effort::check_saved_model(&settings, channel_id, provider, next)?;
     // A local Claude TUI takes the new model by restarting on its session, keeping its context.
-    let relaunch = claude_local_tui_relaunch_applies(provider, channel_id);
+    let relaunch = claude_local_tui_relaunch_applies(provider, channel_id, &host);
     let reset = !relaunch
         && session_reset_required_for_model_change(
             provider,
@@ -284,18 +299,21 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     shared
         .check_settings_owner(provider, runtime_channel_id)
         .await?;
+    let host = super::super::super::admin_host_guard::host_decision_of;
     if matches!(provider, ProviderKind::Claude)
-        && crate::config::session_hosts::herdr_endpoint(runtime_channel_id.get()).is_some()
+        && host(shared, provider, runtime_channel_id.get())
+            .await
+            .is_herdr()
     {
-        return super::super::tui_passthrough::herdr_settings::fast(
-            shared,
-            token,
-            runtime_channel_id,
-            Some(enabled),
-        )
-        .await
-        .map(|(_, changed)| changed)
-        .map_err(io::Error::other);
+        // A thread's pane takes the value its settings channel keeps.
+        let store = super::super::fast_mode::herdr_store_channel(runtime_channel_id, async {
+            channel_id
+        });
+        let fast = super::super::tui_passthrough::herdr_settings::fast;
+        return fast(shared, token, (runtime_channel_id, store.await), Some(enabled))
+            .await
+            .map(|(_, changed)| changed)
+            .map_err(io::Error::other);
     }
     if runtime_channel_id != channel_id {
         shared.check_settings_owner(provider, channel_id).await?;
@@ -577,7 +595,8 @@ mod truthful_tests {
         ));
         assert!(claude_local_tui_relaunch_applies(
             &ProviderKind::Claude,
-            channel
+            channel,
+            &crate::services::session_host::host_decision::HostDecision::Tmux
         ));
     }
 

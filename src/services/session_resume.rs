@@ -401,9 +401,13 @@ pub(crate) async fn perform_resume_rebind(
 
     // A Herdr-configured channel, then the stored rows, are judged before the target lookup, which
     // may copy a transcript into the active home, and before any binding or teardown change.
-    let configured_refusal = crate::services::session_host::operation_policy::configured_refusal;
-    if let Some(reason) = channel_id.and_then(|id| configured_refusal(id.get())) {
-        return Err(ResumeRebindError::HostUnsupported(reason));
+    if let Some(channel) = channel_id {
+        use crate::services::session_host::host_decision::{host_decision, token_hash_of};
+        let token = token_hash_of(session_key);
+        let decided = host_decision(Some(pool), token.as_deref(), provider.as_ref(), channel.get());
+        if let Some(reason) = decided.await.tmux_refusal() {
+            return Err(ResumeRebindError::HostUnsupported(reason));
+        }
     }
     let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
         pool,

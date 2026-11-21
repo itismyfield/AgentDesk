@@ -1940,3 +1940,6 @@ pub(in crate::services::discord::router) fn override_final_local_probe(
 ) -> impl Drop {
     FinalOverride(FINAL.with(|slot| slot.borrow_mut().replace(Box::new(callback))))
 }
+
+#[path = "admission_thread_tests.rs"]
+mod thread;

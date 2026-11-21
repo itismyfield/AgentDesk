@@ -20,7 +20,8 @@ pub(in crate::services::discord) async fn set_channel(
     explicit_key: Option<&str>,
     report: &mut ClearReport,
 ) {
-    if *provider != ProviderKind::Claude || !super::super::herdr_channel(channel) {
+    let host = crate::services::discord::admin_host_guard::host_decision_of;
+    if *provider != ProviderKind::Claude || !host(shared, provider, channel.get()).await.is_herdr() {
         return;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
