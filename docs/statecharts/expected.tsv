@@ -1913,6 +1913,11 @@ tui-o-writer/WriterWakePark.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeSupersededMain.cfg	WriterWake	-	NewSourceGetsFirstReply
 tui-o-writer/WriterWakeSupersededPark.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeUnsafeLoss.cfg	WriterWake	-	-
+turn-mailbox/RecoveryKickoffIdentityAfterReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityAfterZero.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeZero.cfg	RecoveryKickoffIdentity	-	MailboxEventuallyReleased
+turn-mailbox/RecoveryKickoffIdentityWeakZero.cfg	RecoveryKickoffIdentity	NoWrongRelease	-
 turn-presence/TurnPresence.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues
@@ -1935,8 +1940,3 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-turn-mailbox/RecoveryKickoffIdentityAfterReal.cfg	RecoveryKickoffIdentity	-	-
-turn-mailbox/RecoveryKickoffIdentityAfterZero.cfg	RecoveryKickoffIdentity	-	-
-turn-mailbox/RecoveryKickoffIdentityBeforeReal.cfg	RecoveryKickoffIdentity	-	-
-turn-mailbox/RecoveryKickoffIdentityBeforeZero.cfg	RecoveryKickoffIdentity	-	MailboxEventuallyReleased
-turn-mailbox/RecoveryKickoffIdentityWeakZero.cfg	RecoveryKickoffIdentity	NoWrongRelease	-
