@@ -14,7 +14,7 @@ pub fn expand_user_path(raw: &str) -> Option<PathBuf> {
         .or_else(|| trimmed.strip_prefix("~\\"))
     {
         let home = current_home_dir()?;
-        let stripped = stripped.trim_start_matches(|ch| ch == '/' || ch == '\\');
+        let stripped = stripped.trim_start_matches(['/', '\\']);
         return Some(home.join(stripped));
     }
     if trimmed == "~" {

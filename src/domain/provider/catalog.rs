@@ -75,7 +75,7 @@ pub fn derived_counterpart_ids(provider_id: &str) -> Vec<&'static str> {
 
 impl ProviderDescriptor {
     pub fn matches_id_or_alias(&self, normalized: &str) -> bool {
-        self.id == normalized || self.aliases.iter().any(|alias| *alias == normalized)
+        self.id == normalized || self.aliases.contains(&normalized)
     }
 
     pub fn kind(&self) -> Option<ProviderKind> {

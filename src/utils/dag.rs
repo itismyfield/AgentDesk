@@ -16,43 +16,6 @@ pub fn insert_node<'a>(indexed: &mut HashMap<&'a str, usize>, id: &'a str) -> Re
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dag_accepts_shared_predecessors_and_rejects_a_real_back_edge() {
-        let dependencies = [
-            vec![],
-            vec!["a".into()],
-            vec!["a".into()],
-            vec!["b".into(), "c".into()],
-        ];
-        let names = ["a", "b", "c", "d"];
-        let mut ids = HashMap::new();
-        for name in names {
-            insert_node(&mut ids, name).unwrap();
-        }
-        assert!(
-            validate_dependencies(
-                &ids,
-                names
-                    .into_iter()
-                    .zip(dependencies.iter().map(Vec::as_slice))
-            )
-            .is_ok()
-        );
-        let mut cycle = dependencies;
-        cycle[0] = vec!["d".into()];
-        assert_eq!(
-            validate_dependencies(&ids, names.into_iter().zip(cycle.iter().map(Vec::as_slice)))
-                .unwrap_err(),
-            DagError::Cycle(vec!["a".into(), "d".into(), "b".into(), "a".into()])
-        );
-        assert!(validate_dependencies(&HashMap::new(), std::iter::empty()).is_ok());
-    }
-}
-
 pub fn validate_dependencies<'a>(
     ids: &HashMap<&str, usize>,
     nodes: impl IntoIterator<Item = (&'a str, &'a [String])>,
@@ -110,4 +73,41 @@ pub fn validate_dependencies<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dag_accepts_shared_predecessors_and_rejects_a_real_back_edge() {
+        let dependencies = [
+            vec![],
+            vec!["a".into()],
+            vec!["a".into()],
+            vec!["b".into(), "c".into()],
+        ];
+        let names = ["a", "b", "c", "d"];
+        let mut ids = HashMap::new();
+        for name in names {
+            insert_node(&mut ids, name).unwrap();
+        }
+        assert!(
+            validate_dependencies(
+                &ids,
+                names
+                    .into_iter()
+                    .zip(dependencies.iter().map(Vec::as_slice))
+            )
+            .is_ok()
+        );
+        let mut cycle = dependencies;
+        cycle[0] = vec!["d".into()];
+        assert_eq!(
+            validate_dependencies(&ids, names.into_iter().zip(cycle.iter().map(Vec::as_slice)))
+                .unwrap_err(),
+            DagError::Cycle(vec!["a".into(), "d".into(), "b".into(), "a".into()])
+        );
+        assert!(validate_dependencies(&HashMap::new(), std::iter::empty()).is_ok());
+    }
 }

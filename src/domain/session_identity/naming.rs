@@ -12,10 +12,10 @@ pub fn parse_provider_and_channel_from_tmux_name(
     let without_suffix = stripped.strip_suffix(tmux_env_suffix()).unwrap_or(stripped);
     for entry in provider_catalog() {
         let prefix = format!("{}-", entry.id);
-        if let Some(rest) = without_suffix.strip_prefix(&prefix) {
-            if let Some(provider) = ProviderKind::from_str(entry.id) {
-                return Some((provider, rest.to_string()));
-            }
+        if let Some(rest) = without_suffix.strip_prefix(&prefix)
+            && let Some(provider) = ProviderKind::from_str(entry.id)
+        {
+            return Some((provider, rest.to_string()));
         }
     }
     provider_catalog()
