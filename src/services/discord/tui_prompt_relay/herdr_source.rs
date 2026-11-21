@@ -21,7 +21,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
-use crate::services::tmux_common::with_tmux_source_authority;
+use crate::services::tmux_common::{TmuxSourceAuthority, with_tmux_source_authority};
 use crate::services::tui_prompt_dedupe::binding_events::{
     self, BindingEvent, BindingTarget, SourceId,
 };
@@ -124,7 +124,11 @@ fn source_of(event: &BindingEvent, nonce: &str) -> Option<SourceId> {
 
 /// The pane's latest logged source when execution `nonce` logged it; a later Pending or another
 /// execution's record leaves none.
-fn nonce_baseline(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> {
+pub(in crate::services::discord) fn nonce_baseline(
+    channel: u64,
+    logical: &str,
+    nonce: &str,
+) -> Option<SourceId> {
     source_of(pane_records(channel, logical).last()?, nonce)
 }
 
@@ -299,6 +303,31 @@ fn codex_restored_binding(logical: &str, source: &SourceId) -> Option<TuiRuntime
     binding
 }
 
+pub(in crate::services::discord) fn publish_restarted_binding(
+    authority: &TmuxSourceAuthority<'_>,
+    owner: &HostedOwner,
+    channel: u64,
+    source: &SourceId,
+) -> Option<Persisted> {
+    let codex = owner.provider == "codex";
+    let binding = match runtime_binding_for_tmux_session_under_source_authority(authority) {
+        None if codex => codex_restored_binding(&owner.logical_key, source)?,
+        None => claude_tui_rehydrated_binding(&source.session_id, &source.path),
+        Some(live) if live_is(&live, source) => live,
+        Some(_) => return None,
+    };
+    if codex {
+        return register_restored_codex_pane_under_source_authority(
+            authority,
+            channel,
+            binding,
+            source.clone(),
+        );
+    }
+    let record = Record::Exact(source.clone());
+    register_claude_pane_under_source_authority(authority, channel, binding, record)
+}
+
 /// Re-attaches a Bound execution after a restart: only a confirmed match restores the source the
 /// log names for that execution, and only while its path still names that same file. A Claude
 /// execution's own pending clear admits input without restoring a source; Codex has no clear.
@@ -334,20 +363,7 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
     };
     // A live binding of this source keeps its unread cursor; another live source is left alone.
     let registered = with_tmux_source_authority(logical, |authority| {
-        let binding = match runtime_binding_for_tmux_session_under_source_authority(authority) {
-            None if codex => codex_restored_binding(logical, &source)?,
-            None => claude_tui_rehydrated_binding(&source.session_id, &source.path),
-            Some(live) if live_is(&live, &source) => live,
-            Some(_) => return None,
-        };
-        if codex {
-            let source = source.clone();
-            return register_restored_codex_pane_under_source_authority(
-                authority, channel, binding, source,
-            );
-        }
-        let record = Record::Exact(source.clone());
-        register_claude_pane_under_source_authority(authority, channel, binding, record)
+        publish_restarted_binding(authority, owner, channel, &source)
     });
     if !registered.is_some_and(Persisted::published) {
         withhold_herdr_execution(logical, Some(&nonce));
