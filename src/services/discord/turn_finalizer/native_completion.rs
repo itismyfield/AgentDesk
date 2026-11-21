@@ -1,6 +1,5 @@
 //! A native-owned turn's completion records, read from its own proven run instead of the bridge
-//! body: the transcript row, the channel's provider session selector, the scheduled outcome and
-//! the work dispatch completion.
+//! body: the transcript row, the channel session selector, the scheduled outcome and work dispatch.
 use super::*;
 use crate::db::session_transcripts::{PersistSessionTranscript, SessionTranscriptEvent};
 use crate::services::discord::inflight::InflightTurnState;

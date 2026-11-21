@@ -25,9 +25,8 @@ pub(crate) async fn move_provider_selector_pg(
     .map_err(|error| format!("move session #{session_row_id} provider selector: {error}"))
 }
 
-/// Stores `session` as the provider selector of the row `session_key` names, at the end of a run
-/// that began at `started`. A channel cleared since then keeps its empty selector. Returns whether
-/// a row took it.
+/// Stores `session`, whose run began at `started`, as the provider selector of `session_key`'s row
+/// unless the channel was cleared since then. Returns whether a row took it.
 pub(crate) async fn store_provider_selector_pg(
     pool: &PgPool,
     session_key: &str,
