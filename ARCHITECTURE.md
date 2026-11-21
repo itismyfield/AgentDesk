@@ -3829,6 +3829,7 @@ src/
 │   │   │   │   └── tests_pg.rs
 │   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
+│   │   ├── current_key.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
@@ -3836,6 +3837,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── listing_tests.rs
 │   │   ├── output.rs
+│   │   ├── raw_alias_pg_tests.rs
 │   │   ├── resume_fence_api_tests.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -4089,7 +4091,8 @@ src/
 │   │   ├── registry.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
-│   │   └── session_prompt.rs
+│   │   ├── session_prompt.rs
+│   │   └── session_source.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
