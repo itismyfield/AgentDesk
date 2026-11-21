@@ -143,7 +143,8 @@ fn write_transcript(path: &std::path::Path, transcript: Transcript) {
 }
 
 // One Escape reaches a Claude turn whose pane shows spinner chrome over the painted empty
-// composer; submitted, idle, draft, finished and already-interrupted panes receive none.
+// composer, before its first reply and over an ended tail too; a submitted prompt without that
+// chrome, idle, draft, finished and already-interrupted panes receive none.
 #[test]
 fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     let fx = Fixture::new();
@@ -160,7 +161,14 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     let old_tool_interrupted = format!(
         "{foreground}\n  ⎿ Interrupted · What should Claude do instead?\n❯\n{MANUAL_FOOTER}"
     );
-    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 14] = [
+    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 15] = [
+        (
+            "ended-tail",
+            capture!("thinking"),
+            Transcript::Idle,
+            ActiveGeneration,
+            1,
+        ),
         (
             "foreground-no-spinner",
             &foreground,
@@ -200,8 +208,8 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
             "pre-generation",
             capture!("pre-generation"),
             Transcript::Submitted,
-            UserSubmitted,
-            0,
+            ActiveGeneration,
+            1,
         ),
         (
             "submitted",
@@ -292,6 +300,59 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
     });
 }
 
+// A token stop whose pane alone decides shares the draft and modal veto of the other stops.
+#[test]
+fn claude_tui_token_stop_spares_a_draft_and_a_modal_before_the_first_reply() {
+    let fx = Fixture::new();
+    let draft = STREAMING_FOOTER.replace("❯", "❯ queued follow-up");
+    let modal = format!("  1. Allow once\n  2. Deny\n{STREAMING_FOOTER}");
+    run(async {
+        for (name, pane) in [("draft", &draft), ("modal", &modal)] {
+            let session = format!("AgentDesk-claude-token-veto-{name}");
+            let (token, path) = generating_turn(&fx, &session);
+            write_transcript(&path, Transcript::Submitted);
+            fx.pane(pane);
+            let stop =
+                interrupt_claude_turn_session_preserving(&token, Some(session.clone()), "!stop");
+            assert!(!stop.await.sent_keys, "{name}");
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
+    });
+}
+
+// A session stop reads only the transcript O bound: once that file is replaced nothing is sent,
+// whatever the pane shows.
+#[test]
+fn claude_tui_session_stop_refuses_a_replaced_source_under_a_live_pane() {
+    use crate::services::tui_o::shadow::{SourceId, capture::file_identity};
+    let fx = Fixture::new();
+    fx.pane(STREAMING_FOOTER);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("parent.jsonl");
+    write_transcript(&path, Transcript::Streaming);
+    let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
+    run(async {
+        for (replaced, sent) in [(0, true), (1, false)] {
+            let (session_id, path, ino) = ("parent".into(), path.clone(), ino + replaced);
+            let source = SourceId {
+                session_id,
+                path,
+                dev,
+                ino,
+            };
+            let (channel_id, provider) = (1, ShadowProvider::Claude);
+            let source = SourceBinding {
+                channel_id,
+                provider,
+                source,
+            };
+            let session = "AgentDesk-claude-owned-stop".to_owned();
+            let stop = interrupt_owned_claude_session(session, "!stop", Arc::new(|| true), source);
+            assert_eq!(stop.await.sent_keys, sent, "replaced={replaced}");
+        }
+    });
+}
+
 #[test]
 fn claude_tui_session_stop_keeps_cacheless_foreground_prompt_ready() {
     let fx = Fixture::new();
@@ -329,4 +390,19 @@ fn claude_tui_session_stop_keeps_cacheless_foreground_prompt_ready() {
                 .any(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
         );
     });
+}
+
+// A transcript whose 256 KiB tail read starts inside a multi-byte character still yields its turn.
+#[test]
+fn claude_stop_identity_reads_a_tail_cut_inside_a_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let user = serde_json::json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": "go"}});
+    // Three-byte characters fill the cut point, so two of the three paddings cut one in half.
+    for pad in 0..3 {
+        let body = format!("{}{}\n{user}\n", "x".repeat(pad), "가".repeat(100_000));
+        std::fs::write(&path, body).unwrap();
+        let identity = ClaudeStopTurnIdentity::capture(path.to_str().unwrap());
+        assert!(identity.is_some(), "pad={pad}");
+    }
 }

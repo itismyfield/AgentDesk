@@ -60,7 +60,7 @@ mod placeholder_cleanup;
 mod placeholder_controller;
 mod placeholder_live_events;
 mod placeholder_sweeper;
-mod prompt_builder;
+pub(crate) mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
 mod queue_marker;

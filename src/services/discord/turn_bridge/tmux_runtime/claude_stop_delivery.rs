@@ -182,9 +182,11 @@ pub(super) fn classify_tui_interrupt_phase(
     pane_active: bool,
 ) -> ClaudeTuiInterruptPhase {
     match structured_state {
+        // A pane painting the turn live decides whatever the tail reads: a tool that returned at
+        // once, trailing session metadata and a late terminal record all sit under a running turn.
+        Some(_) if pane_active => ClaudeTuiInterruptPhase::ActiveGeneration,
         Some(TuiTurnState::Idle) => ClaudeTuiInterruptPhase::PromptReady,
         Some(TuiTurnState::UserSubmitted) => ClaudeTuiInterruptPhase::UserSubmitted,
-        Some(TuiTurnState::Streaming) if pane_active => ClaudeTuiInterruptPhase::ActiveGeneration,
         Some(TuiTurnState::Streaming | TuiTurnState::Unknown) => ClaudeTuiInterruptPhase::Ambiguous,
         None if pane_ready => ClaudeTuiInterruptPhase::PromptReady,
         None => ClaudeTuiInterruptPhase::Ambiguous,
@@ -231,8 +233,8 @@ pub(super) fn decide_claimed_claude_stop_delivery(
 /// Delivery uses Escape for the interactive TUI or a stream-json interrupt
 /// control request for the wrapper FIFO. A token-local CAS reserves one attempt
 /// and commits only after successful provider I/O; skipped or failed attempts
-/// roll back. Escape requires streaming and current active-pane evidence,
-/// rechecked under the composer lock before writing.
+/// roll back. Escape requires current active-pane evidence whatever the transcript's tail reads;
+/// a native or session stop rechecks it under the composer lock before writing.
 pub(super) async fn interrupt_claude_turn_session_preserving(
     token: &Arc<CancelToken>,
     tmux_session: Option<String>,
@@ -285,7 +287,9 @@ pub(super) async fn interrupt_owned_claude_session(
     .await
 }
 
-fn owned_source_turn_state(source: &SourceBinding) -> TuiTurnState {
+/// O's bound transcript as a session stop reads it; `None` once the file is no longer the bound
+/// one, which no pane evidence may stand in for.
+fn owned_source_turn_state(source: &SourceBinding) -> Option<TuiTurnState> {
     let same_file = || {
         std::fs::metadata(&source.source.path).is_ok_and(|metadata| {
             crate::services::tui_o::shadow::capture::file_identity(&metadata)
@@ -293,15 +297,11 @@ fn owned_source_turn_state(source: &SourceBinding) -> TuiTurnState {
         })
     };
     if source.provider != ShadowProvider::Claude || !same_file() {
-        return TuiTurnState::Unknown;
+        return None;
     }
     let state =
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.source.path);
-    if same_file() {
-        state
-    } else {
-        TuiTurnState::Unknown
-    }
+    same_file().then_some(state)
 }
 
 async fn interrupt_observed_claude_session(
@@ -401,7 +401,7 @@ async fn interrupt_observed_claude_session(
                     &ProviderKind::Claude,
                     binding,
                 ),
-                None => source_for_probe.as_ref().map(owned_source_turn_state),
+                None => source_for_probe.as_ref().and_then(owned_source_turn_state),
             }
         } else {
             Some(
@@ -421,7 +421,8 @@ async fn interrupt_observed_claude_session(
                 if protected_delivery {
                     claude_tui_stop_pane_evidence(pane)
                 } else {
-                    super::claude_stop_pane::legacy_evidence(pane)
+                    let streaming = structured_state == Some(TuiTurnState::Streaming);
+                    super::claude_stop_pane::token_evidence(pane, streaming)
                 }
             });
         let phase = match delivery {
@@ -494,6 +495,7 @@ async fn interrupt_observed_claude_session(
     // An open transcript turn stands in for streaming only while the pane shows no prompt or draft.
     let pane_idle = pane_ready || pane_has_draft;
     let phase = if token.is_none()
+        && owned_source.is_none()
         && structured_state.is_none()
         && pane_active
         && !pane_idle
@@ -557,9 +559,10 @@ async fn interrupt_observed_claude_session(
                     &ProviderKind::Claude,
                     binding,
                 ),
-                None => owned_source.as_ref().map(owned_source_turn_state),
+                None => owned_source.as_ref().and_then(owned_source_turn_state),
             };
             let observed = token_for_task.is_none()
+                && owned_source.is_none()
                 && structured.is_none()
                 && active
                 && !ready
@@ -929,7 +932,7 @@ mod tests {
     fn ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry() {
         for phase in [
             classify_tui_interrupt_phase(Some(TuiTurnState::Streaming), false, false),
-            classify_tui_interrupt_phase(Some(TuiTurnState::Unknown), false, true),
+            classify_tui_interrupt_phase(Some(TuiTurnState::Unknown), false, false),
             classify_tui_interrupt_phase(None, false, true),
         ] {
             let token = CancelToken::new();
