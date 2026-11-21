@@ -390,6 +390,10 @@ where
         if !actor.writer.has_local_retry() {
             actor.deliver_owed(&progress).await;
         }
+        // A restart-cut episode's one notice goes after this poll's owed pieces.
+        if sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry() {
+            actor.writer.deliver_restart_notices().await;
+        }
         if let Some(drain) = drain {
             let prepared = actor
                 .writer

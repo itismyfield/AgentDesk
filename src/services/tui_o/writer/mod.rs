@@ -22,6 +22,7 @@ pub mod pieces;
 pub mod progress;
 mod replay;
 pub(crate) mod restart_end;
+pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;
 pub mod resume;
 pub mod rotation;
