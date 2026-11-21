@@ -74,6 +74,10 @@ mod circuit_evidence_tests;
 mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
+mod process_driver_start;
+pub(in crate::services::discord) use process_driver_start::{
+    StartEntry, stamp_process_driver_start,
+};
 pub(in crate::services::discord) mod row_removed;
 mod store;
 pub(super) use circuit_removal::InflightDeleteRequest;

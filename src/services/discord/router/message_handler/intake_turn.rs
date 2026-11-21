@@ -1944,6 +1944,8 @@ pub(super) async fn handle_text_message(
             adk_session_key.as_deref(),
         )
         .await;
+        use crate::services::discord::inflight::{StartEntry, stamp_process_driver_start};
+        stamp_process_driver_start(&mut inflight_state, &turn_host, StartEntry::DiscordIntake);
         let submission = crate::services::discord::inflight::install_managed_submission_boundary(
             &mut inflight_state,
             &turn_host,

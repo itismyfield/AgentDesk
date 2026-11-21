@@ -460,12 +460,11 @@ impl Request<'_> {
         use crate::services::agent_protocol::RuntimeHandoffKind;
         use crate::services::turn_host::TurnHost;
 
-        // The legacy host also runs process turns when no managed runtime was selected.
-        inflight.headless_process_start = matches!(host, TurnHost::Tmux)
-            && matches!(
-                inflight.runtime_kind,
-                None | Some(RuntimeHandoffKind::ProcessBackend)
-            );
+        crate::services::discord::inflight::stamp_process_driver_start(
+            inflight,
+            host,
+            crate::services::discord::inflight::StartEntry::Headless,
+        );
         // The channel's Herdr execution runs the start as its own turn.
         let channel_turn = standing == super::admission::Standing::Channel;
         let presentation = (channel_turn && matches!(host, TurnHost::Herdr(_))).then(|| {
