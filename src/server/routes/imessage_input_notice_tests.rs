@@ -814,8 +814,8 @@ async fn unparsed_imessage_header_label_and_suffix_each_keep_the_full_text_pg() 
 async fn decision_source_in_a_request_body_reaches_no_backend_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::new(7_811_340, false).await;
-    let forged = json!({"human_input": {"source": "decision",
-        "origin_id": "decision:7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}});
+    const DECISION_ORIGIN: &str = "decision:7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e";
+    let forged = json!({"human_input": {"source": "decision", "origin_id": DECISION_ORIGIN}});
     let refused = [
         (
             "handoff",
@@ -833,6 +833,16 @@ async fn decision_source_in_a_request_body_reaches_no_backend_pg() {
         (
             "turn/deliver",
             json!({"text":"p","author_discord_user_id":"200","source":"decision"}),
+        ),
+        // The same origin named at the top level is stored in the same metadata field.
+        (
+            "turn/start",
+            json!({"prompt":"p","source":"external","origin_id":DECISION_ORIGIN}),
+        ),
+        (
+            "turn/deliver",
+            json!({"text":"p","author_discord_user_id":"200","source":"external",
+                "origin_id":DECISION_ORIGIN}),
         ),
     ];
     let mailbox = crate::services::discord::input_mailbox_for_test(&f.shared, f.channel);

@@ -17,7 +17,10 @@ pub(super) async fn running(
     (channel, session, host): (u64, &str, &TurnHost),
     front: &Front,
 ) -> Result<Option<Registration>, String> {
-    if *provider != ProviderKind::Claude || !origin.is_person() || matches!(host, TurnHost::Tmux) {
+    if *provider != ProviderKind::Claude
+        || !origin.joins_running_turn()
+        || matches!(host, TurnHost::Tmux)
+    {
         return Ok(None);
     }
     let observation = claude_handoff::observe_busy(
@@ -80,7 +83,7 @@ impl OwnerTurn {
     ) -> Result<(Option<Self>, bool), ()> {
         if fresh
             || *provider != ProviderKind::Claude
-            || !owner.as_ref().is_some_and(|owner| owner.origin.is_person())
+            || !(owner.as_ref()).is_some_and(|owner| owner.origin.joins_running_turn())
         {
             return Ok((owner, true));
         }
@@ -330,7 +333,7 @@ pub(super) fn late(
     front: &Front,
     legacy: impl FnOnce() -> Result<Registration, String>,
 ) -> Result<Registration, String> {
-    if turn.force_fresh || *turn.provider != ProviderKind::Claude || !origin.is_person() {
+    if turn.force_fresh || *turn.provider != ProviderKind::Claude || !origin.joins_running_turn() {
         return legacy();
     }
     #[cfg(test)]
