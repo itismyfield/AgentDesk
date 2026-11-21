@@ -60,6 +60,61 @@ fn only_the_exact_saved_discord_mailbox_claim_can_supply_the_input() {
     );
 }
 
+#[tokio::test]
+async fn http_claim_requires_a_saved_inflight_and_same_writer_seat() {
+    use crate::services::imsg_reply::agy_input::{
+        ClaimedInput, SELECTED_WRITER, WriterGate, WriterSelection, with_claim,
+    };
+
+    SELECTED_WRITER
+        .scope(WriterGate::unready(DESTINATION), async {
+            assert!(agy_input::selected(&ProviderKind::Antigravity, DESTINATION).is_some());
+            assert!(agy_input::ready(&ProviderKind::Antigravity, DESTINATION).is_none());
+        })
+        .await;
+
+    let root = tempfile::tempdir().unwrap();
+    let selection = WriterSelection {
+        root: root.path().to_path_buf(),
+        destination: DESTINATION,
+        logical_channel: PARENT,
+        generation: NonZeroU64::MIN,
+    };
+    let source = ImessageSource::from_guid("p:0/GUID").unwrap();
+    assert!(ImessageSource::from_guid(" ").is_none());
+    let claim = ClaimedInput {
+        selection: selection.clone(),
+        source: source.clone(),
+        guid: "p:0/GUID".into(),
+        author: 7,
+        message: MESSAGE,
+    };
+    let cancel = CancelToken::new();
+    let mut state = inflight(&cancel);
+    assert!(AgyForeground::from_http_claim(true, &state, &cancel, Some(PARENT)).is_none());
+    SELECTED_WRITER
+        .scope(
+            WriterGate::ready(selection),
+            with_claim(Some(claim), async {
+                AgyForeground::stamp_http(&mut state);
+                assert_eq!(state.input_origin_ids, ["p:0/GUID"]);
+                assert_eq!(
+                    state.agy_imessage_source_sha256.as_deref(),
+                    Some(source.digest())
+                );
+                let proof = |saved, parent| {
+                    AgyForeground::from_http_claim(saved, &state, &cancel, Some(parent))
+                        .unwrap()
+                        .imessage
+                };
+                assert_eq!(proof(true, PARENT), Ok(Some(source)));
+                assert!(proof(false, PARENT).is_err());
+                assert!(proof(true, PARENT + 1).is_err());
+            }),
+        )
+        .await;
+}
+
 #[cfg(unix)]
 #[test]
 fn writer_selection_reserves_once_and_preparation_failure_settles_it() {

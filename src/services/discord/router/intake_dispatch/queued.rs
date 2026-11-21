@@ -5,6 +5,7 @@ use super::{
     finish_admitted_local,
 };
 use crate::services::discord::Intervention;
+use crate::services::imsg_reply::agy_input::{self, ClaimedInput};
 use crate::services::provider::ProviderKind;
 
 mod race_loss;
@@ -24,6 +25,7 @@ pub(crate) struct AdmittedQueuedIntake {
     submission: IntakeSubmission,
     local_permit: Option<LocalAdmissionPermit>,
     restore_owner: Option<QueuedRestoreOwner>,
+    agy_input: Option<ClaimedInput>,
 }
 #[cfg(test)]
 impl AdmittedQueuedIntake {
@@ -97,7 +99,17 @@ pub(crate) async fn admit_queued_intake(
     let owner = (request_owner, request_owner_name);
     let flags = (defer_watcher_resume, wait_for_completion);
     let submission = queued_submission(provider, channel_id, intervention, owner, flags);
-    let admission = admit_text_intake(deps, &submission).await;
+    let agy = queued_agy_input(deps, &submission, intervention).await;
+    let admission = match &agy {
+        Ok(_) => admit_text_intake(deps, &submission).await,
+        Err(reason) => {
+            tracing::warn!(channel_id = channel_id.get(), user_msg_id = intervention.message_id.get(), %reason,
+                "agy iMessage queue custody held");
+            IntakeAdmission::ReplayDeferred(
+                super::replay_admission::ReplayDefer::UnknownDisposition,
+            )
+        }
+    };
     let writer_boot = matches!(&admission, IntakeAdmission::DeferredWriterBoot(_));
     let local_permit = match admission {
         #[cfg(unix)]
@@ -229,7 +241,50 @@ pub(crate) async fn admit_queued_intake(
         submission,
         local_permit,
         restore_owner,
+        agy_input: agy.ok().flatten(),
     })
+}
+
+async fn queued_agy_input(
+    deps: &super::super::message_handler::IntakeDeps<'_>,
+    submission: &IntakeSubmission,
+    intervention: &Intervention,
+) -> Result<Option<ClaimedInput>, String> {
+    let request = &submission.request;
+    let (channel, message) = (request.channel_id.get(), request.user_msg_id.get());
+    let Some(row) = agy_input::bound_row(
+        deps.shared.pg_pool.as_ref(),
+        &submission.provider,
+        channel,
+        message,
+        false,
+    )
+    .await
+    .map_err(|_| "origin lookup failed")?
+    else {
+        return if intervention
+            .source_message_queued_generations
+            .iter()
+            .any(|source| source.origin.as_deref() == Some(agy_input::QUEUED_ORIGIN))
+        {
+            Err("durable agy iMessage queue binding missing".into())
+        } else {
+            Ok(None)
+        };
+    };
+    if request.source_message_ids.as_slice() != [request.user_msg_id] {
+        return Err("mixed sources in agy iMessage queue entry".into());
+    }
+    agy_input::restore_queued(
+        &row,
+        &submission.provider,
+        channel,
+        message,
+        request.request_owner.get(),
+        &request.user_text,
+    )
+    .map(Some)
+    .ok_or_else(|| "agy iMessage queue binding or writer changed".into())
 }
 
 /// An owner front's start: the owner keeps its original, so no V1 lease or restore applies and
@@ -349,7 +404,12 @@ pub(crate) async fn finish_admitted_queued_intake(
     }
     #[cfg(unix)]
     let original_request = admitted.submission.request.clone();
-    match finish_admitted_local(deps, permit, admitted.submission).await {
+    match agy_input::with_claim(
+        admitted.agy_input,
+        finish_admitted_local(deps, permit, admitted.submission),
+    )
+    .await
+    {
         Err(error) => match error.downcast::<super::QueuedTransitionBusyHandoff>() {
             Ok(handoff) => {
                 // The handoff already includes the original queue uploads once.

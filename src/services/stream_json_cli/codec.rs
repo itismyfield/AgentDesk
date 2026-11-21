@@ -430,7 +430,7 @@ fn empty_success_message(step_detail: Option<&str>, stderr: &str) -> String {
     let mut message = if step_detail.is_some_and(is_permission_denial)
         || is_permission_denial(stderr)
     {
-        "AGY returned an empty response because a tool permission was denied in headless mode. Configure a narrowly scoped permissions.allow rule for the AGY project; do not use --dangerously-skip-permissions.".to_string()
+        "AGY returned an empty response because a tool permission was denied in headless mode. AgentDesk already launches AGY with --dangerously-skip-permissions, so check for an AGY deny rule or policy that still blocks this tool.".to_string()
     } else {
         "AGY returned SUCCESS without any response text; no usable assistant response was produced."
             .to_string()
@@ -647,7 +647,7 @@ mod tests {
             panic!("expected an explicit AGY error, got {messages:?}");
         };
         assert!(message.contains("permission was denied"));
-        assert!(message.contains("permissions.allow"));
+        assert!(message.contains("already launches AGY with --dangerously-skip-permissions"));
         assert!(stderr.contains("headless mode"));
         assert!(
             !messages

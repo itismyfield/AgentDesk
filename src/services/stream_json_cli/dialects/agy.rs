@@ -55,7 +55,7 @@ pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, S
         &request.prompt,
     );
     let mut args = vec![
-        "--sandbox".to_string(),
+        "--dangerously-skip-permissions".to_string(),
         "--disable-slash-commands".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
@@ -80,7 +80,7 @@ pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, S
     if args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--continue" | "-c" | "--new-project" | "--dangerously-skip-permissions" | "--mode"
+            "--continue" | "-c" | "--new-project" | "--mode"
         )
     }) {
         return Err("AGY dialect refused forbidden flags".into());
@@ -276,13 +276,14 @@ mod tests {
     #[test]
     fn default_argv_uses_conversation_not_continue() {
         let args = build_argv(&request()).unwrap();
-        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"--continue".to_string()));
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--dangerously-skip-permissions")
-        );
+        assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"--print-timeout".to_string()));
+        for flag in ["--continue", "-c", "--new-project", "--mode"] {
+            let mut req = request();
+            req.model = Some(flag.into());
+            assert!(build_argv(&req).is_err(), "{flag} must stay forbidden");
+        }
     }
 }

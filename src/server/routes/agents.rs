@@ -811,19 +811,19 @@ pub async fn start_agent_turn(
         }
     };
     let channel_id_num = target.channel_id;
-    // A start the owner takes queues behind an external turn instead of refusing it.
-    if dm_user_id_num.is_none()
-        && let Some(conflict) =
-            super::agents_turn_target::check_start_target(state.health_registry.as_deref(), &target)
-                .await
+    if let Some(response) = super::agents_turn_target::check_http_start(
+        state.health_registry.as_deref(),
+        &target,
+        (
+            body.source.as_deref(),
+            metadata.as_ref(),
+            dm_user_id_num.is_some(),
+        ),
+        notice.as_deref(),
+    )
+    .await
     {
-        super::imessage_input_notice::not_echoed(
-            notice.as_deref(),
-            channel_id_num,
-            "start",
-            "conflict",
-        );
-        return conflict;
+        return response;
     }
 
     let Some(registry) = state.health_registry.as_deref() else {
