@@ -192,6 +192,8 @@ src/
 │   │   │   ├── dispatch_failure.rs
 │   │   │   └── status_write.rs
 │   │   ├── phase_gates/
+│   │   │   ├── current_batch_phase_pg_tests.rs
+│   │   │   ├── reconcile_phase_gate_pg_tests.rs
 │   │   │   └── reconcile_write.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -356,6 +358,7 @@ src/
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
+│   ├── adk_store_lib.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
@@ -445,6 +448,8 @@ src/
 │   │   ├── verification_run.rs
 │   │   ├── workflow_options.rs
 │   │   └── workspace.rs
+│   ├── human_input/
+│   │   └── native_source.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
 │   ├── message_split/
@@ -736,7 +741,8 @@ src/
 │   │   │   ├── execution_mode_http_tests.rs
 │   │   │   ├── handlers.rs
 │   │   │   ├── helpers.rs
-│   │   │   └── responses.rs
+│   │   │   ├── responses.rs
+│   │   │   └── session_patch_tests.rs
 │   │   ├── scheduled_messages/
 │   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
@@ -1235,6 +1241,7 @@ src/
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
 │   │   │   ├── wait.rs
+│   │   │   ├── wait_cause_tests.rs
 │   │   │   └── watched.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
@@ -1397,6 +1404,8 @@ src/
 │   │   │   └── reaping_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
+│   │   │   │   ├── pg_tests/
+│   │   │   │   │   └── pending_lookup_tests.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -1875,6 +1884,7 @@ src/
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
 │   │   │   ├── routine_process.rs
+│   │   │   ├── routine_reset.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -1954,6 +1964,8 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── native_input_custody.rs
+│   │   │   │   ├── native_input_tests.rs
 │   │   │   │   ├── restart_marker_lifetime_tests.rs
 │   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
@@ -2216,6 +2228,7 @@ src/
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── native_intent_tests.rs
 │   │   │   │   ├── native_receipt_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
@@ -2473,7 +2486,8 @@ src/
 │   │   │   │   │   │   ├── routine_presentation_tests.rs
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── replay_start_tests/
-│   │   │   │   │   │   └── routine_policy_tests.rs
+│   │   │   │   │   │   ├── routine_policy_tests.rs
+│   │   │   │   │   │   └── routine_provider_model_tests.rs
 │   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
@@ -2513,6 +2527,7 @@ src/
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
+│   │   │   │   │   ├── dispatch_runtime_tests.rs
 │   │   │   │   │   ├── feature_settings.rs
 │   │   │   │   │   ├── first_key_gate_paths_tests.rs
 │   │   │   │   │   ├── host_refusal.rs
@@ -2536,7 +2551,12 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input/
-│   │   │   │   │   │   └── busy_turn.rs
+│   │   │   │   │   │   ├── native_input/
+│   │   │   │   │   │   │   ├── tests/
+│   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
+│   │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   ├── busy_turn.rs
+│   │   │   │   │   │   └── native_input.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2637,6 +2657,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_missing_input_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_race_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_native_work_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2751,6 +2772,7 @@ src/
 │   │   │   ├── intake.rs
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
+│   │   │   ├── native_input.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
@@ -3074,7 +3096,8 @@ src/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests/
-│   │   │   │   │   └── late_clear_tests.rs
+│   │   │   │   │   ├── late_clear_tests.rs
+│   │   │   │   │   └── record_boundary_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
@@ -3274,6 +3297,7 @@ src/
 │   │   │   │   ├── tool_arms/
 │   │   │   │   │   ├── authority.rs
 │   │   │   │   │   ├── authority_tests.rs
+│   │   │   │   │   ├── session_activity.rs
 │   │   │   │   │   ├── task_notification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
@@ -3404,6 +3428,7 @@ src/
 │   │   │   ├── headless_delivery.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── native_input.rs
 │   │   │   ├── output_lifecycle.rs
 │   │   │   ├── panel_lifecycle.rs
 │   │   │   ├── post_loop_finalize.rs
@@ -3415,6 +3440,7 @@ src/
 │   │   │   ├── resume_pin_tests.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── runtime_handoff_loop.rs
+│   │   │   ├── session_row_writer.rs
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── skill_usage.rs
 │   │   │   ├── stale_resume.rs
@@ -3457,6 +3483,21 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── native_abstain.rs
+│   │   │   ├── native_binding.rs
+│   │   │   ├── native_binding_tests.rs
+│   │   │   ├── native_completion.rs
+│   │   │   ├── native_completion_tests.rs
+│   │   │   ├── native_completion_work_tests.rs
+│   │   │   ├── native_input_tests.rs
+│   │   │   ├── native_key_tests.rs
+│   │   │   ├── native_policy.rs
+│   │   │   ├── native_prepare.rs
+│   │   │   ├── native_restore.rs
+│   │   │   ├── native_restore_gc_tests.rs
+│   │   │   ├── native_supply.rs
+│   │   │   ├── native_terminal.rs
+│   │   │   ├── native_terminal_tests.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
@@ -3521,6 +3562,7 @@ src/
 │   │   │   │   ├── effort_restart.rs
 │   │   │   │   ├── effort_restart_baseline_tests.rs
 │   │   │   │   ├── effort_restart_tests.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -3529,7 +3571,8 @@ src/
 │   │   │   ├── activity_tests/
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── large_tests.rs
-│   │   │   │   └── local_control_tests.rs
+│   │   │   │   ├── local_control_tests.rs
+│   │   │   │   └── native_input_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
@@ -4108,6 +4151,7 @@ src/
 │   │   │   ├── owner_input_tests.rs
 │   │   │   ├── owner_launch_tests.rs
 │   │   │   ├── owner_review_tests.rs
+│   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   ├── run_policy.rs
 │   │   │   ├── start_deferral.rs
@@ -4116,16 +4160,23 @@ src/
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
 │   │   │   └── presentation.rs
+│   │   ├── execution_mode/
+│   │   │   └── provider_choice.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
 │   │   ├── run_diagnostics/
 │   │   │   └── formatting.rs
+│   │   ├── session_control/
+│   │   │   ├── persistent_target.rs
+│   │   │   └── provider_choice_tests.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
-│   │   │   └── failure_escalation.rs
+│   │   │   ├── failure_escalation.rs
+│   │   │   ├── session_interrupt.rs
+│   │   │   └── thread_choices.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
@@ -4138,6 +4189,7 @@ src/
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
+│   │   ├── provider_choice.rs
 │   │   ├── reliability_pg_tests.rs
 │   │   ├── run_diagnostics.rs
 │   │   ├── runtime.rs
@@ -4244,6 +4296,7 @@ src/
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_restore_evidence_tests.rs
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
@@ -4373,6 +4426,12 @@ src/
 │   │   │   │   │   ├── carried_tests.rs
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
+│   │   │   │   │   ├── native.rs
+│   │   │   │   │   ├── native_barrier.rs
+│   │   │   │   │   ├── native_binding.rs
+│   │   │   │   │   ├── native_control.rs
+│   │   │   │   │   ├── native_receipt.rs
+│   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs
@@ -4436,6 +4495,7 @@ src/
 │   │   │   ├── channel_gate.rs
 │   │   │   ├── channel_lookup_tests.rs
 │   │   │   ├── child_funnel_tests.rs
+│   │   │   ├── claude_thread.rs
 │   │   │   ├── intake_route.rs
 │   │   │   └── thread_child_record_tests.rs
 │   │   ├── ownership/
@@ -4549,6 +4609,7 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
@@ -4583,6 +4644,8 @@ src/
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
 │   │   │   │   └── usage_footer.rs
+│   │   │   ├── fresh_resume_tests/
+│   │   │   │   └── authority_contention_tests.rs
 │   │   │   ├── host/
 │   │   │   │   ├── agy_host/
 │   │   │   │   │   └── tests.rs
@@ -4597,6 +4660,13 @@ src/
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
+│   │   │   │   ├── native/
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── terminal_tests.rs
+│   │   │   │   │   ├── receipt.rs
+│   │   │   │   │   ├── terminal.rs
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── reactions.rs
@@ -4968,6 +5038,7 @@ src/
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── clear.rs
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
@@ -4990,6 +5061,7 @@ src/
 │   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── v2_types/
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   └── effort_restart.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
