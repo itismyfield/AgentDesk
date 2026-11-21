@@ -2167,12 +2167,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("setting-row-health.status")).toBeVisible();
   });
 
-  test("audit: both tabs show the pending-API empty state", async ({ page }) => {
+  test("audit: agents without a channel leave the prompt tab empty and the anchor tab keeps its URL key", async ({ page }) => {
     await page.goto("/audit");
-    await expect(page.getByTestId("audit-panel-prompts")).toContainText("#8249");
+    await expect(page.getByTestId("audit-no-agents")).toBeVisible();
     await page.getByRole("tab", { name: /메멘토 앵커|Memento anchors/ }).click();
     await expect(page).toHaveURL(/\/audit\?tab=anchors$/);
-    await expect(page.getByTestId("audit-panel-anchors")).toContainText("#8249");
+    await expect(page.getByTestId("audit-panel-anchors")).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 
