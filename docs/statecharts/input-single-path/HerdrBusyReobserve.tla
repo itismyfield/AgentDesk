@@ -106,6 +106,8 @@ VerifiedClearReevaluatesIdle == <> (r.route = "idle")
 \* Domains and five two-second looks come from 8222-restart-held-readiness.design.md section 2.
 \* `elapsed` is real time since the first typed hold; `age` is what the stored due allows.
 RHScreenHold == Scenario \in {"tmux-modal-held", "tmux-draft-held"}
+\* #8280: a live pane with no active turn whose absence is unproven, still busy or idle later.
+RHNoHolderBusy == Scenario \in {"no-holder-busy", "no-holder-busy-idle"}
 RHTmux == Scenario \in {"tmux-meta", "tmux-meta-reboot", "tmux-retry-due", "tmux-late-follower"}
           \/ RHScreenHold
 RHInit == r = [phase |-> IF RHTmux THEN "queued" ELSE "restart",
@@ -117,7 +119,7 @@ RHInit == r = [phase |-> IF RHTmux THEN "queued" ELSE "restart",
              ELSE IF Scenario = "tool" THEN "tool"
              ELSE IF Scenario = "stop-context" THEN "stop-context" ELSE "reply",
     fence |-> Scenario \in {"pending", "compact", "continuation"},
-    screen |-> ~RHScreenHold /\ Scenario \notin {"draft", "pane-unreadable"},
+    screen |-> ~RHScreenHold /\ ~RHNoHolderBusy /\ Scenario \notin {"draft", "pane-unreadable"},
     owned |-> TRUE, gate |-> TRUE, proof |-> FALSE, reserved |-> FALSE, permit |-> FALSE,
     keys |-> 0, refusals |-> 0, notices |-> 0, requeues |-> 0, leafRefused |-> FALSE,
     records |-> 0, recordKey |-> 0, pendingAck |-> FALSE, epoch |-> 0,
@@ -151,12 +153,24 @@ RHPromptDriver == Entry = "prompt-driver"
 RHEnter == /\ r.phase = "restart"
            /\ r' = [r EXCEPT !.phase = "queued"]
 \* General observe has no proof; running fallback reads Unknown and cannot create Idle.
-RHBusyEntry == /\ r.phase = "queued" /\ ~RHTmux /\ Scenario # "no-holder-live"
+RHBusyEntry == /\ r.phase = "queued" /\ ~RHTmux /\ Scenario # "no-holder-live" /\ ~RHNoHolderBusy
                /\ r' = [r EXCEPT !.phase = "held"]
 \* A live pane with no active turn reaches the missing-recovery refusal before any watch.
 RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
                   /\ r' = [r EXCEPT !.phase = "refused", !.refusals = 1,
                       !.owned = FALSE, !.reason = Scenario]
+\* retire refuses Unproven for a present pane (herdr_launch/retire.rs:59), so the original is held
+\* for reobservation (intake_turn/owned_busy.rs:261,308-327) under the readiness due counted from
+\* this hold (held_watch/readiness.rs:hold_identity, v2/readiness_hold.rs:hold_identity) and
+\* the drive's armed timer. "IdentityUntimed" is the #8280 hold before: no due, no timer.
+RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy
+                  /\ r' = [r EXCEPT !.phase = "held", !.visible = TRUE, !.age = 1,
+                      !.elapsed = 1, !.dueStored = Mutant # "IdentityUntimed",
+                      !.armed = Mutant # "IdentityUntimed"]
+\* The screen may turn idle before the due; the held watch's next look then wakes the Idle start.
+RHIdleScreen == /\ Scenario = "no-holder-busy-idle" /\ r.phase = "held" /\ ~r.screen
+                /\ r.age < 5
+                /\ r' = [r EXCEPT !.screen = TRUE]
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
 \* The wired Busy-held entry records the owner hold (a stored due survives; a hold without one gets
 \* it once here) and arms the drive's deadline timer, which a restart does not keep.
@@ -301,7 +315,7 @@ RHRepeatNotice == /\ Mutant = "RepeatNotice" /\ r.phase = "explained" /\ r.notic
 RHRequeue == /\ Mutant = "RequeueBody" /\ r.phase = "explained" /\ r.requeues = 0
              /\ r' = [r EXCEPT !.requeues = 1]
 RHWait == UNCHANGED vars
-RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep \/ RHTick
+RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHIdentityHold \/ RHIdleScreen \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep \/ RHTick
           \/ RHTmuxReserve \/ RHTmuxNotSent \/ RHTmuxLook \/ RHTmuxRetry
           \/ RHReleaseScreen \/ RHLateArrival \/ RHOverdueRetry
           \/ RHIdleReserve \/ RHArm \/ RHRecheckFail \/ RHWrite \/ RHRace
@@ -310,6 +324,7 @@ RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWa
           \/ RHBusyWrite \/ RHFallback \/ RHRequeue \/ RHRepeatNotice \/ RHWait
 RHSpec == RHInit /\ [][RHNext]_vars
           /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHRefuseUnheld)
+          /\ WF_vars(RHIdentityHold) /\ WF_vars(RHIdleScreen)
           /\ WF_vars(RHFirstKeep)
           /\ WF_vars(RHTmuxReserve) /\ WF_vars(RHTmuxNotSent) /\ WF_vars(RHTmuxLook)
           /\ WF_vars(RHRestoreWake) /\ WF_vars(RHKeep) /\ WF_vars(RHIdleReserve)
@@ -351,6 +366,10 @@ RHReachedKeep == <>(r.phase = "held" /\ r.age = 1)
 RHNoInfiniteKeep == (r.phase = "held") ~> (r.phase \in {"done", "explained"})
 RHEndExactlyOnce == <>((r.keys = 1 /\ r.refusals = 0) \/ (r.keys = 0 /\ r.refusals = 1 /\ r.notices = 1))
 RHHealthyDelivers == <>(r.phase = "done")
+\* #8280 + #8222: an identity hold ends by one delivery or one unsent settlement, never kept.
+RHIdentityHoldEnds == (RHNoHolderBusy /\ r.phase = "held") ~> (r.phase \in {"done", "explained"})
+\* Witness: expected to break in the idle scenario, proving delivery is reached there.
+RHIdentityNeverDelivers == RHNoHolderBusy => r.keys = 0
 \* Without the driver premise a healthy pane delivers or loses only the due race, never evidence.
 RHHealthyOrDeadline == <>(r.phase = "done" \/ (r.phase = "explained" /\ r.reason = "deadline"))
 =============================================================================

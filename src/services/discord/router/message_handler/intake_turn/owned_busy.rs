@@ -533,7 +533,8 @@ async fn finish_identity_hold(mailbox: &ChannelMailboxHandle, front: &Front) -> 
         .await
 }
 
-/// Holds the front and gives the readiness deadline to the watch that owns it.
+/// Holds the front and gives the readiness deadline to the watch that owns it; an identity hold
+/// gets that deadline too, so the hold ends by one delivery or one unsent settlement.
 async fn hold(
     (shared, kind): (&Shared, HoldKind),
     mailbox: &ChannelMailboxHandle,
@@ -541,18 +542,9 @@ async fn hold(
     front: &Front,
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
+    let drive = drive(shared, channel);
     if matches!(kind, HoldKind::Identity) {
-        let original = front.clone();
-        let held = mailbox
-            .v2_request(move |slot| {
-                slot.as_mut()
-                    .ok_or("V2 not adopted")?
-                    .hold_identity(&original)
-            })
-            .await;
-        if let Err(error) = held {
-            tracing::warn!(channel_id = channel.get(), %error, "identity hold not recorded");
-        }
+        held_watch::readiness::hold_identity(drive.clone(), front).await;
     } else {
         hold_start(mailbox, channel, front).await;
     }
@@ -572,7 +564,6 @@ async fn hold(
         channel.get(),
         held_front(probe, mailbox.clone(), front.clone()),
     );
-    let drive = drive(shared, channel);
     if matches!(kind, HoldKind::Readiness) {
         held_watch::readiness::hold(drive.clone(), front).await;
     }

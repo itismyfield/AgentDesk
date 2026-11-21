@@ -3,6 +3,9 @@
 use super::*;
 use crate::db::turns::TerminalOutcome;
 
+/// How long a held front waits for a ready read before the owner refuses it unsent.
+const READINESS_HOLD_MS: u64 = 10_000;
+
 impl ReadinessHold {
     /// Matches only the surviving prefix of the first held unit, excluding its front.
     pub(super) fn matching_followers<'a>(
@@ -42,18 +45,37 @@ impl Owner {
         Ok(hold)
     }
 
-    /// Transfers the queued original's deadline to the identity watch before an expiry commits.
+    /// Holds the queued original while its pane identity is re-read, under the same fixed
+    /// deadline a readiness hold has, counted from its first identity hold. An earlier readiness
+    /// due is replaced, so it cannot end the re-read early; a later identity hold keeps the due.
     #[cfg(unix)]
-    pub(crate) fn hold_identity(&mut self, front: &Front) -> Result<(), String> {
+    pub(crate) fn hold_identity(
+        &mut self,
+        front: &Front,
+        cause: &str,
+        now: u64,
+    ) -> Result<ReadinessHold, String> {
         self.hold_front(front)?;
-        let Some(hold) = self.front_hold() else {
-            return Ok(());
-        };
-        let mut next = self.snapshot.clone();
-        if let Some(saved) = next.readiness_holds.iter_mut().find(|saved| *saved == hold) {
-            saved.identity_held_at_ms = Some(super::origin::now_ms());
+        let member = refused::refused_member(&front.1);
+        let held = self.snapshot.hold_for_member(&member);
+        if let Some(hold) = held.filter(|hold| hold.identity_held_at_ms.is_some()) {
+            return Ok(hold.clone());
         }
-        self.commit(next)
+        let mut next = self.snapshot.clone();
+        if let Some(old) = held {
+            next.readiness_holds.retain(|saved| saved != old);
+        }
+        let followers = self.followers();
+        let members = std::iter::once(&front.1).chain(followers.iter());
+        next.remember_readiness_hold(members, cause, now);
+        let hold = next
+            .readiness_holds
+            .last_mut()
+            .ok_or("identity hold not recorded")?;
+        hold.identity_held_at_ms = Some(now);
+        let hold = hold.clone();
+        self.commit(next)?;
+        Ok(hold)
     }
 
     /// Resolving identity lets any subsequent composer hold record its own deadline.
@@ -77,7 +99,7 @@ impl Owner {
         self.commit(next)
     }
 
-    /// The timed hold of an unattempted front; an identity-held record has no timer.
+    /// The timed hold of an unattempted front, an identity hold included.
     pub(crate) fn front_hold(&self) -> Option<&ReadinessHold> {
         if self.snapshot.head_injection.is_some() {
             return None;
@@ -206,7 +228,6 @@ impl Owner {
 impl SnapshotV2 {
     pub(super) fn readiness_hold(&self, original: &PendingQueueItem) -> Option<&ReadinessHold> {
         self.hold_for_member(&refused::refused_member(original))
-            .filter(|hold| hold.identity_held_at_ms.is_none())
     }
 
     fn hold_for_member(&self, member: &RefusedMember) -> Option<&ReadinessHold> {
@@ -227,7 +248,6 @@ impl SnapshotV2 {
         if let Some(hold) = self.hold_for_member(&original) {
             return hold.clone();
         }
-        const READINESS_HOLD_MS: u64 = 10_000;
         let hold = ReadinessHold {
             identity: original.identity.clone(),
             fingerprint: original.fingerprint.clone(),
