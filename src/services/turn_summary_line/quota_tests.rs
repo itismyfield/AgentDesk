@@ -740,3 +740,61 @@ fn fable_bucket_is_available_for_claude_profiles_and_ignored_for_codex() {
         "-# ✅ 완료 (09:00)\n-# Fable 7d 22% (10/27 16:00)"
     );
 }
+
+#[test]
+fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_session() {
+    use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
+    use crate::services::tui_o::shadow::{CapturedRecord, IDENTITY_VERSION, ShadowProvider};
+    use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
+    let (now, session) = (Utc::now(), uuid::Uuid::new_v4().to_string());
+    let (logical, week) = (format!("footer-{session}"), now.timestamp() + 519_634);
+    crate::services::tmux_common::write_claude_session_auth(&logical, &session, "default").unwrap();
+    let path = record_path(&record_dir(), &session);
+    std::fs::create_dir_all(record_dir()).unwrap();
+    let footer = |account_week: i64| {
+        let limits = json!({"seven_day":{"used_percentage":91,"resets_at":week}});
+        let record = json!({"session_id":session,"rate_limits":limits});
+        std::fs::write(&path, record.to_string()).unwrap();
+        let usage = json!({"buckets":[{"name":"5h","used":40,"limit":100,"reset":week-500_000},
+            {"name":"7d","used":91,"limit":100,"reset":account_week},
+            {"name":"7d Fable","used":12,"limit":100,"reset":account_week}]});
+        publish("claude", "default", &usage.to_string(), now.timestamp());
+        let mut deriver =
+            UnitDeriver::new(8_141_001, ShadowProvider::Claude).with_turn_summary(SummaryInputs {
+                turn_marks: Default::default(),
+                disposed: Default::default(),
+                context_window: None,
+            });
+        let at = |seconds| (now + chrono::Duration::seconds(seconds)).to_rfc3339();
+        let rows = [
+            json!({"type":"user","sessionId":session,"timestamp":at(0),
+                "message":{"content":"request"}}),
+            json!({"type":"assistant","sessionId":session,"timestamp":at(0),"uuid":"answer",
+                "apiBlockIndex":0,"message":{"id":"answer","content":[{"type":"text","text":"a"}]}}),
+            json!({"type":"system","subtype":"stop_hook_summary","sessionId":session,"timestamp":at(2)}),
+        ];
+        let work = rows.map(|row| {
+            let line = serde_json::to_vec(&row).unwrap();
+            let record = CapturedRecord {
+                start: 0,
+                end: 1,
+                line,
+            };
+            deriver.derive_with_session(&record, IDENTITY_VERSION, || Some(logical.clone()))
+        });
+        let [Derived::Piece(piece)] = work[2].as_slice() else {
+            panic!("{work:?}")
+        };
+        piece.payload.clone()
+    };
+    let (matched, other) = (footer(week + 30), footer(week + 3600));
+    publish("claude", "default", "{}", now.timestamp());
+    let _ = std::fs::remove_file(&path);
+    for wanted in ["\n-# 5h 40% (", " · 7d 91% (", " · Fable 7d 12% ("] {
+        assert!(matched.contains(wanted), "{matched}");
+    }
+    assert!(
+        other.contains("\n-# 7d 91% (") && !other.contains("Fable"),
+        "{other}"
+    );
+}
