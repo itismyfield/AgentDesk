@@ -122,14 +122,18 @@ pub(super) async fn observe_routable_unwatched_tui_sessions(
     }
     // One `tmux list-sessions` per pass, off the executor: listing is both the
     // enumeration and the liveness proof. An unavailable tmux yields no
-    // candidates rather than a false absence. The arming decision stays on the
-    // same blocking thread, because a bound session's provider can ask tmux too.
+    // candidates rather than a false absence.
+    let Ok(Ok(live_sessions)) =
+        tokio::task::spawn_blocking(crate::services::platform::tmux::list_session_names).await
+    else {
+        return 0;
+    };
+    // The arming decision leaves the executor too: a bound session's provider can ask tmux.
     let (pass_provider, pass_runtimes) = (provider.clone(), runtimes.to_vec());
     let pass_seen = watcher_derived.clone();
-    let listed = tokio::task::spawn_blocking(move || {
-        let live_sessions = crate::services::platform::tmux::list_session_names().ok()?;
+    let armed = tokio::task::spawn_blocking(move || {
         let runtimes = pass_runtimes.as_slice();
-        Some(routable_unwatched_sessions(
+        routable_unwatched_sessions(
             &pass_provider,
             &live_sessions,
             |tmux_session| {
@@ -145,10 +149,10 @@ pub(super) async fn observe_routable_unwatched_tui_sessions(
             },
             |channel_id| runtime_owning_watcher(runtimes, channel_id).is_some(),
             &pass_seen,
-        ))
+        )
     })
     .await;
-    let Ok(Some(candidates)) = listed else {
+    let Ok(candidates) = armed else {
         return 0;
     };
     let mut absent = 0usize;

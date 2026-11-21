@@ -191,9 +191,8 @@ fn keyed_lookup_teardown(
     )
 }
 
-/// The provider a stored row names, or with none the one its key records, and only then the
-/// one its tmux session records. It only fills the gate's provider: the row, marker and
-/// inflight evidence still decide.
+/// The provider a stored row names, else its key's, else its tmux session's. It only fills
+/// the gate's provider: the row, marker and inflight evidence still decide.
 pub(crate) fn row_provider(
     stored: Option<&str>,
     session_key: &str,
