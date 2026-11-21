@@ -1423,6 +1423,7 @@ src/
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
+│   │   │   ├── effort_resume_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   ├── restart_intent.rs
 │   │   │   └── restart_resume_tests.rs
@@ -1659,6 +1660,7 @@ src/
 │   │   │   │   ├── reports.rs
 │   │   │   │   └── session_details.rs
 │   │   │   ├── effort_restart/
+│   │   │   │   ├── herdr.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── recovery.rs
