@@ -349,15 +349,22 @@ def merge_cases(driver, scenario, args, result, cases):
 def run(driver, scenario, args, client, run_id, result):
     composite = (_run_text_stop if scenario.get("herdr_text_stop")
                  else _run_stop_cases if scenario.get("herdr_stop_cases") else None)
-    if composite is None:
-        return _run(driver, scenario, args, client, run_id, result)
     cases = []
     try:
-        return composite(driver, scenario, args, client, run_id, result, cases)
+        result = (composite(driver, scenario, args, client, run_id, result, cases) if composite
+                  else _run(driver, scenario, args, client, run_id, result))
     except driver.PhaseDeadlineExpired:
         # The phase handler reads only this dict, so carry the subcases' evidence up.
         merge_cases(driver, scenario, args, result, cases)
         raise
+    # As on tmux, a skip or pass without the observed mode/class fails a required gate.
+    if not args.dry_run and result["status"] != "fail":
+        gate = {"scenario_id": str(scenario.get("id"))}
+        (driver._apply_observed_required_agent_mode_gate(
+            result, required=getattr(args, "required_agent_mode", None), declared=result["agent_mode"], **gate)
+         or driver._apply_observed_required_coverage_class_gate(
+            result, required=getattr(args, "required_coverage_class", None), declared=result["coverage_class"], **gate))
+    return result
 
 
 def _run_text_stop(driver, scenario, args, client, run_id, result, cases):
@@ -547,6 +554,13 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     prompt = driver.build_provider_hold_prompt(step["send_provider_hold_prompt"], scenario_id=scenario["id"])
                 else:
                     prompt = str(step.get("send_prompt", step.get("send_discord_prompt"))).replace("{run_id}", run_id)
+                if step.get("requires_absent"):
+                    # A follow-up after the hold already ended proves nothing about busy input.
+                    ingest(client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
+                    ended = str(step["requires_absent"]).replace("{run_id}", run_id)
+                    if any(ended in (assertions.relay_body(r) or "") for r in window.raw_messages):
+                        phase = "inconclusive"
+                        raise assertions.AssertionError(f"inconclusive: {ended} posted before the follow-up was sent")
                 gap_token = None
                 is_clear = prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]
                 if is_clear:

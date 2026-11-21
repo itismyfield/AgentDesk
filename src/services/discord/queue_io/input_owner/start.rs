@@ -18,11 +18,8 @@ pub(crate) async fn original(
     if super::effort_continue::is_continuation(Some(context)) {
         return super::effort_continue::original(mailbox, channel, context).await;
     }
-    let identity = InputOrigin::imessage_identity(
-        channel,
-        context["source"].as_str(),
-        context.get("metadata"),
-    );
+    let identity =
+        InputOrigin::stable_identity(channel, context["source"].as_str(), context.get("metadata"));
     let turn = identity
         .as_ref()
         .map(|(message, _)| format!("discord:{channel}:{message}"))

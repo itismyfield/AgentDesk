@@ -382,6 +382,7 @@ src/
 │   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
 │   ├── decision_forums.rs
+│   ├── decisions.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -1881,6 +1882,8 @@ src/
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   ├── test_hook.rs
 │   │   │   │   │   └── turn_mode_reading_tests.rs
+│   │   │   │   ├── decision_target.rs
+│   │   │   │   ├── decision_target_tests.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
@@ -2284,6 +2287,8 @@ src/
 │   │   │   ├── backstop.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
+│   │   │   ├── decision_drain.rs
+│   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
@@ -2786,6 +2791,8 @@ src/
 │   │   │   │   │   └── n3bc_tests.rs
 │   │   │   │   ├── scoped_recovery_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── queued_recovery/
+│   │   │   │   └── agy_shadow.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
@@ -4527,6 +4534,7 @@ src/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── agy.rs
 │   │   │   ├── children.rs
 │   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
@@ -4584,6 +4592,8 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
+│   │   │   ├── agy_spool/
+│   │   │   │   └── replay.rs
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
 │   │   │   │   ├── p5a2_projection_tests.rs
@@ -4689,7 +4699,10 @@ src/
 │   │   │   ├── fresh_resume_tests/
 │   │   │   │   └── authority_contention_tests.rs
 │   │   │   ├── host/
+│   │   │   │   ├── agy_host/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── agy_host.rs
 │   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs

@@ -26,7 +26,7 @@ fn a_lost_source_settles_only_for_an_opted_in_launch_older_than_this_run() {
     let mut seen = watched(&older.session, None).settling_lost_source();
     assert_eq!(
         seen.expired(idle),
-        Expiry::Unproven(Unproven::Retained),
+        Expiry::Unproven(Unproven::Lost),
         "nothing in flight can publish an older launch's source"
     );
     // A tmux warm follow-up keeps waiting on the same lost source; it never settles it.

@@ -27,6 +27,7 @@ pub(in crate::services::discord) use backstop::{
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 pub(in crate::services::discord) mod auto_queue_eligibility;
+pub(crate) mod decision_drain;
 pub(in crate::services::discord) mod queued_head_inject;
 pub(in crate::services::discord) mod transport;
 mod turn_admission;

@@ -2,7 +2,8 @@
 
 Each case runs in its own setup window through the Herdr runner. A passes on one stop
 acknowledgement, an idle reply well inside the hold and no late sentinel; that reply is B.
-C stays a known gap (GAP) until a follow-up sent during a hold turn is delivered.
+C stays a known gap (GAP) until a follow-up sent during a hold turn is delivered; if the
+hold already posted HOLD_DONE before that send, C fails as inconclusive.
 """
 
 GAP = "#8128 U"
@@ -47,7 +48,7 @@ def cases():
     c = {"id": "E-54-C", **LIVE,
          "steps": [{"send_discord_prompt": hold_prompt("S15C", HOLD_S, done_c)},
                    {"wait_for_discord_text": hold_c, "timeout_s": 120}, {"wait_idle_s": 3},
-                   {"send_discord_prompt": f"E2E S15C busy follow-up. Reply with exactly {follow}"},
+                   {"send_discord_prompt": f"E2E S15C busy follow-up. Reply with exactly {follow}", "requires_absent": done_c},
                    {"wait_for_discord_text": follow, "timeout_s": 240}],
          "assertions": [{"text_present": follow}, {"no_duplicate_marker": follow},
                         *({"raw_text_absent": needle} for needle in DROPPED), {"no_duplicate_content": True}],

@@ -136,7 +136,8 @@ Crash == /\ alive /\ crashes = 1
     /\ alive' = (FALSE)
     /\ crashes' = (0)
     /\ stage' = ([m \in Items |-> IF stage[m] = "writing" THEN "unknown_closed" ELSE stage[m]])
-    /\ UNCHANGED <<gate, choice, first, ledger, kind, raw, forwarded, claims, writes, pending, applied, cursor, scanned, notes, atClose, replyPending, closePending, replyCount, explicitClose, archived, locked, visible, busy, badScope, badReply, afterCloseAccepted, failureNotes>>
+    /\ raw' = ([m \in Items |-> IF stage[m] = "writing" /\ Mode # "KeepUnknownRaw" THEN "" ELSE raw[m]])
+    /\ UNCHANGED <<gate, choice, first, ledger, kind, forwarded, claims, writes, pending, applied, cursor, scanned, notes, atClose, replyPending, closePending, replyCount, explicitClose, archived, locked, visible, busy, badScope, badReply, afterCloseAccepted, failureNotes>>
 Boot == /\ ~alive
     /\ alive' = (TRUE)
     /\ UNCHANGED <<gate, choice, first, ledger, kind, stage, raw, forwarded, claims, writes, pending, applied, cursor, scanned, notes, atClose, replyPending, closePending, replyCount, explicitClose, archived, locked, visible, crashes, busy, badScope, badReply, afterCloseAccepted, failureNotes>>
@@ -161,6 +162,8 @@ ReplyNoLifecycleChange == ~badReply
 CursorCoversAll == \A m \in 1..cursor: m \in ledger
 ClassMatches == \A m \in ledger: kind[m] # "ignore" => kind[m] = BaseKind(m)
 ViewTruth == visible = "closed" => gate = "closed"
+\* A failed or unknown_closed input keeps no runnable payload; only ID/hash/result facts remain.
+FailedRawDiscarded == \A m \in Items: stage[m] \in {"failed","unknown_closed"} => raw[m] = ""
 LiteralDisplayEquality == visible = gate
 ClosedEventuallyArchived == (gate = "closed") ~> (archived /\ locked /\ visible = "closed")
 OpinionEventuallyAccounted == \A m \in Items: (kind[m] = "opinion" /\ stage[m] # "ignored") ~> ((stage[m] \in {"failed","unknown_closed"} /\ m \in failureNotes) \/ (stage[m] = "delivered" /\ m \in notes))

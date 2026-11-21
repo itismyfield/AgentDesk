@@ -676,6 +676,12 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "prompt is required"})),
         );
     }
+    let declared = (body.source.as_deref(), body.metadata.as_ref());
+    if let Some(refused) =
+        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
+    {
+        return refused;
+    }
     let metadata = match super::agents_turn_target::start_metadata(body.metadata, body.origin_id) {
         Ok(metadata) => metadata,
         Err(response) => {
@@ -1075,6 +1081,12 @@ pub async fn agent_handoff(
     axum::extract::Path(to_agent_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<AgentHandoffBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let declared = (body.source.as_deref(), body.metadata.as_ref());
+    if let Some(refused) =
+        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
+    {
+        return refused;
+    }
     let notice = super::imessage_input_notice::notice_line(body.source.as_deref(), &body.prompt);
     let Some(pool) = state.pg_pool_ref() else {
         super::imessage_input_notice::not_echoed(

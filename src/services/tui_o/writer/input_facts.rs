@@ -123,6 +123,7 @@ impl InputFacts {
                     .map_err(|e| e.to_string())?;
                 false
             }
+            ShadowProvider::Antigravity => return Err("agy spools have no pane input facts".into()),
         };
         if child {
             return Err("input facts require a parent transcript".into());
@@ -659,6 +660,7 @@ fn aborted(provider: ShadowProvider, value: &Value) -> bool {
         ShadowProvider::Codex => {
             value["type"] == "event_msg" && value["payload"]["type"] == "turn_aborted"
         }
+        ShadowProvider::Antigravity => false,
     }
 }
 
