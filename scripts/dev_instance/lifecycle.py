@@ -18,6 +18,7 @@ from .files import InstanceError, safe_absolute, publish_runtime, instance_root,
 from . import identity
 from .lease import LEASE_ENV, LeaseBusy, acquire, open_candidate
 from .manifest import API_PORTS, PG_PORTS, check_port, child_environment, validate, worktree_identity
+from .profile import profile_spec
 
 MAX_WALL_SECONDS = 600
 MAX_STOP_GRACE_SECONDS = 30
@@ -198,14 +199,45 @@ def initial_frame(stream):
     return None, _PrefixedControl(text, stream) if text else stream
 
 
+def required_frame(stream, deadline):
+    """Block until one complete admission line arrives; EOF, a partial line or the deadline refuses."""
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        raise InstanceError('verified admission stream is unavailable') from None
+    data = bytearray()
+    while not data.endswith(b'\n'):
+        remaining = deadline - time.monotonic()
+        if len(data) > 4096 or remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+            raise InstanceError('complete admission frame did not arrive before the startup deadline')
+        byte = os.read(descriptor, 1)
+        if not byte:
+            raise InstanceError('admission stream ended before a complete frame')
+        data.extend(byte)
+    try:
+        frame = json.loads(data.decode('utf-8'))
+    except ValueError:
+        raise InstanceError('admission frame is not valid JSON') from None
+    if type(frame) is not dict or frame.get('kind') != 'admission':
+        raise InstanceError('first frame is not an identity admission')
+    identity.parse_admission(frame)
+    return frame, stream
+
+
 def supervise(base, instance_id, ambient, *, binary_sha256, head, wall_timeout,
               stop_grace, max_gateway=1, spawn=subprocess.Popen, resources=None, control_stream=None):
     _bounds(wall_timeout, stop_grace, max_gateway)
     started = time.monotonic()
-    admission, control_stream = initial_frame(control_stream)
+    manifest = validate(base, instance_id, ambient, check_ports=False)
+    if profile_spec(manifest["profile"])["verified_run"]:
+        # A missing frame is never a reason to fall back to the unverified legacy start.
+        if resources is None:
+            raise InstanceError('this profile requires owned runtime resources and admission')
+        admission, control_stream = required_frame(control_stream, started + wall_timeout)
+    else:
+        admission, control_stream = initial_frame(control_stream)
     if admission is not None and resources is None:
         raise InstanceError('verified admission requires owned runtime resources')
-    manifest = validate(base, instance_id, ambient, check_ports=False)
     if (not isinstance(head, str) or manifest["head"] != head
             or not isinstance(binary_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", binary_sha256)):
         raise InstanceError("explicit lifecycle source identity mismatch")
@@ -268,6 +300,8 @@ def _supervise_resources(manifest, specification, binary, environment, lease, de
                          verification=None):
     from . import keeper
     from .manifest import resource_spec
+    if verification is None and profile_spec(manifest["profile"])["verified_run"]:
+        raise InstanceError("this profile cannot start without a verified identity run")
     specification = resource_spec(specification)
     if specification["stop_grace"] != grace or specification["startup_timeout"] > deadline-time.monotonic():
         raise InstanceError("resource bounds exceed supervisor admission")

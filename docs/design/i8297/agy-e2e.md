@@ -161,10 +161,10 @@ agent-op read 'op://AgentDesk/Test-Announce/credential' \
   | scripts/dev-instance.sh credential --instance "$UUID" --name announce_bot_token
 agent-op read 'op://AgentDesk/Test-Notify/credential' \
   | scripts/dev-instance.sh credential --instance "$UUID" --name notify_bot_token
-scripts/dev-instance.sh validate --instance "$UUID" --require-credentials
+scripts/dev-instance.sh validate --instance "$UUID"
 ```
 
-`--agy-login`과 `agy-headless` 프로필은 S1이 넣는다. Test-Announce·Test-Notify의 op 참조는 메모의 "같은 필드 구성"을 따른 것이므로 실행 전에 항목의 필드 id를 확인한다. 이전 head의 instance는 새 instance가 `validate`를 통과한 뒤 `scripts/dev-instance.sh down --instance <이전 uuid>`로 지운다. `down`은 그 root의 credential까지 지운다(`docs/dev-instance.md:149–152`).
+`validate`는 선언만 확인한다(`--require-credentials`는 옛 driver 3개 모드 전용이라 쓰지 않는다). credential 3개 집합과 Discord identity의 최종 확인은 agy 프로필에서 필수인 `up` admission이 한다. `--agy-login`과 `agy-headless` 프로필은 S1이 넣는다. Test-Announce·Test-Notify의 op 참조는 메모의 "같은 필드 구성"을 따른 것이므로 실행 전에 항목의 필드 id를 확인한다. 이전 head의 instance는 새 instance가 `validate`를 통과한 뒤 `scripts/dev-instance.sh down --instance <이전 uuid>`로 지운다. `down`은 그 root의 credential까지 지운다(`docs/dev-instance.md:149–152`).
 
 **O4 agy 로그인 홈 — 코디네이터, 셀 호스트, 한 번.** 턴을 쓰지 않는 조회로 인증과 MCP 0개를 확인한다. 인증이 없다고 나오면 사용자가 이 HOME으로 한 번 로그인한다(브라우저 인증이라 사용자 손이 필요하다).
 

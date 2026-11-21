@@ -286,27 +286,63 @@ class AgyIdentityAdmissionTests(unittest.TestCase):
         with self.assertRaises(files.InstanceError):
             probe()
 
-    def test_up_refuses_a_foreign_discord_identity_before_gateway_spawn(self):
+    def up(self, payload, mismatch=None, delay=0, resources={}):
+        """Run `up` until the lease; report the refusal, probe calls and whether the lease was reached."""
         from scripts.dev_instance import identity
         worktree = self.fixture.worktree
         (worktree/'.git/info/exclude').write_text('target/\n')
         binary = worktree/'target/debug/agentdesk'
-        binary.parent.mkdir(parents=True)
+        binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text('#!/bin/sh\n')
         binary.chmod(0o700)
-        spawn = mock.Mock(side_effect=AssertionError('Gateway spawned before identity admission'))
-        for mismatch in ('antigravity_bot_token', 'silent'):
-            read, write = os.pipe()
-            os.write(write, (json.dumps(self.frame)+'\n').encode())
+        read, write = os.pipe()
+        def produce():
+            time.sleep(delay)
+            os.write(write, payload)
             os.close(write)
-            with self.subTest(mismatch=mismatch), os.fdopen(read) as stream, mock.patch.object(
-                    identity, 'request_json', side_effect=lambda url, end, token: {'id': self.answer(token, end, mismatch)}) as asked:
-                with self.assertRaisesRegex(files.InstanceError, 'application identity'):
-                    lifecycle.supervise(self.fixture.base, self.fixture.instance_id, {}, head=self.manifest['head'],
-                                        binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), wall_timeout=5,
-                                        stop_grace=.1, spawn=spawn, resources={}, control_stream=stream)
-                self.assertTrue(asked.called, 'refusal must come from the identity probe')
+        writer = threading.Thread(target=produce)
+        writer.start()
+        spawn = mock.Mock(side_effect=AssertionError('Gateway spawned before identity admission'))
+        with os.fdopen(read) as stream, mock.patch.object(
+                identity, 'request_json', side_effect=lambda url, end, token: {'id': self.answer(token, end, mismatch)}) as asked, \
+                mock.patch.object(lifecycle, '_acquire_instance', side_effect=LookupError('lease reached')) as leased:
+            with self.assertRaises((files.InstanceError, LookupError)) as refused:
+                lifecycle.supervise(self.fixture.base, self.fixture.instance_id, {}, head=self.manifest['head'],
+                                    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), wall_timeout=2,
+                                    stop_grace=.1, spawn=spawn, resources=resources, control_stream=stream)
+        writer.join()
         spawn.assert_not_called()
+        return str(refused.exception), asked.called, leased.called
+
+    def test_up_refuses_a_foreign_discord_identity_before_gateway_spawn(self):
+        frame = (json.dumps(self.frame)+'\n').encode()
+        for mismatch in ('antigravity_bot_token', 'silent'):
+            with self.subTest(mismatch=mismatch):
+                reason, asked, leased = self.up(frame, mismatch)
+                self.assertIn('application identity', reason)
+                self.assertEqual((asked, leased), (True, False))
+
+    def test_agy_resource_start_without_verification_never_launches_keeper(self):
+        from scripts.dev_instance import keeper
+        with mock.patch.object(keeper, 'launch') as launch, \
+                self.assertRaisesRegex(files.InstanceError, 'verified identity run'):
+            lifecycle._supervise_resources(self.manifest, {}, None, {}, None, time.monotonic()+5, .1, None, None)
+        launch.assert_not_called()
+
+    def test_o3_validate_accepts_the_agy_credential_set_without_going_live(self):
+        result = self.fixture.cli('validate', '--instance', self.fixture.instance_id)
+        self.assertEqual((result.returncode, json.loads(result.stdout)), (0, {
+            'status': 'DECLARATION_VALID', 'live_ready': False, 'instance_id': self.fixture.instance_id}))
+
+    def test_agy_up_requires_a_complete_admission_before_lease_or_keeper(self):
+        frame = (json.dumps(self.frame)+'\n').encode()
+        for name, payload, resources in [('eof', b'', {}), ('partial', frame[:-5], {}), ('no-resources', frame, None)]:
+            with self.subTest(case=name):
+                self.assertEqual(self.up(payload, resources=resources)[1:], (False, False))
+        self.assertEqual(self.up(frame, delay=.3), ('lease reached', True, True))
+        self.assertEqual(self.up(frame, 'antigravity_bot_token', delay=.3)[1:], (True, False))
+        (self.root/'credential/notify_bot_token').unlink()
+        self.assertEqual(self.up(frame)[1:], (False, False))
 
 
 class IdentityTransportTests(unittest.TestCase):

@@ -161,6 +161,12 @@ impl Environment {
         })
     }
 
+    /// The agy profile never starts without a supervisor-verified identity run.
+    #[cfg(unix)]
+    pub(super) fn requires_verified_run(&self) -> bool {
+        self.agy_login.is_some()
+    }
+
     pub(super) fn verify(&self) -> Result<(), String> {
         if self
             .required

@@ -6,8 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 
 const CHILD: &str = "ADK_AGY_CELL_CHILD";
 
-/// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI.
-fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+/// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI
+/// that appends `ADK_CHILD <first arg>` and its env for every launch.
+pub(in crate::config::test_instance) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, root, home) = claude_login_fixture(false);
     let login = home.join(".adk/dev/agy-login");
     let cli = home.join("agy-bin/agy");
@@ -17,7 +18,7 @@ fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     std::fs::write(
         &cli,
         format!(
-            "#!/bin/sh\n[ \"$1\" = --version ] && echo 1.0.0 && exit 0\n/usr/bin/env > {}\n",
+            "#!/bin/sh\n{{ echo \"ADK_CHILD $1\"; /usr/bin/env; }} >> {}\n[ \"$1\" = --version ] && echo 1.0.0\nexit 0\n",
             crate::services::process::shell_escape(&capture.to_string_lossy())
         ),
     )
@@ -94,35 +95,44 @@ fn agy_child_gets_only_declared_env_and_the_mcp_free_login_home() {
             .output()
             .unwrap();
         fixture::assert_single_test_passed(&output, name);
-        let captured = std::fs::read_to_string(root.join("runtime/agy-env"));
-        if with_mcp {
-            assert!(
-                captured.is_err(),
-                "agy spawned despite an MCP server in its login home"
-            );
-            continue;
-        }
-        let env: std::collections::BTreeMap<_, _> = captured
-            .unwrap()
+        let mut runs: Vec<(String, std::collections::BTreeMap<String, String>)> = Vec::new();
+        for line in std::fs::read_to_string(root.join("runtime/agy-env"))
+            .unwrap_or_default()
             .lines()
-            .filter_map(|line| line.split_once('='))
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect();
-        assert_eq!(env.get("HOME").map(String::as_str), login.to_str());
+        {
+            if let Some(kind) = line.strip_prefix("ADK_CHILD ") {
+                runs.push((kind.to_owned(), Default::default()));
+            } else if let (Some((_, env)), Some((key, value))) =
+                (runs.last_mut(), line.split_once('='))
+            {
+                env.insert(key.to_owned(), value.to_owned());
+            }
+        }
+        let turns = runs.iter().filter(|(kind, _)| kind != "--version").count();
+        assert!(turns < runs.len(), "version probe launch was not observed");
         assert_eq!(
-            env.get("PATH").map(String::as_str),
-            Some(
-                format!(
-                    "{}:/usr/bin:/bin",
-                    root.join("fixture-worktree/target/debug").display()
-                )
-                .as_str()
-            )
+            turns,
+            usize::from(!with_mcp),
+            "turn launches with MCP={with_mcp}"
         );
-        assert!(
-            !env.contains_key("SYNTHETIC_AMBIENT"),
-            "dcserver env leaked into agy: {env:?}"
+        let path = format!(
+            "{}:/usr/bin:/bin",
+            root.join("fixture-worktree/target/debug").display()
         );
+        for (kind, env) in &runs {
+            // The version probe keeps the instance HOME; only the turn runs from the login home.
+            let home = if kind == "--version" {
+                root.join("home")
+            } else {
+                login.clone()
+            };
+            assert_eq!(env.get("HOME").map(String::as_str), home.to_str(), "{kind}");
+            assert_eq!(env.get("PATH"), Some(&path), "{kind}");
+            assert!(
+                !env.contains_key("SYNTHETIC_AMBIENT"),
+                "dcserver env leaked into {kind}: {env:?}"
+            );
+        }
     }
 }
 

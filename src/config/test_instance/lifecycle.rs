@@ -185,7 +185,11 @@ struct RunSnapshot {
 fn admit_run(instance: &super::TestInstance, lease: &Witness) -> Result<bool, String> {
     use std::os::fd::FromRawFd;
     let Some(encoded) = std::env::var_os("AGENTDESK_TEST_RUN") else {
-        return Ok(false);
+        return if instance.environment.requires_verified_run() {
+            Err(rejected())
+        } else {
+            Ok(false)
+        };
     };
     let encoded = encoded
         .to_str()

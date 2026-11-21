@@ -6,12 +6,12 @@ import re
 from .files import AGY_CREDENTIAL_NAMES, InstanceError, LIVE_CREDENTIAL_NAMES
 
 TEST_ANTIGRAVITY_APP_ID = "1573471163663785994"
-# Bot roles, channel count, admitted credentials and pinned app IDs per profile.
+# Bot roles, channel count, admitted credentials, pinned app IDs and whether `up` may skip admission.
 PROFILES = {
-    "tui-live": {"providers": ("claude", "codex"), "channels": 2,
-                 "credentials": LIVE_CREDENTIAL_NAMES, "pinned": {}, "gated": True},
+    "tui-live": {"providers": ("claude", "codex"), "channels": 2, "credentials": LIVE_CREDENTIAL_NAMES,
+                 "pinned": {}, "gated": True, "verified_run": False},
     "agy-headless": {"providers": ("antigravity",), "channels": 1, "credentials": AGY_CREDENTIAL_NAMES,
-                     "pinned": {"antigravity": TEST_ANTIGRAVITY_APP_ID}, "gated": False},
+                     "pinned": {"antigravity": TEST_ANTIGRAVITY_APP_ID}, "gated": False, "verified_run": True},
 }
 
 ENV_FLAGS = {
