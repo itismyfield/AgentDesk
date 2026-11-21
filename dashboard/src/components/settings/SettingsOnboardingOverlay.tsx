@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useRef } from "react";
-import { Button } from "../../kit/free/button-clean";
+import { SettingsButton } from "./SettingsPrimitives";
 
 const OnboardingWizard = lazy(() => import("../OnboardingWizard"));
 
@@ -65,15 +65,15 @@ export function SettingsOnboardingOverlay({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[80] overflow-y-auto bg-th-bg-primary text-th-text-primary" role="dialog" aria-modal="true" aria-label={tr("초기 설정", "Initial setup")}>
-      <div className="flex min-h-screen items-start justify-center pb-8 pt-4">
+    <div className="fixed inset-0 z-[80] overflow-y-auto bg-[var(--bg)] text-[var(--fg)]" role="dialog" aria-modal="true" aria-label={tr("초기 설정", "Initial setup")}>
+      <div className="flex min-h-screen items-start justify-center pt-4 pb-8">
         <div ref={onboardingDialogRef} className="w-full max-w-3xl">
           <div className="mb-2 flex justify-end px-4">
-            <Button ref={onboardingCloseButtonRef} variant="secondary" size="lg" onClick={onClose}>
+            <SettingsButton ref={onboardingCloseButtonRef} variant="secondary" onClick={onClose}>
               {tr("닫기", "Close")}
-            </Button>
+            </SettingsButton>
           </div>
-          <Suspense fallback={<div role="status" className="py-8 text-center text-[13px] text-th-text-muted">{tr("불러오는 중…", "Loading…")}</div>}>
+          <Suspense fallback={<div role="status" className="py-8 text-center text-[13px] text-[var(--fg-muted)]">{tr("불러오는 중…", "Loading…")}</div>}>
             <OnboardingWizard
               isKo={isKo}
               onComplete={() => {

@@ -1,9 +1,11 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import type { LucideIcon } from "lucide-react";
 import { getServerVersion } from "../api/settingsRuntime";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
+import { Cap, CountBadge, ROW_HOVER_CLASS, StatusDot } from "../components/common/KitPrimitives";
+import { Separator } from "../kit/free/separator-clean";
 import type { AppRouteEntry, AppRouteId, AppSectionId } from "./routes";
 import { formatRelativeTime } from "./shellFormatting";
 
@@ -19,8 +21,20 @@ interface AppSidebarProps {
   wsLastEventTs: number | null;
 }
 
-const NAV_CLASS =
-  "flex h-10 w-full items-center gap-2.5 rounded-[var(--r-sm)] px-2.5 text-sm font-medium text-th-text-secondary transition-colors hover:bg-surface-subtle aria-[current=page]:bg-[var(--bg-3)] aria-[current=page]:text-th-text-primary pointer-coarse:h-11";
+const NAV_CLASS = `flex h-10 w-full items-center gap-2.5 rounded-[var(--r-sm)] px-2.5 text-sm leading-5 font-medium text-[var(--fg-dim)] ${ROW_HOVER_CLASS} aria-[current=page]:bg-[var(--bg-3)] aria-[current=page]:text-[var(--fg)] pointer-coarse:h-11`;
+
+const RAIL_SEPARATOR_STYLE = {
+  "--ui-sepc-line": "var(--line-soft)",
+  "--ui-sepc-weight": "1px",
+  margin: "8px 4px",
+  width: "calc(100% - 8px)",
+} as CSSProperties;
+
+const RAIL_COUNT_BADGE_STYLE = {
+  fontSize: "11px",
+  fontWeight: 600,
+  paddingInline: "6px",
+} as CSSProperties;
 
 /** Re-renders every few seconds so the "n seconds ago" text stays honest. */
 function useNow(active: boolean, tickMs = 5_000): number {
@@ -53,18 +67,20 @@ export function AppSidebar({
     <nav
       data-testid="app-sidebar-nav"
       aria-label={tr("주 메뉴", "Main menu")}
-      className="flex w-[232px] shrink-0 flex-col gap-1 border-r border-th-border-subtle bg-th-bg-surface p-3"
+      className="flex w-[232px] shrink-0 flex-col gap-1 border-r border-[var(--line-soft)] bg-[var(--bg-1)] p-3"
     >
       <div className="flex shrink-0 items-center gap-2.5 px-2 pt-1.5 pb-3.5">
         <span
           aria-hidden
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-[var(--r-sm)] bg-[var(--accent-soft)] text-xs font-bold text-[var(--th-badge-blue-text)]"
+          className="grid size-8 shrink-0 place-items-center rounded-[var(--r-sm)] bg-[var(--accent-soft)] text-xs leading-none font-bold text-[var(--accent-fg)]"
         >
           AD
         </span>
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-sm font-semibold text-th-text-primary">AgentDesk</div>
-          {version ? <div className="truncate text-xs text-th-text-muted">{version.startsWith("v") ? version : `v${version}`}</div> : null}
+        <div className="min-w-0">
+          <div className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">AgentDesk</div>
+          {version ? (
+            <Cap className="block truncate">{version.startsWith("v") ? version : `v${version}`}</Cap>
+          ) : null}
         </div>
       </div>
 
@@ -72,7 +88,7 @@ export function AppSidebar({
       <div data-testid="app-sidebar-menu" className="-m-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
         {sections.map((sectionId, index) => (
           <div key={sectionId} className="flex flex-col gap-1">
-            {index > 0 ? <div aria-hidden className="mx-1 my-2 h-px bg-[var(--th-border-subtle)]" /> : null}
+            {index > 0 ? <Separator style={RAIL_SEPARATOR_STYLE} /> : null}
             {routes
               .filter((route) => route.section === sectionId)
               .map((route) => {
@@ -94,11 +110,8 @@ export function AppSidebar({
                     <Icon size={18} aria-hidden className="shrink-0" />
                     <span className="min-w-0 flex-1 truncate">{label}</span>
                     {badge ? (
-                      <span
-                        aria-hidden
-                        className="grid h-5 min-w-5 place-items-center rounded-full bg-[var(--th-badge-amber-bg)] px-1.5 text-[11px] font-semibold tabular-nums text-[var(--th-badge-amber-text)]"
-                      >
-                        {badge > 99 ? "99+" : badge}
+                      <span aria-hidden className="ml-auto flex shrink-0">
+                        <CountBadge count={badge} tone="warn" style={RAIL_COUNT_BADGE_STYLE} />
                       </span>
                     ) : null}
                   </Link>
@@ -110,13 +123,9 @@ export function AppSidebar({
 
       <div
         data-testid="sidebar-connection-status"
-        className="mt-2 flex shrink-0 items-center gap-2 rounded-[var(--r-sm)] border border-th-border-subtle p-2.5 text-xs text-th-text-muted"
+        className="mt-2 flex shrink-0 items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line-soft)] p-2.5 text-xs leading-4 text-[var(--fg-muted)]"
       >
-        <span
-          aria-hidden
-          className="h-2 w-2 shrink-0 rounded-full"
-          style={{ background: wsConnected ? "var(--ok)" : "var(--err)" }}
-        />
+        <StatusDot tone={wsConnected ? "ok" : "err"} />
         <span className="min-w-0 truncate">
           {wsConnected
             ? lastEvent

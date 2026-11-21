@@ -1,11 +1,11 @@
 import { RotateCcw, SearchX } from "lucide-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { EmptyState } from "../../kit/free/empty-state-clean";
-import { Switch } from "../../kit/free/switch-clean";
+import { Cap, CardSkeleton, Eyebrow, InspSection, KitCard, ROW_HOVER_CLASS, Row } from "../common/KitPrimitives";
 import type { SettingsCategory } from "./SettingsCopy";
 import { baselineText, isResetValue, type CatalogItem, type CategoryFilter } from "./SettingsModel";
-import { ItemChip, ItemFacts, ItemHeading, InlineControl, RelatedSettings, currentValue, editableItem, resetLabel } from "./SettingsPanels";
-import { SETTINGS_CARD_CLASS, SettingsAction, SettingsSkeletonRows } from "./SettingsPrimitives";
+import { InlineControl, ItemChip, ItemFacts, ItemHeading, RelatedSettings, currentValue, editableItem, hasRelatedSettings, resetLabel } from "./SettingsPanels";
+import { SettingsAction, SettingsSwitch } from "./SettingsPrimitives";
 
 type Tr = (ko: string, en: string) => string;
 
@@ -38,7 +38,7 @@ interface SettingsDesktopCatalogProps extends CatalogActions {
   groups: CatalogGroup[];
   caption: string;
   selected: CatalogItem | null;
-  /** Inspector beside the list (≥1280px); narrower desktops open details under the selected row. */
+  /** Inspector beside the list (>=1280px); narrower desktops open details under the selected row. */
   wide: boolean;
   loading: boolean;
   notice: ReactNode;
@@ -64,24 +64,38 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
             aria-current={entry.id === category ? "true" : undefined}
             data-testid={`settings-category-${entry.id}`}
             onClick={() => onCategory(entry.id)}
-            className="flex min-h-10 w-full items-center justify-between gap-2 rounded-[var(--r-sm)] px-2.5 text-left text-[13px] text-th-text-secondary transition-colors hover:bg-surface-subtle aria-[current=true]:bg-[var(--bg-2)] aria-[current=true]:font-medium aria-[current=true]:text-th-text-primary"
+            className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-[var(--r-sm)] px-2.5 text-left text-sm leading-5 font-medium text-[var(--fg-dim)] pointer-coarse:min-h-11 ${ROW_HOVER_CLASS} aria-[current=true]:bg-[var(--bg-3)] aria-[current=true]:text-[var(--fg)]`}
           >
             <span className="min-w-0 break-keep">{entry.label}</span>
-            <span className="text-xs tabular-nums text-th-text-muted">{entry.count}</span>
+            <Cap className="font-display tabular-nums">{entry.count}</Cap>
           </button>
         ))}
-        <div className="my-2 h-px bg-[var(--line-soft)]" />
-        <div className="flex flex-col gap-3 px-2.5 py-1">
-          <Switch
-            checked={filters.differs}
-            onChange={(event) => onFilter("differs", event.target.checked)}
-            label={<>{tr("기본값과 다름", "Differs from default")} <span className="tabular-nums text-th-text-muted">{filters.differsCount}</span></>}
-          />
-          <Switch
-            checked={filters.restart}
-            onChange={(event) => onFilter("restart", event.target.checked)}
-            label={<>{tr("재시작 필요", "Needs restart")} <span className="tabular-nums text-th-text-muted">{filters.restartCount}</span></>}
-          />
+        <div className="mx-1 my-2 h-px bg-[var(--line-soft)]" />
+        <div className="flex flex-col gap-1 px-2.5 py-1">
+          <div className="py-1">
+            <SettingsSwitch
+              checked={filters.differs}
+              onChange={(event) => onFilter("differs", event.target.checked)}
+              label={
+                <span className={filters.differs ? "text-sm leading-5 text-[var(--fg)]" : "text-sm leading-5 text-[var(--fg-dim)]"}>
+                  {tr("기본값과 다름", "Differs from default")}{" "}
+                  <Cap className="font-display tabular-nums">{filters.differsCount}</Cap>
+                </span>
+              }
+            />
+          </div>
+          <div className="py-1">
+            <SettingsSwitch
+              checked={filters.restart}
+              onChange={(event) => onFilter("restart", event.target.checked)}
+              label={
+                <span className={filters.restart ? "text-sm leading-5 text-[var(--fg)]" : "text-sm leading-5 text-[var(--fg-dim)]"}>
+                  {tr("재시작 필요", "Needs restart")}{" "}
+                  <Cap className="font-display tabular-nums">{filters.restartCount}</Cap>
+                </span>
+              }
+            />
+          </div>
         </div>
       </nav>
 
@@ -89,35 +103,52 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
         <div className="flex min-w-0 items-start gap-5">
           <section aria-label={tr("설정 목록", "Settings list")} className="@container flex min-w-0 flex-1 flex-col gap-3">
             {notice}
-            <p className="m-0 text-xs text-th-text-muted" data-testid="settings-list-caption">{caption}</p>
+            <p className="m-0 text-xs leading-4 text-[var(--fg-muted)]" data-testid="settings-list-caption">{caption}</p>
             {loading ? (
-              <div className={SETTINGS_CARD_CLASS}><SettingsSkeletonRows label={tr("설정을 불러오는 중…", "Loading settings…")} count={4} /></div>
+              <KitCard>
+                <CardSkeleton label={tr("설정을 불러오는 중…", "Loading settings…")} rows={4} />
+              </KitCard>
             ) : groups.length === 0 ? (
               <EmptyState
                 icon={<SearchX aria-hidden />}
                 title={tr("맞는 설정이 없어요", "No matching settings")}
                 text={tr("검색어나 필터를 바꿔 보세요.", "Try another search or filter.")}
               />
-            ) : groups.map((group) => (
-              <section key={group.id} aria-label={group.label} className={`${SETTINGS_CARD_CLASS} overflow-hidden`} data-testid={`settings-group-${group.id}`}>
-                <h3 className="m-0 border-b border-[var(--line-soft)] px-4 py-2.5 text-xs font-medium text-th-text-muted">{group.label}</h3>
-                <div className="[&>*+*]:border-t [&>*+*]:border-[var(--line-soft)]">
-                  {group.items.map((item) => (
-                    <div key={item.key}>
-                      <CatalogRow {...props} item={item} selected={item.key === selected?.key} />
-                      {!wide && item.key === selected?.key ? (
-                        <div className="bg-[var(--bg-1)]" data-testid="settings-inline-details"><Inspector {...props} item={item} /></div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+            ) : (
+              groups.map((group) => (
+                <KitCard key={group.id} as="section" aria-label={group.label} data-testid={`settings-group-${group.id}`}>
+                  <Eyebrow className="border-b border-[var(--line-soft)] px-4 py-2.5">
+                    <h3 className="m-0 text-inherit font-inherit">{group.label}</h3>
+                  </Eyebrow>
+                  <div>
+                    {group.items.map((item) => {
+                      const isSelected = item.key === selected?.key;
+                      return (
+                        <Fragment key={item.key}>
+                          <CatalogRow {...props} item={item} selected={isSelected} />
+                          {!wide && isSelected ? (
+                            <div className="border-t border-[var(--line-soft)] bg-[var(--bg-1)]" data-testid="settings-inline-details">
+                              <Inspector {...props} item={item} />
+                            </div>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
+                  </div>
+                </KitCard>
+              ))
+            )}
             {saveBar}
           </section>
           {wide && selected ? (
-            <aside aria-label={tr("선택한 설정", "Selected setting")} data-testid="settings-inspector" className={`sticky top-4 max-h-[calc(100dvh-6rem)] w-[300px] shrink-0 overflow-y-auto min-[1400px]:w-[340px] ${SETTINGS_CARD_CLASS}`}>
-              <Inspector {...props} item={selected} heading />
+            <aside
+              aria-label={tr("선택한 설정", "Selected setting")}
+              data-testid="settings-inspector"
+              className="sticky top-4 w-[300px] shrink-0 min-[1400px]:w-[340px]"
+            >
+              <KitCard className="max-h-[calc(100dvh-6rem)] overflow-y-auto">
+                <Inspector {...props} item={selected} heading />
+              </KitCard>
             </aside>
           ) : null}
         </div>
@@ -130,46 +161,65 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
 function CatalogRow({ item, selected, onSelect, onChange, locked, problemFor, tr }: CatalogActions & { item: CatalogItem; selected: boolean }) {
   return (
     // Clicking anywhere or focusing the control selects the row; the name button is the keyboard way in.
-    <div
+    <Row
+      selected={selected}
       data-testid={`setting-row-${item.key}`}
       data-selected={selected || undefined}
       onClick={() => onSelect(item.key)}
       onFocusCapture={() => onSelect(item.key)}
-      className={`flex min-h-[60px] min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 ${selected ? "bg-[color-mix(in_oklab,var(--accent)_8%,transparent)] shadow-[inset_2px_0_0_var(--accent)]" : ""}`}
+      className="min-h-[60px] flex-wrap gap-y-1.5"
     >
-      <button type="button" aria-current={selected ? "true" : undefined} className="min-w-0 flex-1 text-left" onClick={() => onSelect(item.key)}>
-        <span className="block text-[13px] leading-5 font-medium break-keep text-th-text-primary">{item.label}</span>
-        <span className="block font-mono text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{item.key}</span>
+      <button
+        type="button"
+        aria-current={selected ? "true" : undefined}
+        className="min-w-0 flex-1 text-left focus-visible:rounded-[var(--r-sm)]"
+        onClick={() => onSelect(item.key)}
+      >
+        <span className="block text-sm leading-5 font-medium break-keep text-[var(--fg)]">{item.label}</span>
+        <Cap className="block font-mono leading-[18px] [overflow-wrap:anywhere]">{item.key}</Cap>
       </button>
       <div className="flex shrink-0 justify-end">
-        <InlineControl item={item} label={item.label} invalid={Boolean(problemFor(item.key))} disabled={locked(item)} onChange={(value) => onChange(item, value)} tr={tr} />
+        <InlineControl
+          item={item}
+          label={item.label}
+          invalid={Boolean(problemFor(item.key))}
+          disabled={locked(item)}
+          onChange={(value) => onChange(item, value)}
+          tr={tr}
+        />
       </div>
       {/* A narrow list moves the default and chips to a second line instead of hiding them. */}
-      <div className="flex w-full min-w-0 items-center gap-2 @min-[34rem]:w-auto" data-testid={`setting-meta-${item.key}`}>
-        <span className="min-w-0 flex-1 text-xs leading-4 text-th-text-muted break-keep @min-[34rem]:w-28 @min-[34rem]:flex-none">{baselineText(item, tr)}</span>
-        <span className="flex shrink-0 flex-wrap justify-end gap-1 @min-[34rem]:w-[84px] @min-[34rem]:flex-col @min-[34rem]:items-center"><ItemChip item={item} tr={tr} all /></span>
+      <div className="flex w-full min-w-0 items-center gap-3 @min-[34rem]:w-auto" data-testid={`setting-meta-${item.key}`}>
+        <Cap className="min-w-0 flex-1 break-keep @min-[34rem]:w-28 @min-[34rem]:flex-none">{baselineText(item, tr)}</Cap>
+        <span className="flex shrink-0 flex-wrap justify-end gap-1 @min-[34rem]:w-[84px] @min-[34rem]:flex-col @min-[34rem]:items-end">
+          <ItemChip item={item} tr={tr} all />
+        </span>
       </div>
-    </div>
+    </Row>
   );
 }
 
 function Inspector({ item, heading = false, onRelated, onReset, locked, problemFor, allItems, categoryLabel, tr }: CatalogActions & { item: CatalogItem; heading?: boolean }) {
   return (
     <div className="flex min-w-0 flex-col">
-      {heading ? <div className="p-4"><ItemHeading item={item} category={categoryLabel(item.category)} /></div> : null}
-      <div className={`flex min-w-0 flex-col gap-3 p-4 ${heading ? "border-t border-[var(--line-soft)]" : ""}`}>
+      {heading ? (
+        <div className="p-4">
+          <ItemHeading item={item} category={categoryLabel(item.category)} />
+        </div>
+      ) : null}
+      <InspSection className={heading ? undefined : "border-t-0"}>
         {heading ? null : <ItemHeading item={item} showTitle={false} />}
         <ItemFacts item={item} problem={problemFor(item.key)} tr={tr} />
         {resettable(item) ? (
-          <SettingsAction icon={<RotateCcw />} className="self-start" disabled={locked(item)} onClick={() => onReset(item)}>
+          <SettingsAction icon={<RotateCcw />} className="mt-1 self-start" disabled={locked(item)} onClick={() => onReset(item)}>
             {resetLabel(item, tr)}
           </SettingsAction>
         ) : null}
-      </div>
-      {item.related.length > 0 ? (
-        <div className="border-t border-[var(--line-soft)] p-4">
+      </InspSection>
+      {hasRelatedSettings(item, allItems) ? (
+        <InspSection>
           <RelatedSettings item={item} items={allItems} onSelect={onRelated} tr={tr} />
-        </div>
+        </InspSection>
       ) : null}
     </div>
   );
