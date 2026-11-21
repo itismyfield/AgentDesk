@@ -277,11 +277,19 @@ async fn normal_end(
     .await
     .is_herdr();
     #[cfg(unix)]
-    let claude =
-        super::clear_end_record::capture_for(&shared.provider, (channel, herdr), owner, &transition);
+    let claude = super::clear_end_record::capture_for(
+        &shared.provider,
+        (channel, herdr),
+        owner,
+        &transition,
+    );
     #[cfg(unix)]
-    let codex =
-        super::codex_end_record::capture_for(&shared.provider, (channel, herdr), owner, &transition);
+    let codex = super::codex_end_record::capture_for(
+        &shared.provider,
+        (channel, herdr),
+        owner,
+        &transition,
+    );
     #[cfg(unix)]
     let fence =
         match crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::try_acquire(owner)

@@ -404,7 +404,12 @@ pub(crate) async fn perform_resume_rebind(
     if let Some(channel) = channel_id {
         use crate::services::session_host::host_decision::{host_decision, token_hash_of};
         let token = token_hash_of(session_key);
-        let decided = host_decision(Some(pool), token.as_deref(), provider.as_ref(), channel.get());
+        let decided = host_decision(
+            Some(pool),
+            token.as_deref(),
+            provider.as_ref(),
+            channel.get(),
+        );
         if let Some(reason) = decided.await.tmux_refusal() {
             return Err(ResumeRebindError::HostUnsupported(reason));
         }

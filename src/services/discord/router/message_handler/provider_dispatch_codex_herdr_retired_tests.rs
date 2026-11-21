@@ -5,9 +5,8 @@ use super::*;
 
 const RETIRED: &str = "fedcba9876543210fedcba9876543210";
 
-// T16a-2 second half (S1a review P2-3): `i8069_restart_reader_clears_retired_codex_presence_and_
-// releases_queued_input_pg` proves the reader releases the input with no Herdr request; this proves
-// the released input's dispatch over that Retired row launches and submits exactly once.
+// The restart reader's test proves the input is released untouched; this proves its dispatch over
+// that Retired row launches and submits exactly once.
 #[test]
 fn a_retired_codex_row_starts_one_new_execution_that_takes_its_input_once_and_binds_pg() {
     let fx = Fixture::admitted("retired-restart");
@@ -41,7 +40,10 @@ fn a_retired_codex_row_starts_one_new_execution_that_takes_its_input_once_and_bi
     assert_eq!(result, Ok(()));
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1, "one create");
     assert_eq!(fx.rig.sends(), prompt_sends(), "one prompt, one submit");
-    let nonce = launched.into_inner().unwrap().expect("the new execution started");
+    let nonce = launched
+        .into_inner()
+        .unwrap()
+        .expect("the new execution started");
     assert_ne!(nonce, RETIRED, "a new execution, not the retired one");
     match fx.record() {
         HostedRecord::Known(record) => {

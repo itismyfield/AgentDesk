@@ -236,7 +236,11 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel).await?;
-    if !local_tui(provider, channel, herdr_now(shared, provider, channel).await) {
+    if !local_tui(
+        provider,
+        channel,
+        herdr_now(shared, provider, channel).await,
+    ) {
         return Err(io::Error::other(not_local(provider)));
     }
     if !EFFORT_LEVELS.contains(&level) {

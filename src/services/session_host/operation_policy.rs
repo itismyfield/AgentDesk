@@ -84,7 +84,11 @@ mod tests {
     async fn configured_and_login_refusals_keep_their_exact_text() {
         use crate::services::session_host::host_decision::host_decision;
         let _hosts = crate::config::session_hosts::force_for_test(Some("node"), &[(17, "node")]);
-        let refusal = async |channel| host_decision(None, None, None, channel).await.tmux_refusal();
+        let refusal = async |channel| {
+            host_decision(None, None, None, channel)
+                .await
+                .tmux_refusal()
+        };
         assert_eq!(
             refusal(17).await.as_deref(),
             Some("Herdr 설정 채널(endpoint `node-endpoint`)이라 tmux 세션을 바꾸지 않아요")

@@ -69,9 +69,8 @@ async fn an_unresolved_thread_an_unknown_provider_and_an_unread_thread_hold() {
     assert!(!input_runs_herdr(None, TOKEN, &ProviderKind::Claude, child).await);
 }
 
-// A thread under a Herdr parent is decided by its execution now, read from its row and its tmux
-// session on every call: a live tmux thread is tmux right after a restart (nothing judged), a
-// failed probe holds, a Bound pane under the parent's endpoint is Herdr on its node.
+// A thread under a Herdr parent is decided from its row and tmux on every call: live tmux is tmux
+// with nothing judged, a failed probe holds, a Bound pane at the parent's endpoint is Herdr.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_thread_under_a_herdr_parent_is_decided_by_its_execution_now_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -89,8 +88,16 @@ async fn a_thread_under_a_herdr_parent_is_decided_by_its_execution_now_pg() {
     assert_eq!(decide(&claude).await, HostDecision::Tmux, "no sessions row");
     seed_channel(&pool, child, None).await;
     force_presence_for_test(TMUX, SessionPresence::Present);
-    assert_eq!(current_execution_cached(child), Execution::Unknown, "nothing judged");
-    assert_eq!(decide(&claude).await, HostDecision::Tmux, "a live tmux thread");
+    assert_eq!(
+        current_execution_cached(child),
+        Execution::Unknown,
+        "nothing judged"
+    );
+    assert_eq!(
+        decide(&claude).await,
+        HostDecision::Tmux,
+        "a live tmux thread"
+    );
     force_presence_for_test(TMUX, SessionPresence::Missing);
     assert_eq!(decide(&claude).await, HostDecision::Tmux, "nothing runs");
     force_presence_for_test(TMUX, SessionPresence::ProbeFailed);
@@ -114,7 +121,10 @@ async fn a_thread_under_a_herdr_parent_is_decided_by_its_execution_now_pg() {
         "a Codex thread has no row of its own here"
     );
     seed_channel(&pool, child, bound_on_forced_endpoint(child, "other-node")).await;
-    assert!(held(&decide(&claude).await), "a pane off the parent's endpoint");
+    assert!(
+        held(&decide(&claude).await),
+        "a pane off the parent's endpoint"
+    );
     seed_channel(&pool, child, Some(serde_json::json!({"schema": 99}))).await;
     assert!(held(&decide(&claude).await), "an unreadable record");
     pool.close().await;

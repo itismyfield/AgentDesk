@@ -3,9 +3,8 @@
 use super::*;
 use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
 
-// T16b-5 (A1): an unresolved thread and a thread under a Herdr parent whose execution cannot be
-// read are refused with the hold reason; no Herdr restart, no tmux restart, no greeting seed (the
-// test entry panics on a seed).
+// An undecided thread's restart is refused with its reason: no Herdr or tmux restart and no
+// greeting seed, which the test entry would panic on.
 #[tokio::test]
 async fn an_undecided_threads_restart_is_refused_and_runs_no_host() {
     let (parent, child, unresolved) = (8_118_430, 8_118_431, 8_118_432);
@@ -24,9 +23,10 @@ async fn an_undecided_threads_restart_is_refused_and_runs_no_host() {
         (child, "현재 실행 미확인: no database or token"),
     ] {
         let identity = ("restart-hold", "!restart", 8_118_433);
-        let replies = restart_channel_for_tests(&http, &data, serenity::ChannelId::new(channel), identity)
-            .await
-            .unwrap();
+        let replies =
+            restart_channel_for_tests(&http, &data, serenity::ChannelId::new(channel), identity)
+                .await
+                .unwrap();
         assert_eq!(
             replies,
             [

@@ -541,7 +541,8 @@ async fn slot_thread_host_decision(
     selected: Option<&SlotThreadRow>,
 ) -> crate::services::session_host::host_decision::HostDecision {
     use crate::services::session_host::host_decision::{host_decision, token_hash_of};
-    let runtime = (target.runtime_targets.iter()).find(|runtime| runtime.thread_channel_id == thread);
+    let runtime =
+        (target.runtime_targets.iter()).find(|runtime| runtime.thread_channel_id == thread);
     let selected_provider = selected.and_then(|row| row.provider.as_deref());
     let provider = selected_provider
         .or(runtime.map(|runtime| runtime.provider_name.as_str()))

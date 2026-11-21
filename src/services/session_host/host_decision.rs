@@ -1,6 +1,5 @@
-//! The host a channel's command, cleanup or input acts on now. A channel's own boot entry decides
-//! as it always did; a thread under a Herdr parent is decided by the execution observed for it now
-//! (its own row, then its tmux session), never by the parent's policy alone or by a cache.
+//! The host a channel's command, cleanup or input acts on now: a channel's own boot entry as before,
+//! a thread under a Herdr parent by its own row and tmux session read now, never by a cache.
 
 use sqlx::PgPool;
 
@@ -12,6 +11,9 @@ use crate::db::dispatched_session_canonical_identity::{
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 use crate::services::platform::tmux::SessionPresence;
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::{
+    HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
+};
 use crate::services::turn_host;
 
 /// Why no host is decided; every consumer leaves both hosts untouched.
@@ -206,7 +208,11 @@ fn presence(name: &str) -> SessionPresence {
         *probes += 1;
         return *forced;
     }
-    crate::services::platform::tmux::session_presence(name)
+    match TmuxHost.presence(HostSessionRef::tmux(name)) {
+        HostPresence::Present => SessionPresence::Present,
+        HostPresence::Missing => SessionPresence::Missing,
+        HostPresence::ProbeFailed => SessionPresence::ProbeFailed,
+    }
 }
 
 /// Answers the tmux probe of `name` with `presence` for this test.
@@ -221,7 +227,11 @@ pub(crate) fn force_presence_for_test(name: &str, presence: SessionPresence) {
 /// How many forced probes of `name` ran.
 #[cfg(test)]
 pub(crate) fn forced_probes(name: &str) -> usize {
-    FORCED_PRESENCE.lock().unwrap().get(name).map_or(0, |entry| entry.1)
+    FORCED_PRESENCE
+        .lock()
+        .unwrap()
+        .get(name)
+        .map_or(0, |entry| entry.1)
 }
 
 #[cfg(test)]

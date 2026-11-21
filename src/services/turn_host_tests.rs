@@ -314,7 +314,10 @@ async fn a_turn_refused_over_a_verified_bound_thread_keeps_its_recorded_pane_pg(
         ),
         "{first:?}"
     );
-    assert!(matches!(current_execution_cached(child), Execution::Herdr(_)));
+    assert!(matches!(
+        current_execution_cached(child),
+        Execution::Herdr(_)
+    ));
     let _stopped = force_admission(Admission::new(false, None));
     assert!(matches!(
         refusal(judge().await),

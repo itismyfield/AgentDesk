@@ -206,6 +206,25 @@ pub(in crate::services::discord) fn claude_local_tui_relaunch_applies(
             == ProviderSessionDriver::TuiHosting
 }
 
+/// Whether a pending launch change restarts this channel's local TUI, and whether its host is Herdr;
+/// the host is read only while a change is pending.
+pub(in crate::services::discord) async fn pending_relaunch(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    pending: bool,
+) -> (bool, bool) {
+    if !pending {
+        return (false, false);
+    }
+    let host = super::super::super::admin_host_guard::host_decision_of;
+    let host = host(shared, provider, channel_id.get()).await;
+    (
+        claude_local_tui_relaunch_applies(provider, channel_id, &host),
+        host.is_herdr(),
+    )
+}
+
 pub(in crate::services::discord) async fn update_channel_model_override(
     shared: &Arc<SharedData>,
     token: &str,
@@ -306,14 +325,18 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
             .is_herdr()
     {
         // A thread's pane takes the value its settings channel keeps.
-        let store = super::super::fast_mode::herdr_store_channel(runtime_channel_id, async {
-            channel_id
-        });
+        let store =
+            super::super::fast_mode::herdr_store_channel(runtime_channel_id, async { channel_id });
         let fast = super::super::tui_passthrough::herdr_settings::fast;
-        return fast(shared, token, (runtime_channel_id, store.await), Some(enabled))
-            .await
-            .map(|(_, changed)| changed)
-            .map_err(io::Error::other);
+        return fast(
+            shared,
+            token,
+            (runtime_channel_id, store.await),
+            Some(enabled),
+        )
+        .await
+        .map(|(_, changed)| changed)
+        .map_err(io::Error::other);
     }
     if runtime_channel_id != channel_id {
         shared.check_settings_owner(provider, channel_id).await?;

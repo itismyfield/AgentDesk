@@ -42,7 +42,9 @@ pub(in crate::services::discord::router) async fn check(
             let configured = endpoint(parent)?;
             let (pool, token) = (deps.shared.pg_pool.as_ref(), &deps.shared.token_hash);
             let host = crate::services::session_host::host_decision::input_runs_herdr;
-            host(pool, token, provider, channel).await.then_some(configured)?
+            host(pool, token, provider, channel)
+                .await
+                .then_some(configured)?
         }
         Relation::NotChild | Relation::Unresolved => endpoint(channel)?,
     };

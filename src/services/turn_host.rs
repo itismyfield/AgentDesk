@@ -166,10 +166,8 @@ pub(crate) async fn for_turn(
     host
 }
 
-/// What a thread's final judgement records as its current execution: the execution evidence it
-/// verified, never the turn's permission. A thread reaches the configured plan only with its Bound
-/// row already matched to its parent's endpoint and owner, so a refusal there leaves that pane
-/// running; only a refusal on the row itself, or a return, forgets it.
+/// A thread's recorded execution is the evidence its judgement verified, not the turn's permission:
+/// a refusal after its Bound row matched keeps that pane; a refusal on the row, or a return, forgets.
 fn recorded_execution(host: &TurnHost) -> Option<bool> {
     match host {
         TurnHost::Herdr(_) => Some(true),
