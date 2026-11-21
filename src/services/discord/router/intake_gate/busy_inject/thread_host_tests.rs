@@ -1,4 +1,4 @@
-//! #8118: the owned busy view follows the thread's next host, not the thread's own boot entry.
+//! The owned busy view follows the thread's next host, not the thread's own boot entry.
 use super::*;
 use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
 use crate::services::session_host::thread_host;

@@ -205,7 +205,7 @@ fn turn_host_writer_judgement_matches_the_writer_for_any_live_entry() {
     assert_eq!(writer_refusal(channel + 1), Some("host_missing"));
 }
 
-// #8118: a channel no policy routes to Herdr passes without a read, and an unresolved thread is
+// A channel no policy routes to Herdr passes without a read, and an unresolved thread is
 // judged instead of passing as tmux.
 #[tokio::test]
 async fn the_first_judgement_passes_only_a_tmux_policy_unread() {
@@ -233,7 +233,7 @@ async fn the_first_judgement_passes_only_a_tmux_policy_unread() {
     assert_eq!(judged(parent).await.1, 1);
 }
 
-// #8118: the final judgement of a thread under a Herdr parent is what its synchronous readers read.
+// The final judgement of a thread under a Herdr parent is what its synchronous readers read.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_threads_final_judgement_is_recorded_for_its_synchronous_readers_pg() {
     use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};

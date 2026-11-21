@@ -225,7 +225,7 @@ fn herdr_thread(parent: u64, child: u64, resolved: bool) -> (impl Drop, impl Dro
     )
 }
 
-// #8118: the boot section names only the parent, and the thread's journal is still kept.
+// The boot section names only the parent, and the thread's journal is still kept.
 #[tokio::test]
 async fn ended_journal_of_a_thread_under_a_herdr_parent_is_kept_and_its_front_waits() {
     for (child, resolved) in [(8_146_111, true), (8_146_112, false)] {

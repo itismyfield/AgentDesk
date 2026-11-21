@@ -1018,7 +1018,7 @@ async fn u_host_scope_matrix_pg() {
     ));
 }
 
-// #8118: a thread has no agent binding, so its scope ends before the boot entry read whatever its
+// A thread has no agent binding, so its scope ends before the boot entry read whatever its
 // parent's policy or its own judged execution is; the absence read stays the configured channel's.
 #[test]
 fn u_thread_scope_ends_at_the_binding_gate() {
