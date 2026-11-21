@@ -368,18 +368,20 @@ class FastCheckCiWiringTests(unittest.TestCase):
         job = jobs["lint"]
 
         self.assertEqual(job["name"], "Lint runner")
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], jobs["rust_build"]["runs-on"])
         self.assertEqual(job["if"], _LINT_FILTER)
         # Clippy over every target and feature is the compile `cargo check` used to repeat.
         self.assertEqual(
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
+                "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "just fmt-check",
                 "npm run test:policies",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"',
                 "sccache --show-stats || true",
             ],
@@ -586,7 +588,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     path.chmod(0o755)
                 env = {**os.environ, **job["env"], **step.get("env", {}),
                        "PATH": f"{temp}:{os.environ['PATH']}", "LIMIT_LOG": str(Path(temp) / "limit")}
-                result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=temp, env=env,
+                run = re.sub(r"\$\{\{ [^{}]+ \}\}", lambda m: eval_expression(m[0], {"runner.environment": "self-hosted"}), step["run"])
+                result = subprocess.run(["bash", "-e", "-c", run], cwd=temp, env=env,
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((Path(temp) / "limit").read_text(), "2\n")
@@ -912,11 +915,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 if line.strip()
             ],
             [
+                "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "npm run test:policies",
                 "just fmt-check",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
                 *non_lib,
                 "sccache --show-stats || true",
