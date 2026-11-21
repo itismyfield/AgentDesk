@@ -267,7 +267,7 @@ async fn judge(
     }
     if !continuing
         && (!crate::services::turn_host::herdr_turn_switched_on()
-            || crate::config::session_hosts::herdr_endpoint(channel.get()).is_none())
+            || !crate::services::session_host::thread_host::next_is_herdr(channel.get()))
     {
         return Ok(None);
     }
@@ -283,13 +283,13 @@ async fn judge(
     .await;
     Ok(Some((key, host)))
 }
-/// Whether boot config no longer routes the channel to Herdr, so a journal has no handoff target.
+/// Whether host policy no longer routes the channel to Herdr, so a journal has no handoff target.
 fn left_herdr(channel: u64) -> bool {
     #[cfg(test)]
     if tests::judged(channel).is_some() {
         return false;
     }
-    !crate::config::session_hosts::has_herdr_endpoint(channel)
+    crate::services::session_host::thread_host::left_herdr(channel)
 }
 async fn abandon(mailbox: &ChannelMailboxHandle, id: String) -> Result<bool, String> {
     mailbox

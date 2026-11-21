@@ -102,7 +102,7 @@ pub(in crate::services::discord::router) fn defer_owned_busy_view(
     channel: ChannelId,
     parent: Option<ChannelId>,
 ) -> bool {
-    !crate::config::session_hosts::has_herdr_endpoint(channel.get())
+    !crate::services::session_host::thread_host::next_is_herdr(channel.get())
         && owned_busy_result(owned, provider, channel, parent)
 }
 
@@ -449,6 +449,10 @@ async fn say(
 #[cfg(test)]
 #[path = "busy_inject_test_support.rs"]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+#[path = "busy_inject/thread_host_tests.rs"]
+mod thread_host_tests;
 
 #[cfg(test)]
 mod tests {

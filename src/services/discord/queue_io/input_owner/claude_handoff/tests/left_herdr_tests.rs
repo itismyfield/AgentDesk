@@ -210,3 +210,43 @@ async fn recovery_drops_an_ended_journal_on_a_channel_that_left_herdr() {
     }
     panic!("recovery kept the journal of a channel that left Herdr");
 }
+
+/// A thread whose checked parent boot config routes to Herdr, with no boot entry of its own.
+fn herdr_thread(parent: u64, child: u64, resolved: bool) -> (impl Drop, impl Drop) {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    let relation = if resolved {
+        Relation::Child { parent }
+    } else {
+        Relation::Unresolved
+    };
+    (
+        crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(parent, "mac-mini")]),
+        force_relation_for_test(child, relation),
+    )
+}
+
+// #8118: the boot section names only the parent, and the thread's journal is still kept.
+#[tokio::test]
+async fn ended_journal_of_a_thread_under_a_herdr_parent_is_kept_and_its_front_waits() {
+    for (child, resolved) in [(8_146_111, true), (8_146_112, false)] {
+        let _thread = herdr_thread(8_146_110, child, resolved);
+        let front = 8_000_000_008_146_400 + child;
+        let rig = rig(child, &[front], true).await;
+        assert!(rig.hand().await.is_err(), "resolved={resolved}");
+        let state = rig.state().await;
+        assert_eq!(state["unfinished_handoff"]["failures"], 1);
+        assert_eq!(state["items"].as_array().unwrap().len(), 1);
+        assert!(rig.started.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn recovery_keeps_an_ended_journal_of_a_thread_under_a_herdr_parent() {
+    let _thread = herdr_thread(8_146_120, 8_146_121, true);
+    let rig = rig(8_146_121, &[8_000_000_008_146_521], true).await;
+    recover(rig.shared.clone(), rig.channel);
+    for _ in 0..30 {
+        assert!(rig.state().await.get("unfinished_handoff").is_some());
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}

@@ -1,0 +1,2 @@
+key: 710-thread-host-s1a
+| `thread-host` judgement split, S1a (#8118) | `94f32aeacf` + S1a | Before: `JournalKept`, `ConsumersAgree`, `NoUnknownAsTmux`; Rev3 (cache read literally): `BootStartResolves`; known gap `BoundThreadSeenAfterRestart` stays RED until the activation slice seeds the judged record at boot | New `ThreadHostS1a` model, After GREEN on journal, boot start and busy readers. [Report](thread-host/thread-host-s1a.report.md) |

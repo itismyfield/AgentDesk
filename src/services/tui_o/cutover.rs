@@ -273,6 +273,20 @@ pub(crate) fn policy_channel(channel: u64) -> u64 {
     test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
 }
 
+/// The shared view's relation of `channel`: a held child stays unresolved, never its own parent.
+pub(crate) fn relation(channel: u64) -> crate::services::session_host::surface_policy::Relation {
+    use crate::services::session_host::surface_policy::Relation;
+    test_override::with_channels(|snapshot| {
+        match snapshot.and_then(|snapshot| snapshot.child(channel)) {
+            None => Relation::NotChild,
+            Some(Ok(child)) => Relation::Child {
+                parent: child.parent,
+            },
+            Some(Err(_)) => Relation::Unresolved,
+        }
+    })
+}
+
 /// The legacy mark used by output-free adoption fixtures.
 #[cfg(test)]
 pub(crate) fn mark_codex_turn_admitted(
@@ -655,6 +669,7 @@ pub(crate) mod test_override {
         crate::services::session_host::surface_policy::install_policy_channel(
             super::policy_channel,
         );
+        crate::services::session_host::surface_policy::install_relation(super::relation);
         ChannelsGuard {
             previous: CHANNELS.with(|cell| cell.replace(Some(snapshot))),
         }

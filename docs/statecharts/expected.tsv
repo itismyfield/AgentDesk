@@ -1729,6 +1729,17 @@ session-lifecycle/TmuxSessionNamingWithoutNonceCAS.cfg	TmuxSession	PrimaryTailIs
 session-lifecycle/TmuxSessionNamingWithoutPromotion.cfg	TmuxSession	PrimaryTailIsCurrentPhysical,PrimaryNotAlias,NoDeadlock	-
 session-lifecycle/TmuxSessionNamingWithoutPromotionNonceGuard.cfg	TmuxSession	PromotionNonceWasCurrent	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
+thread-host/ThreadHostS1aAfterAll.cfg	ThreadHostS1a	-	-
+thread-host/ThreadHostS1aAfterBoot.cfg	ThreadHostS1a	-	-
+thread-host/ThreadHostS1aAfterBusy.cfg	ThreadHostS1a	-	-
+thread-host/ThreadHostS1aAfterJournal.cfg	ThreadHostS1a	-	-
+thread-host/ThreadHostS1aAfterRestartGap.cfg	ThreadHostS1a	BoundThreadSeenAfterRestart	-
+thread-host/ThreadHostS1aBeforeAll.cfg	ThreadHostS1a	JournalKept,ConsumersAgree,NoUnknownAsTmux	-
+thread-host/ThreadHostS1aBeforeBoot.cfg	ThreadHostS1a	-	-
+thread-host/ThreadHostS1aBeforeBusy.cfg	ThreadHostS1a	ConsumersAgree,NoUnknownAsTmux	-
+thread-host/ThreadHostS1aBeforeJournal.cfg	ThreadHostS1a	JournalKept	-
+thread-host/ThreadHostS1aRev3All.cfg	ThreadHostS1a	-	BootStartResolves
+thread-host/ThreadHostS1aRev3Boot.cfg	ThreadHostS1a	-	BootStartResolves
 tui-o-turn-mode/CodexTakeoverAfter.cfg	CodexTakeover	-	-
 tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverNoArchive.cfg	CodexTakeover	-	TakeoverEventuallyConfirms

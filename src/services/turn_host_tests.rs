@@ -204,3 +204,53 @@ fn turn_host_writer_judgement_matches_the_writer_for_any_live_entry() {
     assert_eq!(writer_refusal(channel), writer);
     assert_eq!(writer_refusal(channel + 1), Some("host_missing"));
 }
+
+// #8118: a channel no policy routes to Herdr passes without a read, and an unresolved thread is
+// judged instead of passing as tmux.
+#[tokio::test]
+async fn the_first_judgement_passes_only_a_tmux_policy_unread() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (parent, child, tmux_child, held) = (8_118_300, 8_118_301, 8_118_302, 8_118_303);
+    let _hosts = force_hosts(Some("mac-mini"), &[(parent, "mac-mini")]);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    let _tmux = force_relation_for_test(tmux_child, Relation::Child { parent: 8_118_399 });
+    let _held = force_relation_for_test(held, Relation::Unresolved);
+    let keys = AtomicUsize::new(0);
+    let judged = async |channel: u64| {
+        let before = keys.load(Ordering::Relaxed);
+        let key = || async {
+            keys.fetch_add(1, Ordering::Relaxed);
+            Some(SESSION_KEY.to_owned())
+        };
+        let refusal = refusal_before_turn(None, &ProviderKind::Claude, channel, key).await;
+        (refusal, keys.load(Ordering::Relaxed) - before)
+    };
+    assert_eq!(judged(tmux_child).await, (None, 0));
+    assert_eq!(judged(8_118_304).await, (None, 0), "a plain channel");
+    assert_eq!(judged(held).await, (None, 1), "an unknown policy is judged");
+    assert_eq!(judged(child).await.1, 1);
+    assert_eq!(judged(parent).await.1, 1);
+}
+
+// #8118: the final judgement of a thread under a Herdr parent is what its synchronous readers read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_threads_final_judgement_is_recorded_for_its_synchronous_readers_pg() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    use crate::services::session_host::thread_host::{Execution, current_execution_cached};
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (parent, child) = (8_118_310, 8_118_311);
+    let _hosts = force_hosts(Some("mac-mini"), &[(parent, "mac-mini")]);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    assert_eq!(current_execution_cached(child), Execution::Unknown);
+    let judge = || for_turn(Some(&pool), &ProviderKind::Claude, child, Some(SESSION_KEY));
+    assert!(matches!(judge().await, TurnHost::Tmux), "no sessions row");
+    assert_eq!(current_execution_cached(child), Execution::Tmux);
+    // A refused judgement forgets the execution; it is not left reading tmux.
+    seed(&pool, recorded(HostedState::Pending)).await;
+    assert!(matches!(judge().await, TurnHost::Refused(_)));
+    assert_eq!(current_execution_cached(child), Execution::Unknown);
+    pool.close().await;
+    db.drop().await;
+}

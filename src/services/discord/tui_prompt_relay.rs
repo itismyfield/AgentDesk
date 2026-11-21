@@ -771,7 +771,7 @@ fn owner_channel_for_tmux_session(
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
     let resolved = match (emission_kind, registry_owner, dedupe_owner) {
         (RelayEmissionKind::ObservedPrompt, None, Some(channel))
-            if crate::config::session_hosts::herdr_endpoint(channel).is_some() =>
+            if crate::services::session_host::thread_host::runs_herdr(channel) =>
         {
             Some(ChannelId::new(channel))
         }
