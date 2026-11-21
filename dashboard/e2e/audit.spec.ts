@@ -163,18 +163,22 @@ test("phone: list, detail with five sections, back by button and by browser", as
   await page.goto("/audit");
   await expect(detail(page)).toHaveCount(0);
   await expect(page.getByTestId("audit-tabs")).toBeVisible();
+  await expect(page.getByTestId("topbar")).toBeVisible();
   await page.getByTestId("audit-agent-adk-dashboard").click();
   await expect(page).toHaveURL(/agent=adk-dashboard/);
   await expect(page.getByTestId("audit-section")).toHaveCount(5);
-  // The detail opens on its 56px head: no page tabs, and the provider switch names the provider instead of the meta.
+  // The detail opens on its 56px head in the app top bar's place: no page tabs, and the provider switch names the provider instead of the meta.
   await expect(page.getByTestId("audit-tabs")).toHaveCount(0);
-  expect((await page.getByTestId("audit-detail-head").boundingBox())?.height).toBe(56);
+  await expect(page.getByTestId("topbar")).toHaveCount(0);
+  await expect(page.getByTestId("app-mobile-tabbar")).toBeVisible();
+  expect(await page.getByTestId("audit-detail-head").boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 56 });
   await expect(page.getByTestId("audit-detail-meta")).toHaveText("11월 17일 오후 05:17 시작 · 현재 세션");
   await expect(page.getByTestId("audit-provider")).toBeVisible();
   await page.getByRole("button", { name: "섹션 5개 더 보기" }).click();
   await expect(page.getByTestId("audit-section")).toHaveCount(10);
   await page.getByTestId("audit-back").click();
   await expect(page).not.toHaveURL(/agent=/);
+  await expect(page.getByTestId("topbar")).toBeVisible();
   await page.getByTestId("audit-agent-saved-agent").click();
   await expect(page.getByTestId("audit-detail-meta")).toContainText("최근 저장본");
   await page.goBack();
@@ -246,6 +250,7 @@ test("phone anchors: five rows, then the rest", async ({ page }, testInfo) => {
   await page.getByTestId("audit-agent-adk-dashboard").click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(5);
   await expect(page.getByTestId("audit-tabs")).toHaveCount(0);
+  await expect(page.getByTestId("topbar")).toHaveCount(0);
   await page.getByRole("button", { name: "3개 더 보기" }).click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(8);
   const width = await page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth));

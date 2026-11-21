@@ -104,8 +104,9 @@ export function AuditDetailHeader({ agent, isKo, meta, actions, onBack, phone, t
   tr: Tr;
 }) {
   return (
-    // Phones get one 56px bar across the page (its margins undo PageFrame's padding), with the meta on one line.
-    <div className={phone ? "-mx-4 -mt-3 mb-1 flex h-14 sm:-mx-6 sm:-mt-4 min-w-0 items-center gap-1 border-b border-[var(--line-soft)] px-2" : "flex min-w-0 items-center gap-3"} data-testid="audit-detail-head">
+    // Phones get one 56px bar in the app top bar's row, with the meta on one line; its margins undo PageFrame's padding
+    // and the 4px of its empty phone header.
+    <div className={phone ? "-mx-4 -mt-4 mb-1 flex h-14 sm:-mx-6 min-w-0 items-center gap-1 border-b border-[var(--line-soft)] px-2" : "flex min-w-0 items-center gap-3"} data-testid="audit-detail-head">
       {onBack ? <IconButton icon={<ArrowLeft />} label={tr("에이전트 목록으로", "Back to agents")} onClick={onBack} data-testid="audit-back" /> : null}
       <AgentPersona agent={agent} size={phone ? 32 : 40} />
       <div className={`min-w-0 flex-1 ${phone ? "ml-1.5" : ""}`}>
