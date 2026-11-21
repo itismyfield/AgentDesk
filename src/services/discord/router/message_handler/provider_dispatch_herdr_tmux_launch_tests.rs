@@ -340,6 +340,7 @@ fn dispatched_return(owned: bool) {
     let turn = StreamingTurn {
         pool: Some(&fx.pool),
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: "질문",

@@ -2066,6 +2066,8 @@ src/
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
+│   │   │   ├── o_writer_io/
+│   │   │   │   └── agy.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -2436,6 +2438,7 @@ src/
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
+│   │   │   │   ├── local_turn.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -2532,11 +2535,15 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input/
+│   │   │   │   │   │   └── busy_turn.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
 │   │   │   │   │   │   ├── metadata_hold.rs
 │   │   │   │   │   │   └── restart_gate_tests.rs
+│   │   │   │   │   ├── stream_json_turn/
+│   │   │   │   │   │   └── admission_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_bootstrap_tests.rs
@@ -2572,7 +2579,8 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   ├── start_failure_missing_tests.rs
-│   │   │   │   │   └── start_failure_state_tests.rs
+│   │   │   │   │   ├── start_failure_state_tests.rs
+│   │   │   │   │   └── stream_json_turn.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests/
@@ -4308,10 +4316,15 @@ src/
 │   │   ├── policy_maintenance.rs
 │   │   └── test_barriers.rs
 │   ├── stream_json_cli/
+│   │   ├── codec/
+│   │   │   └── agy_capture.rs
 │   │   ├── dialects/
 │   │   │   ├── agy.rs
 │   │   │   ├── grok.rs
 │   │   │   └── mod.rs
+│   │   ├── runner/
+│   │   │   ├── agy_recording.rs
+│   │   │   └── agy_recording_tests.rs
 │   │   ├── codec.rs
 │   │   ├── mod.rs
 │   │   ├── policy.rs
@@ -4489,6 +4502,8 @@ src/
 │   │   │   ├── thread_children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
+│   │   │   ├── agy_delivery.rs
+│   │   │   ├── agy_spool.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4545,6 +4560,10 @@ src/
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
 │   │   │   │   └── child_debt.rs
+│   │   │   ├── agy_delivery/
+│   │   │   │   ├── agy_delivery_tests.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── plan.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/

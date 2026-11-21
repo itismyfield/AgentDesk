@@ -9,6 +9,7 @@ lateVars == <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
               lateLife, lateSends, lateBadCommit, lateRestored,
               lateRevision, lateCheckedRevision>>
 CONSTANTS Fix, Mut
+VARIABLE agy
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
           recovered, rejected, commitWithOther, hturn, hp
@@ -70,13 +71,15 @@ OwnCustody == turn \in {"running", "held"}
 Exempt == Mut = "exemptAllRows" \/ (Fix # "main" /\ waitMark /\ turn = "held")
 Blocked == (otherCustody /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
 
-Init ==
+QuietLate ==
     /\ lateModal = FALSE /\ lateBound = FALSE /\ lateOutput = FALSE
     /\ lateBoundFirst = FALSE /\ lateJudge = "waiting"
     /\ lateCommits = 0 /\ lateSkips = 0 /\ lateEnd = "waiting"
     /\ lateKind = "clean" /\ lateCheckedOutput = FALSE /\ lateLife = "live"
     /\ lateSends = 0 /\ lateBadCommit = FALSE /\ lateRestored = FALSE
     /\ lateRevision = 0 /\ lateCheckedRevision = 0
+Init ==
+    /\ QuietLate /\ agy = 0
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
     /\ site \in IF sel = "default" THEN {"home", "foreign"} ELSE {"home"}
     /\ root \in IF sel = "default" THEN BOOLEAN ELSE {TRUE}
@@ -223,11 +226,11 @@ Rest == UNCHANGED vars
 LegacyNext == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
         \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
-Next == LegacyNext /\ UNCHANGED lateVars
+Next == LegacyNext /\ UNCHANGED <<lateVars, agy>>
 
 \* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff
 \* and the watcher finalizer are environment.
-Spec == Init /\ [][Next]_vars
+Spec == Init /\ [][Next]_<<vars, agy>>
         /\ WF_vars(TerminalBody) /\ WF_vars(ReEval) /\ WF_vars(RecoveryBody)
         /\ WF_vars(FreshAdopt) /\ WF_vars(WarmAdoptF) /\ WF_vars(OPost)
         /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal)
@@ -248,11 +251,13 @@ RowEventuallySettled == [](op = 1 => <>rowCleared)
 
 \* Cold-launch domain: codex-late-launch.report.md entry census. Native records and Discord
 \* sends are distinct. lateBuffered changes prefix acceptance, not the argv/input protocol.
-LateInit == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
-            /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
-            /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
-            /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
-            /\ rejected = 0 /\ commitWithOther = 0 /\ hturn = 0 /\ hp = 0
+LegacyIdle ==
+    /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
+    /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
+    /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
+    /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
+    /\ rejected = 0 /\ commitWithOther = 0 /\ hturn = 0 /\ hp = 0
+LateInit == /\ LegacyIdle /\ agy = 0
             /\ lateModal \in BOOLEAN
             /\ lateBound = FALSE /\ lateOutput = FALSE /\ lateBoundFirst = FALSE
             /\ lateJudge = "waiting" /\ lateCommits = 0 /\ lateSkips = 0
@@ -362,9 +367,9 @@ LateStartupEnd ==
                     lateLife, lateSends, lateBadCommit, lateRestored,
                     lateRevision, lateCheckedRevision>>
 
-LateNext == LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
-            \/ LateStartupEnd \/ LateInvalidate \/ LateRestore \/ LateLegacySend
-LateSpec == LateInit /\ [][LateNext]_lateVars
+LateNext == (LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
+            \/ LateStartupEnd \/ LateInvalidate \/ LateRestore \/ LateLegacySend) /\ UNCHANGED agy
+LateSpec == LateInit /\ [][LateNext]_<<lateVars, agy>>
             /\ WF_lateVars(LateBind) /\ WF_lateVars(LateNativeOutput)
             /\ WF_lateVars(LateJudge) /\ WF_lateVars(LateCommit)
             /\ WF_lateVars(LateStartupEnd) /\ WF_lateVars(LateRestore)
@@ -378,4 +383,226 @@ LateNoUnsafeCommit == ~lateBadCommit
 LateEligibleCommits == []((lateBound /\ LateValid /\ lateLife = "live" /\ lateSends = 0)
                           => <>(lateCommits = 1 \/ ~LateValid \/ lateLife # "live"))
 LateRestartRestores == [](lateLife = "restarted" => <>lateRestored)
+\* Antigravity has a durable logical owner before a one-shot child can run.
+\* One unit has one or three ordered pieces; counts stand for remote effects,
+\* not POST attempts. Store/authority interruptions preserve durable debt.
+AgyPages == IF Fix = "short" THEN 1 ELSE 3
+AgyTurnLimit == IF Fix = "two" THEN 2 ELSE 1
+AgyZero == [i \in 1..AgyPages |-> 0]
+AgyTurn(id, phase) ==
+    [id |-> id, phase |-> phase, oldDebt |-> phase = "waiting" /\ Fix # "short",
+     ingress |-> "discordForeground", accepted |-> FALSE,
+     deltas |-> 0, terminal |-> "none", spool |-> FALSE,
+     prepared |-> FALSE, discarded |-> FALSE, unresolved |-> FALSE,
+     remote |-> AgyZero, offset |-> 0, frontier |-> 0, ends |-> 0, effects |-> 0, answers |-> 0,
+     applied |-> 0, releases |-> 0, claims |-> 0, kicked |-> FALSE, receiptRejected |-> FALSE,
+     authority |-> TRUE, interrupted |-> FALSE, reconcile |-> FALSE,
+     rejected |-> FALSE, retried |-> FALSE,
+     legacy |-> 0, alarm |-> FALSE, stale |-> FALSE]
+AgyInit == /\ LegacyIdle /\ QuietLate
+           /\ IF Fix = "headless"
+              THEN \E ingress \in {"routine", "authenticatedHttp"} :
+                  agy = [AgyTurn(1, "ready") EXCEPT !.ingress = ingress]
+              ELSE agy = AgyTurn(1, "waiting")
+
+AgyLegacyReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "waiting" /\ agy.oldDebt
+    /\ agy' = [agy EXCEPT !.oldDebt = FALSE]
+AgyAdopt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "waiting" /\ (~agy.oldDebt \/ Mut = "borrow")
+    /\ agy' = [agy EXCEPT !.phase = "ready"]
+AgyReserve ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ agy.ingress = "discordForeground"
+    /\ agy' = [agy EXCEPT !.phase = "reserved", !.accepted = TRUE, !.spool = TRUE]
+AgySpawn ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "reserved"
+    /\ agy' = [agy EXCEPT !.phase = "running"]
+AgyAppendDelta ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "running" /\ agy.deltas < AgyPages - 1
+    /\ agy' = [agy EXCEPT !.deltas = @ + 1]
+AgyObserveSuccess ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "running" /\ agy.deltas = AgyPages - 1 /\ Fix # "failed"
+    /\ agy' = [agy EXCEPT !.phase = "childSucceeded"]
+AgyAppendDone ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "childSucceeded" /\ agy.authority /\ Mut # "missingDone"
+    /\ agy' = [agy EXCEPT !.phase = "sealed", !.terminal = "done"]
+AgyObserveFailure ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase \in {"reserved", "running"}
+    /\ agy' = [agy EXCEPT !.phase = IF agy.phase = "reserved" THEN "spawnFailed" ELSE "childLost"]
+AgyChildFailed ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.authority
+    /\ \/ agy.phase = "spawnFailed" /\ Mut # "missingSpawnFailure"
+       \/ agy.phase = "childLost" /\ Mut # "missingLostChild"
+    /\ agy' = [agy EXCEPT !.phase = "sealed", !.terminal = "failed"]
+AgyDiscard ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Fix = "clear" /\ agy.authority /\ ~agy.discarded
+    /\ agy.phase \in {"reserved", "running", "childSucceeded", "sealed", "delivery"}
+    /\ agy' = IF Mut = "missingDisposition"
+              THEN [agy EXCEPT !.phase = "dropped"]
+              ELSE [agy EXCEPT !.phase = "delivery", !.discarded = TRUE,
+                               !.unresolved = agy.prepared, !.prepared = FALSE]
+AgyReadSeal ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "sealed" /\ agy.spool /\ agy.authority
+    /\ agy' = [agy EXCEPT !.phase = "delivery"]
+AgyPrepare ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.terminal = "done" /\ agy.authority /\ ~agy.discarded
+    /\ ~agy.prepared /\ agy.offset < AgyPages
+    /\ agy' = [agy EXCEPT !.prepared = TRUE]
+AgyPost ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.prepared /\ agy.authority /\ agy.offset < AgyPages
+    /\ agy.remote[agy.offset + 1] = 0
+    /\ agy' = [agy EXCEPT !.remote[agy.offset + 1] = 1]
+AgyReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.prepared /\ agy.authority /\ agy.offset < AgyPages
+    /\ agy.remote[agy.offset + 1] > 0
+    /\ agy' = [agy EXCEPT !.prepared = FALSE, !.reconcile = FALSE, !.offset = @ + 1,
+                           !.frontier = IF agy.offset < @ THEN @ ELSE agy.offset + 1]
+AgyRejectReceipt ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.authority /\ agy.prepared /\ ~agy.receiptRejected
+    /\ agy.remote[agy.offset + 1] > 0
+    /\ agy' = [agy EXCEPT !.authority = FALSE, !.reconcile = TRUE, !.receiptRejected = TRUE]
+AgyNotifyFailure ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "delivery" /\ agy.authority /\ agy.terminal = "failed" /\ ~agy.alarm
+    /\ agy' = [agy EXCEPT !.alarm = TRUE]
+AgyCanFinish == agy.phase = "delivery" /\ ~agy.prepared
+                /\ (agy.offset = AgyPages \/ agy.alarm \/ agy.discarded)
+AgyLoseAuthority ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase \in {"reserved", "running", "childSucceeded", "spawnFailed", "childLost",
+                      "sealed", "delivery", "finishing"}
+    /\ Mut = "abandon" => agy.terminal = "done"
+    /\ agy.authority /\ ~agy.interrupted
+    /\ agy' = [agy EXCEPT !.authority = FALSE, !.interrupted = TRUE,
+                           !.reconcile = IF agy.prepared THEN agy.remote[agy.offset + 1] > 0 ELSE FALSE]
+AgyRestore ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ ~agy.authority /\ Mut # "abandon"
+    /\ agy' = [agy EXCEPT !.authority = TRUE]
+AgyRejectFinish ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ (AgyCanFinish \/ agy.phase = "finishing") /\ agy.authority /\ ~agy.rejected
+    /\ agy' = [agy EXCEPT !.authority = FALSE, !.rejected = TRUE, !.interrupted = TRUE]
+AgyFinish ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ AgyCanFinish /\ agy.authority
+    /\ agy' = [agy EXCEPT !.phase = "finishing", !.ends = @ + 1,
+                           !.answers = IF agy.terminal = "done" /\ ~agy.discarded THEN @ + 1 ELSE @]
+\* Each step represents an idempotent projection with its own durable marker.
+AgyApplyEnd ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "finishing" /\ agy.authority /\ agy.effects < 3
+    /\ agy.applied = agy.effects
+       \/ (Mut = "doubleRelease" /\ agy.effects = 1 /\ agy.rejected /\ agy.releases = 1)
+    /\ agy' = [agy EXCEPT !.applied = agy.effects + 1,
+                          !.releases = IF agy.effects = 1 THEN @ + 1 ELSE @,
+                          !.kicked = @ \/ agy.effects = 2,
+                          !.claims = IF agy.effects = 2 /\ agy.id < AgyTurnLimit THEN 1 ELSE @]
+AgyAckEnd ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "finishing" /\ agy.authority /\ agy.applied = agy.effects + 1
+    /\ agy' = [agy EXCEPT !.effects = @ + 1,
+                           !.phase = IF agy.effects = 2 THEN "ended" ELSE @]
+AgyArchive ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ (agy.phase = "ended" \/ (Mut = "purge" /\ agy.phase = "sealed"))
+    /\ agy.spool /\ ~agy.unresolved
+    /\ agy' = [agy EXCEPT !.spool = FALSE]
+AgyNextInput ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ended" /\ agy.claims = 1 /\ agy.id < AgyTurnLimit
+    /\ agy' = AgyTurn(agy.id + 1, "ready")
+AgyHeadlessAnswer ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "ready" /\ agy.ingress # "discordForeground"
+    /\ agy' = [agy EXCEPT !.phase = "headlessDone", !.legacy = @ + 1]
+AgyLegacyRace ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Mut = "dual" /\ agy.phase = "delivery" /\ agy.terminal = "done" /\ agy.legacy = 0
+    /\ agy' = [agy EXCEPT !.legacy = 1]
+AgyBlindRepost ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Mut = "repost" /\ agy.phase = "delivery" /\ agy.prepared
+    /\ agy.reconcile /\ agy.authority /\ agy.offset < AgyPages
+    /\ agy.remote[agy.offset + 1] = 1
+    /\ agy' = [agy EXCEPT !.remote[agy.offset + 1] = 2]
+AgyRepeatDone ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.terminal = "done" /\ agy.spool /\ ~agy.retried /\ agy.offset >= 2
+    /\ agy' = [agy EXCEPT !.retried = TRUE,
+                           !.offset = IF Mut = "rewind" THEN 0 ELSE @,
+                           !.ends = IF Mut = "doubleEnd" /\ agy.phase = "ended" THEN @ + 1 ELSE @]
+AgyStaleChild ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Mut = "stale" /\ agy.id = 2 /\ agy.phase = "running" /\ ~agy.stale
+    /\ agy' = [agy EXCEPT !.stale = TRUE]
+AgyPrematurePost ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Mut = "preview" /\ agy.phase = "running" /\ agy.deltas > 0
+    /\ agy.remote[1] = 0
+    /\ agy' = [agy EXCEPT !.remote[1] = 1]
+AgyRest == UNCHANGED <<agy, vars, lateVars>>
+AgyNext ==
+       \/ AgyLegacyReceipt \/ AgyAdopt \/ AgyReserve \/ AgySpawn \/ AgyAppendDelta
+       \/ AgyObserveSuccess \/ AgyAppendDone \/ AgyObserveFailure \/ AgyChildFailed \/ AgyDiscard
+       \/ AgyReadSeal \/ AgyPrepare \/ AgyPost \/ AgyReceipt \/ AgyRejectReceipt
+       \/ AgyNotifyFailure \/ AgyLoseAuthority \/ AgyRestore \/ AgyRejectFinish \/ AgyFinish
+       \/ AgyApplyEnd \/ AgyAckEnd
+       \/ AgyArchive \/ AgyNextInput \/ AgyHeadlessAnswer \/ AgyLegacyRace \/ AgyBlindRepost
+       \/ AgyRepeatDone \/ AgyStaleChild \/ AgyPrematurePost \/ AgyRest
+AgySpec == AgyInit /\ [][AgyNext]_agy
+    /\ WF_agy(AgyLegacyReceipt) /\ WF_agy(AgyAdopt) /\ WF_agy(AgyReserve) /\ WF_agy(AgySpawn)
+    /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyObserveSuccess \/ AgyObserveFailure)
+    /\ WF_agy(AgyAppendDone) /\ WF_agy(AgyReadSeal)
+    /\ WF_agy(AgyPrepare) /\ WF_agy(AgyPost) /\ WF_agy(AgyReceipt) /\ WF_agy(AgyRestore)
+    /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyAckEnd)
+    /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
+    /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
+
+AgyOPath == agy.ingress = "discordForeground"
+AgyOnlyDiscordAdmission == (agy.accepted \/ agy.spool) => AgyOPath
+AgyNoDuplicate ==
+    AgyOPath => /\ agy.legacy = 0
+                /\ \A i \in 1..AgyPages : agy.remote[i] <= 1
+AgyNoSilentLoss ==
+    /\ agy.accepted => agy.spool \/ agy.phase = "ended"
+    /\ (AgyOPath /\ agy.phase # "waiting") => ~agy.oldDebt
+    /\ agy.phase = "ended" => (agy.terminal = "done" \/ agy.alarm \/ agy.discarded)
+AgyExactlyOneAnswer ==
+    /\ agy.answers <= 1
+    /\ (agy.phase = "ended" /\ agy.terminal = "done" /\ ~agy.discarded) =>
+        /\ agy.answers = 1
+        /\ \A i \in 1..AgyPages : agy.remote[i] = 1
+AgyOffsetMonotone == agy.offset = agy.frontier
+AgyNoPrematureBody == agy.terminal # "done" => agy.remote = AgyZero
+AgyEndOnce ==
+    /\ agy.ends <= 1
+    /\ agy.applied > 0 => agy.ends = 1
+    /\ agy.releases <= 1 /\ agy.claims <= 1
+    /\ agy.kicked => agy.releases = 1
+    /\ agy.phase = "ended" => agy.effects = 3 /\ agy.kicked
+AgyInputIdentity == ~agy.stale
+\* A later id witnesses End of the earlier one independently of spool retirement.
+AgyAcceptedEnds ==
+    \A id \in 1..AgyTurnLimit :
+        []((agy.id = id /\ agy.accepted) =>
+            <>(agy.id > id \/ (agy.id = id /\ agy.phase = "ended" /\ agy.ends = 1)))
+AgySecondTurnEnds == <>(agy.id = 2 /\ agy.phase = "ended")
+AgyFailedEnds == (Fix = "failed") => <>(agy.phase = "ended" /\ agy.alarm)
+AgyHeadlessKept == (Fix = "headless") => <>(agy.phase = "headlessDone" /\ agy.legacy = 1)
 =============================================================================
