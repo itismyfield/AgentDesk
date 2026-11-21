@@ -208,9 +208,8 @@ impl DelegationControl for FakeControl {
     }
 }
 
-/// Only the owner, pressing in the requesting channel, reaches the APIs; `[중단]` calls turn/stop
-/// only while input-result reports the delegation running, so pressing again after it ends, or
-/// when the state cannot be read, stops nothing.
+/// Only the owner in the requesting channel reaches the APIs; `[중단]` calls turn/stop only while
+/// input-result reports the delegation running, never after it ends or on an unreadable state.
 #[tokio::test(flavor = "current_thread")]
 async fn card_controls_obey_only_the_owner_and_stop_only_a_running_delegation() {
     let origin = DelegationOrigin::new(42, "worker-a").unwrap();

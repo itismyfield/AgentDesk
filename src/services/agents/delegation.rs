@@ -1,6 +1,5 @@
-//! A delegation is a handoff whose origin names the requesting channel. The server posts one
-//! result card there once the worker's terminal receipt commits, and answers the card's
-//! `[상태]`/`[중단]` controls from input-result and turn/stop alone.
+//! A delegation: a handoff whose origin names the requesting channel, which gets one result card
+//! per ended execution and `[상태]`/`[중단]` controls backed by input-result and turn/stop.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -78,9 +77,8 @@ pub struct Delegation {
     pub requester_provider: ProviderKind,
 }
 
-/// The start metadata of a handoff and, for a delegation, the origin minted for it. A
-/// delegation's origin is always the server's; a plain handoff's origin passes through as on
-/// turn/start. Errors carry the HTTP status and code.
+/// A handoff's start metadata plus, for a delegation, the server-minted origin; a plain handoff's
+/// origin passes through as on turn/start. Errors carry the HTTP status and code.
 pub async fn handoff_origin(
     pool: &PgPool,
     from_agent_id: &str,
@@ -164,9 +162,8 @@ pub trait DelegationControl {
     async fn stop(&self, agent_id: &str) -> Result<Value, String>;
 }
 
-/// Only the requesting channel's owner, pressing in that channel, may read or stop. A stop goes
-/// out only while input-result names a running execution, so a repeated press or one after the
-/// end never reaches another turn.
+/// Only the owner pressing in the requesting channel may read or stop; a stop goes out only while
+/// input-result names a running execution, so a later press never reaches another turn.
 pub async fn click_reply(
     control: &(dyn DelegationControl + Sync),
     click: Click,
@@ -241,9 +238,8 @@ fn result_card(origin: &DelegationOrigin, receipt: &OriginReceipt, answer: Optio
     format!("📬 **위임 결과** · `{worker}` · {outcome}\n{body}\n-# origin `{id}`")
 }
 
-/// Stages the result card of every recently ended delegation that has none. It reads committed
-/// receipts only, so whichever writer ended the execution, before or across a restart, the card
-/// follows; the origin-keyed outbox dedupe keeps it to one per delegation.
+/// Stages a result card for each recently ended delegation without one, from committed receipts
+/// alone, so any writer or restart is covered; the origin-keyed dedupe keeps it to one.
 pub async fn publish_result_cards(pool: &PgPool) -> Result<usize, String> {
     let due: Vec<(
         String,

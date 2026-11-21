@@ -920,6 +920,8 @@ src/
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
+│   │   ├── delegation.rs
+│   │   ├── delegation_tests.rs
 │   │   ├── input_result.rs
 │   │   ├── input_result_tests.rs
 │   │   ├── mod.rs
@@ -3654,6 +3656,7 @@ src/
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── decision_forums.rs
 │   │   ├── decision_forums_tests.rs
+│   │   ├── delegation_card.rs
 │   │   ├── delivery_lease_cell.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
