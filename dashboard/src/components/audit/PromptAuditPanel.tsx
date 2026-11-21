@@ -180,6 +180,7 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
                     aria-expanded={expanded}
                     aria-controls={expanded ? `${listId}-${index}` : undefined}
                     selected={expanded}
+                    aria-current={undefined}
                     onClick={() => toggle(index)}
                     className="min-h-14 flex-1 py-2.5"
                   >
