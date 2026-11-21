@@ -63,19 +63,20 @@ function MementoNotice({ memento, copied, isKo, tr }: { memento: AgentAnchors["m
       role="status"
       pad="sm"
       data-testid="audit-memento-notice"
-      className="flex-row items-start gap-2.5"
       style={{
         borderColor: "color-mix(in srgb, var(--warn) 50%, var(--line))",
         background: "color-mix(in srgb, var(--warn) 8%, var(--bg-2))",
       }}
     >
-      <AlertTriangle size={18} aria-hidden className="mt-0.5 shrink-0 text-[var(--warn)]" />
-      <div className="min-w-0 flex-1">
-        <b className="block text-sm leading-5 font-semibold text-[var(--fg)]">{title}</b>
-        <Desc className="mt-0.5 block">
-          {checked ? tr(`${checked}에 마지막으로 확인했어요. `, `Last checked ${checked}. `) : null}
-          {copied ? tr("아래 앵커는 세션을 시작할 때 저장한 사본이에요.", "The anchors below are the copy saved when the session started.") : null}
-        </Desc>
+      <div className="flex min-w-0 items-start gap-2.5">
+        <AlertTriangle size={18} aria-hidden className="mt-0.5 shrink-0 text-[var(--warn)]" />
+        <div className="min-w-0 flex-1">
+          <b className="block text-sm leading-5 font-semibold text-[var(--fg)]">{title}</b>
+          <Desc className="mt-0.5 block">
+            {checked ? tr(`${checked}에 마지막으로 확인했어요. `, `Last checked ${checked}. `) : null}
+            {copied ? tr("아래 앵커는 세션을 시작할 때 저장한 사본이에요.", "The anchors below are the copy saved when the session started.") : null}
+          </Desc>
+        </div>
       </div>
     </KitCard>
   );

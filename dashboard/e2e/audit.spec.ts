@@ -113,6 +113,7 @@ test("desktop: bound agents, sections by source, copy and the provider key", asy
   await expect(rows.nth(0)).toContainText("가림 1");
   await expect(rows.nth(6)).toContainText("런타임 문맥 2");
   await expect(rows.nth(5)).toContainText("agents/role.prompt.md");
+  await expect(page.getByTestId("audit-source-summary")).toContainText("agents/role.prompt.md");
   await rows.nth(5).getByRole("button").click();
   await expect(rows.nth(5).locator("pre")).toContainText("ADK Dashboard frontend specialist");
   await page.getByTestId("audit-copy").click();
@@ -176,6 +177,9 @@ test("phone: list, detail with five sections, back by button and by browser", as
   await expect(page.getByTestId("audit-provider")).toBeVisible();
   await page.getByRole("button", { name: "섹션 5개 더 보기" }).click();
   await expect(page.getByTestId("audit-section")).toHaveCount(10);
+  await page.getByTestId("audit-page").evaluate((el) => { el.scrollTop = 200; });
+  expect(await page.getByTestId("audit-page").evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  expect(await page.getByTestId("audit-detail-head").boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 56 });
   await page.getByTestId("audit-back").click();
   await expect(page).not.toHaveURL(/agent=/);
   await expect(page.getByTestId("topbar")).toBeVisible();
@@ -204,19 +208,21 @@ test("desktop anchors: link from the prompt, scope groups, filters, limits and o
   await expect(page.getByTestId("audit-anchor-group").last()).toContainText("범위 없음");
   await expect(anchorRow(page, 7)).toContainText("응답 방식 — 질문엔 바로 ACK");
 
+  const inspector = page.getByTestId("audit-anchor-inspector");
   await page.getByRole("radio", { name: /한도 근접·초과/ }).click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(3);
   await expect(anchorRow(page, 1)).toContainText("한도 초과");
   await openAnchor(page, 0);
-  await expect(anchorRow(page, 0).getByTestId("audit-anchor-size")).toHaveText("286 / 300자");
+  await expect(anchorRow(page, 0).getByRole("button")).toHaveAttribute("aria-current", "true");
+  await expect(inspector.getByTestId("audit-anchor-size")).toHaveText("286 / 300자");
   await page.getByRole("radio", { name: /정본과 겹침/ }).click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(2);
   await openAnchor(page, 3);
-  await expect(anchorRow(page, 3).getByTestId("audit-anchor-overlaps")).toContainText("agents/_shared.prompt.md");
-  await anchorRow(page, 3).getByRole("button", { name: /앵커 5 · 작업 태도/ }).click();
+  await expect(inspector.getByTestId("audit-anchor-overlaps")).toContainText("agents/_shared.prompt.md");
+  await inspector.getByRole("button", { name: /앵커 5 · 작업 태도/ }).click();
   await expect(page.getByRole("radio", { name: /전체/ })).toHaveAttribute("aria-checked", "true");
-  await expect(anchorRow(page, 4).getByRole("button").first()).toHaveAttribute("aria-expanded", "true");
-  await expect(anchorRow(page, 4).getByRole("button").first()).toBeFocused();
+  await expect(anchorRow(page, 4).getByRole("button")).toHaveAttribute("aria-current", "true");
+  await expect(anchorRow(page, 4).getByRole("button")).toBeFocused();
 
   await page.getByRole("radio", { name: "Codex" }).click();
   await page.getByRole("tab", { name: "시스템 프롬프트" }).click();
@@ -253,6 +259,10 @@ test("phone anchors: five rows, then the rest", async ({ page }, testInfo) => {
   await expect(page.getByTestId("topbar")).toHaveCount(0);
   await page.getByRole("button", { name: "3개 더 보기" }).click();
   await expect(page.getByTestId("audit-anchor")).toHaveCount(8);
+  await openAnchor(page, 0);
+  await expect(anchorRow(page, 0).getByTestId("audit-anchor-size")).toHaveText("286 / 300자");
+  await page.getByTestId("audit-page").evaluate((el) => { el.scrollTop = 200; });
+  expect(await page.getByTestId("audit-detail-head").boundingBox()).toEqual({ x: 0, y: 0, width: 390, height: 56 });
   const width = await page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth));
   expect(width).toBeLessThanOrEqual(390);
 });
