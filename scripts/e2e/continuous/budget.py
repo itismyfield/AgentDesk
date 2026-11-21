@@ -3,6 +3,7 @@
 An unset limit or an unmeasured reservation refuses the run: unset is not unlimited.
 """
 
+import calendar
 import math
 import time
 
@@ -59,7 +60,10 @@ def reserve(state_dir, limits, amounts, run_id, now):
 
 
 def settle(state_dir, when, run_id, actual):
-    """Replace reserved amounts with measured ones; an unknown (None) amount keeps the reservation."""
+    """Replace reserved amounts with measured ones; an unknown (None) amount keeps the reservation.
+
+    Only a measured overrun pauses the provider, until the next ledger day; unknown usage does not.
+    """
     path = _path(state_dir, when)
     ledger = read_json(path, {})
     row = ledger.get(run_id)
@@ -69,11 +73,23 @@ def settle(state_dir, when, run_id, actual):
         for field in FIELDS:
             if used.get(field) is not None and provider in row:
                 row[provider][field] = used[field]
-        if any(used.get(field) is None for field in FIELDS):
+        if used.get("over_budget"):
             paused = read_json(state_dir / "budget" / "paused.json", {})
-            paused[provider] = run_id
+            paused[provider] = {"run_id": run_id, "until": calendar.timegm(time.strptime(when, "%Y-%m-%d")) + 86400}
             write_json(state_dir / "budget" / "paused.json", paused)
     write_json(path, ledger)
+
+
+def active_pauses(state_dir, now, prune=False):
+    """Pauses whose `until` is still ahead; expired and legacy run_id-only entries are ignored, and dropped on prune."""
+    path = state_dir / "budget" / "paused.json"
+    paused = read_json(path, {})
+    entries = paused.items() if isinstance(paused, dict) else ()
+    active = {provider: entry for provider, entry in entries
+              if isinstance(entry, dict) and type(entry.get("until")) in (int, float) and entry["until"] > now}
+    if prune and active != paused:
+        write_json(path, active)
+    return active
 
 
 class TurnGuard:
