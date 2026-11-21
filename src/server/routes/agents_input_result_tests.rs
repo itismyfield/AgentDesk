@@ -521,8 +521,8 @@ async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
         assert_eq!(answer_fields(&body), nulls, "{origin}: {body}");
     }
 
-    // The boundary is the execution's own record: another turn's answer is never borrowed, two
-    // result events are ambiguous, and Claude/Codex wait for their verified final record (#8216).
+    // Only the execution's own record answers; two results are ambiguous, and Claude/Codex
+    // results are not yet a verified final record.
     persist_transcript(&pool, &turn(20), "antigravity", &["other turn"]).await;
     commit_receipt(
         &pool,

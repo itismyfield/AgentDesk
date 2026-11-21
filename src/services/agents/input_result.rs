@@ -166,9 +166,8 @@ fn running_execution(
     }))
 }
 
-/// The record a final answer was read from. Only agy headless has one today: its codec's
-/// terminal `Done` body becomes the execution's single transcript `result` event. Claude and
-/// Codex wait for the verified final record of #8216 (PR6a C2) instead of a commentary mix.
+/// Providers whose single transcript `result` event is their terminal `Done` body; Claude and
+/// Codex join once their result is a verified final record rather than a commentary mix.
 const FINAL_ANSWER_SOURCES: &[(&str, &str)] = &[("antigravity", "agy_terminal_result")];
 
 /// The final answer of one completed execution and the record it came from.
@@ -179,9 +178,8 @@ pub struct FinalAnswer {
     pub source: &'static str,
 }
 
-/// The final answer of the execution `receipt` ended, read from that execution's own transcript
-/// record (still live or archived). None unless it completed, its provider has a verified final
-/// record, and that record holds exactly one non-blank result.
+/// Read from the ended execution's own transcript, live or archived; None unless it completed and
+/// that record holds exactly one non-blank result from a listed provider.
 pub async fn final_answer(
     pool: &PgPool,
     receipt: &OriginReceipt,
