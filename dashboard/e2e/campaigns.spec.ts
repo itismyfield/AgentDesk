@@ -440,7 +440,11 @@ test("stage board: ledger columns keep each task's own status, live work adds a 
   await expect(board).toContainText("10 작업5 진행 중3 대기0 승인 대기0 실패2 막힘");
   const phone = testInfo.project.name === "mobile";
   expect(await columnNames(page)).toEqual(phone ? ["진행 중", "막힘", "실패", "대기", "완료", "건너뜀"] : ["대기", "진행 중", "막힘", "실패", "완료", "건너뜀"]);
-  if (phone) expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
+  if (phone) {
+    expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
+    // Group headers are kit rows; the board's element rules must not draw a box around them.
+    expect(await page.locator(".campaign-board section > button[aria-expanded]").evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).borderTopWidth))).toEqual(Array(6).fill("0px"));
+  }
   for (const [column, id, chip] of [["막힘", "i7336", "막힘"], ["실패", "i7350", "실패"]]) {
     const card = board.getByRole("region", { name: column }).locator(`[data-board-card="${id}"]`);
     await expect(card.locator("[data-status-chip]")).toHaveText(chip);
