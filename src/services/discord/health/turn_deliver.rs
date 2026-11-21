@@ -1,6 +1,7 @@
 //! Human input entry: start a turn when the mailbox is idle, otherwise queue
 //! the input on the channel mailbox with the reason it could not start.
 
+pub(crate) mod decision_target;
 mod inject;
 #[cfg(all(test, unix))]
 mod inject_codex_tests;

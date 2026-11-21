@@ -1,4 +1,7 @@
-use super::human_frame::{Mode, author_name, inject, opens_inject, parse, shows_inject};
+use super::human_frame::{
+    Mode, author_name, inject, opens_inject, parse, plain_inject, preserved_decision_body,
+    shows_inject,
+};
 
 const ID: &str = "343742347365974026";
 
@@ -132,5 +135,43 @@ fn busy_header_bytes_equal_idle_for_one_line_and_multiline() {
             frame("discord:7:9", "200", "ann", "abcdef12", body).as_bytes(),
             expected.as_bytes()
         );
+    }
+}
+
+/// The byte-keeping planners take only a frame an approved opinion built. A source name, the
+/// wrong event kind or a changed body builds none, so such input keeps the normalizing plan.
+#[test]
+fn decision_preserved_plan_needs_an_event_that_approved_the_exact_opinion() {
+    use crate::db::decisions::{DecisionProvenance, EventKind};
+    use crate::services::{claude_tui, codex_tui};
+    let raw = "첫 줄\r\n둘째 줄\r끝";
+    let opinion = DecisionProvenance::for_tests(EventKind::Opinion, 200, raw);
+    let frame = preserved_decision_body(&opinion, "ann", raw).expect("approved opinion");
+    assert_eq!(frame.as_str(), format!("[User: ann (ID: 200)]\n{raw}"));
+    let claude = claude_tui::input::plan_preserved_submit(&frame).unwrap();
+    let kept = claude_tui::input::TuiInputAction::PasteBuffer(frame.as_str().to_string());
+    assert_eq!(claude[0], kept);
+    let codex = codex_tui::input::owned_preserved_plan(&frame).unwrap();
+    let kept = codex_tui::input::TuiInputAction::PasteBuffer(frame.as_str().to_string());
+    assert_eq!(codex[0], kept);
+
+    // No approval for these bytes: no frame, whatever the input calls itself.
+    let selection = DecisionProvenance::for_tests(EventKind::Selection, 200, raw);
+    assert!(preserved_decision_body(&selection, "ann", raw).is_none());
+    assert!(preserved_decision_body(&opinion, "ann", "첫 줄\n둘째 줄\n끝").is_none());
+    // The only path left to a self-declared source=decision input rewrites its line endings.
+    let declared = plain_inject("decision", "200", "ann", "decision:forged", raw);
+    assert_eq!(declared, "[User: ann (ID: 200)]\n첫 줄\n둘째 줄\n끝");
+    for plan in [
+        format!(
+            "{:?}",
+            claude_tui::input::plan_prompt_submit(&format!("x\n{raw}"))
+        ),
+        format!(
+            "{:?}",
+            codex_tui::input::owned_prompt_plan(&format!("x\n{raw}"))
+        ),
+    ] {
+        assert!(!plan.contains("\\r"), "{plan}");
     }
 }

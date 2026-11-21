@@ -131,6 +131,7 @@ pub(crate) use transcript_binding_stall::attach_o_stall_reasons;
 pub(crate) use transcript_binding_stall::o_verdict_for_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) use turn_deliver::CodexLedger;
+pub(crate) use turn_deliver::decision_target;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
