@@ -194,7 +194,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 13] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 14] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",

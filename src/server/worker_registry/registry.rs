@@ -250,7 +250,7 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 self.register_leader_tokio(spec, move || {
-                    crate::services::agents::delegation::result_card_loop(pool.clone())
+                    crate::services::agents::delegation::result_card_loop(pool.as_ref().clone())
                 });
                 Ok(None)
             }

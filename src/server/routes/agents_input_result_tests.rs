@@ -582,28 +582,21 @@ async fn a_completed_agy_execution_reports_its_terminal_answer_pg() {
         "{body}"
     );
     // A duplicate archived record: the newest one answers. A live record outranks both.
-    let reinsert = |table: &'static str, id: i64, body: Value| {
+    let reinsert = |sql: &'static str, id: i64, body: &str| {
         let pool = pool.clone();
-        let sql = format!(
-            "INSERT INTO {table} (id, turn_id, channel_id, provider, events_json)
-             VALUES ($1, $2, $3, 'antigravity', $4)"
-        );
         let events = json!([{"kind": "result", "status": "success", "content": body}]);
-        async move {
-            let query = sqlx::query(&sql).bind(id).bind(turn(10));
-            let query = query.bind(channel.to_string()).bind(events);
-            query.execute(&pool).await.unwrap();
-        }
+        let query = sqlx::query(sql).bind(id).bind(turn(10));
+        let query = query.bind(channel.to_string()).bind(events);
+        async move { query.execute(&pool).await.unwrap() }
     };
-    reinsert(
-        "session_transcripts_archive",
-        9_000_002,
-        json!("newer archive"),
-    )
-    .await;
+    let archive = "INSERT INTO session_transcripts_archive (id, turn_id, channel_id, provider,
+        events_json) VALUES ($1, $2, $3, 'antigravity', $4)";
+    let live = "INSERT INTO session_transcripts (id, turn_id, channel_id, provider, events_json)
+        VALUES ($1, $2, $3, 'antigravity', $4)";
+    reinsert(archive, 9_000_002, "newer archive").await;
     let text = |body: Value| body["terminal"]["final_answer_text"].clone();
     assert_eq!(text(ask_answer(&app, "G-running").await), "newer archive");
-    reinsert("session_transcripts", 9_000_001, json!("live record")).await;
+    reinsert(live, 9_000_001, "live record").await;
     assert_eq!(text(ask_answer(&app, "G-running").await), "live record");
 
     pool.close().await;
