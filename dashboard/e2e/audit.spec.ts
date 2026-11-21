@@ -38,6 +38,27 @@ const audit = (agentId: string, provider: string, origin: string, sections = SEC
   masked_count: sections.reduce((sum, item) => sum + item.masked_count, 0), sections: origin === "unavailable" ? [] : sections,
 });
 
+const anc = (text: string, extra: Record<string, unknown> = {}) => ({
+  id: null, type: null, scope: null, limit: null, masked_count: 0, overlap_candidates: [], receiving_agents: ["adk-dashboard"], text, chars: text.length, ...extra,
+});
+const ANCHORS = [
+  anc("코딩 원칙 — 과도한 방어 금지, 경계에서 한 번만 검증", { type: "선호", scope: "모든 에이전트", chars: 286, limit: 300, overlap_candidates: [{ source: "anchor", index: 6 }] }),
+  anc("코드 작업 원칙 — 근본 원인, 주석은 무엇과 왜", { type: "선호", scope: "모든 에이전트", chars: 310, limit: 300 }),
+  anc("기억 검색·저장 기준 — 과거 결정 전엔 recall", { type: "절차", scope: "모든 에이전트", chars: 281, limit: 400, overlap_candidates: [{ source: "canon_file", path: "agents/_shared.prompt.md" }] }),
+  anc("기억 도구 규칙 — Memento에만 둔다", { type: "절차", scope: "모든 에이전트", chars: 262, limit: 400, overlap_candidates: [{ source: "canon_file", path: "agents/_shared.prompt.md" }, { source: "anchor", index: 4 }] }),
+  anc("작업 태도 — 판단이 갈려도 자율 결정 후 근거와 보고", { type: "선호", scope: "모든 에이전트", chars: 276, limit: 400 }),
+  anc("설계 원칙 — 소규모 개인 운영 시스템", { type: "선호", scope: "AgentDesk", chars: 298, limit: 300, receiving_agents: ["adk-dashboard", "saved-agent"] }),
+  anc("작업 규칙 — 캠페인은 issue-pipeline부터", { type: "절차", scope: "AgentDesk", chars: 231, limit: 400, overlap_candidates: [{ source: "anchor", index: 0 }] }),
+  anc("\n응답 방식 — 질문엔 바로 ACK\n둘째 줄은 펼쳐야 보여요"),
+];
+const anchorsFor = (agentId: string, provider: string, source: string) => ({
+  agent_id: agentId, provider, source, session_id: source === "unavailable" ? null : "session-1",
+  session_started_at: source === "unavailable" ? null : "2026-11-17T08:17:24Z",
+  memento: agentId === "saved-agent" ? { status: "disconnected", checked_at: "2026-11-21T03:12:00Z" } : { status: "connected", checked_at: "2026-11-21T08:00:00Z" },
+  anchor_count: source === "unavailable" ? 0 : 8,
+  anchors: source === "unavailable" ? [] : agentId === "saved-agent" ? [anc("비밀값 규칙 — 1Password에서 읽기"), anc("작업 호스트 — mac-mini 상주")] : ANCHORS,
+});
+
 async function mockApi(page: Page, theme: "dark" | "light" = "dark") {
   // Fixture tests must never reach a real operator API.
   await page.route(/\/api\//, (route) => route.fulfill({ status: 404, json: { error: "not mocked" } }));
@@ -59,14 +80,15 @@ async function mockApi(page: Page, theme: "dark" | "light" = "dark") {
   await json(/\/api\/agents(?:\?.*)?$/, { agents: AGENTS });
   await json(/\/api\/departments(?:\?.*)?$/, { departments: [] });
   await json(/\/api\/dispatched-sessions(?:\?.*)?$/, { sessions: [] });
-  await page.route(/\/api\/agents\/[^/]+\/prompt-audit\?/, async (route) => {
+  await page.route(/\/api\/agents\/[^/]+\/(prompt-audit|anchors)\?/, async (route) => {
     const url = new URL(route.request().url());
-    const id = url.pathname.split("/")[3];
+    const [, , , id, kind] = url.pathname.split("/");
     const provider = url.searchParams.get("provider") ?? "";
     if (id === "broken-agent") return route.abort("connectionrefused");
     if (id === "unbound-agent") return route.fulfill({ status: 404, json: { code: "config", context: {}, error: "agent binding unavailable" } });
     if (id === "slow-agent") await new Promise((resolve) => setTimeout(resolve, 1200));
     const origin = id === "empty-agent" ? "unavailable" : id === "saved-agent" || provider === "codex" ? "latest_saved" : "current_session";
+    if (kind === "anchors") return route.fulfill({ json: anchorsFor(id, provider, origin) });
     return route.fulfill({ json: audit(id, provider, origin, provider === "codex" ? SECTIONS.slice(0, 4) : SECTIONS) });
   });
 }
@@ -155,6 +177,73 @@ test("phone: list, detail with five sections, back by button and by browser", as
   expect(width).toBeLessThanOrEqual(390);
 });
 
+const anchorDetail = (page: Page) => page.getByTestId("audit-anchor-detail");
+const anchorRow = (page: Page, index: number) => page.locator(`[data-testid=audit-anchor][data-index="${index}"]`);
+const openAnchor = (page: Page, index: number) => anchorRow(page, index).getByRole("button").first().click();
+
+test("desktop anchors: link from the prompt, scope groups, filters, limits and overlap jumps", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop layout");
+  await mockApi(page);
+  await page.goto("/audit");
+  await page.getByTestId("audit-open-anchors").click();
+  await expect(page).toHaveURL(/tab=anchors/);
+  await expect(anchorDetail(page)).toHaveAttribute("data-state", "ready");
+  await expect(page.getByTestId("audit-summary")).toContainText(/8\s*앵커.*6\s*확인할 것/);
+  await expect(page.getByTestId("audit-memento-notice")).toHaveCount(0);
+  await expect(page.getByTestId("audit-anchor-group")).toHaveCount(3);
+  await expect(page.getByTestId("audit-anchor-group").last()).toContainText("범위 없음");
+  await expect(anchorRow(page, 7)).toContainText("응답 방식 — 질문엔 바로 ACK");
+
+  await page.getByRole("radio", { name: /한도 근접·초과/ }).click();
+  await expect(page.getByTestId("audit-anchor")).toHaveCount(3);
+  await expect(anchorRow(page, 1)).toContainText("한도 초과");
+  await openAnchor(page, 0);
+  await expect(anchorRow(page, 0).getByTestId("audit-anchor-size")).toHaveText("286 / 300자");
+  await page.getByRole("radio", { name: /정본과 겹침/ }).click();
+  await expect(page.getByTestId("audit-anchor")).toHaveCount(2);
+  await openAnchor(page, 3);
+  await expect(anchorRow(page, 3).getByTestId("audit-anchor-overlaps")).toContainText("agents/_shared.prompt.md");
+  await anchorRow(page, 3).getByRole("button", { name: /앵커 5 · 작업 태도/ }).click();
+  await expect(page.getByRole("radio", { name: /전체/ })).toHaveAttribute("aria-checked", "true");
+  await expect(anchorRow(page, 4).getByRole("button").first()).toHaveAttribute("aria-expanded", "true");
+  await expect(anchorRow(page, 4).getByRole("button").first()).toBeFocused();
+
+  await page.getByRole("radio", { name: "Codex" }).click();
+  await page.getByRole("tab", { name: "시스템 프롬프트" }).click();
+  await expect(page).not.toHaveURL(/tab=/);
+  await expect(page).toHaveURL(/provider=codex/);
+  await expect(page.getByTestId("audit-detail-meta")).toContainText("Codex");
+});
+
+test("desktop anchors: a saved copy while Memento is down, limits left unjudged, no session and no channel", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop layout");
+  await mockApi(page);
+  await page.goto("/audit?tab=anchors&agent=saved-agent");
+  await expect(page.getByTestId("audit-memento-notice")).toContainText("Memento에 연결할 수 없어요");
+  await expect(page.getByTestId("audit-memento-notice")).toContainText("11월 21일 오후 12:12에 마지막으로 확인했어요");
+  await expect(page.getByTestId("audit-detail-meta")).toContainText("세션 없음 · 세션 사본");
+  await expect(page.getByTestId("audit-anchor-group").locator("h3")).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: /한도 근접·초과/ })).toBeDisabled();
+  await openAnchor(page, 0);
+  await expect(page.getByTestId("audit-anchor-size")).toHaveText(/^\d+자$/);
+  await page.getByTestId("audit-agent-empty-agent").click();
+  await expect(page.getByTestId("audit-state-unavailable")).toBeVisible();
+  await page.getByTestId("audit-agent-unbound-agent").click();
+  await expect(page.getByTestId("audit-state-unbound")).toBeVisible();
+});
+
+test("phone anchors: five rows, then the rest", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone layout");
+  await mockApi(page);
+  await page.goto("/audit?tab=anchors");
+  await page.getByTestId("audit-agent-adk-dashboard").click();
+  await expect(page.getByTestId("audit-anchor")).toHaveCount(5);
+  await page.getByRole("button", { name: "3개 더 보기" }).click();
+  await expect(page.getByTestId("audit-anchor")).toHaveCount(8);
+  const width = await page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth));
+  expect(width).toBeLessThanOrEqual(390);
+});
+
 const SIZES = [
   { name: "1440x900", width: 1440, height: 900, path: "/audit" },
   { name: "1024x768", width: 1024, height: 768, path: "/audit" },
@@ -162,24 +251,30 @@ const SIZES = [
   { name: "390x844", width: 390, height: 844, path: "/audit?agent=adk-dashboard" },
 ];
 
-test("captures: three sizes in both themes with overflow and touch counts", async ({ browser }, testInfo) => {
+test("captures: both tabs at three sizes in both themes with overflow and touch counts", async ({ browser }, testInfo) => {
   test.skip(!SHOTS || testInfo.project.name !== "desktop", "set AUDIT_SHOTS to capture");
+  test.setTimeout(180_000);
   const metrics: Record<string, unknown> = {};
-  for (const { name, path, ...viewport } of SIZES) {
-    for (const theme of ["dark", "light"] as const) {
-      const touch = viewport.width < 900;
-      const context = await browser.newContext({ viewport, hasTouch: touch, isMobile: touch, locale: "ko-KR", timezoneId: "Asia/Seoul" });
-      const page = await context.newPage();
-      await mockApi(page, theme);
-      await page.goto(path);
-      if (name.endsWith("list")) await expect(page.getByTestId("audit-agent-list")).toBeVisible();
-      else {
-        await expect(detail(page)).toHaveAttribute("data-state", "ready");
-        await page.getByTestId("audit-section").nth(3).getByRole("button").click();
+  for (const tab of ["audit", "anchors"] as const) {
+    for (const { name, path, ...viewport } of SIZES) {
+      for (const theme of ["dark", "light"] as const) {
+        const touch = viewport.width < 900;
+        const context = await browser.newContext({ viewport, hasTouch: touch, isMobile: touch, locale: "ko-KR", timezoneId: "Asia/Seoul" });
+        const page = await context.newPage();
+        await mockApi(page, theme);
+        await page.goto(tab === "anchors" ? `${path}${path.includes("?") ? "&" : "?"}tab=anchors` : path);
+        if (name.endsWith("list")) await expect(page.getByTestId("audit-agent-list")).toBeVisible();
+        else if (tab === "anchors") {
+          await expect(anchorDetail(page)).toHaveAttribute("data-state", "ready");
+          await openAnchor(page, 3);
+        } else {
+          await expect(detail(page)).toHaveAttribute("data-state", "ready");
+          await page.getByTestId("audit-section").nth(3).getByRole("button").click();
+        }
+        await page.screenshot({ path: `${SHOTS}/${tab}-${name}-${theme}.png`, animations: "disabled" });
+        metrics[`${tab}-${name}-${theme}`] = await page.evaluate(countLayout);
+        await context.close();
       }
-      await page.screenshot({ path: `${SHOTS}/audit-${name}-${theme}.png`, animations: "disabled" });
-      metrics[`${name}-${theme}`] = await page.evaluate(countLayout);
-      await context.close();
     }
   }
   console.log(JSON.stringify(metrics));
