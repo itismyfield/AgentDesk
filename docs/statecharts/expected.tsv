@@ -541,6 +541,8 @@ input-single-path/HerdrComposerWaitCauseBeforeDialogStays.cfg	HerdrComposerWaitC
 input-single-path/HerdrComposerWaitCauseBeforeFence.cfg	HerdrComposerWaitCause	-	Resolution
 input-single-path/HerdrComposerWaitCauseBeforeHealthy.cfg	HerdrComposerWaitCause	-	-
 input-single-path/HerdrComposerWaitCauseBeforeLaunching.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseBeforeOwnMoved.cfg	HerdrComposerWaitCause	NoSilentLoss	OwnDelivers
+input-single-path/HerdrComposerWaitCauseBeforeOwnScreen.cfg	HerdrComposerWaitCause	NoSilentLoss	OwnDelivers
 input-single-path/HerdrComposerWaitCauseBeforeSourceNone.cfg	HerdrComposerWaitCause	-	Resolution
 input-single-path/HerdrComposerWaitCauseBeforeUnread.cfg	HerdrComposerWaitCause	-	Resolution
 input-single-path/HerdrComposerWaitCauseFixedDialog.cfg	HerdrComposerWaitCause	-	-
@@ -558,6 +560,16 @@ input-single-path/HerdrComposerWaitCauseMutantSettleAnyLaunching.cfg	HerdrCompos
 input-single-path/HerdrComposerWaitCauseS0bDialogUnproven.cfg	HerdrComposerWaitCause	-	DialogDelivers
 input-single-path/HerdrComposerWaitCauseS0bOverlay.cfg	HerdrComposerWaitCause	OverlayNotModal	Resolution
 input-single-path/HerdrComposerWaitCauseS0bTmuxLost.cfg	HerdrComposerWaitCause	TmuxKeepsWaits	-
+input-single-path/HerdrComposerWaitCauseUOwnClear.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUOwnMoved.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUOwnMovedMutRefuseMoved.cfg	HerdrComposerWaitCause	NoSilentLoss	OwnDelivers
+input-single-path/HerdrComposerWaitCauseUOwnMovedNoWake.cfg	HerdrComposerWaitCause	-	OwnDelivers
+input-single-path/HerdrComposerWaitCauseUOwnRestart.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUOwnScreen.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUOwnScreenMutRetainScreen.cfg	HerdrComposerWaitCause	NoSilentLoss	OwnDelivers
+input-single-path/HerdrComposerWaitCauseUOwnStop.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUQuietIdle.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUSourceNone.cfg	HerdrComposerWaitCause	-	-
 input-single-path/HerdrIdleMetaAnyMetaIdle.cfg	HerdrIdleMeta	IdleNeedsClosedReply,NoIdlePasteOnRunningTurn,NoRunningIdleDelegation	-
 input-single-path/HerdrIdleMetaBefore.cfg	HerdrIdleMeta	-	IdleInputEventuallyResolves
 input-single-path/HerdrIdleMetaCompacting.cfg	HerdrIdleMeta	-	-
