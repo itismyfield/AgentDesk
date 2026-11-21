@@ -148,6 +148,7 @@ decision-request/DiscussionOpinionClose.cfg	DecisionDiscussion	OpinionKeepsOpen	
 decision-request/DiscussionRaw.cfg	DecisionDiscussion	OpinionRawPreserved	-
 decision-request/DiscussionReplyState.cfg	DecisionDiscussion	ReplyNoLifecycleChange	-
 decision-request/DiscussionScope.cfg	DecisionDiscussion	RequesterOnly	-
+decision-request/DiscussionUnknownRaw.cfg	DecisionDiscussion	FailedRawDiscarded	-
 decision-request/Display.cfg	DecisionRequest	StrictDisplayEquality	-
 decision-request/Duplicate.cfg	DecisionRequest	NoDuplicate	-
 decision-request/FalseSuccess.cfg	DecisionRequest	NoFalseSuccess	-

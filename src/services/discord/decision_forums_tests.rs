@@ -76,9 +76,11 @@ async fn list(State(d): State<Discord>) -> Json<Value> {
 async fn create(State(d): State<Discord>, Json(body): Json<Value>) -> Response {
     let number = d.posts.fetch_add(1, SeqCst) as u64;
     let parent = body["parent_id"].as_str().unwrap().parse().unwrap();
+    // The request body decides the kind, so a Text create never passes as a forum.
+    let kind = serenity::ChannelType::from(body["type"].as_u64().unwrap_or(0) as u8);
     let created = (
         900 + number,
-        serenity::ChannelType::Forum,
+        kind,
         parent,
         body["name"].as_str().unwrap().into(),
     );
@@ -230,6 +232,8 @@ async fn decision_forum_pg_concurrent_callers_create_one_forum() {
     );
     assert_eq!(first.id, second.id);
     assert_eq!([first.created, second.created], [true, false]);
+    let kinds: Vec<_> = d.channels.lock().unwrap().iter().map(|c| c.1).collect();
+    assert_eq!(kinds, [serenity::ChannelType::Forum], "the create body asked for a forum");
     db.drop().await;
 }
 
