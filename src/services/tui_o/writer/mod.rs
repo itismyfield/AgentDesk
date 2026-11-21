@@ -4,6 +4,7 @@
 pub mod activation;
 pub mod actor;
 pub mod adoption;
+pub(crate) mod agy_delivery;
 pub mod binding;
 pub(crate) mod boot;
 pub mod codex_adoption;

@@ -1360,6 +1360,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let turn = StreamingTurn {
         pool: None,
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: "question",

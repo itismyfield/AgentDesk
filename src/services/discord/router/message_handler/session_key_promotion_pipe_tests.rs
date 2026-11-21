@@ -202,6 +202,7 @@ else:
         let turn = StreamingTurn {
             pool: Some(&run_pool),
             registration_origin: Some(false),
+            agy_foreground: None,
             shared: Some(&run_shared),
             provider: &run_provider,
             prompt: "pipe registration",
