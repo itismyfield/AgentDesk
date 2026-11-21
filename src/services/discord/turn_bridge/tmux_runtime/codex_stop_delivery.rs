@@ -11,6 +11,7 @@ use super::claude_stop_delivery::{
 };
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
+use crate::services::agents::turn::AgentHerdrStop;
 use crate::services::provider::cancel_token_claude_interrupt::{
     ClaudeInterruptDeliveryGuard, HerdrSubmission, HerdrTurnStart, LateStop, herdr_cancel_enabled,
     herdr_stop_settlement_available,
@@ -420,6 +421,17 @@ pub(super) async fn herdr_command_stop(
     token: &Arc<CancelToken>,
     reason: &str,
 ) -> HerdrStop {
+    herdr_command_stop_on_row(shared, provider, channel, token, reason, None).await
+}
+
+pub(super) async fn herdr_command_stop_on_row(
+    shared: &Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    channel: poise::serenity_prelude::ChannelId,
+    token: &Arc<CancelToken>,
+    reason: &str,
+    expected: Option<&AgentHerdrStop>,
+) -> HerdrStop {
     let eligible =
         herdr_command_eligible(token, provider, channel.get(), &shared.token_hash, reason);
     if let Err(refusal) = eligible {
@@ -446,16 +458,17 @@ pub(super) async fn herdr_command_stop(
     #[cfg(all(test, unix))]
     if admitted.token.is_some() && !admitted.already_stopping {
         tests::cut::reached(tests::cut::Cut::IntentRecorded, None);
+        tests::after_herdr_intent().await;
     }
     let stop = match admitted.token {
         None => HerdrStop::Refused(HerdrNotSent::Generation),
         Some(_) if admitted.already_stopping => HerdrStop::AlreadyRequested,
         Some(token) => HerdrStop::Requested(match shared.pg_pool.as_ref() {
-            Some(pool) => match interrupt_herdr(pool, &token, provider).await {
+            Some(pool) => match interrupt_herdr_on_row(pool, &token, provider, expected).await {
                 HerdrDelivery::NotSent(HerdrNotSent::Pending) => {
                     #[cfg(all(test, unix))]
                     tests::before_late_stop().await;
-                    late_stop(shared, pool, &token, provider, channel).await
+                    late_stop(shared, pool, &token, provider, channel, expected).await
                 }
                 delivery => delivery,
             },
@@ -490,6 +503,7 @@ async fn late_stop(
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<&AgentHerdrStop>,
 ) -> HerdrDelivery {
     let Some(state) = token.herdr_interrupt_state() else {
         return HerdrDelivery::NotSent(HerdrNotSent::Pending);
@@ -500,6 +514,7 @@ async fn late_stop(
         pool: pool.clone(),
         provider: provider.clone(),
         channel,
+        expected: expected.cloned(),
         handle: tokio::runtime::Handle::current(),
         #[cfg(test)]
         enabled: crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
@@ -509,7 +524,7 @@ async fn late_stop(
         return HerdrDelivery::NotSent(HerdrNotSent::Pending);
     }
     let after = state.seen_progress().unwrap_or(0);
-    let delivery = late_attempt(shared, pool, token, provider, channel).await;
+    let delivery = late_attempt(shared, pool, token, provider, channel, expected).await;
     if retries(delivery) {
         state.retry_late_stop(run.into_stop(), after);
     }
@@ -523,10 +538,11 @@ async fn late_attempt(
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<&AgentHerdrStop>,
 ) -> Option<HerdrDelivery> {
     let current = shared.mailbox_peek(channel)?.cancel_token().await.ok()??;
     match Arc::ptr_eq(&current, token) {
-        true => Some(interrupt_herdr(pool, token, provider).await),
+        true => Some(interrupt_herdr_on_row(pool, token, provider, expected).await),
         false => None,
     }
 }
@@ -549,6 +565,7 @@ struct LateRun {
     pool: sqlx::PgPool,
     provider: ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<AgentHerdrStop>,
     handle: tokio::runtime::Handle,
     #[cfg(test)]
     enabled: Option<bool>,
@@ -565,7 +582,14 @@ impl LateRun {
                 crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
                     .replace(self.enabled);
             // The reader is a blocking thread, as the tail's own waits are.
-            let attempt = late_attempt(&shared, &self.pool, &token, &self.provider, self.channel);
+            let attempt = late_attempt(
+                &shared,
+                &self.pool,
+                &token,
+                &self.provider,
+                self.channel,
+                self.expected.as_ref(),
+            );
             let delivery = self.handle.block_on(attempt);
             #[cfg(test)]
             crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
@@ -585,11 +609,20 @@ impl LateRun {
     }
 }
 
-/// Dormant until settlement lands; only the Herdr user stop calls this executor.
+#[cfg(test)]
 pub(super) async fn interrupt_herdr(
     pool: &sqlx::PgPool,
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
+) -> HerdrDelivery {
+    interrupt_herdr_on_row(pool, token, provider, None).await
+}
+
+async fn interrupt_herdr_on_row(
+    pool: &sqlx::PgPool,
+    token: &Arc<CancelToken>,
+    provider: &ProviderKind,
+    expected: Option<&AgentHerdrStop>,
 ) -> HerdrDelivery {
     use HerdrNotSent::*;
     if !herdr_stop_settlement_available() {
@@ -623,6 +656,12 @@ pub(super) async fn interrupt_herdr(
     else {
         return HerdrDelivery::NotSent(Pending);
     };
+    // Agent ownership can change independently of the mailbox's turn.
+    if let Some(expected) = expected
+        && (!expected.matches(&found) || !expected.still_assigned(pool).await)
+    {
+        return HerdrDelivery::NotSent(Identity);
+    }
     let HostedRecord::Known(record) = found.record else {
         return HerdrDelivery::NotSent(Pending);
     };
@@ -701,6 +740,8 @@ fn deliver(
     use HerdrNotSent::*;
     // A Claude idle refusal's evidence, logged only once the composer lock is released.
     let idle = std::cell::Cell::new(None);
+    // The read that failed, named on the line an unobserved refusal logs.
+    let unread = std::cell::Cell::new("");
     let attempt = || -> Result<HerdrDelivery, HerdrNotSent> {
         let held = || holder(channel);
         let state = token.herdr_interrupt_state().ok_or(Pending)?;
@@ -714,14 +755,24 @@ fn deliver(
         if !source_current() {
             return Err(Identity);
         }
-        let identity = TurnIdentity::capture(provider, &binding.output_path)
-            .map_err(|()| unobserved())?
-            .ok_or(Idle)?;
+        let identity = match TurnIdentity::capture(provider, &binding.output_path) {
+            Ok(identity) => Some(identity.ok_or(Idle)?),
+            Err(()) => {
+                unread.set("turn_identity");
+                // A Claude turn that could not be read may still stop on its screen's own footer.
+                if !matches!(provider, ProviderKind::Claude) {
+                    return Err(unobserved());
+                }
+                None
+            }
+        };
         // A Codex stop targets the turn its token began, never a later native turn of the pane.
-        if let TurnIdentity::Codex(turn) = &identity {
+        if let Some(TurnIdentity::Codex(turn)) = &identity {
             let seen = state.seen_turn_id();
-            turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref())?;
+            let own = turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref());
+            own.inspect_err(|_| unread.set("own_turn"))?;
         }
+        let identity_current = || identity.as_ref().is_none_or(TurnIdentity::current);
         #[cfg(all(test, unix))]
         if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {
             action();
@@ -745,7 +796,7 @@ fn deliver(
             let current =
                 crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
                     .ok_or(Pending)?;
-            if current.output_path != binding.output_path || !identity.current() {
+            if current.output_path != binding.output_path || !identity_current() {
                 return Err(Identity);
             }
             // One read decides: Codex's dim placeholder survives only in the styled read.
@@ -753,7 +804,13 @@ fn deliver(
                 ProviderKind::Codex => target.capture_ansi(-160),
                 _ => target.capture(-160),
             }
-            .ok_or_else(unobserved)?;
+            .ok_or_else(|| {
+                unread.set(match identity {
+                    Some(_) => "screen",
+                    None => "turn_identity+screen",
+                });
+                unobserved()
+            })?;
             let mut judged = None;
             let running = match provider {
                 ProviderKind::Claude => {
@@ -764,10 +821,17 @@ fn deliver(
                     // The tmux stop's pane evidence and phase, plus modal and draft vetoes.
                     let (ready, active, draft) = claude_tui_stop_pane_evidence(&screen);
                     judged = Some((structured, ready, active, draft));
+                    let live = match identity {
+                        Some(_) => {
+                            classify_tui_interrupt_phase(structured, ready || draft, active)
+                                == ClaudeTuiInterruptPhase::ActiveGeneration
+                        }
+                        // Unread, the turn is live only on Claude's own interrupt offer.
+                        None => super::claude_stop_pane::interrupt_offered(&screen),
+                    };
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
                         && !draft
-                        && classify_tui_interrupt_phase(structured, ready || draft, active)
-                            == ClaudeTuiInterruptPhase::ActiveGeneration
+                        && live
                 }
                 ProviderKind::Codex => {
                     crate::services::codex_tui::input::herdr_turn_in_progress(&screen)
@@ -775,6 +839,9 @@ fn deliver(
                 _ => false,
             };
             if !running {
+                if identity.is_none() {
+                    return Err(unobserved());
+                }
                 if let Some(judged) = judged {
                     let at = (channel, logical.as_str(), nonce);
                     let sources = (&binding, &current);
@@ -785,7 +852,7 @@ fn deliver(
                 return Err(Idle);
             }
             target.pin(HerdrMutation::Cancel).map_err(|_| Gate)?;
-            if !identity.current() || !source_current() {
+            if !identity_current() || !source_current() {
                 target.discard_pin();
                 return Err(Identity);
             }
@@ -833,6 +900,15 @@ fn deliver(
         && let Some(evidence) = idle.take()
     {
         evidence.emit();
+    }
+    if result == Err(Unobserved) {
+        tracing::info!(
+            event = "herdr_stop_unobserved",
+            channel_id = channel,
+            provider = provider.as_str(),
+            unread = unread.get(),
+            "herdr user stop left unobserved"
+        );
     }
     result.unwrap_or_else(HerdrDelivery::NotSent)
 }

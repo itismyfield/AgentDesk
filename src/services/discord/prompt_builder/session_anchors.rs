@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::memory::{SessionAnchorRequest, load_session_anchor_prompt};
+use crate::services::memory::{SessionAnchorRequest, load_session_anchor_snapshot};
 
 impl BuiltSystemPrompt {
     pub(in crate::services::discord) fn arm_audit(
@@ -17,7 +17,7 @@ impl BuiltSystemPrompt {
             provider,
             channel.get(),
             turn,
-            self.anchor_count,
+            self.anchors.clone(),
         );
         if let Some(sak) = sak {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -37,14 +37,15 @@ impl BuiltSystemPrompt {
             && matches!(request.provider, ProviderKind::Antigravity)
             && (request.fresh || request.session_id.is_none()))
         .then_some(request.channel_id);
-        let anchors = if self.inspection {
-            request.peek_prompt()
-        } else {
-            load_session_anchor_prompt(request).await
-        };
-        if let Some((anchors, count)) = anchors {
-            self.anchor_count = count;
-            self.append_anchor_layer(&anchors);
+        if self.inspection {
+            if let Some((text, count)) = request.peek_prompt() {
+                self.anchor_count = count;
+                self.append_anchor_layer(&text);
+            }
+        } else if let Some(snapshot) = load_session_anchor_snapshot(request).await {
+            self.anchor_count = snapshot.records.len();
+            self.append_anchor_layer(&snapshot.text);
+            self.anchors = snapshot.records;
             if let Some(channel_id) = agy_launch_channel {
                 tracing::info!(
                     channel_id,
@@ -52,7 +53,7 @@ impl BuiltSystemPrompt {
                         .manifest
                         .as_ref()
                         .map(|manifest| manifest.turn_id.as_str()),
-                    anchor_count = count,
+                    anchor_count = self.anchor_count,
                     "attached Memento anchors to Antigravity launch system prompt"
                 );
             }
@@ -275,6 +276,7 @@ mod tests {
             system_prompt: "existing instructions".into(),
             manifest: None,
             anchor_count: 0,
+            anchors: Vec::new(),
             inspection: false,
         };
         built.append_anchor_layer("[ANCHOR MEMORY]\n- persistent preference");

@@ -13,6 +13,7 @@ mod part_08;
 mod part_09;
 mod part_10;
 mod part_11;
+mod prompt_audit;
 mod public_surfaces;
 mod server_campaigns;
 mod session_evidence;
@@ -34,6 +35,7 @@ pub(super) fn all() -> Vec<EndpointDoc> {
     endpoints.extend(cluster_execution::endpoints());
     endpoints.extend(kakao_calendar::endpoints());
     endpoints.extend(session_evidence::endpoints());
+    endpoints.extend(prompt_audit::endpoints());
     endpoints.extend(server_campaigns::endpoints());
     endpoints
 }

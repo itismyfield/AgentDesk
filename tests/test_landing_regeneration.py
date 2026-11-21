@@ -53,6 +53,15 @@ for name in ('route-inventory', 'worker-inventory', 'env-reference', 'cli-refere
         self.write("scripts/generate_inventory_docs.py", generator)
         self.write("scripts/generate_env_reference.py", "")
         self.write("scripts/generate_cli_reference.py", "")
+        self.write("scripts/generate_user_feature_map.py", """
+from argparse import ArgumentParser
+from pathlib import Path
+parser = ArgumentParser()
+parser.add_argument('--write', action='store_true', required=True)
+parser.add_argument('--base-ref', required=True)
+parser.add_argument('--markdown-output', type=Path, required=True)
+parser.parse_args().markdown_output.write_text('canonical\\n')
+""")
         self.write("docs/e2e-continuous/bundles.schema1.json", json.dumps({
             "execution_contract": {"missing_precondition_witness": "UNEVALUABLE"},
             "scenario_catalog": {"old": {}},
@@ -78,12 +87,13 @@ p.write_text(json.dumps(data)+'\\n')
         self.assertEqual(done.returncode, expected, done.stdout + done.stderr)
         return done
 
-    def run_regen(self, expected: int = 0, check: bool = False, check_merge: bool = False) -> dict:
+    def run_regen(self, expected: int = 0, check: bool = False, check_merge: bool = False,
+                  pr_head: bool = False) -> dict:
         self.count += 1
         artifact = self.root / f"artifacts/{self.count}"
         done = subprocess.run([sys.executable, str(SCRIPT), "--worktree", str(self.root),
                                "--artifact-dir", str(artifact), *(["--check"] if check else []),
-                               *(["--check-merge"] if check_merge else [])],
+                               *(["--check-merge"] if check_merge else []), *(["--pr-head"] if pr_head else [])],
                               text=True, capture_output=True)
         self.assertEqual(done.returncode, expected, done.stdout + done.stderr)
         report = json.loads((artifact / "manifest.json").read_text())
@@ -231,6 +241,35 @@ p.write_text(json.dumps(data)+'\\n')
             with self.subTest(data=data), self.assertRaises(ValueError):
                 REGEN.json_manual_bytes(data, ("scenario_catalog",))
 
+    def test_landing_check_rejects_only_stale_feature_map_markdown(self) -> None:
+        self.run_regen()
+        name = "docs/user-feature-map.md"
+        self.write(name, "stale\n")
+        self.git("add", "docs", "ARCHITECTURE.md", "scripts/generate_user_feature_map.py")
+        self.git("commit", "-qm", "stale feature map only")
+        report = self.run_regen(expected=1, check=True)
+        self.assertEqual(report["status"], "DRIFT")
+        self.assertIn(name, (self.root / "artifacts/2/head.diff").read_text())
+        self.assertFalse((self.root / "docs/generated/user-feature-coverage.json").exists())
+        self.write(name, "stale\n")
+        before = self.run_regen(check=True, pr_head=True)
+        self.assertEqual(before["status"], "REGEN_OK")
+        self.assertNotIn(name, before["files"])
+        self.assertEqual((self.root / name).read_text(), "stale\n")
+        self.git("rm", "-f", name)
+        self.git("commit", "-qm", "missing feature map")
+        missing = self.run_regen(expected=1, check=True)
+        self.assertEqual(missing["head_missing_outputs"], [name])
+
+    def test_landing_rejects_successful_writer_without_feature_map_output(self) -> None:
+        self.run_regen()
+        self.git("add", "ARCHITECTURE.md", "docs")
+        self.git("commit", "-qm", "clean generated documents")
+        self.write("scripts/generate_user_feature_map.py", "")
+        report = self.run_regen(expected=2, check=True)
+        self.assertEqual(report["status"], "CHECK_FAIL")
+        self.assertIn("landing-feature-map.md", report["error"])
+
     def test_generator_failure_is_not_no_change(self) -> None:
         self.write("scripts/generate_env_reference.py", "raise SystemExit(9)\n")
         report = self.run_regen(expected=2, check=True)
@@ -331,7 +370,7 @@ class LandingRequiredCI(unittest.TestCase):
         self.assertIn("set -euo pipefail", gate["run"])
         self.assertIn('git worktree add --detach "$RUNNER_TEMP/landing-regen-head" "$PR_HEAD_SHA"', gate["run"])
         self.assertEqual(gate["env"]["PR_HEAD_SHA"], "${{ github.event.pull_request.head.sha }}")
-        self.assertIn("python3 scripts/landing/regen_after_merge.py --check", gate["run"])
+        self.assertIn("python3 scripts/landing/regen_after_merge.py --check --pr-head", gate["run"])
         upload = next(step for step in steps if step.get("name") == "Upload landing regeneration diff")
         self.assertEqual(upload["if"], "always()")
         self.assertEqual(upload["uses"], "actions/upload-artifact@v4")

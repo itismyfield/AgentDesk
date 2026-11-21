@@ -111,6 +111,24 @@ pub(crate) async fn run_herdr_cancel(
     Some(wire)
 }
 
+/// Stops the holder turn named by a row the agent route selected.
+#[cfg(unix)]
+pub(crate) async fn run_herdr_agent_stop(
+    registry: &crate::services::discord::health::HealthRegistry,
+    expected: &crate::services::agents::turn::AgentHerdrStop,
+) -> Option<serde_json::Value> {
+    let owner = &expected.execution.owner;
+    let provider = ProviderKind::from_str(&owner.provider)?;
+    let channel = owner.channel_id.parse::<u64>().ok().filter(|id| *id != 0)?;
+    let channel = ChannelId::new(channel);
+    let shared = registry
+        .shared_for_provider_on_channel(&provider, channel)
+        .await?;
+    let stop =
+        turn_bridge::ChannelStop::herdr_agent_stop(&shared, &provider, channel, expected).await?;
+    Some(StopReply { stop }.wire())
+}
+
 /// What `/stop` answers once its owner took the cancel: a Herdr holder's answer as it is, and
 /// "stopping" for a cancel that carries none.
 pub(in crate::services::discord) fn remote_cancel_reply(answer: &serde_json::Value) -> String {
