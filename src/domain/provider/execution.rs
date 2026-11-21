@@ -8,7 +8,7 @@ pub enum StreamJsonDialectId {
 }
 
 impl StreamJsonDialectId {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn provider_id(self) -> &'static str {
         match self {
             Self::Grok => "grok",
@@ -37,7 +37,7 @@ impl ProviderExecutionAdapter {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn provider_id(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -100,7 +100,7 @@ pub enum ProviderCompactionAdapter {
 }
 
 impl ProviderCompactionAdapter {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn provider_id(self) -> &'static str {
         match self {
             Self::ClaudeEnvironment => "claude",
@@ -122,7 +122,7 @@ pub enum ProviderReadinessAdapter {
 }
 
 impl ProviderReadinessAdapter {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const fn provider_id(self) -> &'static str {
         match self {
             Self::Claude => "claude",

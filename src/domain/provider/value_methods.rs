@@ -124,7 +124,7 @@ impl ProviderKind {
     /// Claude intentionally has no generic percent environment variable: its
     /// launch path resolves a model-aware absolute
     /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from launch provenance instead.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
         let Some(adapter) = self.compaction_adapter() else {
             return Vec::new();
@@ -177,7 +177,7 @@ impl ProviderKind {
             .unwrap_or(false)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn managed_tmux_wrapper_subcommand(&self) -> Option<&'static str> {
         self.catalog_entry()
             .and_then(|entry| entry.managed_tmux_wrapper_subcommand)

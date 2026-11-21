@@ -1,0 +1,42 @@
+[package]
+name = "adk-base"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "../../src/adk_base_lib.rs"
+
+[features]
+# Parent tests drive the fault and probe hooks inside these modules; the parent
+# enables this only through its dev-dependency, so release builds never carry it.
+test-support = []
+
+[dependencies]
+dirs = "6.0.0"
+hex = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# The root package's lint table is not inherited by workspace members; keep the
+# same gates here so the seed modules stay under them after leaving the parent.
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+correctness = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+drop_non_drop = "deny"
+mistyped_literal_suffixes = "deny"
+large_enum_variant = "deny"
+result_large_err = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"

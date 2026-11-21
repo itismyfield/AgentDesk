@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "adk-base"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "adk-store"
 version = "0.1.0"
 dependencies = [
@@ -25,6 +40,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agentdesk"
 version = "0.1.3"
 dependencies = [
+ "adk-base",
  "adk-store",
  "anyhow",
  "async-trait",
