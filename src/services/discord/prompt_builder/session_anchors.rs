@@ -33,6 +33,10 @@ impl BuiltSystemPrompt {
         mut self,
         request: SessionAnchorRequest<'_>,
     ) -> Self {
+        let agy_launch_channel = (!self.inspection
+            && matches!(request.provider, ProviderKind::Antigravity)
+            && (request.fresh || request.session_id.is_none()))
+        .then_some(request.channel_id);
         let anchors = if self.inspection {
             request.peek_prompt()
         } else {
@@ -41,6 +45,17 @@ impl BuiltSystemPrompt {
         if let Some((anchors, count)) = anchors {
             self.anchor_count = count;
             self.append_anchor_layer(&anchors);
+            if let Some(channel_id) = agy_launch_channel {
+                tracing::info!(
+                    channel_id,
+                    turn_id = self
+                        .manifest
+                        .as_ref()
+                        .map(|manifest| manifest.turn_id.as_str()),
+                    anchor_count = count,
+                    "attached Memento anchors to Antigravity launch system prompt"
+                );
+            }
         }
         self
     }
@@ -73,6 +88,186 @@ impl BuiltSystemPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::settings::MemoryBackendKind;
+    use crate::services::memory::with_memento_test_endpoint;
+    use crate::services::stream_json_cli::{
+        dialects::agy, policy::ConfiguredToolPolicy, request::ProviderTurnRequest,
+        session::ProviderSessionToken,
+    };
+    use axum::{Json, Router, routing::post};
+    use serde_json::{Value, json};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    const AGY_SESSION: &str = "96bb7a8b-4c99-49bb-8917-4979bc776ee4";
+
+    async fn with_memento_fixture(run: impl AsyncFnOnce(Arc<Mutex<Vec<Value>>>, &Path)) {
+        let workspace = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let app = Router::new().route(
+            "/mcp",
+            post(move |Json(request): Json<Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    let result = if request["method"] == "initialize" {
+                        json!({})
+                    } else {
+                        assert_eq!(request["method"], "tools/call");
+                        assert_eq!(request["params"]["name"], "context");
+                        let call = {
+                            let mut calls = recorded.lock().unwrap();
+                            calls.push(request["params"]["arguments"].clone());
+                            calls.len()
+                        };
+                        let content = format!("합성 anchor {call}");
+                        let payload = json!({
+                            "anchorCount": 1,
+                            "anchors": {"permanent": [{"content": content}]},
+                            "injectionText": format!("[ANCHOR MEMORY]\n- {content}")
+                        });
+                        json!({"content": [{"type": "text", "text": payload.to_string()}]})
+                    };
+                    (
+                        [("mcp-session-id", "fixture-session")],
+                        Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": result})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        with_memento_test_endpoint(endpoint, run(calls, workspace.path())).await;
+        server.abort();
+    }
+
+    async fn agy_turn_argv(
+        workspace: &Path,
+        channel: u64,
+        session_id: Option<&str>,
+        fresh: bool,
+    ) -> Vec<String> {
+        let channel = ChannelId::new(channel);
+        let provider = ProviderKind::Antigravity;
+        let settings = ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            memory_group: Some("anchor-fixture".into()),
+            ..Default::default()
+        };
+        let current_path = workspace.to_str().unwrap();
+        let built = {
+            let _root = crate::config::set_agentdesk_root_for_test(workspace);
+            build_system_prompt_with_manifest(
+                "fixture context",
+                &[],
+                current_path,
+                channel,
+                channel,
+                "fixture-token",
+                None,
+                false,
+                PromptProfiles::headless(DispatchProfile::Full),
+                None,
+                None,
+                None,
+                None,
+                Some(&settings),
+                true,
+                false,
+                None,
+                None,
+                Some("fixture-turn"),
+            )
+        };
+        let built = built
+            .with_session_anchors(SessionAnchorRequest {
+                settings: &settings,
+                provider: &provider,
+                current_path,
+                channel_id: channel.get(),
+                memory_scope_channel_id: channel.get(),
+                role_binding: None,
+                session_id,
+                fresh,
+            })
+            .await;
+        let system_prompt = crate::services::provider::system_prompt_for_provider_turn(
+            &provider,
+            session_id,
+            &built.system_prompt,
+        );
+        agy::build_argv(&ProviderTurnRequest {
+            provider: provider.clone(),
+            prompt: "fixture question".into(),
+            system_prompt: system_prompt.map(str::to_owned),
+            tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),
+            model: None,
+            reasoning_effort: None,
+            working_directory: workspace.to_owned(),
+            session: session_id.map(ProviderSessionToken::new_opaque),
+            timeout: Duration::from_secs(1),
+            cancel: None,
+            auth_overlay: crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                provider,
+            ),
+        })
+        .unwrap()
+    }
+
+    fn agy_envelope_system(argv: &[String]) -> &str {
+        let envelope = argv.windows(2).find(|pair| pair[0] == "--print").unwrap()[1].as_str();
+        let (header, body) = envelope.split_once("\nSYSTEM:\n").unwrap();
+        let (system, _) = body.split_once("\nEND_SYSTEM\nUSER:\n").unwrap();
+        assert_eq!(header, format!("SYSTEM_LEN={}", system.len()));
+        system
+    }
+
+    #[tokio::test]
+    async fn fresh_agy_session_envelope_contains_memento_anchors_and_scope_hints() {
+        with_memento_fixture(async |calls, workspace| {
+            let argv = agy_turn_argv(workspace, 7_378_903, None, true).await;
+            let system = agy_envelope_system(&argv);
+            assert!(system.contains("[Proactive Memory Guidance]"));
+            assert!(system.contains("- scope hints: read=`workspace=anchor-fixture, agentId="));
+            assert!(
+                system.contains("[Memento anchor context]"),
+                "missing Memento anchor block"
+            );
+            assert!(
+                system.contains("[ANCHOR MEMORY]\n- 합성 anchor 1\n\n[End Memento anchor context]")
+            );
+            assert!(!argv.iter().any(|arg| arg == "--conversation"));
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["workspace"], "anchor-fixture");
+            assert_eq!(calls[0]["tokenBudget"], 1_000);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agy_session_anchors_reuse_cache_and_reload_on_fresh_turn() {
+        with_memento_fixture(async |calls, workspace| {
+            let channel = 7_378_904;
+            let first = agy_turn_argv(workspace, channel, None, false).await;
+            assert!(agy_envelope_system(&first).contains("합성 anchor 1"));
+            let followup = agy_turn_argv(workspace, channel, Some(AGY_SESSION), false).await;
+            assert!(
+                followup
+                    .windows(2)
+                    .any(|pair| pair == ["--conversation", AGY_SESSION])
+            );
+            assert!(agy_envelope_system(&followup).contains("합성 anchor 1"));
+            assert_eq!(calls.lock().unwrap().len(), 1);
+
+            let fresh = agy_turn_argv(workspace, channel, None, true).await;
+            assert!(agy_envelope_system(&fresh).contains("합성 anchor 2"));
+            assert_eq!(calls.lock().unwrap().len(), 2);
+        })
+        .await;
+    }
 
     #[test]
     fn session_anchors_use_native_codex_developer_instructions() {

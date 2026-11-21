@@ -344,7 +344,10 @@ pub(crate) async fn load_session_anchor_prompt(
         session_id,
         fresh,
     } = request;
-    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
+    if !matches!(
+        provider,
+        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Antigravity
+    ) {
         return None;
     }
     let key = (
