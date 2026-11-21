@@ -4,7 +4,7 @@
 
 ## 질문
 
-시작한 턴은 결국 메일박스를 놓는가(`MailboxEventuallyReleased == <>[](~token)`).
+시작한 턴은 결국 메일박스를 놓는가(PROPERTY `MailboxEventuallyReleased`: 어느 시점부터 토큰이 계속 없다).
 `TurnFinalizer identity-guarded mailbox release skipped ... active_user_message_id=0`이 찍힌 뒤 메일박스가 풀리지 않는 경로를 찾는다.
 
 ## 모델
