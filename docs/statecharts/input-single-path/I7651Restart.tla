@@ -16,7 +16,7 @@ CBSweepNext == CBLook \/ CBNativeEnds \/ CBPaste \/ CBSettle \/ CBNothingLeft \/
 RestartInit == /\ CBSweepInit /\ boots = 0
         /\ \E interrupted \in SUBSET Episodes :
              restartNotices = [e \in Episodes |-> [interrupted |-> e \in interrupted,
-                 phase |-> "unseen", copies |-> 0, mayMiss |-> TRUE]]
+                 phase |-> "unseen", copies |-> 0, mayMiss |-> TRUE, fresh |-> TRUE]]
 
 RecoverNotice(e) ==
     /\ restartNotices[e].phase = "unseen"
@@ -29,10 +29,16 @@ Prepare(e) ==
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "prepared"]
     /\ UNCHANGED <<vars, boots>>
 
-(* Two copies already break the rule; the bound keeps a mutant's state space finite. *)
+(* The POST lands while the durable record still says Prepared; its answer comes later.
+   Two copies already break the rule; the bound keeps a mutant's state space finite. *)
 Create(e) ==
     /\ restartNotices[e].phase = "prepared" /\ restartNotices[e].copies < 2
-    /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "uncertain", ![e].copies = @ + 1]
+    /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "inflight", ![e].copies = @ + 1]
+    /\ UNCHANGED <<vars, boots>>
+
+Answer(e) ==
+    /\ restartNotices[e].phase = "inflight"
+    /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "uncertain"]
     /\ UNCHANGED <<vars, boots>>
 
 MissBeforeCreate(e) ==
@@ -40,10 +46,12 @@ MissBeforeCreate(e) ==
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase = "uncertain", ![e].mayMiss = FALSE]
     /\ UNCHANGED <<vars, boots>>
 
-(* A decisive answer: the exact POST response or a certain non-send. It may never come. *)
+(* A decisive answer: the exact POST response or a certain non-send. It may never come. A
+   non-send is certain only to the process that held the request, or to a decisive port. *)
 Resolve(e) ==
     /\ Mut # "unknownForever"
     /\ restartNotices[e].phase = "uncertain"
+    /\ restartNotices[e].copies > 0 \/ restartNotices[e].fresh \/ Mut = "decisive"
     /\ restartNotices' = [restartNotices EXCEPT ![e].phase =
          IF restartNotices[e].copies = 0 THEN "owed" ELSE "closed"]
     /\ UNCHANGED <<vars, boots>>
@@ -57,17 +65,18 @@ GiveUp(e) ==
          IF Mut = "notFoundRetry" THEN "owed" ELSE "unknown"]
     /\ UNCHANGED <<vars, boots>>
 
-(* The model's delivery port resolves an uncertain request before permitting
-   any new create. One repeat boot may lose the prepared send permission while
-   retaining its receipt or the fact that delivery is uncertain. *)
+(* As the writer's settle_open: a durable Prepared, whether or not its POST landed, is only
+   settled from history after one repeat boot, never prepared again. *)
 Reboot ==
     /\ boots = 0
     /\ boots' = 1
     /\ restartNotices' = [e \in Episodes |->
         IF restartNotices[e].phase = "uncertain" /\ Mut = "blindRetry"
         THEN [restartNotices[e] EXCEPT !.phase = "prepared"]
-        ELSE IF restartNotices[e].phase = "prepared"
-             THEN [restartNotices[e] EXCEPT !.phase = "owed"]
+        ELSE IF restartNotices[e].phase \in {"prepared", "inflight", "uncertain"}
+             THEN [restartNotices[e] EXCEPT !.phase =
+                      IF Mut = "rebootReowe" /\ @ # "uncertain" THEN "owed" ELSE "uncertain",
+                  !.fresh = FALSE]
              ELSE restartNotices[e]]
     /\ UNCHANGED vars
 
@@ -78,8 +87,8 @@ DropInput ==
     /\ UNCHANGED <<ObserverLegacy, restartNotices, boots>>
 
 RestartNext == Queue \/ Reboot \/ DropInput
-        \/ \E e \in Episodes : RecoverNotice(e) \/ Prepare(e) \/ Create(e) \/ MissBeforeCreate(e) \/ Resolve(e)
-            \/ GiveUp(e)
+        \/ \E e \in Episodes : RecoverNotice(e) \/ Prepare(e) \/ Create(e) \/ Answer(e)
+            \/ MissBeforeCreate(e) \/ Resolve(e) \/ GiveUp(e)
 RestartSpec == RestartInit /\ [][RestartNext]_restartVars
     /\ WF_restartVars(CBLook /\ UNCHANGED <<restartNotices, boots>>)
     /\ WF_restartVars(CBNativeEnds /\ UNCHANGED <<restartNotices, boots>>)
@@ -89,9 +98,10 @@ RestartSpec == RestartInit /\ [][RestartNext]_restartVars
     /\ \A e \in Episodes : WF_restartVars(RecoverNotice(e))
                           /\ WF_restartVars(Prepare(e))
                           /\ WF_restartVars(Create(e))
+                          /\ WF_restartVars(Answer(e))
                           /\ WF_restartVars(Resolve(e) \/ GiveUp(e))
 
-(* P2-1: duplicate suppression holds in every state; delivery is claimed only when closed. *)
+(* Duplicate suppression holds in every state; delivery is claimed only when closed. *)
 NoticeAtMostOnce == \A e \in Episodes :
     restartNotices[e].copies <= (IF restartNotices[e].interrupted THEN 1 ELSE 0)
 ClosedNoticeWasDelivered == \A e \in Episodes :

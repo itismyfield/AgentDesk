@@ -4,7 +4,7 @@
 use super::*;
 use crate::services::claude::herdr_turn::TurnRead;
 use crate::services::tui_o::shadow::ShadowProvider;
-use crate::services::tui_o::store::restart_notice::Intent;
+use crate::services::tui_o::store::restart_notice::{Card, Intent};
 
 /// The input's own turn: its terminal, none, or nothing that names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +89,40 @@ fn restart_intent(provider: &ProviderKind, row: &inflight::InflightTurnState) ->
         _ => return None,
     };
     let nonce = row.turn_nonce.as_deref();
-    Intent::exact(row.channel_id, shadow, nonce, row.born_generation)
+    let text = crate::services::tui_o::writer::restart_notice::text(&row.user_text);
+    let mut intent = Intent::exact(row.channel_id, shadow, nonce, row.born_generation, text)?;
+    intent.card = (row.current_msg_id != 0).then(|| Card {
+        msg_id: row.current_msg_id,
+        marker: interrupted_recovery_message(row, ""),
+    });
+    Some(intent)
+}
+
+/// Seals the notice under the input's original admission, so a managed channel's output check
+/// admits it; with none found it stays unstamped and that check decides.
+pub(super) async fn with_origin(
+    pool: &sqlx::PgPool,
+    provider: &ProviderKind,
+    row: &inflight::InflightTurnState,
+    mut intent: Intent,
+) -> Intent {
+    use crate::services::cluster::intake_router_hook::owner_record::output::source_artifact;
+    let (channel, message) = (row.channel_id.to_string(), row.user_msg_id.to_string());
+    let found = source_artifact(
+        Some(pool),
+        provider.as_str(),
+        &channel,
+        &message,
+        None,
+        &intent.text,
+    );
+    match found.await {
+        Ok(origin) => intent.origin = origin,
+        Err(error) => {
+            tracing::warn!(channel_id = row.channel_id, %error, "restart notice unsealed")
+        }
+    }
+    intent
 }
 
 /// The neutral notice after the row's saved partial, which it never calls complete.

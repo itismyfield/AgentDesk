@@ -241,6 +241,7 @@ async fn settle_row(
     if let Settle::Restart(intent) = &settle {
         diagnostics::phase(provider, channel.get(), "restart_notice");
         let root = crate::config::runtime_root().ok_or("runtime_root_unavailable")?;
+        let intent = &outcome::with_origin(pool, provider, &row, intent.clone()).await;
         if let Err(error) = crate::services::tui_o::store::restart_notice::record(&root, intent) {
             tracing::warn!(channel_id = row.channel_id, %error, "restart notice not recorded");
             return Err("restart_notice_unrecorded");

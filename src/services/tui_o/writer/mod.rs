@@ -131,6 +131,29 @@ pub trait DiscordPort: Send + Sync + 'static {
         channel: u64,
         id: u64,
     ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send;
+
+    /// Whether `post_origin` would admit this payload, asked without starting a request.
+    fn output_admits(
+        &self,
+        _channel: u64,
+        _content: &str,
+        origin: Option<
+            &crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+    ) -> impl Future<Output = Result<(), Withhold>> + Send {
+        let refused =
+            origin.map(|_| Withhold::Refused("writer has no execution owner scope".into()));
+        std::future::ready(refused.map_or(Ok(()), Err))
+    }
+}
+
+/// Why an output authority declines a payload before any request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Withhold {
+    /// A certain refusal: the same payload is never admitted.
+    Refused(String),
+    /// The authority could not be read; asking again may admit it.
+    Later(String),
 }
 
 /// The channel's shared delivery lease, held from before admission until the result is recorded

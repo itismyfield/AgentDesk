@@ -3,12 +3,33 @@
 
 use super::deliver::ChannelWriter;
 use super::pieces::PieceWork;
-use super::{AlarmSink, DeliveryLease, DiscordPort};
+use super::{AlarmSink, DeliveryLease, DiscordPort, Withhold};
 use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome};
 use crate::services::tui_o::store::restart_notice::{self, Intent};
 
 pub(crate) const TEXT: &str = "재시작으로 턴이 끊겼습니다.";
+const QUOTE_CHARS: usize = 60;
+
+/// Names the cut request by its first line, without mentions or markdown that could reformat it.
+pub(crate) fn text(request: &str) -> String {
+    let line = request.lines().map(str::trim).find(|line| !line.is_empty());
+    let clean = |c: char| match c {
+        '`' | '*' | '_' | '~' | '|' | '>' | '<' => None,
+        '@' => Some('＠'),
+        c => Some(c),
+    };
+    let quote: String = line.unwrap_or("").chars().filter_map(clean).collect();
+    let quote = quote.trim();
+    match quote.chars().count() {
+        0 => TEXT.to_string(),
+        n if n > QUOTE_CHARS => {
+            let cut: String = quote.chars().take(QUOTE_CHARS).collect();
+            format!("{TEXT} (요청: {}…)", cut.trim_end())
+        }
+        _ => format!("{TEXT} (요청: {quote})"),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Notice {
@@ -17,6 +38,8 @@ pub(crate) enum Notice {
     Refused(u16),
     /// The POST may exist but history could not prove it; no second CREATE.
     Unknown,
+    /// The channel's output authority refused it before any request; nothing was posted.
+    Withheld(String),
     /// Not yet admitted, or the open attempt is still settling.
     Pending,
 }
@@ -54,11 +77,33 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if let Some(notice) = settled(self.store().ledger(), &key) {
             return notice;
         }
+        // The cut marker an earlier relay left on this episode's own card is the notice shown.
+        if let Some(card) = &intent.card {
+            match self.port().message(intent.channel, card.msg_id).await {
+                Ok(Some(seen))
+                    if seen.author_id == self.port().bot_id() && seen.content == card.marker =>
+                {
+                    return Notice::Delivered(seen.id);
+                }
+                Ok(_) => {}
+                Err(_) => return Notice::Pending,
+            }
+        }
+        let origin = intent.origin.as_ref();
+        match self
+            .port()
+            .output_admits(intent.channel, &intent.text, origin)
+            .await
+        {
+            Ok(()) => {}
+            Err(Withhold::Refused(reason)) => return Notice::Withheld(reason),
+            Err(Withhold::Later(_)) => return Notice::Pending,
+        }
         let piece = PieceWork {
             unit_key: key.clone(),
             index: 0,
-            payload: TEXT.to_string(),
-            output_origin: None,
+            payload: intent.text.clone(),
+            output_origin: intent.origin.clone(),
             notice_origin: None,
         };
         self.send_piece(&piece, None, None, None).await;

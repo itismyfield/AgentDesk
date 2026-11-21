@@ -396,6 +396,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         self.channel
     }
 
+    pub(super) fn port(&self) -> Arc<P> {
+        Arc::clone(&self.port)
+    }
+
     pub fn is_stopped(&self) -> bool {
         self.stopped.is_some()
     }

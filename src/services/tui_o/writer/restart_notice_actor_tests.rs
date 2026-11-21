@@ -8,7 +8,8 @@ async fn the_actor_posts_a_recorded_restart_notice_once_across_a_restart() {
     let (harness, _, _) = switched_over(&row("m0", "before"));
     harness.gate.acquired();
     let root = harness._runtime.path().to_path_buf();
-    let intent = Intent::exact(CHANNEL, ShadowProvider::Claude, Some("cut-turn"), 4).unwrap();
+    let claude = ShadowProvider::Claude;
+    let intent = Intent::exact(CHANNEL, claude, Some("cut-turn"), 4, TEXT.into()).unwrap();
     for boot in 0..2 {
         restart_notice::record(&root, &intent).unwrap();
         restart_notice::record(&root, &intent).unwrap();

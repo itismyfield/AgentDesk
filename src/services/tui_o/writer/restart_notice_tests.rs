@@ -6,7 +6,14 @@ use crate::services::tui_o::store::restart_notice::{self, Intent};
 use crate::services::tui_o::writer::restart_notice::{Notice, TEXT, unit_key};
 
 fn intent() -> Intent {
-    Intent::exact(CHANNEL, ShadowProvider::Claude, Some("cut-turn"), 4).unwrap()
+    Intent::exact(
+        CHANNEL,
+        ShadowProvider::Claude,
+        Some("cut-turn"),
+        4,
+        TEXT.into(),
+    )
+    .unwrap()
 }
 
 fn fixture() -> Harness {
@@ -135,10 +142,36 @@ async fn a_busy_lease_keeps_the_intent_pending() {
 #[test]
 fn an_episode_without_its_exact_identity_names_no_intent() {
     let claude = ShadowProvider::Claude;
-    assert!(Intent::exact(CHANNEL, claude, None, 4).is_none());
-    assert!(Intent::exact(CHANNEL, claude, Some(" "), 4).is_none());
-    assert!(Intent::exact(CHANNEL, claude, Some("cut-turn"), 0).is_none());
-    assert!(Intent::exact(0, claude, Some("cut-turn"), 4).is_none());
-    let other = Intent::exact(CHANNEL, claude, Some("cut-turn"), 5).unwrap();
+    assert!(Intent::exact(CHANNEL, claude, None, 4, TEXT.into()).is_none());
+    assert!(Intent::exact(CHANNEL, claude, Some(" "), 4, TEXT.into()).is_none());
+    assert!(Intent::exact(CHANNEL, claude, Some("cut-turn"), 0, TEXT.into()).is_none());
+    assert!(Intent::exact(0, claude, Some("cut-turn"), 4, TEXT.into()).is_none());
+    assert!(Intent::exact(CHANNEL, claude, Some("cut-turn"), 4, " ".into()).is_none());
+    let other = Intent::exact(CHANNEL, claude, Some("cut-turn"), 5, TEXT.into()).unwrap();
     assert_ne!(other.key(), intent().key());
+}
+
+/// The cut marker an earlier relay left on the episode's own card is the notice already shown;
+/// another author's or another text on that card is not.
+#[tokio::test]
+async fn the_episodes_own_card_marker_counts_as_its_notice() {
+    for (author, shown, posts) in [(BOT, "끊김", 0), (BOT + 1, "끊김", 1), (BOT, "⠋", 1)] {
+        let harness = fixture();
+        let (msg_id, marker, mut cut) =
+            (harness.port.say(author, shown).id, "끊김".into(), intent());
+        cut.card = Some(restart_notice::Card { msg_id, marker });
+        restart_notice::record(root(&harness), &cut).unwrap();
+        harness.writer().deliver_restart_notices().await;
+        assert_eq!(harness.port.posts().len(), posts, "{author} {shown}");
+        assert!(restart_notice::pending(root(&harness), CHANNEL).is_empty());
+    }
+}
+
+/// The notice names the cut request by its first line and never pings or reformats.
+#[test]
+fn the_notice_names_its_request_without_mentions() {
+    use super::super::restart_notice::text;
+    let named = text("\n  @everyone `fix` the build\nmore");
+    assert_eq!(named, format!("{TEXT} (요청: ＠everyone fix the build)"));
+    assert_eq!(text(" \n"), TEXT);
 }

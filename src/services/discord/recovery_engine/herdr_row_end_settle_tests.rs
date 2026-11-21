@@ -586,7 +586,13 @@ fn an_o_owned_cut_turn_hands_its_restart_notice_to_the_writer_pg() {
             assert_card_deleted(&run).await;
             let nonce = run.row.turn_nonce.as_deref();
             let born = run.row.born_generation;
-            let intent = Intent::exact(CUT, ShadowProvider::Claude, nonce, born).unwrap();
+            let text = crate::services::tui_o::writer::restart_notice::text(&run.row.user_text);
+            let mut intent = Intent::exact(CUT, ShadowProvider::Claude, nonce, born, text).unwrap();
+            let (msg_id, marker) = (
+                run.row.current_msg_id,
+                interrupted_recovery_message(&run.row, ""),
+            );
+            intent.card = Some(restart_notice::Card { msg_id, marker });
             let root = crate::config::runtime_root().unwrap();
             assert_eq!(restart_notice::pending(&root, CUT), [intent]);
             // The next input starts without waiting on the notice's post.

@@ -11,12 +11,14 @@ use sha2::{Digest, Sha256};
 
 use super::{ChannelStore, STORE_DIR_NAME};
 use crate::domain::file_sync::fsync_parent_dir;
+use crate::services::cluster::intake_router_hook::owner_record::output::Artifact;
 use crate::services::tui_o::shadow::ShadowProvider;
 
 pub(crate) const DIR_NAME: &str = "o_restart_notices";
 static WRITE: Mutex<()> = Mutex::new(());
 
-/// The exact episode a restart cut: the row's channel, provider, turn nonce and born generation.
+/// The exact episode a restart cut (channel, provider, turn nonce, born generation) and the
+/// one payload it may post, fixed when the episode is recorded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
@@ -24,6 +26,18 @@ pub(crate) struct Intent {
     pub provider: ShadowProvider,
     pub turn_nonce: String,
     pub born_generation: u64,
+    pub text: String,
+    /// The episode's own placeholder and the cut marker an earlier relay may have left on it.
+    pub card: Option<Card>,
+    /// The original input's admission sealed for `text`; never the channel's current owner.
+    pub origin: Option<Artifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Card {
+    pub msg_id: u64,
+    pub marker: String,
 }
 
 impl Intent {
@@ -33,15 +47,19 @@ impl Intent {
         provider: ShadowProvider,
         turn_nonce: Option<&str>,
         born_generation: u64,
+        text: String,
     ) -> Option<Self> {
         let turn_nonce = turn_nonce
             .map(str::trim)
             .filter(|nonce| !nonce.is_empty())?;
-        (channel != 0 && born_generation != 0).then(|| Self {
+        (channel != 0 && born_generation != 0 && !text.trim().is_empty()).then(|| Self {
             channel,
             provider,
             turn_nonce: turn_nonce.to_string(),
             born_generation,
+            text,
+            card: None,
+            origin: None,
         })
     }
 
@@ -73,8 +91,10 @@ pub(crate) fn record(root: &Path, intent: &Intent) -> Result<(), String> {
         intent.provider,
         Some(&intent.turn_nonce),
         intent.born_generation,
+        intent.text.clone(),
     );
-    if exact.as_ref() != Some(intent) {
+    let card = intent.card.as_ref().is_none_or(|card| card.msg_id != 0);
+    if exact.is_none_or(|exact| exact.turn_nonce != intent.turn_nonce) || !card {
         return Err("restart notice has no exact episode".into());
     }
     let bytes = serde_json::to_vec(intent).map_err(|error| error.to_string())?;

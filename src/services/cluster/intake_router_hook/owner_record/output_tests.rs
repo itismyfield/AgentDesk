@@ -597,3 +597,100 @@ async fn output_origin_database_failure_never_hides_local_denial_pg() {
         );
     }
 }
+
+/// On a managed channel a restart notice posts once under the input's sealed admission; an
+/// unstamped one is withheld before any request, the writer keeps running, and neither repeats.
+#[tokio::test]
+async fn output_origin_restart_notice_posts_only_under_its_sealed_admission_pg() {
+    use crate::services::discord::outbound::o_writer_io::GatewayPort;
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig, restart_notice};
+    use crate::services::tui_o::writer::{AlarmSink, DeliveryLease, WriterAlarm};
+    use crate::services::tui_o::writer::{deliver::ChannelWriter, restart_notice::text};
+    use crate::services::tui_o::{ownership::OwnershipGate, shadow::ShadowProvider};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    struct Lease;
+    impl DeliveryLease for Lease {
+        type Held = ();
+        fn try_acquire(&self, _: u64, _: u64) -> Option<()> {
+            Some(())
+        }
+    }
+    struct Alarms;
+    impl AlarmSink for Alarms {
+        fn raise(&self, _: u64, _: WriterAlarm) {}
+    }
+    let (_db, pool, origin) = fixture("7336960").await;
+    let channel = origin.channel.parse::<u64>().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let seen = posts.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut bytes = vec![0; 16384];
+            let n = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]).to_string();
+            let content = request.split("\r\n\r\n").nth(1).unwrap_or("{}");
+            let content: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+            seen.fetch_add(1, Ordering::SeqCst);
+            let body = json!({"id": "7336961", "channel_id": channel.to_string(),
+                "author": {"id": "42", "username": "o", "discriminator": "0001", "bot": true},
+                "content": content["content"], "timestamp": "2026-11-21T00:00:00.000000+00:00",
+                "edited_timestamp": null, "tts": false, "mention_everyone": false, "mentions": [],
+                "mention_roles": [], "attachments": [], "embeds": [], "pinned": false, "type": 0})
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    let http = Arc::new(
+        poise::serenity_prelude::HttpBuilder::new("fixture-token")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    store
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                policy_parent: None,
+                channel,
+                sources: vec![],
+                initial_anchor: 100,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+            })
+        })
+        .unwrap();
+    let era = store.read_era().unwrap().unwrap();
+    let say = text("original 90001");
+    let (claude, chan) = (ShadowProvider::Claude, origin.channel.as_str());
+    let unstamped = restart_notice::Intent::exact(channel, claude, Some("a"), 3, say.clone());
+    let mut sealed = restart_notice::Intent::exact(channel, claude, Some("b"), 3, say.clone());
+    let artifact = source_artifact(Some(&pool), "claude", chan, "90001", None, &say).await;
+    sealed.as_mut().unwrap().origin = artifact.unwrap();
+    for boot in 0..2 {
+        for intent in [&unstamped, &sealed] {
+            restart_notice::record(root.path(), intent.as_ref().unwrap()).unwrap();
+        }
+        let port = Arc::new(GatewayPort::new(http.clone(), 42).with_owner_scope(Scope {
+            pool: pool.clone(),
+            provider: "claude".into(),
+        }));
+        let gate = Arc::new(OwnershipGate::default());
+        gate.reacquired().unwrap();
+        let channel_store = store.open_channel(&era, channel).unwrap().unwrap();
+        let mut writer = ChannelWriter::new(channel_store, gate, port, Lease, Alarms);
+        writer.deliver_restart_notices().await;
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "boot {boot}");
+        assert!(!writer.is_stopped(), "boot {boot}");
+        assert!(restart_notice::pending(root.path(), channel).is_empty());
+    }
+    server.abort();
+}

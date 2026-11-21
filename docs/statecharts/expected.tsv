@@ -610,6 +610,7 @@ input-single-path/I7651RestartDeleteOnly.cfg	I7651Restart	ClosedNoticeWasDeliver
 input-single-path/I7651RestartDropInput.cfg	I7651Restart	NoInputLoss	NextInputEventuallyProcessed
 input-single-path/I7651RestartNoSweep.cfg	I7651Restart	-	NextInputEventuallyProcessed
 input-single-path/I7651RestartNotFoundRetry.cfg	I7651Restart	ClosedNoticeWasDelivered,NoticeAtMostOnce	NoticesEventuallySettled
+input-single-path/I7651RestartRebootReowe.cfg	I7651Restart	ClosedNoticeWasDelivered,NoticeAtMostOnce	-
 input-single-path/I7651RestartUnknownForever.cfg	I7651Restart	-	NoticesEventuallyClosed
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-

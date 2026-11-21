@@ -11,7 +11,7 @@ use super::super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, SharedData,
 use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};
 use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 use crate::services::tui_o::writer::{
-    DeliveryLease, DiscordPort, PostOutcome, SeenMessage, confirm,
+    DeliveryLease, DiscordPort, PostOutcome, SeenMessage, Withhold, confirm,
 };
 
 /// Covers a POST and its settlement, each under its own timeout.
@@ -152,6 +152,34 @@ impl DiscordPort for GatewayPort {
                 .run(request)
                 .await
                 .unwrap_or_else(PostOutcome::Uncertain)
+        }
+    }
+
+    /// The same owner check `post_origin` runs, released at once; a database error asks again.
+    fn output_admits(
+        &self,
+        channel: u64,
+        content: &str,
+        origin: Option<
+            &crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+    ) -> impl Future<Output = Result<(), Withhold>> + Send {
+        use crate::services::cluster::intake_router_hook::owner_record::output;
+        let (scope, content, origin) = (self.owner.clone(), content.to_string(), origin.cloned());
+        async move {
+            let channel = channel.to_string();
+            match output::acquire(scope.as_ref(), &channel, &content, origin.as_ref()).await {
+                Ok(guard) => guard
+                    .run(std::future::ready(()))
+                    .await
+                    .map_err(Withhold::Later),
+                Err(output::AcquireError::Withheld(reason)) => {
+                    Err(Withhold::Refused(reason.into()))
+                }
+                Err(output::AcquireError::Database(error)) => {
+                    Err(Withhold::Later(error.to_string()))
+                }
+            }
         }
     }
 
