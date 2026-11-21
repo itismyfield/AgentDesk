@@ -75,40 +75,6 @@ impl DecisionProvenance {
     }
 }
 
-/// Inserts an approved event with its unstarted workflow, as the service that approves one will.
-#[cfg(test)]
-pub(crate) async fn insert_event_for_tests(
-    pool: &PgPool,
-    (kind, channel, actor): (EventKind, u64, u64),
-    text: &str,
-) -> Uuid {
-    let event_id = Uuid::new_v4();
-    let (kind, origin) = match kind {
-        EventKind::Selection => ("selection", format!("decision:{event_id}")),
-        EventKind::Opinion => ("opinion", format!("decision:{event_id}:opinion:77")),
-    };
-    sqlx::query(
-        "INSERT INTO decision_input_events (event_id, kind, source_key, origin,
-             requester_agent_id, logical_channel_id, actor_user_id, text_sha256)
-         VALUES ($1, $2, $3, $3, 'decision-agent', $4, $5, $6)",
-    )
-    .bind(event_id)
-    .bind(kind)
-    .bind(origin)
-    .bind(channel.to_string())
-    .bind(actor.to_string())
-    .bind(hex::encode(Sha256::digest(text.as_bytes())))
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO decision_delivery_attempts (event_id) VALUES ($1)")
-        .bind(event_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    event_id
-}
-
 pub(crate) async fn load_event(
     pool: &PgPool,
     event_id: Uuid,

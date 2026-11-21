@@ -75,12 +75,12 @@ producer가 없어 운영 경로에서는 실행되지 않는다(`agentdesk::dec
 
 | 모델 전이 | 코드 | 메모 |
 |---|---|---|
-| Claim | `src/db/decisions.rs:171` reserve_first_attempt, 호출 `src/services/discord/health/turn_deliver/decision_target.rs:190` | not_started→resolving UPDATE 승자만 진행. 패자는 AlreadyReserved |
+| Claim | `src/db/decisions.rs:130` reserve_first_attempt, 호출 `src/services/discord/health/turn_deliver/decision_target.rs:190` | not_started→resolving UPDATE 승자만 진행. 패자는 AlreadyReserved |
 | ResolvePresent(busy→queued) | `decision_target.rs:103`(owner가 원본 수용), `:154`(mailbox enqueue) | normal_wait, 원본 1개 |
 | ResolvePresent(idle→prepared) → BeginSend | `decision_target.rs:127` | non-owner 시작은 호출 안에서 쓰므로 may_have_sent를 먼저 기록 |
 | Observe(같은 시도의 증거) | `decision_target.rs:132` | 시작이 첫 prompt로 전달 → delivered. 두 번째 deliver 없음 |
 | QueueRefused → RefusalNormalize | `decision_target.rs:160`, `:208` | enqueue 거절은 미전송 확정 |
-| NormalizeAbsent | `decision_target.rs:204`, `:208` | 채널을 가진 runtime 없음 → resolving→normalizing. PG가 두 번째 정상화를 거절(`src/db/decisions.rs:189`) |
+| NormalizeAbsent | `decision_target.rs:204`, `:208` | 채널을 가진 runtime 없음 → resolving→normalizing. PG가 두 번째 정상화를 거절(`src/db/decisions.rs:148`) |
 | NormalizeSuccess | `decision_target.rs:218` | normalizing→resolving, 다시 현재 대상 해석 |
 | NormalizeSuccess(첫 prompt 전달) | `decision_target.rs:212` | delivered로 끝, 뒤의 start 0 |
 | NormalizeFailure | `decision_target.rs:223` | failed(사유) |

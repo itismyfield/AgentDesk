@@ -376,6 +376,7 @@ src/
 │   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
 │   ├── decision_forums.rs
+│   ├── decisions.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -1861,6 +1862,8 @@ src/
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   ├── test_hook.rs
 │   │   │   │   │   └── turn_mode_reading_tests.rs
+│   │   │   │   ├── decision_target.rs
+│   │   │   │   ├── decision_target_tests.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
@@ -2261,6 +2264,8 @@ src/
 │   │   │   ├── backstop.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
+│   │   │   ├── decision_drain.rs
+│   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
