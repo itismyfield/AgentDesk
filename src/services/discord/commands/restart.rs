@@ -11,7 +11,7 @@ use super::super::{
 };
 
 #[cfg(unix)]
-mod herdr;
+pub(super) mod herdr;
 
 #[cfg(unix)]
 pub(in crate::services::discord) use herdr::seed_permit as herdr_seed_permit;

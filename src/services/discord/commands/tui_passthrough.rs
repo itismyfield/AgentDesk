@@ -89,6 +89,12 @@ pub(super) async fn effort_save_notice(
         Ok(level) => level,
         Err(reason) => return format!("effort를 바꾸지 않았습니다: {reason}"),
     };
+    // A Herdr Codex pane restarts on its own thread; a Herdr Claude pane takes the level in place.
+    #[cfg(unix)]
+    if super::config::herdr_codex(provider, channel_id) {
+        let herdr = super::effort_restart::herdr_notice;
+        return herdr(shared, token, channel_id, provider, level).await;
+    }
     if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
         return match herdr_settings::effort(shared, token, channel_id, level).await {
             // Claude Code keeps `max` for the running session only, unlike the other levels.
@@ -121,9 +127,20 @@ async fn saved_effort_notice(
     channel_id: poise::serenity_prelude::ChannelId,
     level: &str,
 ) -> String {
-    use super::effort_restart::{Restart, restart};
     let saved = format!("effort를 `{level}`로 저장했습니다.");
-    match restart(shared, provider, channel_id).await {
+    let restart = super::effort_restart::restart(shared, provider, channel_id).await;
+    restart_notice(&saved, provider, restart)
+}
+
+/// What a restart after the saved level did, said after `saved`.
+#[cfg(unix)]
+pub(super) fn restart_notice(
+    saved: &str,
+    provider: &ProviderKind,
+    restart: super::effort_restart::Restart,
+) -> String {
+    use super::effort_restart::Restart;
+    match restart {
         Restart::Restarted {
             continues: true,
             told: true,

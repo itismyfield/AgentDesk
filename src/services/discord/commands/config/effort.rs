@@ -130,6 +130,22 @@ fn local_tui(provider: &ProviderKind, channel: serenity::ChannelId) -> bool {
             == ProviderSessionDriver::TuiHosting
 }
 
+/// A Herdr Codex TUI channel: `/effort` ends its exact execution and resumes the thread.
+pub(in crate::services::discord) fn herdr_codex(
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> bool {
+    use crate::services::provider_hosting::{
+        ProviderSessionDriver, resolve_provider_session_selection_with_channel,
+    };
+    matches!(provider, ProviderKind::Codex)
+        && crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && crate::services::turn_host::herdr_turn_switched_on_for(provider)
+        && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
+            .driver
+            == ProviderSessionDriver::TuiHosting
+}
+
 fn not_local(provider: &ProviderKind) -> String {
     format!(
         "/effort는 로컬 {} TUI 채널에서만 저장할 수 있습니다.",
@@ -168,6 +184,8 @@ async fn read_entry_capability<T: Send + 'static>(
                 && driver == ProviderSessionDriver::TuiHosting
             {
                 herdr_claude()
+            } else if herdr_codex(&provider, channel) {
+                for_model(&provider, model.as_deref(), channel, cwd.as_deref())
             } else {
                 refused("Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into())
             }
@@ -224,7 +242,8 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel).await?;
-    if !local_tui(provider, channel) {
+    let local = local_tui(provider, channel);
+    if !local && !herdr_codex(provider, channel) {
         return Err(io::Error::other(not_local(provider)));
     }
     if !EFFORT_LEVELS.contains(&level) {
@@ -263,7 +282,10 @@ pub(in crate::services::discord) async fn update_channel_effort(
     candidate
         .channel_effort_levels
         .insert(key.clone(), level.to_string());
-    candidate.channel_relaunch_pending.insert(key);
+    // A Herdr pane is ended by the command itself; only a local TUI relaunches on the next turn.
+    if local {
+        candidate.channel_relaunch_pending.insert(key);
+    }
     candidate.try_save_bot_settings(token)?;
     super::super::control::forget_relaunch_failures(channel);
     *settings = candidate;

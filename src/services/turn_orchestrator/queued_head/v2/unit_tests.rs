@@ -508,3 +508,58 @@ fn refusing_another_input_keeps_the_unsubmitted_effort_original() {
         assert_eq!(snapshot["refused_inputs"].as_array().unwrap().len(), 1);
     }
 }
+
+/// An idle Herdr effort restart: no turn was cut, the next launch owes its thread a resume.
+fn idle_effort(operation: &str) -> super::super::v2_types::effort_restart::Request {
+    serde_json::from_value(json!({"operation":operation,"native_session":"native-idle",
+        "interrupted_episode":null,"desired_revision":1,"ready":false,
+        "cut":{"tmux":"herdr-logical","herdr":"retired-nonce"}}))
+    .unwrap()
+}
+
+#[test]
+fn an_idle_effort_resume_is_closed_once_by_its_own_operation() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 821_730;
+    let mut owner = owner(channel);
+    let intent = owner
+        .prepare_effort(Some(idle_effort("idle-op")), channel, 5)
+        .unwrap();
+    assert!(intent.continuation.is_none() && intent.pending().is_none());
+    assert_eq!(
+        intent.cut.as_ref().and_then(|cut| cut.herdr.as_deref()),
+        Some("retired-nonce")
+    );
+    assert!(!owner.cancel_effort("another-op").unwrap());
+    assert!(owner.cancel_effort("idle-op").unwrap(), "a failed end closes the owed resume");
+    assert!(!owner.cancel_effort("idle-op").unwrap(), "nothing is left to close");
+    drop(owner);
+    let restored = Owner::adopt(path(channel), "unit".into()).unwrap();
+    assert!(restored.snapshot.effort_restart.unwrap().cancelled);
+}
+
+#[tokio::test]
+async fn clear_closes_an_idle_effort_resume_so_the_next_launch_starts_fresh() {
+    use super::super::super::{ChannelMailboxRegistry, QueuePersistenceContext};
+    let _root = TestRuntimeRootGuard::new();
+    let ctx = || QueuePersistenceContext::new(&ProviderKind::Claude, "v2-unit", None);
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(ChannelId::new(821_731));
+    handle.v2_adopt(path(821_731), "unit".into()).await.unwrap();
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().unwrap();
+            owner.prepare_effort(Some(idle_effort("idle-clear")), 821_731, 5).map(drop)
+        })
+        .await
+        .unwrap();
+    handle.clear(ctx()).await;
+    let cancelled = handle
+        .v2_request(|slot| {
+            let intent = slot.as_ref().unwrap().snapshot.effort_restart.clone();
+            Ok(intent.map(|intent| intent.cancelled))
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled, Some(true), "a clear leaves no resume of the old thread");
+}

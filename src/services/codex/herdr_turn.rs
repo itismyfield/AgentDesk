@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
+use super::CodexLaunchOptions;
 use super::tui_session_launch::{
     codex_herdr_home, codex_herdr_launch_admissible, prepare_codex_herdr_launch,
 };
-use super::{CodexLaunchOptions, codex_reasoning_effort_from_env};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedOwner, HostedRecord, HostedState,
 };
@@ -78,6 +78,8 @@ pub(crate) struct CodexHerdrTurn<'a> {
     pub system_prompt: Option<&'a str>,
     pub allowed_tools: &'a [String],
     pub model: Option<&'a str>,
+    /// The channel's saved effort; without one the environment's default applies.
+    pub effort: Option<&'a str>,
     pub fast_mode: Option<bool>,
     pub goals: Option<bool>,
     pub compact_token_limit: Option<u64>,
@@ -107,6 +109,11 @@ pub(crate) trait CodexHerdrPorts {
     /// The channel's transition lease for resolving `owner`'s unplaced Pending.
     fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
         Err("no channel lease".into())
+    }
+    /// The thread an effort restart owes the channel's next launch.
+    #[cfg(unix)]
+    fn effort_resume(&self) -> Option<restart_intent::EffortResume> {
+        None
     }
 }
 
@@ -185,7 +192,7 @@ fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     CodexLaunchOptions::new("")
         .with_developer_instructions(instructions.as_deref())
         .with_model(turn.model)
-        .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+        .with_reasoning_effort(super::effort::resolve(turn.effort, None).as_deref())
         .with_compact_token_limit(turn.compact_token_limit)
         .with_readonly_mode(is_readonly_tool_policy(tools))
         .with_fast_mode_enabled(turn.fast_mode)
@@ -193,14 +200,25 @@ fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
         .with_cwd(Some(turn.working_dir))
 }
 
-fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLaunch {
-    // Only a new execution of a restart's greeting resumes; a selector alone never does.
+fn launch_of(
+    turn: &CodexHerdrTurn<'_>,
+    provider_root: Option<&Path>,
+    ports: &dyn CodexHerdrPorts,
+) -> Result<HerdrLaunch, String> {
+    // Only a new execution of a restart's greeting or of an effort restart resumes; a selector
+    // alone never does.
     #[cfg(unix)]
-    let resume = provider_root.and_then(|_| restart_intent::resume_of(turn));
+    let resume = match provider_root {
+        Some(_) => restart_intent::resume_of(turn, ports.effort_resume())?,
+        None => None,
+    };
     #[cfg(not(unix))]
-    let resume: Option<(String, _)> = None;
+    let resume: Option<(String, _)> = {
+        let _ = ports;
+        None
+    };
     let (native, resume_start) = resume.unzip();
-    HerdrLaunch {
+    Ok(HerdrLaunch {
         endpoint: Some(turn.endpoint.clone()),
         owner: turn.owner.clone(),
         channel_id: Some(turn.channel_id),
@@ -208,7 +226,7 @@ fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLa
         resume: resume_start.is_some(),
         provider_root: provider_root.map(|home| home.join("sessions")),
         resume_start,
-    }
+    })
 }
 
 /// A new execution; hooks and daemon isolation are judged before its Pending row is written.
@@ -239,7 +257,7 @@ fn fresh_launch(
         write_codex_tui_launch_options_fingerprint(logical, &kept_options(nonce, &options))?;
         Ok(command)
     };
-    let launch = launch_of(turn, Some(&home));
+    let launch = launch_of(turn, Some(&home), ports)?;
     launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
 }
 
@@ -277,7 +295,7 @@ fn pending_launch(
         let never = |_: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
             Err("a pending pane is never created again".into())
         };
-        let launch = launch_of(turn, None);
+        let launch = launch_of(turn, None, ports)?;
         launched(runtime.block_on(launch_herdr_session(turn.pool, launch, never, host)))?;
     }
     Ok(nonce.clone())

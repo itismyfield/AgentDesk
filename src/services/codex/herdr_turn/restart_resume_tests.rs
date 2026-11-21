@@ -1,5 +1,35 @@
 use super::*;
 
+/// Ports that launch nothing; `0` is the effort resume the channel's owner holds.
+pub(super) struct Owed(pub(super) Option<restart_intent::EffortResume>);
+
+impl CodexHerdrPorts for Owed {
+    fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+        None
+    }
+    fn attach(
+        &self,
+        _: &HostedOwner,
+        _: &HostedExecution,
+        _: &SourceId,
+        _: &HerdrTarget,
+    ) -> Result<bool, String> {
+        Err("no attach".into())
+    }
+    fn confirm_bound(
+        &self,
+        _: &HostedOwner,
+        _: &HostedExecution,
+        _: &HerdrTarget,
+    ) -> Result<(), String> {
+        Err("no bound".into())
+    }
+    #[cfg(unix)]
+    fn effort_resume(&self) -> Option<restart_intent::EffortResume> {
+        self.0.clone()
+    }
+}
+
 #[tokio::test]
 async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -35,13 +65,14 @@ async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector()
         system_prompt: None,
         allowed_tools: &[],
         model: None,
+        effort: None,
         fast_mode: None,
         goals: None,
         compact_token_limit: None,
         cancel: None,
         bootstrap: false,
     };
-    let launch = launch_of(&turn, Some(Path::new("/test")));
+    let launch = launch_of(&turn, Some(Path::new("/test")), &Owed(None)).unwrap();
     assert!(
         !launch.resume,
         "only explicit restart intent can request resume"
@@ -60,7 +91,7 @@ mod greeting {
 
     const CHANNEL: u64 = 8_128_002;
 
-    fn owner() -> HostedOwner {
+    pub(super) fn owner() -> HostedOwner {
         HostedOwner {
             provider: "codex".into(),
             discord_token_hash: "greeting-token".into(),
@@ -71,7 +102,7 @@ mod greeting {
         }
     }
 
-    fn retired() -> HostedRecord {
+    pub(super) fn retired() -> HostedRecord {
         let owner = owner();
         let source_ref = SourceRef {
             runtime_root: owner.runtime_root.clone(),
@@ -89,7 +120,7 @@ mod greeting {
     }
 
     /// The ended rollout and the O cursor at `behind` bytes before its EOF.
-    fn ended_source(behind: u64) -> (SourceId, PathBuf) {
+    pub(super) fn ended_source(behind: u64) -> (SourceId, PathBuf) {
         let runtime = crate::config::runtime_root().unwrap();
         let native = uuid::Uuid::new_v4().to_string();
         let root = runtime.join("codex/sessions");
@@ -125,6 +156,14 @@ mod greeting {
     }
 
     fn launch(row: &HostedRecord, greeting: bool) -> HerdrLaunch {
+        launch_owing(row, greeting, None).unwrap()
+    }
+
+    pub(super) fn launch_owing(
+        row: &HostedRecord,
+        greeting: bool,
+        effort: Option<restart_intent::EffortResume>,
+    ) -> Result<HerdrLaunch, String> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused@127.0.0.1/unused")
             .unwrap();
@@ -144,6 +183,7 @@ mod greeting {
             system_prompt: None,
             allowed_tools: &[],
             model: None,
+            effort: None,
             fast_mode: None,
             goals: None,
             compact_token_limit: None,
@@ -151,7 +191,10 @@ mod greeting {
             bootstrap: false,
         };
         let operation = greeting.then(|| "restart-operation".to_string());
-        restart_intent::scope(operation, || launch_of(&turn, Some(Path::new("/test"))))
+        let ports = super::Owed(effort);
+        restart_intent::scope(operation, || {
+            launch_of(&turn, Some(Path::new("/test")), &ports)
+        })
     }
 
     #[tokio::test]
@@ -214,3 +257,7 @@ mod greeting {
         );
     }
 }
+
+#[cfg(unix)]
+#[path = "effort_resume_tests.rs"]
+mod effort_resume;

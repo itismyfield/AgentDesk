@@ -214,12 +214,13 @@ fn prepared(
         cut: Some(Cut {
             tmux: tmux.into(),
             bind_nonce,
+            herdr: None,
         }),
     }
 }
 
 /// Stores `request` in the channel's owner snapshot.
-async fn record(
+pub(super) async fn record(
     shared: &Arc<SharedData>,
     channel: ChannelId,
     request: Request,
@@ -254,7 +255,7 @@ pub(super) async fn cancel(shared: &Arc<SharedData>, channel: ChannelId, operati
 }
 
 /// Whether the channel's owner takes a synthetic start, the only path a continuation has.
-async fn owner_takes(
+pub(super) async fn owner_takes(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,

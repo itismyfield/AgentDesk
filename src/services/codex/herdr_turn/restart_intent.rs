@@ -1,9 +1,12 @@
-//! Only the greeting of an explicit restart may resume the conversation its predecessor ended.
+//! Only the greeting of an explicit restart, or a launch an effort restart owes its thread, may
+//! resume the conversation its predecessor ended.
 use std::cell::RefCell;
 
 use super::CodexHerdrTurn;
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::ResumeStart;
+use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
 thread_local! {
     static OPERATION: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -25,17 +28,67 @@ pub(crate) fn scope<R>(operation: Option<String>, turn: impl FnOnce() -> R) -> R
     turn()
 }
 
-/// The native session and the read boundary this turn resumes; `None` launches fresh.
-pub(super) fn resume_of(turn: &CodexHerdrTurn<'_>) -> Option<(String, ResumeStart)> {
-    let operation = OPERATION.with(|slot| slot.borrow().clone())?;
-    match capture(turn, operation) {
-        Ok(resume) => Some(resume),
-        Err(reason) => {
-            let channel = turn.channel_id;
-            tracing::info!(channel, %reason, "codex restart greeting launches a fresh session");
-            None
-        }
+/// The thread an effort restart ended with execution `retired_nonce`, which the next launch from
+/// that retired row resumes. `required`: a continuation waits for it and runs nowhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffortResume {
+    pub(crate) operation: String,
+    pub(crate) native_session: String,
+    pub(crate) retired_nonce: String,
+    pub(crate) required: bool,
+}
+
+/// The native session and the read boundary this turn resumes; `Ok(None)` launches fresh. A
+/// restart greeting falls back to fresh; an effort resume never launches another thread.
+pub(super) fn resume_of(
+    turn: &CodexHerdrTurn<'_>,
+    effort: Option<EffortResume>,
+) -> Result<Option<(String, ResumeStart)>, String> {
+    if let Some(operation) = OPERATION.with(|slot| slot.borrow().clone()) {
+        return Ok(match capture(turn, operation) {
+            Ok(resume) => Some(resume),
+            Err(reason) => {
+                let channel = turn.channel_id;
+                tracing::info!(channel, %reason, "codex restart greeting launches a fresh session");
+                None
+            }
+        });
     }
+    let Some(effort) = effort else {
+        return Ok(None);
+    };
+    // Once another execution holds the row, the restart's resume is spent.
+    let ours = matches!(turn.row, Some(HostedRecord::Known(record))
+        if record.state == HostedState::Retired && record.owner == turn.owner
+            && record.execution_nonce == effort.retired_nonce);
+    if !ours {
+        return match effort.required {
+            true => {
+                Err("codex effort resume: the row is not the execution the restart ended".into())
+            }
+            false => Ok(None),
+        };
+    }
+    let (session, start) = capture(turn, effort.operation)?;
+    if session != effort.native_session {
+        return Err("codex effort resume: the ended thread is not the restarted one".into());
+    }
+    Ok(Some((session, start)))
+}
+
+/// The channel's one live O cursor's source: the native session its ended execution read.
+pub(crate) fn live_source(channel: u64) -> Result<(OStore, SourceId), String> {
+    let runtime = crate::config::runtime_root().ok_or("no runtime root")?;
+    let store = OStore::existing(&runtime).ok_or("no O store")?;
+    let cursors = store
+        .peek_cursors(channel)
+        .map_err(|error| format!("{error:?}"))?;
+    let mut live = cursors.into_iter().filter(|cursor| !cursor.retired);
+    let source = live.next().ok_or("no ended native session")?.source;
+    if live.next().is_some() {
+        return Err("more than one live native source".into());
+    }
+    Ok((store, source))
 }
 
 /// The ended predecessor's one live O cursor names the source; its EOF is the boundary.
@@ -45,16 +98,7 @@ fn capture(turn: &CodexHerdrTurn<'_>, operation: String) -> Result<(String, Resu
     if !retired {
         return Err("no retired predecessor of this owner".into());
     }
-    let runtime = crate::config::runtime_root().ok_or("no runtime root")?;
-    let store = crate::services::tui_o::store::OStore::existing(&runtime).ok_or("no O store")?;
-    let cursors = store
-        .peek_cursors(turn.channel_id)
-        .map_err(|error| format!("{error:?}"))?;
-    let mut live = cursors.into_iter().filter(|cursor| !cursor.retired);
-    let source = live.next().ok_or("no ended native session")?.source;
-    if live.next().is_some() {
-        return Err("more than one live native source".into());
-    }
+    let (store, source) = live_source(turn.channel_id)?;
     let start = ResumeStart::capture(operation, turn.channel_id, &source, &store)?;
     Ok((source.session_id, start))
 }

@@ -156,19 +156,19 @@ struct Request {
 }
 
 /// The canonical row a restart acts on.
-enum Selected {
+pub(in crate::services::discord::commands) enum Selected {
     /// No execution to end: the greeting's own turn launches the session.
     Vacant,
     Refused(String),
     Target(Box<Target>),
 }
 
-struct Target {
-    pool: PgPool,
+pub(in crate::services::discord::commands) struct Target {
+    pub(in crate::services::discord::commands) pool: PgPool,
     row: hosted_execution::HostedObservation,
-    record: hosted_execution::HostedExecution,
-    key: String,
-    dispatch: Option<String>,
+    pub(in crate::services::discord::commands) record: hosted_execution::HostedExecution,
+    pub(in crate::services::discord::commands) key: String,
+    pub(in crate::services::discord::commands) dispatch: Option<String>,
 }
 
 impl Target {
@@ -180,7 +180,11 @@ impl Target {
 
 const UNPLACED: &str = "세션을 재시작하지 않았습니다. 새 세션의 생성 응답을 아직 확인하지 못했습니다.\n메시지를 보내면 기존 경로가 이 상태를 해결합니다.";
 
-async fn select(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> Selected {
+pub(in crate::services::discord::commands) async fn select(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Selected {
     let Some(pool) = shared.pg_pool.as_ref().cloned() else {
         return Selected::Refused(REFUSED.into());
     };

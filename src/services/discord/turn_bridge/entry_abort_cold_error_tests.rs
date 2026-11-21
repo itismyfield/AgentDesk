@@ -307,6 +307,7 @@ impl Cold {
                     working_dir: ".",
                     system_prompt: None,
                     model: None,
+                    effort: None,
                     allowed_tools: &[],
                     fast_mode: None,
                     goals: None,
