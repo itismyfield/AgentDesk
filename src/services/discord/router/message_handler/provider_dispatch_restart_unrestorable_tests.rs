@@ -294,7 +294,7 @@ fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_delivered_once_when_
     restored(&fx, &started, false);
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
-        let original = busy_screen_holds(&fx, &intake, before, &heads).await;
+        let original = front_is_held(&fx, &intake, before, &heads).await;
         show_idle_screen(&fx);
         let snapshot = source_input_settled(&intake, &original, &heads).await;
         assert!(snapshot["refused_fronts"].is_null() && snapshot["refused_inputs"].is_null());
@@ -327,66 +327,61 @@ fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() 
     restored(&fx, &started, false);
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
-        let original = busy_screen_holds(&fx, &intake, before, &heads).await;
-        let due = intake
-            .mailbox
-            .v2_request(|slot| {
-                let hold = slot.as_ref().ok_or("no owner")?.front_hold();
-                let hold = hold.ok_or("the identity hold has no due")?;
-                assert!(hold.identity_held_at_ms.is_some());
-                assert_eq!(hold.due_at_ms - hold.started_at_ms, 10_000);
-                Ok(hold.due_at_ms)
-            })
-            .await
-            .unwrap();
-        let ticked = intake
-            .mailbox
-            .v2_request(move |slot| slot.as_mut().ok_or("no owner")?.tick(due));
-        ticked.await.unwrap();
-        discord::queue_io::input_owner::drive::wake(source_retry_drive(&intake));
-        let settled = crate::test_support::wait::poll_within(
-            async || {
-                let snapshot = intake
-                    .mailbox
-                    .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
-                let snapshot = snapshot.await?;
-                let told = snapshot["refused_fronts"][0]["notice"]["enqueued"] == true;
-                told.then_some(snapshot)
-                    .ok_or_else(|| "the held front is not settled yet".into())
-            },
-            LIMIT,
-            "identity hold due settlement",
-        );
-        let snapshot = settled.await.unwrap();
-        let entry = &snapshot["refused_fronts"][0];
-        assert_eq!(entry["input"]["identity"]["primary"], original.message_id);
-        assert_eq!(
-            entry["reason"], "readiness_deadline: busy_identity_unproven",
-            "{snapshot}"
-        );
-        assert_eq!(snapshot["items"], json!([]), "{snapshot}");
-        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
-        assert!(snapshot["head_injection"].is_null() && !snapshot.to_string().contains(INPUT));
-        let pool = intake.shared.pg_pool.clone().expect("PG test pool");
-        let notices: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM message_outbox WHERE reason_code = 'refused.readiness_unproven'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(notices, 1);
-        assert_eq!(
-            discard_notices(&intake),
-            0,
-            "no second, direct discard notice"
-        );
-        assert_eq!(fx.rig.sends().len(), before, "no key reached the pane");
+        let original = front_is_held(&fx, &intake, before, &heads).await;
+        settles_at_due(&fx, &intake, &original, before, &heads).await;
         assert!(heads.lock().unwrap().is_empty());
     });
 }
 
-/// Starts the restored busy-screen front: it is held with no key, no notice and a watch.
-async fn busy_screen_holds(
+/// After a restart the idle pane's Claude binding is not back yet, so its identity is unresolved
+/// and retire reads the live pane as Unproven: the original is held, not discarded.
+fn identity_unresolved_idle_front(name: &str, resolves: bool) {
+    let fx = Fixture::with_root(name, None, crate::config::TestRuntimeRootGuard::new());
+    let launcher = Arc::new(Launcher::default());
+    let (_nonce, started) = reconnect::launch(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
+    let intake = Intake::new(&fx, &started);
+    restored(&fx, &started, true);
+    let tui = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical())
+        .expect("the launched pane's Claude binding");
+    assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(fx.logical()));
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    intake.runtime.block_on(async {
+        let original = front_is_held(&fx, &intake, before, &heads).await;
+        if !resolves {
+            settles_at_due(&fx, &intake, &original, before, &heads).await;
+            return;
+        }
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(fx.logical(), tui);
+        let snapshot = source_input_settled(&intake, &original, &heads).await;
+        assert!(snapshot["refused_fronts"].is_null() && snapshot["refused_inputs"].is_null());
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2, "one paste and one Enter");
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+        assert_eq!(discard_notices(&intake), 0);
+    });
+}
+
+/// Once the binding is back, the held watch's next read proves the idle pane and sends once.
+#[test]
+fn an_idle_pane_with_unresolved_identity_after_restart_is_delivered_once_when_resolved_pg() {
+    identity_unresolved_idle_front("restart-identity-idle-resolved", true);
+}
+
+/// A binding that never comes back ends the hold at its due with one reason notice.
+#[test]
+fn an_idle_pane_whose_identity_never_resolves_is_settled_unsent_at_its_due_pg() {
+    identity_unresolved_idle_front("restart-identity-idle-unresolved", false);
+}
+
+/// Starts the restored front: it is held with no key, no notice and a watch.
+async fn front_is_held(
     fx: &Fixture,
     intake: &Intake,
     before: usize,
@@ -420,6 +415,71 @@ async fn busy_screen_holds(
     assert_eq!(fx.rig.sends().len(), before, "no key reached the pane");
     assert!(heads.lock().unwrap().is_empty());
     original
+}
+
+/// Pulls the held original's identity due forward: it settles unsent with one reason notice,
+/// no direct discard notice, no key and no body left in the queue.
+async fn settles_at_due(
+    fx: &Fixture,
+    intake: &Intake,
+    original: &PendingQueueItem,
+    before: usize,
+    heads: &Arc<Mutex<Vec<Value>>>,
+) {
+    let due = intake
+        .mailbox
+        .v2_request(|slot| {
+            let hold = slot.as_ref().ok_or("no owner")?.front_hold();
+            let hold = hold.ok_or("the identity hold has no due")?;
+            assert!(hold.identity_held_at_ms.is_some());
+            assert_eq!(hold.due_at_ms - hold.started_at_ms, 10_000);
+            Ok(hold.due_at_ms)
+        })
+        .await
+        .unwrap();
+    let ticked = intake
+        .mailbox
+        .v2_request(move |slot| slot.as_mut().ok_or("no owner")?.tick(due));
+    ticked.await.unwrap();
+    discord::queue_io::input_owner::drive::wake(source_retry_drive(intake));
+    let settled = crate::test_support::wait::poll_within(
+        async || {
+            let snapshot = intake
+                .mailbox
+                .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+            let snapshot = snapshot.await?;
+            let told = snapshot["refused_fronts"][0]["notice"]["enqueued"] == true;
+            told.then_some(snapshot)
+                .ok_or_else(|| "the held front is not settled yet".into())
+        },
+        LIMIT,
+        "identity hold due settlement",
+    );
+    let snapshot = settled.await.unwrap();
+    let entry = &snapshot["refused_fronts"][0];
+    assert_eq!(entry["input"]["identity"]["primary"], original.message_id);
+    assert_eq!(
+        entry["reason"], "readiness_deadline: busy_identity_unproven",
+        "{snapshot}"
+    );
+    assert_eq!(snapshot["items"], json!([]), "{snapshot}");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert!(snapshot["head_injection"].is_null() && !snapshot.to_string().contains(INPUT));
+    let pool = intake.shared.pg_pool.clone().expect("PG test pool");
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code = 'refused.readiness_unproven'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(notices, 1);
+    assert_eq!(
+        discard_notices(intake),
+        0,
+        "no second, direct discard notice"
+    );
+    assert_eq!(fx.rig.sends().len(), before, "no key reached the pane");
+    assert!(heads.lock().unwrap().is_empty());
 }
 
 fn show_idle_screen(fx: &Fixture) {

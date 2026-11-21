@@ -464,6 +464,10 @@ input-single-path/HerdrBusyReobserveRestartNoHolder.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNoHolderBusy.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNoHolderBusyBefore.cfg	HerdrBusyReobserve	-	RHIdentityHoldEnds,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoHolderBusyIdle.cfg	HerdrBusyReobserve	RHIdentityNeverDelivers	-
+input-single-path/HerdrBusyReobserveRestartIdleNeverResolved.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartIdleNeverResolvedBefore.cfg	HerdrBusyReobserve	RHNoDiscardBeforeLook	-
+input-single-path/HerdrBusyReobserveRestartIdleUnresolved.cfg	HerdrBusyReobserve	RHIdentityNeverDelivers	-
+input-single-path/HerdrBusyReobserveRestartIdleUnresolvedBefore.cfg	HerdrBusyReobserve	RHNoDiscardBeforeLook	-
 input-single-path/HerdrBusyReobserveRestartNoReservedExpire.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoWiring.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNonce.cfg	HerdrBusyReobserve	-	-

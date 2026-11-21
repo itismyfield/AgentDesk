@@ -107,7 +107,10 @@ VerifiedClearReevaluatesIdle == <> (r.route = "idle")
 \* `elapsed` is real time since the first typed hold; `age` is what the stored due allows.
 RHScreenHold == Scenario \in {"tmux-modal-held", "tmux-draft-held"}
 \* #8280: a live pane with no active turn whose absence is unproven, still busy or idle later.
-RHNoHolderBusy == Scenario \in {"no-holder-busy", "no-holder-busy-idle"}
+\* Production repro after a restart: an idle pane whose Claude binding is not back yet reads Held
+\* (claude_tui/host_input/busy/herdr.rs:289,344), so retire also answers Unproven; it may resolve.
+RHIdleUnresolved == Scenario \in {"idle-unresolved", "idle-never-resolved"}
+RHNoHolderBusy == Scenario \in {"no-holder-busy", "no-holder-busy-idle"} \/ RHIdleUnresolved
 RHTmux == Scenario \in {"tmux-meta", "tmux-meta-reboot", "tmux-retry-due", "tmux-late-follower"}
           \/ RHScreenHold
 RHInit == r = [phase |-> IF RHTmux THEN "queued" ELSE "restart",
@@ -155,22 +158,27 @@ RHEnter == /\ r.phase = "restart"
 \* General observe has no proof; running fallback reads Unknown and cannot create Idle.
 RHBusyEntry == /\ r.phase = "queued" /\ ~RHTmux /\ Scenario # "no-holder-live" /\ ~RHNoHolderBusy
                /\ r' = [r EXCEPT !.phase = "held"]
-\* A live pane with no active turn reaches the missing-recovery refusal before any watch.
-RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
+\* A live pane with no active turn reaches the missing-recovery refusal before any watch. Main's
+\* recovery also discarded an Unproven pane this way ("UnprovenDiscards"); #8280 keeps that only
+\* for a confirmed Refused (intake_turn/owned_busy.rs:301-302).
+RHRefuseUnheld == /\ r.phase = "queued"
+                  /\ (Scenario = "no-holder-live" \/ (RHNoHolderBusy /\ Mutant = "UnprovenDiscards"))
                   /\ r' = [r EXCEPT !.phase = "refused", !.refusals = 1,
                       !.owned = FALSE, !.reason = Scenario]
 \* retire refuses Unproven for a present pane (herdr_launch/retire.rs:59), so the original is held
-\* for reobservation (intake_turn/owned_busy.rs:261,308,547) under READINESS_HOLD_MS counted from
+\* for reobservation (intake_turn/owned_busy.rs:263,311,327,552) under READINESS_HOLD_MS counted from
 \* this hold (queued_head/v2/readiness_hold.rs:7,51) with the drive's timer armed
 \* (input_owner/held_watch/readiness.rs:34). Expiry is RHExpire (readiness_hold.rs:153).
 \* "IdentityUntimed" is the #8280 hold before: no due, no timer.
-RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy
+RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy /\ Mutant # "UnprovenDiscards"
                   /\ r' = [r EXCEPT !.phase = "held", !.visible = TRUE, !.age = 1,
                       !.elapsed = 1, !.dueStored = Mutant # "IdentityUntimed",
                       !.armed = Mutant # "IdentityUntimed"]
 \* The screen may turn idle before the due; the held watch's next look wakes the Idle start, which
-\* ends the identity hold before its key (intake_turn/owned_busy.rs:135,334).
-RHIdleScreen == /\ Scenario = "no-holder-busy-idle" /\ r.phase = "held" /\ ~r.screen
+\* ends the identity hold before its key (intake_turn/owned_busy.rs:136,338). For the restart repro
+\* the binding comes back and the same probe proves the idle pane (host_input/busy.rs:196).
+RHIdleScreen == /\ Scenario \in {"no-holder-busy-idle", "idle-unresolved"}
+                /\ r.phase = "held" /\ ~r.screen
                 /\ r.age < 5
                 /\ r' = [r EXCEPT !.screen = TRUE]
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
@@ -372,6 +380,11 @@ RHHealthyDelivers == <>(r.phase = "done")
 RHIdentityHoldEnds == (RHNoHolderBusy /\ r.phase = "held") ~> (r.phase \in {"done", "explained"})
 \* Witness: expected to break in the idle scenario, proving delivery is reached there.
 RHIdentityNeverDelivers == RHNoHolderBusy => r.keys = 0
+\* The restart repro: a live idle pane is never refused before a hold was seen and timed.
+RHNoDiscardBeforeLook == RHIdleUnresolved => ~(r.refusals = 1 /\ ~r.visible)
+\* Under the driver premise, a binding back while held before the due ends in one delivery.
+RHResolvedDelivers == [](Scenario = "idle-unresolved" /\ r.phase = "held" /\ r.screen
+                         => <>(r.phase = "done"))
 \* Without the driver premise a healthy pane delivers or loses only the due race, never evidence.
 RHHealthyOrDeadline == <>(r.phase = "done" \/ (r.phase = "explained" /\ r.reason = "deadline"))
 =============================================================================

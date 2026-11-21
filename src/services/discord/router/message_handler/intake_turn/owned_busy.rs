@@ -64,6 +64,7 @@ pub(super) async fn running(
         return Ok(Some(registered));
     }
     let channel = ChannelId::new(channel);
+    decided(channel, "hold", SOURCE_HELD, &observation);
     if let Some(shared) = shared {
         hold(
             (shared, source_hold(state)),
@@ -164,6 +165,7 @@ impl OwnerTurn {
                         )
                         .await;
                 }
+                decided(channel, "hold", &error, &observation);
                 hold(
                     (shared, source_hold(state)),
                     &owner.mailbox,
@@ -297,6 +299,7 @@ impl OwnerTurn {
         let (reason, probe) = match recovery {
             Ok(()) => return Ok((Some(self.finish_reobservation().await?), false)),
             Err(Refused(reason)) => {
+                decided(channel, "discard", &reason, observation);
                 let failure = super::super::start_failure::Failure::owner(&self);
                 let result = failure
                     .discard(Some(shared.clone()), channel, reason)
@@ -317,6 +320,7 @@ impl OwnerTurn {
             ),
             Err(Retry(reason)) => (reason, None),
         };
+        decided(channel, "hold", &reason, observation);
         // When the exact read cannot be built, re-resolve on the next look.
         let probe = probe.unwrap_or_else(|| Box::new(|| Screen::Ready));
         hold(
@@ -451,6 +455,7 @@ fn hold_late(
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
     let kind = source_hold(observation.state());
+    decided(channel, "hold", SOURCE_HELD, observation);
     if let Some(shared) = turn.shared {
         handle.block_on(hold((shared, kind), mailbox, channel, front, probe));
     } else {
@@ -568,6 +573,17 @@ async fn hold(
         held_watch::readiness::hold(drive.clone(), front).await;
     }
     held_watch::watch(drive, front.1.message_id);
+}
+
+/// One line per busy-entry disposition, so a discard or hold can be traced without its notice.
+fn decided(channel: ChannelId, decision: &str, reason: &str, observation: &BusyObservation) {
+    tracing::info!(
+        channel_id = channel.get(),
+        decision,
+        reason,
+        screen = ?observation.state(),
+        "herdr busy entry decision"
+    );
 }
 
 fn recoverable_probe(
