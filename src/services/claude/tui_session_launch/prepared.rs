@@ -34,20 +34,37 @@ pub(super) fn prepare(
         claude_home,
         channel_id,
     } = input;
-    let expected = Some(resolved_session_id);
-    let prepared = match claude_home {
-        Some(home) => PreparedIncarnation::prepare_at(
-            "claude",
-            tmux_session_name,
-            channel_id,
-            expected,
-            resume,
-            Some(home.join("projects")),
-        ),
-        None => {
-            PreparedIncarnation::prepare("claude", tmux_session_name, channel_id, expected, resume)
+    let mut policy = channel_id.filter(|_| !resume).and_then(|channel| {
+        THREAD_WRITER_POLICY
+            .get()
+            .and_then(|(launch, _)| launch(channel))
+    });
+    if policy.is_some() {
+        let candidates =
+            crate::services::claude_tui::transcript_tail::claude_transcript_path_candidates(
+                working_dir_path,
+                resolved_session_id,
+                claude_home,
+            )?;
+        for path in candidates {
+            if path.try_exists().map_err(|error| error.to_string())? {
+                policy = None;
+                break;
+            }
         }
-    }?;
+    }
+    let provider_root = claude_home
+        .map(|home| home.join("projects"))
+        .or_else(crate::services::claude_tui::hook_output_guard::configured_claude_projects_root);
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "claude",
+        tmux_session_name,
+        channel_id,
+        Some(resolved_session_id),
+        resume,
+        provider_root,
+        (None, policy),
+    )?;
     mark_host();
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;

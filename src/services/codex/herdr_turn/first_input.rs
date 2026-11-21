@@ -86,10 +86,14 @@ fn restore_pending(
 ) -> Result<(), String> {
     use crate::services::tmux_common as tc;
     use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context as context};
+    let pending = read_pending(pool, owner, runtime);
+    if let Some(scope) = clear_epoch::current() {
+        scope.check_epoch()?;
+    }
     let order = dedupe::herdr_listing_order(&owner.logical_key);
     let order_guard = order.lock().unwrap_or_else(|p| p.into_inner());
     let restored = tc::with_tmux_source_authority(&owner.logical_key, |authority| {
-        let HostedLookup::Found(found) = runtime.block_on(load(pool, owner)) else {
+        let HostedLookup::Found(found) = pending else {
             return Err("herdr turn: Pending row unreadable before input".into());
         };
         let HostedRecord::Known(record) = found.record else {
@@ -110,6 +114,12 @@ fn restore_pending(
     });
     drop(order_guard);
     restored
+}
+
+fn read_pending(pool: &PgPool, owner: &HostedOwner, runtime: &Handle) -> HostedLookup {
+    #[cfg(test)]
+    pg_tests::before_pending_lookup(&owner.logical_key);
+    runtime.block_on(load(pool, owner))
 }
 
 fn write(

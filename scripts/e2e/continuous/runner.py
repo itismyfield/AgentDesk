@@ -17,6 +17,7 @@ import uuid
 
 from . import budget, channel_lock, inbox, plan, publication, summary
 from .store import read_json, write_json
+from ..tui_relay import preflight_evidence
 
 RESULTS = {"PASS", "FAIL", "UNEVALUABLE"}
 
@@ -190,6 +191,8 @@ def _execute(lease, config, record, row, remaining):
             if key in report:
                 row[key] = report[key]
     status = report.get("status") if isinstance(report, dict) else None
+    if status == "UNEVALUABLE" and (failure := preflight_evidence.bounded(report.get("preflight_failure"))):
+        row.update(reason="CELL_NOT_IDLE", preflight_failure=failure)
     turns = report.get("native_turns") if isinstance(report, dict) else None
     row.update(status=status if status in RESULTS and (proc.returncode == 0 or status == "FAIL") else "UNEVALUABLE",
                driver_rc=proc.returncode, elapsed_s=round(time.monotonic() - started, 3),

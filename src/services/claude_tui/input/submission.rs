@@ -62,15 +62,18 @@ fn submit(
     readiness: PromptReadinessKind,
     cancel: Option<&CancelToken>,
 ) -> Result<(), SubmissionError> {
+    let scope = submission_fence::idle_stash_scope();
     let request = Request {
         session,
         prompt,
         text,
         cancel,
         timing: &busy_inject::TIMING,
+        warm: readiness == PromptReadinessKind::ProvenWarmFollowup,
+        channel: scope.as_ref().map(|(_, context)| context.channel),
     };
     let modal = std::cell::Cell::new(false);
-    let result = match submission_fence::idle_stash_scope() {
+    let result = match scope {
         Some((_, context)) if !context.available || context.target != session => {
             InputRun::Refused(InputRefusal::IdentityMismatch)
         }
@@ -125,6 +128,8 @@ struct Request<'a> {
     text: &'a str,
     cancel: Option<&'a CancelToken>,
     timing: &'a Timing,
+    warm: bool,
+    channel: Option<u64>,
 }
 
 #[cfg(unix)]
@@ -171,6 +176,11 @@ fn run(
             super::super::readiness::watch_current(session, None);
             return refused(Refusal::NotReady);
         };
+        if let Err(error) = reservation.reserve_thread_body(request.channel, request.warm) {
+            tracing::warn!(session, %error, "Claude thread input withheld before the first key");
+            reservation.not_sent();
+            return refused(Refusal::NotReady);
+        }
         if authority.claim(session).is_err() {
             reservation.not_sent();
             return refused(Refusal::SubmissionFence);

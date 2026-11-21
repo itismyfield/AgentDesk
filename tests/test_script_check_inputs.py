@@ -96,9 +96,10 @@ class ScriptCheckInputSelection(unittest.TestCase):
     def test_user_feature_map_inputs_select_both_checks(self) -> None:
         titles = {"User feature map static check", "User feature map generation contract"}
         self.assertTrue(titles <= selector.SELF_TEST_INPUTS.keys())
+        self.assertNotIn("User feature map source contract", selector.SELF_TEST_INPUTS)
         paths = (
             "docs/user-feature-map.rows.yaml", "docs/user-feature-map.md",
-            "docs/generated/user-feature-coverage.json", "docs/source-of-truth.md",
+            "docs/source-of-truth.md", "scripts/ci/user_feature_map_report.py",
             "docs/test-infra.design.md", "docs/e2e/multi-provider-e2e.md",
             "tests/e2e/tui_relay/scenarios/README.md",
             "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
@@ -293,7 +294,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
             root = Path(directory)
             tools = root / "bin"
             tools.mkdir()
-            for name in ("cat", "mktemp", "rm"):
+            for name in ("awk", "cat", "mktemp", "rm", "tee"):
                 target = shutil.which(name)
                 self.assertIsNotNone(target)
                 (tools / name).symlink_to(target)

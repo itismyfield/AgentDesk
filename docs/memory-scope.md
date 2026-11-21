@@ -45,6 +45,29 @@ existing git common-directory workspace and session cache behavior.
 Anchor cache keys include the group so changing groups within a session fetches
 that group’s own shared anchors instead of reusing the previous group’s snapshot.
 
+## Identifier spelling
+
+Memento workspace names are case-sensitive. `AgentDesk` and `agentdesk` are
+different stores, so a PascalCase write splits AgentDesk memory off the
+canonical workspace.
+
+Choose the audience and workspace using the scope rules above. When the chosen
+workspace is AgentDesk, pass `workspace=agentdesk` to calls that accept
+`workspace`. These include `context`, `recall`, `remember`, `batch_remember`,
+`reflect`, and topic-based `forget`. Use the workspace from the scope hint for
+other targets, including legacy private workspaces and other configured groups.
+For global writes, omit `workspace` and use `agentId=default`.
+
+Never use `AgentDesk` as `workspace` or `agentId`. Use the role id for private
+writes and `default` for group-shared or global writes.
+
+- To correct a fact, take the matching fragment's `id` from a scoped `recall`
+  such as `recall({"workspace":"agentdesk","agentId":"ch-td","topic":"<topic>"})`.
+  Pass the id and correction to `amend`, for example
+  `amend({"id":"<fragment-id>","agentId":"ch-td","content":"<corrected fact>"})`.
+- `memory_consolidate({})` triggers master-key maintenance across workspaces.
+  Its only declared option, `stream`, is deprecated.
+
 ## Choosing an audience
 
 - **Private (default):** confirmed preferences or facts relevant to this agent,
@@ -85,8 +108,8 @@ Re-read the authoritative file instead. This includes:
 Treat canonical files as authoritative when a memory duplicates them. Broad
 cleanup, audience changes, and migration of existing memories require review
 of the affected records; this contract does not authorize automatic deletion
-or redistribution. The maintenance `memory.memento_consolidation` job performs
-workspace deduplication and low-importance cleanup, not audience promotion.
+or redistribution. The scheduled `memory.memento_consolidation` job handles
+routine consolidation.
 
 ## PostgreSQL fallback
 

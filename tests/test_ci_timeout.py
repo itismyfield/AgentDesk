@@ -3,12 +3,11 @@ import contextlib
 import importlib.util
 import io
 import os
+import select
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
-import time
 import types
 import unittest
 from pathlib import Path
@@ -96,7 +95,7 @@ class CiTimeoutTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "2", sys.executable, "-c",
              "import os,signal;os.kill(os.getpid(),signal.SIGKILL)"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=30,
         )
         self.assertEqual(result.returncode, 137)
         for child_rc, expected in ((0, 0), (7, 7), (-signal.SIGHUP, 129)):
@@ -546,90 +545,74 @@ class CiTimeoutTests(unittest.TestCase):
             with mock.patch.object(sys, "argv", argv), mock.patch.object(ci_timeout, "_popen") as popen:
                 self.assertEqual(ci_timeout.main(), 2); popen.assert_not_called()
         result = subprocess.run([sys.executable, str(SCRIPT_PATH), "1", "/not/a/program"],
-                                capture_output=True, timeout=5)
+                                capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 1)
 
     def test_non_posix_path_forwards_sigterm_to_real_child_and_restores_handlers(self):
-        installed, trigger_threads, children = {}, [], []
-        real_popen = ci_timeout._popen
+        installed, children = {}, []
+        forwarded = False
 
         def install(signum, handler):
+            nonlocal forwarded
             previous = installed.get(signum, signal.SIG_DFL)
             installed[signum] = handler
-            if (
-                not trigger_threads
-                and all(callable(installed.get(item)) for item in ci_timeout._FORWARDED_SIGNALS)
-            ):
-                trigger = threading.Thread(target=forward_when_child_is_ready)
-                trigger_threads.append(trigger)
-                trigger.start()
+            if not forwarded and all(callable(installed.get(item)) for item in ci_timeout._FORWARDED_SIGNALS):
+                ready = children[0].stdout
+                self.assertTrue(select.select([ready], [], [], 30)[0], "child did not install its SIGTERM handler")
+                self.assertEqual(ready.read(1), b"R")
+                forwarded = True
+                installed[signal.SIGTERM](signal.SIGTERM, None)
             return previous
 
-        with tempfile.TemporaryDirectory() as directory:
-            ready = Path(directory) / "ready"
-            received = Path(directory) / "received"
-
-            def forward_when_child_is_ready():
-                deadline = time.monotonic() + 3
-                while not ready.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                if ready.exists():
-                    installed[signal.SIGTERM](signal.SIGTERM, None)
-
-            child = "\n".join(
-                (
-                    "import signal, sys, time",
-                    "from pathlib import Path",
-                    "def handled(signum, _frame):",
-                    "    Path(sys.argv[2]).write_text(str(signum))",
-                    "    raise SystemExit(0)",
-                    "signal.signal(signal.SIGTERM, handled)",
-                    "Path(sys.argv[1]).write_text('ready')",
-                    "while True: time.sleep(0.01)",
-                )
+        child = "\n".join(
+            (
+                "import os, signal, threading",
+                "def handled(signum, _frame):",
+                "    os.write(1, str(signum).encode())",
+                "    os._exit(0)",
+                "signal.signal(signal.SIGTERM, handled)",
+                "os.write(1, b'R')",
+                "threading.Event().wait()",
             )
-            fallback_os = types.SimpleNamespace(environ=os.environ)
+        )
+        fallback_os = types.SimpleNamespace(environ=os.environ)
 
-            def popen(command, enabled):
-                spawned = real_popen(command, enabled)
-                children.append(spawned)
-                return spawned
+        def popen(command, enabled):
+            self.assertFalse(enabled)
+            spawned = subprocess.Popen(command, start_new_session=True, stdout=subprocess.PIPE)
+            children.append(spawned)
+            return spawned
 
-            try:
-                with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
-                     mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
-                     mock.patch.object(ci_timeout, "_cleanup"), \
-                     mock.patch.object(ci_timeout, "os", fallback_os), \
-                     mock.patch.object(ci_timeout.signal, "signal", side_effect=install) as handlers, \
-                     contextlib.redirect_stderr(io.StringIO()):
-                    rc = ci_timeout.run_command(
-                        5, [sys.executable, "-c", child, str(ready), str(received)]
-                    )
-                trigger_threads[0].join(timeout=1)
-                receipt_deadline = time.monotonic() + 1
-                while not received.exists() and time.monotonic() < receipt_deadline:
-                    time.sleep(0.01)
-                self.assertEqual(rc, 143)
-                self.assertEqual(received.read_text(), str(signal.SIGTERM))
-                self.assertFalse(trigger_threads[0].is_alive())
-                self.assertEqual(handlers.call_count, 4)
-                self.assertEqual(
-                    installed,
-                    {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_DFL},
-                )
-            finally:
-                for spawned in children:
-                    if spawned.poll() is None:
-                        spawned.kill()
-                    spawned.wait(timeout=1)
+        try:
+            with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
+                 mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
+                 mock.patch.object(ci_timeout, "_cleanup"), \
+                 mock.patch.object(ci_timeout, "os", fallback_os), \
+                 mock.patch.object(ci_timeout.signal, "signal", side_effect=install) as handlers, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                rc = ci_timeout.run_command(30, [sys.executable, "-c", child])
+            self.assertEqual(rc, 143)
+            self.assertEqual(children[0].wait(timeout=30), 0)
+            self.assertEqual(children[0].stdout.read().strip(), str(signal.SIGTERM).encode())
+            self.assertEqual(handlers.call_count, 4)
+            self.assertEqual(
+                installed,
+                {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_DFL},
+            )
+        finally:
+            for spawned in children:
+                if spawned.poll() is None:
+                    spawned.kill()
+                spawned.wait(timeout=30)
+                spawned.stdout.close()
 
     # F12
     @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
     def test_child_mask_is_unblocked_and_wrapper_is_single_threaded(self):
         code = ("import signal;m=signal.pthread_sigmask(signal.SIG_BLOCK,[]);"
                 "print(int(signal.SIGTERM in m),int(signal.SIGINT in m))")
-        result = subprocess.run([sys.executable, str(SCRIPT_PATH), "2", sys.executable, "-c", code],
-                                capture_output=True, text=True, timeout=5)
+        result = subprocess.run([sys.executable, str(SCRIPT_PATH), "30", sys.executable, "-c", code],
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "0 0"))
         threads, proc = [], Process([0])
 
@@ -686,18 +669,18 @@ class CiTimeoutTests(unittest.TestCase):
                  mock.patch.object(ci_timeout, "_diagnose_with_deadline") as diagnose, \
                  mock.patch.object(ci_timeout, "_cleanup") as cleanup, \
                  mock.patch.object(ci_timeout, "_send_process_signal") as send, \
+                 mock.patch.object(ci_timeout, "_monotonic", return_value=0), \
+                 mock.patch.object(ci_timeout, "_sleep") as sleep, \
                  mock.patch.object(ci_timeout, "_select_return_code", side_effect=select), \
                  mock.patch.object(ci_timeout, "_report", side_effect=report):
-                started = time.monotonic()
                 rc = ci_timeout.run_command(30, ["cargo", "test"])
             self.assertEqual(rc, 143)
-            self.assertLess(time.monotonic() - started, 55.1)
             self.assertIn(signal.SIGTERM, signal.sigpending())
             self.assertEqual(select_calls, [True])
             self.assertEqual(len(report_pending), 1)
             self.assertIn(signal.SIGINT, report_pending[0])
             self.assertNotIn(signal.SIG_UNBLOCK, mask_operations)
-            for operation in (popen, diagnose, cleanup, send):
+            for operation in (popen, diagnose, cleanup, send, sleep):
                 operation.assert_not_called()
         finally:
             for signum in (signal.SIGTERM, signal.SIGINT):

@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import ast
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
+from urllib.parse import quote
 
 import yaml
 
@@ -20,8 +24,12 @@ except ModuleNotFoundError:
     from e2e.tui_relay.assertion_registry import ASSERTION_OPTIONS
 
 ROWS = Path("docs/user-feature-map.rows.yaml")
+ROWS_LINK = f"[{ROWS.name}]({ROWS.name})"
 MARKDOWN = Path("docs/user-feature-map.md")
-REPORT = Path("docs/generated/user-feature-coverage.json")
+REPORT_NAME = "user-feature-coverage.json"
+RETIRED_REPORT = Path("docs/generated") / REPORT_NAME
+GENERATOR = Path("scripts/generate_user_feature_map.py")
+REGISTRY = Path("scripts/e2e/tui_relay/assertion_registry.py")
 SCENARIOS = Path("tests/e2e/tui_relay/scenarios")
 FEATURE_IDS = (
     "message-delivery", "busy-input", "reaction-display", "cancel-stop",
@@ -46,6 +54,14 @@ class MapError(ValueError):
 def require(ok, message):
     if not ok:
         raise MapError(message)
+
+
+@contextmanager
+def input_context(path):
+    try:
+        yield
+    except (MapError, OSError, UnicodeError, yaml.YAMLError) as error:
+        raise MapError(f"{path}: {error}") from error
 
 
 def nonempty(value):
@@ -93,7 +109,51 @@ def validate_tuple(app):
                 f"schema: invalid qualifier/source {name}")
 
 
-def validate_rows(rows):
+def validate_host_parity(parity, index):
+    require(isinstance(parity, dict), "schema: host_parity mapping required")
+    base = parity.get("base")
+    require(isinstance(base, str) and re.fullmatch(r"[0-9a-f]{40}", base),
+            "schema: host_parity.base must be a full commit SHA")
+    rows = parity.get("rows")
+    require(isinstance(rows, list), "schema: host_parity.rows list required")
+    groups, seen = {}, set()
+    for row in rows:
+        require(isinstance(row, dict) and "feature_id" in row,
+                "schema: host_parity row needs a feature_id (null for additional observations)")
+        fid = row["feature_id"]
+        require(fid is None or (isinstance(fid, str) and fid in index),
+                "schema: unknown feature ID in host_parity")
+        for field in ("scope", "tmux", "herdr", "verdict", "owner", "evidence"):
+            require(nonempty(row.get(field)), f"schema: host_parity {fid}.{field} required")
+        key = (fid, row["scope"].strip())
+        require(key not in seen, f"schema: duplicate host_parity scope {key}")
+        seen.add(key)
+        verdict = row["verdict"]
+        require(verdict in {"같음", "다름", "불가피"}, f"schema: invalid verdict for {key}")
+        if verdict == "다름":
+            require(re.search(r"(?<!\w)#[1-9][0-9]*", row["owner"]),
+                    f"schema: host_parity {key} needs an owner issue")
+        if verdict == "불가피":
+            require(nonempty(row.get("reason")), f"schema: host_parity {key} needs a reason")
+            approval = row.get("approval")
+            require(approval in ("approved", "unrecorded"), f"schema: host_parity {key} needs approval status")
+            if approval == "approved":
+                require(nonempty(row.get("approval_evidence")),
+                        f"schema: host_parity {key} needs approval_evidence")
+        tuples = row.get("coverage_tuples", [])
+        require(isinstance(tuples, list), f"schema: host_parity {key} coverage_tuples list required")
+        applicable = {tuple_key(app) for app in index[fid]["applicable"]} if fid is not None else set()
+        for app in tuples:
+            validate_tuple(app)
+            require(tuple_key(app) in applicable, f"schema: host_parity {key} needs a registered applicable tuple")
+        groups.setdefault(fid, []).append(row)
+    require(index.keys() <= groups.keys(),
+            f"schema: host_parity missing feature IDs: {sorted(index.keys() - groups.keys())}")
+    require(None in groups, "schema: host_parity missing additional observations")
+    return groups
+
+
+def validate_rows(rows, assertion_options=ASSERTION_OPTIONS, *, allow_legacy_host_parity=False):
     require(isinstance(rows, dict) and type(rows.get("schema")) is int and rows["schema"] == 1,
             "schema: rows.schema must be 1")
     features = rows.get("features")
@@ -131,11 +191,14 @@ def validate_rows(rows):
             require(key not in tuples, "schema: duplicate applicable tuple/qualifiers")
             tuples.add(key)
             string_list(app.get("required_assertion_ids"), "required assertion IDs")
-            missing = required_assertions(app) - ASSERTION_OPTIONS.keys()
+            missing = required_assertions(app) - assertion_options.keys()
             require(missing <= pending_ids, f"schema: unsupported required assertion needs pending reason: {sorted(missing - pending_ids)}")
         index[fid] = feature
     require(set(FEATURE_IDS) <= index.keys(), "schema: required initial feature inventory incomplete")
-    return index
+    comparisons = {}
+    if not allow_legacy_host_parity or "host_parity" in rows:
+        comparisons = validate_host_parity(rows.get("host_parity"), index)
+    return index, comparisons
 
 
 def load_yaml(path):
@@ -202,7 +265,7 @@ def inventory_keys(index):
     return result
 
 
-def check_ratchet(rows, index, baseline):
+def check_ratchet(rows, index, baseline, assertion_options):
     reasons = rows.get("removal_reasons", [])
     require(isinstance(reasons, list), "ratchet: removal_reasons list required")
     by_key = {}
@@ -213,7 +276,8 @@ def check_ratchet(rows, index, baseline):
         by_key[entry["key"]] = entry["reason"]
     if baseline is None:
         return
-    removed = inventory_keys(validate_rows(baseline)) - inventory_keys(index)
+    previous, _ = validate_rows(baseline, assertion_options, allow_legacy_host_parity=True)
+    removed = inventory_keys(previous) - inventory_keys(index)
     old = baseline.get("removal_reasons", [])
     old_keys = {entry["key"] for entry in old}
     old_reasons = {entry["reason"] for entry in old}
@@ -222,7 +286,7 @@ def check_ratchet(rows, index, baseline):
                 f"ratchet: new removal_reason required for {key}")
 
 
-def validate_claim(claim, scenario, index):
+def validate_claim(claim, scenario, index, assertion_options):
     validate_tuple(claim)
     fid = claim.get("feature_id")
     require(isinstance(fid, str) and fid in index, "schema: unknown feature ID in claim")
@@ -242,7 +306,7 @@ def validate_claim(claim, scenario, index):
         keys = set(entry) - {"requires_feature"}
         require(len(keys) == 1, "assertion: exactly one action per entry required")
         actions.update(keys)
-    require(operations <= actions & ASSERTION_OPTIONS.keys(),
+    require(operations <= actions & assertion_options.keys(),
             "assertion: claim IDs outside YAML actions / exported registry intersection")
     required = required_assertions(apps[key])
     require(required <= operations, f"required witness/assertion missing: {sorted(required - operations)}")
@@ -255,78 +319,80 @@ def validate_claim(claim, scenario, index):
     return fid, key
 
 
-def scenario_claims(root, index):
+def scenario_claims(root, index, assertion_options):
     claims = {}
     references = {}
     ids = set()
     counts = {"active": 0, "live": 0, "fixture": 0, "unsupported-known-gap": 0, "retired": 0}
     paths = sorted((root / SCENARIOS).glob("*.yaml")) + sorted((root / SCENARIOS / "retired").glob("*.yaml"))
     for path in paths:
-        scenario = load_yaml(path)
-        require(isinstance(scenario, dict) and nonempty(scenario.get("id")), "schema: scenario ID required")
-        sid = scenario["id"]
-        require(sid not in ids, "schema: duplicate scenario ID")
-        ids.add(sid)
-        category = scenario.get("coverage_class")
-        retired = path.parent.name == "retired" or category == "retired"
-        require(isinstance(category, str) and category in CLASSES, "schema: invalid scenario coverage_class")
-        if retired:
-            counts["retired"] += 1
-        else:
-            counts["active"] += 1
-            counts[category] += 1
-        metadata = scenario.get("feature_coverage")
-        if metadata is None:
-            continue
-        require(isinstance(metadata, dict) and type(metadata.get("schema")) is int and metadata["schema"] == 1,
-                "schema: feature_coverage.schema must be 1")
-        entries = metadata.get("claims", [])
-        refs = metadata.get("references", [])
-        require(isinstance(entries, list), "schema: claims list required")
-        require(isinstance(refs, list), "reference: list required")
-        require(bool(entries or refs), "schema: nonempty claims or references required")
-        referenced = set()
-        for reference in refs:
-            require(isinstance(reference, dict), "reference: mapping required")
-            fid = reference.get("feature_id")
-            require(isinstance(fid, str) and fid in index and fid not in referenced,
-                    "reference: unknown or duplicate feature")
-            require(nonempty(reference.get("scope")), "reference: explicit partial scope required")
-            require(reference.get("needs_live") is True, "reference: needs_live must be true")
-            referenced.add(fid)
-            references.setdefault(fid, []).append({"scenario_id": sid, "scope": reference["scope"], "needs_live": True})
-        seen = set()
-        for claim in entries:
-            fid, key = validate_claim(claim, scenario, index)
-            require((fid, key) not in seen, "schema: duplicate feature claim")
-            seen.add((fid, key))
-            live = category == "live" and not retired
-            if live:
-                require(scenario.get("agent_mode") == "real_live", "class: live claims need real_live agent_mode")
-                require(not scenario.get("skip_reason"), "class: skipped/known-gap scenario cannot cover live")
-                steps = scenario.get("steps", [])
-                require(isinstance(steps, list) and all(isinstance(step, dict) for step in steps),
-                        "class: steps must be a list of mappings")
-                fixture = str(scenario.get("execution") or "").strip().lower() in {"fixture", "local_fixture"}
-                fixture = fixture or any("replay_fixture" in step or "fixture_followup_probe" in step for step in steps)
-                require(not fixture, "class: fixture execution cannot cover live")
-                input_steps = {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt",
-                               "send_timed_response_prompt", "send_prompts_concurrent", "send_keys", "local_control_then_prompt"}
-                contact = any(input_steps & step.keys() or ("send_keys_sequence" in step and
-                              isinstance(step["send_keys_sequence"], dict) and
-                              step["send_keys_sequence"].get("mark_prompt_sent", True)) for step in steps)
-                require(contact, "class: live claim needs an executable provider input step")
-                require(not any(op.startswith("fixture_") or op == "no_duplicate_marker_with_known_gap"
-                                for op in claim["assertion_ids"]), "class: fixture/known-gap assertion cannot cover live")
-            claims.setdefault((fid, key), []).append((sid, live))
+        with input_context(path.relative_to(root)):
+            scenario = load_yaml(path)
+            require(isinstance(scenario, dict) and nonempty(scenario.get("id")), "schema: scenario ID required")
+            sid = scenario["id"]
+            require(sid not in ids, "schema: duplicate scenario ID")
+            ids.add(sid)
+            category = scenario.get("coverage_class")
+            retired = path.parent.name == "retired" or category == "retired"
+            require(isinstance(category, str) and category in CLASSES, "schema: invalid scenario coverage_class")
+            if retired:
+                counts["retired"] += 1
+            else:
+                counts["active"] += 1
+                counts[category] += 1
+            metadata = scenario.get("feature_coverage")
+            if metadata is None:
+                continue
+            require(isinstance(metadata, dict) and type(metadata.get("schema")) is int and metadata["schema"] == 1,
+                    "schema: feature_coverage.schema must be 1")
+            entries = metadata.get("claims", [])
+            refs = metadata.get("references", [])
+            require(isinstance(entries, list), "schema: claims list required")
+            require(isinstance(refs, list), "reference: list required")
+            require(bool(entries or refs), "schema: nonempty claims or references required")
+            referenced = set()
+            for reference in refs:
+                require(isinstance(reference, dict), "reference: mapping required")
+                fid = reference.get("feature_id")
+                require(isinstance(fid, str) and fid in index and fid not in referenced,
+                        "reference: unknown or duplicate feature")
+                require(nonempty(reference.get("scope")), "reference: explicit partial scope required")
+                require(reference.get("needs_live") is True, "reference: needs_live must be true")
+                referenced.add(fid)
+                references.setdefault(fid, []).append({"scenario_id": sid, "scope": reference["scope"], "needs_live": True})
+            seen = set()
+            for claim in entries:
+                fid, key = validate_claim(claim, scenario, index, assertion_options)
+                require((fid, key) not in seen, "schema: duplicate feature claim")
+                seen.add((fid, key))
+                live = category == "live" and not retired
+                if live:
+                    require(scenario.get("agent_mode") == "real_live", "class: live claims need real_live agent_mode")
+                    require(not scenario.get("skip_reason"), "class: skipped/known-gap scenario cannot cover live")
+                    steps = scenario.get("steps", [])
+                    require(isinstance(steps, list) and all(isinstance(step, dict) for step in steps),
+                            "class: steps must be a list of mappings")
+                    fixture = str(scenario.get("execution") or "").strip().lower() in {"fixture", "local_fixture"}
+                    fixture = fixture or any("replay_fixture" in step or "fixture_followup_probe" in step for step in steps)
+                    require(not fixture, "class: fixture execution cannot cover live")
+                    input_steps = {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt",
+                                   "send_timed_response_prompt", "send_prompts_concurrent", "send_keys", "local_control_then_prompt"}
+                    contact = any(input_steps & step.keys() or ("send_keys_sequence" in step and
+                                  isinstance(step["send_keys_sequence"], dict) and
+                                  step["send_keys_sequence"].get("mark_prompt_sent", True)) for step in steps)
+                    require(contact, "class: live claim needs an executable provider input step")
+                    require(not any(op.startswith("fixture_") or op == "no_duplicate_marker_with_known_gap"
+                                    for op in claim["assertion_ids"]), "class: fixture/known-gap assertion cannot cover live")
+                claims.setdefault((fid, key), []).append((sid, live))
     return claims, counts, paths, references
 
 
 def source_hash(root, paths, tests=()):
     digest = hashlib.sha256()
     sources = [(str(ROWS), root / ROWS)] + [(str(p.relative_to(root)), p) for p in paths]
-    sources += [("generator", Path(__file__)),
-                ("assertion_registry", Path(__file__).parent / "e2e/tui_relay/assertion_registry.py")]
+    implementation = Path(__file__).resolve().parents[1]
+    sources += [(label, (root if (root / path).is_file() else implementation) / path)
+                for label, path in (("generator", GENERATOR), ("assertion_registry", REGISTRY))]
     sources += [(str(path.relative_to(root)), path) for path in tests]
     for label, path in sources:
         data = path.read_bytes()
@@ -334,14 +400,19 @@ def source_hash(root, paths, tests=()):
     return digest.hexdigest()
 
 
-def generate(root: Path, base_ref: str):
+def generate(root: Path, base_ref: str, *, assertion_options=ASSERTION_OPTIONS,
+             allow_legacy_host_parity=False):
     root = Path(root).resolve()
-    baseline = base_rows(root, base_ref)
-    rows = load_yaml(root / ROWS)
-    index = validate_rows(rows)
-    check_ratchet(rows, index, baseline)
-    tests = test_sources(root, index)
-    claims, counts, paths, references = scenario_claims(root, index)
+    with input_context(f"{base_ref}:{ROWS}"):
+        baseline = base_rows(root, base_ref)
+    with input_context(ROWS):
+        rows = load_yaml(root / ROWS)
+        index, comparisons = validate_rows(
+            rows, assertion_options, allow_legacy_host_parity=allow_legacy_host_parity,
+        )
+        check_ratchet(rows, index, baseline, assertion_options)
+        tests = test_sources(root, index)
+    claims, counts, paths, references = scenario_claims(root, index, assertion_options)
     report = {"schema_version": 1, "applicable": 0, "covered": 0, "missing": 0,
               "unsupported": 0, "by_feature": {}, "scenario_counts": counts,
               "source_hash": source_hash(root, paths, tests)}
@@ -351,7 +422,7 @@ def generate(root: Path, base_ref: str):
             key = tuple_key(app)
             matches = claims.get((fid, key), [])
             live = sorted(sid for sid, supported in matches if supported)
-            unsupported = bool(required_assertions(app) - ASSERTION_OPTIONS.keys())
+            unsupported = bool(required_assertions(app) - assertion_options.keys())
             entries.append({"key": applicable_key(fid, app), **app,
                             "required_assertion_ids": sorted(required_assertions(app)),
                             "scenario_ids": live, "non_live_scenario_ids": sorted(sid for sid, supported in matches if not supported),
@@ -365,27 +436,58 @@ def generate(root: Path, base_ref: str):
         report["by_feature"][fid] = summary
         for field in ("applicable", "covered", "missing", "unsupported"):
             report[field] += summary[field]
-    return render(index, report), report
+    comparison_base = rows["host_parity"]["base"] if comparisons else None
+    return render(index, report, comparisons, comparison_base), report
 
 
 def cell(value):
     return str(value).replace("|", "\\|").replace("\n", "<br>")
 
 
-def render(index, report):
+def render_host_rows(index, report, comparisons):
+    for fid in [*sorted(index), None]:
+        for position, row in enumerate(comparisons.get(fid, ())):
+            scope = f"{fid or '추가 관찰 항목'} / {row['scope']}"
+            details = ("", "", "", "")
+            if fid is not None and position == 0:
+                feature, summary = index[fid], report["by_feature"][fid]
+                scope = f"{fid} / {feature['title']}\n{row['scope']}"
+                coverage = " / ".join(str(summary[field]) for field in ("applicable", "covered", "missing"))
+                details = (feature["visible_contract"], feature["verification"], coverage,
+                           f"{feature['owner']} / {feature['chart']}")
+            verdict = row["verdict"]
+            if verdict == "불가피":
+                approval = "사용자 확인 미기록"
+                if row["approval"] == "approved":
+                    approval = f"사용자 승인 완료 ({row['approval_evidence']})"
+                verdict = f"{verdict}({row['reason']}) · {approval}"
+            evidence = "\n".join([row["evidence"], *(f"`{tuple_key(app)}`" for app in row.get("coverage_tuples", []))])
+            values = (scope, *details, row["tmux"], row["herdr"], f"{verdict} · {row['owner']}", evidence)
+            yield "| " + " | ".join(cell(v) for v in values) + " |"
+
+
+def render(index, report, comparisons, comparison_base):
     lines = ["# 사용자 기능 지도", "", "생성: `python3 scripts/generate_user_feature_map.py --write --base-ref origin/main`", "",
-             "수기 정본: [user-feature-map.rows.yaml](user-feature-map.rows.yaml). 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
+             f"수기 정본: {ROWS_LINK}. 이 지도는 live **명세** 연결이며 실행 PASS·최근성 증거가 아니다.",
              "fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않는다. `unspecified` output은 실제 출력 경로를 증명하지 않는다.", "",
              "기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.", "",
              f"적용 {report['applicable']} · covered {report['covered']} · 빈 칸 {report['missing']} · 미지원 단언 칸 {report['unsupported']}",
-             f"시나리오 분류: {json.dumps(report['scenario_counts'], ensure_ascii=False, sort_keys=True)}", "",
-             "| ID / 기능 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 |",
-             "| --- | --- | --- | --- | --- |"]
-    for fid, feature in sorted(index.items()):
-        summary = report["by_feature"][fid]
-        lines.append("| " + " | ".join(cell(v) for v in (
-            f"{fid} / {feature['title']}", feature["visible_contract"], feature["verification"],
-            f"{summary['applicable']} / {summary['covered']} / {summary['missing']}", f"{feature['owner']} / {feature['chart']}")) + " |")
+             f"시나리오 분류: {json.dumps(report['scenario_counts'], ensure_ascii=False, sort_keys=True)}", ""]
+    if comparison_base is None:
+        lines += ["| ID / 기능 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 |",
+                  "| --- | --- | --- | --- | --- |"]
+        for fid, feature in sorted(index.items()):
+            summary = report["by_feature"][fid]
+            lines.append("| " + " | ".join(cell(v) for v in (
+                f"{fid} / {feature['title']}", feature["visible_contract"], feature["verification"],
+                f"{summary['applicable']} / {summary['covered']} / {summary['missing']}", f"{feature['owner']} / {feature['chart']}")) + " |")
+    else:
+        lines += [
+            f"호스트 동작은 [`{comparison_base[:10]}`](https://github.com/itismyfield/AgentDesk/tree/{comparison_base})에서 확인한 코드 기준이다.", "",
+            "| ID / 기능·범위 | 사용자에게 보이는 계약 | 확인 명령 | 적용 / covered / 빈 칸 | 담당 / 차트 | tmux 동작 | Herdr 동작 | 판정 / 담당 | 근거 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        lines.extend(render_host_rows(index, report, comparisons))
     for fid, summary in report["by_feature"].items():
         lines += ["", f"## {fid}", "", f"needs_live: `{str(summary['needs_live']).lower()}`", ""]
         for name in summary["test_names"]:
@@ -400,35 +502,63 @@ def render(index, report):
             lines.append("")
         for pending in summary["pending_assertions"]:
             lines.append(f"- `{pending['assertion_id']}` ({pending['issue']}; {', '.join(pending['input_sources'])}): {pending['reason']}")
-    lines += ["", f"source_hash: `{report['source_hash']}`", ""]
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
+
+
+def with_rows_link(markdown: str, destination: str) -> str:
+    return markdown.replace(ROWS_LINK, f"[{ROWS.name}]({destination})", 1)
+
+
+def report_bytes(report):
+    return (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+
+
+def recovery(base_ref):
+    return f"python3 scripts/generate_user_feature_map.py --write --base-ref {shlex.quote(base_ref)}"
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--write", action="store_true")
-    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--validate", action="store_true", help="validate inputs without reading generated outputs")
+    mode.add_argument("--output-dir", type=Path, help="write Markdown and coverage JSON to a separate directory")
+    mode.add_argument("--write", action="store_true", help="regenerate the tracked Markdown for landing")
+    mode.add_argument("--check", action="store_true", help="compare tracked Markdown to a fresh render")
+    parser.add_argument("--markdown-output", type=Path, help="write landing Markdown to an explicit path")
     parser.add_argument("--base-ref", required=True)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args(argv)
+    if args.markdown_output and not args.write:
+        parser.error("--markdown-output requires --write")
     try:
         markdown, report = generate(args.root, args.base_ref)
         if base_rows(args.root, args.base_ref) is None:
             print("bootstrap: valid base commit has no feature rows; full inventory validated")
-        outputs = {MARKDOWN: markdown.encode(),
-                   REPORT: (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()}
-        for path, content in outputs.items():
-            target = args.root / path
-            if args.write:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(content)
-            else:
-                require(target.exists() and target.read_bytes() == content, f"drift: regenerate {path}")
+        target = args.root / MARKDOWN
+        if args.output_dir:
+            md_out = args.output_dir / MARKDOWN.name
+            json_out = args.output_dir / REPORT_NAME
+            require(md_out.resolve() != target.resolve()
+                    and json_out.resolve() != (args.root / RETIRED_REPORT).resolve(),
+                    "output directory must be separate from the repository's generated documentation")
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            rows_path = args.root.resolve() / ROWS
+            try:
+                relative = Path(os.path.relpath(rows_path, args.output_dir.resolve())).as_posix()
+                rows_link = quote(relative)
+            except ValueError:
+                rows_link = rows_path.as_uri()
+            md_out.write_bytes(with_rows_link(markdown, rows_link).encode())
+            json_out.write_bytes(report_bytes(report))
+        elif args.write:
+            (args.markdown_output or target).write_bytes(markdown.encode())
+        elif args.check:
+            require(target.is_file() and target.read_bytes() == markdown.encode(),
+                    f"drift: regenerate {MARKDOWN}")
         print(f"user feature map: applicable={report['applicable']} covered={report['covered']} missing={report['missing']}")
         return 0
     except (MapError, OSError, yaml.YAMLError) as exc:
-        print(f"user feature map: {exc}", file=sys.stderr)
+        print(f"user feature map: {exc}\nReproduce: {recovery(args.base_ref)}", file=sys.stderr)
         return 1
 
 

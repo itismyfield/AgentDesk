@@ -41,6 +41,8 @@ pub(crate) enum InputRefusal {
     Unknown,
     /// The readiness budget ended on an idle source that proves no boundary; no look clears it.
     Unproven(super::readiness::Unproven),
+    /// The readiness budget ended on a wait a later look may clear, and why.
+    Waits(super::readiness::WaitCause),
     Conflict,
     IdentityMismatch,
     Composer(crate::services::tui_input::submission::Refusal),

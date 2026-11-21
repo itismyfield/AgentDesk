@@ -250,7 +250,7 @@ impl Terminating {
             tmux_session: logical.clone(),
             channel_id: Some(CHANNEL_ID),
             owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
-            host: None,
+            host: Some(herdr::NODE.into()),
             expected_native_session_id: None,
             launch_mode: "fresh".into(),
             provider_root: Some(sessions.clone()),

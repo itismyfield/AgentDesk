@@ -188,10 +188,11 @@ async fn restore_selected_tmux_watchers(
 
         // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
         // skip this session. Registering early blocks new session creation for the channel.
-        let is_dm = matches!(
-            channel_id.to_channel(http.as_ref()).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
+        let destination = channel_id.to_channel(http.as_ref()).await;
+        if let Ok(serenity::Channel::Guild(thread)) = &destination {
+            crate::services::tui_o::cutover::claude_thread::record_restored(thread, session_name);
+        }
+        let is_dm = matches!(destination, Ok(serenity::Channel::Private(_)));
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
         let (allowlist_channel_id, provider_channel_name) = if let Some((pid, pname)) =

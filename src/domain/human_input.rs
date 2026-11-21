@@ -1,3 +1,5 @@
+pub(crate) mod native_source;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HumanInputDelivery {
     Started {

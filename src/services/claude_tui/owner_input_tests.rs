@@ -124,7 +124,19 @@ fn owner_scope_claim_does_not_start_payload_and_is_not_inherited_by_threads() {
                 !std::thread::spawn(active).join().unwrap(),
                 "new threads need explicit owner scope installation"
             );
-            assert_eq!(payload(|| Ok(17)).unwrap(), 17);
+            assert_eq!(key_attempted(), Some(false));
+            assert_eq!(
+                payload(|| {
+                    assert_eq!(
+                        key_attempted(),
+                        Some(true),
+                        "admitted send observes its first key"
+                    );
+                    Ok(17)
+                })
+                .unwrap(),
+                17
+            );
         },
     );
     assert_eq!(commit.load(Ordering::SeqCst), 1);

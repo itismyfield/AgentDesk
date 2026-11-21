@@ -1,0 +1,860 @@
+use super::native::{Disposition, Episode, Outcome, Ticket};
+use super::*;
+
+pub(crate) struct Fixture {
+    pub(crate) history: Registry,
+    pub(crate) ticket: Ticket,
+    pub(crate) input: Value,
+}
+
+impl Fixture {
+    pub(crate) fn at(path: PathBuf, channel: u64, primary: bool) -> Self {
+        Self::at_execution(path, channel, primary, "incarnation-1")
+    }
+    pub(crate) fn at_execution(
+        path: PathBuf,
+        channel: u64,
+        primary: bool,
+        execution: &str,
+    ) -> Self {
+        Self::at_target(
+            path,
+            channel,
+            primary,
+            json!({"host":"herdr","owner":"fixture-pane","execution_nonce":execution}),
+        )
+    }
+
+    pub(crate) fn at_target(path: PathBuf, channel: u64, primary: bool, target: Value) -> Self {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let transcript = path.with_extension("jsonl");
+        std::fs::write(&transcript, "native input\n").unwrap();
+        let key = json!({"identity":{"primary":channel+1,"sources":[{"message_id":channel+1,"queued_generation":1}]},
+            "attempt":{"nonce":format!("attempt-{channel}"),"provider":"claude",
+                "target":target,
+                "source":{"kind":"existing","session_id":"native","transcript":transcript,
+                    "file":file_id(&std::fs::metadata(&transcript).unwrap()),"offset":0}}});
+        let input = json!({"identity":key["identity"],"attempt":key["attempt"],
+            "original":{"author_id":7},"payload":{"frame":"한국어 원본 입력"}});
+        let history = Registry::at(path);
+        history.prepare("native-fixture", &input).unwrap();
+        let ticket = Ticket {
+            key: key.clone(),
+            channel_id: channel,
+            source: Some(history.source("native-fixture", &key).unwrap()),
+            extra: Default::default(),
+            owning_episode: primary.then(|| Episode {
+                user_message_id: channel + 1,
+                turn_nonce: format!("episode-{channel}"),
+                generation: 1,
+                extra: Default::default(),
+            }),
+        };
+        history.prepare_native("native-fixture", &ticket).unwrap();
+        Self {
+            history,
+            ticket,
+            input,
+        }
+    }
+    pub(crate) fn outcome(disposition: Disposition) -> Outcome {
+        Outcome {
+            disposition,
+            range: Some([0, 1]),
+            extra: Default::default(),
+        }
+    }
+}
+
+#[test]
+fn native_8148_v3_reader_keeps_follower_results_through_projection_and_compaction() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    for disposition in [Disposition::Executed, Disposition::WithdrawnNotExecuted] {
+        let dir = test_dir(&runtime);
+        let f = Fixture::at(dir.path().join("frames.json"), 8148001, false);
+        let outcome = Fixture::outcome(disposition.clone());
+        assert!(
+            f.history
+                .record_native_outcome("native-fixture", &f.ticket, &outcome)
+                .unwrap()
+        );
+        assert!(
+            !f.history
+                .record_native_outcome("native-fixture", &f.ticket, &outcome)
+                .unwrap()
+        );
+        let withdrawn = disposition == Disposition::WithdrawnNotExecuted;
+        assert_eq!(
+            f.history
+                .ack_native_withdrawal_notice("native-fixture", &f.ticket)
+                .unwrap(),
+            withdrawn
+        );
+        assert!(
+            !f.history
+                .ack_native_withdrawal_notice("native-fixture", &f.ticket)
+                .unwrap()
+        );
+        let mut future = f.history.json().unwrap();
+        future["live"][0]["registration"]["native_settlement"]["future_proof"] =
+            json!({"native_id":"run-1"});
+        future["live"][0]["registration"]["native_settlement"]["warned"] = json!(true);
+        std::fs::write(dir.path().join("frames.json"), future.to_string()).unwrap();
+        f.history
+            .project(&json!({"namespace":"native-fixture","head_injection":null,
+            "retained_inputs":[{"input":f.input}],"terminal_identities":[]}))
+            .unwrap();
+        f.history
+            .project(&json!({"namespace":"native-fixture","head_injection":null,
+            "retained_inputs":[],"terminal_identities":[{"identity":f.ticket.key["identity"]}]}))
+            .unwrap();
+        let reopened = Registry::at(dir.path().join("frames.json"));
+        let value = reopened.json().unwrap();
+        assert_eq!(value["version"], 3);
+        assert_eq!(value["passive"].as_array().unwrap().len(), 1);
+        let settlement = &value["passive"][0]["registration"]["native_settlement"];
+        assert_eq!(
+            settlement["outcome"],
+            serde_json::to_value(outcome).unwrap()
+        );
+        assert_eq!(settlement["withdrawal_notice"], withdrawn);
+        assert_eq!(settlement["future_proof"], json!({"native_id":"run-1"}));
+        assert_eq!(settlement["warned"], true);
+        assert!(settlement["ticket"]["owning_episode"].is_null());
+        let boot = native::boot_records(&dir.path().join("frames.json"), "claude").unwrap();
+        assert_eq!(boot.len(), 1);
+        assert_eq!(boot[0]["settlement"], *settlement);
+        assert!(super::super::compat::read_legacy(&dir.path().join("frames.json")).is_err());
+    }
+}
+
+#[test]
+fn native_8148_full_ticket_cas_rejects_foreign_episode_source_and_missing_registration() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let f = Fixture::at(dir.path().join("frames.json"), 8148002, false);
+    let before = std::fs::read(dir.path().join("frames.json")).unwrap();
+    for axis in 0..4 {
+        let mut wrong = f.ticket.clone();
+        match axis {
+            0 => {
+                wrong.owning_episode = Some(Episode {
+                    user_message_id: 8148003,
+                    turn_nonce: "foreign".into(),
+                    generation: 2,
+                    extra: Default::default(),
+                })
+            }
+            1 => wrong.source.as_mut().unwrap().target["execution_nonce"] = json!("incarnation-2"),
+            2 => wrong.key["attempt"]["nonce"] = json!("different-attempt"),
+            _ => wrong.channel_id += 1,
+        }
+        assert!(
+            f.history
+                .record_native_outcome(
+                    "native-fixture",
+                    &wrong,
+                    &Fixture::outcome(Disposition::Executed)
+                )
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("frames.json")).unwrap(),
+            before
+        );
+    }
+    assert!(
+        f.history
+            .record_native_outcome(
+                "other-namespace",
+                &f.ticket,
+                &Fixture::outcome(Disposition::Executed)
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn native_8148_ordinary_registration_remains_v2_and_v3_is_not_a_legacy_writer() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let f = Fixture::at(dir.path().join("frames.json"), 8148003, true);
+    let before = std::fs::read(dir.path().join("frames.json")).unwrap();
+    assert!(super::super::compat::v2_prefix(&dir.path().join("frames.json")).unwrap());
+    assert!(super::super::compat::read_legacy(&dir.path().join("frames.json")).is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("frames.json")).unwrap(),
+        before
+    );
+    let ordinary = Registry::at(dir.path().join("ordinary.json"));
+    ordinary.prepare("native-fixture", &f.input).unwrap();
+    let value = ordinary.json().unwrap();
+    assert_eq!(value["version"], 2);
+    assert!(
+        value["live"][0]["registration"]
+            .get("native_settlement")
+            .is_none()
+    );
+    assert!(
+        native::boot_records(&dir.path().join("ordinary.json"), "claude")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        native::boot_records(&dir.path().join("frames.json"), "codex")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn test_dir(runtime: &crate::config::TestRuntimeRootGuard) -> tempfile::TempDir {
+    let root = runtime.path().join("runtime");
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
+#[test]
+fn native_8148_boot_reader_exempts_only_decoded_historical_envelopes() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let path = dir.path().join("frames.json");
+    for raw in [
+        r#"{"entries":[]}"#,
+        r#"{"version":2,"live":[],"passive":[]}"#,
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        assert!(native::boot_records(&path, "claude").unwrap().is_empty());
+    }
+    for raw in [r#"{"version":2,"live":7,"passive":[]}"#, "{broken"] {
+        std::fs::write(&path, raw).unwrap();
+        assert!(native::boot_records(&path, "claude").is_err());
+    }
+    std::fs::remove_file(&path).unwrap();
+    let fixture = Fixture::at(path.clone(), 8148500, true);
+    let mut value = fixture.history.json().unwrap();
+    value["version"] = json!(2);
+    std::fs::write(&path, value.to_string()).unwrap();
+    assert!(
+        native::boot_records(&path, "claude").is_err(),
+        "a native ticket cannot use the historical exception"
+    );
+}
+
+#[test]
+fn native_8148_boot_adopts_full_registration_without_reopening_a_live_slot() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/boot-adopt.json");
+    let _fixture = Fixture::at(path.clone(), 81489951, true);
+    let mut record = super::native::boot_records(&path, "claude")
+        .unwrap()
+        .remove(0);
+    for location in ["settlement", "registration"] {
+        let settlement = if location == "settlement" {
+            &mut record[location]
+        } else {
+            &mut record[location]["native_settlement"]
+        };
+        settlement["ticket"]["opaque_ticket"] = json!({"preserve": [1,2,3]});
+        settlement["opaque_settlement"] = json!({"preserve": "proof"});
+        settlement["warned"] = json!(true);
+    }
+    let record = super::native::RestoredRecord::decode(record).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let restored = Registry::at(path.clone());
+    assert_eq!(
+        restored
+            .adopt_native_records(std::slice::from_ref(&record))
+            .unwrap()
+            .len(),
+        1
+    );
+    let expected = serde_json::to_value(&record).unwrap();
+    let state = restored.json().unwrap();
+    assert_eq!(
+        state["passive"][0]["registration"],
+        expected["registration"]
+    );
+    assert_eq!(state["passive"][0]["state"], "retained");
+    assert!(state["passive"][0]["entry"].is_object());
+    assert!(state["planned"].as_array().unwrap().is_empty());
+    assert_eq!(state["version"], 3);
+    assert!(state["live"].as_array().unwrap().is_empty());
+    let bytes = std::fs::read(&path).unwrap();
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let mut missing_entry = restored.json().unwrap();
+    missing_entry["passive"][0]["entry"] = Value::Null;
+    std::fs::write(&path, missing_entry.to_string()).unwrap();
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    let source = record.settlement.ticket.source.as_ref().unwrap();
+    assert_eq!(
+        restored.receipt(
+            "native-fixture",
+            &record.settlement.ticket.key,
+            (
+                &source.transcript,
+                source.offset,
+                "user",
+                Some("boot-restored-user"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    restored
+        .adopt_native_records(std::slice::from_ref(&record))
+        .unwrap();
+    assert_eq!(
+        restored.json().unwrap()["passive"][0]["entry"]["events"][0]["row"],
+        "boot-restored-user"
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    for mutation in ["namespace", "frame", "frame_author", "outcome", "extra"] {
+        let mut bad = serde_json::to_value(&record).unwrap();
+        match mutation {
+            "namespace" => bad["namespace"] = json!("another-namespace"),
+            "frame" => bad["registration"]["frame"]["class_hash"] = json!("another-frame"),
+            "frame_author" => bad["registration"]["frame"]["author"] = json!("forged-author"),
+            "outcome" => {
+                bad["settlement"]["cleanup_complete"] = json!(true);
+                bad["registration"]["native_settlement"]["cleanup_complete"] = json!(true);
+            }
+            _ => {
+                bad["settlement"]["opaque_settlement"] = json!(false);
+                bad["registration"]["native_settlement"]["opaque_settlement"] = json!(false);
+            }
+        }
+        let rejected = super::native::RestoredRecord::decode(bad)
+            .and_then(|bad| restored.adopt_native_records(&[bad]).map(drop));
+        assert!(rejected.is_err(), "{mutation}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{mutation}");
+    }
+}
+
+#[test]
+fn native_8148_boot_stale_custody_cannot_roll_back_a_durable_result_or_ack() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/boot-monotonic.json");
+    let f = Fixture::at(path.clone(), 81489952, false);
+    let old = super::native::RestoredRecord::decode(
+        super::native::boot_records(&path, "claude")
+            .unwrap()
+            .remove(0),
+    )
+    .unwrap();
+    let outcome = Fixture::outcome(Disposition::Executed);
+    f.history
+        .record_native_outcome("native-fixture", &f.ticket, &outcome)
+        .unwrap();
+    f.history
+        .ack_native_cleanup("native-fixture", &f.ticket, &outcome)
+        .unwrap();
+    f.history.project(&json!({"namespace":"native-fixture","head_injection":null,"retained_inputs":[],"terminal_identities":[{"identity":f.ticket.key["identity"]}]})).unwrap();
+    let before = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    let merged = f
+        .history
+        .adopt_native_records(std::slice::from_ref(&old))
+        .unwrap();
+    assert_eq!(merged[0].settlement, before);
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap(),
+        before
+    );
+    let mut conflicting = serde_json::to_value(&merged[0]).unwrap();
+    for place in ["settlement", "registration"] {
+        let settlement = if place == "settlement" {
+            &mut conflicting[place]
+        } else {
+            &mut conflicting[place]["native_settlement"]
+        };
+        settlement["outcome"]["disposition"] = json!("withdrawn_not_executed");
+    }
+    let conflict = super::native::RestoredRecord::decode(conflicting).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(f.history.adopt_native_records(&[conflict]).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn native_8148_p2_cold_source_adoption_is_monotonic_in_both_orders() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::at(
+        runtime.path().join("runtime/source-template.json"),
+        81489991,
+        true,
+    );
+    let source = f.ticket.source.clone().unwrap();
+    let mut input = f.input.clone();
+    input["attempt"]["source"] = json!({"kind":"pre_source", "expected_session_id":"native",
+        "expected_transcript":source.transcript,"binding_watermark":null});
+    let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
+    let path = runtime.path().join("runtime/cold.json");
+    let history = Registry::at(path.clone());
+    history.prepare("native-fixture", &input).unwrap();
+    let mut ticket = f.ticket.clone();
+    ticket.key = key.clone();
+    ticket.source = None;
+    history.prepare_native("native-fixture", &ticket).unwrap();
+    let old = super::native::RestoredRecord::decode(
+        super::native::boot_records(&path, "claude")
+            .unwrap()
+            .remove(0),
+    )
+    .unwrap();
+    history.bind("native-fixture", &key, &source).unwrap();
+    ticket.source = Some(source.clone());
+    history
+        .note_native_any_key("native-fixture", &ticket)
+        .unwrap();
+    let outcome = Fixture::outcome(Disposition::TransferredUnverified);
+    history
+        .record_native_outcome("native-fixture", &ticket, &outcome)
+        .unwrap();
+    history
+        .ack_native_cleanup("native-fixture", &ticket, &outcome)
+        .unwrap();
+    let bound = history
+        .native_boot_record("native-fixture", &ticket)
+        .unwrap();
+    let seeded = std::fs::read(&path).unwrap();
+    for canonical in [false, true] {
+        for reverse in [false, true] {
+            if canonical {
+                std::fs::write(&path, &seeded).unwrap();
+            } else if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let records = if reverse {
+                [bound.clone(), old.clone()]
+            } else {
+                [old.clone(), bound.clone()]
+            };
+            history.adopt_native_records(&records).unwrap();
+            let actual = history
+                .native_settlement("native-fixture", &ticket)
+                .unwrap();
+            assert_eq!(actual.ticket.source, Some(source.clone()));
+            assert_eq!(actual.outcome, Some(outcome.clone()));
+            assert!(actual.cleanup_complete);
+        }
+    }
+    let foreign_path = runtime.path().join("runtime/foreign-cold.json");
+    let mut foreign = serde_json::to_value(&bound).unwrap();
+    foreign["registration"]["source"]["session_id"] = json!("foreign");
+    foreign["settlement"]["ticket"]["source"]["session_id"] = json!("foreign");
+    foreign["registration"]["native_settlement"] = foreign["settlement"].clone();
+    let foreign = super::native::RestoredRecord::decode(foreign).unwrap();
+    assert!(
+        Registry::at(foreign_path.clone())
+            .adopt_native_records(&[foreign])
+            .is_err()
+    );
+    assert!(!foreign_path.exists());
+    for mutation in ["source", "watermark", "target", "frame", "episode"] {
+        let before = std::fs::read(&path).unwrap();
+        let mut bad = serde_json::to_value(&bound).unwrap();
+        match mutation {
+            "source" => {
+                for prefix in ["registration", "settlement"] {
+                    let at = if prefix == "registration" {
+                        &mut bad[prefix]["source"]
+                    } else {
+                        &mut bad[prefix]["ticket"]["source"]
+                    };
+                    at["session_id"] = json!("foreign");
+                }
+            }
+            "watermark" => {
+                bad["registration"]["source"]["binding_watermark"] = json!("foreign");
+                bad["settlement"]["ticket"]["source"]["binding_watermark"] = json!("foreign");
+            }
+            "target" => {
+                bad["registration"]["source"]["target"]["execution_nonce"] = json!("other");
+                bad["settlement"]["ticket"]["source"]["target"]["execution_nonce"] = json!("other");
+            }
+            "frame" => bad["registration"]["frame"]["class_hash"] = json!("foreign"),
+            _ => {
+                bad["settlement"]["ticket"]["owning_episode"]["turn_nonce"] = json!("foreign");
+            }
+        }
+        bad["registration"]["native_settlement"] = bad["settlement"].clone();
+        let result = super::native::RestoredRecord::decode(bad)
+            .and_then(|record| history.adopt_native_records(&[record]).map(drop));
+        assert!(result.is_err(), "{mutation}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_8148_p2_receipt_adoption_keeps_facts_and_rejects_foreign_owners() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/receipt-custody.json");
+    let f = Fixture::at(path.clone(), 81489995, true);
+    let source = f.ticket.source.as_ref().unwrap();
+    for row in ["receipt-a", "receipt-b"] {
+        assert_eq!(
+            f.history.receipt(
+                "native-fixture",
+                &f.ticket.key,
+                (&source.transcript, 0, "user", Some(row), "한국어 원본 입력")
+            ),
+            Some(true)
+        );
+        if row == "receipt-a" {
+            let raw = super::native::boot_records(&path, "claude")
+                .unwrap()
+                .remove(0);
+            assert_eq!(raw["entry"]["events"][0]["row"], "receipt-a");
+            std::fs::write(path.with_extension("old"), raw.to_string()).unwrap();
+        }
+    }
+    let old: Value =
+        serde_json::from_slice(&std::fs::read(path.with_extension("old")).unwrap()).unwrap();
+    let latest = serde_json::to_value(
+        f.history
+            .native_boot_record("native-fixture", &f.ticket)
+            .unwrap(),
+    )
+    .unwrap();
+    for reverse in [false, true] {
+        std::fs::remove_file(&path).unwrap();
+        let records = if reverse {
+            [&latest, &old]
+        } else {
+            [&old, &latest]
+        };
+        let records = records
+            .into_iter()
+            .map(|v| super::native::RestoredRecord::decode(v.clone()).unwrap())
+            .collect::<Vec<_>>();
+        f.history.adopt_native_records(&records).unwrap();
+        let registration = f.history.native_evidence_registrations().unwrap().remove(0);
+        assert_eq!(
+            registration
+                .receipts
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["receipt-a".to_owned(), "receipt-b".to_owned()]
+                .into_iter()
+                .collect()
+        );
+    }
+    let mut legacy = latest.clone();
+    legacy.as_object_mut().unwrap().remove("entry");
+    f.history
+        .adopt_native_records(&[super::native::RestoredRecord::decode(legacy.clone()).unwrap()])
+        .unwrap();
+    assert_eq!(
+        f.history.native_evidence_registrations().unwrap()[0]
+            .receipts
+            .len(),
+        2
+    );
+    let missing = Registry::at(runtime.path().join("runtime/old-custody.json"));
+    missing
+        .adopt_native_records(&[super::native::RestoredRecord::decode(legacy).unwrap()])
+        .unwrap();
+    assert!(
+        missing.native_evidence_registrations().unwrap()[0]
+            .receipts
+            .is_empty()
+    );
+    for field in ["id", "path", "file", "hash", "event"] {
+        let before = std::fs::read(&path).unwrap();
+        let mut bad = latest.clone();
+        match field {
+            "file" => bad["entry"][field] = json!([1, 2]),
+            "event" => bad["entry"]["events"][0]["key"] = json!("user:forged"),
+            _ => bad["entry"][field] = json!("foreign"),
+        }
+        let result = super::native::RestoredRecord::decode(bad)
+            .and_then(|r| f.history.adopt_native_records(&[r]).map(drop));
+        assert!(result.is_err(), "{field}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    let mut input = f.input.clone();
+    input["identity"]["primary"] = json!(81489999u64);
+    input["identity"]["sources"][0]["message_id"] = json!(81489999u64);
+    input["attempt"]["nonce"] = json!("different-receipt-owner");
+    f.history.prepare("native-fixture", &input).unwrap();
+    let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
+    let mut ticket = f.ticket.clone();
+    ticket.key = key;
+    ticket.owning_episode.as_mut().unwrap().user_message_id = 81489999;
+    ticket.owning_episode.as_mut().unwrap().turn_nonce = "different-receipt-episode".into();
+    f.history.prepare_native("native-fixture", &ticket).unwrap();
+    let mut other = serde_json::to_value(
+        f.history
+            .native_boot_record("native-fixture", &ticket)
+            .unwrap(),
+    )
+    .unwrap();
+    other["entry"]["events"] = latest["entry"]["events"].clone();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .adopt_native_records(&[super::native::RestoredRecord::decode(other).unwrap()])
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn native_8148_control_store_trylocks_cas_and_encoding_are_fail_closed() {
+    use crate::test_support::wait::{WAIT_CAP, join_within};
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let path = runtime.path().join("runtime/try-control.json");
+    let f = Fixture::at(path.clone(), 81489740, true);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &f.ticket,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    f.history
+        .note_native_any_key("native-fixture", &f.ticket)
+        .unwrap();
+    for kind in ["cache", "pending", "flock"] {
+        let cache = (kind == "cache").then(|| f.history.cached.lock().unwrap());
+        let pending = (kind == "pending").then(|| f.history.pending.lock().unwrap());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        if kind == "flock" {
+            lock.lock().unwrap();
+        }
+        let history = f.history.clone();
+        let ticket = f.ticket.clone();
+        let result = join_within(
+            std::thread::spawn(move || {
+                history.try_native_control(
+                    "native-fixture",
+                    &ticket,
+                    super::native::Disposition::Cancelled,
+                    None,
+                )
+            }),
+            WAIT_CAP,
+        );
+        assert!(result.is_err(), "{kind}");
+        drop(cache);
+        drop(pending);
+        drop(lock);
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+    }
+    f.history
+        .encode_fault
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &f.ticket,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    f.history
+        .encode_fault
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            super::native::Disposition::Cancelled,
+            None,
+        )
+        .unwrap();
+    let first = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    f.history
+        .try_native_control(
+            "native-fixture",
+            &f.ticket,
+            super::native::Disposition::OperatorReleased,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap(),
+        first
+    );
+    let mut changed = f.ticket.clone();
+    changed.extra.insert("foreign".into(), true.into());
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        f.history
+            .try_native_control(
+                "native-fixture",
+                &changed,
+                super::native::Disposition::Cancelled,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn native_8148_control_unflushed_candidate_repairs_or_preserves_a_third_state() {
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    for third in [false, true] {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let path = runtime.path().join("runtime/control-flush.json");
+        let f = Fixture::at(path.clone(), 81489741, true);
+        f.history
+            .note_native_any_key("native-fixture", &f.ticket)
+            .unwrap();
+        let second = Fixture::at(path.clone(), 81489742, true);
+        f.history
+            .note_native_any_key("native-fixture", &second.ticket)
+            .unwrap();
+        {
+            let _fault = Watch::new(
+                path.parent().unwrap(),
+                Plan {
+                    fail: vec![Step::ParentSync],
+                    block: None,
+                },
+            );
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &f.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            let candidate = std::fs::read(&path).unwrap();
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &second.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), candidate);
+        }
+        if third {
+            let mut other: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            other["live"][0]["registration"]["native_settlement"]["third"] = true.into();
+            let other = other.to_string().into_bytes();
+            std::fs::write(&path, &other).unwrap();
+            assert!(
+                f.history
+                    .try_native_control(
+                        "native-fixture",
+                        &f.ticket,
+                        super::native::Disposition::Cancelled,
+                        None
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), other);
+        } else {
+            f.history
+                .try_native_control(
+                    "native-fixture",
+                    &f.ticket,
+                    super::native::Disposition::Cancelled,
+                    None,
+                )
+                .unwrap();
+            assert!(f.history.pending.lock().unwrap().is_none());
+            assert_eq!(
+                f.history
+                    .native_settlement("native-fixture", &f.ticket)
+                    .unwrap()
+                    .outcome
+                    .unwrap()
+                    .disposition,
+                super::native::Disposition::Cancelled
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_8148_classification_keeps_settled_follower_and_unresolved_source() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let f = Fixture::at(dir.path().join("frames.json"), 81480441, false);
+    assert!(
+        f.history
+            .record_native_outcome(
+                "native-fixture",
+                &f.ticket,
+                &Fixture::outcome(Disposition::Executed)
+            )
+            .unwrap()
+    );
+    assert!(
+        f.history
+            .native_evidence_registrations()
+            .unwrap()
+            .is_empty()
+    );
+    let classified = f.history.native_classification_registrations().unwrap();
+    assert_eq!(classified.len(), 1);
+    assert_eq!(classified[0].ticket, f.ticket);
+    assert!(!classified[0].candidate);
+    let mut cold = f.input.clone();
+    cold["attempt"]["nonce"] = json!("unresolved");
+    cold["attempt"]["source"] = json!({"kind":"cold"});
+    let key = json!({"identity":cold["identity"],"attempt":cold["attempt"]});
+    f.history.prepare("native-fixture", &cold).unwrap();
+    f.history
+        .prepare_native_intent(
+            "native-fixture",
+            &key,
+            f.ticket.channel_id,
+            &native::Intent::Follower,
+        )
+        .unwrap();
+    let classified = f.history.native_classification_registrations().unwrap();
+    assert_eq!(classified.len(), 2);
+    assert!(
+        classified
+            .iter()
+            .any(|r| r.ticket.source.is_none() && r.candidate)
+    );
+}

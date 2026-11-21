@@ -16,6 +16,7 @@ pub(in crate::services::discord) struct Snapshot {
     pub(in crate::services::discord) watcher_initialization_observed: bool,
     pub(in crate::services::discord) stream_decoder_initialization_observed: bool,
     pub(in crate::services::discord) decoded_chunks: Vec<String>,
+    pub(in crate::services::discord) source_reads: Vec<(u64, u64)>,
     pub(in crate::services::discord) parser_responses: Vec<String>,
     pub(in crate::services::discord) events: BTreeMap<&'static str, usize>,
 }
@@ -52,6 +53,7 @@ impl Snapshot {
                 .skip(baseline.decoded_chunks.len())
                 .cloned()
                 .collect(),
+            source_reads: self.source_reads[baseline.source_reads.len()..].to_vec(),
             parser_responses: self
                 .parser_responses
                 .iter()
@@ -231,6 +233,25 @@ pub(in crate::services::discord) fn source_decoded(source: SourceFileIdentity, t
         let keyed = observations.keys.entry(key).or_default();
         keyed.decoded_source_chunks += 1;
         keyed.decoded_chunks.push(text.to_owned());
+    }
+}
+
+pub(in crate::services::discord) fn source_read(
+    provider: &ProviderKind,
+    channel_id: u64,
+    source: SourceFileIdentity,
+    start: u64,
+    end: u64,
+) {
+    let key = (provider.as_str().to_owned(), channel_id);
+    let mut observations = OBSERVATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if end > start && observations.sources.get(&key) == Some(&Some(source)) {
+        observations
+            .keys
+            .entry(key)
+            .or_default()
+            .source_reads
+            .push((start, end));
     }
 }
 

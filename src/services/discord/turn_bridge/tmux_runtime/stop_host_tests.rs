@@ -961,7 +961,7 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         Stored, busy_turn, channel_key, runtime, seed,
     };
     use crate::services::routines::session_control::{
-        RoutineSessionCommand, RoutineSessionController,
+        RoutineSessionCommand::Reset, RoutineSessionController, seed_started_control_session,
     };
     let fx = Fixture::new();
     let (db, pool) = postgres().await;
@@ -979,8 +979,14 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         let pid = 65_000 + n as u32;
         let (name, token, alive) =
             seeded_runtime_channel(&shared, channel, &channel_name, pid).await;
-        case.seed(&pool, &channel_key(&shared, &name), &name, channel.get())
-            .await;
+        let key = channel_key(&shared, &name);
+        case.seed(&pool, &key, &name, channel.get()).await;
+        sqlx::query("UPDATE sessions SET agent_id=$1 WHERE session_key=$2")
+            .bind(&agent)
+            .bind(&key)
+            .execute(&pool)
+            .await
+            .unwrap();
         let active = shared.restart.global_active.load(Ordering::SeqCst);
         let _ = fx.take_calls();
         let routine = crate::services::routines::store::RoutineRecord {
@@ -1004,9 +1010,25 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let reset =
-            controller.control_persistent_session(&routine, RoutineSessionCommand::Reset, "p6ao");
-        let result = reset.await.unwrap();
+        seed_started_control_session(&pool, &routine, "claude", &channel.to_string(), &key).await;
+        let result = controller
+            .control_persistent_session(&routine, Reset, "p6ao", Some(registry.as_ref()))
+            .await;
+        if !case.has_row() {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("session is not provable"),
+                "{case:?}"
+            );
+            assert!(runtime_kept(&shared, channel, &token).await, "{case:?}");
+            assert!(alive.load(Ordering::SeqCst), "{case:?}");
+            assert!(fx.take_calls().is_empty(), "{case:?}");
+            crate::services::session_backend::remove_process_session(&name);
+            continue;
+        }
+        let result = result.unwrap();
         if case.admitted() {
             assert_eq!(result.lifecycle_path, "runtime-clear", "{case:?}");
             assert!(!alive.load(Ordering::SeqCst), "{case:?}: main kills");

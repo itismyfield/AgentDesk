@@ -608,6 +608,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        for name in ("rust_or_policy", "rust_compile", "cross_os_rust"):
+            with self.subTest(filter=name):
+                self.assertTrue(selects(filters[name], "crates/adk-store/Cargo.toml"))
         jobs = yaml.safe_load(workflow)["jobs"]
         check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (
@@ -644,7 +648,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
                 ("check_fast_cross_os_targets",
                  "set -euo pipefail\n"
-                 "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
+                 "cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json\n"
                  "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json\n"),
             ],
         )
@@ -883,7 +887,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
-        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --profile ci",))
+        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --workspace --profile ci",))
         # Local non-PG lib tests take the native CI path; the other commands equal CI Main's non-lib step.
         recipe = just_recipe_commands(justfile, "test-non-pg")
         self.assertTrue(any(command.startswith('RUNNER_TEMP="$PWD/target/nextest-local" GITHUB_WORKSPACE="$PWD" '
@@ -2136,7 +2140,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 helper, encoding="utf-8"
             )
             (root / "scripts/ci").mkdir()
-            for helper in ("nextest_required.py", "cargo_test_filters.py"):
+            for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
+                           "main_script_check_shards.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
