@@ -160,14 +160,16 @@ RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
                   /\ r' = [r EXCEPT !.phase = "refused", !.refusals = 1,
                       !.owned = FALSE, !.reason = Scenario]
 \* retire refuses Unproven for a present pane (herdr_launch/retire.rs:59), so the original is held
-\* for reobservation (intake_turn/owned_busy.rs:261,308-327) under the readiness due counted from
-\* this hold (held_watch/readiness.rs:hold_identity, v2/readiness_hold.rs:hold_identity) and
-\* the drive's armed timer. "IdentityUntimed" is the #8280 hold before: no due, no timer.
+\* for reobservation (intake_turn/owned_busy.rs:261,308,547) under READINESS_HOLD_MS counted from
+\* this hold (queued_head/v2/readiness_hold.rs:7,52) with the drive's timer armed
+\* (input_owner/held_watch/readiness.rs:34). Expiry is RHExpire (readiness_hold.rs:154).
+\* "IdentityUntimed" is the #8280 hold before: no due, no timer.
 RHIdentityHold == /\ r.phase = "queued" /\ RHNoHolderBusy
                   /\ r' = [r EXCEPT !.phase = "held", !.visible = TRUE, !.age = 1,
                       !.elapsed = 1, !.dueStored = Mutant # "IdentityUntimed",
                       !.armed = Mutant # "IdentityUntimed"]
-\* The screen may turn idle before the due; the held watch's next look then wakes the Idle start.
+\* The screen may turn idle before the due; the held watch's next look wakes the Idle start, which
+\* ends the identity hold before its key (intake_turn/owned_busy.rs:135,334).
 RHIdleScreen == /\ Scenario = "no-holder-busy-idle" /\ r.phase = "held" /\ ~r.screen
                 /\ r.age < 5
                 /\ r' = [r EXCEPT !.screen = TRUE]
