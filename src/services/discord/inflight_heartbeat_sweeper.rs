@@ -80,6 +80,9 @@ fn run_heartbeat_sweep_pass_inner(
     }
     let mut candidates: Vec<Candidate> = Vec::new();
 
+    // Only names leave the scan: reading a session's provider can ask tmux, which must not
+    // happen under the registry's shard lock.
+    let mut stale_sessions: Vec<String> = Vec::new();
     for entry in shared.tmux_watchers.iter() {
         report.scanned += 1;
         if !entry.value().heartbeat_stale() {
@@ -92,7 +95,10 @@ fn run_heartbeat_sweep_pass_inner(
             continue;
         }
         report.heartbeat_stale += 1;
-        let tmux_session_name = entry.value().tmux_session_name.clone();
+        stale_sessions.push(entry.value().tmux_session_name.clone());
+    }
+
+    for tmux_session_name in stale_sessions {
         let Some(session_provider) = tmux_session_provider(&tmux_session_name) else {
             continue;
         };

@@ -4,7 +4,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use sqlx::Row;
 
-use crate::services::provider::{ProviderKind, session_source::tmux_session_provider};
+use crate::services::provider::ProviderKind;
 
 use super::SharedData;
 
@@ -482,22 +482,17 @@ async fn release_relinquished_turn_mailbox(
     }
 }
 
+/// `provider_kind` is the dead session's watcher's own: the session is gone by now, so its tmux
+/// marker cannot be asked and its name says nothing.
 pub(super) async fn resume_aborted_restart_turn(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
+    provider_kind: &ProviderKind,
     tmux_session_name: &str,
     output_path: &str,
 ) -> bool {
-    let Some(provider_kind) = tmux_session_provider(tmux_session_name) else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",
-            tmux_session_name
-        );
-        return false;
-    };
-    let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
+    let Some(state) = super::inflight::load_inflight_state(provider_kind, channel_id.get()) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         // #3014: there is no persisted inflight turn to hand off, but the pane
         // may have died *mid-turn while Discord inputs were queued*. Without
@@ -538,7 +533,7 @@ pub(super) async fn resume_aborted_restart_turn(
             );
             super::queue_io::schedule_deferred_idle_queue_kickoff(
                 shared.clone(),
-                provider_kind,
+                provider_kind.clone(),
                 channel_id,
                 "watcher_death_backlog_recovery",
             );
@@ -583,7 +578,7 @@ pub(super) async fn resume_aborted_restart_turn(
         channel_id,
         http,
         shared,
-        &provider_kind,
+        provider_kind,
         state,
         &best_response,
     )
