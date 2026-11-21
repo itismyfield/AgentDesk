@@ -141,11 +141,11 @@ class Runner(unittest.TestCase):
             pass
         Path(f"{gate}.done").read_text()
         released = self.tick(4e9 + 1)
-        self.assertEqual(released["status"], "DEFERRED_BUDGET")
+        self.assertEqual(released["status"], "UNEVALUABLE")
         records = [json.loads(p.read_text()) for p in (self.state / "runs").glob("*.json")]
         orphan = next(r for r in records if r["run_id"] != released["run_id"])
         self.assertEqual((orphan["result"], orphan["abandoned_by"]), ("ABANDONED", released["run_id"]))
-        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records), 2)
         self.assertEqual(orphan["cursor_index"], 0)
         ledger = json.loads((self.state / "budget" / f"{orphan['budget_day']}.json").read_text())
         self.assertEqual(ledger[orphan["run_id"]]["claude"]["turns"], 6)
@@ -328,7 +328,7 @@ class Recovery(Runner):
                 self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "UNEVALUABLE")
                 self.assertEqual(len(self.driven()), 2)
 
-    def test_crash_after_driver_leaves_unknown_provider_paused(self):
+    def test_crash_after_driver_keeps_reservation_without_pausing_provider(self):
         original = runner._execute
 
         def execute(*args):
@@ -338,8 +338,8 @@ class Recovery(Runner):
         with mock.patch.object(runner, "_execute", side_effect=execute), self.assertRaises(RuntimeError):
             self.tick(1000)
         self.assertEqual(len(self.driven()), 1)
-        self.assertEqual(self.tick(90000)["status"], "DEFERRED_BUDGET")
-        self.assertEqual(len(self.driven()), 1)
+        self.assertEqual(self.tick(90000)["status"], "UNEVALUABLE")
+        self.assertGreater(len(self.driven()), 1)
 
     def test_completion_replay_is_idempotent_at_each_file_boundary(self):
         for kind in ("scheduled", "deploy"):
@@ -596,7 +596,7 @@ class ReviewS2(unittest.TestCase):
                 record = self.completed(result)
                 self.assertEqual(result["status"], "UNEVALUABLE")
                 self.assertFalse(record["usage_complete"])
-                self.assertIn("claude", read_json(self.state / "budget/paused.json", {}))
+                self.assertNotIn("claude", read_json(self.state / "budget/paused.json", {}))
                 self.assertEqual(read_json(self.state / f"budget/{record['budget_day']}.json", {})[record["run_id"]]["claude"]["tokens"], 1000)
                 self.assertEqual(outbox.pending(self.state), 1)
                 view = publication.view({**self.config, "state_dir": self.state}, head=SHA, now=time.time())
@@ -644,7 +644,7 @@ class ReviewS2(unittest.TestCase):
                     self.assertEqual(spawned.call_count, 1)
                     self.assertTrue(record["completed_at"] and record["applied"])
                     self.assertEqual(plan.cursor(self.state)["index"], 1)
-                    self.assertIn("claude", read_json(self.state / "budget/paused.json", {}))
+                    self.assertNotIn("claude", read_json(self.state / "budget/paused.json", {}))
                     self.assertEqual(outbox.pending(self.state), 1)
                     self.assertEqual(read_json(record["occurrences"][0]["driver_report_path"], {})["usage"], usage)
 
@@ -861,15 +861,20 @@ class Publication(unittest.TestCase):
         state = read_json(self.state / "status.json", {})
         self.assertEqual(state["heartbeat_at"], now + 180)
 
-    def test_usage_paused_tick_refreshes_heartbeat_without_new_turns(self):
-        now = time.time()
-        with mock.patch.dict("os.environ", {"FAKE_TURNS": "null"}):
+    def test_overrun_pause_defers_with_heartbeat_until_next_ledger_day(self):
+        now, paused = time.time(), self.state / "budget/paused.json"
+        with mock.patch.dict("os.environ", {"FAKE_TURNS": "7"}):
             self.tick(now)
-        self.assertEqual(len(self.driven()), 1)
+        until = read_json(paused, {})["claude"]["until"]
+        self.assertEqual((budget.day(until - 1), budget.day(until)), (budget.day(now), budget.day(now + 86400)))
         self.submit("while-paused")
-        self.assertEqual(self.tick(now + 180)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(self.tick(until - 1)["status"], "DEFERRED_BUDGET")
         self.assertEqual(len(self.driven()), 1)
-        self.assertEqual(read_json(self.state / "status.json", {})["heartbeat_at"], now + 180)
+        self.assertEqual(read_json(self.state / "status.json", {})["heartbeat_at"], until - 1)
+        write_json(paused, {**read_json(paused, {}), "codex": "legacy-run-id"})
+        self.assertNotEqual(self.tick(until)["status"], "DEFERRED_BUDGET")
+        self.assertGreater(len(self.driven()), 1)
+        self.assertEqual(read_json(paused, None), {})
 
     def test_completed_assertion_contract_is_frozen_during_republication(self):
         value = report()
