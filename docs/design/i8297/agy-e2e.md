@@ -105,6 +105,8 @@
 
 ## 운영 변경 목록
 
+O1–O5 각 착수 전 메인에 항목·호스트·되돌리기(`enabled=false`, `down`)를 알린다.
+
 모두 릴리스 runtime 밖의 변경이다. `agentdesk.yaml`·운영 봇 `auth`·운영 credential·운영 launchd 작업은 바꾸지 않는다. 직전 설계의 운영 봇 허용 목록 수정 계획은 없앴다. 셀 호스트는 mac-book 한 곳을 제안한다(직전 설계의 배정 유지). 다른 Mac에는 아래 항목을 적용하지 않는다. 그 Mac은 배포 후크에서 config가 없어 아무 일도 하지 않는다(`scripts/e2e/continuous/after_deploy.sh:7–8`).
 
 명령의 `<...>`는 코디네이터가 채우는 비밀 아닌 값이다. 비밀값은 `agent-op read`의 stdout을 다음 명령의 stdin으로만 넘긴다. 변수에 담지 않고, 인자·env·로그에 남기지 않으며, `set -x`를 켜지 않는다. op 참조는 필드 id를 쓴다(라벨 `자격 증명`은 참조에서 오류가 난다).
