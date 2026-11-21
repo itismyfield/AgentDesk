@@ -1,10 +1,10 @@
 //! Which execution consumed an accepted input and how it ended, read only from owner records: its
 //! queue file, its inflight row, then its `turns` receipt. A delivery response is never evidence.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::db::turns::{OriginReceipt, find_origin_receipt};
+use crate::db::turns::{OriginReceipt, TerminalOutcome, find_origin_receipt};
 
 pub const MAX_ORIGIN_ID_LEN: usize = 256;
 
@@ -164,6 +164,71 @@ fn running_execution(
             execution_id,
         },
     }))
+}
+
+/// Providers whose single transcript `result` event is their terminal `Done` body; Claude and
+/// Codex join once their result is a verified final record rather than a commentary mix.
+const FINAL_ANSWER_SOURCES: &[(&str, &str)] = &[("antigravity", "agy_terminal_result")];
+
+/// The final answer of one completed execution and the record it came from.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FinalAnswer {
+    pub text: String,
+    pub boundary: Value,
+    pub source: &'static str,
+}
+
+/// Read from the ended execution's own transcript, live or archived; None unless it completed and
+/// that record holds exactly one non-blank result from a listed provider.
+pub async fn final_answer(
+    pool: &PgPool,
+    receipt: &OriginReceipt,
+) -> Result<Option<FinalAnswer>, String> {
+    if receipt.terminal_outcome != TerminalOutcome::Completed.as_str() {
+        return Ok(None);
+    }
+    let record: Option<(Option<String>, Value)> = sqlx::query_as(
+        "SELECT provider, events_json FROM (
+            SELECT provider, events_json, 0 AS tier FROM session_transcripts WHERE turn_id = $1
+            UNION ALL
+            SELECT provider, events_json, 1 AS tier FROM session_transcripts_archive
+             WHERE turn_id = $1
+         ) found ORDER BY tier LIMIT 1",
+    )
+    .bind(&receipt.turn_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("read final answer record failed: {error}"))?;
+    let Some((provider, events)) = record else {
+        return Ok(None);
+    };
+    Ok(final_answer_in(
+        &receipt.turn_id,
+        provider.as_deref(),
+        &events,
+    ))
+}
+
+fn final_answer_in(turn_id: &str, provider: Option<&str>, events: &Value) -> Option<FinalAnswer> {
+    let source = FINAL_ANSWER_SOURCES
+        .iter()
+        .find(|(name, _)| Some(*name) == provider)?
+        .1;
+    let mut results = events
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.get("kind").and_then(Value::as_str) == Some("result"));
+    let (index, event) = results.next()?;
+    if results.next().is_some() || event.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let text = event.get("content").and_then(Value::as_str)?;
+    (!text.trim().is_empty()).then(|| FinalAnswer {
+        text: text.to_string(),
+        boundary: json!({"turn_id": turn_id, "result_event_index": index}),
+        source,
+    })
 }
 
 #[cfg(test)]
