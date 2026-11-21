@@ -1,0 +1,20 @@
+stateDiagram-v2
+    [*] --> Entry: BootHerdr / BootTmux / LiveTmux / DeadTmux / ProbeFail / HerdrBound / Unresolved
+
+    state "host_decision (row + tmux now, no cache)" as Decide
+    Entry --> Decide: CmdRestart / CmdTmuxOp / CmdRelaunch / Input
+    Decide --> Herdr: own boot Herdr, or Bound row at the parent's endpoint
+    Decide --> Tmux: plain channel, tmux parent, live tmux, nothing runs
+    Decide --> Hold: Unresolved, provider unknown, probe failed, row unknown
+
+    Herdr --> [*]: A1 herdr::run, A2-A9 keep tmux, no relaunch, consent asked (Bound passes)
+    Tmux --> [*]: A1 tmux restart, A2-A9 tmux path, relaunch applies, consent not asked
+    Hold --> [*]: A1 refused (no host), A2-A9 keep tmux, no relaunch, consent not asked
+
+    state "process record (thread_host JUDGED)" as Record
+    Entry --> Record: Turn (for_turn)
+    Record --> Record: gate refusal over a verified Bound row keeps Herdr (After)
+    Record --> Empty: Restart (process memory)
+    Empty --> Record: S2 BootRestore seeds Bound threads before readers
+    Record --> SyncRead: #15 / #43 / #45 read Herdr -> Herdr path, else tmux path
+    Empty --> SyncRead: Unknown -> tmux path (base behaviour)
