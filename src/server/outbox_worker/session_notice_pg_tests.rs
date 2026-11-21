@@ -764,3 +764,91 @@ async fn explicit_autoqueue_notice_does_not_convert_arbitrary_system_content_pg(
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn secretary_channel_progress_posts_silently_while_reminders_and_other_channels_push_pg() {
+    let _isolation = Isolation::new();
+    let (db, pool) = database("secretary channel push policy").await;
+    let discord = Discord::new().await;
+    let registry = discord.registry().await;
+    let _provider_rest = crate::services::discord::session_notice_delivery::register_test_provider(
+        &registry,
+        "claude",
+        CHANNEL,
+        discord.provider.clone(),
+        pool.as_ref().clone(),
+    )
+    .await;
+    // (secretary channels, source, reason, session, content)
+    for (channels, source, reason, session, content) in [
+        (
+            vec![CHANNEL.to_string()],
+            "lifecycle_notifier",
+            REASON,
+            SESSION,
+            ORIGINAL,
+        ),
+        (
+            vec![CHANNEL.to_string()],
+            "retained_input_notice",
+            "retained",
+            "s1",
+            "progress",
+        ),
+        (
+            vec![CHANNEL.to_string()],
+            "scheduled_message",
+            "smsg",
+            "s2",
+            "reminder",
+        ),
+        (
+            vec![],
+            "retained_input_notice",
+            "retained",
+            "s3",
+            "unlisted",
+        ),
+    ] {
+        let mut config = crate::config::Config::default();
+        config.discord.secretary_channels = channels;
+        crate::config_live_reload::install(config);
+        message_outbox::enqueue_outbox_pg_returning_id(
+            &pool,
+            OutboxMessage {
+                target: TARGET,
+                content,
+                bot: "notify",
+                source,
+                reason_code: Some(reason),
+                session_key: Some(session),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("push policy fixture must enqueue a row");
+        assert_eq!(
+            drain_message_outbox_once(&pool, &registry, "push-worker").await,
+            1
+        );
+    }
+    let mut flags: Vec<_> = discord
+        .posts()
+        .into_iter()
+        .map(|(_, body)| {
+            (
+                body["content"].as_str().unwrap_or_default().to_string(),
+                body["flags"].as_u64(),
+            )
+        })
+        .collect();
+    flags.sort();
+    let silent = Some(4096);
+    let designated = flags.iter().find(|(content, _)| content.starts_with("-# "));
+    assert_eq!(designated.map(|(_, flag)| *flag), Some(silent));
+    assert!(flags.contains(&("progress".into(), silent)), "{flags:?}");
+    assert!(flags.contains(&("reminder".into(), None)), "{flags:?}");
+    assert!(flags.contains(&("unlisted".into(), None)), "{flags:?}");
+    pool.close().await;
+    db.drop().await;
+}

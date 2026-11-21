@@ -314,6 +314,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn secretary_channel_tool_cards_post_silently_while_replies_push() {
+        use crate::services::tui_o::repost::io::tests::{Mock, reply};
+        use crate::services::tui_o::shadow::UnitKind;
+        let _live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let mut config = crate::config::Config::default();
+        config.discord.secretary_channels = vec!["72280900".into()];
+        crate::config_live_reload::install(config);
+        let created = serde_json::json!({
+            "id": "9001", "channel_id": "72280900", "content": "x", "timestamp": "2026-11-21T00:00:00+00:00",
+            "author": {"id": "42", "username": "bot", "discriminator": "0001", "avatar": null, "bot": true},
+            "edited_timestamp": null, "tts": false, "mention_everyone": false, "mentions": [],
+            "mention_roles": [], "attachments": [], "embeds": [], "pinned": false, "type": 0
+        })
+        .to_string();
+        let mock = Mock::start(vec![
+            reply("200 OK", &[], &created),
+            reply("200 OK", &[], &created),
+        ])
+        .await;
+        let http = serenity::HttpBuilder::new("fixture-token").proxy(mock.base.clone());
+        let port = GatewayPort::new(Arc::new(http.ratelimiter_disabled(true).build()), 42);
+        for kind in [UnitKind::Tool, UnitKind::Body] {
+            let outcome = port
+                .post_unit(72280900, format!("{kind:?}"), None, kind)
+                .await;
+            assert!(matches!(outcome, PostOutcome::Created(_)), "{kind:?}");
+        }
+        let flags: Vec<_> = mock
+            .requests()
+            .iter()
+            .map(|(_, body)| {
+                serde_json::from_slice::<serde_json::Value>(body).unwrap()["flags"].as_u64()
+            })
+            .collect();
+        assert_eq!(flags, [Some(4096), None]);
+    }
+
     #[test]
     fn only_400_403_and_404_count_as_refused() {
         for status in [400, 403, 404] {
