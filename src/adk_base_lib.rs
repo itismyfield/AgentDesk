@@ -1,6 +1,5 @@
-//! Seed of the shared base crate: value contracts and pure helpers that build
-//! without the parent. Files stay in place; the parent re-exports each module
-//! under its old path, so `crate::domain::…` and `crate::utils::…` keep resolving.
+//! Seed of the shared base crate, built from the files in place.
+//! The parent re-exports each module, so `crate::domain::…` and `crate::utils::…` paths keep resolving.
 #![deny(clippy::drop_non_drop)]
 #![deny(clippy::await_holding_lock)]
 #![deny(clippy::mistyped_literal_suffixes)]
