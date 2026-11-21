@@ -218,6 +218,9 @@ pub struct DiscordConfig {
         skip_serializing_if = "decisions::DecisionsConfig::is_default"
     )]
     pub decisions: decisions::DecisionsConfig,
+    /// Secretary channel ids whose progress posts and quiet-hour notices skip the push.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secretary_channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

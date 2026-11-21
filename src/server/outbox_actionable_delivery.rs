@@ -138,7 +138,18 @@ async fn deliver_with_bot(
     .await
 }
 
+/// Every post this row makes is judged by its class against the channel its target resolves to.
 pub(super) async fn deliver(
+    registry: &HealthRegistry,
+    pg_pool: &PgPool,
+    row: &PendingMessageOutboxRow,
+) -> (String, String) {
+    use crate::services::discord::outbound::notification_policy as policy;
+    let class = policy::outbox_class(&row.source, row.reason_code.as_deref());
+    policy::scoped(class, deliver_row(registry, pg_pool, row)).await
+}
+
+async fn deliver_row(
     registry: &HealthRegistry,
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,

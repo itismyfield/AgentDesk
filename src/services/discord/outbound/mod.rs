@@ -15,6 +15,7 @@ pub(in crate::services::discord) mod delivery_frontier_probe;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
+pub(crate) mod notification_policy;
 #[cfg(unix)]
 pub(in crate::services::discord) mod o_delivery_evidence;
 #[cfg(unix)]

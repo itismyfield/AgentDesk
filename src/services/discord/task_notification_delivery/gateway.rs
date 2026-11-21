@@ -144,12 +144,16 @@ impl TaskCardTransport for DiscordTaskCardTransport {
         content: &str,
         nonce: &str,
     ) -> Result<u64, TaskCardTransportError> {
-        super::super::gateway::send_outbound_message_with_nonce_classified(
-            bot.http.clone(),
-            self.shared.clone(),
-            ChannelId::new(channel_id),
-            content,
-            nonce,
+        use super::super::outbound::notification_policy as policy;
+        policy::scoped(
+            policy::NoticeClass::Unrequested,
+            super::super::gateway::send_outbound_message_with_nonce_classified(
+                bot.http.clone(),
+                self.shared.clone(),
+                ChannelId::new(channel_id),
+                content,
+                nonce,
+            ),
         )
         .await
         .map(|message_id| message_id.get())
