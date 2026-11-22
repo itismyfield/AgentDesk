@@ -9,6 +9,14 @@ from pathlib import Path
 TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 CLAUDE = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 CODEX = ("input_tokens", "cached_input_tokens", "output_tokens")
+# The budget leaves out cache reads: reusing a cached prompt costs almost nothing, yet usage still records them.
+BUDGET_TOKENS = ("input_tokens", "output_tokens", "cache_write_tokens")
+BUDGET_BASIS = "+".join(BUDGET_TOKENS)
+
+
+def budget_tokens(spent):
+    """Tokens charged against the turn and run budgets for measured usage keyed by TOKENS."""
+    return sum(spent[field] for field in BUDGET_TOKENS)
 
 
 def mark(path):

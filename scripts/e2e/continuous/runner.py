@@ -17,6 +17,7 @@ import uuid
 
 from . import budget, channel_lock, inbox, plan, publication, summary
 from .store import read_json, write_json
+from .usage import BUDGET_BASIS, budget_tokens
 from ..tui_relay import preflight_evidence
 
 RESULTS = {"PASS", "FAIL", "UNEVALUABLE"}
@@ -201,7 +202,7 @@ def _execute(lease, config, record, row, remaining):
     usage = row["usage"] = row.get("usage") if isinstance(row.get("usage"), dict) else {field: None for field in summary.USAGE}
     if (not isinstance(usage, dict) or any(type(usage.get(field)) is not int or usage[field] < 0 for field in summary.USAGE)
             or usage.get("native_turns") != row["native_turns"]
-            or sum(usage.get(field, 0) or 0 for field in summary.USAGE[1:]) != row["tokens"]):
+            or budget_tokens(usage) != row["tokens"]):
         row["tokens"] = None
     if row["elapsed_s"] >= remaining["time_s"]:
         row["timeout"] = True
@@ -263,7 +264,7 @@ def _run(lease, state, config, request, run_id, now):
         turns = [row["native_turns"] for row in mine]
         measured[provider] = {"time_s": round(spent.get(provider, 0), 3),
                               "tokens": None if provider in unknown else tokens.get(provider, 0),
-                              "turns": sum(turns) if None not in turns else None}
+                              "turns": sum(turns) if None not in turns else None, "tokens_basis": BUDGET_BASIS}
         if provider in over:
             measured[provider]["over_budget"] = True
     usage = {}
