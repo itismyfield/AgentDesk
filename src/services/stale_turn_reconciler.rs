@@ -7,10 +7,12 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::provider::ProviderKind;
 
+mod inflight_episode;
 #[cfg(test)]
 pub(crate) mod owner_boundary_tests;
 mod policy_maintenance;
 mod test_barriers;
+pub(crate) use inflight_episode::{InflightEpisodeIdentity, InflightEpisodeLookup};
 pub(crate) use policy_maintenance::{PolicyMaintenanceIo, maintain_policy_sessions};
 #[cfg(test)]
 use test_barriers::await_stale_sweep_apply_barrier;
@@ -240,7 +242,7 @@ async fn load_precondition_diagnostic_pg(
 /// permanently unreconcilable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InflightObservation {
-    Present(crate::services::discord::zombie_foreground_release::InflightEpisodeIdentity),
+    Present(InflightEpisodeIdentity),
     Absent,
     Unknown,
 }
@@ -311,7 +313,6 @@ fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightOb
     if !identity.records_provider(&db_provider) {
         return InflightObservation::Unknown;
     }
-    use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
     match crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name(
         &db_provider,
         &identity.tmux_name,

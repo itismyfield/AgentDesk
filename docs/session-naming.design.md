@@ -254,7 +254,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/discord/health/recovery/stall_alert.rs:36` | provider가 일치하는 tmux key만 stall 복구 후보로 선택 | S/I/M |
 | `src/services/discord/health/watcher_respawn/idle_relay_absence.rs:84` | provider별 watchdog이 자기 provider 세션만 관측 | I/B/M |
 | `src/services/discord/host_defer_gate.rs:255` | idle mirror eviction에서 이름으로 provider row 선택 | S/B/M |
-| `src/services/discord/host_teardown_gate.rs:199` | row provider 없을 때 teardown gate provider 보충 | S/M |
+| `src/services/discord/host_teardown_gate.rs:190` | row provider 없을 때 teardown gate provider 보충 | S/M |
 | `src/services/discord/inflight_heartbeat_sweeper.rs:97` | provider별 sweeper가 다른 bot watcher를 건드리지 않도록 제한 | I/B/M |
 | `src/services/discord/org_schema.rs:447` | binding context channel 누락 시 숫자 채널명에서 channel ID 보충; auth overlay 라우팅 | B/S/M |
 | `src/services/discord/org_schema.rs:467` | binding context channel 누락 시 숫자 채널명에서 channel ID 보충; auth overlay 라우팅 | B/S/M |
@@ -296,8 +296,8 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/provider/cancel_token_cleanup/executor.rs:327` | channel을 추출하여 unified-thread cleanup 억제 여부 조회 | T/S/M |
 | `src/services/session_activity.rs:69` | provider/runtime_kind로 input-ready 판정기 선택 | B/I/S/M |
 | `src/services/session_resume.rs:236` | resume의 canonical row/provider 및 owner host 조회 | S/M |
-| `src/services/stale_turn_reconciler.rs:311` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
-| `src/services/stale_turn_reconciler.rs:731` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:313` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:732` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
 | `src/services/tmux_turn_liveness.rs:64` | idle cleanup 전에 provider별 native rollout 근거 검사 | S/B/I/M |
 
 ## 3. -t<숫자> decoder와 전체 helper 소비자
@@ -479,7 +479,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K18 | `services/dispatched_sessions/output.rs:153` | row id로 읽은 primary→capture/output name 및 host guard | **자동(A)**. row primary에서 새 name을 얻음. 과거 explicit transcript pin은 별도 원문 보존. |
 | K19 | `services/dispatched_sessions/tmux_cleanup.rs:27` | raw 요청 key→name을 먼저 만들고 DB row/provider/host를 읽어 kill-tmux | 새 primary 요청은 **자동(A)**. old-alias HTTP 입력은 **S3**에서 current primary resolve 후 name/marker/probe/kill. |
 | K20 | `services/queue.rs:137,453,735` | active dispatch/channel cancel이 `SELECT s.session_key`(primary)→tmux name→lifecycle stop | **자동(A)**. queue cancel 대상이 새 name. PG+host fake 또는 격리 tmux 회귀에서 새 세션 중지·queue 보존 효과를 확인. |
-| K21 | `services/queue/http_force.rs:152` | selected row의 primary에서 응답 `tmux_session` 표시(Herdr termination 응답 포함) | **자동(A)**. 표시/현재 row key 일치. Herdr pane 제어는 원래 pane ID여서 key tail로 바꾸지 않음. |
+| K21 | `services/queue/http_force.rs:148` | selected row의 primary에서 응답 `tmux_session` 표시(Herdr termination 응답 포함) | **자동(A)**. 표시/현재 row key 일치. Herdr pane 제어는 원래 pane ID여서 key tail로 바꾸지 않음. |
 | K22 | `services/routines/session_control.rs:251,431,476,853` | local helper가 ownership token 또는 latest thread row key의 tail을 추출 | latest current primary는 **자동(A)**. persisted fresh-run ownership token은 **실행 pin**이므로 그대로 유지, alias로 successor 물리 이름을 강제로 선택하지 않음. synthetic routine row를 canonical channel 승격에 섞지 않는 S6 계약과 함께 검증. |
 | K23 | `services/session_host/resolve.rs:162` | supplied matched key 꼬리의 host_kind marker로 host evidence 구성 | current primary는 **자동(A)**. **S2**에서 임의 HTTP alias가 SessionKey 증거로 들어오는 경계는 current primary로 정규화. pinned inflight host locator/nonce는 유지. |
 | K24 | `services/session_resume.rs:226` | raw resume key의 name으로 provider/owner load와 local rebind 대상 결정 | 새 primary는 **자동(A)**. **S3**에서 old alias→current primary를 먼저 resolve; old name으로 rebind하지 않음. |
@@ -1083,8 +1083,8 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/discord/health/recovery/runtime_lookup.rs:130` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/health/turn_deliver/inject.rs:283` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/host_defer_gate.rs:71` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/host_teardown_gate.rs:105` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/host_teardown_gate.rs:302` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/host_teardown_gate.rs:96` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/host_teardown_gate.rs:293` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/manual_rebind/mod.rs:265` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/manual_rebind/watcher_claim.rs:74` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/restore_inflight.rs:307` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |

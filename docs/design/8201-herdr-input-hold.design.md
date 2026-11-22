@@ -46,7 +46,7 @@
 | C2 | `first_input.rs` `Closed` → `src/services/provider/herdr_before_start.rs` `release_claude_hold` | 첫 키 전에 멈춘 턴 → 해제 |
 | C3 | `src/services/codex/herdr_turn.rs:655` / `release_closed_hold` | Codex 후속: 제출됐거나 건드리지 않음 → 해제 |
 | C4 | `src/services/codex/herdr_turn/first_input.rs:158·167·220` | Codex 첫 입력: 닫힘·건드리지 않음 → 해제. 제출 뒤에는 `observe`가 session start를 찾고 bind한 뒤에만 해제한다. 못 찾으면 **남는다** |
-| C5 | `src/services/discord/herdr_terminate.rs:321` `settle_and_release` | 종료: retire CAS 뒤 해제 |
+| C5 | `src/services/discord/herdr_terminate.rs:320` `settle_and_release` | 종료: retire CAS 뒤 해제 |
 | C6 | `src/services/discord/recovery_engine/herdr_row_end.rs:495` `commit` | 행 끝 retire 뒤 해제 |
 | C7 | `src/services/discord/recovery_engine/herdr_row_end_live.rs:72` | 살아 있던 턴의 실행이 사라짐 → retire 뒤 해제 |
 | C8 | `src/services/herdr_launch/retired_hold.rs:79` ← `src/services/herdr_launch.rs:452` `before_fresh` | 새 incarnation 전에 retired 표지를 해제 |

@@ -115,8 +115,8 @@ P2 early/clear 보완은 아래 본문에 반영했다. 새 사용자 요구의 
 | slash/text stop `commands/stop.rs:84-111`→`turn_bridge::begin_user_stop` | Herdr는 intent+키 전달 관측, provider terminal 정산. `finish:75`는 cleanup 안 함 | Busy 주입 때문에 별도 tmux cancel binding을 만들지 않음; stop 경쟁에 기존 기준 적용 |
 | Herdr current token `turn_orchestrator/herdr_user_stop.rs:14,36,55` | current token에 첫 intent만 기록, cancel=false | legacy stop authority 생성 0 |
 | Queue API cancel preserve [Herdr cancel 응답 L13–L52](https://github.com/itismyfield/AgentDesk/blob/5bcbb82297f5cc3ab8897b81ddb9891459e0321b/src/services/queue/herdr_stop.rs#L13-L52) | non-force는 holder stop 답, 완료/inflight cleared라고 거짓 보고 안 함 | Held 원문은 유지; post-key 원문 replay 0 |
-| Queue force cancel / explicit terminate `discord/herdr_terminate.rs:400,679`, `server/routes/herdr_terminate.rs:40-95` | exact session_key+execution_nonce 및 existing exclusion/retire | 새 cleanup/kill 권한 추가 0; stale target 재선택 안 함 |
-| dispatched session kill `dispatched_sessions/herdr_kill.rs:50` | 같은 terminate service | Busy 경로가 kill을 호출하지 않음 |
+| Queue force cancel / explicit terminate `discord/herdr_terminate.rs:399,678`, `server/routes/herdr_terminate.rs:40-95` | exact session_key+execution_nonce 및 existing exclusion/retire | 새 cleanup/kill 권한 추가 0; stale target 재선택 안 함 |
+| dispatched session kill `dispatched_sessions/herdr_kill.rs:49` | 같은 terminate service | Busy 경로가 kill을 호출하지 않음 |
 | clear `commands/control.rs:540`→`control/herdr_recovery.rs:177-264` | waiting/refused discard, drops receipt settlement, 실제 실패/count_unknown 유지 | clear가 원문을 이미 discard했으면 이후 watch/wake로 resurrect하지 않음 |
 | clear teardown `control/clear_teardown.rs:137-204` | explicit exact execution retire 안에서 selector clear | 새 incarnation으로 옛 입력 전송 안 함 |
 | session resume/clear release `session_transition.rs:132-153` | guard 해제 뒤 owner wake | guard 보유 중 key=0, 해제 후 1회 |

@@ -1972,7 +1972,6 @@ src/
 │   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
-│   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
@@ -4452,6 +4451,7 @@ src/
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
+│   │   ├── inflight_episode.rs
 │   │   ├── owner_boundary_tests.rs
 │   │   ├── policy_maintenance.rs
 │   │   └── test_barriers.rs
@@ -5182,6 +5182,7 @@ src/
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
 │   │   ├── herdr_user_stop.rs
+│   │   ├── http_terminate.rs
 │   │   ├── inbound_order.rs
 │   │   ├── inbound_order_restore_tests.rs
 │   │   ├── incarnation.rs
@@ -5209,6 +5210,7 @@ src/
 │   │   ├── reply_results.rs
 │   │   ├── restart_operation.rs
 │   │   ├── restart_operation_tests.rs
+│   │   ├── retired_exclusion.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs

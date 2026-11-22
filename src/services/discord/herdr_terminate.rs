@@ -2,11 +2,10 @@
 //! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
 pub(crate) mod restart_recovery;
-mod retired_exclusion;
 pub(crate) mod root_replaced;
 
 pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
-pub(crate) use retired_exclusion::RetiredExclusion;
+pub(crate) use crate::services::turn_orchestrator::RetiredExclusion;
 
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;

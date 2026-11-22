@@ -45,7 +45,7 @@ Init ==
 Matches(id) == token /\ (active = id \/ (Policy = "weak" /\ active = 0))
 
 \* Live admission binds the finalizer id (Discord message, or the TUI-direct anchor).
-\*   src/services/turn_orchestrator.rs:2006, tui_prompt_relay/synthetic_start/claim/admitted.rs:121
+\*   src/services/turn_orchestrator.rs:2014, tui_prompt_relay/synthetic_start/claim/admitted.rs:121
 Start ==
     /\ phase = "idle"
     /\ phase' = "live" /\ token' = TRUE /\ active' = FinId /\ holder' = "ours"
@@ -58,14 +58,14 @@ Restart ==
     /\ UNCHANGED <<wrong, staleDone>>
 
 \* Pane alive: watcher reattach re-registers with the effective finalizer id.
-\*   recovery_engine/runtime.rs:193,325 (mailbox_try_start_turn_unless_released) -> turn_orchestrator.rs:2006
+\*   recovery_engine/runtime.rs:193,325 (mailbox_try_start_turn_unless_released) -> turn_orchestrator.rs:2014
 Reattach ==
     /\ phase = "down"
     /\ phase' = "recovered" /\ token' = TRUE /\ active' = FinId /\ holder' = "ours"
     /\ UNCHANGED <<wrong, staleDone>>
 
 \* Pane not alive: recovery reader kickoff on the empty slot.
-\*   src/services/discord/recovery_engine/restore_inflight.rs:2245, turn_orchestrator.rs:2078
+\*   src/services/discord/recovery_engine/restore_inflight.rs:2245, turn_orchestrator.rs:2086
 Kickoff ==
     /\ phase = "down"
     /\ phase' = "recovered" /\ token' = TRUE /\ active' = KickoffId /\ holder' = "ours"

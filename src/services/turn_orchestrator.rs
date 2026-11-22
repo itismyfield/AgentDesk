@@ -20,6 +20,8 @@ mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
 mod herdr_user_stop;
+#[cfg(unix)]
+mod http_terminate;
 mod inbound_order;
 mod incarnation;
 mod injected_inputs;
@@ -28,6 +30,8 @@ mod lease_release;
 mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
+#[cfg(unix)]
+pub(crate) use http_terminate::{Expected, HttpTerminate, Released};
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 pub(crate) mod checked_purge;
 mod overflow;
@@ -41,8 +45,12 @@ mod recovery_kickoff;
 mod recovery_kickoff_tests;
 pub(crate) mod registry_purge;
 pub(crate) use registry_purge::PurgeQueueResult;
+#[cfg(unix)]
+pub(crate) use retired_exclusion::RetiredExclusion;
 mod remint_fence;
 mod reply_results;
+#[cfg(unix)]
+mod retired_exclusion;
 mod source_generation;
 mod turn_finished_signal;
 pub(crate) mod witnessed_release;

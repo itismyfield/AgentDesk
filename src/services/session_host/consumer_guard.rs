@@ -76,6 +76,16 @@ impl ClearedHostSession {
     }
 }
 
+/// The keyed gate's verdict for a caller outside the discord module.
+pub(crate) enum ChannelTeardown {
+    /// A found legacy row with no host trace.
+    Cleared(ClearedHostSession),
+    /// No sessions row and no marker or inflight trace of another host.
+    RowMissing,
+    /// Herdr, unknown, conflicting or unreadable evidence, or no runtime to key it.
+    Kept,
+}
+
 /// The guard verdict for `change`; `Proceed` also needs a tmux/process ref to act on.
 pub(crate) fn clear_legacy_session(
     target: &ResolvedSessionTarget,

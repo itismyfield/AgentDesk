@@ -7,10 +7,11 @@ use crate::services::discord::health::{
     FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
 };
 use crate::services::discord::host_teardown_gate::{
-    ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
-    row_gate, runtime_target_holds, runtime_teardown,
+    backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown, row_gate,
+    runtime_target_holds, runtime_teardown,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::ChannelTeardown;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 

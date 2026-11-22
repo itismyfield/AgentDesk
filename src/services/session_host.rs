@@ -103,8 +103,9 @@ pub(crate) use traits::InteractiveSessionHost;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use {
     consumer_guard::{
-        AutomaticEffect, ClearedHostSession, DeferReason, GuardRefusal, GuardVerdict, PolicyProbe,
-        StateChange, clear_legacy_session, guard_first_state_change, probe_for_policy,
+        AutomaticEffect, ChannelTeardown, ClearedHostSession, DeferReason, GuardRefusal,
+        GuardVerdict, PolicyProbe, StateChange, clear_legacy_session, guard_first_state_change,
+        probe_for_policy,
     },
     resolve::{
         ResolvedSessionTarget, SessionTargetEvidenceSource, SessionTargetInput, TargetHost,
