@@ -87,7 +87,7 @@ fn current_binding<'a>(
             binding.node_id == node_id
                 && binding.gate == gate
                 && binding.run_id == run.id
-                && binding.definition_revision == state.definition_revision
+                && binding.definition_revision == state.legacy_execution_revision()
                 && item.approval.is_none()
         })
         .map(|item| &item.binding)

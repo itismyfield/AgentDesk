@@ -32,6 +32,7 @@ pub fn judge_pane(provider: ShadowProvider, capture: &str) -> PaneVerdict {
     match provider {
         ShadowProvider::Claude => judge_claude(capture),
         ShadowProvider::Codex => judge_codex(capture),
+        ShadowProvider::Antigravity => PaneVerdict::NotReady,
     }
 }
 

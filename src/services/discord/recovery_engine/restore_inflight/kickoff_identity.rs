@@ -11,12 +11,13 @@ pub(super) struct RecoveryKickoffIdentity {
 }
 
 /// `None` when the row has no Discord request owner (watcher-reacquired rows).
+/// Binds the finalizer key so a row without a Discord message id is still released.
 pub(super) fn recovery_kickoff_identity(
     state: &inflight::InflightTurnState,
 ) -> Option<RecoveryKickoffIdentity> {
     Some(RecoveryKickoffIdentity {
         request_owner: UserId::new(NonZeroU64::new(state.request_owner_user_id)?.get()),
-        user_message_id: optional_message_id(state.user_msg_id),
+        user_message_id: inflight::opt_message_id(state.effective_finalizer_turn_id()),
     })
 }
 

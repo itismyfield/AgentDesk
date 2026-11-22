@@ -482,6 +482,7 @@ fn reserved_native_keys_cannot_alias_a_synthetic_card() {
             ShadowProvider::Claude => tool("t#card", "Bash", json!({"cmd":"safe"})),
             ShadowProvider::Codex => record(json!({"type":"response_item","payload":{
                 "type":"function_call","id":"t#card","call_id":"call","name":"exec_command","arguments":"{}"}})),
+            ShadowProvider::Antigravity => unreachable!("pane fixture"),
         };
         assert!(matches!(
             &derive.derive(&record)[..],

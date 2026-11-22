@@ -51,7 +51,7 @@ async fn borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_
     let mut context = RetryPromptContext::raw(Some(raw.into()));
     let expected = "[WIP 리마인더 — 이전 턴 종료 시 커밋되지 않은 변경사항 감지]\n\ndirty\n\n[메모리 리마인더 — 이전 턴 recall 후 tool_feedback 미평가]\n\nevaluate\n\n[이전 대화 복원 — 새 세션 시작으로 최근 대화를 컨텍스트에 포함합니다]\n\nuser: recover\n\nquoted\r\n[WIP 리마인더] is user text\n";
     for attempt in 0..7 {
-        let prepared = prepare_for_owner(&shared, &provider, channel, context, false).await;
+        let prepared = prepare(&shared, &provider, channel, context).await;
         assert_eq!(
             prepared.rendered.as_deref(),
             Some(expected),
@@ -127,9 +127,7 @@ async fn borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_
         assert_eq!(restored[0].text, body);
         context = ingress(restored[0].reply_context.clone(), true, false);
     }
-    let context = prepare_for_owner(&shared, &provider, channel, context, false)
-        .await
-        .context;
+    let context = prepare(&shared, &provider, channel, context).await.context;
     assert_ne!(context.selected, Preludes::default());
     store::consume_confirmed(
         Some(&pool),
@@ -196,7 +194,7 @@ async fn identical_legacy_and_raw_bytes_keep_distinct_semantics_through_real_que
             raw,
             "REAL_QUEUE_RAW_LEGACY_PROVENANCE"
         );
-        let prepared = prepare_for_owner(&shared, &provider, channel, context, false).await;
+        let prepared = prepare(&shared, &provider, channel, context).await;
         assert_eq!(prepared.context.raw.as_deref(), Some(bytes));
         if raw {
             assert_eq!(prepared.rendered.as_deref(), Some(format!("[WIP 리마인더 — 이전 턴 종료 시 커밋되지 않은 변경사항 감지]\n\none new WIP\n\n{bytes}").as_str()));
@@ -229,14 +227,7 @@ async fn failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg() {
     let channel = ChannelId::new(731_420);
     recovery_text::store_turn_end_wip_warning(Some(&pool), &provider, channel.get(), "old")
         .unwrap();
-    let prepared = prepare_for_owner(
-        &shared,
-        &provider,
-        channel,
-        RetryPromptContext::raw(None),
-        false,
-    )
-    .await;
+    let prepared = prepare(&shared, &provider, channel, RetryPromptContext::raw(None)).await;
     let pending = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
     std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
     std::fs::write(&pending, "blocked queue directory").unwrap();
@@ -351,7 +342,7 @@ async fn queued_none_is_raw_and_selects_recovery_after_real_queue_roundtrip_pg()
     assert_eq!(restored[0].reply_context, None);
     let context = ingress(restored[0].reply_context.clone(), true, false);
     assert!(context.may_select(), "QUEUED_NONE_IS_RAW");
-    let prepared = prepare_for_owner(&shared, &provider, channel, context, false).await;
+    let prepared = prepare(&shared, &provider, channel, context).await;
     assert_eq!(
         prepared.context.selected.recovery.as_deref(),
         Some("recover queued input"),

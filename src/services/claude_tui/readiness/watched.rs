@@ -39,6 +39,8 @@ pub(crate) enum Unproven {
     Retained,
     /// Its transcript moved and the windows ended without evidence: the input is refused for good.
     Refused,
+    /// An execution older than this run lost its source: retained with its resend ask.
+    Lost,
 }
 
 /// What a budget that ended without a proof says of its source.
@@ -77,6 +79,8 @@ pub(crate) enum WaitCause {
     Screen,
     /// A dialog, such as a permission prompt, covers the composer until it is dismissed.
     Modal,
+    /// The Herdr first input's unproven wait saw the session's own turn; its end proves the source.
+    OwnTurn,
 }
 
 impl Watched {
@@ -93,7 +97,7 @@ impl Watched {
             // publish a source: retained with its resend ask instead of held for good.
             return match super::source::nonce(&self.session) {
                 Some(Some(nonce)) if self.settle_lost && super::launched_before_run(&nonce) => {
-                    Expiry::Unproven(Unproven::Retained)
+                    Expiry::Unproven(Unproven::Lost)
                 }
                 _ => Expiry::Waits(WaitCause::NoSource),
             };

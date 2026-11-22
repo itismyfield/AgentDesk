@@ -351,20 +351,6 @@ pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
-/// Read both routes from one boot snapshot. The direct route takes precedence.
-pub(crate) fn herdr_endpoint_with_parent(
-    channel: u64,
-    parent: u64,
-    accepts_parent: impl FnOnce(&ChannelEndpoint) -> bool,
-) -> Option<ChannelEndpoint> {
-    with_boot(|boot| {
-        let boot = boot?;
-        boot.herdr_endpoint(channel)
-            .or_else(|| boot.herdr_endpoint(parent).filter(|at| accepts_parent(at)))
-            .cloned()
-    })
-}
-
 /// Whether boot config routes this channel to a Herdr endpoint; callers outside the host-policy owners ask this instead of reading the endpoint.
 pub(crate) fn has_herdr_endpoint(channel: u64) -> bool {
     with_boot(|boot| boot.is_some_and(|boot| boot.herdr_endpoint(channel).is_some()))

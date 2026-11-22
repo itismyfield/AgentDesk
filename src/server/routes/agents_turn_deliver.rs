@@ -19,6 +19,7 @@ use crate::services::discord::health::{
 };
 use crate::services::imsg_reply;
 
+pub(super) mod agy_input;
 mod legacy_origin;
 mod origin_admission;
 
@@ -106,6 +107,15 @@ fn bad_request(error: &str) -> RouteResponse {
     failure(StatusCode::BAD_REQUEST, error)
 }
 
+/// A request cannot name the Decision source itself: only an approved PG event delivers under it.
+pub(super) fn refuse_decision_source(
+    source: Option<&str>,
+    metadata: Option<&Value>,
+) -> Option<RouteResponse> {
+    use crate::services::discord::decision_drain::{SOURCE_REFUSED, self_declared};
+    self_declared(source, metadata).then(|| bad_request(SOURCE_REFUSED))
+}
+
 /// Only a canonical positive decimal snowflake is accepted, so no alternate
 /// spelling can alias an allowed id.
 fn parse_author_id(raw: &str) -> Option<u64> {
@@ -149,14 +159,20 @@ pub async fn deliver_turn_input(
         return bad_request("invalid_author_id");
     };
     let source = non_empty(body.source).unwrap_or_else(|| "external".to_string());
+    if let Some(refused) = refuse_decision_source(Some(&source), None) {
+        return refused;
+    }
     if source.len() > MAX_SOURCE_LEN {
         return bad_request("source_too_long");
     }
     let obligations_enabled = imsg_reply::enabled_for_source(admission_enabled(), &source);
+    let raw_origin = body.origin_id;
     let origin_id = if obligations_enabled {
-        body.origin_id.filter(|origin| !origin.trim().is_empty())
+        raw_origin
+            .clone()
+            .filter(|origin| !origin.trim().is_empty())
     } else {
-        non_empty(body.origin_id)
+        non_empty(raw_origin.clone())
     };
     if obligations_enabled && origin_id.is_none() {
         super::imessage_input_notice::not_echoed(
@@ -186,12 +202,7 @@ pub async fn deliver_turn_input(
     };
     let provider_override = non_empty(body.provider);
     let channel_override = non_empty(body.channel_id);
-    let AgentTurnTarget {
-        provider,
-        primary_channel,
-        channel_id,
-        thread,
-    } = match resolve_agent_turn_target(
+    let target = match resolve_agent_turn_target(
         pool,
         state.health_registry.as_deref(),
         &id,
@@ -211,6 +222,8 @@ pub async fn deliver_turn_input(
             return response;
         }
     };
+    let channel_id = target.channel_id;
+    let thread = &target.thread;
     let Some(registry) = state.health_registry.as_deref() else {
         super::imessage_input_notice::not_echoed(
             notice.as_deref(),
@@ -222,11 +235,11 @@ pub async fn deliver_turn_input(
     };
 
     let channel_name_hint = (thread.is_none()
-        && !primary_channel.chars().all(|ch| ch.is_ascii_digit()))
-    .then_some(primary_channel);
+        && !target.primary_channel.chars().all(|ch| ch.is_ascii_digit()))
+    .then(|| target.primary_channel.clone());
     let request = HumanInputRequest {
         channel_id: poise::serenity_prelude::ChannelId::new(channel_id),
-        provider,
+        provider: target.provider.clone(),
         text: text.to_string(),
         author_id,
         source: source.clone(),
@@ -237,6 +250,17 @@ pub async fn deliver_turn_input(
         }})),
         channel_name_hint,
     };
+    if let Some(selection) = imsg_reply::agy_input::selected(&target.provider, channel_id) {
+        return agy_input::deliver(
+            pool,
+            (registry, &target),
+            selection,
+            request,
+            (&id, raw_origin.as_deref(), notice.as_deref()),
+            obligations_enabled,
+        )
+        .await;
+    }
     if let Some(origin_id) = origin_id.as_deref() {
         let provider = request.provider.clone();
         let input = imsg_reply::AdmissionInput {
@@ -645,6 +669,9 @@ mod tests {
 
 #[cfg(test)]
 mod pg_tests;
+
+#[cfg(all(test, unix))]
+mod agy_input_pg_tests;
 
 #[cfg(all(test, unix))]
 mod legacy_origin_tests;

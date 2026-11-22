@@ -8,9 +8,6 @@ pub(crate) mod root_replaced;
 #[path = "herdr_gate/legacy_return.rs"]
 pub(crate) mod legacy_return;
 
-#[cfg(unix)]
-mod restart_read;
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};

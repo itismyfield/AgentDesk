@@ -489,3 +489,74 @@ async fn native_8148_fix1_live_record_survives_registry_contention_pg() {
     );
     fixture.close().await;
 }
+
+/// A native turn leaves its run's session as the channel selector the next turn and a restart
+/// resume; a user clear, a pane that moved on and another channel's row are left as they are.
+#[test]
+fn native_8261_completion_stores_the_run_session_as_channel_selector_pg() {
+    use crate::services::tui_prompt_dedupe as dedupe;
+    let _rotations = dedupe::lock_claude_session_rotations_for_tests();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let fixture = CompletionFixture::new().await;
+        let (pool, shared) = (&fixture.pool, fixture.shared(1));
+        let cases = ["fresh", "boot", "cleared", "clear-boundary", "rotated", "foreign"];
+        for (index, case) in cases.into_iter().enumerate() {
+            let f = Fixture::at(
+                fixture.root.join(format!("{case}.json")),
+                82610500 + index as u64,
+                true,
+            );
+            let mut row = b2b_row(&f);
+            let (channel, key) = (ChannelId::new(row.channel_id), format!("fixture-host:{case}"));
+            let run = f.ticket.source.as_ref().unwrap().session_id.clone();
+            let owner = row.channel_id + if case == "foreign" { 500 } else { 0 };
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3)")
+                .bind(&key).bind(&shared.token_hash).bind(owner.to_string()).execute(pool).await.unwrap();
+            row.session_key = Some(key.clone());
+            row.tmux_session_name = Some(format!("pane-{case}"));
+            inflight::save_inflight_state(&row).unwrap();
+            if case != "boot" {
+                crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, case).await;
+                shared.core.lock().await.sessions.get_mut(&channel).unwrap().cleared = case == "cleared";
+            }
+            if case == "clear-boundary" {
+                let cleared = crate::db::session_transcripts::record_channel_clear_boundary;
+                cleared(Some(pool), &row.channel_id.to_string()).await.unwrap();
+            }
+            if case == "rotated" {
+                dedupe::record_claude_session_rotation(dedupe::ClaudeSessionRotation {
+                    tmux_session_name: "pane-rotated".into(),
+                    old_session_id: Some(run.clone()),
+                    old_output_path: String::new(),
+                    old_last_offset: 0,
+                    new_session_id: "moved-on".into(),
+                    new_output_path: String::new(),
+                    observed_drain_frontier: 0,
+                    polls_without_drain_progress: 0,
+                    selector_followed: false,
+                    left_session_ids: Vec::new(),
+                });
+            }
+            let evidence = proof(&f, Some("own answer"), Disposition::Executed);
+            let settlement = durable(&f, &evidence);
+            let turn = TurnKey::new(channel, row.user_msg_id, row.born_generation)
+                .with_episode_nonce(row.turn_nonce.as_deref());
+            record(&shared, &settlement, &evidence, turn, Some(&row), None).await;
+            let expected = match case {
+                "fresh" | "boot" => Some(run),
+                "rotated" => Some("moved-on".to_string()),
+                _ => None,
+            };
+            let stored: (Option<String>, Option<String>) = sqlx::query_as("SELECT claude_session_id, raw_provider_session_id FROM sessions WHERE session_key = $1")
+                .bind(&key).fetch_one(pool).await.unwrap();
+            assert_eq!(stored, (expected.clone(), expected.clone()), "{case}");
+            let cached = shared.core.lock().await.sessions.get(&channel).and_then(|live| live.session_id.clone());
+            assert_eq!(cached, expected.filter(|_| case != "boot"), "{case}");
+        }
+        fixture.close().await;
+    });
+}

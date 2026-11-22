@@ -13,6 +13,7 @@ use crate::services::codex_tui::canary::CANARY_TMUX;
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_bootstrap_base, o_writer_ready};
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::thread_host::{self, PolicyHost};
 use crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap;
 
 #[derive(Debug)]
@@ -159,7 +160,15 @@ pub(crate) async fn for_turn(
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
-    resolve(pool, provider, channel_id, session_key, true).await
+    let host = resolve(pool, provider, channel_id, session_key, true).await;
+    // Synchronous readers of a thread's current execution read this final judgement.
+    let judged = match &host {
+        TurnHost::Herdr(_) => Some(true),
+        TurnHost::Tmux => Some(false),
+        TurnHost::Return(_) | TurnHost::Refused(_) => None,
+    };
+    thread_host::record_judged(channel_id, judged);
+    host
 }
 
 /// Reads the selected host and its current row without admission or output-writer gates.
@@ -243,55 +252,14 @@ fn is_live_thread_endpoint(
     else {
         return false;
     };
-    expected_owner(provider, channel, key).as_ref() == Some(&record.owner)
-        && bound_thread_endpoint_matches(record, channel, endpoint)
-}
-
-fn bound_thread_endpoint_matches(
-    record: &HostedExecution,
-    channel: u64,
-    endpoint: &ChannelEndpoint,
-) -> bool {
     record.state == HostedState::Bound
-        && record.owner.channel_id == channel.to_string()
+        && expected_owner(provider, channel, key).as_ref() == Some(&record.owner)
         && record.location.as_ref().is_some_and(|location| {
             location.endpoint_config_key == endpoint.key
                 && location.execution_node == endpoint.execution_node
                 && location.socket_addr == endpoint.socket_path.to_string_lossy()
                 && location.named_session == endpoint.herdr_session
         })
-}
-
-/// Whether the actual destination can have a local Herdr execution to inspect.
-pub(crate) fn has_effective_herdr_endpoint(channel: u64) -> bool {
-    session_hosts::has_herdr_endpoint(channel)
-        || session_hosts::has_herdr_endpoint(
-            crate::services::session_host::surface_policy::policy_channel(channel),
-        )
-}
-
-/// A canonical Bound child can continue with the same endpoint rule as turn routing.
-pub(crate) fn bound_herdr_endpoint(
-    channel: u64,
-    record: &HostedExecution,
-    inherits_parent: bool,
-) -> Option<ChannelEndpoint> {
-    let parent = inherits_parent
-        .then(|| crate::services::session_host::surface_policy::policy_channel(channel))
-        .unwrap_or(channel);
-    session_hosts::herdr_endpoint_with_parent(channel, parent, |endpoint| {
-        parent != channel && bound_thread_endpoint_matches(record, channel, endpoint)
-    })
-}
-
-pub(crate) fn herdr_restart_candidate(
-    channel: u64,
-    (hosted, kind, pathless): (bool, Option<RuntimeHandoffKind>, bool),
-) -> bool {
-    hosted
-        || (kind == Some(RuntimeHandoffKind::ClaudeTui)
-            && pathless
-            && has_effective_herdr_endpoint(channel))
 }
 
 /// Before resetting, reconciling or clearing a turn, refuse a configured Herdr session.
@@ -305,7 +273,8 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
-    if !has_effective_herdr_endpoint(channel_id) {
+    // An unknown policy is judged below rather than passed as tmux.
+    if matches!(thread_host::parent_policy(channel_id), PolicyHost::Tmux) {
         return None;
     }
     let session_key = session_key().await;

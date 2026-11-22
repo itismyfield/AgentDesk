@@ -333,15 +333,26 @@ pub(crate) async fn register_inject_runtime(
     channels: &[u64],
     pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
-    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
+    register_inject_runtime_for_provider(registry, channels, pool, ProviderKind::Claude).await
+}
+
+pub(crate) async fn register_inject_runtime_for_provider(
+    registry: &HealthRegistry,
+    channels: &[u64],
+    pool: Option<sqlx::PgPool>,
+    provider: ProviderKind,
+) -> Arc<SharedData> {
+    let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
+    Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
     {
         let mut settings = shared.settings.write().await;
+        settings.provider = provider.clone();
         settings.owner_user_id = Some(100);
         settings.allowed_user_ids = vec![200];
         settings.allowed_channel_ids = channels.to_vec();
     }
     registry
-        .register("claude".to_string(), shared.clone())
+        .register(provider.as_str().to_string(), shared.clone())
         .await;
     shared
 }
@@ -1929,10 +1940,10 @@ async fn a_headless_claim_returns_the_token_it_registered() {
             UserId::new(100),
             &reservation,
             identity,
-            (None, None),
+            None,
         )
         .await;
-        let Ok((_transition, token, false)) = claimed else {
+        let Ok((_transition, token)) = claimed else {
             panic!("an idle channel claims");
         };
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;

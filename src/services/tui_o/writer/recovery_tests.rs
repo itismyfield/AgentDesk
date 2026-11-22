@@ -757,7 +757,7 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
         }
     }
     let old_payloads = payloads(&original);
-    assert_eq!(old_payloads, ["old", "-# ⏱️ 5초"]);
+    assert_eq!(old_payloads, ["old", "-# ⏱️ 5초 (09:00)"]);
     assert_eq!(harness.port.posts(), ["old"]);
     drop(writer);
     let old_segment = segments(&harness).pop().unwrap();
@@ -772,7 +772,7 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
         .resume(&mut writer, &mut deriver, &mut owed)
         .unwrap();
     sources.follow(&mut writer).unwrap();
-    assert_eq!(payloads(&owed), ["-# ⏱️ 5초"]);
+    assert_eq!(payloads(&owed), ["-# ⏱️ 5초 (09:00)"]);
     assert_eq!(sources.replayed.posted, 1);
     while let Some(item) = owed.pop_front() {
         assert_eq!(writer.deliver(&item).await, Step::Done);
@@ -782,7 +782,7 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
     sources
         .capture(&mut writer, &mut deriver, &mut owed)
         .unwrap();
-    assert_eq!(payloads(&owed), ["new", "-# ⏱️ 10초"]);
+    assert_eq!(payloads(&owed), ["new", "-# ⏱️ 10초 (09:00)"]);
     while let Some(item) = owed.pop_front() {
         assert_eq!(writer.deliver(&item).await, Step::Done);
     }

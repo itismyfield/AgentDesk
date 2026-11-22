@@ -1154,6 +1154,17 @@ async fn shipped_docs_router_advertises_all_server_campaign_endpoints() {
         ("PUT", "/api/server-campaigns/{id}/definition"),
         ("POST", "/api/server-campaigns/{id}/commands"),
         ("GET", "/api/server-campaigns/{id}/events"),
+        ("GET", "/api/server-campaigns/pipeline/condition-fields"),
+        ("GET", "/api/server-campaigns/pipeline/templates"),
+        (
+            "GET",
+            "/api/server-campaigns/pipeline/templates/{template_id}/{version}",
+        ),
+        ("POST", "/api/server-campaigns/pipeline/validate"),
+        ("GET", "/api/server-campaigns/{id}/pipeline"),
+        ("POST", "/api/server-campaigns/{id}/pipeline/validate"),
+        ("PUT", "/api/server-campaigns/{id}/pipeline"),
+        ("POST", "/api/server-campaigns/{id}/pipeline/migrate"),
     ] {
         assert!(
             endpoints
@@ -1166,3 +1177,6 @@ async fn shipped_docs_router_advertises_all_server_campaign_endpoints() {
 
 #[path = "dashboard_wait_tests.rs"]
 mod dashboard_wait_tests;
+
+#[path = "pipeline_http_tests.rs"]
+mod pipeline_http_tests;

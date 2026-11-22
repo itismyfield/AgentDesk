@@ -56,8 +56,10 @@ fn replay(
     source: &str,
     legacy_hash: &str,
 ) -> AdmissionResponse {
-    let expected_hash = if row.request_hash.starts_with("v2:") {
-        identity.request_hash
+    let (stored_parent, stored_hash) = super::agy_input::split_hash(&row.request_hash);
+    let (offered_parent, offered_hash) = super::agy_input::split_hash(identity.request_hash);
+    let expected_hash = if stored_hash.starts_with("v2:") {
+        offered_hash
     } else {
         legacy_hash
     };
@@ -65,7 +67,8 @@ fn replay(
         || row.agent_id != identity.agent_id
         || row.channel_id != identity.channel_id
         || row.person_id != identity.person_id
-        || row.request_hash != expected_hash
+        || stored_hash != expected_hash
+        || matches!((stored_parent, offered_parent), (Some(left), Some(right)) if left != right)
     {
         return failure(StatusCode::CONFLICT, "origin_conflict");
     }
@@ -93,6 +96,15 @@ pub(crate) async fn replay_existing(
     input: &AdmissionInput<'_>,
     source: &str,
 ) -> Option<AdmissionResponse> {
+    replay_with_hash(pool, input, source, &request_hash(input)).await
+}
+
+pub(crate) async fn replay_with_hash(
+    pool: &PgPool,
+    input: &AdmissionInput<'_>,
+    source: &str,
+    hash: &str,
+) -> Option<AdmissionResponse> {
     let Ok(person_id) = i64::try_from(input.author_id) else {
         return Some(failure(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -110,13 +122,12 @@ pub(crate) async fn replay_existing(
         }
     };
     let channel_id = input.channel_id.to_string();
-    let hash = request_hash(input);
     let identity = AdmissionIdentity {
         origin_id: input.origin_id,
         agent_id: input.agent_id,
         channel_id: &channel_id,
         person_id,
-        request_hash: &hash,
+        request_hash: hash,
     };
     Some(replay(&row, &identity, source, &legacy_request_hash(input)))
 }
@@ -137,6 +148,24 @@ where
     DF: Future<Output = Result<HumanInputDelivery, HumanInputError>>,
     S: FnOnce(Result<HumanInputDelivery, HumanInputError>) -> AdmissionResponse,
 {
+    let hash = request_hash(input);
+    deliver_with_hash(pool, (input, source, &hash), authorize, deliver, serialize).await
+}
+
+pub(crate) async fn deliver_with_hash<A, AF, D, DF, S>(
+    pool: &PgPool,
+    (input, source, request_hash): (&AdmissionInput<'_>, &str, &str),
+    authorize: A,
+    deliver: D,
+    serialize: S,
+) -> AdmissionResponse
+where
+    A: FnOnce() -> AF,
+    AF: Future<Output = Result<(), HumanInputError>>,
+    D: FnOnce() -> DF,
+    DF: Future<Output = Result<HumanInputDelivery, HumanInputError>>,
+    S: FnOnce(Result<HumanInputDelivery, HumanInputError>) -> AdmissionResponse,
+{
     if let Err(error) = authorize().await {
         return serialize(Err(error));
     }
@@ -144,13 +173,12 @@ where
         return failure(StatusCode::UNPROCESSABLE_ENTITY, "invalid_author_id");
     };
     let channel_id = input.channel_id.to_string();
-    let request_hash = request_hash(input);
     let identity = AdmissionIdentity {
         origin_id: input.origin_id,
         agent_id: input.agent_id,
         channel_id: &channel_id,
         person_id,
-        request_hash: &request_hash,
+        request_hash,
     };
     let reserved = if source == "imessage" {
         reserve_admission(pool, &identity).await

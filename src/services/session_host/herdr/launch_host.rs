@@ -21,10 +21,8 @@ use super::pane_probe::{
 };
 use super::transport::{HerdrSocketConfig, HerdrSocketTransport};
 use super::wire::LineJsonFraming;
-use crate::db::dispatched_sessions::hosted_execution::{ExpectedExecution, HostedExecution};
-use crate::services::herdr_launch::unplaced::{
-    ChannelPane, Residue, candidate_label, workspace_nonce,
-};
+use crate::db::dispatched_sessions::hosted_execution::ExpectedExecution;
+use crate::services::herdr_launch::unplaced::{ChannelPane, Residue, candidate_label};
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
     launch_command_eligible,
@@ -198,49 +196,6 @@ pub(crate) fn accepting_pid(socket: &Path, wait: Duration) -> Option<u32> {
 }
 
 impl SocketHerdrLaunchHost {
-    /// One current workspace for the recorded nonce. A complete snapshot with conflicting
-    /// names leaves selection to the caller's exact pane check.
-    pub(crate) fn named_panes(
-        &self,
-        stored: &HostedExecution,
-    ) -> Result<Option<(ServerWitness, Vec<String>)>, String> {
-        let at = stored.location.as_ref().ok_or("no hosted location")?;
-        let launch = HerdrLaunchEndpoint {
-            execution_node: at.execution_node.clone(),
-            config_key: at.endpoint_config_key.clone(),
-            socket_addr: at.socket_addr.clone(),
-            herdr_session: at.named_session.clone(),
-        };
-        let (_, transport) = self.endpoint(&launch).ok_or("endpoint is not configured")?;
-        let witness = transport
-            .server_witness()
-            .map_err(|why| format!("{why:?}"))?;
-        let snapshot = residue::snapshot_on(transport.as_ref(), &witness, &self.next_id)?;
-        let Some(workspaces) = snapshot.workspaces else {
-            return Ok(None);
-        };
-        let mut named = workspaces.iter().filter_map(|workspace| {
-            workspace_nonce(&stored.owner.logical_key, &workspace.label)
-                .map(|nonce| (workspace, nonce))
-        });
-        let Some((workspace, nonce)) = named.next() else {
-            return Ok(None);
-        };
-        if named.next().is_some() || nonce != stored.execution_nonce {
-            return Ok(None);
-        }
-        let panes: Vec<_> = snapshot
-            .panes
-            .into_iter()
-            .filter(|pane| pane.workspace_id == workspace.workspace_id)
-            .map(|pane| pane.pane_id)
-            .collect();
-        if panes.len() != workspace.pane_count as usize {
-            return Err("incomplete named workspace".into());
-        }
-        Ok(Some((witness, panes)))
-    }
-
     /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
         let endpoints = endpoints

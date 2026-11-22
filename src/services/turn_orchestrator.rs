@@ -828,9 +828,6 @@ impl ChannelMailboxHandle {
         &self,
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
-        // `None` for a recovery turn that carries no user message
-        // (user_msg_id == 0, e.g. a TUI-direct turn) — there is then no
-        // `active_user_message_id` to bind. `MessageId::new(0)` would panic.
         user_message_id: Option<MessageId>,
     ) -> RecoveryKickoffResult {
         self.request(|reply| ChannelMailboxMsg::RecoveryKickoff {

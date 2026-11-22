@@ -276,16 +276,6 @@ pub(super) fn invalidate_stale_generation_in_root(
     current_generation: u64,
 ) -> Vec<(u64, Option<u64>)> {
     let states = load_inflight_states_from_root_excluding(root, provider, |_| false);
-    let hosted_recovery = |row: &InflightTurnState| {
-        crate::services::turn_host::herdr_restart_candidate(
-            row.channel_id,
-            (
-                row.hosted_execution_nonce.is_some(),
-                row.runtime_kind,
-                row.output_path.is_none(),
-            ),
-        )
-    };
     let mut removed = Vec::new();
     for state in states {
         if state.restart_mode.is_some() {
@@ -324,10 +314,6 @@ pub(super) fn invalidate_stale_generation_in_root(
             }
             continue;
         }
-        // The Herdr recovery owner adjudicates its hosted episode before taking the lease.
-        if hosted_recovery(&state) {
-            continue;
-        }
         // Codex review HIGH on PR #2460: normal rows are constructed with
         // `restart_generation: None` (see `InflightTurnState::new`). The
         // previous `Some(current_generation)` guard alone would evict every
@@ -354,7 +340,7 @@ pub(super) fn invalidate_stale_generation_in_root(
         if receipt_protected_path(&path) {
             continue;
         }
-        if state.restart_mode.is_some() || hosted_recovery(&state) {
+        if state.restart_mode.is_some() {
             continue;
         }
         if state.rebind_origin {

@@ -99,5 +99,7 @@ Notice entry points are the owner's `effect.rs:103` unsent settlement and `retai
 then the drive's `owner_input.rs:308` settlement callback, `input_owner/notice.rs:68` outbox handoff,
 and `retained_notice.rs:39` persistent enqueue. The static outbox source is `RetainedInputNotice`
 (`src/domain/outbound/outbox/source.rs:22,77`). The PG regression
-`a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg` exercises the restarted source,
+`a_restarted_idle_source_retains_with_one_resend_notice_pg` exercises the restarted source,
 unproven timeout, retained intent and actual persistent outbox enqueue with duplicate replay.
+Since #8128 U the Herdr first input holds a wait whose screen shows the continuing turn and delivers
+it after that turn (`HerdrComposerWaitCause.tla` `own_screen`); this boundary stays for tmux.

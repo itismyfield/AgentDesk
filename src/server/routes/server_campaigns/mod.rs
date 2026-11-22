@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod dto;
+pub(super) mod pipeline;
 mod protocol;
 use dto::*;
 use protocol::{body, id, store_error};

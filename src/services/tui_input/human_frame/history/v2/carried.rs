@@ -32,30 +32,6 @@ pub(crate) fn lookup(
     transcript: &Path,
     through: u64,
 ) -> Option<Consumed> {
-    lookup_at(
-        (primary, namespace),
-        (owner, sid, transcript, through),
-        None,
-    )
-}
-
-/// Resolve only the original whose receipt names this exact Herdr execution.
-pub(crate) fn lookup_herdr(
-    input: (u64, &str),
-    target: &Value,
-    sid: &str,
-    transcript: &Path,
-    through: u64,
-) -> Option<Consumed> {
-    let owner = target["owner"].as_str()?;
-    lookup_at(input, (owner, sid, transcript, through), Some(target))
-}
-
-fn lookup_at(
-    (primary, namespace): (u64, &str),
-    (owner, sid, transcript, through): (&str, &str, &Path, u64),
-    target: Option<&Value>,
-) -> Option<Consumed> {
     let state: Snapshot = serde_json::from_value(Registry::runtime().ok()?.json().ok()?).ok()?;
     let registrations: Vec<_> = state
         .live
@@ -95,7 +71,7 @@ fn lookup_at(
     let (_, Some(entry)) = state.locate(namespace, &registration.key)? else {
         return None;
     };
-    let source = checked_source(registration, entry, (owner, sid, transcript), target)?;
+    let source = checked_source(registration, entry, owner, sid, transcript)?;
     let fingerprint = source_fingerprint(transcript)?;
     let mut entries = Vec::new();
     for (r, e) in state.entries().filter(|(_, e)| {
@@ -110,7 +86,7 @@ fn lookup_at(
         if state.abandoned(&r.namespace, &r.key) {
             continue;
         }
-        checked_source(r, e, (owner, sid, transcript), target)?;
+        checked_source(r, e, owner, sid, transcript)?;
         let mut view = e.clone();
         view.class_hash = e.hash.clone();
         entries.push(view);
@@ -204,16 +180,13 @@ fn native_frames(text: &str) -> impl Iterator<Item = &str> {
 fn checked_source(
     r: &Registration,
     e: &Entry,
-    (owner, sid, path): (&str, &str, &Path),
-    target: Option<&Value>,
+    owner: &str,
+    sid: &str,
+    path: &Path,
 ) -> Option<Source> {
     let source = r.source.as_ref()?;
-    let wrong_target = match target {
-        Some(expected) => source.target != *expected,
-        None => source.target["host"] != "tmux",
-    };
     if source.provider != "claude"
-        || wrong_target
+        || source.target["host"] != "tmux"
         || owner.is_empty()
         || source.target["owner"] != owner
         || source.session_id != sid

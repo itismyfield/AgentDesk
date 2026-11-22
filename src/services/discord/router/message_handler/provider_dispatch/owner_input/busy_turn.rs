@@ -1,0 +1,41 @@
+use super::*;
+
+pub(super) fn build<'a>(
+    pool: Option<&'a sqlx::PgPool>,
+    runtime: Option<&'a Shared>,
+    provider: &'a ProviderKind,
+    payload: &'a str,
+    session: &'a str,
+    host: &'a TurnHost,
+    channel: u64,
+) -> StreamingTurn<'a> {
+    StreamingTurn {
+        pool,
+        registration_origin: None,
+        agy_foreground: None,
+        shared: runtime,
+        provider,
+        prompt: payload,
+        session_id: None,
+        working_dir: "",
+        system_prompt: None,
+        allowed_tools: &[],
+        cancel: std::sync::Arc::new(CancelToken::new()),
+        codex_observation: None,
+        tmux_session_name: Some(session),
+        teardown: None,
+        host,
+        channel_id: channel,
+        model: None,
+        native_fast_mode: None,
+        effort: None,
+        codex_goals: None,
+        compact_percent: None,
+        compact_lower_bound_tokens: 0,
+        compact_token_limit: None,
+        cache_ttl_minutes: None,
+        dispatch_type: None,
+        force_fresh: false,
+        submission: None,
+    }
+}

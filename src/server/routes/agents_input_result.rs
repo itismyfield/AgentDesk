@@ -13,7 +13,7 @@ use super::AppState;
 use super::auth::HumanInputCaller;
 use crate::db::agents::AgentChannelBindings;
 use crate::services::agents::input_result::{
-    InputResult, MAX_ORIGIN_ID_LEN, OriginChannel, lookup,
+    FinalAnswer, InputResult, MAX_ORIGIN_ID_LEN, OriginChannel, final_answer, lookup,
 };
 use crate::services::provider::ProviderKind;
 
@@ -54,7 +54,22 @@ pub async fn input_result(
         Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, "input_result_unavailable"),
     };
     match lookup(pool, &id, origin, &origin_channels(&bindings)).await {
-        Ok(Some(result)) => (StatusCode::OK, Json(result_body(&id, origin, result))),
+        Ok(Some(result)) => {
+            let answer = match &result {
+                InputResult::Terminal(receipt) => final_answer(pool, receipt).await,
+                _ => Ok(None),
+            };
+            match answer {
+                Ok(answer) => (
+                    StatusCode::OK,
+                    Json(result_body(&id, origin, result, answer)),
+                ),
+                Err(error) => {
+                    tracing::warn!(agent_id = %id, %error, "input result answer read failed");
+                    failure(StatusCode::SERVICE_UNAVAILABLE, "input_result_unavailable")
+                }
+            }
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"ok": false, "contract": CONTRACT, "error": "origin_not_found"})),
@@ -101,7 +116,12 @@ fn message_turn_id(execution_id: &str) -> Option<&str> {
     .then_some(execution_id)
 }
 
-fn result_body(agent_id: &str, origin_id: &str, result: InputResult) -> Value {
+fn result_body(
+    agent_id: &str,
+    origin_id: &str,
+    result: InputResult,
+    answer: Option<FinalAnswer>,
+) -> Value {
     let (channel_id, execution_id, terminal) = match result {
         // Admitted and waiting: no execution has taken the input yet.
         InputResult::Accepted { channel_id } => {
@@ -121,10 +141,10 @@ fn result_body(agent_id: &str, origin_id: &str, result: InputResult) -> Value {
             json!({
                 "outcome": receipt.terminal_outcome,
                 "confirmed_at": receipt.terminal_confirmed_at.to_rfc3339(),
-                // No verified final-message boundary is produced yet.
-                "final_answer_text": null,
-                "final_answer_boundary": null,
-                "final_answer_source": null,
+                // All three null unless the execution completed with a verified final record.
+                "final_answer_text": answer.as_ref().map(|a| a.text.as_str()),
+                "final_answer_boundary": answer.as_ref().map(|a| &a.boundary),
+                "final_answer_source": answer.as_ref().map(|a| a.source),
             }),
         ),
     };

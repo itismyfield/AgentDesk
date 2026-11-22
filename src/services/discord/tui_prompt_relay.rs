@@ -375,10 +375,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
             return;
         };
-        match super::http::dispatch_channel_message(
-            &notify_http,
-            channel_id,
-            serenity::CreateMessage::new().content(note),
+        match crate::services::discord::outbound::notification_policy::progress(
+            super::http::dispatch_channel_message(
+                &notify_http,
+                channel_id,
+                serenity::CreateMessage::new().content(note),
+            ),
         )
         .await
         {
@@ -563,10 +565,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
             message_id
         } else {
-            match super::http::dispatch_channel_message(
-                &notify_http,
-                channel_id,
-                serenity::CreateMessage::new().content(content),
+            match crate::services::discord::outbound::notification_policy::progress(
+                super::http::dispatch_channel_message(
+                    &notify_http,
+                    channel_id,
+                    serenity::CreateMessage::new().content(content),
+                ),
             )
             .await
             {
@@ -771,7 +775,7 @@ fn owner_channel_for_tmux_session(
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
     let resolved = match (emission_kind, registry_owner, dedupe_owner) {
         (RelayEmissionKind::ObservedPrompt, None, Some(channel))
-            if crate::config::session_hosts::herdr_endpoint(channel).is_some() =>
+            if crate::services::session_host::thread_host::runs_herdr(channel) =>
         {
             Some(ChannelId::new(channel))
         }

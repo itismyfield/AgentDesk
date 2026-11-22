@@ -1,6 +1,7 @@
 pub mod candidate_seal;
 pub mod decision_item;
 pub mod definition;
+pub mod deployment;
 pub mod evidence;
 pub mod evidence_gate;
 pub mod execution_pin;
@@ -10,6 +11,8 @@ pub mod model;
 pub mod pipeline;
 pub mod pipeline_fields;
 pub mod pipeline_rules;
+pub mod pipeline_template;
+pub mod pipeline_validate;
 pub mod profile;
 pub mod review_gate;
 pub mod verification_run;

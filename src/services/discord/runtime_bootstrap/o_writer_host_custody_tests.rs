@@ -51,6 +51,7 @@ fn pending(provider: ShadowProvider, channel: u64) -> TuiDirectPendingStart {
     let provider = match provider {
         Claude => "claude",
         Codex => "codex",
+        ShadowProvider::Antigravity => unreachable!("pane fixture"),
     };
     TuiDirectPendingStart {
         hosted_source: None,

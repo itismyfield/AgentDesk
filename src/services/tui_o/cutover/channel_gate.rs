@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::{
     alarm::AlarmRouter,
-    channel_policy::{self, BodyClaimed, BootChannels, ClaimReason, LegacySend},
+    channel_policy::{self, BodyClaimed, BootChannels, ClaimReason, LegacySend, SendStage},
     writer::WriterAlarm,
 };
 
@@ -264,7 +264,10 @@ pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<BodySend<T>, IdentityError> {
-    let (sent, _send) = claim_then_send_held(claim, send).await?;
+    let (sent, held) = claim_then_send_held(claim, send).await?;
+    if let Some(held) = &held {
+        held.reached(SendStage::SentUnsettled);
+    }
     Ok(sent)
 }
 
@@ -386,6 +389,13 @@ impl BodyTransport {
         Self { _send: send, tag }
     }
 
+    /// The holder's report of how far its claimed send got; an unclaimed transport has none.
+    pub(crate) fn reached(&self, stage: SendStage) {
+        if let Some(send) = &self._send {
+            send.reached(stage);
+        }
+    }
+
     pub(crate) async fn run<T>(&self, next: impl std::future::Future<Output = T>) -> T {
         if self.tag.is_some() {
             census_scope(self.tag.clone(), next).await
@@ -400,7 +410,8 @@ pub(crate) async fn claim_then_send_at<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<BodySend<T>, IdentityError> {
-    let (sent, _context) = claim_then_send_held_at(site, claim, send).await?;
+    let (sent, context) = claim_then_send_held_at(site, claim, send).await?;
+    context.reached(SendStage::SentUnsettled);
     Ok(sent)
 }
 
@@ -432,6 +443,19 @@ fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityErr
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push((claim.channel_id, claimed.owned));
     Ok(claimed)
+}
+
+/// For a stuck report: the Legacy send counters and oldest open send of the adoption a body
+/// claim on `channel_id` counts against; none when no adoption is selected for it.
+pub(crate) fn legacy_sends_report(channel_id: u64) -> Option<String> {
+    super::test_override::with_channels(|snapshot| {
+        let snapshot = snapshot?;
+        let candidate = snapshot
+            .unresolved_child(channel_id)
+            .or_else(|| Some(snapshot.child(channel_id)?.ok()?.candidate))
+            .or_else(|| snapshot.candidate(channel_id).cloned())?;
+        Some(candidate.sends_report())
+    })
 }
 
 /// Test builds: every body claim this process judged, with whether O took the body.

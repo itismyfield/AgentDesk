@@ -59,6 +59,7 @@ class LiveShapedDiscord:
         self.channel_id = None
         self.session_id = "00000000-0000-4000-8000-000000000001"
         self.secret = None
+        self.fetch_failures = 0  # lookups that time out once the T2 prompt is in the channel
 
     def session_evidence(self, base_url, path):  # noqa: ARG002
         return 200, {"channel_id": self.channel_id, "provider": "claude",
@@ -108,6 +109,9 @@ class LiveShapedDiscord:
         return sent
 
     def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+        if self.fetch_failures and any(m["content"].endswith(":T2] 만 출력해줘.") for m in self.messages):
+            self.fetch_failures -= 1
+            raise TimeoutError("timed out")
         floor = int(after_id or 0)
         return [dict(m) for m in self.messages if int(m["id"]) > floor][:limit]
 
@@ -117,7 +121,7 @@ class LiveShapedDiscord:
 
 
 def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None,
-                    partial_result_sink: dict | None = None) -> dict:
+                    partial_result_sink: dict | None = None, fetch_failures: int = 0) -> dict:
     scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id)
     args = Namespace(
         cell=cell, channel_id=CHANNELS[cell], thread_channel_id=None, base_url="http://offline.invalid",
@@ -132,6 +136,7 @@ def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver"
         clock[0] += float(seconds)
 
     client = LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author)
+    client.fetch_failures = fetch_failures
     with (
         patch("run_tui_relay.time.sleep", side_effect=advance),
         patch("run_tui_relay.time.monotonic", side_effect=lambda: clock[0]),
@@ -253,6 +258,15 @@ class TurnSmokeFromCollectedEvidence(unittest.TestCase):
         passed, detail = verdict(result, "E-51", "codex-tui", "turns-clean.dcserver.log")
         self.assertTrue(passed, detail)
         self.assertIn("T1=1 T2=1 AFTER_CLEAR=1", detail)
+
+    def test_lookup_timeout_is_retried_and_a_stalled_lookup_is_not_a_non_delivery(self):
+        self.assertEqual(run_live_shaped("E-51", "codex-tui", fetch_failures=1)["status"], "pass")
+        result = run_live_shaped("E-51", "codex-tui", fetch_failures=10**6)
+        self.assertIn("unobserved: fetch transport timeout", result["reason"])
+        passed, detail = verdict(result, "E-51", "codex-tui", "turns-clean.dcserver.log")
+        self.assertFalse(passed)
+        self.assertIn("T2 delivery unobserved: fetch transport timeout", detail)
+        self.assertNotIn("body not delivered", detail)
 
     def test_claude_body_withheld_after_clear_fails_with_zero_deliveries(self):
         # Claude live record: after !clear only the completion chrome reached Discord.
@@ -591,7 +605,7 @@ class StepTimings(unittest.TestCase):
             self.assertAlmostEqual(earlier["started_s"] + earlier["duration_s"], later["started_s"], places=1)
 
     def test_a_hung_read_shows_as_the_step_the_run_ended_in(self):
-        # 11-01 19:26Z: the read after T1 hung 30 s and the run ended with a bare TimeoutError.
+        # 11-01 19:26Z: the read after T1 hung 30 s; reads now retry until the step deadline.
         original = LiveShapedDiscord.fetch_messages
 
         def hanging(client, channel_id, *, after_id=None, limit=100):
@@ -602,13 +616,13 @@ class StepTimings(unittest.TestCase):
 
         with patch.object(LiveShapedDiscord, "fetch_messages", hanging):
             result = run_live_shaped("E-50", "claude-tui")
-        self.assertEqual(result["reason"], "TimeoutError: timed out")
+        self.assertIn("unobserved: fetch transport timeout", result["reason"])
         self.assertEqual([row["step"] for row in result["step_timings"]],
                          ["send_discord_prompt", "wait_for_discord_text"])
         self.assertGreaterEqual(result["step_timings"][-1]["duration_s"], 30.0)
         passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
         self.assertFalse(passed)
-        self.assertRegex(detail, r"; steps: send_discord_prompt \d+\.\ds, wait_for_discord_text 3\d\.\ds$")
+        self.assertRegex(detail, r"; steps: send_discord_prompt \d+\.\ds, wait_for_discord_text \d+\.\ds$")
 
 
 class GatewayReadyTest(unittest.TestCase):
@@ -1176,7 +1190,7 @@ class CellResetTest(unittest.TestCase):
         functions = "\n".join(name + "() {\n" + deploy.split(name + "() {\n", 1)[1].split("\n}\n", 1)[0]
                               + "\n}" for name in names)
         release = self.root / "release"
-        (release / "config").mkdir(parents=True)
+        (release / "config").mkdir(parents=True, exist_ok=True)
         (release / "config/agentdesk.yaml").write_bytes(self.config.read_bytes())
         (self.root / "detail.json").write_text(json.dumps({"mailboxes": [
             {"provider": "claude", "channel_id": "222", "has_cancel_token": True,
@@ -1184,7 +1198,7 @@ class CellResetTest(unittest.TestCase):
         (self.root / "sessions.json").write_text(json.dumps({"sessions": [
             {"provider": "claude", "channel_id": "222", "status": "active"}]}))
         (self.root / "health.json").write_text('{"cluster_standby": false}')
-        (release / "logs").mkdir()
+        (release / "logs").mkdir(exist_ok=True)
         (release / "logs/dcserver.stdout.log").write_text("fixture\n")
         (self.root / "fake_driver.py").write_text('''import argparse, json, sys
 from pathlib import Path
@@ -1217,6 +1231,7 @@ POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096; POST_DEPLOY_SMOKE_TURN_COVERAGE=''
 POST_DEPLOY_SMOKE_GATEWAY_READY_S=120; POST_DEPLOY_SMOKE_RELAY_PATH=''
 _post_deploy_smoke_note() { printf '%s\\n' "$1"; }
 _post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
+_notify_channel() { printf 'NOTIFY: %s\\n' "$1"; }
 _post_deploy_smoke_resolve_cluster_standby() { printf false; }
 _post_deploy_smoke_resolve_health_module() { printf true; }
 _post_deploy_smoke_log_identity_and_size() { printf 'fixture 0\\n'; }
@@ -1290,6 +1305,24 @@ exit "$rc"
         self.assertIn("COVERAGE=E-50=pass E-51=skipped", result.stdout)
         self.assertIn("relay E-51=skipped: codex-tui not proven idle (writer not ready: "
                       f"target writer codex:333 not accepting: {hold})", result.stdout)
+
+    def test_second_consecutive_not_proven_idle_skip_alerts_until_an_evaluated_run(self):
+        reason = "writer not ready: target writer codex:333 not accepting: held"
+        alert = (f"NOTIFY: ⚠ 배포 스모크 E-51: codex-tui 셀(채널 333)이 배포 2회 연속 idle 미증명으로 건너뛰어졌습니다. "
+                 f"셀 점검이 필요합니다. 마지막 사유: {reason}")
+        for ready, alerts, streak in ((False, [], 1), (False, [alert], 2), (True, [], None), (False, [], 1)):
+            self.writers = [] if ready else [{"provider": "codex", "channel_id": "333", "accepts": False,
+                                              "hold_reason": "held"}]
+            out = self.deploy_round_trip(run_all=True).stdout
+            self.assertEqual([line for line in out.splitlines() if line.startswith("NOTIFY: ")], alerts, out)
+            self.assertIn(f"E-51=pass" if ready else f"not proven idle ({reason}) consecutive={streak}", out)
+
+    def test_skip_blocked_by_e1_fail_is_not_counted(self):
+        self.change_on_release = True
+        for _ in range(2):
+            out = self.deploy_round_trip(run_all=True).stdout
+            self.assertIn("relay E-50=skipped: blocked by E-1 FAIL", out)
+            self.assertNotIn("NOTIFY: ", out)
 
     def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
         with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:

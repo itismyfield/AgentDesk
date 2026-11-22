@@ -426,41 +426,6 @@ pub(crate) async fn record_pane_location_pg(
     compare_and_set_pg(pool, observed, &next).await
 }
 
-/// Refresh only the pane locator of the exact Bound observation. Its endpoint and launch
-/// evidence stay attached to the same owner and execution nonce.
-pub(crate) async fn refresh_bound_pane_pg(
-    pool: &PgPool,
-    observed: &HostedObservation,
-    pane_id: String,
-) -> Result<Option<HostedObservation>, HostedTransitionError> {
-    let HostedRecord::Known(current) = &observed.record else {
-        return Err(HostedTransitionError::UnknownRecord);
-    };
-    if current.state != HostedState::Bound {
-        return Err(HostedTransitionError::NotAllowed(Some(current.state)));
-    }
-    let mut next = current.clone();
-    let at = next
-        .location
-        .as_mut()
-        .ok_or(HostedTransitionError::Incomplete)?;
-    if at.pane_id == pane_id {
-        return Ok(Some(observed.clone()));
-    }
-    at.pane_id = pane_id;
-    let raw = serde_json::to_value(&next)
-        .map_err(|error| HostedTransitionError::Database(error.to_string()))?;
-    Ok(
-        (compare_and_set_pg(pool, observed, &next).await? == HostedCasOutcome::Written).then(
-            || HostedObservation {
-                raw: Some(raw),
-                record: HostedRecord::Known(next),
-                ..observed.clone()
-            },
-        ),
-    )
-}
-
 /// Fill the pane location and launch evidence once, only for the same Pending nonce.
 pub(crate) async fn record_launch_evidence_pg(
     pool: &PgPool,

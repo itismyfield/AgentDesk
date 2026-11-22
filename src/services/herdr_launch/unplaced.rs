@@ -102,7 +102,7 @@ fn label_of(logical_key: &str, label: &str) -> Option<Label> {
     if label == logical_key {
         return Some(Label::Bare);
     }
-    let nonce = workspace_nonce(logical_key, label)?;
+    let nonce = label.strip_prefix(logical_key)?.strip_prefix('#')?;
     let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
     (nonce.len() == 32 && nonce.chars().all(hex)).then(|| Label::Marked(nonce.to_owned()))
 }
@@ -110,11 +110,6 @@ fn label_of(logical_key: &str, label: &str) -> Option<Label> {
 /// Whether a workspace label is one a launch of `logical_key` gives; no other pane is read.
 pub(crate) fn candidate_label(logical_key: &str, label: &str) -> bool {
     label_of(logical_key, label).is_some()
-}
-
-/// Includes other nonce spellings when counting competing workspace names.
-pub(crate) fn workspace_nonce<'a>(logical_key: &str, label: &'a str) -> Option<&'a str> {
-    label.strip_prefix(logical_key)?.strip_prefix('#')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

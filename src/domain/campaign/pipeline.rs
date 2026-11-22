@@ -13,6 +13,7 @@ pub struct PipelineDefinition {
     pub vocabulary_version: u32,
     pub evaluator_version: u32,
     pub registry_version: u32,
+    #[serde(default)]
     pub start: String,
     pub states: Vec<PipelineState>,
     pub transitions: Vec<PipelineTransition>,

@@ -58,15 +58,6 @@ impl Epoch {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.clearing == 0 && self.1 == Some(state.epoch)
     }
-
-    pub(crate) fn begin_effect(&self) -> Option<EffectPermit> {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.clearing != 0 || self.1 != Some(state.epoch) {
-            return None;
-        }
-        state.effects += 1;
-        Some(EffectPermit(Arc::clone(&self.0)))
-    }
 }
 
 pub(crate) struct ClearGuard(Arc<Cell>);

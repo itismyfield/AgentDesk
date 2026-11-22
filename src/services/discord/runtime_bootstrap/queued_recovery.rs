@@ -4,6 +4,8 @@ use super::*;
 mod native_input;
 pub(super) use native_input::prepare_native_boot;
 
+mod agy_shadow;
+
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
 mod s2a_tests;
@@ -31,6 +33,7 @@ pub(super) async fn restore_queued_and_inflight_work(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
+    agy_shadow::observe(http, provider).await;
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
     #[cfg(unix)]
     {

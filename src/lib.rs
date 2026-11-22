@@ -313,6 +313,17 @@ pub mod campaign_adapter {
     };
 }
 
+/// Dormant Decision input contracts: an approved event's single delivery and its byte-keeping
+/// plans. The service that approves events calls them; no request reaches them on its own.
+pub mod decision_input {
+    pub use crate::services::claude_tui::input::plan_preserved_submit as claude_preserved_plan;
+    pub use crate::services::codex_tui::input::owned_preserved_plan as codex_preserved_plan;
+    pub use crate::services::discord::health::decision_target::{
+        FirstAttempt, Normalized, Normalizer, deliver_once,
+    };
+    pub use crate::services::tui_input::human_frame::{PreservedFrame, preserved_decision_body};
+}
+
 /// Dormant iMessage reply contracts for admission and claim/ACK integration.
 pub mod imsg_reply {
     pub use crate::db::imsg_reply::{

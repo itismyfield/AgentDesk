@@ -171,6 +171,11 @@ pub(crate) async fn start<W: RepostWriter>(
     let channel = permit.key().unit().channel_id;
     let mut envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
     envelope.output_origin = writer.output_origin(permit.key());
+    {
+        use crate::services::discord::outbound::notification_policy as policy;
+        envelope.silent =
+            policy::live_suppresses_push(channel, policy::unit_class(permit.key().unit().kind));
+    }
     let gate = writer.gate();
     let admitted = Arc::new(AtomicU64::new(0));
     let (observed, writer_live, deadline) = (gate.subscribe(), writer.live(), permit.deadline);

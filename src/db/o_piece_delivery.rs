@@ -63,6 +63,7 @@ impl PieceKey {
     /// `None` for what is never posted as its own message: tool calls and Codex tool results.
     pub(crate) fn new(unit: UnitKey, piece_index: u32) -> Option<Self> {
         let postable = match (unit.provider, unit.kind) {
+            (ShadowProvider::Antigravity, _) => false,
             (_, UnitKind::Body) | (ShadowProvider::Claude, UnitKind::ToolResult) => true,
             (_, UnitKind::Tool | UnitKind::InputNotice | UnitKind::Recap)
             | (ShadowProvider::Codex, UnitKind::ToolResult) => false,
@@ -116,6 +117,7 @@ pub(crate) fn provider_name(provider: ShadowProvider) -> &'static str {
     match provider {
         ShadowProvider::Claude => "claude",
         ShadowProvider::Codex => "codex",
+        ShadowProvider::Antigravity => "antigravity",
     }
 }
 

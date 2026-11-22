@@ -1,5 +1,5 @@
 //! A native-owned turn's completion records, read from its own proven run instead of the bridge
-//! body: the transcript row, the scheduled outcome and the work dispatch completion.
+//! body: the transcript row, the channel session selector, the scheduled outcome and work dispatch.
 use super::*;
 use crate::db::session_transcripts::{PersistSessionTranscript, SessionTranscriptEvent};
 use crate::services::discord::inflight::InflightTurnState;
@@ -72,7 +72,7 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
         return;
     }
     match read_run(evidence, source) {
-        Ok((body, events)) => write(shared, &row, &body, &events, actor).await,
+        Ok((body, events)) => write(shared, &row, &source.session_id, &body, &events, actor).await,
         Err(error) => tracing::warn!(
             channel_id = row.channel_id,
             user_msg_id = row.user_msg_id,
@@ -150,9 +150,49 @@ fn read_run(
     Ok((body, tools.transcript_events))
 }
 
+/// The run's own session becomes the channel's stored and cached provider selector, as a bridge
+/// turn end leaves it; a channel cleared since the turn began stays empty.
+async fn record_selector(shared: &Arc<SharedData>, row: &InflightTurnState, session: &str) {
+    // A pane that already left this session keeps the one it runs now.
+    let rotated = row
+        .tmux_session_name
+        .as_deref()
+        .and_then(crate::services::tui_prompt_dedupe::claude_session_rotation_for_tmux)
+        .filter(|rotation| rotation.left_session_ids.iter().any(|left| left == session))
+        .map(|rotation| rotation.new_session_id);
+    let session = rotated.as_deref().unwrap_or(session);
+    let channel = ChannelId::new(row.channel_id);
+    let live = shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get(&channel)
+        .map(|live| live.cleared);
+    if live == Some(true) {
+        return;
+    }
+    if let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), row.session_key.as_deref()) {
+        let started = *MessageId::new(row.user_msg_id).created_at();
+        let store = crate::db::dispatched_sessions::rotation_selector::store_provider_selector_pg;
+        match store(pool, key, session, &row.channel_id.to_string(), started).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(channel_id = row.channel_id, %error, "native selector not stored")
+            }
+        }
+    }
+    let mut data = shared.core.lock().await;
+    if let Some(live) = data.sessions.get_mut(&channel).filter(|live| !live.cleared) {
+        live.restore_provider_session(Some(session.to_string()));
+    }
+}
+
 async fn write(
     shared: &Arc<SharedData>,
     row: &InflightTurnState,
+    session: &str,
     body: &str,
     events: &[SessionTranscriptEvent],
     actor: Option<&CancelToken>,
@@ -161,62 +201,68 @@ async fn write(
     let channel = ChannelId::new(row.channel_id);
     let turn_id = format!("discord:{}:{}", row.channel_id, row.user_msg_id);
     let answered = !body.trim().is_empty();
-    if answered {
-        let (isolated, routine) = crate::services::discord::turn_bridge::native_completion_scope(
-            shared, channel, &turn_id, row,
+    let (isolated, routine) = crate::services::discord::turn_bridge::native_completion_scope(
+        shared, channel, &turn_id, row,
+    )
+    .await;
+    let isolated_run = row.routine_presentation.isolated_run();
+    if answered && (routine || !isolated) {
+        let binding = crate::services::discord::settings::resolve_role_binding(
+            channel,
+            row.channel_name.as_deref(),
+        );
+        let channel_text = row.channel_id.to_string();
+        let persisted = crate::db::session_transcripts::persist_turn_db_in_context(
+            pool,
+            PersistSessionTranscript {
+                turn_id: &turn_id,
+                session_key: row.session_key.as_deref(),
+                channel_id: Some(channel_text.as_str()),
+                agent_id: binding.as_ref().map(|binding| binding.role_id.as_str()),
+                provider: Some(ProviderKind::Claude.as_str()),
+                dispatch_id: row.dispatch_id.as_deref(),
+                user_message: &row.user_text,
+                assistant_message: body,
+                events,
+                duration_ms: crate::services::discord::tmux::inflight_duration_ms(Some(
+                    row.started_at.as_str(),
+                )),
+                turn_started_at_millis:
+                    crate::db::session_transcripts::discord_message_started_at_millis(Some(
+                        MessageId::new(row.user_msg_id),
+                    )),
+            },
+            None,
+            !isolated_run,
         )
         .await;
-        let isolated_run = row.routine_presentation.isolated_run();
-        if routine || !isolated {
-            let binding = crate::services::discord::settings::resolve_role_binding(
-                channel,
-                row.channel_name.as_deref(),
-            );
-            let channel_text = row.channel_id.to_string();
-            let persisted = crate::db::session_transcripts::persist_turn_db_in_context(
-                pool,
-                PersistSessionTranscript {
-                    turn_id: &turn_id,
-                    session_key: row.session_key.as_deref(),
-                    channel_id: Some(channel_text.as_str()),
-                    agent_id: binding.as_ref().map(|binding| binding.role_id.as_str()),
-                    provider: Some(ProviderKind::Claude.as_str()),
-                    dispatch_id: row.dispatch_id.as_deref(),
-                    user_message: &row.user_text,
-                    assistant_message: body,
-                    events,
-                    duration_ms: crate::services::discord::tmux::inflight_duration_ms(Some(
-                        row.started_at.as_str(),
-                    )),
-                    turn_started_at_millis:
-                        crate::db::session_transcripts::discord_message_started_at_millis(Some(
-                            MessageId::new(row.user_msg_id),
-                        )),
-                },
-                None,
-                !isolated_run,
-            )
-            .await;
-            if let Err(error) = persisted {
-                tracing::warn!(%turn_id, %error, "native completion transcript not persisted");
-            }
+        if let Err(error) = persisted {
+            tracing::warn!(%turn_id, %error, "native completion transcript not persisted");
         }
     }
     let dispatch = row.dispatch_id.as_deref().filter(|_| answered);
-    if !row.scheduled.may_settle() && dispatch.is_none() {
-        return;
-    }
-    // Only a live token can classify a protected outcome as ordinary.
-    let ordinary = match actor {
-        Some(actor) => {
-            !crate::services::discord::turn_bridge::should_suppress_headless_delivery_for_cancel(
-                Some(actor),
-            ) && crate::services::discord::replay_policy::ordinary_outcome(pool, actor, row).await
+    let owns_channel = !isolated && !isolated_run;
+    let unprotected = row.replay_receipt_id.is_none() && !row.replay_rerun_blocked();
+    let ordinary = if !row.scheduled.may_settle() && dispatch.is_none() {
+        // No outcome is classified here, so only an unprotected turn's session is recorded.
+        owns_channel && unprotected && actor.and_then(|actor| actor.replay_attempt()).is_none()
+    } else {
+        // Only a live token can classify a protected outcome as ordinary.
+        match actor {
+            Some(actor) => {
+                !crate::services::discord::turn_bridge::should_suppress_headless_delivery_for_cancel(
+                    Some(actor),
+                ) && crate::services::discord::replay_policy::ordinary_outcome(pool, actor, row)
+                    .await
+            }
+            None => unprotected,
         }
-        None => row.replay_receipt_id.is_none() && !row.replay_rerun_blocked(),
     };
     if !ordinary {
         return;
+    }
+    if owns_channel {
+        record_selector(shared, row, session).await;
     }
     if row.scheduled.may_settle() {
         let outcome = if answered {

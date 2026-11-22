@@ -374,7 +374,8 @@ async function pickAndSave(page: Page, key: string, option: string, phone: boole
   await page.getByRole("option", { name: option }).click();
   const save = (phone ? scope : page.getByTestId("settings-save-bar")).getByRole("button", { name: /^(저장|Save)$/ });
   await save.click();
-  await expect(save).toHaveCount(0);
+  // The desktop button reads "저장 중…" while the PUT is in flight, so wait for the whole bar to go.
+  await expect(phone ? save : page.getByTestId("settings-save-bar")).toHaveCount(0);
 }
 
 test.describe("settings catalog", () => {
@@ -438,6 +439,8 @@ test.describe("settings catalog", () => {
     const inspector = page.getByTestId("settings-inspector");
     await expect(inspector).toContainText("바로 · 재시작해도 유지");
     await row(page, "max_review_rounds").locator("input").fill("10");
+    await expect(bar).toHaveCSS("position", "sticky");
+    await expect(bar).toBeInViewport();
     await expect(bar).toContainText("최대 리뷰 라운드 30 → 10 · 저장하면 바로 적용돼요");
     await expect(inspector).toContainText("고칠 값10");
     await row(page, "maxEntryRetries").locator("input").fill("");

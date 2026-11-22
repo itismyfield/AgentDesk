@@ -2,11 +2,13 @@
 
 import json
 import os
+import stat
 import sys
 import subprocess
 from pathlib import Path
 
-from .files import InstanceError, safe_absolute
+from .files import InstanceError, read_regular_text, safe_absolute
+from .profile import profile_spec
 
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
 
@@ -79,16 +81,78 @@ def active_claude_login(home):
         'cli': str((home / '.local/bin/claude').resolve(strict=True))}, home)
 
 
+class BlockedAgyLogin(InstanceError):
+    """The dedicated agy login home cannot be shown to carry zero MCP servers."""
+
+
+AGY_CLI_CANDIDATES = ('/opt/homebrew/bin/agy', '/usr/local/bin/agy')
+
+
+def validate_agy_login(value, root):
+    """Bind agy to `<instances parent>/agy-login`, never the real or instance HOME."""
+    if (type(value) is not dict or set(value) != {'mode', 'login_home', 'cli'}
+            or value['mode'] != 'dedicated_home'
+            or not isinstance(value['login_home'], str) or not isinstance(value['cli'], str)):
+        raise InstanceError('explicit dedicated agy login required')
+    root = safe_absolute(root)
+    cli = safe_absolute(value['cli'])
+    try:
+        metadata = cli.lstat()
+    except OSError:
+        raise InstanceError('agy CLI is unavailable') from None
+    if (safe_absolute(value['login_home']) != root.parent.parent / 'agy-login'
+            or not stat.S_ISREG(metadata.st_mode) or not os.access(cli, os.X_OK)):
+        raise InstanceError('agy login binding is not the dedicated location')
+    return dict(value)
+
+
+def discover_agy_login(home, root):
+    cli = next((Path(p).resolve(strict=True) for p in AGY_CLI_CANDIDATES if Path(p).exists()), None)
+    if cli is None:
+        raise InstanceError('agy CLI is unavailable')
+    return validate_agy_login({'mode': 'dedicated_home', 'login_home': str(safe_absolute(home) / '.adk/dev/agy-login'),
+                               'cli': str(cli)}, root)
+
+
+def check_agy_login_home(value):
+    """Admit only a private login home whose agy MCP config is absent or empty."""
+    home = safe_absolute(value['login_home'])
+    try:
+        metadata = home.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise ValueError()
+        path = safe_absolute(home / '.gemini/config/mcp_config.json')
+        if not os.path.lexists(path):
+            return
+        servers = json.loads(read_regular_text(path)).get('mcpServers', {})
+        if type(servers) is not dict or servers:
+            raise ValueError()
+    except (OSError, ValueError, AttributeError, InstanceError):
+        raise BlockedAgyLogin('agy login home MCP state is not empty') from None
+
+
 def provider_home(root: Path, provider: str) -> Path:
     return root / "home/.adk/profiles" / provider / f"test-{provider}"
 
 
-def build_org(root: Path, profile: dict, claude_login=None) -> dict:
-    providers = ("claude", "codex")
+def _org_home(root, provider, claude_login, agy_login):
+    if provider == "claude" and claude_login:
+        return claude_login["config_dir"]
+    if provider == "antigravity":
+        return agy_login["login_home"]
+    return str(provider_home(root, provider))
+
+
+def runtime_mode(provider):
+    return "pipe" if provider == "antigravity" else "tui"
+
+
+def build_org(root: Path, profile: dict, claude_login=None, agy_login=None) -> dict:
+    providers = profile_spec(profile)["providers"]
     return {
         "version": 1, "name": "Isolated test instance",
         "provider_auth_profiles": {
-            f"test-{provider}": {"provider": provider, "home": claude_login["config_dir"] if provider == "claude" and claude_login else str(provider_home(root, provider)), "env": {}}
+            f"test-{provider}": {"provider": provider, "home": _org_home(root, provider, claude_login, agy_login), "env": {}}
             for provider in providers
         },
         "provider_auth_primary_profiles": {provider: f"test-{provider}" for provider in providers},
@@ -128,7 +192,8 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
     herdr = declared_hosts(root, instance_id)["herdr"]
     agents = []
     bots = {}
-    for provider, channel in zip(("claude", "codex"), channels):
+    providers = profile_spec(profile)["providers"]
+    for provider, channel in zip(providers, channels):
         agents.append({
             "id": provider,
             "name": f"Test {provider.title()}",
@@ -141,7 +206,7 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
                 "id": channel,
                 "provider": provider,
                 "auth_profile": f"test-{provider}",
-                "runtime": "tui",
+                "runtime": runtime_mode(provider),
                 "peer_agents": False,
                 "workspace": str(root / "workspaces" / provider),
                 "prompt_file": str(root / "config" / "agents" / f"{provider}.md"),
@@ -165,8 +230,8 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
         "discord": {"bots": bots},
         "agents": agents,
         "providers": {
-            provider: {"runtime": "tui", "transcript_homes": []}
-            for provider in ("claude", "codex")
+            provider: {"runtime": runtime_mode(provider), "transcript_homes": []}
+            for provider in providers
         },
         "data": {"dir": str(root / "data"), "db_name": "agentdesk.db"},
         "database": {

@@ -7,6 +7,8 @@ use serde_json::Value;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
 
+mod agy_capture;
+
 pub trait StreamJsonCodec: Send {
     fn push_stdout_line(&mut self, line: &str) -> Result<Vec<StreamMessage>, String>;
     fn finish(
@@ -14,6 +16,11 @@ pub trait StreamJsonCodec: Send {
         exit_code: Option<i32>,
         stderr: &str,
     ) -> Result<Vec<StreamMessage>, String>;
+
+    fn start_capture(&mut self, _resume: Option<uuid::Uuid>) {}
+    fn captured_body(&mut self) -> Option<(uuid::Uuid, String)> {
+        None
+    }
 }
 
 /// Grok `streaming-messages-json` uses the shared Messages accumulator.
@@ -108,6 +115,7 @@ impl StreamJsonCodec for MessagesJsonCodec {
 /// AGY `event=init|step_update|result` codec.
 pub struct AgyCodec {
     session_id: Option<String>,
+    capture: Option<agy_capture::Capture>,
     saw_text_delta: bool,
     emitted_text: String,
     usage_steps: std::collections::BTreeSet<i64>,
@@ -120,6 +128,7 @@ impl AgyCodec {
     pub fn new() -> Self {
         Self {
             session_id: None,
+            capture: None,
             saw_text_delta: false,
             emitted_text: String::new(),
             usage_steps: std::collections::BTreeSet::new(),
@@ -137,16 +146,32 @@ impl Default for AgyCodec {
 }
 
 impl StreamJsonCodec for AgyCodec {
+    fn start_capture(&mut self, resume: Option<uuid::Uuid>) {
+        self.capture = Some(agy_capture::Capture::new(resume));
+    }
+
+    fn captured_body(&mut self) -> Option<(uuid::Uuid, String)> {
+        self.capture.as_mut()?.body(&self.emitted_text)
+    }
+
     fn push_stdout_line(&mut self, line: &str) -> Result<Vec<StreamMessage>, String> {
-        if self.finished || self.terminal.is_some() {
+        let had_terminal = self.terminal.is_some();
+        if self.finished || (had_terminal && self.capture.is_none()) {
             return Ok(Vec::new());
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-        let envelope: Value = serde_json::from_str(trimmed)
-            .map_err(|error| format!("malformed AGY StreamJson line: {error}"))?;
+        let envelope: Value = match serde_json::from_str(trimmed) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return self.invalid_stdout(
+                    had_terminal,
+                    format!("malformed AGY StreamJson line: {error}"),
+                );
+            }
+        };
         let event = envelope
             .get("event")
             .and_then(Value::as_str)
@@ -155,9 +180,20 @@ impl StreamJsonCodec for AgyCodec {
         // fields at the top level. Never mix terminal fields across the two.
         let json = match envelope.get(event) {
             Some(payload) if payload.is_object() => payload,
-            Some(_) => return Err(format!("AGY {event} payload must be an object")),
+            Some(_) => {
+                return self.invalid_stdout(
+                    had_terminal,
+                    format!("AGY {event} payload must be an object"),
+                );
+            }
             None => &envelope,
         };
+        if let Some(capture) = &mut self.capture {
+            capture.observe(event, json, &envelope);
+        }
+        if had_terminal {
+            return Ok(Vec::new());
+        }
         match event {
             "init" => {
                 let id = json
@@ -327,6 +363,21 @@ impl StreamJsonCodec for AgyCodec {
 }
 
 impl AgyCodec {
+    fn invalid_stdout(
+        &mut self,
+        had_terminal: bool,
+        error: String,
+    ) -> Result<Vec<StreamMessage>, String> {
+        if had_terminal {
+            if let Some(capture) = &mut self.capture {
+                capture.invalidate();
+            }
+            Ok(Vec::new())
+        } else {
+            Err(error)
+        }
+    }
+
     fn remember_step_error(&mut self, json: &Value, step_type: &str) {
         let state = json
             .get("status")
@@ -379,7 +430,7 @@ fn empty_success_message(step_detail: Option<&str>, stderr: &str) -> String {
     let mut message = if step_detail.is_some_and(is_permission_denial)
         || is_permission_denial(stderr)
     {
-        "AGY returned an empty response because a tool permission was denied in headless mode. Configure a narrowly scoped permissions.allow rule for the AGY project; do not use --dangerously-skip-permissions.".to_string()
+        "AGY returned an empty response because a tool permission was denied in headless mode. AgentDesk already launches AGY with --dangerously-skip-permissions, so check for an AGY deny rule or policy that still blocks this tool.".to_string()
     } else {
         "AGY returned SUCCESS without any response text; no usable assistant response was produced."
             .to_string()
@@ -596,7 +647,7 @@ mod tests {
             panic!("expected an explicit AGY error, got {messages:?}");
         };
         assert!(message.contains("permission was denied"));
-        assert!(message.contains("permissions.allow"));
+        assert!(message.contains("already launches AGY with --dangerously-skip-permissions"));
         assert!(stderr.contains("headless mode"));
         assert!(
             !messages

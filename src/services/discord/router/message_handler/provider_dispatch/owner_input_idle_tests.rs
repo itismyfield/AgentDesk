@@ -1248,6 +1248,7 @@ fn idle_turn(
     let turn = StreamingTurn {
         pool: None,
         registration_origin: None,
+        agy_foreground: None,
         shared: None,
         provider: &provider,
         prompt: &front.1.text,
@@ -3018,7 +3019,6 @@ pub(crate) fn claimed_root_recovery_launch(
         until_done: None,
         native_pin_submitted: None,
         observation: None,
-        restarted: None,
         recovery: Default::default(),
     };
     created(

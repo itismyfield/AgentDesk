@@ -22,7 +22,8 @@ from ..tui_relay import preflight_evidence
 REPO = Path(__file__).resolve().parents[3]
 SCENARIOS = REPO / "tests/e2e/tui_relay/scenarios"
 ASSERTION = "turns_delivered_once"
-TRANSPORT = re.compile(r"^(TimeoutError|socket\.timeout)\b|URL error|\bHTTP 5\d\d\b|retry budget exhausted")
+TRANSPORT = re.compile(r"^(TimeoutError|socket\.timeout)\b|URL error|\bHTTP 5\d\d\b|retry budget exhausted"
+                       r"|fetch transport timeout")
 FINGERPRINT_BYTES = 65536
 # Every input of these steps is a channel post that passes the turn gate; nothing else is driven here.
 GATED_STEPS = {"send_discord_prompt", "wait_for_discord_text", "wait_for_raw_discord_text", "wait_idle_s",

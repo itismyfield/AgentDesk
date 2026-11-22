@@ -322,6 +322,7 @@ async fn failed_create_and_missing_target_receipts_survive_new_pool_pg() {
                 code: definition::DefinitionErrorCode::EmptyAcceptance,
                 target: Some("a".into()),
                 path: Vec::new(),
+                pipeline_errors: Vec::new(),
             }),
         }))
     );
@@ -905,7 +906,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 34] = [
+    let expected: [(i64, &[&str]); 36] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -1090,6 +1091,14 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "column:routines.model",
                 "constraint:routines_model_requires_provider_check",
                 "column:agents.provider_channels",
+            ],
+        ),
+        (199, &["column:provider_session_system_prompts.anchors"]),
+        (
+            200,
+            &[
+                "table:decision_input_events",
+                "table:decision_delivery_attempts",
             ],
         ),
     ];

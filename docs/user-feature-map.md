@@ -110,7 +110,7 @@ needs_live: `true`
 - 기존 시험 정의: `src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs::herdr_http_cancel_stops_a_live_turn_and_completes_nothing_pg`
 - 기존 시험 정의: `src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs::preserve_stop_failed_command_notice_once_and_reader_continues`
 - 부분 시나리오 `E-18` (needs_live): Claude/Codex의 cancel 뒤 late marker 부재와 hold/health 명세를 참조한다. 입력은 legacy_automation이며 인간 입력 취소보존과 구체 tui_o output receipt를 증명하지 않는다. Herdr의 durable hold·legacy idle 검사는 N/A이고 자동 busy witness operation도 없다.
-- 부분 시나리오 `E-54` (needs_live): Claude tmux의 late marker 부재와 idle !stop 답글 정확히 1회 UX만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
+- 부분 시나리오 `E-54` (needs_live): Claude tmux·Herdr의 late marker 부재와 idle !stop 답글 정확히 1회 UX, Herdr hold 중 후속 입력 전달 여부만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
 | --- | --- | --- | --- |

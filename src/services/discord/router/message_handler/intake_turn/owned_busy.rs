@@ -2,16 +2,10 @@
 use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
 use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
-use crate::services::discord::recovery_engine::herdr_reattach::{
-    confirm_admitted_input_identity, confirm_input_identity,
-};
 
 #[path = "owned_busy/missing_watch.rs"]
 mod missing_watch;
-#[path = "owned_busy/reconnect.rs"]
-mod reconnect;
 pub(super) use missing_watch::guard as watch_guard;
-pub(in crate::services::discord) use reconnect::{ROUTE_DIFFERS, route_matches};
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
 
@@ -64,12 +58,13 @@ pub(super) async fn running(
             observation.clone(),
         )
     {
-        confirm_input_identity(mailbox, Some(front))
+        finish_identity_hold(mailbox, front)
             .await
             .map_err(effect::unsent)?;
         return Ok(Some(registered));
     }
     let channel = ChannelId::new(channel);
+    decided(channel, "hold", SOURCE_HELD, &observation);
     if let Some(shared) = shared {
         hold(
             (shared, source_hold(state)),
@@ -100,10 +95,12 @@ pub(super) async fn running(
 impl OwnerTurn {
     pub(in crate::services::discord) async fn early(
         shared: &Shared,
-        (provider, channel, session, key): (&ProviderKind, ChannelId, Option<&str>, Option<&str>),
+        provider: &ProviderKind,
+        channel: ChannelId,
+        session: Option<&str>,
+        key: Option<&str>,
         owner: Option<Self>,
         fresh: bool,
-        lease: Option<&crate::services::discord::session_transition::SessionTransitionLease<'_>>,
     ) -> Result<(Option<Self>, bool), ()> {
         let Some(owner) = owner else {
             return Ok((None, true));
@@ -133,23 +130,11 @@ impl OwnerTurn {
         {
             owner.recovery.mark();
         }
-        if let Err(error) = confirm_admitted_input_identity(
-            shared,
-            &owner.mailbox,
-            channel,
-            (&host, session, owner.front()),
-        )
-        .await
-        {
-            tracing::warn!(channel_id = channel.get(), %error, "restart identity hold not settled");
-            owner.defer_before_submit("herdr_restart_hold_unsettled");
-            return Err(());
-        }
         let state = observation.state();
         match state {
             BusyState::Legacy => return Ok((Some(owner), true)),
             BusyState::Idle if matches!(&host, TurnHost::Herdr(_)) => {
-                return Ok((Some(owner.finish_restart_identity().await?), false));
+                return Ok((Some(owner.finish_reobservation().await?), false));
             }
             BusyState::Idle => return Ok((Some(owner), false)),
             _ => {}
@@ -170,18 +155,17 @@ impl OwnerTurn {
         let registered = match registered {
             Ok(registered) => registered,
             Err(error) => {
-                if owner.late.restarted.is_none()
-                    && owner.mailbox.has_active_turn().await == Ok(false)
-                {
+                if owner.mailbox.has_active_turn().await == Ok(false) {
                     return owner
                         .recover_or_discard(
                             shared,
                             (provider, channel, key, session),
                             &host,
-                            (&observation, lease),
+                            &observation,
                         )
                         .await;
                 }
+                decided(channel, "hold", &error, &observation);
                 hold(
                     (shared, source_hold(state)),
                     &owner.mailbox,
@@ -204,11 +188,8 @@ impl OwnerTurn {
             claim,
             settled,
             runtime,
-            late,
             ..
-        } = owner.finish_restart_identity().await?;
-        let mut registered = registered;
-        registered.restarted = late.restarted;
+        } = owner.finish_reobservation().await?;
         let runtime = runtime.or_else(|| Some(shared.clone()));
         let _ = paste_busy(
             (shared.pg_pool.clone(), provider.clone(), runtime),
@@ -219,6 +200,147 @@ impl OwnerTurn {
         )
         .await;
         Err(())
+    }
+
+    async fn recover_or_discard(
+        self,
+        shared: &Shared,
+        (provider, channel, key, session): (&ProviderKind, ChannelId, Option<&str>, &str),
+        host: &TurnHost,
+        observation: &BusyObservation,
+    ) -> Result<(Option<Self>, bool), ()> {
+        use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+        use crate::services::claude::herdr_turn::HoldRelease;
+        use crate::services::herdr_launch::retire::{self, RetireRefusal, Scope};
+        use RecoveryFailure::{Refused, Reobserve, Retry};
+        let refused = |reason: &str| Refused(reason.into());
+        let recovery = async {
+            let TurnHost::Herdr(plan) = host else {
+                return Err(refused("host is not a local Herdr execution"));
+            };
+            let row = plan
+                .row
+                .as_ref()
+                .ok_or_else(|| refused("hosted row unavailable"))?;
+            let HostedRecord::Known(record) = &row.record else {
+                return Err(refused("hosted record unreadable"));
+            };
+            let root = crate::config::runtime_root()
+                .ok_or_else(|| Retry("runtime root unavailable".into()))?;
+            let node = crate::config::session_hosts::local_node()
+                .ok_or_else(|| Retry("local node unavailable".into()))?;
+            let at = record
+                .location
+                .as_ref()
+                .ok_or_else(|| refused("recorded pane unavailable"))?;
+            if record.state != HostedState::Bound
+                || record.owner.provider != "claude"
+                || record.owner.discord_token_hash != shared.token_hash
+                || record.owner.channel_id != channel.get().to_string()
+                || record.owner.logical_key != session
+                || root != std::path::Path::new(&record.owner.runtime_root)
+                || node != record.owner.owner_node
+                || record.owner.owner_node != plan.endpoint.execution_node
+                || at.execution_node != plan.endpoint.execution_node
+                || at.endpoint_config_key != plan.endpoint.config_key
+                || at.socket_addr != plan.endpoint.socket_addr
+                || at.named_session != plan.endpoint.herdr_session
+            {
+                return Err(refused("local execution owner or endpoint differs"));
+            }
+            let pool = shared
+                .pg_pool
+                .as_ref()
+                .ok_or_else(|| Retry("database unavailable".into()))?;
+            crate::services::discord::herdr_terminate::root_replaced::current(pool, row)
+                .await
+                .map_err(Retry)?;
+            let retired = retire::observed(pool, row, Scope::Missing)
+                .await
+                .map_err(|error| {
+                    let reason = format!("retire: {error:?}");
+                    match error {
+                        RetireRefusal::Unproven(_) | RetireRefusal::ProviderRunning => {
+                            Reobserve(reason)
+                        }
+                        RetireRefusal::Changed(_) | RetireRefusal::NoLocalEndpoint => Retry(reason),
+                        RetireRefusal::NoRow(_) => Refused(reason),
+                    }
+                })?;
+            if retired.hold != HoldRelease::Released {
+                return Err(refused(
+                    "retired execution input hold could not be released",
+                ));
+            }
+            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
+                session,
+                Some(&record.execution_nonce),
+            );
+            self.recovery.mark();
+            let mut expected = record.clone();
+            expected.state = HostedState::Retired;
+            match crate::services::turn_host::for_turn(Some(pool), provider, channel.get(), key)
+                .await
+            {
+                TurnHost::Herdr(next)
+                    if next
+                        .row
+                        .as_ref()
+                        .is_some_and(|row| row.record == HostedRecord::Known(expected.clone())) =>
+                {
+                    Ok(())
+                }
+                _ => Err(refused(
+                    "fresh Herdr execution is not admissible after retirement",
+                )),
+            }
+        }
+        .await;
+        let (reason, probe) = match recovery {
+            Ok(()) => return Ok((Some(self.finish_reobservation().await?), false)),
+            Err(Refused(reason)) => {
+                decided(channel, "discard", &reason, observation);
+                let failure = super::super::start_failure::Failure::owner(&self);
+                let result = failure
+                    .discard(Some(shared.clone()), channel, reason)
+                    .await
+                    .map(|_| ());
+                let _ = self.settled.send(result.map_err(effect::unsent));
+                return Err(());
+            }
+            Err(Reobserve(reason)) => (
+                reason,
+                recovery_probe(
+                    host,
+                    observation,
+                    shared.pg_pool.as_ref(),
+                    &self.mailbox,
+                    self.front(),
+                ),
+            ),
+            Err(Retry(reason)) => (reason, None),
+        };
+        decided(channel, "hold", &reason, observation);
+        // When the exact read cannot be built, re-resolve on the next look.
+        let probe = probe.unwrap_or_else(|| Box::new(|| Screen::Ready));
+        hold(
+            (shared, HoldKind::Identity),
+            &self.mailbox,
+            channel,
+            self.front(),
+            Some(probe),
+        )
+        .await;
+        self.defer_before_submit(&reason);
+        Err(())
+    }
+
+    async fn finish_reobservation(self) -> Result<Self, ()> {
+        if let Err(error) = finish_identity_hold(&self.mailbox, self.front()).await {
+            self.defer_before_submit(&error);
+            return Err(());
+        }
+        Ok(self)
     }
 
     pub(in crate::services::discord) async fn legacy_diagnostic(
@@ -333,6 +455,7 @@ fn hold_late(
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
     let kind = source_hold(observation.state());
+    decided(channel, "hold", SOURCE_HELD, observation);
     if let Some(shared) = turn.shared {
         handle.block_on(hold((shared, kind), mailbox, channel, front, probe));
     } else {
@@ -404,7 +527,19 @@ pub(super) fn unwound(
     })
 }
 
-/// Holds the front and gives the readiness deadline to the watch that owns it.
+async fn finish_identity_hold(mailbox: &ChannelMailboxHandle, front: &Front) -> Result<(), String> {
+    let front = front.clone();
+    mailbox
+        .v2_request(move |slot| {
+            slot.as_mut()
+                .ok_or("V2 not adopted")?
+                .finish_identity_hold(&front)
+        })
+        .await
+}
+
+/// Holds the front and gives the readiness deadline to the watch that owns it; an identity hold
+/// gets that deadline too, so the hold ends by one delivery or one unsent settlement.
 async fn hold(
     (shared, kind): (&Shared, HoldKind),
     mailbox: &ChannelMailboxHandle,
@@ -412,18 +547,9 @@ async fn hold(
     front: &Front,
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
+    let drive = drive(shared, channel);
     if matches!(kind, HoldKind::Identity) {
-        let original = front.clone();
-        let held = mailbox
-            .v2_request(move |slot| {
-                slot.as_mut()
-                    .ok_or("V2 not adopted")?
-                    .hold_identity(&original)
-            })
-            .await;
-        if let Err(error) = held {
-            tracing::warn!(channel_id = channel.get(), %error, "identity hold not recorded");
-        }
+        held_watch::readiness::hold_identity(drive.clone(), front).await;
     } else {
         hold_start(mailbox, channel, front).await;
     }
@@ -443,11 +569,21 @@ async fn hold(
         channel.get(),
         held_front(probe, mailbox.clone(), front.clone()),
     );
-    let drive = drive(shared, channel);
     if matches!(kind, HoldKind::Readiness) {
         held_watch::readiness::hold(drive.clone(), front).await;
     }
     held_watch::watch(drive, front.1.message_id);
+}
+
+/// One line per busy-entry disposition, so a discard or hold can be traced without its notice.
+fn decided(channel: ChannelId, decision: &str, reason: &str, observation: &BusyObservation) {
+    tracing::info!(
+        channel_id = channel.get(),
+        decision,
+        reason,
+        screen = ?observation.state(),
+        "herdr busy entry decision"
+    );
 }
 
 fn recoverable_probe(

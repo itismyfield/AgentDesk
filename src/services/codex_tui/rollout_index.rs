@@ -42,6 +42,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+pub(crate) mod summary_context;
+
 /// Maximum header lines scanned looking for the `session_meta` record. Mirrors
 /// the legacy bound in `session.rs` / `rollout_tail.rs` so the bounded-read
 /// guarantee (REQ-005) is preserved.
@@ -227,7 +229,11 @@ fn strict_session_meta_from_header(
 }
 
 pub(crate) fn strict_parent_session(path: &Path, session_id: &str) -> std::io::Result<()> {
-    let meta = strict_session_meta_from_header(std::fs::File::open(path)?)?
+    strict_parent_session_file(&std::fs::File::open(path)?, session_id)
+}
+
+fn strict_parent_session_file(file: &std::fs::File, session_id: &str) -> std::io::Result<()> {
+    let meta = strict_session_meta_from_header(file)?
         .ok_or_else(|| std::io::Error::other("parent session_meta unavailable"))?;
     if meta.is_subagent() || meta.id.as_deref() != Some(session_id) {
         return Err(std::io::Error::other("parent session identity mismatch"));

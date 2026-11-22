@@ -159,7 +159,7 @@ pub(super) async fn collect(
                     continue;
                 };
                 if channel == 0
-                    || crate::config::session_hosts::herdr_endpoint(channel).is_some()
+                    || crate::services::session_host::thread_host::next_is_herdr(channel)
                     || provider.build_tmux_session_name(&format!("scheduled:{}", row.definition))
                         != *name
                 {

@@ -127,6 +127,29 @@ pub async fn read_obligation(
         .await
 }
 
+pub(crate) async fn read_agy_binding(
+    pool: &PgPool,
+    channel: u64,
+    message: u64,
+    episode: Option<&str>,
+) -> Result<Option<Obligation>, sqlx::Error> {
+    let mut rows = sqlx::query_as(
+        "SELECT * FROM imsg_reply_obligations
+         WHERE channel_id = $1 AND (queued_message_id = $2 OR episode_key = $3)
+           AND starts_with(request_hash, 'v3:agy:')
+         LIMIT 2",
+    )
+    .bind(channel.to_string())
+    .bind(message.to_string())
+    .bind(episode)
+    .fetch_all(pool)
+    .await?;
+    if rows.len() > 1 {
+        return Err(sqlx::Error::Protocol("ambiguous agy input binding".into()));
+    }
+    Ok(rows.pop())
+}
+
 pub async fn read_action(pool: &PgPool, id: Uuid) -> Result<Option<Action>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM imsg_reply_actions WHERE id = $1")
         .bind(id)

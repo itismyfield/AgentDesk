@@ -536,3 +536,57 @@ fn unproven_canary_retired_source_regrows_is_read_and_alarms() {
         runtime.block_on(unproven_canary(false, true, configured));
     }
 }
+
+/// Herdr never captures a Codex end: two smokes' replaced sources retire after the Herdr silence.
+#[test]
+fn herdr_two_smoke_sources_retire_after_herdr_silence_and_clear_health() {
+    let _hosts = crate::config::session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")]);
+    let aged = std::time::SystemTime::now()
+        - crate::services::tui_o::writer::rotation::HERDR_UNPROVEN_SILENCE;
+    for configured in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fixture = Fixture::new(false);
+            let (sources, _) = backlog(&fixture, 2);
+            for source in &sources[..2] {
+                let file = std::fs::File::options()
+                    .write(true)
+                    .open(&source.path)
+                    .unwrap();
+                file.set_times(std::fs::FileTimes::new().set_modified(aged))
+                    .unwrap();
+            }
+            let pane = fixture.context.tmux_session.clone();
+            let (retained, cursors, _, health) = with_ready_codex_backlog(
+                sources,
+                pane,
+                configured,
+                WAIT_CAP * 3,
+                |_, probe| async move {
+                    // Past the 2h stalled-retention grace, which a 24h silence would outlast.
+                    tokio::time::advance(std::time::Duration::from_secs(2 * 3600)).await;
+                    probe.retained
+                },
+            )
+            .await;
+            assert_eq!(
+                retained.lock().unwrap().last(),
+                Some(&(1, 0)),
+                "configured={configured}"
+            );
+            assert_eq!(
+                cursors.iter().map(|c| c.retired).collect::<Vec<_>>(),
+                [true, true, false]
+            );
+            assert!(
+                !health
+                    .current_at(std::time::Instant::now())
+                    .contains(&format!("tui_o:reader_retention_stalled:{CHANNEL}"))
+            );
+        });
+    }
+}

@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::model::Repository;
-use super::pipeline::PipelineDefinition;
 use super::workflow_options::WorkflowOptions;
+use super::{pipeline::PipelineDefinition, pipeline_validate::PipelineDiagnostic};
 use crate::utils::dag::{self, DagError};
 
 pub const WORKFLOW_VERSION: &str = "campaign-v1";
@@ -71,6 +71,8 @@ pub struct DefinitionHashes {
 pub struct ValidatedDefinition {
     input: DefinitionInput,
     hashes: BTreeMap<String, DefinitionHashes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_execution_revision: Option<u64>,
 }
 
 impl ValidatedDefinition {
@@ -79,6 +81,17 @@ impl ValidatedDefinition {
     }
     pub fn hashes(&self) -> &BTreeMap<String, DefinitionHashes> {
         &self.hashes
+    }
+    pub(crate) fn set_pipeline(
+        &mut self,
+        pipeline: Box<PipelineDefinition>,
+        active_revision: Option<u64>,
+    ) {
+        self.legacy_execution_revision = self.legacy_execution_revision.or(active_revision);
+        self.input.pipeline = Some(pipeline);
+    }
+    pub(super) fn legacy_execution_revision(&self, current: u64) -> u64 {
+        self.legacy_execution_revision.unwrap_or(current)
     }
     pub fn superseded_nodes(&self, next: &Self) -> Vec<String> {
         self.hashes
@@ -95,11 +108,14 @@ pub struct DefinitionError {
     pub code: DefinitionErrorCode,
     pub target: Option<String>,
     pub path: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipeline_errors: Vec<PipelineDiagnostic>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefinitionErrorCode {
     InvalidField,
+    InvalidPipeline,
     UnsupportedProfile,
     EmptyAcceptance,
     DuplicateAcceptance,
@@ -114,6 +130,7 @@ fn error(code: DefinitionErrorCode, target: impl Into<String>) -> DefinitionErro
         code,
         target: Some(target.into()),
         path: Vec::new(),
+        pipeline_errors: Vec::new(),
     }
 }
 pub fn valid_id(id: &str) -> bool {
@@ -145,25 +162,39 @@ fn graph_error(value: DagError) -> DefinitionError {
             code: C::MissingDependency,
             target: Some(node),
             path: vec![dependency],
+            pipeline_errors: Vec::new(),
         },
         DagError::RepeatedDependency { node, dependency } => DefinitionError {
             code: C::RepeatedDependency,
             target: Some(node),
             path: vec![dependency],
+            pipeline_errors: Vec::new(),
         },
         DagError::Cycle(path) => DefinitionError {
             code: C::Cycle,
             target: None,
             path,
+            pipeline_errors: Vec::new(),
         },
+    }
+}
+
+pub(crate) fn validate_pipeline(pipeline: &PipelineDefinition) -> Result<(), DefinitionError> {
+    let pipeline_errors = pipeline.validate();
+    if pipeline_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(DefinitionError {
+            pipeline_errors,
+            ..error(DefinitionErrorCode::InvalidPipeline, "pipeline")
+        })
     }
 }
 
 pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition, DefinitionError> {
     use DefinitionErrorCode as C;
-    // Pipeline definitions require the pipeline-aware save path.
-    if input.pipeline.is_some() {
-        return Err(error(C::InvalidField, "pipeline"));
+    if let Some(pipeline) = &input.pipeline {
+        validate_pipeline(pipeline)?;
     }
     if !text(&input.title, 512)
         || !text(&input.goal, 64_000)
@@ -225,7 +256,11 @@ pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition
             .map(|n| (n.id.as_str(), n.dependencies.as_slice())),
     )
     .map_err(graph_error)?;
-    Ok(ValidatedDefinition { input, hashes })
+    Ok(ValidatedDefinition {
+        input,
+        hashes,
+        legacy_execution_revision: None,
+    })
 }
 
 #[cfg(test)]

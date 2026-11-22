@@ -144,6 +144,7 @@ impl HostIo for GatewayHost {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return None,
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -330,6 +331,7 @@ impl HostIo for GatewayHost {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return Err("agy uses committed spool custody".into()),
         };
         let pending = |record: &super::super::tui_direct_pending_start::TuiDirectPendingStart| {
             record.channel_id == channel && record.provider.eq_ignore_ascii_case(kind.as_str())
@@ -421,6 +423,7 @@ impl HostIo for GatewayHost {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
             ShadowProvider::Codex => ProviderKind::Codex,
+            ShadowProvider::Antigravity => return,
         };
         super::super::queue_io::schedule_writer_ready_queue_kick(
             self.shared.clone(),
@@ -429,15 +432,30 @@ impl HostIo for GatewayHost {
         );
     }
 
-    fn adopted(&self, channel: u64, provider: ShadowProvider) {
-        let kind = match provider {
-            ShadowProvider::Claude => ProviderKind::Claude,
-            ShadowProvider::Codex => ProviderKind::Codex,
-        };
-        let confirm =
-            super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
-        let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
-        super::super::turn_presence::supervisor::register(&kind, &confirmed);
+    fn pane_adopted(&self, channel: u64, provider: host::PaneAdoptionProvider) {
+        pane_confirmation::publish(self, channel, provider);
+    }
+}
+
+mod pane_confirmation {
+    use super::host::PaneAdoptionProvider as ShadowProvider;
+    use super::{GatewayHost, ProviderKind};
+
+    impl GatewayHost {
+        fn adopted(&self, channel: u64, provider: ShadowProvider) {
+            let kind = match provider {
+                ShadowProvider::Claude => ProviderKind::Claude,
+                ShadowProvider::Codex => ProviderKind::Codex,
+            };
+            let confirm =
+                super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
+            let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
+            super::super::turn_presence::supervisor::register(&kind, &confirmed);
+        }
+    }
+
+    pub(super) fn publish(host: &GatewayHost, channel: u64, provider: ShadowProvider) {
+        host.adopted(channel, provider);
     }
 }
 
@@ -528,6 +546,15 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
+    if *provider == ProviderKind::Antigravity {
+        // Only a boot-selected agy parent reads its threads; without one nothing is installed.
+        let selected = crate::services::tui_o::cutover::boot_snapshot()
+            .is_some_and(|boot| !boot.agy_channels().is_empty());
+        if selected {
+            install_thread_lookup(shared, provider);
+        }
+        return;
+    }
     let Some(shadow) = shadow_of(provider) else {
         return;
     };

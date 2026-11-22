@@ -12,7 +12,8 @@ import re
 def herdr_profile(scenario, cell):
     if cell not in {"claude-herdr", "codex-herdr"}:
         return None
-    issue = {"E-12": "#5340 P11", "E-18": "#5340 HTTP HostOwned follow-up (not P10-3)", "E-18-stop": "#5340 P10-3"}.get(scenario)
+    issue = {"E-12": "#5340 P11", "E-18": "#5340 HTTP HostOwned follow-up (not P10-3)", "E-18-stop": "#5340 P10-3",
+             "E-54-C": "#8128 U"}.get(scenario)
     if not issue and cell == "codex-herdr" and scenario in {
             "E-2", "E-5", "E-8", "E-19", "E-30", "E-36", "E-51"}:
         issue = "#5340 P10-2"

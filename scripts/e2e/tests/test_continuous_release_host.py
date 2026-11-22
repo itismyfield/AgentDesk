@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO))
 from scripts.e2e.continuous import (budget, channel_lock, consumer, plan, publication, release_host, runner,  # noqa: E402
                                     smoke_driver, summary, turn_gate, usage)
 from scripts.e2e.continuous.store import read_json, write_json  # noqa: E402
+from scripts.e2e.tui_relay import discord  # noqa: E402
 
 HEAD = "c" * 40
 HERDR = {"admission": "open", "restart_required": False, "endpoints": {"ep": {"local": True}}, "configured_channels": ["20"],
@@ -401,9 +402,9 @@ class Driver(Fixture):
                 write_json(self.root / "herdr-status.json", {"executions": [RUNNING], "other_input_holds": []})
 
     def test_lost_observation_is_unevaluable_but_a_seen_or_unsent_failure_is_fail(self):
-        def timeout(state, duplicate=False):
+        def timeout(state, duplicate=False, reason="TimeoutError: timed out"):
             first, second, _third = state["row"]["marker_counts"]
-            state["row"].update(status="fail", reason="TimeoutError: timed out",
+            state["row"].update(status="fail", reason=reason,
                                 step_timings=[{"step": "send_discord_prompt"}, {"step": "wait_for_discord_text"}])
             state["row"]["marker_counts"].update({first: 2 if duplicate else 1, second: 0})
             state["rc"] = 1
@@ -432,6 +433,8 @@ class Driver(Fixture):
 
         report, _, _ = self.drive(harness=timeout, prompts=2, host="tmux")
         self.assertEqual((report["status"], report["reason"], report["native_turns"]), ("UNEVALUABLE", "UNOBSERVED_TRANSPORT", 2))
+        stalled = f"FetchTransportTimeout: {discord.FetchTransportTimeout(4, TimeoutError('timed out'), [])}"
+        self.assertEqual(self.drive(harness=lambda state: timeout(state, reason=stalled), prompts=2, host="tmux")[0]["reason"], "UNOBSERVED_TRANSPORT")
         self.assertEqual(report["assertions"], [{"key": "turns_delivered_once", "status": "UNEVALUABLE", "complete": False}])
         self.assertEqual(self.drive(harness=lambda state: state.update(rotate=True), host="tmux")[0]["reason"], "UNOBSERVED_SERVER_LOG")
         for broken in (lambda state: timeout(state, duplicate=True), missing, unsent, refused, residue):

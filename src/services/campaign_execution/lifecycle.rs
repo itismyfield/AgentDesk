@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::domain::campaign::{
-    decision_item::ApprovalTarget, definition::valid_id, model::ReviewedCandidate,
+    decision_item::{ApprovalBinding, ApprovalTarget},
+    definition::valid_id,
+    deployment::DeployJob,
+    model::ReviewedCandidate,
     workflow_options::ApprovalGate,
 };
 
@@ -66,7 +69,10 @@ pub(super) fn gate_status(
             && matches!(&bound.target, ApprovalTarget::Candidate { base_sha, head_sha }
                 if base_sha == t.base_sha && head_sha == t.head_sha)
     });
-    if bound.run_id != run.id || bound.definition_revision != state.definition_revision || !exact {
+    if bound.run_id != run.id
+        || bound.definition_revision != state.legacy_execution_revision()
+        || !exact
+    {
         GateStatus::Unopened
     } else if item.approval.is_none() {
         GateStatus::Unapproved
@@ -203,6 +209,8 @@ fn begin_run(next: &mut CampaignState, expected_revision: u64, run_id: &str) -> 
         reviews: BTreeMap::new(),
         landings: BTreeMap::new(),
         merges: BTreeMap::new(),
+        deployments: BTreeMap::new(),
+        acceptance_checks: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),
@@ -438,12 +446,44 @@ pub(super) fn merge_approval(
     node_id: &str,
     landing: &super::landing_effects::Landing,
     pr: &super::landing_effects::OpenedPr,
-) -> Option<(
-    crate::domain::campaign::decision_item::ApprovalBinding,
-    bool,
-)> {
-    use crate::domain::campaign::decision_item::ApprovalBinding;
-    let gate = ApprovalGate::Merge;
+) -> Option<(ApprovalBinding, bool)> {
+    let target = ApprovalTarget::PullRequest {
+        number: pr.number,
+        head_sha: pr.head_sha.clone(),
+    };
+    let policy = &landing.target.pin_hash;
+    slot_approval(state, run, node_id, ApprovalGate::Merge, policy, target)
+}
+
+// The Deploy slot names the exact main commit of the intent; another commit is another gate.
+pub(super) fn deploy_approval(
+    state: &CampaignState,
+    run: &Run,
+    node_id: &str,
+    job: &DeployJob,
+) -> Option<(ApprovalBinding, bool)> {
+    let target = ApprovalTarget::Main {
+        sha: job.intent.target_sha.clone(),
+    };
+    slot_approval(
+        state,
+        run,
+        node_id,
+        ApprovalGate::Deploy,
+        &job.pin_hash,
+        target,
+    )
+}
+
+// A configured slot's exact binding and whether its current gate carries that approval.
+fn slot_approval(
+    state: &CampaignState,
+    run: &Run,
+    node_id: &str,
+    gate: ApprovalGate,
+    policy_hash: &str,
+    target: ApprovalTarget,
+) -> Option<(ApprovalBinding, bool)> {
     if !state
         .definition
         .input()
@@ -456,12 +496,9 @@ pub(super) fn merge_approval(
         run_id: run.id.clone(),
         node_id: node_id.into(),
         gate,
-        definition_revision: state.definition_revision,
-        policy_hash: landing.target.pin_hash.clone(),
-        target: ApprovalTarget::PullRequest {
-            number: pr.number,
-            head_sha: pr.head_sha.clone(),
-        },
+        definition_revision: state.legacy_execution_revision(),
+        policy_hash: policy_hash.into(),
+        target,
     };
     let approved = binding
         .slot_id()
@@ -470,6 +507,73 @@ pub(super) fn merge_approval(
         .and_then(|id| run.approvals.items.get(id))
         .is_some_and(|item| item.binding == binding && item.approval.is_some());
     Some((binding, approved))
+}
+
+// The landed node whose deployment may still be requested or started: running, unstopped,
+// waiting on main verification with its reviewed candidate still current.
+pub(super) fn deploy_opening<'a>(
+    state: &CampaignState,
+    run: &'a Run,
+    node_id: &str,
+) -> Option<(u64, &'a ReviewedCandidate)> {
+    let node = state.nodes.get(node_id)?;
+    let fence = run.fences.get(node_id)?;
+    (state.control == CampaignControl::Running
+        && run.stop.is_none()
+        && node.stage == Stage::MainVerification
+        && node.disposition == NodeDisposition::Verifying
+        && node.main_integrated
+        && node.current_attempt.is_none()
+        && fence.interruption.is_none())
+    .then(|| landing_candidate(state, run, node_id))
+    .flatten()
+    .map(|candidate| (fence.epoch, candidate))
+}
+
+pub(super) fn deploy_position(
+    state: &CampaignState,
+    run: &Run,
+    node_id: &str,
+    job: &DeployJob,
+) -> bool {
+    deploy_opening(state, run, node_id).is_some_and(|(epoch, candidate)| {
+        epoch == job.epoch
+            && run.control_version == job.control_version
+            && candidate.pin_hash == job.pin_hash
+    })
+}
+
+// A witnessed deployment moves a running node on to its final checks; a stopped one stays put.
+pub(super) fn deployment_confirmed(state: &mut CampaignState, node_id: &str) -> Transition {
+    let running = state.control == CampaignControl::Running
+        && state.run.as_ref().is_some_and(|run| run.stop.is_none());
+    let stage = state.nodes.get(node_id).map(|node| node.stage);
+    if running && stage == Some(Stage::MainVerification) {
+        return advance(
+            state,
+            node_id,
+            Stage::FinalVerification,
+            NodeDisposition::Verifying,
+        );
+    }
+    Ok(stage.map(|stage| EventKind::NodeAdvanced {
+        node_id: node_id.into(),
+        stage,
+    }))
+}
+
+// Recorded only by the final acceptance judgement, for the candidate the definition still names.
+pub(super) fn acceptance_judged(state: &mut CampaignState, node_id: &str) -> Transition {
+    let node = state
+        .nodes
+        .get_mut(node_id)
+        .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))?;
+    node.acceptance_complete = true;
+    node.evidence_current = true;
+    Ok(Some(EventKind::NodeAdvanced {
+        node_id: node_id.into(),
+        stage: node.stage,
+    }))
 }
 
 pub(super) fn main_observed(state: &mut CampaignState, node_id: &str, active: bool) -> Transition {

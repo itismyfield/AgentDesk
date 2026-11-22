@@ -135,6 +135,8 @@ def judge(
 
     counts = (result or {}).get("marker_counts")
     counts = counts if isinstance(counts, dict) else {}
+    # Lookups that kept failing until the deadline saw nothing; a zero count is not a non-delivery.
+    unobserved = "fetch transport timeout" in str((result or {}).get("reason") or "")
     marker_parts = []
     for marker in markers:
         label = _label(marker)
@@ -148,7 +150,9 @@ def judge(
             findings.append(f"{label} delivery count unobserved")
             continue
         marker_parts.append(f"{label}={hits}")
-        if hits == 0 and label == AFTER_CLEAR_LABEL:
+        if hits == 0 and unobserved:
+            findings.append(f"{label} delivery unobserved: fetch transport timeout")
+        elif hits == 0 and label == AFTER_CLEAR_LABEL:
             findings.append(f"{label} body withheld after !clear (0 deliveries)")
         elif hits == 0:
             findings.append(f"{label} body not delivered")

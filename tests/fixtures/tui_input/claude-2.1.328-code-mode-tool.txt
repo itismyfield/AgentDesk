@@ -1,0 +1,16 @@
+  중단이 오면 늦은 표식 없이 멈춰.
+
+⏺ [E2E-8081-STOP:OK]
+
+⏺ Running 75s sleep per scenario · 4s
+  ⎿  $ python3 -c "import time; time.sleep(75)" (3s)
+
+✽ Ideating… (Run 75s sleep per scenario · 7s ·
+  ↓ 300 tokens)
+
+✔ Update installed · Restart to update
+──────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────
+  ⏱ 2m │ ░░░░░░░░░░ │ 4% │ 45K/1.0M │ 📦️ 54% │ $0.27
+  ◆ Sonnet(X) │ ⚠️ │ 7d: 58% (3d17h) │ 7d-F: 12% (3d17h)

@@ -1,6 +1,6 @@
 # Decision 포럼 설계 (#8211)
 
-<!-- doc-path-refs: proposed src/cli/args/decision.rs src/cli/decision.rs src/cli/decision/owner_cache.rs src/db/decisions.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/server/routes/decisions.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/ingress.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/requester.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs src/services/discord/health/turn_deliver/decision_target.rs src/services/discord/queue_io/decision_drain.rs src/services/turn_orchestrator/queued_head/v2/decision.rs -->
+<!-- doc-path-refs: proposed src/cli/args/decision.rs src/cli/decision.rs src/cli/decision/owner_cache.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/server/routes/decisions.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/ingress.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/requester.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs src/services/turn_orchestrator/queued_head/v2/decision.rs -->
 
 설계 기준 코드는 `1161162a18`이다. 이 문서는 #8211 설계 개정 3(독립 리뷰 P0 0·P1 0·P2 3)의 요지이며, 리뷰 P2 3건을 다음 조각의 수용 조건으로 넣었다. 상태 모델은 [decision-request 모델](statecharts/decision-request/decision-request.report.md)에 있다. 줄 번호는 설계 기준 코드의 좌표이며 이후 편집으로 밀릴 수 있다.
 
@@ -300,7 +300,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 
 ## 상태 모델
 
-[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 35개(정상 7, 의도한 반례 28)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
+[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 38개(정상 7, 의도한 반례 31)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
 
 ## 미확인
 

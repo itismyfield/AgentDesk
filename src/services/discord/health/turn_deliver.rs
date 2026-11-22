@@ -1,6 +1,7 @@
 //! Human input entry: start a turn when the mailbox is idle, otherwise queue
 //! the input on the channel mailbox with the reason it could not start.
 
+pub(crate) mod decision_target;
 mod inject;
 #[cfg(all(test, unix))]
 mod inject_codex_tests;
@@ -22,6 +23,7 @@ use super::HealthRegistry;
 use super::runtime_resolve::resolve_direct_channel_shared;
 pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
 use crate::services::discord::{SharedData, router};
+use crate::services::imsg_reply::agy_input::{self, ADMITTED_DELIVERY};
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -328,6 +330,7 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_start(&self) -> StartAttempt {
+        let agy = ADMITTED_DELIVERY.try_with(Clone::clone).ok();
         // With injection on, human input claims behind input queued or reserved before it.
         let reservation = match self.inject_mode() {
             InjectMode::Off => router::reserve_headless_turn(),
@@ -335,7 +338,7 @@ impl DeliveryPorts for LivePorts {
                 router::reserve_headless_turn().behind_queue()
             }
         };
-        let reservation = if self.owner_takes().await {
+        let reservation = if agy.is_some() || self.owner_takes().await {
             reservation.for_input(
                 self.request.channel_id,
                 Some(&self.request.source),
@@ -344,7 +347,11 @@ impl DeliveryPorts for LivePorts {
         } else {
             reservation
         };
-        let Some(reply) = &self.reply else {
+        let Some(reply) = self
+            .reply
+            .as_ref()
+            .or_else(|| agy.as_ref().map(|input| input.binding()))
+        else {
             return self.start_reserved(reservation).await;
         };
         // The reserved turn is named before anything can start it; a refused start releases it.
@@ -353,7 +360,10 @@ impl DeliveryPorts for LivePorts {
         if !reply.bind_episode(&episode, None).await {
             return StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string());
         }
-        match self.start_reserved(reservation).await {
+        let claim = agy
+            .as_ref()
+            .map(|input| input.for_message(reservation.user_msg_id().get()));
+        match agy_input::with_claim(claim, self.start_reserved(reservation)).await {
             committed @ (StartAttempt::Started(_) | StartAttempt::Accepted(_)) => committed,
             _ if !reply.release_episode(&episode).await => {
                 StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string())
@@ -375,7 +385,11 @@ impl DeliveryPorts for LivePorts {
         let request = &self.request;
         let (intervention, turn_id) = request.queue_entry(self.reply.as_ref());
         // The GUID names its queue entry before the entry exists.
-        if let Some(reply) = &self.reply
+        let agy = ADMITTED_DELIVERY.try_with(Clone::clone).ok();
+        if let Some(reply) = self
+            .reply
+            .as_ref()
+            .or_else(|| agy.as_ref().map(|input| input.binding()))
             && !reply.bind_queued(intervention.message_id.get()).await
         {
             return Err(imsg_reply::UNBOUND.to_string());
@@ -397,6 +411,9 @@ impl DeliveryPorts for LivePorts {
     }
 
     fn inject_mode(&self) -> InjectMode {
+        if ADMITTED_DELIVERY.try_with(|_| ()).is_ok() {
+            return InjectMode::Off;
+        }
         inject::mode(self.request.channel_id.get())
     }
 
@@ -487,6 +504,9 @@ impl HumanInputRequest {
             .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        if ADMITTED_DELIVERY.try_with(|_| ()).is_ok() {
+            source.origin = Some(agy_input::QUEUED_ORIGIN.into());
+        }
         let intervention = Intervention {
             author_id: UserId::new(self.author_id),
             author_is_bot: false,

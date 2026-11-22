@@ -40,14 +40,26 @@ pub(super) async fn admit_headless(
     state: &InflightTurnState,
     cancel_token: &Arc<CancelToken>,
     mut created: Result<(), CreateNewInflightError>,
-) -> Result<(), HeadlessTurnStartError> {
+) -> Result<bool, HeadlessTurnStartError> {
     if matches!(created, Err(CreateNewInflightError::AlreadyExists))
         && receipt_settle::settle_marked_row(shared, provider, state.channel_id).await
     {
         created = crate::services::discord::inflight::save_inflight_state_create_new(state);
     }
+    let saved = created.is_ok();
     if !held_by_another_turn(created, provider, state) {
-        return Ok(());
+        if !saved && state.agy_imessage_source_sha256.is_some() {
+            crate::services::discord::mailbox_finish::unwind_unstarted_turn(
+                shared,
+                ChannelId::new(state.channel_id),
+                cancel_token,
+            )
+            .await;
+            return Err(HeadlessTurnStartError::Internal(
+                "agy iMessage inflight not persisted".into(),
+            ));
+        }
+        return Ok(saved);
     }
     let channel = ChannelId::new(state.channel_id);
     crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel, cancel_token)

@@ -169,7 +169,7 @@ python3 scripts/e2e/run_tui_relay.py \
 
 Add `--dry-run` to inspect the plan first; a dry run is not execution evidence.
 `--filter` uses exact comma-separated IDs and `cells` must include the requested
-cell. The default per-scenario reset cancels inflight work and truncates relay
+cell; an ID the cell does not run is refused with exit 2. The default per-scenario reset cancels inflight work and truncates relay
 queues, so the explicit runtime root and dedicated channels matter. Use
 `--no-reset-before-each` when the selected scenario requires session continuity.
 Destructive scenarios require both `--allow-destructive` and
@@ -190,6 +190,16 @@ python3 scripts/e2e/run_multi_provider_matrix.py \
   --queue-runtime-root "$E2E_RUNTIME_ROOT" \
   --output out/e2e/tui_relay/manual-matrix --dry-run
 ```
+
+`E-54` also lists `claude-herdr`. A Herdr cell does not run its tmux steps but
+the cases in [`herdr_stop.py`](../../../../scripts/e2e/tui_relay/herdr_stop.py):
+`E-54-AB` stops a hold with `!stop`, sends an idle `!stop` 15s later whose single
+no-active-turn reply is the early-idle witness, and requires the late sentinel to
+stay absent past the hold. `E-54-C` sends a follow-up during a hold; it must be
+delivered with no not-delivered or not-kept notice, and remains a known gap
+(`known_gap.herdr_profile`) until then. Run it with `--cell claude-herdr`,
+`--herdr-endpoint` and the destructive opt-in. Without that opt-in the scenario is
+skipped and the coverage gate reports `coverage_class_actual=unsupported-known-gap`.
 
 Inspect each selected YAML's prerequisites and acceptance criteria before live
 execution. In particular, `E-36` needs exclusive `--filter E-36`,
