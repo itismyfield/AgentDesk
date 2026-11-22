@@ -157,10 +157,14 @@ pub(crate) use turn_deliver::{
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.
+#[cfg(all(test, unix))]
+pub(crate) use recovery::InflightDisposition;
 #[cfg(test)]
 pub(crate) use recovery::STALL_WATCHDOG_INTERVAL_SECS;
 #[cfg(all(test, unix))]
 pub(crate) use recovery::StaleSweepWarrantFixture;
+#[cfg(test)]
+pub(crate) use recovery::TOKEN_SUPERSEDED_PATH;
 #[allow(unused_imports)]
 pub(crate) use recovery::self_watchdog;
 #[cfg(test)]
@@ -177,8 +181,6 @@ pub use recovery::{
     stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
     stop_runtime_turn_preserving_watcher,
 };
-#[cfg(test)]
-pub(crate) use recovery::{InflightDisposition, TOKEN_SUPERSEDED_PATH};
 pub(crate) use recovery::{
     channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
