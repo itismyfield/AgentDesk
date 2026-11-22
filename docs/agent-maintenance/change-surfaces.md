@@ -1203,7 +1203,7 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     formatters + their `extract_loop_body` /
     `sanitize_inline_code` / `should_suppress_local_only_kind_note_after_continuation`
     helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs`
-    sibling (318 prod LoC, below the giant threshold); names are re-imported via
+    (removed; later moved under task_notification_delivery) sibling (318 prod LoC, below the giant threshold); names are re-imported via
     `use self::injected_prompt_policy::{…}` so call sites stay byte-identical and
     the stateful dedupe/bridge helpers (`slash_command_control_turn_is_first_sighting`,
     `record_system_continuation_note_rendered`,
@@ -1271,15 +1271,15 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     the pure placeholder-suppression decision core, `evidence.rs` owns frontier /
     proof / EOF helpers, and `ops.rs` owns Discord edit/delete cleanup operations.
     All three files are below the giant-file threshold).
-  - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
+  - `src/services/discord/task_notification_delivery/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
-    coupling, all items `pub(super)` and re-imported by the parent; below the
+    coupling, re-imported by `tui_prompt_relay`; below the
     giant-file threshold).
   - `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` (278 prod
     lines; #3479 rank-10: pure Claude/Codex transcript+rollout prompt scanners
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
-    coupling, all items `pub(super)` and re-imported by the parent; below the
+    coupling, re-imported by `tui_prompt_relay`; below the
     giant-file threshold).
   - `src/services/discord/tui_prompt_relay/rehydration.rs` (sub-1000 production module; #3479
     rank-10: the Discord-IO/`SharedData`-coupled Claude TUI binding rehydration +

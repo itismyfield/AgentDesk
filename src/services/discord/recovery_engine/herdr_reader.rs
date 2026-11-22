@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
+use super::herdr_attach::HerdrSourceAttach;
 use super::host_reconcile::{HostReconcile, NoHerdrEndpoint, reconcile_hosted};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
@@ -15,9 +16,7 @@ use crate::services::discord::herdr_terminate::root_replaced::{
     self, Recovery, RootReplacedCandidate, missing_marker,
 };
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
-use crate::services::discord::tui_prompt_relay::herdr_source::{
-    HerdrSourceAttach, attach_restarted_herdr_source,
-};
+use crate::services::discord::tui_prompt_relay::herdr_source::attach_restarted_herdr_source;
 use crate::services::provider::ProviderKind;
 pub(in crate::services::discord) use crate::services::session_host::SocketHerdrReader;
 use crate::services::session_host::herdr_endpoints;

@@ -2125,6 +2125,7 @@ src/
 │   │   │   │   ├── content.rs
 │   │   │   │   ├── frontier.rs
 │   │   │   │   ├── owner_context.rs
+│   │   │   │   ├── parked_owner.rs
 │   │   │   │   ├── rollout.rs
 │   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
@@ -2938,6 +2939,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   ├── retired_metadata.rs
 │   │   │   │   └── terminal_footer.rs
+│   │   │   ├── background_child_completion.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
 │   │   │   ├── card_render_tests.rs
@@ -2946,11 +2948,15 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── footer_surface_tests.rs
 │   │   │   ├── gateway.rs
+│   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── inline_contract_tests.rs
 │   │   │   ├── inline_delivery.rs
+│   │   │   ├── input_notice.rs
+│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── metadata_retirement_pg_tests.rs
 │   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── response_chunks.rs
 │   │   │   ├── retired_metadata.rs
 │   │   │   ├── send_stage_tests.rs
@@ -3260,7 +3266,6 @@ src/
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
-│   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
 │   │   │   ├── claude_idle_bridge.rs
@@ -3279,12 +3284,8 @@ src/
 │   │   │   ├── hook_observer.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_transcript_scan.rs
-│   │   │   ├── injected_prompt_policy.rs
-│   │   │   ├── input_notice.rs
-│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
-│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs

@@ -214,7 +214,7 @@ pub(super) async fn handle_stream_tool_message(
                             // A transcript completion read before this insert
                             // committed found no child, so recheck it here.
                             #[cfg(unix)]
-                            let finished = crate::services::discord::tui_prompt_relay::background_child_completion::registered_child_already_finished(
+                            let finished = crate::services::discord::task_notification_delivery::background_child_completion::registered_child_already_finished(
                                 pg_pool, parent_session_key, tool_use_id.as_deref(), inflight_state,
                             )
                             .await;

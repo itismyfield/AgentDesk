@@ -80,7 +80,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
                 "Isolated instance credential binary tests",
             "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs":
                 "Comment-only change checker self-tests",
-            "src/services/discord/tui_prompt_relay/injected_prompt_policy.rs":
+            "src/services/discord/task_notification_delivery/injected_prompt_policy.rs":
                 "TUI relay e2e harness unit tests (#5065/#5997)",
             "src/services/discord/commands/control/native.rs":
                 "TUI relay e2e harness unit tests (#5065/#5997)",
@@ -325,7 +325,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
 
     def test_runner_changed_fixture_input_executes_only_its_self_test_bundle(self) -> None:
         done = self.fixture_runner(SCRIPT_CHECK_CHANGED_FILES=json.dumps([
-            "src/services/discord/tui_prompt_relay/injected_prompt_policy.rs",
+            "src/services/discord/task_notification_delivery/injected_prompt_policy.rs",
         ]))
         self.assertEqual(self.executed(done), {
             "fixture current source", "TUI relay e2e harness unit tests (#5065/#5997)",

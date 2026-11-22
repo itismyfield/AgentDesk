@@ -603,7 +603,7 @@ pub(super) fn local_cmd_no_output(
         && !fresh_assistant_text_seen
         && !tool_state.any_tool_used
         && first_user_prompt_text(unprocessed_tail).is_some_and(|prompt| {
-        !crate::services::discord::tui_prompt_relay::observed_prompt_starts_external_turn_lifecycle(
+        !crate::services::discord::task_notification_delivery::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle(
             &prompt,
         )
     })

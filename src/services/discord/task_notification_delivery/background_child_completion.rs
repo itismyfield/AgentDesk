@@ -2,13 +2,19 @@
 //! transcript, whether or not a turn was running when each record was written.
 
 use std::io::{BufRead, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::*;
+use super::super::SharedData;
+use super::super::inflight::InflightTurnState;
+use super::injected_prompt_policy;
 use crate::db::session_observability::{
     close_background_child_for_tool_use_pg, has_open_background_children_pg,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::provider::ProviderKind;
 
 /// Read position per tmux session, separate from the prompt cursor so records a
 /// running turn already consumed are still read here.
@@ -82,7 +88,9 @@ async fn close_children_finished_in_transcript(
             Ok(true) => 0,
             Ok(false) => len,
             Err(error) => {
-                tracing::warn!(tmux_session_name, %error,
+                tracing::warn!(
+                    target: "agentdesk::services::discord::tui_prompt_relay::background_child_completion",
+                    tmux_session_name, %error,
                     "background child completion scan deferred; open-child lookup failed");
                 return;
             }
@@ -108,6 +116,7 @@ async fn close_children_finished_in_transcript(
             .await
             {
                 Ok(Some(child_session_id)) => tracing::info!(
+                    target: "agentdesk::services::discord::tui_prompt_relay::background_child_completion",
                     tmux_session_name,
                     tool_use_id = %completion.tool_use_id,
                     child_session_id,
@@ -116,7 +125,9 @@ async fn close_children_finished_in_transcript(
                 ),
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(tmux_session_name, tool_use_id = %completion.tool_use_id,
+                    tracing::warn!(
+                        target: "agentdesk::services::discord::tui_prompt_relay::background_child_completion",
+                        tmux_session_name, tool_use_id = %completion.tool_use_id,
                         %error, "background child close failed; retrying from this record");
                     cursor = completion.line_start;
                     break;
@@ -185,7 +196,9 @@ pub(in crate::services::discord) async fn registered_child_already_finished(
     {
         Ok(_) => true,
         Err(error) => {
-            tracing::warn!(parent_session_key, tool_use_id, %error,
+            tracing::warn!(
+                target: "agentdesk::services::discord::tui_prompt_relay::background_child_completion",
+                parent_session_key, tool_use_id, %error,
                 "background child finished before registration but its close failed");
             schedule_registration_retry(turn, Path::new(&path), from);
             false
