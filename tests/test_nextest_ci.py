@@ -1824,12 +1824,12 @@ class RustSources(unittest.TestCase):
                           "src/krx.rs": "#[cfg(test)]\n#[cfg(unix)]\nmod t;\n", "src/krx/t.rs": test}.items():
             (base / rel).parent.mkdir(parents=True, exist_ok=True)
             (base / rel).write_text(text)
-        host = '#[cfg(test)]\n#[path = "krx/{}.rs"]\nmod krx_t;\n'
+        host = '#[cfg(unix)]\n#[cfg(test)]\n#[path = "krx/{}.rs"]\nmod krx_t;\n'
         # Reordered or repeated cfgs are the same conjunction; any other difference is a loss.
-        cases = {"same": ("#[cfg(unix)]\n#[cfg(test)]\n" + host.format("t"), test, ""),
-                 "cfg": (host.format("t"), test, ""), "deleted": ("", "", ""), "file": (host.format("t2"), "", test),
-                 "ignore": ("#[cfg(unix)]\n" + host.format("t"), test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn"), ""),
-                 "should_panic": ("#[cfg(unix)]\n" + host.format("t"), test.replace("fn", "#[should_panic]\nfn"), "")}
+        cases = {"same": ("#[cfg(test)]\n" + host.format("t"), test, ""),
+                 "cfg": (host.format("t").replace("#[cfg(unix)]\n", ""), test, ""), "deleted": ("", "", ""), "file": (host.format("t2"), "", test),
+                 "ignore": (host.format("t"), test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn"), ""),
+                 "should_panic": (host.format("t"), test.replace("fn", "#[should_panic]\nfn"), "")}
         for case, (upper, body, other) in cases.items():
             with self.subTest(case):
                 self.tree({"src/lib.rs": "mod krx;\nmod upper;\n", "src/krx.rs": "", "src/upper.rs": upper,
