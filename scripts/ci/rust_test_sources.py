@@ -374,7 +374,9 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
         if production:
             inv.sources.append((source.resolve(), outer, file_cfgs))
             inv.logical_modules.add(outer)
-        rel = source.relative_to(repo_root)
+        # A `#[path = "../x.rs"]` load must name the file the same way as a plain `mod` does.
+        resolved = source.resolve()
+        rel = resolved.relative_to(repo_root) if resolved.is_relative_to(repo_root) else source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]
         depth, pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = 0, None, False, (), (), ()
         index = 0
