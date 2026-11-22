@@ -1202,8 +1202,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     `format_slash_command_control_note` / `format_system_continuation_note`
     formatters + their `extract_loop_body` /
     `sanitize_inline_code` / `should_suppress_local_only_kind_note_after_continuation`
-    helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs`
-    (removed; later moved under session_notice) sibling (318 prod LoC, below the giant threshold); names are re-imported via
+    helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs` (removed)
+    sibling, later moved under session_notice (318 prod LoC, below the giant threshold); names are re-imported via
     `use self::injected_prompt_policy::{…}` so call sites stay byte-identical and
     the stateful dedupe/bridge helpers (`slash_command_control_turn_is_first_sighting`,
     `record_system_continuation_note_rendered`,
