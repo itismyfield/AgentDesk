@@ -552,8 +552,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     let mut report = ClearReport::default();
     let first_pause = crate::services::tui_o::cutover::pause_codex_first(channel_id.get());
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
-    let _completion =
-        super::super::session_transition::SessionTransitionCompletion::new(shared, channel_id);
+    let _completion = super::super::router::SessionTransitionCompletion::new(shared, channel_id);
     // Clear registration must reopen before completion wakes the next owner input.
     let clear_epoch = crate::services::herdr_launch::clear_epoch::begin_clear(
         provider.as_str(),
