@@ -15,9 +15,14 @@ attribute is absent when ``test`` is disabled.  A form such as
 ``cfg_attr(not(test), cfg(any()))`` is test-only because it applies an
 always-false cfg gate to non-test builds.
 
+``any(test, feature = "test-support")`` counts as ``test``: the feature is
+enabled only by test builds.  The feature alone, or with any third option,
+stays production-visible.
+
 Callers must blank comments and strings before using the attribute finder.  It
 preserves the conservative convention established by
-``check_durable_frontier_writer_call_sites.py``.
+``check_durable_frontier_writer_call_sites.py``.  Passing the unblanked
+``source`` lets it read cfg string values; without it the alias is not seen.
 """
 
 from __future__ import annotations
@@ -26,22 +31,26 @@ import re
 from collections.abc import Iterator
 
 
+TEST_SUPPORT_FEATURE = "test-support"
+_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 CFG_ATTR_START_RE = re.compile(r"#\s*!?\s*\[\s*(cfg|cfg_attr)\s*\(")
 ATTR_OPEN_RE = re.compile(r"#\s*!?\s*\[")
 
 
 class _CfgNode:
-    __slots__ = ("kind", "name", "children")
+    __slots__ = ("kind", "name", "children", "value")
 
     def __init__(
         self,
         kind: str,
         name: str | None = None,
         children: tuple["_CfgNode", ...] = (),
+        value: str | None = None,
     ) -> None:
         self.kind = kind
         self.name = name
         self.children = children
+        self.value = value
 
 
 class CfgAttributeMatch:
@@ -80,7 +89,7 @@ class CfgAttributeMatch:
 def _cfg_tokens(expression: str) -> list[str]:
     """Tokenise cfg meta syntax after strings/comments were blanked."""
 
-    return re.findall(r"[A-Za-z_]\w*|[(),=]", expression)
+    return re.findall(r'"(?:[^"\\]|\\.)*"|[A-Za-z_]\w*|[(),=]', expression)
 
 
 def _parse_cfg_expression(expression: str) -> _CfgNode | None:
@@ -116,11 +125,14 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
             index += 1
             return _CfgNode(name, children=tuple(children))
 
-        # A key/value predicate's string was blanked by the caller.  Consume
-        # its punctuation and retain the key as an unknown Boolean atom.
+        # Keep a key/value predicate as one unknown atom; its string survives
+        # only when the caller passed unblanked text.
+        value = None
         while index < len(tokens) and tokens[index] not in {",", ")"}:
+            if tokens[index].startswith('"'):
+                value = tokens[index][1:-1]
             index += 1
-        return _CfgNode("atom", name=name)
+        return _CfgNode("atom", name=name, value=value)
 
     node = parse_expr()
     if node is None or index != len(tokens):
@@ -128,7 +140,17 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
     return node
 
 
+def _is_test_support_alias(node: _CfgNode) -> bool:
+    """Whether a node is exactly ``any(test, feature = "test-support")``."""
+    if node.kind != "any" or len(node.children) != 2:
+        return False
+    atoms = sorted((child.name or "", child.value or "") for child in node.children if child.kind == "atom")
+    return atoms == [("feature", TEST_SUPPORT_FEATURE), ("test", "")]
+
+
 def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bool:
+    if _is_test_support_alias(node):
+        return test_enabled
     if node.kind == "atom":
         if node.name == "test":
             return test_enabled
@@ -146,6 +168,8 @@ def _can_be_true_without_test(node: _CfgNode) -> bool:
     unknowns: list[_CfgNode] = []
 
     def collect(current: _CfgNode) -> None:
+        if _is_test_support_alias(current):
+            return
         if current.kind == "atom":
             if current.name != "test":
                 unknowns.append(current)
@@ -176,7 +200,7 @@ def _split_top_level_args(expression: str) -> list[str] | None:
     args: list[str] = []
     depth = 0
     start = 0
-    for index, char in enumerate(expression):
+    for index, char in enumerate(_STRING_RE.sub(lambda m: " " * len(m.group()), expression)):
         if char == "(":
             depth += 1
         elif char == ")":
@@ -232,7 +256,16 @@ def _cfg_attr_gate(expression: str) -> _CfgNode | None:
     )
 
 
-def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | None:
+def _with_source_strings(blanked: str, raw: str | None) -> str:
+    """Use the raw span only when it differs from the blanked span by string literals."""
+    if raw is not None and _STRING_RE.sub(lambda m: " " * len(m.group()), raw) == blanked:
+        return raw
+    return blanked
+
+
+def _attribute_match(
+    code: str, opening: re.Match[str], source: str | None = None
+) -> CfgAttributeMatch | None:
     """Parse one candidate at its opening token, if it is a test-only cfg."""
     cfg = CFG_ATTR_START_RE.match(code, opening.start())
     if cfg is None:
@@ -258,7 +291,10 @@ def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | N
         return None
     attribute_end += 1
 
-    expression = code[open_paren + 1 : close_paren]
+    expression = _with_source_strings(
+        code[open_paren + 1 : close_paren],
+        None if source is None else source[open_paren + 1 : close_paren],
+    )
     kind = cfg.group(1)
     parsed = (
         _parse_cfg_expression(expression)
@@ -271,12 +307,15 @@ def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | N
     return None
 
 
-def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
+def find_test_only_cfg_attributes(
+    code: str, source: str | None = None
+) -> Iterator[CfgAttributeMatch]:
     """Yield test-only cfg attributes outside strings, attributes, and macro token trees.
 
     `code` must already have comments and strings blanked. Attribute-like tokens in
     a doc RHS or macro input are tokens, not active build gates. Delimiter state is
     kept across lines so multi-line invocations are treated the same way.
+    ``source`` is the same text unblanked, offset for offset.
     """
     stack: list[tuple[str, bool, bool]] = []  # opener, macro-token-tree, attribute
     index = 0
@@ -287,7 +326,7 @@ def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
             if opening:
                 nested = any(is_macro or is_attribute for _, is_macro, is_attribute in stack)
                 if not nested:
-                    match = _attribute_match(code, opening)
+                    match = _attribute_match(code, opening, source)
                     if match is not None:
                         yield match
                 bracket = code.find("[", index, opening.end())
@@ -334,13 +373,13 @@ def _macro_delimiter_precedes(code: str, index: int) -> bool:
 
 
 def find_test_only_cfg_attribute(
-    code: str, start: int = 0
+    code: str, start: int = 0, source: str | None = None
 ) -> CfgAttributeMatch | None:
     """Find the next active cfg/cfg_attr whose effective gate requires ``test``."""
     return next(
         (
             match
-            for match in find_test_only_cfg_attributes(code)
+            for match in find_test_only_cfg_attributes(code, source)
             if match.start() >= start
         ),
         None,
