@@ -19,13 +19,13 @@
 
 | 전제 | main의 코드 좌표 | 보존할 의미 |
 |---|---|---|
-| 봇별 상태 생성 | `src/services/discord/runtime_bootstrap/shared_data.rs:88`, 시험 생성 `src/services/discord/mod.rs:1306` | 생성 횟수·provider/token namespace·주입 Arc의 동일성 유지 |
-| 원자 세션 상태 | `src/services/discord/mod.rs:934` | sessions를 한 Mutex로 잠그는 단위 유지 |
+| 봇별 상태 생성 | `src/services/discord/runtime_bootstrap/shared_data.rs:88`, 시험 생성 `src/services/discord/shared_data.rs:350` | 생성 횟수·provider/token namespace·주입 Arc의 동일성 유지 |
+| 원자 세션 상태 | `src/services/discord/bot_settings_state.rs:72` | sessions를 한 Mutex로 잠그는 단위 유지 |
 | transition lease | `src/services/discord/session_transition.rs:136`, `src/services/discord/session_transition.rs:157` | Drop 뒤 기존 owner wake를 동일 시점에 실행; map 이전과 wake 구현 이전을 구별 |
 | finalizer | `src/services/discord/turn_finalizer.rs:350`, `src/services/discord/turn_finalizer.rs:618` | 한 actor·기존 Weak 순환 방지·토큰 해제 뒤 완료 발행을 보존 |
 | 완료 버스 | `src/services/discord/turn_completion_events.rs:13`, `src/services/discord/turn_completion_events.rs:82` | capacity 64·phase·lag 후 reconcile 동작 유지 |
 | HTTP fallback | `src/services/discord/shared_state.rs:67` | ready ctx 우선, token REST fallback, 둘 다 없으면 hard failure 유지 |
-| answer flush | `src/services/discord/mod.rs:1014`, `src/services/discord/gateway/outbound_messages.rs` | RAII 해제와 queued notice bounded wait의 위치 유지 |
+| answer flush | `src/services/discord/shared_data.rs:56`, `src/services/discord/gateway/outbound_messages.rs` | RAII 해제와 queued notice bounded wait의 위치 유지 |
 | 실제 nonce | `src/services/discord/outbound/transport.rs:22` | nonce 문자열·enforce_nonce 플래그를 요청까지 보존 |
 | 관측 scope | `src/services/discord/outbound/raw_output.rs:26`, `src/services/discord/outbound/transport.rs:292` | task-local census를 현재 future·tx/savepoint에서 실행; spawn/선관측 금지 |
 | replay 재시도 권한 | `src/services/discord/replay_policy.rs:138` | sealed permit을 DTO 생성자로 대체하지 않으며 exact retry의 Refused/Started 유지 |
@@ -37,7 +37,7 @@
 
 ### 1.1 SharedData 전 필드
 
-정의는 `src/services/discord/mod.rs:1011`부터 34필드다. E는 엔진 저장 상태, B는 봇 상태, M은 혼합 객체다. bot event에서도 쓴다는 이유만으로 E를 B로 분류하지 않았다. E의 mutex/map/atomic은 한 번만 생성한다. M의 순수 부분만 떼고 실제 봇 실행 객체는 남긴다.
+정의는 `src/services/discord/shared_data.rs:53`부터 34필드다. E는 엔진 저장 상태, B는 봇 상태, M은 혼합 객체다. bot event에서도 쓴다는 이유만으로 E를 B로 분류하지 않았다. E의 mutex/map/atomic은 한 번만 생성한다. M의 순수 부분만 떼고 실제 봇 실행 객체는 남긴다.
 
 참조 파일 수는 **S/D 두 문자 검색 지표**다. S=`rg -l -U '\bshared\s*\.\s*FIELD\b' src`, D=`rg -l -U '\.\s*FIELD\b' src`의 파일 중복 제거 개수다. S는 shared라는 receiver의 직접 접근(줄바꿈 포함), D는 self/다른 receiver까지 포함한 후보 상한이다. 문자열·시험·동명 필드가 포함되며 S는 self·별칭 접근을 놓친다. 특히 provider/http의 D를 타입 해석된 참조 수로 쓰면 안 된다. cargo 금지 레그에서 rustc 기반 전 참조 수를 꾸미지 않는다. 아래 분류 근거는 실제 소유 타입과 대표 생산자/소비자를 따로 대조했다.
 
@@ -117,7 +117,7 @@ P0-D의 `overrides`와 `restart`는 bot wrapper의 별도 UI/gateway 필드를 �
 
 P0-E에서 완료 값과 sender를 이전하고, **메일박스 조회·cache 관측처럼 봇 IO가 없는 실제 함수만** `&EngineRuntime`으로 바꾼다. `session_transition_completion`, finalizer, health_registry, reaction/view 등 혼합 실행 객체는 SharedData를 계속 받는다. 이 조각은 그 실행 객체를 추상화한 G05/G07/G08 port를 새로 만들지 않는다. 전체 엔진 이동은 후속 계획이며, 그때 이동할 함수에 SharedData를 다시 넣는 우회는 허용하지 않는다.
 
-P0-E의 첫 실제 engine borrow 대상은 `src/services/discord/mod.rs:1119`의 has_runtime_storage와 `src/services/discord/mod.rs:1136`의 mailbox_snapshots_for_idle_detector, `src/services/discord/session_transition.rs:165`의 session_transition_lock 및 acquire_session_transition이다. 순수 조회/락 획득 본체는 EngineRuntime inherent impl로 옮기고 SharedData에서는 필요 시 같은 호출만 전달한다. 락 획득의 반환값 SessionTransitionBusy와 SESSION_TRANSITION_LOCK_WAIT_TIMEOUT(기존 session_transition 4/8행)은 legacy_state의 아래 값 계약으로 함께 소유 이전하고 기존 경로에 같은 이름으로 재수출한다. engine helper가 그 상수를 얻으려고 Discord 모듈을 import하지 않는다. session_transition_completion의 SharedData identity/Drop wake는 유지한다. helper를 부르는 engine 함수는 &EngineRuntime으로 좁히되 mixed caller에 &SharedData를 다시 cast하는 API를 만들지 않는다.
+P0-E의 첫 실제 engine borrow 대상은 `src/services/discord/shared_data.rs:158`의 has_runtime_storage와 `src/services/discord/shared_data.rs:175`의 mailbox_snapshots_for_idle_detector, `src/services/discord/session_transition.rs:165`의 session_transition_lock 및 acquire_session_transition이다. 순수 조회/락 획득 본체는 EngineRuntime inherent impl로 옮기고 SharedData에서는 필요 시 같은 호출만 전달한다. 락 획득의 반환값 SessionTransitionBusy와 SESSION_TRANSITION_LOCK_WAIT_TIMEOUT(기존 session_transition 4/8행)은 legacy_state의 아래 값 계약으로 함께 소유 이전하고 기존 경로에 같은 이름으로 재수출한다. engine helper가 그 상수를 얻으려고 Discord 모듈을 import하지 않는다. session_transition_completion의 SharedData identity/Drop wake는 유지한다. helper를 부르는 engine 함수는 &EngineRuntime으로 좁히되 mixed caller에 &SharedData를 다시 cast하는 API를 만들지 않는다.
 
 ### 타입 폐쇄와 가시성의 구체 경계
 

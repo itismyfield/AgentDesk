@@ -3727,6 +3727,8 @@ src/
 │   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
+│   │   ├── bot_runtime.rs
+│   │   ├── bot_settings_state.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
 │   │   ├── codex_absence.rs
@@ -3775,6 +3777,7 @@ src/
 │   │   ├── jsonl_watcher.rs
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
+│   │   ├── mailbox_ops.rs
 │   │   ├── mailbox_probe.rs
 │   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
@@ -3790,6 +3793,7 @@ src/
 │   │   ├── placeholder_controller.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── queue_dispatch.rs
+│   │   ├── queue_exit.rs
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
 │   │   ├── queue_overflow_dlq.rs
@@ -3845,6 +3849,7 @@ src/
 │   │   ├── session_status_hook.rs
 │   │   ├── session_transition.rs
 │   │   ├── settings.rs
+│   │   ├── shared_data.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
 │   │   ├── sidecar_interaction.rs
@@ -3864,6 +3869,7 @@ src/
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_delivery_custody.rs
+│   │   ├── test_fixtures.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
