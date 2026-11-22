@@ -2,6 +2,7 @@
 use super::super::*;
 use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::discord::queue_io::transport::IntakeDeps;
+use crate::services::discord::shared_state::{PortFuture, QueuedAdmission, QueuedRun};
 
 #[cfg(test)]
 #[path = "cancel_backstop_race_support_tests.rs"]
@@ -147,8 +148,9 @@ async fn kickoff_queue_channel_inner(
         }
     };
 
-    let queued_gate =
-        Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
+    let queued_gate = Some(
+        shared.router_ports.queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool,
+    );
     let trigger = match lane {
         KickoffLane::Idle => "idle_kickoff",
         KickoffLane::QueuedOnly(reason) => reason,
@@ -218,60 +220,60 @@ async fn kickoff_queue_channel_inner(
         channel_id
     );
 
-    let admitted = match router::admit_queued_intake(
-        deps,
-        provider.clone(),
+    let after_admission: PortFuture<'_, bool> = Box::pin(async {
+        let late_settlement = (shared.router_ports.checkpoint_waits)(channel_id);
+        if !late_settlement {
+            let source_message_generations = intervention.source_message_queued_generations();
+            queue_marker::start_and_drain_kickoff_markers(
+                shared,
+                deps.http,
+                channel_id,
+                intervention.message_id,
+                &source_message_generations,
+            )
+            .await;
+
+            let drained_cards = gateway::drain_merged_queued_placeholders(
+                shared,
+                channel_id,
+                intervention.message_id,
+                &intervention.source_message_ids,
+            )
+            .await;
+            // #5035 (A5): the drain now yields tokens only for gate-released cards.
+            for teardown in drained_cards {
+                let _ = queued_card_gate::teardown_delete(deps.http, shared, teardown).await;
+            }
+        }
+        late_settlement
+    });
+    let admission = QueuedAdmission {
+        provider: provider.clone(),
         channel_id,
-        &intervention,
-        intervention.author_id,
-        owner_name,
-        has_more,
-        false,
-        "intake_admission_pre_kickoff_defer",
-        dispatch_lease.clone(),
-    )
-    .await
-    {
-        router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-        router::QueuedAdmissionDisposition::Deferred
-        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
-        | router::QueuedAdmissionDisposition::ConsumedToHold => {
+        intervention: &intervention,
+        request_owner: intervention.author_id,
+        request_owner_name: owner_name,
+        defer_watcher_resume: has_more,
+        wait_for_completion: false,
+        backstop_reason: "intake_admission_pre_kickoff_defer",
+        dispatch_lease: dispatch_lease.clone(),
+    };
+    let admit = shared.router_ports.admit_and_finish_queued;
+    let (late_settlement, dispatch_result) = match admit(deps, admission, after_admission).await {
+        QueuedRun::Finished {
+            after_admission,
+            result,
+        } => (after_admission, result),
+        QueuedRun::NotAdmitted => {
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
-        router::QueuedAdmissionDisposition::RejectedRestore => {
+        QueuedRun::RejectedRestore => {
             queue_dispatch::log_kickoff_rejected_restore(provider, channel_id);
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
     };
-
-    let late_settlement = (shared.router_ports.checkpoint_waits)(channel_id);
-    if !late_settlement {
-        let source_message_generations = intervention.source_message_queued_generations();
-        queue_marker::start_and_drain_kickoff_markers(
-            shared,
-            deps.http,
-            channel_id,
-            intervention.message_id,
-            &source_message_generations,
-        )
-        .await;
-
-        let drained_cards = gateway::drain_merged_queued_placeholders(
-            shared,
-            channel_id,
-            intervention.message_id,
-            &intervention.source_message_ids,
-        )
-        .await;
-        // #5035 (A5): the drain now yields tokens only for gate-released cards.
-        for teardown in drained_cards {
-            let _ = queued_card_gate::teardown_delete(deps.http, shared, teardown).await;
-        }
-    }
-
-    let dispatch_result = router::finish_admitted_queued_intake(deps, admitted).await;
     match dispatch_result {
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");

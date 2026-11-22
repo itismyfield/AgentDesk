@@ -422,12 +422,7 @@ pub(crate) async fn intake(
             .await
             .allowed_bot_ids
             .contains(&request.request_owner.get());
-    let raw = crate::services::discord::router::input_payload::owned_original(
-        request,
-        bot,
-        uploads,
-        durable_context,
-    );
+    let raw = (shared.router_ports.owned_original)(request, bot, uploads, durable_context);
     admit_raw(shared, provider, request.channel_id, &raw, uploads_pending).await
 }
 
