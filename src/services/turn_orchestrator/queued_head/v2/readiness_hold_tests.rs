@@ -171,6 +171,67 @@ fn a_reserved_leaf_starts_its_first_key_only_before_the_original_due() {
 }
 
 #[test]
+fn identity_hold_survives_adoption_and_allows_a_new_readiness_deadline() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = queue_dir();
+    let mut owner = owner(&dir, &[(5, 7)]);
+    let front = owner.front().unwrap();
+    let now = super::super::origin::now_ms();
+    let old = owner
+        .hold_readiness(&front, "busy_readiness_unproven", now)
+        .unwrap();
+    let mut stale = front.clone();
+    stale.1.queued_generation += 1;
+    assert!(owner.hold_identity(&stale, "identity", now + 5).is_err());
+    assert_eq!(owner.settle_due(), Some(old.due_at_ms));
+
+    let identity = owner.hold_identity(&front, "identity", now + 5).unwrap();
+    assert_eq!(identity.identity_held_at_ms, Some(now + 5));
+    assert_eq!(identity.due_at_ms, now + 5 + 10_000);
+    let again = owner.hold_identity(&front, "identity", now + 9).unwrap();
+    assert_eq!(again, identity, "a later identity hold keeps its due");
+    let repeated = owner
+        .hold_readiness(&front, "composer_unavailable", now + 9)
+        .unwrap();
+    assert_eq!(repeated, identity);
+    assert!(!owner.refuse_readiness_front(&old, old.due_at_ms).unwrap());
+    drop(owner);
+
+    let mut owner = Owner::adopt(dir.path().join("q.json"), "readiness".into()).unwrap();
+    assert_eq!(owner.settle_due(), Some(identity.due_at_ms));
+    owner.tick(old.due_at_ms).unwrap();
+    assert!(is_front(&owner.front().unwrap(), &front));
+    assert!(owner.snapshot.refused_fronts.is_empty());
+
+    owner.finish_identity_hold(&front).unwrap();
+    let next = owner
+        .hold_readiness(&front, "composer_unavailable", old.due_at_ms)
+        .unwrap();
+    assert!(next.identity_held_at_ms.is_none());
+    assert_eq!(owner.settle_due(), Some(old.due_at_ms + 10_000));
+    assert_eq!(next.cause, "composer_unavailable");
+}
+
+#[test]
+fn an_identity_hold_no_ready_read_ends_is_refused_unsent_at_its_due() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = queue_dir();
+    let mut owner = owner(&dir, &[(6, 7)]);
+    let front = owner.front().unwrap();
+    let hold = owner.hold_identity(&front, "identity", 1_000).unwrap();
+    assert_eq!(owner.settle_due(), Some(11_000));
+    owner.tick(10_999).unwrap();
+    assert!(is_front(&owner.front().unwrap(), &front));
+    owner.tick(11_000).unwrap();
+    assert!(owner.front().is_none());
+    let refused = &owner.snapshot.refused_fronts;
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].input.identity, hold.identity);
+    assert_eq!(refused[0].reason, "readiness_deadline: identity");
+    assert!(owner.snapshot.readiness_holds.is_empty());
+}
+
+#[test]
 fn a_legacy_readiness_hold_without_members_can_only_refuse_its_front() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dir = queue_dir();

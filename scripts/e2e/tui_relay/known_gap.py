@@ -3,6 +3,7 @@
 Captures come from unfiltered fetch responses, not reconstructed latest bodies.
 Only complete single-page observations are supported; no pagination inference,
 normalization, extra polling, or cleanup/deletion inference is performed here.
+Herdr expected failures and YAML `known_failing` rows share the KNOWN_GAP/UNEXPECTED_PASS result shape.
 """
 
 from datetime import datetime, timedelta
@@ -26,6 +27,33 @@ def apply_herdr_result(result, profile, *, passed):
                                                "observed_reason": result.get("reason")})
     result["status"] = "unexpected_pass" if passed else "known_gap"
     result["reason"] = f"{classification}: {profile['issue']}"
+
+
+def validate_known_failing(scenario):
+    """`known_failing` names its issue and the exact wait_for_discord_text marker the bug withholds."""
+    spec = scenario.get("known_failing")
+    if spec is None:
+        return
+    if not isinstance(spec, dict) or set(spec) != {"issue", "marker"} or not all(
+            isinstance(spec[key], str) and spec[key].strip() for key in spec):
+        raise ValueError("known_failing needs nonempty issue and marker")
+    if not any(step.get("wait_for_discord_text") == spec["marker"] for step in scenario.get("steps") or []
+               if isinstance(step, dict)):
+        raise ValueError("known_failing marker must be a wait_for_discord_text step")
+
+
+def apply_known_failing(scenario, result, run_id):
+    """Only an assertion timeout on the declared marker is KNOWN_GAP; a pass is UNEXPECTED_PASS, the rest stays."""
+    spec = scenario.get("known_failing")
+    if not spec or result.get("status") not in {"pass", "fail"}:
+        return
+    if result["status"] == "fail":
+        marker = spec["marker"].replace("{run_id}", run_id)
+        timed_out = {item.get("needle") for item in result.get("wait_timeouts") or [] if isinstance(item, dict)}
+        if (result.get("failure_attribution") or {}).get("source") != "assertion" or marker not in timed_out:
+            return
+    apply_herdr_result(result, {"profile": "scenario_known_failing", "issue": spec["issue"]},
+                       passed=result["status"] == "pass")
 
 
 PROFILE = "e22_headless_cumulative_republication_v1"
