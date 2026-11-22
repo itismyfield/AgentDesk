@@ -355,6 +355,20 @@ pub(super) async fn start_restart_handoff_from_state(
         }
     }
 
+    // The dead turn's terminal commits before any cleanup can drop its row: failed unless its
+    // answer was delivered. A planned restart or rebind row ends nothing here.
+    let ended = if state.terminal_delivery_completed() {
+        super::receipt_settle::body_outcome(&state.full_response)
+    } else {
+        crate::db::turns::TerminalOutcome::Failed
+    };
+    if state.restart_mode.is_none()
+        && !state.rebind_origin
+        && !super::receipt_settle::record_or_stamp(shared.pg_pool.as_ref(), &state, ended).await
+    {
+        return false;
+    }
+
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 
     // tmux death during an inflight turn usually fails the bound dispatch.

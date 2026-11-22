@@ -313,6 +313,15 @@ impl RestoredInput {
                     {
                         return Err("native boot row authority changed".into());
                     }
+                    if !super::super::terminal_handler::record_native_terminal(
+                        shared,
+                        &row,
+                        &outcome.disposition,
+                    )
+                    .await
+                    {
+                        return Err("native boot receipt pending".into());
+                    }
                     let (cleared, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,
                         &row,
