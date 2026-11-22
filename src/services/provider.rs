@@ -14,6 +14,7 @@ pub(crate) mod herdr_before_start;
 pub(crate) mod native_stop;
 mod output_reader;
 mod registry;
+pub(crate) mod restart_report_env;
 mod runtime;
 pub(crate) mod session_probe;
 pub(crate) mod session_prompt;

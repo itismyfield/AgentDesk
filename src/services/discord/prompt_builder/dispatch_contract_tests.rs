@@ -78,7 +78,6 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        auth_profile: "default".to_string(),
         memory: Default::default(),
     }
 }
@@ -833,7 +832,6 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        auth_profile: "default".to_string(),
         memory: Default::default(),
     };
     let dispatch_context = serde_json::json!({

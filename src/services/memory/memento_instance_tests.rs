@@ -86,7 +86,7 @@ fn test_instance_memento_anchor_load_never_connects_after_configuration_drift() 
                 current_path: root.to_str().unwrap(),
                 channel_id: 900004,
                 memory_scope_channel_id: 900004,
-                role_binding: None,
+                role_id: None,
                 session_id: Some("synthetic-test-instance-session"),
                 fresh: true,
             }));

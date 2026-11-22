@@ -823,7 +823,9 @@ async fn start_reserved_headless_turn_admitted(
             current_path: &current_path,
             channel_id: channel_id.get(),
             memory_scope_channel_id: memory_scope_channel_id.get(),
-            role_binding: role_binding.as_ref(),
+            role_id: role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
             session_id: session_id.as_deref(),
             fresh: force_fresh_provider_session || session_was_cleared,
         })

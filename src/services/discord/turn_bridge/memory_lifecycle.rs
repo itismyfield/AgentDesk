@@ -537,7 +537,7 @@ pub(in crate::services::discord) fn take_memento_reflect_request(
     session.memento_reflected = true;
     Some(ReflectRequest {
         provider: provider.clone(),
-        role_id: resolve_memory_role_id(role_binding),
+        role_id: resolve_memory_role_id(role_binding.map(|binding| binding.role_id.as_str())),
         channel_id,
         channel_name: session.channel_name.clone(),
         session_id,

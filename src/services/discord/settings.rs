@@ -25,6 +25,7 @@ use super::runtime_store;
 use super::runtime_store::{bot_settings_path, discord_uploads_root};
 
 pub(crate) use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+pub(crate) use crate::services::channel_roles::RegisteredChannelBinding;
 pub(crate) use crate::utils::discord::discord_token_hash;
 pub(super) use content::{
     channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, is_known_agent,
@@ -108,8 +109,6 @@ pub(crate) struct RoleBinding {
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,
-    /// Resolved auth profile id (`default` when unset).
-    pub auth_profile: String,
     pub memory: ResolvedMemorySettings,
 }
 
@@ -122,17 +121,9 @@ impl From<crate::services::channel_roles::RoleProjection> for RoleBinding {
             model: binding.model,
             reasoning_effort: binding.reasoning_effort,
             peer_agents_enabled: binding.peer_agents_enabled,
-            auth_profile: binding.auth_profile,
             memory: binding.memory,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RegisteredChannelBinding {
-    pub channel_id: u64,
-    pub owner_provider: ProviderKind,
-    pub fallback_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

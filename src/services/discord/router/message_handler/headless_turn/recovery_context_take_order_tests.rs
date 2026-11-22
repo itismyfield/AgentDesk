@@ -93,7 +93,6 @@ fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: false,
-        auth_profile: "default".to_string(),
         memory: Default::default(),
     };
     let built = build_system_prompt_with_manifest(
