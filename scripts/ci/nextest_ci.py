@@ -9,8 +9,7 @@
                   matching scripts/ci/test-removal-justifications.txt row; landed rows only warn
   required-gate, comparison-base, classify-worker   see nextest_required.py
 
-Every input format carries a version and is rejected when it does not match; a missing or
-unreadable artifact is a failure, never an empty pass.
+A missing or unreadable artifact fails the audit.
 """
 
 import argparse
@@ -30,6 +29,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nextest_required  # noqa: E402
+import pr_nextest  # noqa: E402
 
 
 PLAN_KIND = "agentdesk-nextest-plan"
@@ -461,7 +461,13 @@ def cmd_plan(args):
     timings, invalid = load_timings(args.timings or [])
     weights, timing = weights_for(universe, timings)
     timing["invalid_records"] = invalid
-    buckets, loads = lpt(weights, args.workers)
+    phase = None
+    if args.pr_scope:
+        if args.only or args.identity_from:
+            raise PlanError("PR scope requires the unfiltered head universe")
+        buckets, loads, phase = pr_nextest.phase_layout(_SELF, args, weights)
+    else:
+        buckets, loads = lpt(weights, args.workers)
     today = datetime.date.fromisoformat(args.today) if args.today else datetime.datetime.now(datetime.UTC).date()
     policy = load_policy(args.retry_policy, args.scope, today, universe, ignored)
     archive = Path(args.archive)
@@ -483,6 +489,10 @@ def cmd_plan(args):
             "universe_count": len(universe), "universe_digest": _digest(sorted(list(t) for t in universe)),
             "ignored": sorted(list(t) for t in ignored), "retry_policy": policy, "retry_mode": args.retry_mode,
             "timing": timing, "workers": workers}
+    if phase:
+        plan["pr_scope"] = phase
+        pr_nextest.validate_layout(_SELF, plan)
+        pr_nextest.write_matrix(plan, args.pr_scope)
     plan["plan_digest"] = _plan_digest(plan)
     (out / "plan.json").write_text(json.dumps(plan, indent=1, sort_keys=True) + "\n")
     try:
@@ -520,6 +530,8 @@ def load_plan(path):
         seen |= tests
     if len(seen) != plan["universe_count"] or _digest(sorted(list(t) for t in seen)) != plan["universe_digest"]:
         raise PlanError("plan workers do not cover the listed universe exactly")
+    if "pr_scope" in plan:
+        pr_nextest.validate_layout(_SELF, plan)
     return plan
 
 
@@ -619,7 +631,7 @@ def audit_worker(plan, index, wdir, policy_ids):
             seconds = total = 0.0
         row["seconds"] += seconds
         row["total_attempt_seconds"] += total
-        cases.append({"id": test_id, "outcome": outcome, "attempts": attempts, "seconds": seconds,
+        cases.append({"worker": index, "id": test_id, "outcome": outcome, "attempts": attempts, "seconds": seconds,
                       "total_attempt_seconds": total})
         if outcome == "failed":
             bad("failed" if attempts == 1 else "retry-exhausted",
@@ -708,6 +720,10 @@ def cmd_audit(args):
     cases = []
     verdict = audit(plan, Path(args.results), cases)
     Path(args.json_out).write_text(json.dumps(verdict, indent=1, sort_keys=True) + "\n")
+    if args.pr_scope_out:
+        if "pr_scope" not in plan:
+            raise PlanError("PR audit requires a PR scope layout")
+        pr_nextest.audit_observation(_SELF, args, plan, verdict, cases)
     census_artifact(args, plan, verdict, cases)
     summary = render_summary(verdict)
     Path(args.summary_out).write_text(summary)
@@ -823,7 +839,7 @@ def cmd_base_diff(args):
         run = {tuple(t) for w in p["workers"] for t in w["tests"]}
         return run, {tuple(t) for t in p["ignored"]}
 
-    run, ign = sets(plan)
+    run, ign = pr_nextest.base_diff_inventory(_SELF, args, plan, sets(plan))
     base_run, base_ign = sets(base)
     head_ids, base_ids = run | ign, base_run | base_ign
     removed, new_ignored, present_sources, relocated = source_losses(
@@ -912,7 +928,7 @@ def cmd_base_diff(args):
 
 # The plan and JUnit readers that nextest_required reuses.
 _SELF = argparse.Namespace(load_plan=load_plan, PlanError=PlanError, _junit_root=_junit_root, _cases=_cases,
-                           classify=classify)
+                           classify=classify, lpt=lpt, audit_worker=audit_worker, load_universe=load_universe)
 
 
 def main(argv=None):
@@ -940,6 +956,7 @@ def main(argv=None):
     p.add_argument("--today", help="YYYY-MM-DD for policy expiry (default: UTC today)")
     p.add_argument("--identity-from", help="plan.json whose scope and build flags this plan takes")
     p.add_argument("--only", help="pg_test_classifier.py JSON; plan only the tests it names under non_pg")
+    p.add_argument("--pr-scope", metavar="GITHUB_OUTPUT", help="plan PR scope and write job matrices")
     p.add_argument("--output", required=True)
     v = sub.add_parser("verify-archive")
     v.add_argument("--plan", required=True)
@@ -955,9 +972,13 @@ def main(argv=None):
     a.add_argument("--results", required=True, help="directory holding worker-<i>/{worker.json,exit-code,junit.xml}")
     a.add_argument("--json-out", required=True)
     a.add_argument("--summary-out", required=True)
+    a.add_argument("--pr-scope-out")
+    a.add_argument("--pr-scope-result")
+    a.add_argument("--pr-full-result")
     b = sub.add_parser("base-diff")
     b.add_argument("--plan", required=True)
     b.add_argument("--baseline", required=True)
+    b.add_argument("--head-universe", help="unfiltered discovery JSON for the PR head")
     b.add_argument("--comparison-base-sha", required=True)
     b.add_argument("--baseline-sha", help="SHA the baseline plan must carry (default: the comparison base)")
     b.add_argument("--head-sha", required=True, help="SHA the head plan must have been planned for")
@@ -965,7 +986,7 @@ def main(argv=None):
     b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
     b.add_argument("--source-removed", required=True, help="rust_test_sources.py removed JSON")
     b.add_argument("--json-out", required=True)
-    delegated = nextest_required.register(sub)
+    delegated = nextest_required.register(sub) | pr_nextest.register(sub)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "verify-archive": cmd_verify_archive,
                "audit": cmd_audit, "base-diff": cmd_base_diff}.get(args.command)

@@ -666,6 +666,9 @@ jobs:
   rust_build:
     name: Rust tests build and plan
     needs: changes
+    outputs:
+      scope_workers: ${{ steps.plan.outputs.scope_workers }}
+      full_workers: ${{ steps.plan.outputs.full_workers }}
     if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
     runs-on: >-
       ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
@@ -734,11 +737,13 @@ jobs:
           MEMORY_STEP: "Archive, list, compare and plan"
         run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Archive, list, compare and plan
+        id: plan
         timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
           GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
@@ -754,7 +759,7 @@ jobs:
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
             --rust-version 1.94.1 --nextest-version "$(${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
-            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --pr-scope "$GITHUB_OUTPUT" --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
       - name: End runner memory step
         if: always()
@@ -850,7 +855,6 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"
 
-  # Every worker runs its planned exact IDs once, serially, against its own PostgreSQL server.
       - name: End runner memory step
         if: always()
         continue-on-error: true
@@ -876,16 +880,17 @@ jobs:
           path: ${{ runner.temp }}/runner-memory
           if-no-files-found: warn
           retention-days: 7
-  rust_tests:
+  # Scope workers use the same archive and isolated PostgreSQL as the sweep.
+  rust_scope:
     name: Rust tests (worker ${{ matrix.worker }})
     needs: [changes, rust_build]
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' && needs.rust_build.outputs.scope_workers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        worker: [0, 1, 2, 3, 4, 5]
+        worker: ${{ fromJSON(needs.rust_build.outputs.scope_workers) }}
     env:
       RUST_BACKTRACE: 1
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -903,36 +908,6 @@ jobs:
         with:
           name: nextest-plan
           path: ${{ runner.temp }}/nextest
-      - name: Start PostgreSQL service
-        run: ./scripts/ci/postgres-service.sh start
-      # Rollback rehearsal executes the runbook's literal rg command.
-      - name: Install ripgrep
-        id: ripgrep
-        continue-on-error: true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: ripgrep
-      # A release download outage must not stop the workers; any packaged rg runs the runbook command.
-      - name: Install ripgrep from the OS package manager
-        if: steps.ripgrep.outcome != 'success'
-        shell: bash
-        run: |
-          echo "::warning title=ripgrep download failed::installing ripgrep from the ${RUNNER_OS} package manager"
-          case "$RUNNER_OS" in
-            Linux) sudo apt-get install -y ripgrep || { sudo apt-get update && sudo apt-get install -y ripgrep; } ;;
-            macOS) brew install ripgrep ;;
-            Windows) choco install ripgrep --yes --no-progress ;;
-          esac
-      - name: Require ripgrep
-        run: rg --version
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.149
       - name: Verify archive and plan
         shell: bash
         env:
@@ -942,52 +917,16 @@ jobs:
           --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst"
           --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA"
           --record "$RUNNER_TEMP/nextest-result"
-      # The real-Herdr fixture tests read this pinned binary; the key carries version and digest.
-      - name: Restore herdr test binary
-        id: herdr_cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/herdr-test-bin
-          key: herdr-0.9.5-14d9e8bc8b4a-linux-x86_64
-      # A download outage fails here, before any test, with the line the infra rerun classifier matches.
-      - name: Install herdr test binary
-        id: herdr
-        shell: bash
-        env:
-          HERDR_CACHE_HIT: ${{ steps.herdr_cache.outputs.cache-hit }}
-        run: |
-          expected=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d
-          bin="$RUNNER_TEMP/herdr-test-bin/herdr-0.9.5"
-          if [ "$HERDR_CACHE_HIT" != true ]; then
-            mkdir -p "$RUNNER_TEMP/herdr-test-bin"
-            code=$(curl --fail --location --retry 3 --silent --show-error --output "$bin" --write-out '%{http_code}' \
-              https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64) || {
-              echo "::error title=herdr download failed::herdr test binary download failed: HTTP ${code:-000}"
-              exit 1
-            }
-          fi
-          echo "$expected  $bin" | sha256sum --check
-          chmod 700 "$bin"
-          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Prepare nextest worker
+        id: setup
+        uses: ./.github/actions/pr-nextest-setup
       - name: Run planned tests
         timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
-          ADK_TEST_HERDR_BIN: ${{ steps.herdr.outputs.bin }}
-        run: |
-          set +e
-          NEXTEST_DIR="$RUNNER_TEMP/nextest"
-          RESULT_DIR="$RUNNER_TEMP/nextest-result"
-          mkdir -p "$RUNNER_TEMP/nextest-extract"
-          cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
-            --extract-to "$RUNNER_TEMP/nextest-extract" --extract-overwrite \
-            --config-file "$NEXTEST_DIR/plan/worker-${{ matrix.worker }}.toml" --profile ci --no-tests fail
-          code=$?
-          echo "$code" > "$RESULT_DIR/exit-code"
-          junit="$(find "$RUNNER_TEMP/nextest-extract" "$GITHUB_WORKSPACE/target" -path '*/nextest/ci/junit.xml' 2>/dev/null | head -n 1)"
-          [ -n "$junit" ] && cp "$junit" "$RESULT_DIR/junit.xml"
-          exit "$code"
+          ADK_TEST_HERDR_BIN: ${{ steps.setup.outputs.herdr-bin }}
+        run: bash scripts/ci/nextest-pr-worker.sh ${{ matrix.worker }} scope
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
@@ -1002,13 +941,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Planned == executed per worker, retry policy, and the targeted selectors; any gap is red.
-  test_evidence:
-    name: Rust tests evidence
-    needs: [changes, rust_build, rust_tests]
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}
+  rust_tests:
+    name: Rust tests (worker ${{ matrix.worker }})
+    needs: [changes, rust_build, rust_scope]
+    if: >-
+      ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' &&
+      (needs.rust_scope.result == 'success' ||
+      (needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJSON(needs.rust_build.outputs.full_workers) }}
+    env:
+      RUST_BACKTRACE: 1
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
+      CI: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Download nextest plan
@@ -1016,16 +971,69 @@ jobs:
         with:
           name: nextest-plan
           path: ${{ runner.temp }}/nextest
+      - name: Verify archive and plan
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: >-
+          python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json"
+          --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst"
+          --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA"
+          --record "$RUNNER_TEMP/nextest-result"
+      - name: Prepare nextest worker
+        id: setup
+        uses: ./.github/actions/pr-nextest-setup
+      - name: Run planned tests
+        timeout-minutes: 60
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          ADK_TEST_HERDR_BIN: ${{ steps.setup.outputs.herdr-bin }}
+        run: bash scripts/ci/nextest-pr-worker.sh ${{ matrix.worker }}
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+      # The attempt is part of the name so a rerun never reads an older attempt's results.
+      - name: Upload worker results
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nextest-result
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The audit still requires the full universe, including the exact IDs proved by the first wave.
+  test_evidence:
+    name: Rust tests evidence
+    needs: [changes, rust_build, rust_scope, rust_tests]
+    if: ${{ !github.event.pull_request.draft && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download nextest plan
+        id: plan
+        if: needs.rust_build.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan
+          path: ${{ runner.temp }}/nextest
       - name: Download worker results
+        if: steps.plan.outcome == 'success'
         uses: actions/download-artifact@v4
         with:
           pattern: nextest-worker-*
           path: ${{ runner.temp }}/nextest-artifacts
       - name: Audit worker results
         id: audit
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' }}
         shell: bash
         env:
           BASH_ENV: /dev/null
+          SCOPE_RESULT: ${{ needs.rust_scope.result }}
+          FULL_RESULT: ${{ needs.rust_tests.result }}
         run: |
           set -euo pipefail
           plan="$RUNNER_TEMP/nextest/plan/plan.json"
@@ -1034,9 +1042,35 @@ jobs:
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$plan"
           status=0
           python3 scripts/ci/nextest_ci.py audit --plan "$plan" --results "$RUNNER_TEMP/nextest-results" \
-            --json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?
+            --json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" \
+            --pr-scope-out "$RUNNER_TEMP/scope-observation.json" --pr-scope-result "$SCOPE_RESULT" \
+            --pr-full-result "$FULL_RESULT" || status=$?
           cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Record unavailable Rust evidence
+        if: ${{ !cancelled() && steps.audit.outcome != 'success' }}
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          RUST_TESTS: ${{ needs.changes.outputs.rust_tests }}
+          BUILD_RESULT: ${{ needs.rust_build.result }}
+        run: |
+          [ ! -f "$RUNNER_TEMP/scope-observation.json" ] || exit 0
+          reason=rust-build-unavailable
+          if [ "$BUILD_RESULT" = success ]; then
+            reason=plan-unavailable
+          elif [ "$RUST_TESTS" = false ] && [ "$BUILD_RESULT" = skipped ]; then
+            reason=rust-path-filter
+          fi
+          python3 scripts/ci/nextest_ci.py pr-scope-unavailable --reason "$reason" --output "$RUNNER_TEMP/scope-observation.json"
+      - name: Upload PR scope observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-pr-scope-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scope-observation.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload census execution evidence
         if: ${{ steps.audit.outputs.census_evidence_dir != '' }}
         continue-on-error: true
@@ -1098,7 +1132,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 3072b914eda8ec329f2c6c619882915a374f8aa4666443b9fe0a353a8f7a08cc
+          pin scripts/check-ci-runner-hardening.sh 11d342e4500e3d7404ce7d4ec555e998aebda2d4862856899c44ce0f6a4dcc6c
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

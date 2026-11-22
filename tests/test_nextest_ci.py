@@ -1027,6 +1027,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.sp = subprocess
         self.repo = self.dir / "repo"
         for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
+                    "scripts/ci/pr_nextest.py",
                     "scripts/ci/nextest-base-diff.sh", ".config/nextest.toml",
                     "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
