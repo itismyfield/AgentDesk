@@ -568,6 +568,9 @@ class TestCfgList(unittest.TestCase):
                          {"tests": [3], "h": [4, 13], "for_test": [8]})
         self.assertEqual(vistool_testcfg.definition("for_test", "Store::for_test", defs)[0][1], 8)
         self.assertEqual(vistool_testcfg.definition("h", "h", defs), (None, 2))
+        # An inline `mod test_support {` line belongs to the block it opens; the path names its parent.
+        mods = {"test_support": [("src/a.rs", 3, ("a", "test_support")), ("src/b.rs", 9, ("b", "test_support"))]}
+        self.assertEqual(vistool_testcfg.definition("test_support", "crate::b::test_support", mods)[0][1], 9)
 
 
 def real_repo(root, extra=None):

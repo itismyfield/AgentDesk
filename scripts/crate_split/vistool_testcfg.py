@@ -115,7 +115,8 @@ def definition(name, path, defs):
     cands = defs.get(name, [])
     if len(cands) > 1:
         module = module_of_path(path)
-        narrowed = [c for c in cands if module is not None and c[2] == module]
+        # A `mod name {` line belongs to the block it opens, so its module ends with the name itself.
+        narrowed = [c for c in cands if module is not None and c[2] in (module, module + (name,))]
         if len(narrowed) == 1:
             return narrowed[0], len(cands)
     return (cands[0] if len(cands) == 1 else None), len(cands)
