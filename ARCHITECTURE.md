@@ -1598,7 +1598,8 @@ src/
 │   │   │   │   ├── effort.rs
 │   │   │   │   ├── effort_settings_tests.rs
 │   │   │   │   ├── provider_settings.rs
-│   │   │   │   └── provider_settings_snapshot_tests.rs
+│   │   │   │   ├── provider_settings_snapshot_tests.rs
+│   │   │   │   └── provider_settings_thread_owner_tests.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
