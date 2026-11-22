@@ -310,12 +310,9 @@ impl Abandonment {
         }
     }
     pub(crate) fn schedule(self, reason: &'static str) {
-        crate::services::discord::task_supervisor::spawn_observed(
-            "replay_unstarted_hold",
-            async move {
-                self.abandon(reason).await;
-            },
-        );
+        crate::utils::observed_task::spawn_observed("replay_unstarted_hold", async move {
+            self.abandon(reason).await;
+        });
     }
 }
 

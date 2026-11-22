@@ -72,6 +72,9 @@ struct ClaimedPorts<'a> {
 }
 
 impl HerdrTurnPorts for ClaimedPorts<'_> {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
         Some(self.host.clone())
     }

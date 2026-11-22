@@ -13,7 +13,7 @@
 | 1 | `src/services/discord/router/message_handler/intake_turn.rs:1009,1898,1926`; `src/services/discord/router/message_handler/intake_turn/worker_entry.rs:49,160` | foreground mailbox claim, 실제 목적지·논리 채널과 nonce를 보존해 `AgyReserve`. |
 | 2 | `src/services/discord/router/message_handler/intake_turn.rs:2136,2174,2193` | 프로듀서·panic·기존 bridge 입구. owner 토큰을 확보한 경우에만 `AgySpawn`; 한 종료 경로로 합친다. |
 | 3 | `src/services/discord/health/turn_deliver.rs:330,432,510,518` | iMessage 등 인증된 HTTP 사용자 입력은 기존 headless starter를 사용한다. 조각 1의 입장은 Discord foreground로 한정하며 인증된 HTTP는 조각 1b 설계 보강이 필요하다. |
-| 4 | `src/services/discord/router/message_handler/provider_dispatch.rs:277,340,510,849` | StreamJson 분기와 요청 구성. 타입이 지정된 agy 채널 프로듀서만 `AgySpawn`; 루틴은 `AgyHeadlessAnswer`. |
+| 4 | `src/services/discord/router/message_handler/provider_dispatch.rs:277,340,510,857` | StreamJson 분기와 요청 구성. 타입이 지정된 agy 채널 프로듀서만 `AgySpawn`; 루틴은 `AgyHeadlessAnswer`. |
 | 5 | `src/services/stream_json_cli/request.rs:15,31,54`; `src/services/stream_json_cli/mod.rs:18,28`; `src/services/stream_json_cli/dialects/mod.rs:20,25` | 요청·인증·dialect 라우팅. spool handle은 채널 턴 호출자만 전달한다. `AgySpawn`, `AgyHeadlessAnswer`. |
 | 6 | `src/services/stream_json_cli/dialects/agy.rs:15,27,65`; `src/services/stream_json_cli/runner.rs:47,76,79` | 정책 검증, 한 턴 argv, spawn과 취소 토큰 등록. spawn 전 실패도 `AgyChildFailed`로 전달한다. |
 | 7 | `src/services/stream_json_cli/runner.rs:97,121,130,143,159,173,196,207` | stdout 큐, cancel, startup timeout, 파서 실패, 수신자 종료, wait 및 codec finish. `AgyAppendDelta`, `AgyAppendDone`, `AgyChildFailed`. |

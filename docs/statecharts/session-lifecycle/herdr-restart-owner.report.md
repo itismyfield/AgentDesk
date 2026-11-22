@@ -50,7 +50,7 @@
 3. **live effect permission:** 같은 mutex에서 begin_clear가 즉시 epoch++/clearing on하고 BeginEffect가 live epoch/clearing을 재검사한다. clear 전에 발급한 EffectPermit을 blocking backend 호출 반환까지 보유한다. clear는 이후 새 grant를 막고 기존 effect/startup 배수 뒤 exact teardown한다. CheckEpoch bool 전달만으로는 이 계약이 안 된다.
 4. **startup registration:** clearing 중 신규 launch 등록은 같은 mutex에서 거절/보류하고 counter를 늘리지 않는다. 모델 OwnerFree/LaunchBegin의 clearing gate가 이 선형화의 추상화다. clear 완료 뒤 새 입력은 정상 허용한다. 새 giant owner 동작이 이미 존재한다는 주장이 아니다.
 5. **exact successor/dispatch:** SeedJoin은 ticket/attempt가 소유한 successor nonce만 허용한다. 복원 Bound도 submit permission을 소비한다. disconnect는 restart postlude 또는 같은 seed permit만 하고, 일반 입력은 old dispatch를 지우지 않는다. dispatch status/history는 PG snapshot 시험이 필요하다.
-6. **실제 effect 경계:** headless_turn.rs:147~165는 claim/reset 전이다. seed 설치 뒤 전체 terminate를 재호출하지 않는다. leaf는 queue_io/input_owner/effect.rs:96, receipt :130; Pending CAS는 herdr_launch.rs:498, registry 연결 :508, prepared create :531이다. TLA의 historical :482 주석은 실행 증거 좌표로 쓰지 않는다. TUI claim은 synthetic_start/claim.rs:54 및 wiring :618이다.
+6. **실제 effect 경계:** headless_turn.rs:147~165는 claim/reset 전이다. seed 설치 뒤 전체 terminate를 재호출하지 않는다. leaf는 queue_io/input_owner/effect.rs:96, receipt :130; Pending CAS는 herdr_launch.rs:500, registry 연결 :508, prepared create :531이다. TLA의 historical :482 주석은 실행 증거 좌표로 쓰지 않는다. TUI claim은 synthetic_start/claim.rs:54 및 wiring :618이다.
 7. **sticky startup/followers:** clear가 관측한 startup은 먼저 끝나도 sticky해야 한다. 실제 PreparedPayload.followers(queued_head/v2_types.rs:147)의 snapshot/claim/clear receipt/upload/bind index는 B1 Rust 시험이 검증한다. 모델은 head+follower 단위이며 임의 merge payload 직렬화는 증명하지 않는다.
 
 ## 값 범위·가정과 한계

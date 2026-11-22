@@ -72,7 +72,7 @@ provider 인증은 독립 config home에 사전 준비하며 운영 credential �
 | DB | `src/config.rs:707`의 database 설정; `src/db/postgres.rs:190`에서 `DATABASE_URL`이 config보다 우선 | DB 접속 전에 test manifest endpoint/DB/user와 실제 connect options 일치. 독립 PG 권한으로 운영 DB 연결 자체가 불가능해야 함 |
 | bot token | `src/services/discord/agentdesk_config.rs:141`은 inline/credential fallback; `src/credential.rs:46`은 runtime root 기준; `src/runtime_layout/paths.rs:10`은 `<bot>_bot_token` 경로 | 신규 token_env를 만들지 않음. root credential만 허용, inline/단일 AGENTDESK_TOKEN 상속 금지. canonical ancestor·파일/권한은 별도 검증 |
 | tmux | `src/domain/provider/naming.rs:6`의 고정 `AgentDesk` prefix; `src/services/platform/tmux.rs:30`은 `-u`만 지정 | 공통 command 생성과 raw tmux 진입점 전수 확인. socket·prefix를 launch/scan/attach/cancel/clear/recovery 모두에 전달 |
-| Herdr | `src/services/herdr_launch.rs:56`, `src/config/session_hosts.rs:158`은 host 선택 시 exact channel 조회 | 시험 endpoint 설정과 실제 session host가 일치. 기본 endpoint는 test mode에서 오류 |
+| Herdr | `src/services/herdr_launch.rs:59`, `src/config/session_hosts.rs:158`은 host 선택 시 exact channel 조회 | 시험 endpoint 설정과 실제 session host가 일치. 기본 endpoint는 test mode에서 오류 |
 | provider 설정 sync | `src/bootstrap.rs:43`, `src/lib.rs:267`의 일반 RunServer initialize는 MCP sync 수행 | 명시 `dcserver` 경로는 이 initialize를 통과하지 않는 현재 동작 유지. 이를 무조건 발생하는 dcserver 부작용으로 오인하지 않음. HOME·provider home 격리는 별도로 필요 |
 | HOME·host 탐색 | `src/services/provider_auth_profile.rs:189`, `:485`의 profile home; `src/services/codex/tui_session_launch.rs:149`의 HOME fallback; `src/services/cluster/session_discovery.rs:707`의 tmux 스캔 | test HOME 아래 named profile만 허용. 시험 Herdr home은 `src/services/session_host/herdr/managed_config/path.rs:47`의 개인 경로 보호와 충돌하지 않는 형제 경로로 배치 |
 | store·Herdr default | `src/services/tui_o/store/mod.rs:182`의 root/o_store; `src/config/session_hosts/user_default.rs:31`의 기본 socket | root와 HOME을 모두 강제. 시험 프로필에서 user_default 빈 endpoint 금지 |
@@ -429,7 +429,7 @@ E1 실행 join key는 scenario×cell×claim tuple×qualifiers×assertion operati
 | busy 반응 #8113 | tmux/Claude/channel/busy, managed 턴; 이후 herdr·Codex 통제군 | `src/services/discord/router/intake_gate.rs:1004`는 기본 옵션, `src/services/discord/router/intake_queue_transaction.rs:96`은 QueueState 기본값. 새 이력 단언 필요 |
 | busy 주입 #8114 | herdr/Claude/channel/busy; tmux 및 Codex 대응군 | `src/services/discord/router/message_handler/intake_turn.rs:1109`, `:1754`에 Herdr 제외. **이미 있는** `src/services/discord/router/intake_gate/busy_inject.rs:90` queued_head_covers의 Herdr 포함은 재구현하지 않음 |
 | 새 스레드 #8115 | tmux/herdr × Claude × thread × idle/unowned, preferred node ready·v1 slots 없음 | `src/services/cluster/intake_router_hook/placement.rs:24`, `:96` → `src/services/cluster/execution_capacity.rs:56`의 필터. fresh start의 실제 node/session 확인 필요 |
-| thread host·출력 #8118 | herdr/Claude/thread/idle와 busy; tmux 통제군, Codex 확대 | `src/services/herdr_launch.rs:56` → `src/config/session_hosts.rs:158` exact lookup; `src/services/tui_o/channel_policy.rs:74`에 parent 상속 없음. host뿐 아니라 source binding·tui_o·후속/취소까지 |
+| thread host·출력 #8118 | herdr/Claude/thread/idle와 busy; tmux 통제군, Codex 확대 | `src/services/herdr_launch.rs:59` → `src/config/session_hosts.rs:158` exact lookup; `src/services/tui_o/channel_policy.rs:74`에 parent 상속 없음. host뿐 아니라 source binding·tui_o·후속/취소까지 |
 
 #8118의 댓글에 있는 간헐 `source not bound`도 busy thread 계약의 반례로 넣는다.
 E-14의 thread 선언이나 E-50/E-51의 herdr cell만으로 위 칸이 채워졌다고 하지 않는다.

@@ -136,7 +136,12 @@ pub(super) fn launched_source(
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
     let mut hooks = ports.hook_events();
-    let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
+    let mut launch = launch(
+        turn,
+        Some(session_id.clone()),
+        resumed.is_some(),
+        ports.owner_port(),
+    );
     launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome).map_err(|e| launch_error("admit_create_evidence", e))?;
@@ -396,6 +401,9 @@ mod tests {
             || {
                 struct Ports;
                 impl HerdrTurnPorts for Ports {
+                    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+                        crate::services::discord::HERDR_OWNER_PORT
+                    }
                     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
                         Some(Arc::new(SocketHerdrLaunchHost::new(
                             vec![],

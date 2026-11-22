@@ -228,6 +228,7 @@ async fn unplaced(
         endpoint: launch,
         host,
         quiet: UNPLACED_QUIET,
+        close_unrecorded: crate::services::discord::HERDR_OWNER_PORT.close_unrecorded,
     };
     match resolve_unplaced(&lease, &target).await {
         Resolution::Retired => Ok(()),

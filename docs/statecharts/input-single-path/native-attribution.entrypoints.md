@@ -66,11 +66,11 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/mailbox_finish.rs:341` | `mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/mailbox_finish.rs:350` | `mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/mailbox_finish.rs:362` | `mailbox_clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/mod.rs:1255` | `record_tmux_watcher_reconnect` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/mod.rs:1565` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1572` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1587` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1595` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1260` | `record_tmux_watcher_reconnect` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/mod.rs:1570` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1577` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1592` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1600` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
 | `src/services/discord/placeholder_live_events/mod.rs:129` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/placeholder_live_events/mod.rs:134` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/placeholder_live_events/panel_cache_invalidation.rs:51` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
@@ -327,8 +327,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/inflight/save_store/rebind_adoption.rs:58` | `save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/inflight/save_store/rebind_adoption.rs:68` | `save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/inflight_heartbeat_sweeper.rs:151` | `run_heartbeat_sweep_pass_inner` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/discord/mod.rs:604` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/discord/mod.rs:605` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/discord/mod.rs:609` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/discord/mod.rs:610` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/placeholder_sweeper/abandon_guard.rs:279` | `delete_state_if_allowed` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/receipt_settle.rs:155` | `settle_marked` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/receipt_settle.rs:323` | `stopped` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
@@ -526,13 +526,13 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/health/recovery/zombie_reclaim.rs:41` | `release_zombie_foreground_turn_by_tmux_name` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/live_bridge.rs:337` | `defer_unstarted_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_finish.rs:255` | `unwind_unstarted_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1467` | `cleanup_retry_inflight_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1540` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1546` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2105` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2159` | `maybe_schedule_catch_up_retry_after_queue_drain` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2186` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2228` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1472` | `cleanup_retry_inflight_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1545` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1551` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2110` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2164` | `maybe_schedule_catch_up_retry_after_queue_drain` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2191` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2233` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/placeholder_sweeper/abandon_guard.rs:390` | `finalize_abandoned_mailbox_admitted` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch.rs:88` | `log_kickoff_rejected_restore` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch.rs:264` | `mailbox_take_next_automatic_intervention` | Kick(wake/event/queue admission, 같은 head 재검증) |

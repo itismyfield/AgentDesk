@@ -187,7 +187,12 @@ mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
+#[cfg(any(unix, test))]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::note_ended as note_takeover_ended;
+#[cfg(any(unix, test))]
+mod herdr_owner_port;
+#[cfg(any(unix, test))]
+pub(crate) use herdr_owner_port::HERDR_OWNER_PORT;
 #[cfg(test)]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,

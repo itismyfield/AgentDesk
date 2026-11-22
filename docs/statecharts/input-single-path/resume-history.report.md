@@ -26,7 +26,7 @@ this run exists yet. Before this change a queued input stayed held until a perso
 | Stop and UserPromptSubmit of the current incarnation | `readiness/mod.rs:497` | an entry behind a recovery floor; a prompt arms `pending` |
 | First observation with no entry (daemon restart, lost hook) | `readiness/mod.rs:138` | an entry behind a recovery floor at the daemon's start |
 | Herdr launch or handoff from tmux, fresh or resumed | `claude/herdr_turn/handoff.rs:49 launched_source` → `discord/tui_prompt_relay/herdr_source.rs:154` (binding at `:187`) | runtime binding after the launch's own `SessionStart` |
-| Herdr reattach after a daemon restart | `discord/tui_prompt_relay/herdr_source.rs:274`, then `claude/herdr_turn.rs:283 bound_source` | runtime binding only; no start, so the recovery floor applies |
+| Herdr reattach after a daemon restart | `discord/tui_prompt_relay/herdr_source.rs:274`, then `claude/herdr_turn.rs:285 bound_source` | runtime binding only; no start, so the recovery floor applies |
 | tmux launch | `claude.rs:2002` | runtime binding |
 | End of a Herdr turn | `claude/herdr_turn/first_input.rs:242` | runtime binding at the turn's end |
 | Source selection | `readiness/source.rs:23 Source::current` | reads marker nonce, context, `starts`, binding, entries |

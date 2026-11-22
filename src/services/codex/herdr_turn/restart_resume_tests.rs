@@ -41,7 +41,11 @@ async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector()
         cancel: None,
         bootstrap: false,
     };
-    let launch = launch_of(&turn, Some(Path::new("/test")));
+    let launch = launch_of(
+        &turn,
+        Some(Path::new("/test")),
+        crate::services::discord::HERDR_OWNER_PORT,
+    );
     assert!(
         !launch.resume,
         "only explicit restart intent can request resume"
@@ -151,7 +155,13 @@ mod greeting {
             bootstrap: false,
         };
         let operation = greeting.then(|| "restart-operation".to_string());
-        restart_intent::scope(operation, || launch_of(&turn, Some(Path::new("/test"))))
+        restart_intent::scope(operation, || {
+            launch_of(
+                &turn,
+                Some(Path::new("/test")),
+                crate::services::discord::HERDR_OWNER_PORT,
+            )
+        })
     }
 
     #[tokio::test]

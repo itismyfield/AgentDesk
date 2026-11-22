@@ -938,6 +938,9 @@ fn bound_codex_followup_reserves_and_writes_each_normalized_prompt() {
     use sha2::{Digest, Sha256};
     struct Bound;
     impl CodexHerdrPorts for Bound {
+        fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+            crate::services::discord::HERDR_OWNER_PORT
+        }
         fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
             None
         }

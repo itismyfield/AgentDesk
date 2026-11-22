@@ -18,7 +18,7 @@
 
 | 진입점 | tmux 채널 현재 | herdr 채널 현재 | tmux 스레드 현재 | herdr 스레드 현재 | 목표 동작 | 담당 조각 | 불가피한 차이·보존할 사유 |
 |---|---|---|---|---|---|---|---|
-| Discord 새 메시지·새 세션 | intake→provider launch | intake용 host admission 뒤 Herdr 실행 | 부모 path bootstrap 후 tmux | child ID exact lookup으로 tmux 선택 | 같은 intake, 새 child는 부모 host 정책, 실제 child target 사용 | #8118 H1, #8115 | host IO·admission 수단만 다름. `D=session_runtime.rs:505,513`, `S=herdr_launch.rs:56`, `S=turn_host.rs:151` |
+| Discord 새 메시지·새 세션 | intake→provider launch | intake용 host admission 뒤 Herdr 실행 | 부모 path bootstrap 후 tmux | child ID exact lookup으로 tmux 선택 | 같은 intake, 새 child는 부모 host 정책, 실제 child target 사용 | #8118 H1, #8115 | host IO·admission 수단만 다름. `D=session_runtime.rs:505,513`, `S=herdr_launch.rs:59`, `S=turn_host.rs:151` |
 | 일하는 중 사람 입력 | owner가 busy paste, source 불명은 Held | 기존에는 일부 defer; #8114가 공통 operation으로 교체 예정 | 새 owner 경로 사용. 이슈 실측 source-not-bound 실패도 있음 | launch는 tmux인데 busy gate는 부모 H로 배제하는 불일치 | #8114 operation을 동일 소비; child의 source/history를 먼저 bind | #8114 뒤 #8118 O/H | tmux server guard, Herdr exact pin/physical writer lease 보존. `D=router/intake_gate/busy_inject.rs:82`, `D=router/message_handler/intake_turn.rs:1110,1754`(전체 경로는 부록) |
 | 터미널에서 시작된 턴 합류 | Claude live transcript→owner busy | endpoint 존재 시 제외 | child ID 기준으로 tmux 합류 | 설정과 actual host가 어긋남 | 정책 host가 아닌 actual operation 관측으로 같은 사람 입력 합류 | #8114, #8118 H1 | native unknown은 key0 Held, post-key 불명은 no-resend. `D=router/message_handler/intake_turn.rs:1751` |
 | 출력 본문·placeholder·도구 카드·푸터 | O 선택 채널은 O writer | O-ready가 Herdr launch 선행 | boot selection에 child가 없어 legacy로 빠짐 | 동일; parent O여도 child O 0이라는 이슈 관측 | 부모 O selection·kind·site를 상속, child별 writer/store/adoption/usage | **#8118 O-a→O-b 첫 출력 묶음**, #7651 자체 관문 별도 | legacy 증상 개별 수리 금지. `S=tui_o/channel_policy.rs:74,346`, `S=tui_o/cutover/channel_gate.rs:433`, `D=runtime_bootstrap/owner_execution.rs:79` |
@@ -130,7 +130,7 @@ GC의 **실제 row delete 성공** 뒤 같은 child/init provenance·row/nonce/g
 
 | 소유·소비 묶음 | 대표 좌표와 전수 범위 | 공통 함수/operation으로 가는 조각 |
 |---|---|---|
-| boot 원천·host factory | `config/session_hosts.rs:158,349,350`, `herdr_launch.rs:56,62`, `turn_host.rs:157,186` | 원천은 경계 내부로 한정, policy resolver를 통과. H1 |
+| boot 원천·host factory | `config/session_hosts.rs:158,349,350`, `herdr_launch.rs:59,65`, `turn_host.rs:157,186` | 원천은 경계 내부로 한정, policy resolver를 통과. H1 |
 | launch·absence | `claude.rs:2607`, `claude/tui_session_launch.rs:38,53`, `codex.rs:1426,1527`, `codex/absence_launch.rs:78,294`, `codex/tui_session_launch/{first_input.rs:216,launch_policy.rs:70}`, `discord/codex_absence.rs:30` | H1; 기존 admission/refusal 유지 |
 | intake·queue·actual source | `discord/router/intake_gate/busy_inject.rs:86`, `router/message_handler/intake_turn.rs:1110,1754`, `queue_dispatch.rs:253`, `queue_io/input_owner/claude_handoff.rs:219`, `router/message_handler/tui_followup/nameless_gate.rs:79`, `session_runtime.rs:513` | #8114가 없앨 중복 재구현 금지. H1 |
 | synthetic source·O actor·notice | `discord/tui_prompt_relay.rs:757`, `tui_prompt_relay/synthetic_start/admission_fence.rs:168`, `tui_prompt_dedupe/hosted_source.rs:64`, `tui_o/writer/actor.rs:423`, `tui_o/writer/input_notices/admission.rs:104`, `tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:67` | O 조각은 필요한 output adapter만, 나머지 H2. actual source pin 유지 |
@@ -383,7 +383,7 @@ src/services/discord/health/recovery.rs:273:    discord::admin_host_guard::run_b
 src/services/discord/health/turn_deliver/inject.rs:312:        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
 src/services/discord/health/turn_deliver/inject/herdr.rs:48:        || crate::config::session_hosts::herdr_endpoint(channel).is_none()
 src/services/discord/herdr_terminate/http_force_writer_tests.rs:129:        let configured = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/herdr_terminate/missing_marker_turn_tests.rs:113:                crate::services::discord::admin_host_guard::managed_reset_refusal(
+src/services/discord/herdr_terminate/missing_marker_turn_tests.rs:116:                crate::services::discord::admin_host_guard::managed_reset_refusal(
 src/services/discord/herdr_terminate/root_replaced.rs:249:        crate::config::session_hosts::herdr_endpoint(channel).ok_or("endpoint unavailable")?;
 src/services/discord/herdr_terminate/root_replaced/preclaim.rs:22:    let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel.get()) else {
 src/services/discord/inflight/host_recovery_guard.rs:103:    if crate::services::discord::admin_host_guard::configured_refusal(channel_id).is_some() {
@@ -435,7 +435,7 @@ src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs:2
 src/services/discord/router/message_handler/intake_turn/worker_entry/dispatch_guard_pg_tests.rs:6:use crate::services::discord::admin_host_guard::tests::api_child;
 src/services/discord/router/message_handler/intake_turn/worker_entry/goal_fresh_pg_tests.rs:21:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
 src/services/discord/router/message_handler/intake_turn/worker_entry/preserve_cancel_tests.rs:5:use crate::services::discord::admin_host_guard::tests::api_child;
-src/services/discord/router/message_handler/provider_dispatch.rs:1070:            "herdr turn refused: executor_not_wired"
+src/services/discord/router/message_handler/provider_dispatch.rs:1078:            "herdr turn refused: executor_not_wired"
 src/services/discord/router/message_handler/provider_dispatch/owner_input_codex_tests.rs:629:    crate::services::discord::admin_host_guard::tests::api_child(test)
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:54:    _api: discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:183:        let api = discord::admin_host_guard::tests::Recorder::start().await;
@@ -443,7 +443,7 @@ src/services/discord/router/message_handler/provider_dispatch/owner_input_turn_m
 src/services/discord/router/message_handler/provider_dispatch/owner_input_turn_mode_tests.rs:478:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
 src/services/discord/router/message_handler/provider_dispatch/owner_provenance_tests.rs:5:use crate::services::discord::admin_host_guard::tests::{ModeTmux, Tmux, api_child};
 src/services/discord/router/message_handler/provider_dispatch/owner_start_failure_tests.rs:84:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
-src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:1366:    let refused = Err("herdr turn refused: executor_not_wired".to_string());
+src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:1369:    let refused = Err("herdr turn refused: executor_not_wired".to_string());
 src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs:201:                discord::admin_host_guard::turn_release_refusal(shared, provider, channel);
 src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs:55:    api: &'a crate::services::discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs:223:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
@@ -463,8 +463,8 @@ src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_
 src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:61:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:126:    assert!(crate::config::session_hosts::herdr_endpoint(CHANNEL).is_none());
 src/services/discord/router/message_handler/root_replaced_recovery_tests/policy_tests.rs:97:        let configured = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:105:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:963:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:108:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:966:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs:154:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/wake_tests.rs:260:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/s1_entry_tests.rs:206:    if !discord::admin_host_guard::tests::api_child(concat!(
@@ -506,7 +506,7 @@ src/services/discord/tui_prompt_relay/tests.rs:6885:    use crate::services::dis
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:56:        let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).unwrap();
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:878:    assert!(crate::config::session_hosts::herdr_endpoint(SOURCE_CHANNEL).is_none());
 src/services/discord/tui_prompt_relay/writer_notice_owner_tests.rs:44:    use crate::services::discord::admin_host_guard::tests::Recorder;
-src/services/discord/turn_bridge/before_start_stop_tests.rs:1308:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
+src/services/discord/turn_bridge/before_start_stop_tests.rs:1314:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
 src/services/discord/turn_bridge/runtime_handoff_loop/codex_replacement_tests.rs:2:use crate::services::discord::admin_host_guard::tests::Recorder;
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs:697:    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:924:    let alive = crate::services::discord::admin_host_guard::tests::process(&name, pid);
@@ -523,8 +523,8 @@ src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:52:    
 src/services/discord/turn_presence/activity/unbound/retired_codex_runtime_marker_tests.rs:53:        let endpoint = crate::config::session_hosts::herdr_endpoint(id).unwrap();
 src/services/discord/turn_presence/activity/unbound/retired_codex_runtime_marker_tests.rs:145:    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).unwrap();
 src/services/dispatched_sessions/output.rs:171:    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
-src/services/herdr_launch.rs:56:pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
-src/services/herdr_launch.rs:62:    crate::config::session_hosts::herdr_endpoint(channel).is_some()
+src/services/herdr_launch.rs:59:pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
+src/services/herdr_launch.rs:65:    crate::config::session_hosts::herdr_endpoint(channel).is_some()
 src/services/provider/cancel_token_cleanup/executor.rs:162:        let marker = crate::services::discord::admin_host_guard::marker_refusal;
 src/services/provider_cli/session_guard.rs:199:        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
 src/services/routines/session_control.rs:8:use crate::services::discord::admin_host_guard::ManagedReset;

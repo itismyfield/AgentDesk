@@ -34,7 +34,7 @@
 | # | 위치 | 상태 변화 |
 |---|---|---|
 | W1 | `src/services/claude/herdr_turn/first_input.rs:90` `write` → `herdr_turn.rs` `hold` | Claude 턴 시작(Bound·Pending·새 launch, owner `submit_owned`와 legacy `submit` 공통). 붙여넣기 전에 기록하고 fsync한다 |
-| W2 | `src/services/codex/herdr_turn.rs:622` `followup_write` → `hold` | Codex Bound 후속 입력 |
+| W2 | `src/services/codex/herdr_turn.rs:630` `followup_write` → `hold` | Codex Bound 후속 입력 |
 | W3 | `src/services/codex/herdr_turn/first_input.rs:147` → `hold` | Codex 첫 입력(launch·Pending 뒤) |
 | W4 | `src/services/claude/herdr_turn/composer.rs` `when_idle` → `src/services/claude_tui/readiness/mod.rs` `reserve` | 키 전에 readiness 예약: `Entry.pending = (transcript floor, revision)`. 이 예약이 있는 동안 같은 source의 `observe`는 floor 뒤에 새 활동과 terminal이 없으면 준비를 인정하지 않는다 |
 
@@ -44,12 +44,12 @@
 |---|---|---|
 | C1 | `first_input.rs` `write`의 `composer_settled(&run)` 뒤 `remove_file` | `Applied`·`Refused`·`Cancelled{0}`이면 해제. `Indeterminate`·`Cancelled{>0}`이면 **남는다** |
 | C2 | `first_input.rs` `Closed` → `src/services/provider/herdr_before_start.rs` `release_claude_hold` | 첫 키 전에 멈춘 턴 → 해제 |
-| C3 | `src/services/codex/herdr_turn.rs:647` / `release_closed_hold` | Codex 후속: 제출됐거나 건드리지 않음 → 해제 |
+| C3 | `src/services/codex/herdr_turn.rs:655` / `release_closed_hold` | Codex 후속: 제출됐거나 건드리지 않음 → 해제 |
 | C4 | `src/services/codex/herdr_turn/first_input.rs:158·167·220` | Codex 첫 입력: 닫힘·건드리지 않음 → 해제. 제출 뒤에는 `observe`가 session start를 찾고 bind한 뒤에만 해제한다. 못 찾으면 **남는다** |
 | C5 | `src/services/discord/herdr_terminate.rs:321` `settle_and_release` | 종료: retire CAS 뒤 해제 |
 | C6 | `src/services/discord/recovery_engine/herdr_row_end.rs:495` `commit` | 행 끝 retire 뒤 해제 |
 | C7 | `src/services/discord/recovery_engine/herdr_row_end_live.rs:72` | 살아 있던 턴의 실행이 사라짐 → retire 뒤 해제 |
-| C8 | `src/services/herdr_launch/retired_hold.rs:79` ← `src/services/herdr_launch.rs:446` `before_fresh` | 새 incarnation 전에 retired 표지를 해제 |
+| C8 | `src/services/herdr_launch/retired_hold.rs:79` ← `src/services/herdr_launch.rs:452` `before_fresh` | 새 incarnation 전에 retired 표지를 해제 |
 | C9 | `src/cli/herdr.rs:294` `release_left_hold` | 이미 Retired인 행에 남은 표지 |
 | C10 | `src/cli/herdr.rs:330` `retire_on_reading` | pane에 종료가 보일 때만 retire 뒤 해제 |
 
@@ -69,10 +69,10 @@
 
 | # | 위치 | 상태 변화 (main) | 설계 |
 |---|---|---|---|
-| R1 | `src/services/claude/herdr_turn.rs:264` Bound → `not_held` | 거절 → Opaque start failure 2회 → retained | 거절하지 않고 `write`의 키 직전 판정으로 넘긴다(3.2) |
-| R2 | `src/services/claude/herdr_turn.rs:268` Pending → `not_held` | 위와 같음 | 위와 같음(`pending_source`가 키를 보내지 않는다는 것은 S1 수용 시험으로 확인) |
-| R3 | `src/services/codex/herdr_turn.rs:153` Bound | 위와 같음 | S3 |
-| R4 | `src/services/codex/herdr_turn.rs:157` Pending | 위와 같음 | S3 |
+| R1 | `src/services/claude/herdr_turn.rs:266` Bound → `not_held` | 거절 → Opaque start failure 2회 → retained | 거절하지 않고 `write`의 키 직전 판정으로 넘긴다(3.2) |
+| R2 | `src/services/claude/herdr_turn.rs:270` Pending → `not_held` | 위와 같음 | 위와 같음(`pending_source`가 키를 보내지 않는다는 것은 S1 수용 시험으로 확인) |
+| R3 | `src/services/codex/herdr_turn.rs:155` Bound | 위와 같음 | S3 |
+| R4 | `src/services/codex/herdr_turn.rs:159` Pending | 위와 같음 | S3 |
 | R5 | `src/services/claude/herdr_return.rs:69` | 표지가 있으면 tmux 복귀를 거절 | 변화 없음(후속) |
 | R6 | `src/services/discord/recovery_engine/herdr_reader.rs:249` | 재연결 패스에서 표지 수만 센다 | 변화 없음(키 없음) |
 | R7 | `src/server/routes/health_api/runtime_profile.rs:74` | health 표시 | v1·v2를 모두 읽음 |

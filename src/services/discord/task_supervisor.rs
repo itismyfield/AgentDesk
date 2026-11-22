@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -7,33 +6,12 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
+use crate::utils::observed_task::panic_payload_summary;
+pub(in crate::services::discord) use crate::utils::observed_task::spawn_observed;
 pub(in crate::services::discord) mod watcher_completion;
 #[cfg(all(test, unix))]
 #[path = "task_supervisor/watcher_spawn_observation_tests.rs"]
 pub(in crate::services::discord) mod watcher_spawn_observation;
-
-pub(in crate::services::discord) fn spawn_observed<F>(
-    task_name: &'static str,
-    future: F,
-) -> tokio::task::JoinHandle<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    // Boxed before the hand-off: unoptimized builds otherwise copy the whole future through
-    // tokio::spawn's own frame, which overflowed 2 MiB test threads on the turn-start path.
-    tokio::spawn(Box::pin(async move {
-        match AssertUnwindSafe(future).catch_unwind().await {
-            Ok(()) => {}
-            Err(payload) => {
-                tracing::error!(
-                    task_name,
-                    panic = %panic_payload_summary(payload.as_ref()),
-                    "discord background task panicked"
-                );
-            }
-        }
-    }))
-}
 
 pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
     task_name: &'static str,
@@ -109,16 +87,6 @@ impl Drop for TmuxWatcherTaskGuard {
             );
         }
     }
-}
-
-fn panic_payload_summary(payload: &(dyn Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "non-string panic payload".to_string()
 }
 
 #[cfg(test)]

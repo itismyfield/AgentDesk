@@ -36,7 +36,7 @@ use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
-    HerdrLaunchHost, HerdrLaunchOutcome, clear_epoch, launch_herdr_session,
+    HerdrLaunchHost, HerdrLaunchOutcome, OwnerPort, clear_epoch, launch_herdr_session,
     unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
@@ -192,6 +192,8 @@ pub(crate) trait HerdrTurnPorts {
     fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
         Err("no channel lease".into())
     }
+    /// The owner runtime's side of this turn's launch and unplaced resolution.
+    fn owner_port(&self) -> OwnerPort;
     /// Posts an input hold's one notice row; without it a hold that needs one is never released.
     fn hold_notice(&self) -> Option<Arc<HoldNotice>> {
         None
@@ -480,6 +482,7 @@ fn unplaced_resolved(
         endpoint: &turn.endpoint,
         host,
         quiet: unplaced::quiet(),
+        close_unrecorded: ports.owner_port().close_unrecorded,
     };
     unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
 }
@@ -631,7 +634,12 @@ pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {
+fn launch(
+    turn: &HerdrTurn<'_>,
+    session_id: Option<String>,
+    resume: bool,
+    owner_port: OwnerPort,
+) -> HerdrLaunch {
     HerdrLaunch {
         endpoint: Some(turn.endpoint.clone()),
         owner: turn.owner.clone(),
@@ -640,6 +648,7 @@ fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> Her
         resume,
         provider_root: None,
         resume_start: None,
+        takeover_ended: owner_port.takeover_ended,
     }
 }
 

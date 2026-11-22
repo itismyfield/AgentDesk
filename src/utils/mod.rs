@@ -17,6 +17,7 @@ pub use adk_base::utils::github_links;
 pub use adk_base::utils::home_path;
 pub(crate) mod input_validation;
 pub mod loopback_url;
+pub(crate) mod observed_task;
 pub(crate) mod parsed_bytes;
 pub use adk_base::utils::redact;
 pub mod secret_file;

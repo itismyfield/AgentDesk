@@ -96,7 +96,7 @@ A·B1·B2a·B2b는 각각 리뷰하고 **함께 착지한다**. B2a만 배포하
 | owner의 기존 wake | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:602` | gate Drop 뒤 typed 연결 |
 | prefix와 admission bind | `src/services/turn_orchestrator/queued_head/v2.rs:398`, `v2/source_admission.rs:627` | B1 고정 followers와 기존 atomic commit 재사용 |
 | headless 제한 | `src/services/discord/router/message_handler/headless_turn.rs:159` | typed permit만 선택. 일반 시작 거절 유지 |
-| Codex A 포트 | `src/services/codex/herdr_turn.rs:192`, `src/services/herdr_launch/codex_resume.rs:13` | seed-only typed 요청, 기존 source/O EOF 검증 유지 |
+| Codex A 포트 | `src/services/codex/herdr_turn.rs:194`, `src/services/herdr_launch/codex_resume.rs:13` | seed-only typed 요청, 기존 source/O EOF 검증 유지 |
 | dispatch 재발견 | `src/services/dispatches/thread_reuse.rs:247` | seed만 차단, backlog는 기존 tmux 정책 |
 
 `headless_turn.rs`·`owner_input.rs`·`herdr_terminate.rs`와 source-admission 부모에는
