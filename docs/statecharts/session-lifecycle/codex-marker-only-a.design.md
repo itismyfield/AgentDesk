@@ -278,7 +278,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `codex/tui_session_launch/first_input.rs:51,79,122,221` | create / publish_codex_tui_launch_script / spawn_owned | AFenceContender; publisher fence |
 | `codex_tui/execution_end/confirm.rs:28` | observe | AObserve registry guard; 기존 process 효과 별도 |
 | `codex_tui/warm_followup.rs:505,1220,1252` | verified_warm / verified_warm_inner / warm_followup_on | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
-| `discord/admin_host_guard.rs:381` | row_is_legacy_tmux | AObserve registry guard; 기존 process 효과 별도 |
+| `discord/admin_host_guard.rs:416` | row_is_legacy_tmux | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/clear_teardown/clear_end_record.rs:135` | vacant | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/clear_teardown/execution_cleanup.rs:161,296,363` | inflight_ready / normal_end / run_with | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/managed_reset.rs:92,93` | end_process | AObserve registry guard; 기존 process 효과 별도 |
@@ -314,7 +314,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `session_host/process_host.rs:39,95` | execution_pid / presence | AObserve registry guard; 기존 process 효과 별도 |
 | `session_host/resolve.rs:19,21,36,39,127,129,132,147,148,150,389,390,397,408,409,422,423` | (module) / host_votes / kind_hint / legacy_target_host / resolve_host_kind / unread | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `session_resume.rs:632` | clear_resume_runtime_binding | AChange/source evidence; 기존 binding cleanup 별도 |
-| `stale_turn_reconciler.rs:750` | independent_tmux_liveness | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
+| `stale_turn_reconciler.rs:762` | independent_tmux_liveness | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `tmux_common.rs:5,6,1045,1213` | (module) / cleanup_session_temp_files_under_source_authority / tmux_exact_target | AFenceContender; publisher fence |
 | `tmux_common/session_markers.rs:125,129,134,137` | resolve_tmux_runtime_kind_marker / write_tmux_runtime_kind_marker | AFenceContender; publisher fence |
 | `tui_o/cutover/channel_gate.rs:372` | session_kind | AObserve/ARecheck evidence; 기존 reader 권한 유지 |

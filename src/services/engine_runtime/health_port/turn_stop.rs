@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use poise::serenity_prelude::ChannelId;
+use sqlx::PgPool;
 
+use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::ChannelTeardown;
@@ -188,6 +190,27 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
         channel_id: ChannelId,
         caller: &'a str,
     ) -> BoxFuture<'a, Option<Arc<S>>>;
+
+    /// Whether everything `channel_id`'s runtime would stop is the session a verdict approved.
+    fn runtime_target_holds<'a>(
+        shared: &'a S,
+        provider: &'a ProviderKind,
+        channel_id: ChannelId,
+        approved: Option<&'a str>,
+    ) -> BoxFuture<'a, bool>;
+
+    /// The host gate for a caller that read `session_key` from its own row, with the row lookup.
+    fn row_gate<'a>(
+        pool: &'a PgPool,
+        stored_provider: Option<&'a str>,
+        channel_id: u64,
+        session_key: &'a str,
+        tmux_name: &'a str,
+        caller: &'a str,
+    ) -> BoxFuture<'a, (ChannelTeardown, HostedLookup)>;
+
+    /// The inflight finalizer backfill the cancel lookup writes, run only once the guard admits.
+    fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId);
 }
 
 /// A shared registry answers as the registry it holds.
@@ -278,5 +301,36 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         caller: &'a str,
     ) -> BoxFuture<'a, Option<Arc<S>>> {
         (**self).nameless_runtime_teardown(provider, channel_id, caller)
+    }
+
+    fn runtime_target_holds<'a>(
+        shared: &'a S,
+        provider: &'a ProviderKind,
+        channel_id: ChannelId,
+        approved: Option<&'a str>,
+    ) -> BoxFuture<'a, bool> {
+        <T as TurnStopPort<S>>::runtime_target_holds(shared, provider, channel_id, approved)
+    }
+
+    fn row_gate<'a>(
+        pool: &'a PgPool,
+        stored_provider: Option<&'a str>,
+        channel_id: u64,
+        session_key: &'a str,
+        tmux_name: &'a str,
+        caller: &'a str,
+    ) -> BoxFuture<'a, (ChannelTeardown, HostedLookup)> {
+        <T as TurnStopPort<S>>::row_gate(
+            pool,
+            stored_provider,
+            channel_id,
+            session_key,
+            tmux_name,
+            caller,
+        )
+    }
+
+    fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
+        <T as TurnStopPort<S>>::backfill_inflight_after_guard(provider, channel_id)
     }
 }

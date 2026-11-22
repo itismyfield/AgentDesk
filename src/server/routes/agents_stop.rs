@@ -25,7 +25,8 @@ pub async fn stop_agent_turn(
             }
         }
 
-        match find_agent_turn_session_pg(pool, &id).await {
+        let refusal = crate::services::discord::admin_host_guard::row_refusal_port;
+        match find_agent_turn_session_pg(pool, &id, refusal).await {
             Ok(session) => session,
             Err(e) => {
                 return (
