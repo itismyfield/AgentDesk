@@ -1,0 +1,58 @@
+id: E-68
+title: Discord message sent during a terminal-started Claude TUI turn is delivered exactly once after it rests (#8323)
+agent_mode: real_live
+coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
+cells: [claude-tui]
+isolation: required
+requires_thread_channel: true
+known_failing:
+  issue: "#8323"
+  marker: "[E2E:E68:MARK:{run_id}]"
+acceptance_criteria:
+  - Open a turn AgentDesk did not start by typing a prompt into the thread's tmux pane.
+  - While that turn runs a 75 s Bash call, post one Discord message to the same thread.
+  - After the terminal turn ends and the session rests, the Discord message is answered exactly once.
+notes: |
+  Live reproduction of #8323 on a tmux-hosted Claude thread session: the Discord
+  input waits for idle evidence, times out with PreparationHold
+  idle_evidence_pending while the terminal turn still runs, posts a
+  retained_input_notice and is never redelivered once the session rests.
+  The 75 s Bash call outlasts that idle wait. The keys go to the thread's tmux
+  session, so a thread hosted elsewhere fails at the key step, not as #8323.
+  known_failing turns only a timeout on the MARK wait into KNOWN_GAP #8323; any
+  other failure stays FAIL and a pass is reported as UNEXPECTED_PASS, the cue to
+  drop known_failing once #8323 is fixed. Markers are split so the direct-input
+  notice and the Discord prompt cannot satisfy the provider waits.
+steps:
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E68:WARMUP] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E68:WARMUP]"
+    timeout_s: 240
+  - wait_idle_s: 5
+  - send_keys_sequence:
+      keys:
+        - "E-68 direct terminal turn. Run Bash exactly once with this command: python3 -c \"import time; time.sleep(75); print('E68_DONE')\" and after it finishes reply with exactly one line made by concatenating '[E2E:E68:DI' and 'RECT]'."
+        - C-m
+      key_interval_s: 0.35
+  - wait_for_raw_discord_text: "-# ⌨️ tui direct input\n```\nE-68 direct terminal turn."
+    timeout_s: 60
+  # Let the Bash call start before the Discord message arrives.
+  - wait_idle_s: 8
+  - send_discord_prompt: "E-68 marker. 응답에 정확히 한 줄로 '[E2E:E68:MA' 와 'RK:{run_id}]' 를 이어 붙인 문자열만 출력해줘."
+  - wait_for_discord_text: "[E2E:E68:DIRECT]"
+    relay_author: provider
+    timeout_s: 240
+  - wait_for_discord_text: "[E2E:E68:MARK:{run_id}]"
+    relay_author: provider
+    timeout_s: 180
+  - wait_idle_s: 5
+assertions:
+  - raw_text_present: "-# ⌨️ tui direct input\n```\nE-68 direct terminal turn."
+  - provider_text_present: "[E2E:E68:DIRECT]"
+  - provider_text_present: "[E2E:E68:MARK:{run_id}]"
+  - ordered_text_present:
+      - "[E2E:E68:DIRECT]"
+      - "[E2E:E68:MARK:{run_id}]"
+  - no_duplicate_marker: "[E2E:E68:DIRECT]"
+  - no_duplicate_marker: "[E2E:E68:MARK:{run_id}]"
+  - no_duplicate_content: true

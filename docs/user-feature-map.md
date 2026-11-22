@@ -8,7 +8,7 @@ fixture·known-gap·retired와 미구현 witness는 live coverage로 세지 않�
 기존 시험 이름은 소스 정의 참조이며 실행/PASS가 아니다. 부분 시나리오 references와 needs_live는 covered 수를 늘리지 않는다.
 
 적용 23 · covered 4 · 빈 칸 19 · 미지원 단언 칸 19
-시나리오 분류: {"active": 43, "fixture": 2, "live": 38, "retired": 3, "unsupported-known-gap": 3}
+시나리오 분류: {"active": 44, "fixture": 2, "live": 39, "retired": 3, "unsupported-known-gap": 3}
 
 호스트 동작은 [`cd9951d3ca`](https://github.com/itismyfield/AgentDesk/tree/cd9951d3cac6a4f0b81d02789facabbc6ed2a55d)에서 확인한 코드 기준이다.
 
