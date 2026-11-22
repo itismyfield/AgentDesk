@@ -503,7 +503,7 @@ fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
 }
 
 /// The latest prompt row's turn: the last 256 KiB first, then the whole file when that tail holds
-/// none, as a Code Mode turn's context can push its prompt out of it (#8081).
+/// none, as a Code Mode turn's context can push its prompt out of it.
 fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentity> {
     const MAX_TAIL_BYTES: u64 = 256 * 1024;
     match scan_user_turn(path, MAX_TAIL_BYTES)? {

@@ -567,9 +567,8 @@ fn code_mode_turn(context_bytes: usize) -> String {
     rows.iter().map(|row| format!("{row}\n")).collect()
 }
 
-// #8081: a live Code Mode turn gets its one Escape while its tool runs past a prompt the turn's
-// context pushed out of the last 256 KiB, and while its reply row is half written inside a
-// character. Without a prompt row to read, the same live screen still gets none.
+// A live Code Mode turn gets its one Escape with its prompt past the last 256 KiB or its reply
+// row cut inside a character; without a prompt row to read, the same screen gets none.
 #[test]
 fn herdr_claude_code_mode_stop_reads_a_running_or_generating_turn() {
     let live =

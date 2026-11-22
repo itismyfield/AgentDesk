@@ -425,7 +425,7 @@ fn code_mode_turn(context_bytes: usize) -> String {
     rows.iter().map(|row| format!("{row}\n")).collect()
 }
 
-// #8081: a Code Mode turn whose context pushed its prompt out of the last 256 KiB, and one whose
+// A Code Mode turn whose context pushed its prompt out of the last 256 KiB, and one whose
 // reply row is half written inside a character, still yield that prompt's turn.
 #[test]
 fn claude_stop_identity_reads_a_code_mode_turn_running_or_generating() {
