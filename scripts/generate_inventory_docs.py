@@ -136,6 +136,8 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
+    "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
+    "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
     "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
     "test_support/": "Test runtime that holds fixture serialization for the whole async body.",

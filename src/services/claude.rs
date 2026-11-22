@@ -82,7 +82,7 @@ use crate::services::{
 };
 
 #[cfg(unix)]
-const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+pub(crate) const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -1892,7 +1892,7 @@ pub(crate) fn tmux_tui_turn_for_tests(
 }
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-fn run_claude_tui_fresh_turn_and_finalize(
+pub(crate) fn run_claude_tui_fresh_turn_and_finalize(
     transcript_path: &std::path::Path,
     transcript_path_string: &str,
     sender: Sender<StreamMessage>,
@@ -4099,7 +4099,3 @@ mod claude_tui_session_resolution_tests {
         }
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "claude_tui/hosting/fresh_hold_tests.rs"]
-mod fresh_hold_tests;

@@ -1,16 +1,24 @@
-use super::tests::NONCE;
-use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::claude::herdr_turn::Attached;
+use crate::services::claude::herdr_turn::first_input::*;
+use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::discord::{
     owner_drive_for_test as drive, owner_effect_for_test as effect,
     owner_held_watch_for_test as held_watch,
 };
+use crate::services::krx_claude_tests::claude_herdr_first_input::NONCE;
+use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
+use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe, binding_context, binding_events as events,
 };
 use serde_json::{Value, json};
 use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 struct Source {
     context: binding_context::BindingContext,
@@ -180,7 +188,9 @@ fn run(case: Case) {
     let old_binding = dedupe::runtime_binding_for_tmux_session(logical)
         .unwrap()
         .output_path;
-    let (_, target) = super::tests::bound_target(&rig, logical, channel);
+    let (_, target) = crate::services::krx_claude_tests::claude_herdr_first_input::bound_target(
+        &rig, logical, channel,
+    );
     let attached = source.attached(target.clone());
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));

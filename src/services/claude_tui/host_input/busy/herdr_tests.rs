@@ -1,17 +1,23 @@
 //! Direct source, ownership and captured-target contracts on the existing typed Herdr rig.
-use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedObservation, HostedOwner, HostedRecord, HostedState,
     SourceRef,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::claude_tui::busy_inject::Screen;
+use crate::services::claude_tui::host_input::busy::BusyState;
+use crate::services::claude_tui::host_input::busy::herdr::*;
 use crate::services::discord::observe_owned_claude_busy_for_test as observe_busy;
 use crate::services::herdr_admission::{Admission, force_for_test};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
+use crate::services::session_host::HerdrMutation;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::tui_o::cutover::{self, test_override};
+use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 use crate::services::tui_prompt_dedupe::hosted_source::tests::{
     CHANNEL, Fixture as BindingFixture, LOGICAL, N1, N2,
 };
+use crate::services::tui_prompt_dedupe::{self, binding_events};
 use crate::services::turn_host::HerdrTurnPlan;
 use binding_events::{BindingCause, CauseSource, HookSignal, Proposal};
 use serde_json::json;

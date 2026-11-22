@@ -1,4 +1,7 @@
-use super::*;
+use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+use crate::services::codex::herdr_turn::*;
+use crate::services::herdr_launch::HerdrLaunchEndpoint;
+use std::path::Path;
 
 /// Ports that launch nothing; `0` is the effort resume the channel's owner holds.
 pub(super) struct Owed(pub(super) Option<restart_intent::EffortResume>);
@@ -91,11 +94,16 @@ async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector()
 
 #[cfg(unix)]
 mod greeting {
-    use super::super::*;
-    use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, SourceRef};
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedExecution, HostedOwner, HostedRecord, HostedState, SourceRef,
+    };
+    use crate::services::codex::herdr_turn::*;
+    use crate::services::herdr_launch::{HerdrLaunch, HerdrLaunchEndpoint};
     use crate::services::tui_o::store::spool::Cursor;
+    use crate::services::tui_prompt_dedupe::binding_events::SourceId;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
     use std::path::PathBuf;
 
     const CHANNEL: u64 = 8_128_002;

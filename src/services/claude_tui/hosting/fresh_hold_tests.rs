@@ -1,7 +1,9 @@
-use super::*;
+use crate::services::claude::*;
 use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
 use crate::services::claude_tui::input::submission::tests::{frame_renderer as renderer, screen};
+use crate::services::provider::CancelToken;
+use crate::services::provider_teardown::TeardownClearance;
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 
 #[test]

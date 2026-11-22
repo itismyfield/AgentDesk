@@ -7,8 +7,6 @@ pub(crate) mod busy;
 mod first_input;
 #[cfg(unix)]
 pub(crate) mod restart_intent;
-#[cfg(test)]
-mod restart_resume_tests;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -203,7 +201,7 @@ fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
         .with_cwd(Some(turn.working_dir))
 }
 
-fn launch_of(
+pub(crate) fn launch_of(
     turn: &CodexHerdrTurn<'_>,
     provider_root: Option<&Path>,
     ports: &dyn CodexHerdrPorts,
