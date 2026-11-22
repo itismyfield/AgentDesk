@@ -9,3 +9,10 @@ pub(crate) fn relay_allowed_mentions() -> CreateAllowedMentions {
         .everyone(false)
         .all_roles(false)
 }
+
+pub(crate) fn relay_message_payload(content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": content,
+        "allowed_mentions": relay_allowed_mentions(),
+    })
+}

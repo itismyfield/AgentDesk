@@ -49,7 +49,7 @@ pub(in crate::services::discord) use native_stop_pin::{
 };
 pub(crate) mod read_only_owner_snapshot;
 mod runtime_view;
-pub(crate) use runtime_view::install_codex_absence_reader;
+pub(crate) use runtime_view::{install_codex_absence_reader, install_engine_probes};
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
 pub(in crate::services::discord) use terminal_receipt_stamp::stamp_terminal_receipt_if_matches_identity;

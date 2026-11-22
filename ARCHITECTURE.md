@@ -169,6 +169,7 @@ src/
 │   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
+│   ├── channel_alias.rs
 │   ├── cluster_role.rs
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
@@ -3933,6 +3934,7 @@ src/
 │   │   ├── outbox_route.rs
 │   │   ├── result_header.rs
 │   │   ├── routing_constraint.rs
+│   │   ├── thread_archive_defer.rs
 │   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
 │   ├── engine_runtime/
