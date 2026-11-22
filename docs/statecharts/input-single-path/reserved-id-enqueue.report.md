@@ -60,7 +60,7 @@ are omitted: `foreign_row.rs:90`, `catch_up.rs:631`, `queue_effects.rs:320` and
 | `discord/catch_up/phase1_sweep.rs:689`, `phase2_sweep.rs:458` | Replay through the catch-up API. |
 | `discord/catch_up/api.rs:95` | Replay with the classifying snapshot's claim observation. |
 | `discord/health/turn_deliver.rs:373` | Ordinary receipt through the shared adapter. |
-| `discord/queue_exit.rs:314` | Replay of the same original id for internal history recovery. |
+| `discord/queue_exit.rs:295` | Replay of the same original id for internal history recovery. |
 | `discord/router/intake_dispatch.rs:930` | Deferred live input, including absorbed sources; refusal leaves checkpoint unread. |
 | `discord/router/intake_gate/queue_effects.rs:121` | Replay of a soft intake input. |
 | `discord/router/message_handler/intake_turn/race_loss.rs:51,62` | Ordinary receipt; refusal no longer abandons the pending owner. |

@@ -529,7 +529,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/mailbox_ops.rs:45` | `cleanup_retry_inflight_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_ops.rs:118` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_ops.rs:124` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_exit.rs:348` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_exit.rs:329` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_ops.rs:268` | `maybe_schedule_catch_up_retry_after_queue_drain` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_ops.rs:295` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_ops.rs:337` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
