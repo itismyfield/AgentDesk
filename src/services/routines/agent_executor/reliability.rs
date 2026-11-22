@@ -439,6 +439,7 @@ mod tests {
         use crate::db::dispatched_sessions::hosted_execution::tests::{
             TOKEN, owner, pending, wire,
         };
+        use crate::services::discord::health::HealthRegistry;
         use crate::services::discord::host_key_derivation::tests::seed_row;
         use crate::services::platform::tmux::PaneLiveness;
         use crate::services::tmux_diagnostics::PaneLivenessOverrideGuard;

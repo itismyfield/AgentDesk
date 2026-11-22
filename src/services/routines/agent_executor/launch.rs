@@ -65,15 +65,15 @@ impl RoutineAgentExecutor {
                 channel_id,
                 None,
                 bot,
-                reserve_headless_agent_turn(channel_id),
+                registry.reserve_headless_agent_turn(channel_id),
             )
         } else if let Some(dm_user_id_num) = dm_user_id_num {
-            let (dm_channel_id, reservation) =
-                reserve_headless_agent_turn_in_dm(registry, channel_id, dm_user_id_num, &provider)
-                    .await
-                    .map_err(|error| {
-                        start_deferral::dm_reservation_error(agent_id, dm_user_id_num, error)
-                    })?;
+            let (dm_channel_id, reservation) = registry
+                .reserve_headless_agent_turn_in_dm(channel_id, dm_user_id_num, &provider)
+                .await
+                .map_err(|error| {
+                    start_deferral::dm_reservation_error(agent_id, dm_user_id_num, error)
+                })?;
             (dm_channel_id, None, "dm".to_string(), reservation)
         } else {
             let routine_channel = self
@@ -114,7 +114,7 @@ impl RoutineAgentExecutor {
                 turn_channel_id,
                 discord_thread_id,
                 delivery_bot,
-                reserve_headless_agent_turn(turn_channel_id),
+                registry.reserve_headless_agent_turn(turn_channel_id),
             )
         };
         let turn_id = reservation.turn_id().to_string();
@@ -197,35 +197,35 @@ impl RoutineAgentExecutor {
         }
 
         let outcome = if let Some(dm_user_id_num) = dm_user_id_num {
-            start_reserved_headless_agent_turn_in_dm(
-                registry,
-                channel_id,
-                turn_channel_id,
-                dm_user_id_num,
-                provider.clone(),
-                prompt.to_string(),
-                Some("routine".to_string()),
+            let start = HeadlessDmTurnStart {
+                owner_channel_id: channel_id,
+                dm_channel_id: turn_channel_id,
+                dm_user_id: dm_user_id_num,
+                owner_provider: provider.clone(),
+                prompt: prompt.to_string(),
+                source: Some("routine".to_string()),
                 metadata,
                 tmux_session_label,
-                reservation,
-            )
-            .await
+            };
+            registry
+                .start_reserved_headless_agent_turn_in_dm(start, reservation)
+                .await
         } else {
             // The selected provider channel resolves the workspace; the synthetic label
             // keeps this routine's session separate.
-            start_reserved_headless_agent_turn_with_owner_channel(
-                registry,
-                channel_id,
+            let start = HeadlessTurnStart {
+                owner_channel_id: channel_id,
                 turn_channel_id,
-                provider.clone(),
-                prompt.to_string(),
-                Some("routine".to_string()),
+                owner_provider: provider.clone(),
+                prompt: prompt.to_string(),
+                source: Some("routine".to_string()),
                 metadata,
                 channel_name_hint,
                 tmux_session_label,
-                reservation,
-            )
-            .await
+            };
+            registry
+                .start_reserved_headless_agent_turn_with_owner_channel(start, reservation)
+                .await
         }
         .map_err(|error| start_deferral::headless_start_error(agent_id, error))?;
 

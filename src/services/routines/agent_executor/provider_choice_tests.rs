@@ -3,7 +3,7 @@
 use super::owner_input_tests::{OWNER, settled_generation};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::register_bot_auth_for_tests;
+use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 use crate::services::routines::provider_choice::ProviderChoice;
 use crate::services::routines::store::{NewRoutine, RoutinePatch};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};

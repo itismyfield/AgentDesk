@@ -2,7 +2,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 use std::sync::{Mutex, Weak};
 
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::AppHealthRegistry;
 
 // ── Global registry handle ─────────────────────────────────────────────────
 //
@@ -15,17 +15,17 @@ use crate::services::discord::health::HealthRegistry;
 // If it's gone (standalone mode / unit tests without Discord), the host fn
 // returns `{ok:false, error:"Discord not available"}` without panicking.
 
-static GLOBAL_HEALTH_REGISTRY: Mutex<Option<Weak<HealthRegistry>>> = Mutex::new(None);
+static GLOBAL_HEALTH_REGISTRY: Mutex<Option<Weak<AppHealthRegistry>>> = Mutex::new(None);
 
 /// Called once from dcserver setup (after both the engine and the registry
 /// exist) to wire the JS bridge to the live registry.
-pub fn set_global_health_registry(registry: &std::sync::Arc<HealthRegistry>) {
+pub fn set_global_health_registry(registry: &std::sync::Arc<AppHealthRegistry>) {
     if let Ok(mut slot) = GLOBAL_HEALTH_REGISTRY.lock() {
         *slot = Some(std::sync::Arc::downgrade(registry));
     }
 }
 
-pub(crate) fn health_registry() -> Option<std::sync::Arc<HealthRegistry>> {
+pub(crate) fn health_registry() -> Option<std::sync::Arc<AppHealthRegistry>> {
     GLOBAL_HEALTH_REGISTRY
         .lock()
         .ok()?

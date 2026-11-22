@@ -819,7 +819,7 @@ host_parity:
     herdr: 현행 자동 reset 및 legacy repair의 hosted 보호·거절
     verdict: 다름
     owner: '#8128 R2c는 R2a 결과와 기존 조건부 SQL 및 exact 실행 fence를 소비. 다음 run으로 재할당된 slot은 보존'
-    evidence: '`src/services/auto_queue/runtime.rs:177–193,346,472`, `src/services/discord/admin_host_guard.rs:207–228`,
+    evidence: '`src/services/auto_queue/runtime.rs:177–193,349,475`, `src/services/discord/admin_host_guard.rs:207–228`,
       `src/services/routines/session_control.rs:103–117`, `src/services/discord/health/recovery.rs:242`, `src/server/routes/domains/runtime.rs:42,87,112`,
       `src/server/routes/health_api/session_repair.rs:17,76,111`'
   - feature_id: reset-clear

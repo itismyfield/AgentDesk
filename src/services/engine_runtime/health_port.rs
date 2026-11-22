@@ -21,10 +21,20 @@ pub use turn_stop::{
 };
 pub(crate) use turn_stop::{PendingQueueView, TurnStopJudgement, TurnStopPort};
 
+mod app_health;
 mod headless_turn;
 mod queue_cancel;
+mod resume_runtime;
+mod routine_process;
+mod slot_reset;
 mod stale_sweep;
-pub(crate) use headless_turn::{HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart};
+pub use app_health::{AppHealth, AppHealthBinding, AppHealthRegistry};
+pub(crate) use headless_turn::{
+    HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart,
+};
 pub use queue_cancel::FinishCancelledMailboxResult;
 pub(crate) use queue_cancel::QueueCancelPort;
+pub(crate) use resume_runtime::ResumeRuntimePort;
+pub(crate) use routine_process::RoutineProcessPort;
+pub(crate) use slot_reset::SlotResetPort;
 pub(crate) use stale_sweep::{StaleSweepPort, stale_sweep_port};

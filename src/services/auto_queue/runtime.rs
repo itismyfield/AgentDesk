@@ -7,9 +7,9 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::admin_host_guard::ManagedResetVerdict;
-use crate::services::discord::host_teardown_gate::row_host_refusal;
-use crate::services::engine_runtime::health_port::ManagedResetPort;
+use crate::services::engine_runtime::health_port::{
+    AppHealthRegistry, ManagedResetPort, SlotResetPort,
+};
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
 
@@ -201,6 +201,9 @@ async fn clear_slot_sessions_with_owner_pg(
     .map(|result| result.rows_affected() as usize)
     .map_err(|error| format!("clear postgres slot sessions for {thread_count} thread(s): {error}"))
 }
+
+/// The managed-reset verdict of the registry the application carries.
+type ManagedResetVerdict = <AppHealthRegistry as SlotResetPort>::Verdict;
 
 /// The one runtime capability a slot clear takes from the health registry: a reset verdict.
 pub(crate) type SlotRuntimeHealth = Arc<dyn ManagedResetPort<ManagedResetVerdict>>;
@@ -515,7 +518,8 @@ async fn filter_safe_slot_thread_reset_targets(
             }
             _ => None,
         };
-        if let Some(reason) = verdict.as_ref().and_then(ManagedResetVerdict::refusal) {
+        let refusal = <AppHealthRegistry as SlotResetPort>::verdict_refusal;
+        if let Some(reason) = verdict.as_ref().and_then(refusal) {
             tracing::warn!(
                 "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
             );
@@ -582,6 +586,7 @@ async fn slot_thread_host_refusal(
             return Some(format!("`{key}` names no tmux session"));
         };
         let (provider, caller) = (provider.as_deref(), "auto_queue_slot_reset");
+        let row_host_refusal = <AppHealthRegistry as SlotResetPort>::row_host_refusal;
         let refused = row_host_refusal(pool, provider, Some(thread_id), &key, &name, caller).await;
         if refused.is_some() {
             return refused;

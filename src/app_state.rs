@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::engine::PolicyEngine;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::AppHealthRegistry;
 
 /// Shared application state passed to all route handlers.
 #[derive(Clone)]
@@ -20,7 +20,7 @@ pub struct AppState {
     pub config: Arc<crate::config::Config>,
     pub broadcast_tx: crate::eventbus::BroadcastTx,
     pub batch_buffer: crate::eventbus::BatchBuffer,
-    pub health_registry: Option<Arc<HealthRegistry>>,
+    pub health_registry: Option<Arc<AppHealthRegistry>>,
     pub cluster_instance_id: Option<String>,
 }
 
