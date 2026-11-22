@@ -45,3 +45,13 @@ impl AppState {
         crate::services::settings::SettingsService::new(self.pg_pool.clone(), self.config.clone())
     }
 }
+
+impl From<&AppState> for crate::services::session_forwarding::ForwardCallerContext {
+    fn from(state: &AppState) -> Self {
+        Self {
+            pg_pool: state.pg_pool.clone(),
+            config: state.config.clone(),
+            cluster_instance_id: state.cluster_instance_id.clone(),
+        }
+    }
+}

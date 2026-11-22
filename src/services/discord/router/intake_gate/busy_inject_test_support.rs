@@ -1,13 +1,18 @@
 //! Test seams for the Discord injection hook: a per-channel gate, and what each message met.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
 use super::InjectAttempt;
 
-static OPEN: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+enum GateFixture {
+    Platform,
+    WithFlock,
+}
+
+static OPEN: Mutex<Option<HashMap<u64, GateFixture>>> = Mutex::new(None);
 /// Per message: hook entries past the gate, promotion answers and attempt results.
 static SEEN: Mutex<Option<HashMap<u64, Seen>>> = Mutex::new(None);
 type Park = (Arc<Notify>, Arc<Notify>);
@@ -26,19 +31,31 @@ pub(crate) struct OpenGate(u64);
 impl Drop for OpenGate {
     fn drop(&mut self) {
         let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-        open.get_or_insert_with(HashSet::new).remove(&self.0);
+        open.get_or_insert_with(HashMap::new).remove(&self.0);
     }
 }
 
 pub(crate) fn open_gate(channel: u64) -> OpenGate {
+    open_gate_with(channel, GateFixture::Platform)
+}
+
+/// Stubs flock support for a gate decision on this fixture channel.
+pub(super) fn open_gate_with_flock(channel: u64) -> OpenGate {
+    open_gate_with(channel, GateFixture::WithFlock)
+}
+
+fn open_gate_with(channel: u64, fixture: GateFixture) -> OpenGate {
     let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    open.get_or_insert_with(HashSet::new).insert(channel);
+    open.get_or_insert_with(HashMap::new)
+        .insert(channel, fixture);
     OpenGate(channel)
 }
 
-pub(super) fn gate_open(channel: u64) -> bool {
+pub(super) fn gate_open(channel: u64, platform_has_flock: bool) -> bool {
     let open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    open.as_ref().is_some_and(|open| open.contains(&channel))
+    open.as_ref()
+        .and_then(|open| open.get(&channel))
+        .is_some_and(|fixture| platform_has_flock || matches!(fixture, GateFixture::WithFlock))
 }
 
 fn record(message: u64, note: impl FnOnce(&mut Seen)) {

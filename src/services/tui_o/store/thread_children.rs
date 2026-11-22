@@ -8,7 +8,9 @@ use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::session_host::surface_policy::InitScope;
 use crate::services::session_host::surface_policy::VerifiedSurface;
 
+mod child_store;
 mod lifecycle;
+pub(crate) use child_store::ChildStore;
 pub(crate) use lifecycle::ChildLifecycle;
 
 const FLOOR: &str = "thread_children.floor";

@@ -10,7 +10,6 @@ use std::pin::Pin;
 use serde_json::Value;
 
 use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::discord::settings::RoleBinding;
 use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
@@ -114,9 +113,9 @@ pub(crate) fn build_resolved_memory_backend(
     }
 }
 
-pub(crate) fn resolve_memory_role_id(role_binding: Option<&RoleBinding>) -> String {
-    role_binding
-        .map(|binding| binding.role_id.clone())
+pub(crate) fn resolve_memory_role_id(role_id: Option<&str>) -> String {
+    role_id
+        .map(|role_id| role_id.to_string())
         .unwrap_or_else(|| UNBOUND_MEMORY_ROLE_ID.to_string())
 }
 

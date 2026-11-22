@@ -219,7 +219,8 @@
         "E-7",
         "E-10",
         "E-21",
-        "E-37"
+        "E-37",
+        "E-68"
       ],
       "selection": "one_cell_per_occurrence",
       "host_policy": "yaml_cells_intersect_runtime_capabilities",
@@ -297,7 +298,7 @@
         "R-fresh",
         "R-host"
       ],
-      "expected_existing_live_scenarios": 38,
+      "expected_existing_live_scenarios": 39,
       "selection": "resolve_all_expected_occurrences_before_first_send",
       "measured": {
         "runs": 0,
@@ -830,6 +831,14 @@
     "E-64": {
       "path": "tests/e2e/tui_relay/scenarios/E-64-claude-local-control-exactly-once.yaml",
       "sha256": "2539a5e8a5c6d14ebf9cdbb5cafed981b391e17a12fa9ec1b3bd821b694df6c0",
+      "coverage_class": "live",
+      "cells": [
+        "claude-tui"
+      ]
+    },
+    "E-68": {
+      "path": "tests/e2e/tui_relay/scenarios/E-68-claude-tui-discord-during-terminal-turn.yaml",
+      "sha256": "7066dacbeb08d26355dfda4b9a3282f9bd37a5948a60251dfd31bb4587f77442",
       "coverage_class": "live",
       "cells": [
         "claude-tui"

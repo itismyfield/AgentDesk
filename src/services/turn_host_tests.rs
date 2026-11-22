@@ -254,3 +254,111 @@ async fn a_threads_final_judgement_is_recorded_for_its_synchronous_readers_pg() 
     pool.close().await;
     db.drop().await;
 }
+
+/// A Bound row of `CHANNEL`'s owner on `node`'s forced endpoint, as the turn host verifies it.
+pub(crate) fn bound_on_forced_endpoint(channel: u64, node: &str) -> Option<Value> {
+    let mut owner = owner(&channel.to_string());
+    owner.owner_node = node.into();
+    owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
+    let mut record = record(&owner, "nonce-bound", HostedState::Bound);
+    let location = record.location.as_mut().unwrap();
+    location.execution_node = node.into();
+    location.endpoint_config_key = format!("{node}-endpoint");
+    location.socket_addr = "/adk/herdr/agentdesk.sock".into();
+    location.named_session = "agentdesk".into();
+    Some(serde_json::to_value(record).unwrap())
+}
+
+/// Seeds `channel`'s own row under the shared test key.
+pub(crate) async fn seed_channel(pool: &PgPool, channel: u64, raw: Option<Value>) {
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, identity_kind,
+                               discord_token_hash, channel_id, hosted_execution)
+         VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)
+         ON CONFLICT (session_key) DO UPDATE SET hosted_execution = EXCLUDED.hosted_execution,
+                                                 channel_id = EXCLUDED.channel_id",
+    )
+    .bind(SESSION_KEY)
+    .bind(&owner(&channel.to_string()).discord_token_hash)
+    .bind(channel.to_string())
+    .bind(raw)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+// A thread's recorded execution follows the row the judgement verified: a refusal of this turn
+// alone keeps its live Bound pane, a refusal on the row forgets it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_refused_over_a_verified_bound_thread_keeps_its_recorded_pane_pg() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    use crate::services::session_host::thread_host::{Execution, current_execution_cached};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (parent, child) = (8_118_320, 8_118_321);
+    let _hosts = force_hosts(Some("test-node"), &[(parent, "test-node")]);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    let judge = || for_turn(Some(&pool), &ProviderKind::Claude, child, Some(SESSION_KEY));
+    seed_channel(&pool, child, bound_on_forced_endpoint(child, "test-node")).await;
+    // Whatever this turn's own gates answer, the verified pane is recorded.
+    let _open = force_admission(Admission::new(true, None));
+    let first = judge().await;
+    assert!(
+        matches!(
+            first,
+            TurnHost::Herdr(_)
+                | TurnHost::Refused(
+                    HerdrRefusal::OWriterNotReady | HerdrRefusal::AdmissionStopped { .. }
+                )
+        ),
+        "{first:?}"
+    );
+    assert!(matches!(
+        current_execution_cached(child),
+        Execution::Herdr(_)
+    ));
+    let _stopped = force_admission(Admission::new(false, None));
+    assert!(matches!(
+        refusal(judge().await),
+        HerdrRefusal::AdmissionStopped { .. }
+    ));
+    assert!(
+        matches!(current_execution_cached(child), Execution::Herdr(_)),
+        "an admission refusal does not end the pane"
+    );
+    seed_channel(&pool, child, Some(serde_json::json!({"schema": 99}))).await;
+    assert!(matches!(
+        refusal(judge().await),
+        HerdrRefusal::HostedRowUnreadable { .. } | HerdrRefusal::HostedHerdrUnconfigured { .. }
+    ));
+    assert_eq!(current_execution_cached(child), Execution::Unknown);
+    pool.close().await;
+    db.drop().await;
+}
+
+// The record table: verified evidence sets it, the row's own refusal or a return forgets it.
+#[test]
+fn the_recorded_execution_is_the_verified_evidence_not_the_turns_permission() {
+    let refused = |refusal| recorded_execution(&TurnHost::Refused(refusal));
+    assert_eq!(recorded_execution(&TurnHost::Tmux), Some(false));
+    for gate in [
+        HerdrRefusal::ProviderUnsupported {
+            provider: "codex".into(),
+        },
+        HerdrRefusal::EndpointNotLocal { node: "n".into() },
+        HerdrRefusal::AdmissionStopped {
+            cause: StopCause::Env,
+        },
+        HerdrRefusal::OWriterNotReady,
+        HerdrRefusal::ExecutorNotWired,
+    ] {
+        assert_eq!(refused(gate.clone()), Some(true), "{gate:?}");
+    }
+    for row in [
+        HerdrRefusal::HostedHerdrUnconfigured { state: None },
+        HerdrRefusal::HostedRowUnreadable { detail: "x".into() },
+    ] {
+        assert_eq!(refused(row.clone()), None, "{row:?}");
+    }
+}

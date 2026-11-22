@@ -9,7 +9,29 @@ use sqlx::PgPool;
 
 use super::SharedData;
 use crate::services::provider::ProviderKind;
-pub(crate) use crate::services::session_host::operation_policy::configured_refusal;
+use crate::services::session_host::host_decision::{HostDecision, host_decision};
+
+/// The host `channel`'s operation acts on now, read with this runtime's database and token.
+pub(crate) async fn host_decision_of(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> HostDecision {
+    let pool = shared.pg_pool.as_ref();
+    let token = Some(shared.token_hash.as_str());
+    host_decision(pool, token, Some(provider), channel_id).await
+}
+
+/// Why `channel`'s tmux session is left as it is: a Herdr host, or no host decided.
+pub(crate) async fn configured_refusal(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<String> {
+    host_decision_of(shared, provider, channel_id)
+        .await
+        .tmux_refusal()
+}
 
 /// Why a channel's session may not be changed or observed by its tmux name. A found legacy
 /// row, or no row yet with no marker or inflight trace of another host, keeps main's path.
@@ -102,7 +124,10 @@ pub(super) async fn managed_reset_refusal(
     let kills = reset_provider_state && provider.uses_managed_tmux_backend();
     if !(kills || recreate_tmux) {
         // A Herdr-configured channel keeps its provider state whatever the runtime's backend.
-        return reset_provider_state.then(|| configured_refusal(channel_id.get()))?;
+        if !reset_provider_state {
+            return None;
+        }
+        return configured_refusal(shared, provider, channel_id.get()).await;
     }
     let name = session_channel_name(shared, channel_id).await;
     let reason = reset_refusal(shared, provider, channel_id, explicit_session_key, name).await?;
@@ -132,7 +157,7 @@ async fn reset_refusal(
     {
         return Some(reason.to_owned());
     }
-    if let Some(reason) = configured_refusal(channel_id.get()) {
+    if let Some(reason) = configured_refusal(shared, provider, channel_id.get()).await {
         return Some(reason);
     }
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
@@ -333,11 +358,6 @@ pub(crate) async fn session_key_refusal(
     let channel = channel_id.filter(|id| *id != 0).map(ChannelId::new);
     let refusal = super::host_defer_gate::resume_host_refusal;
     refusal(pool, provider, channel, session_key, tmux_name).await
-}
-
-/// The marker-only check retained for cancel-token cleanup's separate teardown path.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    crate::services::session_host::operation_policy::marker_refusal(tmux_name)
 }
 
 /// [`session_key_refusal`] on a stored row's provider and channel columns.

@@ -67,6 +67,26 @@ impl Drop for Recorder {
     }
 }
 
+/// The production admission check; only the executor is stood in.
+pub(crate) const CHECKPOINT_WAITS: super::CheckpointWaits =
+    crate::services::discord::checkpoint_waits_for_admission;
+pub(crate) const PORT: super::IntakeTurnPort = super::IntakeTurnPort {
+    checkpoint_waits: CHECKPOINT_WAITS,
+    execute: boxed_execute,
+};
+
+fn boxed_execute<'a>(
+    http: &'a std::sync::Arc<serenity::http::Http>,
+    shared: &'a std::sync::Arc<crate::services::discord::SharedData>,
+    token: &'a str,
+    request: IntakeRequest,
+    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+) -> super::IntakeTurnFuture<'a> {
+    Box::pin(execute_intake_turn_core(
+        http, shared, token, request, uploads,
+    ))
+}
+
 /// Stands in for the executor while a `Recorder` lives, otherwise runs the real one.
 pub(crate) async fn execute_intake_turn_core(
     http: &std::sync::Arc<serenity::http::Http>,

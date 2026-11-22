@@ -1,0 +1,294 @@
+[
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "found an item that was configured out",
+    "spans": [
+     {
+      "byte_end": 792,
+      "byte_start": 788,
+      "column_end": 11,
+      "column_start": 7,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": false,
+      "label": "the item is gated here",
+      "line_end": 51,
+      "line_start": 51,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     },
+     {
+      "byte_end": 822,
+      "byte_start": 809,
+      "column_end": 28,
+      "column_start": 15,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 52,
+      "line_start": 52,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "cannot find function `fixture_value` in module `crate::core`",
+  "spans": [
+   {
+    "byte_end": 1040,
+    "byte_start": 1027,
+    "column_end": 60,
+    "column_start": 47,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "not found in `crate::core`",
+    "line_end": 41,
+    "line_start": 41,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0425"
+  },
+  "_test": true,
+  "_side": "upper"
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "`Widget` and `probe_lower::app::Widget` have similar names, but are actually distinct types",
+    "spans": []
+   },
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "`Widget` is defined in the current crate",
+    "spans": [
+     {
+      "byte_end": 69,
+      "byte_start": 45,
+      "column_end": 25,
+      "column_start": 1,
+      "file_name": "src/app.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 3,
+      "line_start": 3,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   },
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "`probe_lower::app::Widget` is defined in crate `probe_lower`",
+    "spans": [
+     {
+      "byte_end": 69,
+      "byte_start": 45,
+      "column_end": 25,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/app.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 3,
+      "line_start": 3,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   },
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "function defined here",
+    "spans": [
+     {
+      "byte_end": 727,
+      "byte_start": 722,
+      "column_end": 20,
+      "column_start": 15,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 47,
+      "line_start": 47,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "mismatched types",
+  "spans": [
+   {
+    "byte_end": 875,
+    "byte_start": 865,
+    "column_end": 40,
+    "column_start": 30,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "expected `probe_lower::app::Widget`, found `Widget`",
+    "line_end": 33,
+    "line_start": 33,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 864,
+    "byte_start": 846,
+    "column_end": 29,
+    "column_start": 11,
+    "file_name": "src/app.rs",
+    "is_primary": false,
+    "label": "arguments to this function are incorrect",
+    "line_end": 33,
+    "line_start": 33,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0308"
+  },
+  "_test": true,
+  "_side": "upper"
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "but type `Widget` is only usable at visibility `pub(crate)`",
+    "spans": [
+     {
+      "byte_end": 69,
+      "byte_start": 45,
+      "column_end": 25,
+      "column_start": 1,
+      "file_name": "src/app.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 3,
+      "line_start": 3,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "warning",
+  "message": "type `Widget` is more private than the item `greet`",
+  "spans": [
+   {
+    "byte_end": 700,
+    "byte_start": 652,
+    "column_end": 49,
+    "column_start": 1,
+    "file_name": "src/core.rs",
+    "is_primary": true,
+    "label": "function `greet` is reachable at visibility `pub`",
+    "line_end": 47,
+    "line_start": 47,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "private_interfaces"
+  },
+  "_test": true,
+  "_side": "lower"
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "define and implement a trait or new type instead",
+    "spans": []
+   }
+  ],
+  "level": "error",
+  "message": "cannot define inherent `impl` for a type outside of the crate where the type is defined",
+  "spans": [
+   {
+    "byte_end": 99,
+    "byte_start": 88,
+    "column_end": 12,
+    "column_start": 1,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "impl for type defined outside of crate",
+    "line_end": 5,
+    "line_start": 5,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0116"
+  },
+  "_test": true,
+  "_side": "upper"
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "method `doubled` is private",
+  "spans": [
+   {
+    "byte_end": 673,
+    "byte_start": 666,
+    "column_end": 25,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private method",
+    "line_end": 25,
+    "line_start": 25,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 141,
+    "byte_start": 106,
+    "column_end": 40,
+    "column_start": 5,
+    "file_name": "<PROBE>/lower/src/app.rs",
+    "is_primary": false,
+    "label": "private method defined here",
+    "line_end": 6,
+    "line_start": 6,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0624"
+  },
+  "_test": true,
+  "_side": "upper"
+ }
+]

@@ -1,5 +1,6 @@
 //! The claimed send's stage reports, on the task response that holds its send the longest.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,11 +8,12 @@ use tokio::sync::Semaphore;
 
 use super::claim_at_post_tests::owned;
 use super::*;
+use crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES;
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
 use crate::services::cluster::stream_relay::{self as relay, RelaySink, RelaySinkOutcome};
 use crate::services::tui_o::cutover::{legacy_sends_report, test_override};
-use crate::services::tui_o::store::{OStore, StoreConfig};
+use crate::services::tui_o::store::{OStore, STORE_DIR_NAME, StoreConfig};
 use crate::services::tui_o::writer::activation::activate_with;
 
 /// The gates of one delivery: before its post lands, its settlement, and its return.
@@ -96,15 +98,21 @@ async fn a_blocked_send_and_a_blocked_settlement_report_different_stages_and_ref
     let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap();
     assert!(candidate.defer(channel));
     let root = tempfile::tempdir().unwrap();
-    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path());
-    let store = store.unwrap().unwrap();
+    let store = if PARENT_DIR_FSYNC_FLUSHES {
+        OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+            .unwrap()
+            .unwrap()
+    } else {
+        // The handoff must refuse before writing to the store.
+        std::fs::create_dir(root.path().join(STORE_DIR_NAME)).unwrap();
+        OStore::existing(root.path()).unwrap()
+    };
     let handoff = || {
         let (facts, sources) = (Ok(Default::default()), || Ok(Vec::new()));
         activate_with(&store, channel, facts, || Ok(false), &candidate, sources)
     };
     let gates = gates();
     let owner = tokio::spawn(deliver(channel, gates.clone(), false));
-    let origin = concat!("oldest_open=seq=1,origin=", file!());
     for (gate, stage, shown) in [
         (0, "before_send", "sent=0 settled=0 finished=0"),
         (1, "sent_unsettled", "sent=1 settled=0 finished=0"),
@@ -113,7 +121,8 @@ async fn a_blocked_send_and_a_blocked_settlement_report_different_stages_and_ref
         let seen = report(channel, &format!("stage={stage}")).await;
         let refused = Err("Legacy body send in flight".to_string());
         assert_eq!(handoff(), refused, "a handoff during {stage}");
-        assert!(seen.contains(shown) && seen.contains(origin), "{seen}");
+        assert!(seen.contains(shown), "{seen}");
+        test_override::assert_first_open_send(&seen, Path::new(file!()), stage);
         gates[gate].add_permits(1);
     }
     assert_eq!(owner.await.unwrap(), Ok(()));

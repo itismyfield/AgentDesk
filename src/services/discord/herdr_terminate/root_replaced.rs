@@ -245,8 +245,11 @@ fn local(
         .ok_or("channel unavailable")?;
     let node = crate::config::session_hosts::local_node().ok_or("local node unavailable")?;
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
-    let endpoint =
-        crate::config::session_hosts::herdr_endpoint(channel).ok_or("endpoint unavailable")?;
+    // A thread's execution is compared with its parent's endpoint, where it runs.
+    use crate::services::session_host::thread_host::{PolicyHost, parent_policy};
+    let PolicyHost::Herdr { endpoint, .. } = parent_policy(channel) else {
+        return Err("endpoint unavailable".into());
+    };
     if owner.discord_token_hash != shared.token_hash
         || owner.owner_node != node
         || owner.runtime_root != root.display().to_string()

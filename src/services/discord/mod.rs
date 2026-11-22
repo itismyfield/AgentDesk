@@ -39,6 +39,7 @@ mod id_bridge;
 mod idle_detector;
 mod idle_relay_drift;
 mod inflight;
+pub(crate) use inflight::install_codex_absence_reader;
 #[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
@@ -196,8 +197,6 @@ pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 #[cfg(test)]
 pub(crate) use tui_prompt_relay::INPUT_NOTICE_RUNS;
-#[cfg(unix)]
-pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 pub(crate) use tui_prompt_relay::{
@@ -319,9 +318,11 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .0
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
+#[cfg(all(test, unix))]
+pub(crate) use router::TurnKind;
 pub(crate) use router::{
     HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
-    IntakeRequest, TurnKind, checkpoint_waits_for_admission, execute_intake_turn_core,
+    IntakeRequest, checkpoint_waits_for_admission, execute_intake_turn_core,
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
@@ -358,10 +359,8 @@ use adk_session::{
     build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
     parse_dispatch_id,
 };
+pub(in crate::services) use compact_turn_authority::ManagedCompactTurnIdentity;
 use compact_turn_authority::compact_eligible_turn_source;
-pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, pending_managed_turn_matches,
-};
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
 #[cfg(test)]

@@ -42,74 +42,86 @@ fn text(cause: &str) -> String {
     crate::services::discord::session_notice::subtext("⚠️", &format!("{body} (사유: {cause})"))
 }
 
-impl OperatorNotice {
-    /// Moves this fault's episode to `cause` and returns where its notice stands. The runtime
-    /// supervising the channel posts it; with none the notice stays pending and counts as unsent.
-    pub(crate) async fn observe(&self, cause: Option<&'static str>) -> &'static str {
-        let channel = self.channel;
-        #[cfg(test)]
-        if let Some(send) = tests::sender() {
-            return self
-                .observe_with(cause, move |text| std::future::ready(send(channel, text)))
-                .await;
-        }
-        let poster = lock(&POSTERS)
-            .iter()
-            .filter_map(Weak::upgrade)
-            .find(|poster| super::super::observes(&poster.provider, channel));
-        match poster {
-            Some(poster) => {
-                let send = move |text| async move {
-                    super::super::Effects::notice(&*poster, channel, text).await
-                };
-                self.observe_with(cause, send).await
-            }
-            // A recovery still ends the episode; only a post needs a poster.
-            None if cause.is_none() => {
-                self.observe_with(None, |_| async { Err("no poster".to_string()) })
-                    .await
-            }
-            None => "pending",
-        }
+/// Moves this fault's episode to `cause` and returns where its notice stands. The runtime
+/// supervising the channel posts it; with none the notice stays pending and counts as unsent.
+pub(crate) async fn observe(notice: &OperatorNotice, cause: Option<&'static str>) -> &'static str {
+    let channel = notice.channel;
+    #[cfg(test)]
+    if let Some(send) = tests::sender() {
+        return observe_with(notice, cause, move |text| {
+            std::future::ready(send(channel, text))
+        })
+        .await;
     }
+    let poster = lock(&POSTERS)
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|poster| super::super::observes(&poster.provider, channel));
+    match poster {
+        Some(poster) => {
+            let send = move |text| async move {
+                super::super::Effects::notice(&*poster, channel, text).await
+            };
+            observe_with(notice, cause, send).await
+        }
+        // A recovery still ends the episode; only a post needs a poster.
+        None if cause.is_none() => {
+            observe_with(notice, None, |_| async { Err("no poster".to_string()) }).await
+        }
+        None => "pending",
+    }
+}
 
-    async fn observe_with<F, Fut>(&self, cause: Option<&'static str>, send: F) -> &'static str
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = Result<(), String>>,
-    {
-        let scope = Scope {
-            root: self
-                .root
-                .clone()
-                .or_else(crate::services::discord::runtime_store::runtime_root),
-            provider: HERDR_CONFIG.into(),
-            token_hash: self.fault.clone(),
-            channel: self.channel,
-        };
-        let owner = lock(&OPERATOR)
-            .entry(scope.clone())
-            .or_insert_with(|| Owner::get(scope))
-            .clone();
-        let observed = cause.map(|reason| NoticeObservation {
-            identity: ExecutionIdentity::Unresolved,
-            target_label: None,
-            reason,
-            hold_leaf: None,
-            progress: false,
-        });
-        if owner.observe(observed, true, None, Instant::now()) {
-            owner.drive(move |reason| send(text(&reason))).await;
-        }
-        let state = lock(&owner.state);
-        if state.key.is_none() {
-            "none"
-        } else {
-            state.notice_state()
-        }
+/// `observe` as the managed-config upkeep's notice port, which cannot name this crate layer.
+pub(crate) fn observe_boxed<'a>(
+    notice: &'a OperatorNotice,
+    cause: Option<&'static str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = &'static str> + Send + 'a>> {
+    Box::pin(observe(notice, cause))
+}
+
+async fn observe_with<F, Fut>(
+    notice: &OperatorNotice,
+    cause: Option<&'static str>,
+    send: F,
+) -> &'static str
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let scope = Scope {
+        root: notice
+            .root
+            .clone()
+            .or_else(crate::services::discord::runtime_store::runtime_root),
+        provider: HERDR_CONFIG.into(),
+        token_hash: notice.fault.clone(),
+        channel: notice.channel,
+    };
+    let owner = lock(&OPERATOR)
+        .entry(scope.clone())
+        .or_insert_with(|| Owner::get(scope))
+        .clone();
+    let observed = cause.map(|reason| NoticeObservation {
+        identity: ExecutionIdentity::Unresolved,
+        target_label: None,
+        reason,
+        hold_leaf: None,
+        progress: false,
+    });
+    if owner.observe(observed, true, None, Instant::now()) {
+        owner.drive(move |reason| send(text(&reason))).await;
+    }
+    let state = lock(&owner.state);
+    if state.key.is_none() {
+        "none"
+    } else {
+        state.notice_state()
     }
 }
 
 #[cfg(test)]
 #[path = "operator_notice_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::{restart_for_test, send_on_this_thread};

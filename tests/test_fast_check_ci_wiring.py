@@ -68,6 +68,9 @@ MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 SCCACHE_ACTION = Path(".github/actions/sccache-or-nothing/action.yml")
+PR_NEXTEST_SETUP = Path(".github/actions/pr-nextest-setup/action.yml")
+PR_NEXTEST_WIRING = "scripts/ci/pr_nextest_wiring.rb"
+PR_NEXTEST_WORKER = "scripts/ci/nextest-pr-worker.sh"
 RUNNER_MEMORY_OBSERVER_NAMES = {
     "Start runner memory sampler", "Begin runner memory step",
     "End runner memory step", "Summarize runner memory", "Upload runner memory",
@@ -95,6 +98,10 @@ def step_block(job: str, step_name: str) -> str:
         job, match.end()
     )
     return job[match.start() : next_step.start() if next_step else len(job)]
+
+
+def replace_job_if(job: str, condition: str) -> str:
+    return re.sub(r"(?m)^    if: .*\n(?:^      .*\n)*", f"    if: {condition}\n", job, count=1)
 
 
 _STEP_IF_TOKEN = re.compile(
@@ -270,6 +277,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 for output in ("true", "false", ""):
                     context = {name: output for name in re.findall(r"needs\.changes\.outputs\.\w+", condition)}
                     context.update({"cancelled()": cancelled, "needs.rust_build.result": "success",
+                                    "needs.rust_build.outputs.scope_workers": "[0]", "needs.rust_scope.result": "success",
                                     "github.event.pull_request.draft": True})
                     self.assertFalse(eval_step_if(condition, context), job_id)
                     context["github.event.pull_request.draft"] = False
@@ -404,19 +412,20 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("rust_build", "          python3 scripts/ci/nextest_ci.py selector-audit --plan \"$NEXTEST_DIR/plan/plan.json\"\n", "", "exact cargo/test command list"),
             ("rust_build", "python3 scripts/ci/rust_test_sources.py compare --platform linux", "true", "exact cargo/test command list"),
             ("rust_build", "          name: nextest-plan\n", "          name: nextest-plan-copy\n", "artifact uploads"),
-            ("rust_tests", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}", "if: success()", "required needs closure"),
-            ("rust_tests", " --profile ci --no-tests fail", " --profile ci", "exact cargo/test command list"),
-            ("rust_tests", "fail-fast: false", "fail-fast: true", "matrix"),
-            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "matrix"),
+            ("rust_scope", " && needs.rust_build.outputs.scope_workers != '[]'", "", "required needs closure"),
+            ("rust_tests", "needs.rust_scope.result == 'success' ||", "always() ||", "required needs closure"),
+            ("rust_scope", "nextest-pr-worker.sh ${{ matrix.worker }} scope", "nextest-pr-worker.sh ${{ matrix.worker }}", "exact cargo/test command list"),
+            ("rust_scope", "fail-fast: false", "fail-fast: true", "matrix"),
+            ("rust_tests", "worker: ${{ fromJSON(needs.rust_build.outputs.full_workers) }}", "worker: [0, 1, 2, 3, 4]", "matrix"),
             ("rust_tests", "-attempt-${{ github.run_attempt }}", "", "artifact uploads"),
             ("test_evidence", "python3 scripts/ci/nextest_ci.py collect-results", "python3 scripts/ci/nextest_ci.py --help", "exact cargo/test command list"),
-            ("test_evidence", "    needs: [changes, rust_build, rust_tests]\n", "    needs: [changes, rust_build]\n", "exact needs"),
+            ("test_evidence", "    needs: [changes, rust_build, rust_scope, rust_tests]\n", "    needs: [changes, rust_build, rust_tests]\n", "exact needs"),
             ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
             ("base_compare", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
             ("base_compare", step_block(job_block(workflow, "base_compare"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
             ("base_compare", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}", "if: ${{ !github.event.pull_request.draft && needs.rust_build.result == 'success' }}", "required needs closure"),
             # The workers start at the plan upload; waiting for the base comparison again is red.
-            ("rust_tests", "    needs: [changes, rust_build]\n", "    needs: [changes, rust_build, base_compare]\n", "exact needs"),
+            ("rust_scope", "    needs: [changes, rust_build]\n", "    needs: [changes, rust_build, base_compare]\n", "exact needs"),
             ("rust_build", "--retry-mode all-once", "--retry-mode policy", "exact cargo/test command list"),
             # Without CI Main's JUnit times the plan silently splits by test count again.
             ("rust_build", ' "${timings[@]}"\n', "\n", "exact cargo/test command list"),
@@ -428,18 +437,24 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 changed = original.replace(old, new, 1)
                 self.assertNotEqual(changed, original)
                 mutated = workflow.replace(original, changed, 1)
-                gate = self._repin_job_hash(hardening, mutated, job_id)
-                result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
+                result = self._run_hardening_with_repinned_pr_nextest_job(hardening, mutated, job_id)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
-        # Main runs the PR's N: any drift from the PR jobs, or a lost or shortened baseline, is red.
+        worker = (REPO_ROOT / PR_NEXTEST_WORKER).read_text(encoding="utf-8")
+        changed_worker = worker.replace(" --profile ci --no-tests fail", " --profile ci", 1)
+        self.assertNotEqual(worker, changed_worker)
+        result = self.run_hardening_fixture(workflow, extra_files={PR_NEXTEST_WORKER: changed_worker})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"{PR_NEXTEST_WORKER} content hash mismatch", result.stderr)
+
+        # Main pins its full sweep and keeps the baseline available to the PR comparison job.
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
         main_mutants = (
-            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "main rust_tests must equal the PR job"),
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "main rust_tests must retain the full sweep job"),
             ("test_evidence", "    needs: [rust_build, rust_tests]\n", "    needs: rust_build\n", "main test_evidence must keep needs"),
             ("rust_build", "          retention-days: 14\n", "          retention-days: 3\n", "nextest-baseline for 14 days"),
             ("rust_build", "          name: nextest-baseline\n", "          name: nextest-plan-copy\n", "nextest-baseline for 14 days"),
-            ("rust_build", "--retry-mode all-once", "--retry-mode policy", "main rust_build must equal the PR job"),
+            ("rust_build", "--retry-mode all-once", "--retry-mode policy", "main rust_build must retain the full sweep job"),
         )
         for job_id, old, new, reason in main_mutants:
             with self.subTest(main_job=job_id, mutation=old):
@@ -1365,10 +1380,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_needs_closure_rejects_fail_open_mutations(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mutations = []
-        for job_id in ("rust_build", "base_compare", "rust_tests", "test_evidence", "pg15_owner_proof",
+        for job_id in ("rust_build", "base_compare", "rust_scope", "rust_tests", "test_evidence", "pg15_owner_proof",
                        "relay_authority_mutations", "lint", "dashboard", "check_fast_cross_os_targets"):
             runner = job_block(workflow, job_id)
-            mutations.append((job_id, runner, re.sub(r"(?m)^    if: .*\n", "    if: always()\n", runner, count=1)))
+            mutations.append((job_id, runner, replace_job_if(runner, "always()")))
             mutations.append((job_id, runner, runner.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1)))
         for job_id, original, changed in mutations:
             with self.subTest(job=job_id, mutation=changed.splitlines()[2:4]):
@@ -1413,12 +1428,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
-        n_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}"
+        built = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success'"
+        n_gate = built + " }}"
         rust_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
         cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
             "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_census": MIRROR_IF, "scripts_contracts": MIRROR_IF,
-            "rust_build": rust_gate, "pg15_owner_proof": n_gate, "base_compare": n_gate, "rust_tests": n_gate, "test_evidence": n_gate,
+            "rust_build": rust_gate, "pg15_owner_proof": n_gate, "base_compare": n_gate, "test_evidence": MIRROR_IF,
+            "rust_scope": built + " && needs.rust_build.outputs.scope_workers != '[]' }}",
+            "rust_tests": (built + " && (needs.rust_scope.result == 'success' || "
+                           "(needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]')) }}"),
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}",
             "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
@@ -1435,14 +1454,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(closure, set(expected_if))
         for job_id, condition in expected_if.items():
             self.assertEqual(jobs[job_id].get("if"), condition, job_id)
+        context = {"github.event.pull_request.draft": False, "cancelled()": False,
+                   "needs.rust_build.result": "success"}
+        for workers, scope_result, sweep in (("[0]", "success", True), ("[0]", "failure", False),
+                                             ("[0]", "skipped", False), ("[]", "skipped", True)):
+            case = {**context, "needs.rust_build.outputs.scope_workers": workers,
+                    "needs.rust_scope.result": scope_result}
+            with self.subTest(workers=workers, scope_result=scope_result):
+                self.assertEqual(eval_step_if(jobs["rust_scope"]["if"], case), workers != "[]")
+                self.assertEqual(eval_step_if(jobs["rust_tests"]["if"], case), sweep)
         for job_id in sorted(expected_if):
             job = job_block(workflow, job_id)
             marker = f"    name: {jobs[job_id]['name']}\n"
             self.assertIn(marker, job)
-            injected_if = "    if: ${{ github.event_name == 'push' }}\n"
+            injected_if = "${{ github.event_name == 'push' }}"
             for key, mutated_job in (
                 ("continue-on-error", job.replace(marker, f"{marker}    continue-on-error: true\n", 1)),
-                ("if", re.sub(r"(?m)^    if: .*\n", injected_if, job, count=1) if "if" in jobs[job_id] else job.replace(marker, marker + injected_if, 1)),
+                ("if", replace_job_if(job, injected_if) if "if" in jobs[job_id] else job.replace(marker, f"{marker}    if: {injected_if}\n", 1)),
             ):
                 with self.subTest(job=job_id, key=key):
                     result = self.run_hardening_fixture(workflow.replace(job, mutated_job, 1))
@@ -1699,11 +1727,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             with self.subTest(mutation=label):
                 self.assertNotEqual(changed, swap)
                 mutated = workflow.replace(job, job.replace(swap, changed, 1), 1)
-                gate = self._repin_job_hash(hardening, mutated, "rust_build")
-                mutated = mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest())
-                result = self.run_hardening_fixture(mutated, hardening_script=gate)
+                result = self._run_hardening_with_repinned_pr_nextest_job(hardening, mutated, "rust_build")
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn("main rust_build must equal the PR job", result.stderr)
+                self.assertIn("PR rust_build must retain the exact swap step", result.stderr)
                 self.assertNotIn("semantic structure or command inventory changed", result.stderr)
                 if label == "debug override":
                     self.assertIn("must not set CARGO_PROFILE_TEST_DEBUG", result.stderr)
@@ -1880,7 +1906,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     f"      - name: {step_name}\n{insertion}",
                     1,
                 )
-                # Main and nightly must carry the same step policy, since their nextest jobs equal the PR's.
+                # Main, Nightly and PR each accept an explicit boolean false on the archive step.
                 same = {
                     name: path.read_text(encoding="utf-8").replace(
                         f"      - name: {step_name}\n", f"      - name: {step_name}\n{insertion}", 1
@@ -1973,7 +1999,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         action = (REPO_ROOT / SCCACHE_ACTION).read_text(encoding="utf-8")
         fallback_step = action[action.index("    # RUSTC_WRAPPER=sccache"):]
         warning_line = next(line for line in action.splitlines(keepends=True) if "::warning" in line)
-        ripgrep = step_block(job_block(workflow, "rust_tests"), "Install ripgrep from the OS package manager")
         direct = "        uses: mozilla-actions/sccache-action@v0.0.10\n"
         cases = (
             ("direct sccache step", workflow.replace("        uses: ./.github/actions/sccache-or-nothing\n", direct, 1), action,
@@ -1989,8 +2014,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
              "must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED"),
             ("wrapper left set", workflow, action.replace('          echo "RUSTC_WRAPPER="\n', ""),
              "must clear exactly RUSTC_WRAPPER and SCCACHE_GHA_ENABLED"),
-            ("ripgrep fallback removed", workflow.replace(ripgrep, "", 1), action,
-             "followed by a warning package-manager fallback gated on steps.ripgrep.outcome"),
         )
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
@@ -2000,6 +2023,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(candidate, extra_files={str(SCCACHE_ACTION): candidate_action})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
+        worker_setup = (REPO_ROOT / PR_NEXTEST_SETUP).read_text(encoding="utf-8")
+        no_ripgrep_fallback = re.sub(r"(?ms)^    - name: Install ripgrep from the OS package manager\n.*?(?=^    - name:)",
+                                    "", worker_setup, count=1)
+        self.assertNotEqual(no_ripgrep_fallback, worker_setup)
+        rejected = self.run_hardening_fixture(workflow, extra_files={str(PR_NEXTEST_SETUP): no_ripgrep_fallback})
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(f"{PR_NEXTEST_SETUP} content hash mismatch", rejected.stderr)
 
     def test_ci_sccache_server_outlives_the_uncached_lib_test_rustc(self) -> None:
         # The lib-test rustc runs 20+ minutes after the last cached request; hardening pins only the PR env.
@@ -2097,6 +2127,18 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             + hardening[job_match.end() :]
         )
 
+    def _run_hardening_with_repinned_pr_nextest_job(self, hardening, workflow, job_id):
+        original = (REPO_ROOT / PR_NEXTEST_WIRING).read_text(encoding="utf-8")
+        wiring = self._repin_job_hash(original, workflow, job_id)
+        old_pin = f"verify_helper_hash {PR_NEXTEST_WIRING} {hashlib.sha256(original.encode()).hexdigest()}"
+        new_pin = f"verify_helper_hash {PR_NEXTEST_WIRING} {hashlib.sha256(wiring.encode()).hexdigest()}"
+        self.assertIn(old_pin, hardening)
+        gate = hardening.replace(old_pin, new_pin, 1)
+        return self.run_hardening_fixture(
+            workflow.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()),
+            hardening_script=gate, extra_files={PR_NEXTEST_WIRING: wiring},
+        )
+
     def test_nested_libtest_checker_is_required_and_fails_closed(self) -> None:
         hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
         pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(hardening.encode()).hexdigest())
@@ -2129,6 +2171,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (root / SCCACHE_ACTION).parent.mkdir(parents=True)
             (root / SCCACHE_ACTION).write_bytes((REPO_ROOT / SCCACHE_ACTION).read_bytes())
+            (root / PR_NEXTEST_SETUP).parent.mkdir(parents=True)
+            (root / PR_NEXTEST_SETUP).write_bytes((REPO_ROOT / PR_NEXTEST_SETUP).read_bytes())
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():
@@ -2147,7 +2191,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             )
             (root / "scripts/ci").mkdir()
             for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
-                           "main_script_check_shards.rb"):
+                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:

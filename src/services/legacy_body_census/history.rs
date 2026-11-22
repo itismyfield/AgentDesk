@@ -150,7 +150,7 @@ pub(super) fn prepare_with_sync(
         .as_ref()
         .and_then(|header| header["boot_id"].as_str());
     let doctor = doctor.or_else(|| {
-        crate::cli::doctor::startup::current_boot_id_at(root)
+        crate::runtime_layout::boot_id::current_boot_id_at(root)
             .ok()
             .filter(|id| id.split('-').next() == Some(std::process::id().to_string().as_str()))
     });

@@ -339,6 +339,6 @@ pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc
     for channel in
         crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
     {
-        super::super::session_transition::wake_installed_owner(shared, channel).await;
+        super::super::router::wake_installed_owner(shared, channel).await;
     }
 }

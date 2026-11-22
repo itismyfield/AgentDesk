@@ -6,7 +6,6 @@ use crate::domain::memory::{
     ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_POLICY, ANCHOR_CONTEXT_START, AnchorRecord,
     MemoryBackendKind,
 };
-use crate::services::discord::settings::RoleBinding;
 use crate::services::provider::ProviderKind;
 
 #[path = "memento_anchor/audit.rs"]
@@ -313,7 +312,7 @@ pub(crate) struct SessionAnchorRequest<'a> {
     pub(crate) current_path: &'a str,
     pub(crate) channel_id: u64,
     pub(crate) memory_scope_channel_id: u64,
-    pub(crate) role_binding: Option<&'a RoleBinding>,
+    pub(crate) role_id: Option<&'a str>,
     pub(crate) session_id: Option<&'a str>,
     pub(crate) fresh: bool,
 }
@@ -354,7 +353,7 @@ pub(crate) async fn load_session_anchor_snapshot(
         current_path,
         channel_id,
         memory_scope_channel_id,
-        role_binding,
+        role_id,
         session_id,
         fresh,
     } = request;
@@ -398,9 +397,7 @@ pub(crate) async fn load_session_anchor_snapshot(
             return None;
         }
     };
-    let role_id = role_binding
-        .map(|binding| binding.role_id.as_str())
-        .unwrap_or(UNBOUND_MEMORY_ROLE_ID);
+    let role_id = role_id.unwrap_or(UNBOUND_MEMORY_ROLE_ID);
     let workspace = if let Some(workspace) = config.workspace_override.as_ref() {
         workspace.clone()
     } else if let Some(group) = settings.memory_group.as_ref() {
@@ -521,7 +518,7 @@ mod tests {
             current_path: "/inspection",
             channel_id: 7_378_902,
             memory_scope_channel_id: 7_378_902,
-            role_binding: None,
+            role_id: None,
             session_id: Some("current-native-id"),
             fresh: false,
         };

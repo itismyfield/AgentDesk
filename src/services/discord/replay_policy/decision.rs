@@ -24,7 +24,7 @@ async fn decide_live<'a>(
 pub(in crate::services::discord) async fn stale_resume(
     pool: Option<&PgPool>,
     token: &CancelToken,
-    inflight: &InflightTurnState,
+    inflight: &dyn ReplayRow,
 ) -> StaleResume {
     if ordinary_allowed(token, inflight) {
         return StaleResume::Legacy;
@@ -71,7 +71,7 @@ pub(in crate::services::discord) async fn stale_resume(
 async fn classify_terminal(
     pool: Option<&PgPool>,
     token: &CancelToken,
-    inflight: &InflightTurnState,
+    inflight: &dyn ReplayRow,
 ) -> bool {
     if !protected(token, inflight) {
         return true;
@@ -114,7 +114,7 @@ async fn classify_terminal(
 pub(in crate::services::discord) async fn error_is_ordinary(
     pool: Option<&PgPool>,
     token: &CancelToken,
-    inflight: &InflightTurnState,
+    inflight: &dyn ReplayRow,
     stale_resume: bool,
 ) -> bool {
     if stale_resume && !ordinary_allowed(token, inflight) {
@@ -130,7 +130,7 @@ pub(in crate::services::discord) async fn error_is_ordinary(
 pub(in crate::services::discord) async fn ordinary_outcome(
     pool: Option<&PgPool>,
     token: &CancelToken,
-    inflight: &InflightTurnState,
+    inflight: &dyn ReplayRow,
 ) -> bool {
     let ordinary = classify_terminal(pool, token, inflight).await;
     if !ordinary {
@@ -144,7 +144,7 @@ pub(in crate::services::discord) async fn ordinary_outcome(
 pub(in crate::services::discord) async fn hold_recovery(
     pool: Option<&PgPool>,
     token: &CancelToken,
-    inflight: &InflightTurnState,
+    inflight: &dyn ReplayRow,
 ) -> bool {
     if ordinary_allowed(token, inflight) {
         return false;

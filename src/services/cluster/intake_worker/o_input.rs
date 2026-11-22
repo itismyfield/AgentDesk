@@ -1,10 +1,6 @@
 //! Claimed input keeps its SQL identity while the writer observes fresh eligibility.
 
-#[cfg(test)]
-use super::test_executor::execute_intake_turn_core;
 use super::*;
-#[cfg(not(test))]
-use crate::services::discord::execute_intake_turn_core;
 use crate::services::tui_o::cutover::intake_route::IntakeRoute;
 
 pub(super) async fn hold_off_o_gateway(
@@ -77,9 +73,13 @@ pub(super) mod scope_key {
 
 /// The first entry consumes the slot even when the request does not match.
 #[cfg(unix)]
-pub(crate) fn take_before_effects(request: &IntakeRequest) -> Option<BeforeEffects> {
+pub(crate) fn take_before_effects(
+    request: &IntakeRequest,
+    checkpoint_waits: CheckpointWaits,
+) -> Option<BeforeEffects> {
     crate::intake_consent_authority::issuer::take(scope_key::WorkerScopeKey(())).filter(|proof| {
-        intake_request_from_row(proof.row()).is_ok_and(|original| original == *request)
+        intake_request_from_row(proof.row(), checkpoint_waits)
+            .is_ok_and(|original| original == *request)
     })
 }
 
@@ -94,15 +94,14 @@ async fn scope_before_effects<T>(
 
 pub(super) async fn execute_before_effects(
     row: &IntakeOutboxRow,
+    execute: ExecuteIntakeTurn,
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     token: &str,
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
-    let execution = Box::pin(execute_intake_turn_core(
-        http, shared, token, request, uploads,
-    ));
+    let execution = execute(http, shared, token, request, uploads);
     #[cfg(unix)]
     {
         scope_before_effects(row, execution).await
@@ -125,10 +124,10 @@ async fn effects_cannot_acquire_late_before_effects_authority_pg() {
     let pool = db.connect_and_migrate().await;
     let (row, root, store, consent, intent) =
         crate::db::intake_outbox::consent_handoff::tests::setup(&pool, "891214").await;
-    let request = intake_request_from_row(&row).unwrap();
+    let request = intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS).unwrap();
     let before = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row.id).await;
     scope_before_effects(&row, async {
-        let proof = take_before_effects(&request).unwrap();
+        let proof = take_before_effects(&request, test_executor::CHECKPOINT_WAITS).unwrap();
         drop(proof);
         sqlx::query("CREATE TABLE consent_boundary_effects (row_id BIGINT PRIMARY KEY)")
             .execute(&pool)
@@ -139,7 +138,7 @@ async fn effects_cannot_acquire_late_before_effects_authority_pg() {
             .execute(&pool)
             .await
             .unwrap();
-        let rearmed = match take_before_effects(&request) {
+        let rearmed = match take_before_effects(&request, test_executor::CHECKPOINT_WAITS) {
             Some(late) => {
                 crate::db::intake_outbox::consent_handoff::return_before_record(&pool, late)
                     .await
@@ -150,7 +149,7 @@ async fn effects_cannot_acquire_late_before_effects_authority_pg() {
         assert!(!rearmed, "effects cannot obtain late rollback authority");
     })
     .await;
-    assert!(take_before_effects(&request).is_none());
+    assert!(take_before_effects(&request, test_executor::CHECKPOINT_WAITS).is_none());
     assert_eq!(
         crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row.id).await,
         before
@@ -179,7 +178,7 @@ async fn scoped_reclaim_preserves_once_marker_across_process_tokens_pg() {
     for (channel, fresh_incarnation) in [("891290", false), ("891291", true)] {
         let fixture = consent_handoff::tests::setup(&pool, channel).await;
         let original = &fixture.0;
-        let request = intake_request_from_row(original).unwrap();
+        let request = intake_request_from_row(original, test_executor::CHECKPOINT_WAITS).unwrap();
         let original_token = original.claim_owner.as_deref().unwrap();
         let next_incarnation = format!("{original_token}-fresh-incarnation");
         let token = if fresh_incarnation {
@@ -188,11 +187,11 @@ async fn scoped_reclaim_preserves_once_marker_across_process_tokens_pg() {
             original_token
         };
         assert_eq!(token == original_token, !fresh_incarnation);
-        assert!(take_before_effects(&request).is_none());
+        assert!(take_before_effects(&request, test_executor::CHECKPOINT_WAITS).is_none());
         assert!(
             scope_before_effects(original, async {
-                let proof = take_before_effects(&request).unwrap();
-                assert!(take_before_effects(&request).is_none());
+                let proof = take_before_effects(&request, test_executor::CHECKPOINT_WAITS).unwrap();
+                assert!(take_before_effects(&request, test_executor::CHECKPOINT_WAITS).is_none());
                 consent_handoff::return_before_record(&pool, proof)
                     .await
                     .unwrap()
@@ -213,19 +212,25 @@ async fn scoped_reclaim_preserves_once_marker_across_process_tokens_pg() {
         let before = snapshot(&pool, original.id).await;
         assert_eq!(before["status"], "spawned");
         assert_eq!(before["last_error"], rearmed["last_error"]);
-        let reclaimed_request = intake_request_from_row(&claimed).unwrap();
-        assert!(take_before_effects(&reclaimed_request).is_none());
+        let reclaimed_request =
+            intake_request_from_row(&claimed, test_executor::CHECKPOINT_WAITS).unwrap();
+        assert!(take_before_effects(&reclaimed_request, test_executor::CHECKPOINT_WAITS).is_none());
         assert!(
             !scope_before_effects(&claimed, async {
-                let proof = take_before_effects(&reclaimed_request).unwrap();
-                assert!(take_before_effects(&reclaimed_request).is_none());
+                let proof =
+                    take_before_effects(&reclaimed_request, test_executor::CHECKPOINT_WAITS)
+                        .unwrap();
+                assert!(
+                    take_before_effects(&reclaimed_request, test_executor::CHECKPOINT_WAITS)
+                        .is_none()
+                );
                 consent_handoff::return_before_record(&pool, proof)
                     .await
                     .unwrap()
             })
             .await
         );
-        assert!(take_before_effects(&reclaimed_request).is_none());
+        assert!(take_before_effects(&reclaimed_request, test_executor::CHECKPOINT_WAITS).is_none());
         assert_eq!(snapshot(&pool, original.id).await, before);
         drop(fixture);
     }

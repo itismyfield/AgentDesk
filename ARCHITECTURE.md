@@ -477,6 +477,7 @@ src/
 │   │   ├── outbox/
 │   │   │   ├── identity.rs
 │   │   │   └── source.rs
+│   │   ├── alert_origin.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
@@ -616,6 +617,7 @@ src/
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
 ├── runtime_layout/
+│   ├── boot_id.rs
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
 │   ├── mod.rs
@@ -1163,6 +1165,8 @@ src/
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
+│   ├── claude_compact_trigger/
+│   │   └── turn_identity.rs
 │   ├── claude_tui/
 │   │   ├── activity/
 │   │   │   ├── background/
@@ -1420,6 +1424,7 @@ src/
 │   │   ├── intake_routing.rs
 │   │   ├── intake_routing_config.rs
 │   │   ├── intake_routing_telemetry.rs
+│   │   ├── intake_turn.rs
 │   │   ├── intake_worker.rs
 │   │   ├── intake_worker_capabilities.rs
 │   │   ├── machine_resources.rs
@@ -1616,6 +1621,7 @@ src/
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── replacement.rs
 │   │   │   ├── replacement_tests.rs
+│   │   │   ├── row.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
 │   │   │   ├── cancel_backstop_tests/
@@ -1627,7 +1633,8 @@ src/
 │   │   │   │   ├── effort.rs
 │   │   │   │   ├── effort_settings_tests.rs
 │   │   │   │   ├── provider_settings.rs
-│   │   │   │   └── provider_settings_snapshot_tests.rs
+│   │   │   │   ├── provider_settings_snapshot_tests.rs
+│   │   │   │   └── provider_settings_thread_owner_tests.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
@@ -1708,6 +1715,7 @@ src/
 │   │   │   │   └── home_pg_tests.rs
 │   │   │   ├── restart/
 │   │   │   │   ├── herdr.rs
+│   │   │   │   ├── host_hold_tests.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -2081,6 +2089,7 @@ src/
 │   │   │   ├── restart_mark_tests.rs
 │   │   │   ├── row_removed.rs
 │   │   │   ├── row_removed_tests.rs
+│   │   │   ├── runtime_view.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -2456,7 +2465,8 @@ src/
 │   │   │   ├── permit_tests.rs
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── recovery.rs
-│   │   │   └── recovery_tests.rs
+│   │   │   ├── recovery_tests.rs
+│   │   │   └── row.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
@@ -2469,6 +2479,7 @@ src/
 │   │   │   │   ├── admission_notice_tests.rs
 │   │   │   │   ├── admission_refusal.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── admission_thread_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
 │   │   │   │   ├── return_input.rs
@@ -2691,6 +2702,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_pending_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_retired_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
@@ -2747,6 +2759,7 @@ src/
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
+│   │   │   ├── transition_wake.rs
 │   │   │   └── turn_start.rs
 │   │   ├── routine_presentation/
 │   │   │   └── tests.rs
@@ -3261,6 +3274,7 @@ src/
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice.rs
 │   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
@@ -4036,6 +4050,7 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── mentions.rs
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
 │   │   ├── routine_incident.rs
@@ -4140,6 +4155,7 @@ src/
 │   │   ├── read_fault.rs
 │   │   ├── reaping_tests.rs
 │   │   ├── registry.rs
+│   │   ├── restart_report_env.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
 │   │   ├── session_prompt.rs
@@ -4395,6 +4411,8 @@ src/
 │   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
+│   │   ├── host_decision.rs
+│   │   ├── host_decision_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── operation_policy.rs
@@ -4456,8 +4474,10 @@ src/
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
+│   │   ├── runtime_activity.rs
 │   │   ├── runtime_hint_fence.rs
-│   │   └── session_markers.rs
+│   │   ├── session_markers.rs
+│   │   └── unified_thread.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
@@ -4627,6 +4647,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── child_store.rs
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── agy_delivery.rs
@@ -5046,6 +5067,7 @@ src/
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
 │   │   ├── observation.rs
+│   │   ├── observer_publication.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
 │   │   ├── pending_renumber_tests.rs
@@ -5057,6 +5079,7 @@ src/
 │   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
+│   │   ├── terminal_custody.rs
 │   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   ├── claude_meta.rs
@@ -5341,6 +5364,7 @@ src/
 │   ├── secret_file.rs
 │   └── wip_detect.rs
 ├── adk_base_lib.rs
+├── adk_test_support_lib.rs
 ├── api_caller_observability.rs
 ├── app_state.rs
 ├── bootstrap.rs
@@ -5395,6 +5419,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
 | `src/adk_base_lib.rs` | Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths. |
+| `src/adk_test_support_lib.rs` | Library root of the `adk-test-support` workspace crate; builds the `test_support` capped waits, serialized runtimes, lock holder records and source lexer in place for dev-dependencies only, which the parent re-exports under `#[cfg(test)]`. |
 | `src/api_caller_observability.rs` | Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths. |
 | `src/app_state.rs` | Shared HTTP route-handler state (`AppState`); lives at crate root below server+services so service-layer handlers reference it without a service→server backflow. |
 | `src/bootstrap.rs` | Builds config, database, policy engine, and shared app state before launch. |

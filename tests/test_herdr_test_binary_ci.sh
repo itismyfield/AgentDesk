@@ -23,13 +23,30 @@ check_wiring() {
   if ruby -ryaml - "$ROOT_DIR/$workflow" "$expected" "$out" <<'RUBY'; then pass "$label wiring"; else fail "$label wiring"; fi
 path, expected, out = ARGV
 steps = Array(YAML.load_file(path).dig("jobs", "rust_tests", "steps"))
-find = ->(&pred) { steps.index { |step| step.is_a?(Hash) && pred.call(step) } }
-cache_at = find.call { |step| step["uses"] == "actions/cache@v4" }
-install_at = find.call { |step| step["name"] == "Install herdr test binary" }
-tests_at = find.call { |step| step["name"] == "Run planned tests" }
-cache, install, tests = [cache_at, install_at, tests_at].map { |at| at && steps[at] }
+find = ->(list, &pred) { list.index { |step| step.is_a?(Hash) && pred.call(step) } }
+tests_at = find.call(steps) { |step| step["name"] == "Run planned tests" }
+# The PR worker installs Herdr inside a local composite action; check its steps and the output it exposes.
+setup_at = find.call(steps) { |step| step["uses"].to_s.start_with?("./.github/actions/") }
+if setup_at
+  setup = steps[setup_at]
+  action = YAML.load_file(File.join(File.dirname(path), "../..", setup["uses"], "action.yml"))
+  inner = Array(action.dig("runs", "steps"))
+  cache_at = find.call(inner) { |step| step["uses"] == "actions/cache@v4" }
+  install_at = find.call(inner) { |step| step["name"] == "Install herdr test binary" }
+  ordered = cache_at && install_at && tests_at && cache_at < install_at && setup_at < tests_at
+  cache, install = [cache_at, install_at].map { |at| at && inner[at] }
+  output = install && Array(action["outputs"]).find { |_, o| o["value"] == "${{ steps.#{install["id"]}.outputs.bin }}" }
+  bin = output && "${{ steps.#{setup["id"]}.outputs.#{output[0]} }}"
+else
+  cache_at = find.call(steps) { |step| step["uses"] == "actions/cache@v4" }
+  install_at = find.call(steps) { |step| step["name"] == "Install herdr test binary" }
+  ordered = cache_at && install_at && tests_at && cache_at < install_at && install_at < tests_at
+  cache, install = [cache_at, install_at].map { |at| at && steps[at] }
+  bin = install && "${{ steps.#{install["id"]}.outputs.bin }}"
+end
+tests = tests_at && steps[tests_at]
 errors = []
-unless cache && install && tests && cache_at < install_at && install_at < tests_at
+unless ordered
   errors << "rust_tests must restore the cache, then install herdr, then run the tests"
 else
   key = "herdr-0.9.5-#{expected[0, 12]}-linux-x86_64"
@@ -38,8 +55,7 @@ else
   errors << "install must fail the job" if install.key?("continue-on-error") || install.key?("if")
   errors << "install must read the cache hit" unless install.dig("env", "HERDR_CACHE_HIT") == "${{ steps.#{cache["id"]}.outputs.cache-hit }}"
   errors << "install must pin the fixture sha256" unless install["run"].to_s.include?("expected=#{expected}\n")
-  bin = "${{ steps.#{install["id"]}.outputs.bin }}"
-  errors << "Run planned tests must receive ADK_TEST_HERDR_BIN from the install step" unless tests.dig("env", "ADK_TEST_HERDR_BIN") == bin
+  errors << "Run planned tests must receive ADK_TEST_HERDR_BIN from the install step" unless bin && tests.dig("env", "ADK_TEST_HERDR_BIN") == bin
   File.write(out, install["run"])
 end
 errors.each { |error| warn "#{path}: #{error}" }

@@ -1,5 +1,4 @@
 //! Host and occupancy observations around the existing thread GC SQL boundary.
-use futures::future::BoxFuture;
 use sqlx::PgPool;
 
 use crate::db::dispatched_sessions::{
@@ -8,32 +7,7 @@ use crate::db::dispatched_sessions::{
 use crate::db::session_agent_resolution::parse_thread_channel_id_from_session_key;
 use crate::services::platform::tmux::{SessionPresence, session_presence};
 
-/// O's thread child stores as thread GC reaches them: pinned before a row delete and asked to
-/// retire only after that exact delete. The owner decides; GC grants it nothing else.
-pub(crate) trait ChildStore: Sync {
-    type Pinned: Send;
-    fn pin(&self, thread: u64) -> Option<Self::Pinned>;
-    fn retire<'a>(
-        &'a self,
-        pinned: Self::Pinned,
-        successor: BoxFuture<'a, Result<bool, String>>,
-    ) -> BoxFuture<'a, Result<(), String>>;
-}
-
-/// No child store to retire.
-impl ChildStore for () {
-    type Pinned = std::convert::Infallible;
-    fn pin(&self, _thread: u64) -> Option<Self::Pinned> {
-        None
-    }
-    fn retire<'a>(
-        &'a self,
-        pinned: Self::Pinned,
-        _successor: BoxFuture<'a, Result<bool, String>>,
-    ) -> BoxFuture<'a, Result<(), String>> {
-        match pinned {}
-    }
-}
+pub(crate) use crate::services::tui_o::store::thread_children::ChildStore;
 
 pub(crate) async fn gc_stale_thread_sessions_pg(
     pool: &PgPool,

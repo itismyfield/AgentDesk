@@ -30,10 +30,10 @@ use crate::services::claude_tui::hosting::{
     try_claude_tui_warm_followup,
 };
 use crate::services::discord::replay_policy::live::{RawTap, Seen};
-use crate::services::discord::restart_report::{
+use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::provider::restart_report_env::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::session_prompt;
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,

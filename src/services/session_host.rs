@@ -27,6 +27,7 @@ pub(crate) use create::create_in_effect;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+pub(crate) mod host_decision;
 pub(crate) mod surface_policy;
 pub(crate) mod thread_host;
 #[cfg(all(test, unix))]

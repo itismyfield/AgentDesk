@@ -1954,10 +1954,16 @@ fn stale_foreign_same_identity_revival_blocks_destructive_cancel() {
             .lines()
             .find(|line| line.contains("(#4030)"))
             .expect(&warned);
-        let stage = concat!("finished=0 oldest_open=seq=1,origin=", file!());
+        // The tracing formatter escapes backslashes in string fields.
+        let (_, report) = skip.split_once("legacy_sends=\"").expect(skip);
         assert!(
-            skip.contains(stage) && skip.contains("stage=before_send"),
+            report.contains("finished=0 oldest_open=seq=1,origin="),
             "{skip}"
+        );
+        cutover::test_override::assert_first_open_send(
+            &report.replace("\\\\", "\\"),
+            std::path::Path::new(file!()),
+            "before_send",
         );
         drop(open);
         revival.await.expect("revival task");
