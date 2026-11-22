@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::services::discord::outbound::source_registry::{
-    RETIRED_SEND_SOURCES, SendCallerClass, validate_send_source_for,
-};
+use crate::domain::outbound::outbox::source::RETIRED_SEND_SOURCES;
+use crate::services::message_outbox::validate_outbox_source;
 use crate::services::message_outbox_recovery_support::{
     FailedOutboxInspection, OutboxRow, RedriveOutcome, load_rows, outcome, semantic_key,
     semantic_siblings, snippet,
@@ -64,11 +63,9 @@ pub(crate) async fn redrive_failed_rows(
         .iter()
         .filter(|row| !RETIRED_SEND_SOURCES.contains(&row.source.as_str()))
     {
-        validate_send_source_for(&row.source, SendCallerClass::LoopbackInternal).map_err(|_| {
-            RecoveryError::SourceNotAllowed {
-                id: row.id,
-                label: row.source.clone(),
-            }
+        validate_outbox_source(&row.source).map_err(|_| RecoveryError::SourceNotAllowed {
+            id: row.id,
+            label: row.source.clone(),
         })?;
     }
     let by_id: HashMap<i64, &OutboxRow> = rows.iter().map(|row| (row.id, row)).collect();

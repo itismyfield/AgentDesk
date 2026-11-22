@@ -67,6 +67,11 @@ pub(crate) fn shared_outbound_deduper() -> &'static OutboundDeduper {
     DEDUPER.get_or_init(OutboundDeduper::new)
 }
 
+/// Installs the ports engine producers use to reach Discord outbound, before any command runs.
+pub(crate) fn install_engine_ports() {
+    crate::services::dispatches::http_outbound::install(transport::engine_http_deliver);
+}
+
 pub(crate) fn delivery_record_rollout_health_json() -> serde_json::Value {
     delivery_record::delivery_record_rollout_health_json()
 }

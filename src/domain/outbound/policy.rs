@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// Discord's hard per-message character limit.
+pub(crate) const DISCORD_MESSAGE_HARD_LIMIT_CHARS: usize = 2000;
+
 /// How to handle content beyond the Discord per-message limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
