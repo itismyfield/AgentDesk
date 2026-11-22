@@ -74,6 +74,8 @@ campaign-execution/CampaignPipelineDeleteRace.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineDeleteRaceBug.cfg	CampaignPipeline	NoOrphanState	InstanceTerminates
 campaign-execution/CampaignPipelineDuplicateEvent.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineDuplicateEventBug.cfg	CampaignPipeline	OneCommittedExitPerVisit,PriorityRespected,TerminalNeedsEvidence	-
+campaign-execution/CampaignPipelineEditor.cfg	CampaignPipeline	-	-
+campaign-execution/CampaignPipelineEditorBefore.cfg	CampaignPipeline	MigrationKeepsResult,OccupiedStateKept,RevisionMatchesExpected,RevisionOnlyWhenEditable,ValidatedDefinitionOnly	-
 campaign-execution/CampaignPipelineFinishAllowsAllBug.cfg	CampaignPipeline	NoLaunchAfterFence,NoNewIntentAfterStop	-
 campaign-execution/CampaignPipelineFinishBlockedBug.cfg	CampaignPipeline	FinishStageKeepsGrant	-
 campaign-execution/CampaignPipelineLateEventBug.cfg	CampaignPipeline	ConditionFromCurrentVisit	-
@@ -1819,6 +1821,10 @@ tui-o-writer/WriterAgyDualOwner.cfg	WriterAdoption	AgyNoDuplicate	-
 tui-o-writer/WriterAgyEarlyPurge.cfg	WriterAdoption	AgyNoSilentLoss	-
 tui-o-writer/WriterAgyFailed.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyHeadless.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyHttpDuplicate.cfg	WriterAdoption	AgyHttpOnce	-
+tui-o-writer/WriterAgyHttpMissing.cfg	WriterAdoption	-	AgyHttpDisposition
+tui-o-writer/WriterAgyHttpOff.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyHttpOn.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyLong.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyMissingDisposition.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyMissingDone.cfg	WriterAdoption	-	AgyAcceptedEnds
@@ -1968,6 +1974,11 @@ tui-o-writer/WriterWakePark.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeSupersededMain.cfg	WriterWake	-	NewSourceGetsFirstReply
 tui-o-writer/WriterWakeSupersededPark.cfg	WriterWake	-	-
 tui-o-writer/WriterWakeUnsafeLoss.cfg	WriterWake	-	-
+turn-mailbox/RecoveryKickoffIdentityAfterReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityAfterZero.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeReal.cfg	RecoveryKickoffIdentity	-	-
+turn-mailbox/RecoveryKickoffIdentityBeforeZero.cfg	RecoveryKickoffIdentity	-	MailboxEventuallyReleased
+turn-mailbox/RecoveryKickoffIdentityWeakZero.cfg	RecoveryKickoffIdentity	NoWrongRelease	-
 turn-presence/TurnPresence.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
 turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues

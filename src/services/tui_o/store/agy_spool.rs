@@ -29,6 +29,33 @@ pub(crate) struct AgyReservation<'a> {
     pub resume: Option<Uuid>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImessageSource(String);
+
+impl ImessageSource {
+    pub(crate) fn from_guid(guid: &str) -> Option<Self> {
+        if guid.is_empty()
+            || guid.len() > 256
+            || guid.trim() != guid
+            || guid.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"agentdesk:agy:imessage-http:v1\0");
+        digest.update(guid.as_bytes());
+        Some(Self(format!("{:x}", digest.finalize())))
+    }
+
+    fn slot(&self) -> String {
+        format!("imsg-{}", self.0)
+    }
+
+    pub(crate) fn digest(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Failure {
@@ -53,6 +80,22 @@ pub(crate) struct AgySpool {
 
 impl AgySpool {
     pub(crate) fn reserve(root: &Path, input: AgyReservation<'_>) -> io::Result<Self> {
+        Self::reserve_source(root, input, None)
+    }
+
+    pub(crate) fn reserve_imessage(
+        root: &Path,
+        input: AgyReservation<'_>,
+        source: &ImessageSource,
+    ) -> io::Result<Self> {
+        Self::reserve_source(root, input, Some(source))
+    }
+
+    fn reserve_source(
+        root: &Path,
+        input: AgyReservation<'_>,
+        source: Option<&ImessageSource>,
+    ) -> io::Result<Self> {
         if !PARENT_DIR_FSYNC_FLUSHES {
             return Err(io::Error::other("agy spool requires directory sync"));
         }
@@ -70,7 +113,8 @@ impl AgySpool {
         let version = ensure_version_dir(root, input.destination)?;
 
         // One create-once directory per source. A new mailbox nonce cannot replace its obligation.
-        let turn_dir = version.join(input.message.to_string());
+        let turn_dir =
+            version.join(source.map_or_else(|| input.message.to_string(), ImessageSource::slot));
         private_dir(&turn_dir, false)?;
         let path = turn_dir.join(SEGMENT);
         let mut options = OpenOptions::new();
@@ -94,11 +138,16 @@ impl AgySpool {
             terminal: false,
             resume: input.resume,
         };
-        spool.append("open", json!({
+        let mut open = json!({
             "ingress": "discord_foreground", "message_id": input.message,
             "logical_channel": input.logical_channel, "writer_generation": input.writer_generation,
             "resume": input.resume,
-        }))?;
+        });
+        if let Some(source) = source {
+            open["ingress"] = json!("imessage_http");
+            open["original_input_sha256"] = json!(source.0);
+        }
+        spool.append("open", open)?;
         Ok(spool)
     }
 

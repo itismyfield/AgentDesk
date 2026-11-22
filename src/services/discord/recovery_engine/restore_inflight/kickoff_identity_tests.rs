@@ -24,17 +24,44 @@ fn ownerless_reacquired_row_has_no_kickoff_identity() {
     assert!(recovery_kickoff_identity(&state).is_none());
 }
 
-#[test]
-fn owned_row_kickoff_identity_matches_persisted_ids() {
-    for user_msg_id in [2, 0] {
-        let mut state = super::tests::recovery_state(ProviderKind::Claude, 6_029_002);
+/// A recovered turn, with or without a Discord message id, is released by its own finalizer.
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_kickoff_is_released_by_the_rows_finalizer() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let shared = super::super::make_shared_data_for_tests_with_storage(None);
+    for (channel, user_msg_id) in [(6_029_002, 2), (6_029_012, 0)] {
+        let mut state = super::tests::recovery_state(ProviderKind::Claude, channel);
         state.user_msg_id = user_msg_id;
+        state.turn_nonce = Some(format!("kickoff-{channel}"));
         let identity = recovery_kickoff_identity(&state).expect("owned row kicks off");
-        assert_eq!(
-            identity.request_owner,
-            UserId::new(state.request_owner_user_id)
+        let channel_id = ChannelId::new(channel);
+        let token = Arc::new(CancelToken::from_persisted_turn_nonce(
+            state.turn_nonce.clone(),
+        ));
+        let owner = identity.request_owner;
+        let kickoff =
+            mailbox_recovery_kickoff(&shared, channel_id, token, owner, identity.user_message_id);
+        assert!(kickoff.await.activated_turn());
+        let key = crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            state.effective_finalizer_turn_id(),
+            shared.restart.current_generation,
+        )
+        .with_episode_nonce(state.turn_nonce.as_deref());
+        let provider = ProviderKind::Claude;
+        let claim = crate::services::discord::turn_finalizer::claim_normal_episode(
+            &shared, &provider, key, false, None,
         );
-        assert_eq!(identity.user_message_id, optional_message_id(user_msg_id));
+        let released = claim.await.ok().flatten();
+        assert!(
+            released.is_some_and(|captured| captured.finish.removed_token.is_some()),
+            "user_msg_id={user_msg_id}: the finalizer's guarded release frees the recovered turn"
+        );
     }
 }
 

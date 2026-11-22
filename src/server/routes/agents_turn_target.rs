@@ -16,6 +16,14 @@ pub(super) struct AgentTurnTarget {
     pub(super) thread: Option<ThreadTurnRuntime>,
 }
 
+impl AgentTurnTarget {
+    pub(super) fn logical_channel(&self) -> u64 {
+        self.thread
+            .as_ref()
+            .map_or(self.channel_id, ThreadTurnRuntime::parent_id)
+    }
+}
+
 /// Resolves the provider and channel an agent turn runs on, honoring the allowed overrides.
 pub(super) async fn resolve_agent_turn_target(
     pool: &sqlx::PgPool,
@@ -187,8 +195,30 @@ pub(super) async fn external_turn_conflict(
     Some((StatusCode::CONFLICT, Json(body)))
 }
 
+pub(super) async fn check_http_start(
+    registry: Option<&HealthRegistry>,
+    target: &AgentTurnTarget,
+    (source, metadata, dm_requested): (Option<&str>, Option<&serde_json::Value>, bool),
+    notice: Option<&str>,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if let Some(response) = super::agents_turn_deliver::agy_input::start_redirect(
+        target,
+        source,
+        metadata,
+        dm_requested,
+    ) {
+        return Some(response);
+    }
+    if dm_requested {
+        return None;
+    }
+    let conflict = check_start_target(registry, target).await?;
+    super::imessage_input_notice::not_echoed(notice, target.channel_id, "start", "conflict");
+    Some(conflict)
+}
+
 /// Initial availability is checked before the normal start conflict test tries the channel.
-pub(super) async fn check_start_target(
+async fn check_start_target(
     registry: Option<&HealthRegistry>,
     target: &AgentTurnTarget,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {

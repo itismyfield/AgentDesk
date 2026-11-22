@@ -117,6 +117,14 @@ INSTALL_COMMITTED=1
         self.assertIn('runtime_root="\\${AGENTDESK_ROOT_DIR:-\\$home_dir/.adk/release}"', cli_wrapper)
         self.assertIn('"\\$runtime_root/bin/agentdesk"', cli_wrapper)
 
+    def test_standalone_dashboard_deploy_installs_dependencies_before_build(self):
+        # dash-deploy-deps-1122: a dependency added in package-lock.json (#8314 tailwind-merge) broke the standalone build.
+        text = (ROOT / "scripts" / "deploy-dashboard.sh").read_text(encoding="utf-8")
+        check = text.index('node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$DASHBOARD_SRC"')
+        install = text.index('bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$DASHBOARD_SRC"')
+        self.assertLess(check, install)
+        self.assertLess(install, text.index("npm run build"))
+
     def test_installer_creates_canonical_config_before_legacy_config(self):
         text = self.read_script()
 

@@ -560,6 +560,20 @@ class HerdrCells(unittest.TestCase):
                 self.assertIn('planned', output.getvalue())
                 self.assertFalse(any(a.get('passed') for a in result['assertions']))
 
+    def test_filter_id_the_cell_does_not_run_is_refused(self):
+        import io, tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+        for extra in ([], ['--dry-run']):
+            with tempfile.TemporaryDirectory() as out, self.subTest(extra=extra), \
+                 patch.object(driver.sys, 'argv', ['driver', '--cell', 'codex-herdr', '--channel-id', '41', '--base-url',
+                              'http://unused.test', '--scenarios', str(ROOT / 'tests/e2e/tui_relay/scenarios'), '--filter', 'E-1,E-54',
+                              '--required-coverage-class', 'live', '--output', out, *extra]), \
+                 patch.object(driver.discord, 'DiscordClient', side_effect=AssertionError('client')), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(driver.main(), 2)
+                self.assertIn('not applicable to codex-herdr: E-54', err.getvalue())
+
     def run_herdr_restart(self, after_incarnation):
         from unittest.mock import Mock, patch
         from argparse import Namespace

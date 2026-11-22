@@ -15,6 +15,7 @@ mod part_10;
 mod part_11;
 mod prompt_audit;
 mod public_surfaces;
+mod server_campaign_pipeline;
 mod server_campaigns;
 mod session_evidence;
 
@@ -37,5 +38,6 @@ pub(super) fn all() -> Vec<EndpointDoc> {
     endpoints.extend(session_evidence::endpoints());
     endpoints.extend(prompt_audit::endpoints());
     endpoints.extend(server_campaigns::endpoints());
+    endpoints.extend(server_campaign_pipeline::endpoints());
     endpoints
 }

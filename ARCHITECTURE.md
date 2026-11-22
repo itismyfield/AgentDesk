@@ -457,7 +457,9 @@ src/
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_template.rs
 │   │   ├── pipeline_tests.rs
+│   │   ├── pipeline_validate.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -651,6 +653,8 @@ src/
 │   │   ├── agents_crud/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
+│   │   │   ├── agy_input.rs
+│   │   │   ├── agy_input_pg_tests.rs
 │   │   │   ├── legacy_origin.rs
 │   │   │   ├── legacy_origin_tests.rs
 │   │   │   ├── origin_admission.rs
@@ -688,6 +692,7 @@ src/
 │   │   │   │       ├── part_11.rs
 │   │   │   │       ├── prompt_audit.rs
 │   │   │   │       ├── public_surfaces.rs
+│   │   │   │       ├── server_campaign_pipeline.rs
 │   │   │   │       ├── server_campaigns.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── group_response.rs
@@ -781,6 +786,8 @@ src/
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── pipeline.rs
+│   │   │   ├── pipeline_http_tests.rs
 │   │   │   └── protocol.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
@@ -1078,6 +1085,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
+│   │   ├── pipeline_editor.rs
 │   │   ├── pipeline_rules.rs
 │   │   ├── pipeline_rules_tests.rs
 │   │   ├── profile.rs
@@ -2062,6 +2070,7 @@ src/
 │   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
+│   │   │   ├── process_driver_start.rs
 │   │   │   ├── read_only_owner_snapshot.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── receipt_boundary_tests.rs
@@ -3953,6 +3962,7 @@ src/
 │   │   └── runtime_marker_launch_tests.rs
 │   ├── imsg_reply/
 │   │   ├── admission.rs
+│   │   ├── agy_input.rs
 │   │   ├── contract.rs
 │   │   ├── episode.rs
 │   │   └── mod.rs

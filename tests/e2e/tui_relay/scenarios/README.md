@@ -169,7 +169,7 @@ python3 scripts/e2e/run_tui_relay.py \
 
 Add `--dry-run` to inspect the plan first; a dry run is not execution evidence.
 `--filter` uses exact comma-separated IDs and `cells` must include the requested
-cell. The default per-scenario reset cancels inflight work and truncates relay
+cell; an ID the cell does not run is refused with exit 2. The default per-scenario reset cancels inflight work and truncates relay
 queues, so the explicit runtime root and dedicated channels matter. Use
 `--no-reset-before-each` when the selected scenario requires session continuity.
 Destructive scenarios require both `--allow-destructive` and

@@ -27,6 +27,7 @@ pub mod landing_prepare;
 mod lifecycle;
 pub mod main_integration;
 pub mod model;
+pub(crate) mod pipeline_editor;
 pub mod pipeline_rules;
 pub mod profile;
 pub mod resource_admission;

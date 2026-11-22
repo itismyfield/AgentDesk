@@ -17,6 +17,8 @@ read -r WSL_RUST_BUILD_RUNNER <<'EXPR'
 ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
 EXPR
 readonly WSL_RUST_BUILD_RUNNER
+# Lint runs on its own WSL runner so it does not queue behind the test build.
+readonly WSL_LINT_RUNNER="${WSL_RUST_BUILD_RUNNER/adk-wsl-rust/adk-wsl-lint}"
 readonly RUNNER_MEMORY_STEPS_JSON='{
   "Start runner memory sampler": {"name":"Start runner memory sampler","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh start"},
   "Save runner memory checkpoint": {"name":"Save runner memory checkpoint","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh checkpoint"},
@@ -1087,7 +1089,7 @@ validate_main_script_check_shards() {
 validate_main_script_check_shards
 
 validate_main_lint_and_nextest() {
-  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" "$RUNNER_MEMORY_STEPS_JSON" "$WSL_RUST_BUILD_RUNNER" <<'RUBY'
+  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" "$RUNNER_MEMORY_STEPS_JSON" "$WSL_LINT_RUNNER" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -1109,7 +1111,7 @@ runner_gated = ->(step) { (step["if"] == "runner.environment == 'github-hosted'"
     next
   end
   errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
-  errors << "job #{job_id} must run on the rust_build WSL runner expression" unless job["runs-on"] == wsl_runner
+  errors << "job #{job_id} must run on the lint WSL runner expression" unless job["runs-on"] == wsl_runner
   %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
@@ -1368,11 +1370,11 @@ validate_workflow_job_policy() {
   fi
 
   while IFS= read -r -d '' workflow; do
-    if ! ruby - "$workflow" "$main_workflow" "$pr_workflow" "$WSL_RUST_BUILD_RUNNER" <<'RUBY'
+    if ! ruby - "$workflow" "$main_workflow" "$pr_workflow" "$WSL_RUST_BUILD_RUNNER" "$WSL_LINT_RUNNER" <<'RUBY'
 require "yaml"
 require "json"
 
-path, main_path, pr_path, wsl_rust_build_runner = ARGV
+path, main_path, pr_path, wsl_rust_build_runner, wsl_lint_runner = ARGV
 begin
   # Workflow aliases are intentionally unsupported. Rejecting them keeps every
   # audited job definition local and explicit instead of expanding YAML graphs.
@@ -1477,7 +1479,7 @@ if retired_runner_reference?(document) || implicit_retired_reference
 end
 jobs.each do |job_id, job|
   wsl_build = %w[rust_build lint].include?(job_id) && [main_path, pr_path].include?(path)
-  next if job.is_a?(Hash) && wsl_build && job["runs-on"] == wsl_rust_build_runner
+  next if job.is_a?(Hash) && wsl_build && job["runs-on"] == (job_id == "lint" ? wsl_lint_runner : wsl_rust_build_runner)
 
   unless job.is_a?(Hash) && !wsl_build && hosted_runner?(job["runs-on"], job)
     warn "#{path}: jobs.#{job_id}.runs-on violates repository hosted runner policy: use one approved label (scalar or singleton array), optionally under labels, or an explicitly enumerated static matrix runner axis; every include row must specify that axis and exclude cannot approve forbidden candidates; each matrix runner value must be an approved scalar label (#{HOSTED_RUNNER_LABELS.join(', ')})"

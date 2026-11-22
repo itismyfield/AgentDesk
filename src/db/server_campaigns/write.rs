@@ -63,7 +63,12 @@ pub(super) async fn persist(
     {
         return Err(StoreError::InconsistentState);
     }
-    if let Some(run) = &state.run {
+    if let Some(run) = &state.run
+        && !decision
+            .events
+            .iter()
+            .all(|event| matches!(event.kind, EventKind::PipelineSaved { .. }))
+    {
         sqlx::query(
             "INSERT INTO server_campaign_runs (campaign_id, run_id, document, nodes, definition_pin) \
              VALUES ($1, $2, $3, $4, $5) ON CONFLICT (campaign_id, run_id) DO UPDATE \

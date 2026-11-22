@@ -136,6 +136,9 @@ pub(in crate::services::discord) async fn restore_inflight_states(
     #[cfg(unix)]
     let channels: Vec<u64> = states.iter().map(|state| state.channel_id).collect();
     for mut state in states {
+        if replay_hold::hold_agy_imessage(&state) {
+            continue;
+        }
         #[cfg(unix)]
         if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
             continue;

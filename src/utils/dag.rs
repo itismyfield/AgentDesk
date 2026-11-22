@@ -79,9 +79,21 @@ pub fn validate_dependencies<'a>(
             edges[index].push(next);
         }
     }
-    // Iterative DFS returns the actual back-edge path without risking recursion on long DAGs.
-    let mut color = vec![0; ids.len()];
-    for root in 0..ids.len() {
+    if let Some(cycle) = find_cycle(&edges) {
+        return Err(DagError::Cycle(
+            cycle
+                .into_iter()
+                .map(|node| names[node].to_owned())
+                .collect(),
+        ));
+    }
+    Ok(())
+}
+
+// Iterative DFS returns the actual back-edge path without recursing on long graphs.
+pub(crate) fn find_cycle(edges: &[Vec<usize>]) -> Option<Vec<usize>> {
+    let mut color = vec![0; edges.len()];
+    for root in 0..edges.len() {
         if color[root] != 0 {
             continue;
         }
@@ -96,12 +108,13 @@ pub fn validate_dependencies<'a>(
             *edge += 1;
             if color[next] == 1 {
                 let start = stack.iter().position(|(id, _)| *id == next).unwrap_or(0);
-                let path = stack[start..]
-                    .iter()
-                    .map(|(id, _)| names[*id].to_owned())
-                    .chain(std::iter::once(names[next].to_owned()))
-                    .collect();
-                return Err(DagError::Cycle(path));
+                return Some(
+                    stack[start..]
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .chain(std::iter::once(next))
+                        .collect(),
+                );
             }
             if color[next] == 0 {
                 color[next] = 1;
@@ -109,5 +122,5 @@ pub fn validate_dependencies<'a>(
             }
         }
     }
-    Ok(())
+    None
 }

@@ -235,6 +235,7 @@ fn model_rejection_definition_error_is_backward_compatible_and_preserves_typed_d
         code: DefinitionErrorCode::MissingDependency,
         target: Some("a".into()),
         path: vec!["absent".into()],
+        pipeline_errors: Vec::new(),
     };
     let rejection = Rejection::invalid_definition(detail.clone());
     assert_eq!(rejection.target, detail.target);

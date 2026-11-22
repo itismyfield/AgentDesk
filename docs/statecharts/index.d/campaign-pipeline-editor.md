@@ -1,0 +1,2 @@
+key: campaign-pipeline-editor
+| `campaign-execution` pipeline editor (#8249) | `c511a30f0e247185d50883fc9c8413b0f6886621` | Saving invalid input, editing during execution, stale revision, deleting an occupied state and changing the legacy execution result on migration | The editor configuration compares guarded transactions against a RED configuration with each defect reachable. [Editor model](campaign-execution/CampaignPipeline.tla) |

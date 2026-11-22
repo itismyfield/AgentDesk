@@ -1,6 +1,7 @@
 //! iMessage reply contracts layered over durable origin admission.
 
 pub(crate) mod admission;
+pub(crate) mod agy_input;
 mod contract;
 pub(crate) mod episode;
 

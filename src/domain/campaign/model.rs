@@ -13,6 +13,7 @@ use super::evidence::{EvidenceDecision, EvidenceEnvelope};
 use super::evidence_gate::{StageAssessment, Verdict};
 use super::execution_pin::ExecutionPin;
 use super::landing::{Landing, LandingFact, MergeFact, MergeJob};
+use super::pipeline::PipelineDefinition;
 use super::profile::ExecutionEnvironment;
 use super::review_gate::{ReviewFact, ReviewJob, StagePrerequisite};
 use super::verification_run::{
@@ -96,6 +97,8 @@ domain_enum!(ExecutionReadiness { Unavailable });
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCode {
     InvalidDefinition,
+    DefinitionSchemaUpgradeRequired,
+    StateInUse,
     StaleDefinition,
     StaleRun,
     StaleBinding,
@@ -386,6 +389,13 @@ pub struct CampaignState {
     pub last_event_at: Option<DateTime<Utc>>,
 }
 
+impl CampaignState {
+    pub(crate) fn legacy_execution_revision(&self) -> u64 {
+        self.definition
+            .legacy_execution_revision(self.definition_revision)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
@@ -400,6 +410,10 @@ pub enum Command {
         expected_revision: u64,
         definition: DefinitionInput,
         change: Option<ChangeReason>,
+    },
+    EditPipeline {
+        expected_revision: u64,
+        pipeline: Option<Box<PipelineDefinition>>,
     },
     Start {
         expected_revision: u64,
@@ -608,6 +622,9 @@ pub enum EventKind {
         approval: Box<ApprovalRecord>,
     },
     DefinitionCreated,
+    PipelineSaved {
+        migrated: bool,
+    },
     DefinitionEdited {
         superseded_nodes: Vec<String>,
         change: Option<ChangeReason>,

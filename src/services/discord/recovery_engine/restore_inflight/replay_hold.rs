@@ -2,6 +2,17 @@
 
 use super::*;
 
+pub(super) fn hold_agy_imessage(state: &inflight::InflightTurnState) -> bool {
+    if state.agy_imessage_source_sha256.is_none() {
+        return false;
+    }
+    tracing::warn!(
+        channel_id = state.channel_id,
+        "agy iMessage recovery held for spool reader"
+    );
+    true
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ReplayLookup {
     Verified,
