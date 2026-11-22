@@ -85,7 +85,7 @@ impl Default for RecoveryRuntime {
 }
 
 impl RecoveryRuntime {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -519,7 +519,7 @@ impl RecoveryRuntime {
 mod durable;
 #[cfg(test)]
 pub use durable::observe_durable;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable::test_store;
 pub(crate) use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
