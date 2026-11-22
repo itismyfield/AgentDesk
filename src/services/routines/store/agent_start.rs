@@ -95,6 +95,7 @@ impl RoutineStore {
             next_retry_at=NULL,owned_tmux_session=NULL,lease_expires_at=NOW()+($5::bigint*INTERVAL '1 second'),
             attempts=COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','input_pending','agent_id',$4->>'agent_id','kind',$4->>'attempt_kind','turn_id',$3::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW())),updated_at=NOW()
             WHERE id=$1 AND status='running' AND turn_id IS NOT DISTINCT FROM $2
+              AND result_json->>'owner_recovering' IS DISTINCT FROM 'true'
               AND (result_json->'owner_input' IS NULL
                    OR (result_json->>'status'='started' AND result_json#>'{owner_input,bind}' IS NOT NULL
                        AND result_json#>'{owner_input,bind}'<>'null'::jsonb
@@ -115,6 +116,7 @@ impl RoutineStore {
                 THEN COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','started','agent_id',$4->>'agent_id','kind',$4->>'attempt_kind','turn_id',$2::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW()))
                 ELSE attempts END,updated_at=NOW()
             WHERE id=$1 AND turn_id=$2 AND status='running' AND action='agent'
+              AND result_json->>'owner_recovering' IS DISTINCT FROM 'true'
               AND result_json#>>'{owner_input,ticket}'=$3
               AND ((result_json->'owner_input')-'bind'::text)=(($4::jsonb->'owner_input')-'bind'::text)
               AND (result_json#>'{owner_input,bind}' IS NULL OR result_json#>'{owner_input,bind}'='null'::jsonb

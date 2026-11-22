@@ -178,24 +178,25 @@ impl Owner {
         self.snapshot.readiness_hold(&head.original)
     }
 
-    /// Approves `key`'s first key (C-s included) unless its original's readiness due came first;
-    /// the clock is read only when that original has a due.
+    /// Approves `key`'s first key (C-s included) before its readiness and routine delivery deadlines.
+    /// The clock is read only when the original has an applicable deadline.
     pub(crate) fn approve_first_key(
         &mut self,
         key: &AttemptRef,
         now: &dyn Fn() -> u64,
     ) -> Result<(), String> {
-        let Some(hold) = self.attempt_readiness_hold(key) else {
-            return Ok(());
-        };
         if self.first_key_approved.as_ref() == Some(key) {
             return Ok(());
         }
-        if now() >= hold.due_at_ms {
+        let readiness_due = self.attempt_readiness_hold(key).map(|hold| hold.due_at_ms);
+        if readiness_due.is_some_and(|due| now() >= due) {
             self.due_refused = Some(key.clone());
             return Err("readiness_deadline".into());
         }
-        self.first_key_approved = Some(key.clone());
+        self.approve_routine_first_key(key, now)?;
+        if readiness_due.is_some() {
+            self.first_key_approved = Some(key.clone());
+        }
         Ok(())
     }
 

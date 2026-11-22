@@ -8,6 +8,7 @@ use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
 mod run_policy;
+mod settlement;
 pub(crate) mod start_deferral;
 mod surface;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
@@ -364,6 +365,16 @@ impl RoutineAgentExecutor {
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
+            match settlement::delivery_deadline(self, store, &run, pause_on_terminal_failure)
+                .await?
+            {
+                settlement::Deadline::Proceed => {}
+                settlement::Deadline::Hold => continue,
+                settlement::Deadline::Closed(outcome) => {
+                    outcomes.push(outcome);
+                    continue;
+                }
+            }
             let Some(run) = owner_input::reconcile_run(self, store, run).await? else {
                 continue;
             };
