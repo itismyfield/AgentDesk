@@ -296,6 +296,8 @@ class Inventory:
     unreadable: list = field(default_factory=list)
     # Declaration site -> its ignore conditions: () for a plain #[ignore], else a cfg_attr predicate.
     ignores: dict = field(default_factory=dict)
+    # Test declaration site -> its outer attributes in order, as (kind, value) tokens.
+    attrs: dict = field(default_factory=dict)
     # Production occurrences retain inherited cfgs, including mutually exclusive targets.
     sources: list = field(default_factory=list)
     logical_modules: set = field(default_factory=set)
@@ -374,7 +376,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
             inv.logical_modules.add(outer)
         rel = source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]
-        depth, pending_path, pending_test, pending_cfgs, pending_ignore = 0, None, False, (), ()
+        depth, pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = 0, None, False, (), (), ()
         index = 0
         while index < len(tokens):
             token = tokens[index]
@@ -392,6 +394,8 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                 attr_path = tuple(item.value for item in attr[:path_end] if item.kind == "ident")
                 outer_attr = bracket == index + 1
                 pending_test = pending_test or attr_path in TEST_ATTRS
+                if outer_attr:
+                    pending_attrs += (tuple((item.kind, item.value) for item in attr),)
                 if attr_path == ("path",) and outer_attr:
                     pending_path = next((item.value for item in attr if item.kind == "string"), pending_path)
                 elif attr_path == ("cfg",):
@@ -418,7 +422,8 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                     inv.tests.setdefault(test_id, []).append((site, cfgs + pending_cfgs))
                     if pending_ignore:
                         inv.ignores[site] = pending_ignore
-                pending_path, pending_test, pending_cfgs, pending_ignore = None, False, (), ()
+                    inv.attrs[site] = pending_attrs
+                pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = None, False, (), (), ()
             elif token.kind == "ident" and token.value == "mod" and index + 2 < len(tokens) \
                     and tokens[index + 1].kind == "ident":
                 name = tokens[index + 1].value
@@ -432,7 +437,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                     if production:
                         inv.logical_modules.add(names + (name,))
                     index = cursor + 1
-                    pending_path, pending_test, pending_cfgs = None, False, ()
+                    pending_path, pending_test, pending_cfgs, pending_attrs = None, False, (), ()
                     continue
                 if cursor < len(tokens):
                     candidates = ((redirect_dir / pending_path,) if pending_path
@@ -461,16 +466,16 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                 depth += 1
                 if pending_cfgs:
                     cfg_stack.append((depth, cfgs + pending_cfgs))
-                pending_cfgs = ()
+                pending_cfgs, pending_attrs = (), ()
             elif token.kind == "punct" and token.value == "}":
                 # A tail-expression attribute ends with its block; it must not reach the next item.
-                depth, pending_cfgs = depth - 1, ()
+                depth, pending_cfgs, pending_attrs = depth - 1, (), ()
                 while scopes and scopes[-1][0] > depth:
                     scopes.pop()
                 while len(cfg_stack) > 1 and cfg_stack[-1][0] > depth:
                     cfg_stack.pop()
             elif token.kind == "punct" and token.value == ";":
-                pending_path, pending_test, pending_cfgs, pending_ignore = None, False, (), ()
+                pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = None, False, (), (), ()
             index += 1
     return inv
 
@@ -725,7 +730,8 @@ def platform_tests(repo_root, allow_missing_files=False):
     return found, sorted(missing), libraries
 
 
-def _declarations(repo_root, libraries):
+def _declarations(repo_root, libraries, same_binary=False):
+    """Unambiguous declaration key -> (binary, test ID); same_binary keys also hold every test attribute."""
     owners = defaultdict(set)
     declarations = defaultdict(list)
     for binary, (_, inventory) in libraries.items():
@@ -737,6 +743,9 @@ def _declarations(repo_root, libraries):
             site, cfg = sites[0]
             filename = site.rsplit(":", 1)[0]
             key = (filename, name.rsplit("::", 1)[-1], cfg, tuple(inventory.ignores.get(site, ())))
+            if same_binary:
+                # A cfg chain is a conjunction: order and repeats do not change when the test compiles.
+                key = (*key[:2], tuple(sorted(set(cfg))), key[3], inventory.attrs.get(site, ()))
             declarations[key].append((binary, name))
     return {key: ids[0] for key, ids in declarations.items()
             if len(ids) == 1 and owners[(repo_root / key[0]).resolve()] == {ids[0][0]}}
@@ -745,15 +754,19 @@ def _declarations(repo_root, libraries):
 def _source_losses(base_root, head_root, base, head, base_libs, head_libs):
     before = _declarations(base_root, base_libs)
     after = _declarations(head_root, head_libs)
-    moves = {origin: after[key] for key, origin in before.items()
+    moves = {origin: (after[key], key) for key, origin in before.items()
              if key in after and origin[0] != after[key][0]}
+    # Within one binary only the module path may change: same file, name, cfg conjunction and test attributes.
+    before, after = _declarations(base_root, base_libs, True), _declarations(head_root, head_libs, True)
+    moves.update((origin, (after[key], key)) for key, origin in before.items()
+                 if key in after and origin[0] == after[key][0])
     by_binary = {key: {} for key in ("removed", "runnable_to_ignored", "present_tests")}
     relocated = {}
     for platform in PLATFORMS:
         old, old_ignored = base[platform]
         new, new_ignored = head[platform]
         removed, added = old - new, new - old
-        relocated[platform] = sorted((a, b) for a, b in moves.items() if a in removed and b in added
+        relocated[platform] = sorted((a, b) for a, (b, _) in moves.items() if a in removed and b in added
                                      and (a in old_ignored) == (b in new_ignored))
         by_binary["removed"][platform] = sorted(removed)
         by_binary["runnable_to_ignored"][platform] = sorted((old - old_ignored) & new_ignored)
@@ -765,7 +778,9 @@ def _source_losses(base_root, head_root, base, head, base_libs, head_libs):
         moved = {origin for origin, _ in pairs}
         legacy["removed"][platform] = sorted({name for binary, name in by_binary["removed"][platform]
                                               if (binary, name) not in moved})
-    return {**legacy, "by_binary": by_binary, "relocated": relocated}
+    accepted = sorted({pair for pairs in relocated.values() for pair in pairs})
+    keys = [{"from": a, "to": b, "key": moves[a][1]} for a, b in accepted]
+    return {**legacy, "by_binary": by_binary, "relocated": relocated, "relocation_keys": keys}
 
 
 def _ignored_on(conditions, target_os, features):
@@ -1044,7 +1059,7 @@ def main(argv=None):
             lost["base_missing_files"] = missing
         Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
         print(" · ".join(f"{p} -{len(lost['removed'][p])} ignored+{len(lost['runnable_to_ignored'][p])}"
-                         for p in PLATFORMS))
+                         f" relocated {len(lost['relocated'][p])}" for p in PLATFORMS))
         return 0
     try:
         if args.command == "check":

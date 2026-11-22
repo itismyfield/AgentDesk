@@ -1818,6 +1818,29 @@ class RustSources(unittest.TestCase):
             self.assertEqual(doc["by_binary"]["removed"][platform],
                              [["x", "db::repository::disable"], ["x", "db::repository::keep"]])
 
+    def test_same_binary_move_counts_only_when_file_name_cfg_and_test_attributes_match(self):
+        base, test = self.root / "base", "#[test]\nfn moved() {}\n"
+        for rel, text in {"Cargo.toml": '[package]\nname = "x"\n', "src/lib.rs": "mod krx;\nmod upper;\n",
+                          "src/krx.rs": "#[cfg(test)]\n#[cfg(unix)]\nmod t;\n", "src/krx/t.rs": test}.items():
+            (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (base / rel).write_text(text)
+        host = '#[cfg(test)]\n#[path = "krx/{}.rs"]\nmod krx_t;\n'
+        # Reordered or repeated cfgs are the same conjunction; any other difference is a loss.
+        cases = {"same": ("#[cfg(unix)]\n#[cfg(test)]\n" + host.format("t"), test, ""),
+                 "cfg": (host.format("t"), test, ""), "deleted": ("", "", ""), "file": (host.format("t2"), "", test),
+                 "ignore": ("#[cfg(unix)]\n" + host.format("t"), test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn"), ""),
+                 "should_panic": ("#[cfg(unix)]\n" + host.format("t"), test.replace("fn", "#[should_panic]\nfn"), "")}
+        for case, (upper, body, other) in cases.items():
+            with self.subTest(case):
+                self.tree({"src/lib.rs": "mod krx;\nmod upper;\n", "src/krx.rs": "", "src/upper.rs": upper,
+                           "src/krx/t.rs": body, "src/krx/t2.rs": other})
+                self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "r.json")[0], 0)
+                doc = json.loads((self.root / "r.json").read_text())
+                moved = [[["x", "krx::t::moved"], ["x", "upper::krx_t::moved"]]] if case == "same" else []
+                self.assertEqual((doc["relocated"]["linux"], doc["removed"]["linux"]),
+                                 (moved, [] if moved else ["krx::t::moved"]))
+                self.assertEqual([[r["from"], r["to"]] for r in doc["relocation_keys"]], moved)
+
     def test_cfg_evaluator_operators(self):
         cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),
                  ("( any ( windows target_os = macos ) )", "macos", True),
