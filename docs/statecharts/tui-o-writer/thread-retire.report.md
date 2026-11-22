@@ -8,12 +8,12 @@ Values come only from the entry table below. `Observe` is the pin taken before t
 
 | Step | Code |
 |---|---|
-| GC judgement, pin before delete | `src/services/dispatched_sessions/hosted_cleanup/thread_gc.rs:50` (`gc_stale_thread_sessions_retiring_pg`), `ChildStore::pin` `src/services/tui_o/writer/host/child_retirement.rs:40` |
+| GC judgement, pin before delete | `src/services/dispatched_sessions/hosted_cleanup/thread_gc.rs:50` (`gc_stale_thread_sessions_retiring_pg`), `ChildStore::pin` `src/services/tui_o/store/thread_children/child_store.rs:9` |
 | Row delete | `src/db/dispatched_sessions/thread_gc.rs:92` (`delete_stale_thread_cleanup_row_pg`) |
 | Request after the delete, successor read | `thread_gc.rs:103` (`retire_child_store`), `src/db/dispatched_sessions/thread_gc.rs:82` |
 | Production GC callers | `src/services/discord/runtime_bootstrap/session_gc.rs:10`, `src/services/dispatched_sessions.rs:159` |
-| Handle kept instead of detached | `src/services/tui_o/writer/host/child_retirement.rs:23` (`keep_stoppable`), callers `writer/host.rs:425`, `runtime_bootstrap/o_writer_host.rs:812,878` |
-| Transition, debt read, stop and join | `writer/host/child_retirement.rs:118` (`retire_child`), `writer/host.rs:492` (`stop_and_join`) |
+| Handle kept instead of detached | `src/services/tui_o/writer/host/child_retirement.rs:24` (`keep_stoppable`), callers `writer/host.rs:425`, `runtime_bootstrap/o_writer_host.rs:812,878` |
+| Transition, debt read, stop and join | `writer/host/child_retirement.rs:92` (`retire_child`), `writer/host.rs:492` (`stop_and_join`) |
 | Generation and epoch compare, mark publish | `src/services/tui_o/channel_policy/children/lifecycle.rs:124,151` |
 | Mark write and read | `src/services/tui_o/store/thread_children/lifecycle.rs:31,46` |
 | Boot rehydration | `channel_policy/children/lifecycle.rs:53`, called from `children.rs` `seeded_from_store` |

@@ -420,7 +420,7 @@ pub(in crate::services) fn maybe_inject_compact_with_source<T: CompactTurnIdenti
             threshold,
             &turn_identity,
             pending.completing(),
-            T::pending_turn_matches,
+            |turn: &T| turn.pending_turn_matches(),
             |permit| {
                 pending.poll(permit, |publish| {
                     // No file or source-authority reads while holding the generation leaf lock.

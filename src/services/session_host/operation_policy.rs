@@ -1,7 +1,6 @@
 //! Read-only host policy observations. These values grant no execution or teardown authority.
 
-use crate::services::session_host::HostKind;
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+pub(crate) use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
 
 /// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
 pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
@@ -10,29 +9,6 @@ pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
     Some(format!(
         "Herdr 설정 채널(endpoint `{key}`)이라 tmux 세션을 바꾸지 않아요"
     ))
-}
-
-/// Whether the marker alone admits a tmux observation; rows can still refuse it.
-pub(crate) fn marker_is_tmux(marker: &HostKindMarker) -> bool {
-    matches!(
-        marker,
-        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
-    )
-}
-
-/// The `.host_kind` marker check alone, for a path holding only a tmux name.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    let marker = read_host_kind_marker(tmux_name);
-    let tmux = marker_is_tmux(&marker);
-    if !tmux {
-        tracing::info!(
-            name = tmux_name,
-            ?marker,
-            row_tmux = true,
-            "tmux probe deferred: host is not tmux"
-        );
-    }
-    (!tmux).then(|| format!("the host marker of {tmux_name} is not tmux"))
 }
 
 /// A provider-auth login target: only the auth namespace with no other host's marker.

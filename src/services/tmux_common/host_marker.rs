@@ -30,6 +30,30 @@ pub(crate) fn record_tmux_host_marker(session_name: &str) {
     }
 }
 
+/// Whether the marker alone admits a tmux observation; rows can still refuse it.
+pub(crate) fn marker_is_tmux(marker: &HostKindMarker) -> bool {
+    matches!(
+        marker,
+        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
+    )
+}
+
+/// The `.host_kind` marker check alone, for a path holding only a tmux name.
+pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
+    let marker = read_host_kind_marker(tmux_name);
+    let tmux = marker_is_tmux(&marker);
+    if !tmux {
+        tracing::info!(
+            target: "agentdesk::services::session_host::operation_policy",
+            name = tmux_name,
+            ?marker,
+            row_tmux = true,
+            "tmux probe deferred: host is not tmux"
+        );
+    }
+    (!tmux).then(|| format!("the host marker of {tmux_name} is not tmux"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

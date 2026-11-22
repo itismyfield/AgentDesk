@@ -7,7 +7,7 @@ use crate::db::dispatched_sessions::{
 use crate::db::session_agent_resolution::parse_thread_channel_id_from_session_key;
 use crate::services::platform::tmux::{SessionPresence, session_presence};
 
-pub(crate) use crate::services::tui_o::writer::host::ChildStore;
+pub(crate) use crate::services::tui_o::store::thread_children::ChildStore;
 
 pub(crate) async fn gc_stale_thread_sessions_pg(
     pool: &PgPool,
