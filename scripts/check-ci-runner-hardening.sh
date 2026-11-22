@@ -110,21 +110,7 @@ require "yaml"
 require "json"
 require "digest"
 
-def canonical_yaml(value)
-  case value
-  when Hash
-    value.keys.sort_by(&:to_s).each_with_object({}) do |key, canonical|
-      item = value[key]
-      next if key.to_s == "continue-on-error" && (item.nil? || item == false)
-
-      canonical[key.to_s] = canonical_yaml(item)
-    end
-  when Array
-    value.map { |item| canonical_yaml(item) }
-  else
-    value
-  end
-end
+require File.expand_path("scripts/ci/pr_nextest_wiring", Dir.pwd)
 
 def raw_yaml_node(node)
   case node
@@ -394,19 +380,18 @@ unless script_checks_job["needs"] == "changes"
 end
 # Every job the CI required judge reads, with the exact if that runs it; the judge
 # accepts a skip only when the changes outputs say the job was not expected.
-rust_tests_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
-built_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}"
+built_gate = PrNextestWiring::BUILT_GATE
 relay_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
 cross_os_gate = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
 expected_closure_if = {
-  "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => rust_tests_gate, "base_compare" => built_gate,
-  "rust_tests" => built_gate, "test_evidence" => built_gate,
+  "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => PrNextestWiring::BUILD_GATE, "base_compare" => built_gate,
+  "rust_tests" => PrNextestWiring::SWEEP_GATE, "test_evidence" => PrNextestWiring::EVIDENCE_GATE,
   "lint" => "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}",
   "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_census" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
   "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => built_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
-  "required_contexts" => "${{ always() }}",
+  "required_contexts" => "${{ always() }}", "rust_scope" => PrNextestWiring::SCOPE_GATE,
 }
 closure = []
 frontier = ["required_contexts"]
@@ -446,7 +431,7 @@ pin_run = <<~SH
      SH
 expected_required_job = {
   "name" => "CI required",
-  "needs" => expected_closure_if.keys - ["required_contexts"],
+  "needs" => expected_closure_if.keys - %w[required_contexts rust_scope],
   "if" => "${{ always() }}",
   "runs-on" => "ubuntu-latest",
   "timeout-minutes" => 15,
@@ -756,9 +741,11 @@ end
 # Test results travel only as the plan artifact and per-attempt worker artifacts the audit reads.
 expected_uploads = {
   "scripts_contracts" => GeneratedArtifactSteps.uploads("pr"),
-  "test_evidence" => [{"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}],
+  "test_evidence" => [{"name" => "Upload PR scope observation", "if" => "${{ !cancelled() }}", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-pr-scope-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/scope-observation.json", "if-no-files-found" => "error", "retention-days" => 14}},
+    {"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}],
   "rust_build" => [{"name" => "Upload nextest plan", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-plan", "path" => "${{ runner.temp }}/nextest", "if-no-files-found" => "error", "retention-days" => 1}}],
   "rust_tests" => [{"name" => "Upload worker results", "if" => "always()", "timeout-minutes" => 10, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/nextest-result", "if-no-files-found" => "warn", "retention-days" => 7}}],
+  "rust_scope" => [{"name" => "Upload worker results", "if" => "always()", "timeout-minutes" => 10, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/nextest-result", "if-no-files-found" => "warn", "retention-days" => 7}}],
 }
 jobs.each do |job_id, job|
   uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
@@ -770,93 +757,7 @@ jobs.each do |job_id, job|
   end
 end
 
-targets = {
-  "rust_build" => {
-    "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
-    "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
-    "job_timeout_minutes" => 100, "job_sha256" => "61a778cc7baaa8f73daf531613ffa819267031cc51b766f091dda9bf91c30fa3",
-    "cargo_steps" => {
-      "Disable remote compiler cache" => {
-        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
-        "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
-      },
-      "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
-      "Archive, list, compare and plan" => {
-        "commands" => [
-          "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"',
-          'cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
-          %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\},
-          '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
-          'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
-          'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
-          '--json-out "$NEXTEST_DIR/compare.json"',
-          'mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)',
-          'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
-          '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
-          %q{--rust-version 1.94.1 --nextest-version "$(${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest --version | awk 'NR==1 {print $2}')" \\},
-          "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
-          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"',
-          'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
-        ],
-        "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null", "GH_TOKEN" => "${{ github.token }}"},
-      },
-    },
-  },
-  # The workers do not wait for it; the judge still requires it through N.
-  "base_compare" => {
-    "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
-    "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "41081e071c6a78b00398c44a1eb991661e448f8f26b5f0a8cd104d3596473adf",
-    "cargo_steps" => {
-      # Dropping this step or changing its argv (a report-only diff) is rejected here.
-      "Compare tests with the comparison base" => {
-        "commands" => ['bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"'], "timeout_minutes" => 40,
-        "env" => {"BASH_ENV" => "/dev/null", "GH_TOKEN" => "${{ github.token }}", "PR_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}"},
-      },
-    },
-  },
-  "rust_tests" => {
-    "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
-    "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 75, "job_sha256" => "865bee919018a57df997b694dce340c865fc46c580bdc5c0424f4e8370d9e8e3", "require_debug_env" => false,
-    "cargo_steps" => {
-      "Verify archive and plan" => {
-        "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
-        "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"},
-      },
-      "Run planned tests" => {
-        "commands" => [
-          "set +e", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'RESULT_DIR="$RUNNER_TEMP/nextest-result"', 'mkdir -p "$RUNNER_TEMP/nextest-extract"',
-          'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
-          '--extract-to "$RUNNER_TEMP/nextest-extract" --extract-overwrite \\',
-          '--config-file "$NEXTEST_DIR/plan/worker-${{ matrix.worker }}.toml" --profile ci --no-tests fail',
-          "code=$?", 'echo "$code" > "$RESULT_DIR/exit-code"',
-          %q(junit="$(find "$RUNNER_TEMP/nextest-extract" "$GITHUB_WORKSPACE/target" -path '*/nextest/ci/junit.xml' 2>/dev/null | head -n 1)"),
-          '[ -n "$junit" ] && cp "$junit" "$RESULT_DIR/junit.xml"', 'exit "$code"',
-        ],
-        "timeout_minutes" => 60, "env" => {"BASH_ENV" => "/dev/null", "ADK_TEST_HERDR_BIN" => "${{ steps.herdr.outputs.bin }}"},
-      },
-    },
-  },
-  "test_evidence" => {
-    "label" => "nextest evidence job", "name" => "Rust tests evidence",
-    "needs" => %w[changes rust_build rust_tests], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 15, "job_sha256" => "0ef6d5301e839a0d7f8628afa5350a2ca4852cffec1241dc52122390351309ff", "require_debug_env" => false,
-    "cargo_steps" => {
-      "Audit worker results" => {
-        "commands" => [
-          "set -euo pipefail", 'plan="$RUNNER_TEMP/nextest/plan/plan.json"',
-          'python3 scripts/ci/nextest_ci.py collect-results --plan "$plan" --artifacts "$RUNNER_TEMP/nextest-artifacts" \\',
-          '--output "$RUNNER_TEMP/nextest-results"',
-          'python3 scripts/ci/nextest_ci.py selector-audit --plan "$plan"', "status=0",
-          'python3 scripts/ci/nextest_ci.py audit --plan "$plan" --results "$RUNNER_TEMP/nextest-results" \\',
-          '--json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?',
-          'cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"', 'exit "$status"',
-        ],
-        "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"},
-      },
-    },
-  },
+targets = PrNextestWiring.targets(ARGV.fetch(2)).merge({
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
     "name" => 'Fast check + non-PG tests (${{ matrix.os }})',
@@ -937,7 +838,7 @@ targets = {
       },
     },
   },
-}
+})
 keys = %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG]
 protected_step_env = {
   "BASH_ENV" => "/dev/null",
@@ -994,8 +895,14 @@ targets.each do |job_id, spec|
       errors << "#{label} must retain the Windows matrix" unless strategy.dig("matrix", "os") == ["windows-latest"]
     end
   end
-  if job_id == "rust_tests"
-    expected_strategy = {"fail-fast" => false, "matrix" => {"worker" => [0, 1, 2, 3, 4, 5]}}
+  if job_id == "rust_build"
+    expected_swap = {"name" => "Ensure swap for the lib test build", "uses" => "./.github/actions/ensure-swap",
+                     "if" => "runner.environment == 'github-hosted'", "with" => {"size-gb" => "24"}}
+    swaps = Array(job["steps"]).select { |step| step["name"] == expected_swap["name"] }
+    errors << "PR rust_build must retain the exact swap step" unless swaps == [expected_swap]
+  end
+  if %w[rust_scope rust_tests].include?(job_id)
+    expected_strategy = PrNextestWiring.matrix(job_id)
     errors << "#{label} must use the validated sweep matrix without fail-fast" unless job["strategy"] == expected_strategy
   end
 
@@ -1080,6 +987,9 @@ nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
 verify_helper_hash scripts/ci/generated_artifact_steps.rb 870d236cd7867ddb578830cb7e60ce864d3c68ec9a4c89d678cf14c0780e98fb || exit 1
 verify_helper_hash scripts/ci/main_script_check_shards.rb 52bd83f0cf608795ab5e9df277dad307dd92e252f83ae26912a1a3c9acdca32b || exit 1
+verify_helper_hash scripts/ci/pr_nextest_wiring.rb bb33c90bdf1b5298c900a20085c7971f86587a4e8b8d5017eac72640b1cbdc37 || exit 1
+verify_helper_hash .github/actions/pr-nextest-setup/action.yml eb2bed4b88d18e067175c1e4055471116da4b9fceb849a16e267dc5fe4686965 || exit 1
+verify_helper_hash scripts/ci/nextest-pr-worker.sh 888892db12a7fa0173b7f211571a255f84c619f6045fd15c8fe841fd2fd3f5a8 || exit 1
 validate_runner_memory_wiring
 validate_main_script_check_shards() {
   if ! ruby scripts/ci/main_script_check_shards.rb "$main_workflow" "$RUNNER_MEMORY_STEPS_JSON"; then
@@ -1093,6 +1003,7 @@ validate_main_lint_and_nextest() {
 require "yaml"
 require "json"
 require "digest"
+require File.expand_path("scripts/ci/pr_nextest_wiring", Dir.pwd)
 main_path, pr_path, nightly_path, memory_json, wsl_runner = ARGV
 memory_specs = JSON.parse(memory_json)
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
@@ -1151,7 +1062,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR and main share the producer; nightly keeps the hosted setup and strict retry policy.
+# Main keeps its full sweep; nightly uses hosted setup and the strict retry policy.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1162,9 +1073,11 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     next
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
-  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
+  main_full = role_free.(main_job, "Upload nextest baseline")
+  shape = Digest::SHA256.hexdigest(JSON.generate(canonical_yaml(main_full)))
+  errors << "main #{job_id} must retain the full sweep job" unless shape == PrNextestWiring::MAIN_JOB_SHA.fetch(job_id)
   nightly_job = nightly_jobs[job_id]
-  expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  expected_nightly = main_full.merge(main_job.slice("needs", "if"))
   if job_id == "rust_build"
     hosted_actions = %w[./.github/actions/sccache-or-nothing Swatinem/rust-cache@v2 ./.github/actions/ensure-swap]
     expected_nightly["runs-on"] = "ubuntu-latest"

@@ -2,15 +2,6 @@
 
 pub(crate) use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
 
-/// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
-pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
-    let key = endpoint.key;
-    Some(format!(
-        "Herdr 설정 채널(endpoint `{key}`)이라 tmux 세션을 바꾸지 않아요"
-    ))
-}
-
 /// A provider-auth login target: only the auth namespace with no other host's marker.
 pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
     if !tmux_name.starts_with("adk-login-") {
@@ -65,14 +56,20 @@ mod tests {
         assert_eq!(auth_login_refusal(name), refused);
     }
 
-    #[test]
-    fn configured_and_login_refusals_keep_their_exact_text() {
+    #[tokio::test]
+    async fn configured_and_login_refusals_keep_their_exact_text() {
+        use crate::services::session_host::host_decision::host_decision;
         let _hosts = crate::config::session_hosts::force_for_test(Some("node"), &[(17, "node")]);
+        let refusal = async |channel| {
+            host_decision(None, None, None, channel)
+                .await
+                .tmux_refusal()
+        };
         assert_eq!(
-            configured_refusal(17).as_deref(),
+            refusal(17).await.as_deref(),
             Some("Herdr 설정 채널(endpoint `node-endpoint`)이라 tmux 세션을 바꾸지 않아요")
         );
-        assert_eq!(configured_refusal(18), None);
+        assert_eq!(refusal(18).await, None);
         assert_eq!(
             auth_login_refusal("AgentDesk-login-x").as_deref(),
             Some("AgentDesk-login-x is not a provider-auth login session")

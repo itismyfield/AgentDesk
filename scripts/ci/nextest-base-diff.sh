@@ -2,7 +2,7 @@
 # Compare the head nextest plan with the comparison base: CI Main's nextest-baseline artifact for
 # that exact SHA, or a base plan built here when the artifact is missing or not comparable. When that
 # build fails with compiler errors, the nearest first-parent ancestor's CI Main baseline stands in.
-# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json>
+# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json and PR universe.json>
 #   (env: PR_HEAD_SHA, GH_TOKEN; GITHUB_SHA and GITHUB_RUN_ID name the run that must have written the plan)
 set -euo pipefail
 
@@ -34,6 +34,9 @@ missing="$(python3 -c 'import json,sys; print("; ".join(json.load(open(sys.argv[
 diff_args=(--plan "$plan" --head-sha "$GITHUB_SHA" --head-run-id "$GITHUB_RUN_ID" --comparison-base-sha "$base_sha"
   --justifications scripts/ci/test-removal-justifications.txt --source-removed "$work/source-removed.json"
   --json-out "$work/diff.json")
+if [ -f "$NEXTEST_DIR/universe.json" ]; then
+  diff_args+=(--head-universe "$NEXTEST_DIR/universe.json")
+fi
 
 # CI Main uploads the baseline as soon as its build job has planned, so a run that is still testing, or
 # failed or was cancelled later, carries the same IDs; base-diff still checks the SHA, scope and build.

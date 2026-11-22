@@ -1,0 +1,1088 @@
+[
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the struct `Thing` is defined here",
+    "spans": [
+     {
+      "byte_end": 57,
+      "byte_start": 34,
+      "column_end": 24,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/services/store.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 3,
+      "line_start": 3,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "struct `Thing` is private",
+  "spans": [
+   {
+    "byte_end": 24,
+    "byte_start": 19,
+    "column_end": 25,
+    "column_start": 20,
+    "file_name": "src/services/web.rs",
+    "is_primary": true,
+    "label": "private struct",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the function `thing` is defined here",
+    "spans": [
+     {
+      "byte_end": 119,
+      "byte_start": 89,
+      "column_end": 31,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/services/store.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 7,
+      "line_start": 7,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "function `thing` is private",
+  "spans": [
+   {
+    "byte_end": 31,
+    "byte_start": 26,
+    "column_end": 32,
+    "column_start": 27,
+    "file_name": "src/services/web.rs",
+    "is_primary": true,
+    "label": "private function",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the struct `Config` is defined here",
+    "spans": [
+     {
+      "byte_end": 114,
+      "byte_start": 90,
+      "column_end": 25,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 7,
+      "line_start": 7,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "struct `Config` is private",
+  "spans": [
+   {
+    "byte_end": 24,
+    "byte_start": 18,
+    "column_end": 25,
+    "column_start": 19,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private struct",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the struct `Id` is defined here",
+    "spans": [
+     {
+      "byte_end": 571,
+      "byte_start": 551,
+      "column_end": 21,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 35,
+      "line_start": 35,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "struct `Id` is private",
+  "spans": [
+   {
+    "byte_end": 28,
+    "byte_start": 26,
+    "column_end": 29,
+    "column_start": 27,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private struct",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the struct `Point` is defined here",
+    "spans": [
+     {
+      "byte_end": 388,
+      "byte_start": 365,
+      "column_end": 24,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 22,
+      "line_start": 22,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "struct `Point` is private",
+  "spans": [
+   {
+    "byte_end": 35,
+    "byte_start": 30,
+    "column_end": 36,
+    "column_start": 31,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private struct",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the struct `Span` is defined here",
+    "spans": [
+     {
+      "byte_end": 462,
+      "byte_start": 440,
+      "column_end": 23,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 27,
+      "line_start": 27,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "struct `Span` is private",
+  "spans": [
+   {
+    "byte_end": 41,
+    "byte_start": 37,
+    "column_end": 42,
+    "column_start": 38,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private struct",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the function `span_lo` is defined here",
+    "spans": [
+     {
+      "byte_end": 533,
+      "byte_start": 492,
+      "column_end": 42,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 31,
+      "line_start": 31,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "function `span_lo` is private",
+  "spans": [
+   {
+    "byte_end": 233,
+    "byte_start": 226,
+    "column_end": 25,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private function",
+    "line_end": 6,
+    "line_start": 6,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the tuple struct constructor `Shared` is defined here",
+    "spans": [
+     {
+      "byte_end": 87,
+      "byte_start": 69,
+      "column_end": 34,
+      "column_start": 16,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 5,
+      "line_start": 5,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "tuple struct constructor `Shared` is private",
+  "spans": [
+   {
+    "byte_end": 411,
+    "byte_start": 405,
+    "column_end": 37,
+    "column_start": 31,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private tuple struct constructor",
+    "line_end": 13,
+    "line_start": 13,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 39,
+    "byte_start": 25,
+    "column_end": 40,
+    "column_start": 26,
+    "file_name": "<PROBE>/lower/src/core/util.rs",
+    "is_primary": false,
+    "label": "a constructor is private if any of the fields is private",
+    "line_end": 1,
+    "line_start": 1,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the function `make_token` is defined here",
+    "spans": [
+     {
+      "byte_end": 651,
+      "byte_start": 616,
+      "column_end": 36,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 39,
+      "line_start": 39,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "function `make_token` is private",
+  "spans": [
+   {
+    "byte_end": 456,
+    "byte_start": 446,
+    "column_end": 41,
+    "column_start": 31,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private function",
+    "line_end": 14,
+    "line_start": 14,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the function `helper` is defined here",
+    "spans": [
+     {
+      "byte_end": 696,
+      "byte_start": 667,
+      "column_end": 30,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 43,
+      "line_start": 43,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "function `helper` is private",
+  "spans": [
+   {
+    "byte_end": 657,
+    "byte_start": 651,
+    "column_end": 30,
+    "column_start": 24,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private function",
+    "line_end": 23,
+    "line_start": 23,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the module `util` is defined here",
+    "spans": [
+     {
+      "byte_end": 19,
+      "byte_start": 0,
+      "column_end": 20,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 1,
+      "line_start": 1,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "module `util` is private",
+  "spans": [
+   {
+    "byte_end": 687,
+    "byte_start": 683,
+    "column_end": 28,
+    "column_start": 24,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private module",
+    "line_end": 24,
+    "line_start": 24,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 693,
+    "byte_start": 689,
+    "column_end": 34,
+    "column_start": 30,
+    "file_name": "src/app.rs",
+    "is_primary": false,
+    "label": "function `tidy` is not publicly re-exported",
+    "line_end": 24,
+    "line_start": 24,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `0` of struct `core::util::Shared` is private",
+  "spans": [
+   {
+    "byte_end": 627,
+    "byte_start": 626,
+    "column_end": 19,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 22,
+    "line_start": 22,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 1
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "but type `Token` is only usable at visibility `pub(crate)`",
+    "spans": [
+     {
+      "byte_end": 571,
+      "byte_start": 548,
+      "column_end": 24,
+      "column_start": 1,
+      "file_name": "src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 37,
+      "line_start": 37,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   },
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "`#[warn(private_interfaces)]` on by default",
+    "spans": []
+   }
+  ],
+  "level": "warning",
+  "message": "type `Token` is more private than the item `make_token`",
+  "spans": [
+   {
+    "byte_end": 602,
+    "byte_start": 574,
+    "column_end": 29,
+    "column_start": 1,
+    "file_name": "src/core.rs",
+    "is_primary": true,
+    "label": "function `make_token` is reachable at visibility `pub`",
+    "line_end": 39,
+    "line_start": 39,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "private_interfaces"
+  },
+  "_test": true,
+  "_side": "lower",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "constructor is not visible here due to private fields",
+    "spans": [
+     {
+      "byte_end": 364,
+      "byte_start": 362,
+      "column_end": 14,
+      "column_start": 12,
+      "file_name": "src/app.rs",
+      "is_primary": true,
+      "label": "private field",
+      "line_end": 12,
+      "line_start": 12,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "cannot match against a tuple struct which contains private fields",
+  "spans": [
+   {
+    "byte_end": 361,
+    "byte_start": 359,
+    "column_end": 11,
+    "column_start": 9,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": null,
+    "line_end": 12,
+    "line_start": 12,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0532"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "the function `tidy` is defined here",
+    "spans": [
+     {
+      "byte_end": 73,
+      "byte_start": 36,
+      "column_end": 38,
+      "column_start": 1,
+      "file_name": "<PROBE>/lower/src/core/util.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 3,
+      "line_start": 3,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "function `tidy` is private",
+  "spans": [
+   {
+    "byte_end": 693,
+    "byte_start": 689,
+    "column_end": 34,
+    "column_start": 30,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private function",
+    "line_end": 24,
+    "line_start": 24,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0603"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "associated function `new` is private",
+  "spans": [
+   {
+    "byte_end": 303,
+    "byte_start": 300,
+    "column_end": 29,
+    "column_start": 26,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private associated function",
+    "line_end": 10,
+    "line_start": 10,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 217,
+    "byte_start": 180,
+    "column_end": 42,
+    "column_start": 5,
+    "file_name": "<PROBE>/lower/src/core.rs",
+    "is_primary": false,
+    "label": "private associated function defined here",
+    "line_end": 13,
+    "line_start": 13,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0624"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "constructor is not visible here due to private fields",
+    "spans": [
+     {
+      "byte_end": 544,
+      "byte_start": 530,
+      "column_end": 29,
+      "column_start": 15,
+      "file_name": "<PROBE>/lower/src/core.rs",
+      "is_primary": true,
+      "label": "private field",
+      "line_end": 35,
+      "line_start": 35,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "cannot initialize a tuple struct which contains private fields",
+  "spans": [
+   {
+    "byte_end": 370,
+    "byte_start": 368,
+    "column_end": 20,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": null,
+    "line_end": 12,
+    "line_start": 12,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0423"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `name` of struct `Config` is private",
+  "spans": [
+   {
+    "byte_end": 475,
+    "byte_start": 471,
+    "column_end": 16,
+    "column_start": 12,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 15,
+    "line_start": 15,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `limit` of struct `Config` is private",
+  "spans": [
+   {
+    "byte_end": 511,
+    "byte_start": 506,
+    "column_end": 23,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 16,
+    "line_start": 16,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "method `limit` is private",
+  "spans": [
+   {
+    "byte_end": 534,
+    "byte_start": 529,
+    "column_end": 23,
+    "column_start": 18,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private method",
+    "line_end": 17,
+    "line_start": 17,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   },
+   {
+    "byte_end": 320,
+    "byte_start": 287,
+    "column_end": 38,
+    "column_start": 5,
+    "file_name": "<PROBE>/lower/src/core.rs",
+    "is_primary": false,
+    "label": "private method defined here",
+    "line_end": 17,
+    "line_start": 17,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0624"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `x` of struct `Point` is private",
+  "spans": [
+   {
+    "byte_end": 554,
+    "byte_start": 553,
+    "column_end": 18,
+    "column_start": 17,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 18,
+    "line_start": 18,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `y` of struct `Point` is private",
+  "spans": [
+   {
+    "byte_end": 572,
+    "byte_start": 571,
+    "column_end": 18,
+    "column_start": 17,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 19,
+    "line_start": 19,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `size` of struct `Thing` is private",
+  "spans": [
+   {
+    "byte_end": 110,
+    "byte_start": 106,
+    "column_end": 14,
+    "column_start": 10,
+    "file_name": "src/services/web.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 5,
+    "line_start": 5,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0616"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 2
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [
+   {
+    "children": [],
+    "code": null,
+    "level": "note",
+    "message": "consider marking `Shared` as `pub` in the imported module",
+    "spans": [
+     {
+      "byte_end": 73,
+      "byte_start": 55,
+      "column_end": 27,
+      "column_start": 9,
+      "file_name": "src/core.rs",
+      "is_primary": true,
+      "label": null,
+      "line_end": 5,
+      "line_start": 5,
+      "suggested_replacement": null,
+      "suggestion_applicability": null
+     }
+    ]
+   }
+  ],
+  "level": "error",
+  "message": "`Shared` is only public within the crate, and cannot be re-exported outside",
+  "spans": [
+   {
+    "byte_end": 73,
+    "byte_start": 55,
+    "column_end": 27,
+    "column_start": 9,
+    "file_name": "src/core.rs",
+    "is_primary": true,
+    "label": null,
+    "line_end": 5,
+    "line_start": 5,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0364"
+  },
+  "_test": true,
+  "_side": "lower",
+  "_iter": 3
+ },
+ {
+  "$message_type": "diagnostic",
+  "children": [],
+  "level": "error",
+  "message": "field `lo` of struct `Span` is private",
+  "spans": [
+   {
+    "byte_end": 202,
+    "byte_start": 200,
+    "column_end": 25,
+    "column_start": 23,
+    "file_name": "src/app.rs",
+    "is_primary": true,
+    "label": "private field",
+    "line_end": 5,
+    "line_start": 5,
+    "suggested_replacement": null,
+    "suggestion_applicability": null
+   }
+  ],
+  "code": {
+   "code": "E0451"
+  },
+  "_test": true,
+  "_side": "upper",
+  "_iter": 4
+ }
+]

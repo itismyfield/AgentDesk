@@ -10,12 +10,16 @@ pub(in crate::services::discord) use message_handler::input_payload;
 mod queue_status_presentation;
 mod response_format;
 mod thread_binding;
+mod transition_wake;
 mod turn_start;
 
 pub(crate) use authorization::TurnKind;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
 pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
+pub(in crate::services::discord) use transition_wake::SessionTransitionCompletion;
+#[cfg(unix)]
+pub(in crate::services::discord) use transition_wake::wake_installed_owner;
 pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> bool {
     intake_dispatch::replay_admission::dormant_start(channel).is_some()
 }

@@ -37,15 +37,14 @@ SKIPPED_WHEN_COMMENT_ONLY = (
     "rust_build",
     "base_compare",
     "rust_tests",
-    "test_evidence",
     "lint",
     "relay_authority_mutations",
     "pg15_owner_proof",
     "check_fast_cross_os",
     "check_fast_cross_os_targets",
 )
-KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_census", "scripts_contracts")
-KEPT_FOR_INCLUDED_RUST = {"rust_build", "base_compare", "rust_tests", "test_evidence", "lint",
+KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_census", "scripts_contracts", "test_evidence")
+KEPT_FOR_INCLUDED_RUST = {"rust_build", "base_compare", "rust_tests", "lint",
                           "relay_authority_mutations", "pg15_owner_proof"}
 REQUIRED_CONTEXTS = (
     "Lint",
@@ -542,6 +541,13 @@ TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'((?:[^']|'')*)'|([A-Za-z_][\
 FORCE_FULL = "needs.pg_shards.outputs.force_full == 'true'"
 UPSTREAM_RESULT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.result\s*==\s*'success'")
 
+PR_SCOPE_BASE = "!github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success'"
+PR_SCOPE_CONDITIONS = {
+    PR_SCOPE_BASE + " && needs.rust_build.outputs.scope_workers != '[]'",
+    PR_SCOPE_BASE + " && (needs.rust_scope.result == 'success' || "
+    "(needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]'))",
+}
+
 
 def cancelled_path_gate(expr: str, lookup) -> bool:
     """Only the status-first cancellation guard and one changes output or upstream success are shared gates."""
@@ -586,7 +592,7 @@ def evaluate(expr: str, lookup) -> object:
     if whole:
         expr = whole.group(1).strip()
     guarded_needs = re.search(r"\b[A-Za-z_][\w]*\s*\(", expr) and re.search(r"\bneeds\.", expr)
-    if guarded_needs:
+    if guarded_needs and expr not in PR_SCOPE_CONDITIONS:
         return cancelled_path_gate(expr, lookup)
     tokens: list[tuple[str, str]] = []
     pos = 0
@@ -689,8 +695,10 @@ class WorkflowSimulation:
         rust_lint_skip: str | None = None,
         gate_outcome: str = "success",
         run_cancelled: bool = False,
+        scope_workers: str = "[]",
     ):
         self.run_cancelled = run_cancelled
+        self.scope_workers = scope_workers
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip, "rust_lint_skip": rust_lint_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
@@ -720,6 +728,8 @@ class WorkflowSimulation:
             return self.run_cancelled
         parts = name.split(".")
         assert parts[0] == "needs", name
+        if name == "needs.rust_build.outputs.scope_workers":
+            return self.scope_workers if self.results["rust_build"] == "success" else ""
         if parts[2] == "outputs":
             assert parts[1] == "changes", name
             return self.changes.get(parts[3], "")
@@ -865,6 +875,7 @@ class WorkflowWiringTests(unittest.TestCase):
             with self.subTest(filters=raw):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "skipped", job_id)
+                self.assertEqual(run.results["rust_scope"], "skipped")
                 for job_id in KEPT_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "success", job_id)
                 self.assertEqual(run.changes["comment_only"], "true")
@@ -908,6 +919,13 @@ class WorkflowWiringTests(unittest.TestCase):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "success", job_id)
                 self.assertPublishedGreen(run)
+
+    def test_scope_failure_and_unexpected_skip_block_the_required_full_sweep(self) -> None:
+        for outcome, expected in (("success", "success"), ("failure", "skipped"), ("skipped", "skipped")):
+            with self.subTest(scope=outcome):
+                run = WorkflowSimulation(HEAVY_RAW, "false", forced={"rust_scope": outcome}, scope_workers="[0]")
+                self.assertEqual(run.results["rust_tests"], expected)
+                self.assertEqual(run.gate(), "success" if outcome == "success" else "failure")
 
     def test_heavy_jobs_still_fail_closed_when_not_comment_only(self) -> None:
         for job_id, contexts in CONTEXTS_OF.items():
