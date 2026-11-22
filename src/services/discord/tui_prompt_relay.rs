@@ -65,7 +65,7 @@ pub(super) fn install_observer_publication() {
 }
 
 use super::tmux_watcher_registry::idle_tail_state::CLAUDE_IDLE_RESPONSE_TAILS;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::tmux_watcher_registry::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
@@ -166,7 +166,7 @@ use self::synthetic_start::{
 use self::synthetic_start::{
     restore_pending_starts, tui_direct_synthetic_inflight_active_for_prompt,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) use super::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches;
 
 #[cfg(unix)]
