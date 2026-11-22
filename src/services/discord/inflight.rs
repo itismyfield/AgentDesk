@@ -594,7 +594,7 @@ pub(crate) mod policy_op_unlink_hook {
 }
 /// The one path the JS policy op names from outside this store.
 pub(crate) mod policy_op {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) use super::PolicyOpRemoveOutcome as RemoveOutcome;
     #[cfg(test)]
     pub(crate) use super::policy_op_unlink_hook as unlink_hook;
