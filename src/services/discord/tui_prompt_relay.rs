@@ -864,6 +864,15 @@ fn slash_command_control_turn_is_duplicate_external_replay(
     !slash_command_control_turn_is_first_sighting(tmux_session_name, kind)
 }
 
+impl hosted_source::AdoptionRuntime for SharedData {
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        self.pg_pool.as_ref()
+    }
+    fn token_hash(&self) -> &str {
+        &self.token_hash
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "tui_prompt_relay/local_model_queue_wake_e2e_tests.rs"]
 mod local_model_queue_wake_e2e;

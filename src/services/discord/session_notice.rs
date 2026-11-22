@@ -1,6 +1,6 @@
 //! Shared single-line rendering and channel-runtime credentials for status notices.
 
-use super::{ProviderKind, health::HealthRegistry, tui_task_card};
+use super::{ProviderKind, tui_task_card};
 use poise::serenity_prelude::{ChannelId, Http};
 use std::sync::Arc;
 
@@ -51,13 +51,23 @@ pub(crate) fn is_inline(text: &str) -> bool {
             .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
 }
 
+/// Channel runtime lookup for `provider_http`; the health registry implements it.
+pub(super) trait ChannelRuntimeHttp {
+    /// `None` when no single runtime owns the channel, `Some(None)` when it has no credentials.
+    fn channel_runtime_http(
+        &self,
+        provider: &ProviderKind,
+        channel: ChannelId,
+    ) -> impl std::future::Future<Output = Option<Option<Arc<Http>>>> + Send;
+}
+
 pub(super) async fn provider_http(
-    registry: &HealthRegistry,
+    registry: &impl ChannelRuntimeHttp,
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Result<Arc<Http>, String> {
     let shared = registry
-        .shared_for_provider_on_channel(provider, channel)
+        .channel_runtime_http(provider, channel)
         .await
         .ok_or_else(|| {
             format!(
@@ -65,7 +75,5 @@ pub(super) async fn provider_http(
                 provider.as_str()
             )
         })?;
-    shared
-        .serenity_http_or_token_fallback()
-        .ok_or_else(|| "channel provider credentials unavailable".to_string())
+    shared.ok_or_else(|| "channel provider credentials unavailable".to_string())
 }
