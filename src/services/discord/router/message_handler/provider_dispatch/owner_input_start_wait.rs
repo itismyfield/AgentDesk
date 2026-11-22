@@ -18,17 +18,27 @@ impl Observed {
     }
 }
 
+/// Whether a start of `origin` runs under the channel's key; `None`: a routine's own context says.
+/// An effort continuation resumes the channel's own session.
+pub(super) fn keyed_to_channel(origin: super::InputOrigin) -> Option<bool> {
+    use super::InputOrigin::{EffortContinue, HttpStart, Routine};
+    match origin {
+        Routine => None,
+        origin => Some(origin.is_person() || origin == HttpStart || origin == EffortContinue),
+    }
+}
+
 /// A Herdr start under the channel's key reads its current execution; a watch never reuses an old
 /// host proof.
 pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value) -> Observed {
     use crate::services::claude_tui::host_input::busy::BusyState;
     let origin = super::InputOrigin::from_context(Some(context));
     // A start apart from the channel's key keeps its native wait and existing typed refusal order.
-    let channel_turn = match origin {
-        super::InputOrigin::Routine => {
+    let channel_turn = match keyed_to_channel(origin) {
+        Some(keyed) => keyed,
+        None => {
             super::super::super::headless_turn::owner_start_takes_channel(shared, context).await
         }
-        origin => origin.is_person() || origin == super::InputOrigin::HttpStart,
     };
     if !channel_turn {
         return Observed::Legacy;

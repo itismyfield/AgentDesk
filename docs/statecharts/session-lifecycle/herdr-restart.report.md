@@ -10,13 +10,13 @@ A 코드 조사 기준: `2c8873381478c7179f0347d5bfc5b850d5cb90e2`. 기존 B 설
 
 | 값/단계 | 기준 코드 좌표 | 모델 범위 |
 |---|---|---|
-| 일반 launch `resume=false` | `src/services/codex/herdr_turn.rs:190`, `:193`, `:194` | `AResumeIntent=FALSE`이면 mode는 항상 `fresh`; native session이 있다는 이유로 resume으로 바꾸지 않음 |
+| 일반 launch `resume=false` | `src/services/codex/herdr_turn.rs:198`, `:201`, `:202` | `AResumeIntent=FALSE`이면 mode는 항상 `fresh`; native session이 있다는 이유로 resume으로 바꾸지 않음 |
 | immutable incarnation | `src/services/herdr_launch.rs:735`, `:744`, `:749`, `:750`, `:758`; `src/services/tui_prompt_dedupe/binding_context.rs:21` | 새 nonce와 explicit `fresh/resume` 모드. A의 reader start offset은 같은 incarnation에 내구 기록하는 추가 포트 |
 | 내구 기록·복원 | `src/services/tui_prompt_dedupe/binding_context.rs:366`, `:379`, `:382`, `:389`, `:495`, `:500` | 파일·directory durability 뒤 launch, boot는 같은 nonce의 기록을 읽음. 기준 구조에는 resume offset 필드가 없으므로 A 구현이 필요 |
 | old End 이후 EOF | `src/services/discord/herdr_terminate.rs:589`, `:594`, `:596`, `:603` | `endConfirmed` proof가 있는 뒤에만 resume EOF 캡처. 이 proof 전달은 실제 호출자 검증 대상 |
-| offset `0/1/2` | 기존 first-input `src/services/codex/herdr_turn/first_input.rs:211`, `:216`, `:225`; tail offset 인자 `src/services/codex/herdr_turn.rs:666`, `:676` | 0=fresh 시작, 1=확인된 old End의 nonzero EOF, 2=새 startup metadata가 붙은 EOF. 바이트 길이의 작은 동치류이며 실제 파일 크기 값이 아님 |
+| offset `0/1/2` | 기존 first-input `src/services/codex/herdr_turn/first_input.rs:211`, `:216`, `:225`; tail offset 인자 `src/services/codex/herdr_turn.rs:700`, `:710` | 0=fresh 시작, 1=확인된 old End의 nonzero EOF, 2=새 startup metadata가 붙은 EOF. 바이트 길이의 작은 동치류이며 실제 파일 크기 값이 아님 |
 | O cursor와 EOF | 기존 source/offset를 소비하는 위 경로와 A capture 포트 | 캡처 시 `ACursorMatches=TRUE/FALSE`. 불일치는 A에서 resume 거절; fresh fallback은 B 정책이므로 A 모델에 없음 |
-| `Startup/Resume` cause | consumer `src/services/codex/herdr_turn.rs:287`, `:288`, `:290`; producer `src/services/tui_prompt_dedupe/binding_events/codex.rs:845`, `:857` | explicit resume의 자기 nonce/source는 Resume도 허용. ordinary fresh는 Startup. 임의 Resume 이벤트 전체 허용을 증명하지 않음 |
+| `Startup/Resume` cause | consumer `src/services/codex/herdr_turn.rs:321`, `:322`, `:324`; producer `src/services/tui_prompt_dedupe/binding_events/codex.rs:845`, `:857` | explicit resume의 자기 nonce/source는 Resume도 허용. ordinary fresh는 Startup. 임의 Resume 이벤트 전체 허용을 증명하지 않음 |
 | seed 전 crash·boot | 위 incarnation read/write와 first-input `observe(Submitted)` (`first_input.rs:185`) | launch/startup metadata 후 첫 seed 전 1회 crash. volatile offset/nonce 소실 후 durable 기록 복원. `AObserve`는 첫 seed가 제출된 뒤 Source attach·tail을 관찰하는 포트이며 seed exactly-once 자체는 B 영역 계약 |
 
 `AResumeIntent`는 검증한 explicit resume 준비 요청이다. 소스 문자열/설정 추측으로 만든 bool이 아니다. 모델은 source nonce/native session/dev·ino 검증이 끝난 포트를 입력으로 가정하며 그 검증 자체를 증명하지 않는다. EOF가 0인 resume, 반복 crash, 제출 후 ACK 불명·임의 native 키는 이번 A축 밖이다.
@@ -132,7 +132,7 @@ O cursor==EOF 검사는 **old End 직후 capture 시점**이다. boot/첫 입력
 | `Busy={TRUE,FALSE}`, `inflight/settled/warned` | 기존 active 판정·경고·cancel `src/services/discord/commands/restart.rs:223`; captured turn recheck `src/services/discord/herdr_terminate.rs:484`, settlement `:603` | 재시작 수락 전 실행 중인 옛 턴은 중단 경고와 exact token 결산 대상으로 분리. 새 입력을 옛 턴으로 replay하지 않음 |
 | `q={incoming,queued,held,delivered,cancelled,lost}`, `accepted`, `effects=0..2` | owner `SnapshotV2.items/head_injection/retained_inputs/terminal_identities` (`src/services/turn_orchestrator/queued_head/v2_types.rs:19`), target nonce `:117`, busy transition durable requeue (`src/services/discord/router/message_handler/intake_turn/runtime_transition.rs:35`, `:72`) | `lost`·두 번째 effect는 mutant 검출용. 기존 Reserved/MayHaveSent/Unknown (`src/services/turn_orchestrator/queued_head.rs:53`)의 이미 시도한 입력은 신규 수락 집합 밖이며 기존 불명확성 결산을 보존해야 함 |
 | `generation/intentGeneration=0/1`, `clearReceipts` | 명시 clear는 transition timeout 뒤에도 진행 `src/services/discord/commands/control.rs:523`, memory discard `:552`; V2 terminal identity와 owed drop receipt `src/services/turn_orchestrator/queued_head/v2_types.rs:25`, `:35` | `ClearSupersedes`는 create 직전 1회만 검사. clear의 자체 pane 종료나 임의 횟수 경쟁을 증명하지 않음 |
-| `SeedReply={accepted,failed}`, `seedEffects` | 기존 restart seed 및 두 번 이하 Conflict 재시도 `src/services/discord/commands/restart.rs:133`, `:166`; Codex first input→source attach `src/services/codex/herdr_turn.rs:442` | `accepted`는 단순 owner enqueue 응답이 아니라 **seed effect+정확한 startup/source binding 완료**를 뜻하는 제안 포트. Claude의 bind-before-seed와 Codex seed-before-bind 차이를 하나의 단계 안에서 다룸 |
+| `SeedReply={accepted,failed}`, `seedEffects` | 기존 restart seed 및 두 번 이하 Conflict 재시도 `src/services/discord/commands/restart.rs:133`, `:166`; Codex first input→source attach `src/services/codex/herdr_turn.rs:476` | `accepted`는 단순 owner enqueue 응답이 아니라 **seed effect+정확한 startup/source binding 완료**를 뜻하는 제안 포트. Claude의 bind-before-seed와 Codex seed-before-bind 차이를 하나의 단계 안에서 다룸 |
 | `phase={idle,closing,retiring,preparing,creating,binding,ready,notice,failed}` | 위 request→exact close→old token 결산→new nonce Pending→create→seed/source bind→Ready 또는 notice 경로 | 기존 enum 추가 주장이 아니다. 호출이 반환하거나 실패 알림이 재시도 끝에 도착한다는 공정성은 명시적 가정 |
 
 ## 기존 B 규칙

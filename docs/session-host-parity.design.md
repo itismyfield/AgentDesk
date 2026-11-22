@@ -435,7 +435,7 @@ src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs:2
 src/services/discord/router/message_handler/intake_turn/worker_entry/dispatch_guard_pg_tests.rs:6:use crate::services::discord::admin_host_guard::tests::api_child;
 src/services/discord/router/message_handler/intake_turn/worker_entry/goal_fresh_pg_tests.rs:21:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
 src/services/discord/router/message_handler/intake_turn/worker_entry/preserve_cancel_tests.rs:5:use crate::services::discord::admin_host_guard::tests::api_child;
-src/services/discord/router/message_handler/provider_dispatch.rs:1078:            "herdr turn refused: executor_not_wired"
+src/services/discord/router/message_handler/provider_dispatch.rs:1087:            "herdr turn refused: executor_not_wired"
 src/services/discord/router/message_handler/provider_dispatch/owner_input_codex_tests.rs:629:    crate::services::discord::admin_host_guard::tests::api_child(test)
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:54:    _api: discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:183:        let api = discord::admin_host_guard::tests::Recorder::start().await;
@@ -506,7 +506,7 @@ src/services/discord/tui_prompt_relay/tests.rs:6885:    use crate::services::dis
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:56:        let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).unwrap();
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:878:    assert!(crate::config::session_hosts::herdr_endpoint(SOURCE_CHANNEL).is_none());
 src/services/discord/tui_prompt_relay/writer_notice_owner_tests.rs:44:    use crate::services::discord::admin_host_guard::tests::Recorder;
-src/services/discord/turn_bridge/before_start_stop_tests.rs:1314:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
+src/services/discord/turn_bridge/before_start_stop_tests.rs:1315:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
 src/services/discord/turn_bridge/runtime_handoff_loop/codex_replacement_tests.rs:2:use crate::services::discord::admin_host_guard::tests::Recorder;
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs:697:    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:924:    let alive = crate::services::discord::admin_host_guard::tests::process(&name, pid);

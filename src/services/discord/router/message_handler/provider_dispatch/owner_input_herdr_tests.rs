@@ -303,6 +303,7 @@ impl HerdrOwner {
             system_prompt: None,
             allowed_tools: &[],
             model: None,
+            effort: None,
             fast_mode: None,
             goals: None,
             compact_token_limit: None,

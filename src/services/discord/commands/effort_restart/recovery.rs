@@ -43,7 +43,25 @@ async fn resolve_held(shared: &Arc<SharedData>, channel: ChannelId) -> bool {
         let Some(cut) = &intent.cut else {
             return false;
         };
-        let liveness = crate::services::tmux_diagnostics::tmux_session_pane_liveness(&cut.tmux);
+        // A Herdr execution ended only once its row is retired; a live or replaced one owes nothing.
+        if let Some(nonce) = &cut.herdr {
+            // The restart still running here decides it; its gate's release wakes the owner again.
+            let gate = crate::services::discord::queue_io::input_owner::restart_gate::inflight;
+            if gate(provider.as_str(), &shared.token_hash, channel.get()) {
+                return false;
+            }
+            match super::herdr::ended(shared, provider, channel, nonce).await {
+                None => return false,
+                Some(false) => {
+                    return super::tmux::cancel(shared, channel, &intent.operation).await;
+                }
+                Some(true) => {}
+            }
+        }
+        let liveness = match &cut.herdr {
+            Some(_) => PaneLiveness::DeadOrAbsent,
+            None => crate::services::tmux_diagnostics::tmux_session_pane_liveness(&cut.tmux),
+        };
         // A live pane still bound to the process the restart named, or to one it could not name.
         let same = || {
             let bound = super::witness::bound(provider, channel.get(), &cut.tmux);

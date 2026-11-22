@@ -237,7 +237,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 
 | 진입점 | A 계약 | 모델 대응 |
 |---|---|---|
-| `codex/herdr_turn.rs:206,230` fresh | A guard 전달·새 Pending/host stamp까지 fence, 기존 CAS 유지 | AGrant/ACreate |
+| `codex/herdr_turn.rs:219,246` fresh | A guard 전달·새 Pending/host stamp까지 fence, 기존 CAS 유지 | AGrant/ACreate |
 | 같은 파일 `:240,255,261` Pending 재사용 | 새 cleanup/새 create 없음. P의 등록부 복구·기존 Startup 검증 유지 | 기존 PendingRegistration 모델, A 범위 밖 |
 | `herdr_launch.rs:462,474,484,494` | fresh Pending CAS·registry·host/spawn 게시/기존 marker cleanup과 같은 fence | ACreate; downstream 별도 |
 | `codex/tui_session_launch/first_input.rs:196,220,221` | owner/runtime publisher 전체 outer fence; Herdr-configured 기존 거절 유지 | AFenceContender/ARecheck |
@@ -272,7 +272,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `claude/tui_session_launch.rs:37` | prepare_and_create_claude_tui_session | AFenceContender; publisher fence |
 | `codex.rs:68,69,95,647,1546,1588,1612` | (module) / codex_tui_session_turn_lock / execute_streaming_local_tmux / prepare_codex_tui_hook_overrides | AFenceContender; publisher fence |
 | `codex/absence_launch.rs:149` | execute_observed | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
-| `codex/herdr_turn.rs:40,230,268` | (module) / fresh_launch / pending_launch | ACreate / 기존 Pending 별도 |
+| `codex/herdr_turn.rs:41,246,302` | (module) / fresh_launch / pending_launch | ACreate / 기존 Pending 별도 |
 | `codex/herdr_turn/first_input.rs:145` | write | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `codex/process_session_launch.rs:81,88,137,146,170` | execute_streaming_local_process_codex | AObserve registry guard; 기존 process 효과 별도 |
 | `codex/tui_session_launch/first_input.rs:51,79,122,221` | create / publish_codex_tui_launch_script / spawn_owned | AFenceContender; publisher fence |

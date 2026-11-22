@@ -17,7 +17,7 @@ pub(super) fn resolve(channel: Option<&str>, fallback: Option<&str>) -> Option<S
     select(channel, environment.as_deref(), fallback)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(super) fn from_env() -> Option<String> {
     resolve(None, None)
 }

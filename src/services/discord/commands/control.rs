@@ -477,7 +477,11 @@ pub(super) async fn consume_reflected(
         .overrides
         .model_session_reset_pending
         .remove(&channel_id);
-    if fast || model.is_some() || removed {
+    // Codex goals are a launch option too: the ended TUI's next launch reads them as well.
+    let goals = *provider == ProviderKind::Codex
+        && clear_codex_goals_reset_pending_for_channel(shared, channel_id);
+    removed |= goals && settings.channel_codex_goals_reset_pending.remove(&key);
+    if fast || goals || model.is_some() || removed {
         sync_session_reset_pending(shared, channel_id);
         sync_session_reset_pending(shared, fast_channel);
     }

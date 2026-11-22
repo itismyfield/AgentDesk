@@ -601,8 +601,8 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | Codex tmux TUI resume argv | codex/tui_session_launch/launch_policy.rs:147-164 | resume 먼저, common options, ID 마지막 |
 | Codex warm/absence launch | codex/absence_launch.rs:121-138,171-198,326-395 | env effort, same session selection/preflight, new incarnation, launch, resume proof |
 | Codex process launch | codex/process_session_launch.rs:110 | env effort로만 시작 |
-| Codex Herdr launch options | codex/herdr_turn.rs:176-187 | turn.model + env effort; channel effort 없음 |
-| Codex Herdr identity | codex/herdr_turn.rs:190-197 | expected_native_session_id=None, resume=false |
+| Codex Herdr launch options | codex/herdr_turn.rs:184-195 | turn.model + env effort; channel effort 없음 |
+| Codex Herdr identity | codex/herdr_turn.rs:198-205 | expected_native_session_id=None, resume=false |
 | Codex Herdr fresh guard | codex/tui_session_launch/launch_policy.rs:178-182,210-214,229-260 | resume launch 거절(다음 단락 참조) |
 | Codex warm fingerprint | codex_tui/warm_followup.rs:125-126 | reasoning_effort도 launch fingerprint에 포함 |
 | wrapper default | codex_tmux_wrapper/input.rs:279-290 | explicit effort 없고 model 지정이면 high, 양쪽 없으면 None |
@@ -676,7 +676,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | legacy managed process 종료 | `src/services/discord/commands/control/managed_reset.rs:75`, `:110`, `:146` | runtime hint fence 아래 process handle/tree + exact tmux end, kill 확인 후 temp cleanup. 임의 name kill 권한을 새로 만들면 안 됨 |
 | verified Codex reset refusal | `src/services/discord/commands/control/managed_reset.rs:13`, `:45`, `:60` | verified incarnation output proof 전 reset 불가. effort라는 이름으로 우회하지 말고 종료·writer proof 연동 수용 시험 필요 |
 | process resume launch | `src/services/claude/tui_session_launch.rs:12`, `:154`, `:166`; `src/services/codex/tui_session_launch.rs` | Claude Herdr prepare는 context.launch_mode=resume 및 expected_native_session_id 일치 요구. 새 native session으로 fallback하는 즉시 restart 성공 보고 금지 |
-| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:236`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:126`, `:174`, `:188` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
+| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:236`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:134`, `:182`, `:196` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
 | 부팅 시 Herdr 재획득 | `src/services/discord/recovery_engine/herdr_reader.rs:220`, `:228`, `:506` | Bound Herdr row read/reconnect→existing source attach. effort pending debt도 attach 성공과 구분해야 함 |
 | 부팅 시 watcher 재획득 | `src/services/discord/watchers/lifecycle/restore_retry.rs:83`, `:93`; `runtime_bootstrap/recovery_flush.rs:55`, `:73` | recovery handled channel skip으로 duplicate watcher 방지. restart local command도 같은 registry fences 보존 |
 | stream active inflight 재생성 | `src/services/discord/tmux_watcher/liveness.rs:462`, `:473`, `:486`; `tmux_watcher/loop_poll_prologue.rs:483`; `tmux_watcher/streaming_status_tick.rs:268` | turn-mode 채널은 synthetic reacquire 안 함. legacy active stream은 recovery gate + save-if-absent. old watcher가 restart 후 원치 않는 inflight를 다시 만들지 않도록 exact generation 종료 필요 |
@@ -749,6 +749,5 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 <!-- doc-path-refs: proposed src/services/codex/herdr_turn/resume.rs -->
 <!-- doc-path-refs: proposed src/services/codex/tui_session_launch/launch_policy/resume.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/cancel.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/herdr.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/state.rs -->
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/effort_restart.rs -->
