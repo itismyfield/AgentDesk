@@ -1826,8 +1826,10 @@ class RustSources(unittest.TestCase):
             (base / rel).write_text(text)
         host = '#[cfg(unix)]\n#[cfg(test)]\n#[path = "krx/{}.rs"]\nmod krx_t;\n'
         # Reordered or repeated cfgs are the same conjunction; any other difference is a loss.
-        cases = {"same": ("#[cfg(test)]\n" + host.format("t"), test, ""),
-                 "cfg": (host.format("t").replace("#[cfg(unix)]\n", ""), test, ""), "deleted": ("", "", ""), "file": (host.format("t2"), "", test),
+        cases = {"same": ("#[cfg(test)]\n" + host.format("t"), test, ""), "deleted": ("", "", ""),
+                 "cfg": (host.format("t").replace("#[cfg(unix)]\n", ""), test, ""),
+                 "file": (host.format("t2"), "", test),
+                 "name": (host.format("t"), test.replace("moved", "renamed"), ""),
                  "ignore": (host.format("t"), test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn"), ""),
                  "should_panic": (host.format("t"), test.replace("fn", "#[should_panic]\nfn"), "")}
         for case, (upper, body, other) in cases.items():
