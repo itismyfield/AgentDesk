@@ -13,13 +13,9 @@ mod response_chunks;
 mod retired_metadata;
 mod store;
 mod terminal_identity;
-// Prompt classification, notices, and child completions, re-imported by `tui_prompt_relay`.
+// Background-child completions from transcript task notifications, re-imported by `tui_prompt_relay`.
 #[cfg(unix)]
 pub(in crate::services::discord) mod background_child_completion;
-pub(in crate::services::discord) mod injected_prompt_policy;
-pub(in crate::services::discord) mod input_notice;
-mod input_notice_memo;
-pub(in crate::services::discord) mod observed_prompt_decision;
 
 #[cfg(test)]
 mod footer_retirement_tests;

@@ -33,7 +33,7 @@ use self::injected_prompt_policy::{
 use self::injected_prompt_policy::{
     format_subagent_notification_card, is_start_anchored_task_notification,
 };
-use super::task_notification_delivery::injected_prompt_policy;
+use super::session_notice::injected_prompt_policy;
 mod hook_observer;
 mod task_notification_prompt;
 use self::hook_observer::spawn_tui_prompt_relay_observer;
@@ -47,7 +47,7 @@ mod slash_command_output;
 use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
-use super::task_notification_delivery::observed_prompt_decision;
+use super::session_notice::observed_prompt_decision;
 
 /// Routes dedupe's binding publications to the observer wake; `HealthRegistry::new` installs it.
 pub(super) fn install_observer_publication() {

@@ -614,7 +614,7 @@ def _scenario(scenario_id):
 class E6CompactRecapOracle(unittest.TestCase):
     """E-6 must go red on the real /compact recap, not on a literal the product never emits."""
 
-    SOURCE = ROOT / "src/services/discord/task_notification_delivery/injected_prompt_policy.rs"
+    SOURCE = ROOT / "src/services/discord/session_notice/injected_prompt_policy.rs"
     # Claude Code's compact summary as it lands in the transcript, old and current wording.
     RECAPS = (
         "This session is being continued from a previous conversation that ran out of context. "

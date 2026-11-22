@@ -2875,6 +2875,11 @@ src/
 │   │   │   ├── durable_stores_tests.rs
 │   │   │   ├── record_lock.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── session_notice/
+│   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice.rs
+│   │   │   ├── input_notice_memo.rs
+│   │   │   └── observed_prompt_decision.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
@@ -2948,15 +2953,11 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── footer_surface_tests.rs
 │   │   │   ├── gateway.rs
-│   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── inline_contract_tests.rs
 │   │   │   ├── inline_delivery.rs
-│   │   │   ├── input_notice.rs
-│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── metadata_retirement_pg_tests.rs
 │   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── response_chunks.rs
 │   │   │   ├── retired_metadata.rs
 │   │   │   ├── send_stage_tests.rs

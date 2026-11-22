@@ -4,7 +4,7 @@
 //! cluster from the `tui_prompt_relay` parent module. Every item here is pure
 //! (no `shared.`/`http.`/async-IO coupling, no module-private static state);
 //! the stateful dedupe/bridge helpers that drive these classifiers stay in the
-//! parent, which re-imports this module from `task_notification_delivery`,
+//! parent, which re-imports this module from `session_notice`,
 //! so call sites are unchanged.
 
 use super::super::response_sanitizer::subagent_notification_card;

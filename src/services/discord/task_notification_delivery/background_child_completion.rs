@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::super::SharedData;
 use super::super::inflight::InflightTurnState;
-use super::injected_prompt_policy;
+use super::super::session_notice::injected_prompt_policy;
 use crate::db::session_observability::{
     close_background_child_for_tool_use_pg, has_open_background_children_pg,
 };

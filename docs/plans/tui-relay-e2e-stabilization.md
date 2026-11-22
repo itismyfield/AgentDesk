@@ -25,7 +25,7 @@
 |---|---|---|
 | Claude input | `src/services/claude_tui/input.rs:88-100` | `plan_prompt_submit`, paste 1800자, control char **reject** |
 | Codex input | `src/services/codex_tui/input.rs:1-100` | rounded-box composer, fresh=120s/followup=45s |
-| Notification strip | `format_ssh_direct_prompt_notification` @ `task_notification_delivery/injected_prompt_policy.rs`, `strip_terminal_controls` @ `tui_task_card.rs` | 표시용 control char strip — #2699 |
+| Notification strip | `format_ssh_direct_prompt_notification` @ `session_notice/injected_prompt_policy.rs`, `strip_terminal_controls` @ `tui_task_card.rs` | 표시용 control char strip — #2699 |
 | Claude tail | `src/services/claude_tui/transcript_tail.rs` + `tui_prompt_relay.rs:247,373,584,631` | offset JSON, rehydrate grace |
 | Codex tail | `src/services/codex_tui/rollout_tail.rs` | composer_ready, tool deadline 5m |
 | Turn state | `src/services/tui_turn_state.rs:64-120` | envelope classifier + partial parser(Claude only) |

@@ -199,8 +199,8 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
 };
 mod tui_prompt_relay;
 #[cfg(test)]
-pub(crate) use task_notification_delivery::input_notice::INPUT_NOTICE_RUNS;
-pub(crate) use task_notification_delivery::input_notice::{
+pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
+pub(crate) use session_notice::input_notice::{
     input_notice_content, input_notice_line, scheduled_input_notice_content,
 };
 #[cfg(all(test, unix))]
