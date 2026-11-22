@@ -115,7 +115,7 @@ pub(crate) fn build_resolved_memory_backend(
 
 pub(crate) fn resolve_memory_role_id(role_id: Option<&str>) -> String {
     role_id
-        .map(str::to_string)
+        .map(|role_id| role_id.to_string())
         .unwrap_or_else(|| UNBOUND_MEMORY_ROLE_ID.to_string())
 }
 
