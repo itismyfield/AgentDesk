@@ -479,7 +479,11 @@ def find_item_line(lines, start, end, name, kind):
         if not m:
             continue
         if m.group("kw") == "use":
-            return i
+            # Only a `use` that binds the name (or a glob that may) declares it here.
+            text = use_text(lines, i)
+            if name in use_leaf_names(text) or "::*" in text:
+                return i
+            continue
         if re.match(r"(?:mut\s+)?" + re.escape(name) + r"\b", m.group("rest")):
             return i
     # A name inside a multi-line `use` tree: walk back to the line that opens the `use`.
@@ -491,6 +495,33 @@ def find_item_line(lines, start, end, name, kind):
             if i < start and lines[i].rstrip().endswith((";", "}")) and not m:
                 break
     return None
+
+
+def use_text(lines, index):
+    """The `use` statement starting at lines[index], joined up to its `;`."""
+    return " ".join(lines[index:index + 40]).split(";")[0]
+
+
+def item_level_lines(lines):
+    """0-based indexes whose first token sits at item level of its module (not inside a fn/impl/block)."""
+    out, stack, depth, seen = set(), [], 0, set()
+    toks = rts.rust_tokens("\n".join(lines))
+    for i, t in enumerate(toks):
+        if t.line not in seen:
+            seen.add(t.line)
+            if depth == (stack[-1] if stack else 0):
+                out.add(t.line - 1)
+        if t.kind != "punct":
+            continue
+        if t.value == "{":
+            depth += 1
+            if i >= 2 and toks[i - 2].value == "mod" and toks[i - 1].kind == "ident":
+                stack.append(depth)
+        elif t.value == "}":
+            if stack and stack[-1] == depth:
+                stack.pop()
+            depth -= 1
+    return out
 
 
 def widen_line(line):
@@ -603,6 +634,7 @@ class Widener:
         self.layout, self.lower, self.upper = layout, lower, upper
         self.text = {}
         self.original = {}
+        self._level_cache = {}
 
     def lines(self, rel):
         if rel not in self.text:
@@ -681,8 +713,9 @@ class Widener:
             return {}, ("unresolved", f"no item `{name}` at {rel}:{start + 1}")
         if ITEM.match(lines[index]).group("kw") == "macro_rules!":
             return {}, ("macro_path", f"macro_rules! {name} at {rel}:{index + 1}")
-        if widen_line(lines[index]) is None and ITEM.match(lines[index]).group("kw") == "use":
-            # An already-`pub` re-export (often `pub use inner::*;`): the blocker is behind it.
+        if ITEM.match(lines[index]).group("kw") == "use":
+            # A re-export (often an already-`pub` `pub use inner::*;`): the blocker may be behind it, and
+            # a `use` of an above item must stay restricted (P1-2), so resolve it before widening.
             return self._through_use(rel, index, name)
         return self._edit(rel, index, ("item",), name)
 
@@ -696,15 +729,28 @@ class Widener:
         start = find_item_line(self.lines(rel), i, i, name, "item")
         return self._through_use(rel, i if start is None else start, name)
 
+    def _levels(self, rel):
+        if rel not in self._level_cache:
+            self._level_cache[rel] = item_level_lines(self.lines(rel))
+        return self._level_cache[rel]
+
     def _through_use(self, rel, index, name, hops=6):
-        """Ops for the declarations a `use` at rel:index binds `name` to, by explicit path or by glob;
-        an already-`pub` re-export on the way is followed (at most `hops` deep)."""
-        text = " ".join(self.lines(rel)[index:index + 40]).split(";")[0]
+        """Ops for a `use` at rel:index that binds `name` (explicit path or glob): the declaration behind it,
+        every restricted re-export on the way, and this line when it is restricted.
+
+        - A chain that reaches an above (or unpartitioned) item yields that class and no op at all, so no
+          `pub use` of an above `pub(crate)` item is ever written (lower would fail with E0364).
+        - In the target module, a direct declaration or explicit binding of `name` wins; only when there is
+          none are its visible `pub(..) use x::*;` globs searched, and a glob is widened only if `name` is
+          found behind it. Private `use x::*;` and fn-local `use`s are never touched."""
+        lines = self.lines(rel)
+        text = use_text(lines, index)
         base = self.layout.module_at(rel, index + 1)
+        own = {(rel, index): ("item",)} if widen_line(lines[index]) else {}
         m = re.search(r"((?:[A-Za-z_]\w*::)+)" + re.escape(name) + r"\b", text) or \
             re.search(r"((?:[A-Za-z_]\w*::)+)\{[^}]*\b" + re.escape(name) + r"\b", text)
         prefixes = [m.group(1)] if m else [g.group(1) for g in re.finditer(r"((?:[A-Za-z_]\w*::)+)\*", text)]
-        edits, outcome = {}, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
+        edits, reached, outcome = {}, False, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
         for prefix in prefixes:
             segs = [x for x in re.sub(r"^.*\buse\s+", "", prefix).split("::") if x]
             module = () if segs and segs[0] == "crate" else base
@@ -712,25 +758,40 @@ class Widener:
                 module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
             found = self.layout.locate(module)
             if found is None:
+                if m and segs and segs[0] not in ("crate", "self", "super") and \
+                        self.layout.locate(base + (segs[0],)) is None:
+                    reached = True  # another crate's (public) item: only this line may need `pub`
                 continue
             target, first, last = found
-            tl = self.lines(target)
-            hits = [j for j in range(max(first - 1, 0), min(last, len(tl)))
-                    if find_item_line(tl, j, j, name, "item") == j and self.layout.module_at(target, j + 1) == module
-                    and (ITEM.match(tl[j]).group("kw") != "use" or name in use_leaf_names(" ".join(tl[j:j + 40]))
-                         or re.search(r"::\*", tl[j]))]
-            for j in hits:
+            if self._place(target, first):
+                return {}, self._place(target, first)
+            tl, levels = self.lines(target), self._levels(target)
+            cand = [j for j in range(max(first - 1, 0), min(last, len(tl)))
+                    if j in levels and find_item_line(tl, j, j, name, "item") == j
+                    and self.layout.module_at(target, j + 1) == module and (target, j) != (rel, index)]
+            is_use = lambda j: ITEM.match(tl[j]).group("kw") == "use"
+            direct = [j for j in cand if not is_use(j) or name in use_leaf_names(use_text(tl, j))]
+            globs = [j for j in cand if j not in direct and ITEM.match(tl[j]).group("vis")]
+            for j in direct or globs:
                 if self._place(target, j + 1):
-                    outcome = self._place(target, j + 1)
-                elif widen_line(tl[j]):
-                    edits[(target, j)] = ("item",)
-                elif ITEM.match(tl[j]).group("kw") == "use" and hops and (target, j) != (rel, index):
-                    sub, out = self._through_use(target, j, name, hops - 1)
+                    return {}, self._place(target, j + 1)
+                if not is_use(j):
+                    reached = True
+                    if widen_line(tl[j]):
+                        edits[(target, j)] = ("item",)
+                    continue
+                sub, out = self._through_use(target, j, name, hops - 1) if hops else ({}, outcome)
+                if out == "edit":
+                    reached = True
                     edits.update(sub)
-                    outcome = outcome if out == "edit" else out
-            if hits and not edits and outcome[0] == "unresolved":
-                outcome = ("unresolved", f"`{name}` in {target} is already pub")
-        return (edits, "edit") if edits else ({}, outcome)
+                elif out[0] != "unresolved":
+                    return {}, out
+        if not reached:
+            return {}, outcome
+        edits.update(own)
+        if not edits:
+            return {}, ("unresolved", f"`{name}` behind {rel}:{index + 1} is already pub")
+        return edits, "edit"
 
     def _field(self, rel, sline, field, owner):
         lines = self.lines(rel)
@@ -863,7 +924,8 @@ def edit_bindings(before, lines, index):
         while ";" not in text and j + 1 < len(lines):
             j += 1
             text += " " + lines[j]
-        return [(n, "use") for n in use_leaf_names(text)]
+        globs = [("*", "glob")] if "::*" in text.split(";")[0] else []
+        return [(n, "use") for n in use_leaf_names(text)] + globs
     name = re.match(r"(?:mut\s+)?(\w+)", m.group("rest"))
     return [(name.group(1), kw)] if name else []
 
@@ -908,6 +970,12 @@ def glob_check(edits, layout, read):
             continue
         for name, kind in e["bindings"]:
             if kind == "field":
+                continue
+            if kind == "glob":
+                # Which names a widened restricted glob re-export brings (a trait? a prelude name?) is not
+                # resolved here: fail closed.
+                risks.append({"file": e["file"], "line": e["line"], "name": "*", "kind": "glob",
+                              "importer": "(glob re-export widened beyond its old scope)", "fail": True})
                 continue
             for importer, irel, iline, target in imports:
                 if target != module or importer[:len(scope)] == scope:
@@ -980,10 +1048,11 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
         while True:
             iters += 1
             low, low_s = run_check(cargo, lower, ["--lib"], target_dir, lower)
-            up, up_s = [], 0.0
+            up, up_s, ran_upper = [], 0.0, False
             if not any(d.get("level") == "error" for d in low):
                 # Upper cannot build on a broken lower; its round waits for lower's re-export fixes.
                 up, up_s = run_check(cargo, upper, ["--lib", "--tests"], target_dir, upper)
+                ran_upper = True
             (out_dir / f"vistool-{crate}-diags-{iters}.json").write_text(
                 json.dumps({"lower": low, "upper": up}, indent=0, ensure_ascii=False), "utf-8")
             vis, residue, low_err = [], defaultdict(list), []
@@ -1011,7 +1080,10 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                         entry[2].add(where(d, resolver))
                     continue
                 kind, why = outcome
-                if kind in ("cut_residue", "macro_path", "impl_residue"):
+                if run_root == lower and d.get("level") == "error":
+                    # A lower error nothing here repairs keeps upper from running: never a success (P1-2).
+                    low_err.append(d)
+                elif kind in ("cut_residue", "macro_path", "impl_residue"):
                     residue[kind].append(d)
                 elif kind == "outside_crate":
                     outside.append(f"{code_of(d)} {why} <- {where(d, resolver)}")
@@ -1019,7 +1091,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                     unresolved.append(f"{code_of(d)} {d.get('message')} :: {why} <- {where(d, resolver)}")
             vis_count = sum(1 for d, _ in vis)
             # rustc skips its field-privacy pass (E0451) while any other error stands: say so, never hide it.
-            manifest["privacy_pass_masked"] = any(d.get("level") == "error" for d in up) or not up_s
+            manifest["privacy_pass_masked"] = any(d.get("level") == "error" for d in up) or not ran_upper
             manifest["rounds"].append({"iter": iters, "lower_errors": len(low_err), "vis": vis_count,
                                        "edits": len(edits), "unresolved": len(unresolved),
                                        "residue": {k: len(v) for k, v in sorted(residue.items())},
@@ -1029,7 +1101,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
             log(f"vistool: iter={iters} lower_err={len(low_err)} vis={vis_count} edits={len(edits)} "
                 f"unresolved={len(unresolved)} lower={low_s}s upper={up_s}s", file=sys.stderr)
             manifest["unresolved"] = unresolved
-            if up_s or not manifest["residue"]:
+            if ran_upper or not manifest["residue"]:
                 # Residue comes from the last round upper ran in; a lower-only round must not erase it.
                 manifest["residue"] = {k: {"count": len(residue.get(k, [])), "scope": SCOPE[k],
                                            "first": [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
@@ -1042,13 +1114,13 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
             if outside:
                 manifest["outside"] = outside[:50]
                 raise VisFail("outside_crate", outside[0])
-            if not edits and not unresolved:
+            if not edits and not unresolved and ran_upper:
                 # Every visibility diagnostic left is residue a later slice owns (cut, impl, macro).
                 if residue.get("unclassified"):
                     raise VisFail("unclassified_residue", manifest["residue"]["unclassified"]["first"][0])
                 break
             if not edits:
-                raise VisFail("no_progress", unresolved[0])
+                raise VisFail("no_progress", (unresolved or ["upper did not run and nothing is left to edit"])[0])
             applied = widener.apply({k: v[0] for k, v in edits.items()})
             for (rel, index), line in sorted(applied.items()):
                 _, codes, sites = edits[(rel, index)]
@@ -1089,7 +1161,8 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
         manifest["glob_risk"] = risks
         if any(r["fail"] for r in risks):
             r = next(r for r in risks if r["fail"])
-            status, reason = "fail", VisFail("glob_prelude_collision", f"{r['name']} ({r['kind']}) <- {r['importer']}")
+            status, reason = "fail", VisFail("unresolved_glob_reexport" if r["kind"] == "glob" else
+                                             "glob_prelude_collision", f"{r['name']} ({r['kind']}) <- {r['importer']}")
     manifest["final_edits"] = [{k: v for k, v in e.items() if k != "bindings"} for e in edits_final]
     manifest["files"] = len({p[0] for p in pairs})
     manifest["equiv"] = equiv_verdict(repo, head) if status == "ok" else "판정 보류 (실패)"

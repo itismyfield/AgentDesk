@@ -8,6 +8,7 @@ The end-to-end case runs the real tool on a throwaway copy outside the repositor
 
 import copy
 import json
+import os
 from pathlib import Path
 import random
 import shutil
@@ -78,6 +79,12 @@ EXPECTED = {
 }
 
 
+# The E0364 was recorded once its `pub use` line had been widened; the source here is still the original,
+# so resolving it also widens that line.
+EXTRA = {"`Shared` is only public within the crate, and cannot be re-exported outside": (
+    "src/core.rs", "pub(crate) use self::util::Shared;", "pub use self::util::Shared;")}
+
+
 def mismatches():
     """Rows of EXPECTED the resolver gets wrong (an empty list is a pass)."""
     w, r = widener()
@@ -88,6 +95,9 @@ def mismatches():
         edits, outcome = w.resolve(d, r, Path(d["_root"]))
         got = {k: vistool.apply_op(w.lines(k[0])[k[1]], op) for k, op in edits.items()}
         want = {(rel, line_of(rel, before) - 1): after}
+        if msg in EXTRA:
+            xrel, xbefore, xafter = EXTRA[msg]
+            want[(xrel, line_of(xrel, xbefore) - 1)] = xafter
         if outcome != "edit" or got != want:
             bad.append((msg, outcome, edits))
     return bad
@@ -171,25 +181,62 @@ class RecordedDiagnostics(unittest.TestCase):
         self.assertEqual(vistool.classify_residue({"code": {"code": "E0599"}, "message": "x", "_test": False},
                                                   restricted), "unclassified")
 
-    def test_already_pub_glob_reexport_is_followed(self):
-        # `pub use inner::*;` re-exports only what is visible; the note points at the glob line.
+    def glob_follow(self, sources, sides=None):
+        """resolve() of `struct Deep is private` whose note points at line 1 of src/a/mod.rs."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "src/a").mkdir(parents=True)
-            (root / "src/a/mod.rs").write_text("pub use inner::*;\nmod inner;\n")
-            (root / "src/a/inner.rs").write_text("pub(crate) struct Deep;\n")
-            files = {"src/a/mod.rs": ("a",), "src/a/inner.rs": ("a", "inner")}
+            files = {}
+            for rel, text in sources.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+                files[rel] = tuple(Path(rel).with_suffix("").parts[1:])
+                if files[rel][-1] == "mod":
+                    files[rel] = files[rel][:-1]
             by_module = {m: f for f, m in files.items()}
             layout = SimpleNamespace(
                 crate="LOW", x_files=set(files), module_at=lambda rel, line: files[rel],
-                side_of=lambda rel, line=None: "x",
+                side_of=lambda rel, line=None: (sides or {}).get(rel, "x"),
                 locate=lambda m: (by_module[m], 1, 10 ** 9) if m in by_module else None)
             w = vistool.Widener(layout, root, UPPER)
             r = vistool.Resolver(root, UPPER, "src/probe_lower_lib.rs", "src/lib.rs")
             diag = {"code": {"code": "E0603"}, "message": "struct `Deep` is private", "spans": [],
                     "children": [{"message": "the struct `Deep` is defined here",
                                   "spans": [{"file_name": str(root / "src/a/mod.rs"), "line_start": 1, "line_end": 1}]}]}
-            self.assertEqual(w.resolve(diag, r, UPPER), ({("src/a/inner.rs", 0): ("item",)}, "edit"))
+            return w.resolve(diag, r, UPPER)
+
+    def test_already_pub_glob_reexport_is_followed(self):
+        # `pub use inner::*;` re-exports only what is visible; the note points at the glob line.
+        got = self.glob_follow({"src/a/mod.rs": "pub use inner::*;\nmod inner;\n",
+                                "src/a/inner.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 0): ("item",)}, "edit"))
+
+    def test_glob_follow_leaves_private_and_unrelated_globs(self):
+        # P1-3: `use super::*;`, an unrelated `pub(crate) use other::*;` and a fn-local `use Shape::*;`
+        # stay as written when the module declares the name itself.
+        got = self.glob_follow({"src/a/mod.rs": "pub use inner::*;\nmod inner;\n",
+                                "src/a/inner.rs": "use super::*;\npub(crate) use other::*;\nfn f() {\n"
+                                                  "    use Shape::*;\n}\npub(crate) struct Deep;\n",
+                                "src/a/inner/other.rs": "pub(crate) struct Unrelated;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 5): ("item",)}, "edit"))
+
+    def test_glob_follow_widens_only_the_glob_that_holds_the_name(self):
+        got = self.glob_follow({"src/a/mod.rs": "pub use inner::*;\nmod inner;\n",
+                                "src/a/inner.rs": "use super::*;\npub(crate) use empty::*;\npub(crate) use sub::*;\n",
+                                "src/a/inner/empty.rs": "pub(crate) struct Other;\n",
+                                "src/a/inner/sub.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 2): ("item",), ("src/a/inner/sub.rs", 0): ("item",)}, "edit"))
+
+    def test_reexport_of_an_above_item_is_not_widened(self):
+        # P1-2: X's `pub(crate) use crate::app::AboveSecret;` must stay; `pub use` of an above
+        # pub(crate) item breaks lower (E0364) and the single crate alike.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::app::Deep;\n",
+                                "src/app.rs": "pub(crate) struct Deep;\n"}, sides={"src/app.rs": "above"})
+        self.assertEqual(got[0], {})
+        self.assertEqual(got[1][0], "cut_residue")
+
+    def test_use_line_must_bind_the_name(self):
+        lines = ["use std::fmt;", "pub(crate) struct Foo;"]
+        self.assertEqual(vistool.find_item_line(lines, 0, 1, "Foo", "item"), 1)
 
     def test_lint_type_path_uses_last_segment(self):
         lint = {"code": {"code": "private_interfaces"}, "message": "type `probe::SessionProbe<T>` is more private"}
@@ -281,6 +328,12 @@ class GlobSafety(unittest.TestCase):
         layout, read = glob_layout()
         layout.module_of = {k: v for k, v in layout.module_of.items() if k != "src/c.rs" and k != "src/a/x.rs"}
         self.assertEqual(vistool.glob_check([edit("enum Option {}")], layout, read), [])
+
+    def test_restricted_glob_reexport_widening_fails_closed(self):
+        # P1-3: the names a widened `pub(super) use inner::*;` brings are unknown here (a trait, a prelude name).
+        risks = self.risks("pub(super) use inner::*;")
+        self.assertTrue(risks and all(r["fail"] and r["kind"] == "glob" for r in risks))
+        self.assertEqual(self.risks("pub(crate) use inner::*;"), [])
 
     def test_mutant_without_glob_scan_is_caught(self):
         with mock.patch.object(vistool, "glob_imports", lambda layout, read: []):
@@ -377,8 +430,44 @@ class Probe(unittest.TestCase):
         self.assertEqual(vistool.decl_hits(lines, "tui_o", ("services",), ("services",)), [1])
 
 
-@unittest.skipUnless(shutil.which("cargo") and shutil.which("git"), "cargo and git required")
+# Wrappers and incremental settings of the caller (CI's global RUSTC_WRAPPER=sccache, cargo-shim's
+# CARGO_INCREMENTAL=1, a ~/.cargo/config.toml rustc-wrapper) must not reach the throwaway fixture build.
+CLEAN_CARGO_ENV = {"RUSTC_WRAPPER": "", "CARGO_BUILD_RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": "",
+                   "CARGO_INCREMENTAL": "0", "CARGO_TARGET_DIR": ""}
+
+
+# Opt-in: the Script checks guards shard runs without a Rust toolchain contract; lanes and the cargo
+# shard set AGENTDESK_VISTOOL_E2E=1.
+@unittest.skipUnless(os.environ.get("AGENTDESK_VISTOOL_E2E") == "1" and shutil.which("cargo") and shutil.which("git"),
+                     "set AGENTDESK_VISTOOL_E2E=1 (cargo and git required)")
+@mock.patch.dict(os.environ, CLEAN_CARGO_ENV)
 class EndToEnd(unittest.TestCase):
+    def test_upward_reexport_stays_and_the_run_completes(self):
+        # P1-2: an X re-export of an above pub(crate) item is cut residue; every other widening still lands.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = fixture_repo(Path(tmp))
+            with open(repo / "src/app.rs", "a") as f:
+                f.write("\npub(crate) struct AboveSecret;\n")
+            with open(repo / "src/core.rs", "a") as f:
+                f.write("\npub(crate) use crate::app::AboveSecret;\n")
+            web = (repo / "src/services/web.rs").read_text()
+            (repo / "src/services/web.rs").write_text(
+                web.replace("    made.size\n", "    let _secret = crate::core::AboveSecret;\n    made.size\n"))
+            subprocess.run(git + ["commit", "-qam", "upward re-export"], check=True)
+            out = Path(tmp) / "out"
+            ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=out, apply=True,
+                                                 log=lambda *a, **k: None)
+            self.assertTrue(ok, (line, manifest.get("fail"), manifest.get("unresolved")))
+            # The upper residue (E0603 on AboveSecret) masks rustc's field-privacy pass, so `Span.lo` (E0451)
+            # is the one widening of the clean run that cannot show up here; the manifest says so.
+            self.assertRegex(line, r" edits=21 cut_residue=1 ")
+            self.assertTrue(manifest["privacy_pass_masked"])
+            self.assertNotIn("pub lo: u32", (repo / "src/core.rs").read_text())
+            self.assertIn("pub(crate) use crate::app::AboveSecret;", (repo / "src/core.rs").read_text())
+            check = subprocess.run(["cargo", "check", "--all-targets", "--quiet"], cwd=repo, capture_output=True,
+                                   text=True, env=dict(os.environ, CARGO_TARGET_DIR=str(Path(tmp) / "t")))
+            self.assertEqual(check.returncode, 0, check.stderr[-2000:])
+
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
         with tempfile.TemporaryDirectory() as tmp:
