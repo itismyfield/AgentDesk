@@ -1,5 +1,7 @@
 # agy ACP channel session with steering (#8339 design)
 
+<!-- doc-path-refs: external AcpSessionRuntime.ts -->
+
 Code reference: `5021d25794` (origin/main). The ACP client does not exist yet, so this is a design model. Its counterexamples are checked against the design and against the T3 Code reference behaviour. They are not replayed against current Rust code. The output side (spool → writer → Discord receipt) stays the contract of [WriterAdoption AgySpec](../tui-o-writer/agy-adoption.report.md); in this model it is one receipt-guarded `Settle` step.
 
 Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `0b841da987fc427a6bda6b0ffdff504c030279e1cadb090b8d4531f0846fa5d7`.
