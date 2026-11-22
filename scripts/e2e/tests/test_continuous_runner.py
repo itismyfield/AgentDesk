@@ -232,6 +232,20 @@ class Recovery(Runner):
         self.tick(100000)
         self.assertEqual(sum(row["--cell"].startswith("claude-") for row in self.driven()), 1)
 
+    def test_budget_charges_input_output_and_cache_write_but_keeps_cache_read_in_usage(self):
+        reservation = {"R1": {"claude": {"turns": 6, "tokens": 300000, "time_s": 300}}}
+        # Five claude occurrences fit when only cache reads are large; one uncached overrun pauses claude.
+        for (inp, out, write, read), expected in (((10000, 5000, 20000, 370000), (175000, 1850000, False)),
+                                                  ((200000, 50000, 60000, 0), (300000, 0, True))):
+            self.setUp()
+            now, used = 1000, {"input_tokens": inp, "output_tokens": out, "cache_read_tokens": read, "cache_write_tokens": write}
+            (self.root / "driver.py").write_text(f"import json\nprint(json.dumps({{'schema_version': 2, 'status': 'PASS', 'native_turns': 1, "
+                                                 f"'budget_checked': 1, 'tokens': {inp + out + write}, 'usage': {{'native_turns': 1, **{used!r}}}}}))\n")
+            run = read_json(self.state / "runs" / f"{self.tick(now, reservation=reservation)['run_id']}.json", {})
+            charged = read_json(self.state / "budget" / f"{budget.day(now)}.json", {})[run["run_id"]]["claude"]
+            self.assertEqual((charged["tokens"], run["usage"]["claude"]["cache_read_tokens"], "claude" in budget.active_pauses(self.state, now)), expected)
+            self.assertEqual(charged["tokens_basis"], "input_tokens+output_tokens+cache_write_tokens")
+
     def test_missing_usage_capability_never_starts_driver(self):
         self.assertEqual(self.tick(1000, capabilities=[])["status"], "DEFERRED_BUDGET")
         self.assertEqual(self.driven(), [])

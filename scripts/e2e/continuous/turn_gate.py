@@ -52,7 +52,7 @@ class TurnGate:
         # Only a measured or timed-out turn is closed, so an interrupted wait is settled again later.
         self.open = None
         self.spent.append(spent)
-        self.guard.finish(sum(spent.values()) if spent is not None else None)
+        self.guard.finish(usage.budget_tokens(spent) if spent is not None else None)
         if self.guard.pending is not None:
             self.stopped = "TURN_USAGE_UNKNOWN" if spent is None else "TURN_OVER_BUDGET"
 

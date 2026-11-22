@@ -218,7 +218,7 @@ def run(args, config, spawn=subprocess.run):
         status, reason = ("FAIL", reason) if status == "FAIL" else ("UNEVALUABLE", reason or "USAGE_UNKNOWN")
     else:
         spent = {field: sum(turn[field] for turn in gate.spent) for field in usage.TOKENS}
-        report.update(native_turns=turns, tokens=sum(spent.values()), budget_checked=turns,
+        report.update(native_turns=turns, tokens=usage.budget_tokens(spent), budget_checked=turns,
                       usage={"native_turns": turns, **spent})
     try:
         after = release_host.detail(host["base_url"])
