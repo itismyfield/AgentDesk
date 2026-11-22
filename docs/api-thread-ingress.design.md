@@ -106,7 +106,7 @@ E01–E22를 모두 다시 읽었다. 행 삭제는 0이며 아래 표 밖 E01�
 | 출처 | main 좌표 | 분류/identity/소유 |
 |---|---|---|
 | Discord 사용자 직접 입력 | `src/services/discord/router/intake_gate.rs:733,769`; `src/services/discord/router/message_handler/intake_turn.rs:33,983`; `src/services/discord/queue_io/input_owner/origin.rs:5,26,31` | `Discord`, is_person=true. 실제 child/message original. #8184 early/late 관측 대상. bot 여부/allowed automation은 intake 분류 유지 |
-| iMessage 답장 | `src/services/discord/queue_io/input_owner/origin.rs:49,55,59,62,67`; `src/services/discord/queue_io/input_owner/start.rs:21,32,43,47`; `src/services/discord/router/turn_start.rs:29,88` | source=imessage, routine_id/scheduled_message_id 없음. metadata.human_input.origin_id GUID가 있으면 child+GUID가 stable message/ticket. is_person=true. source 문자열만으로 caller/parent 권한 생기지 않음 |
+| iMessage 답장 | `src/services/discord/queue_io/input_owner/origin.rs:49,55,59,62,67`; `src/services/discord/queue_io/input_owner/start.rs:21,32,43,47`; `src/services/discord/router/turn_start.rs:29,36` | source=imessage, routine_id/scheduled_message_id 없음. metadata.human_input.origin_id GUID가 있으면 child+GUID가 stable message/ticket. is_person=true. source 문자열만으로 caller/parent 권한 생기지 않음 |
 | generic API start | `src/services/discord/router/message_handler/headless_turn.rs:125,144,159,203`; `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:649,676,887`; `src/services/discord/queue_io/input_owner/origin.rs:42` | `HttpStart`, is_person=false. machine own-turn으로 busy 끝날 때까지 wait; origin_id 추적값만으로 일반 HTTP retry dedupe를 추가하지 않음. `source=imessage`+사람 계약을 갖춘 경우만 별도 person 정책 |
 | API deliver | `src/server/routes/agents_turn_deliver.rs:124,160,236,268`; `src/services/discord/health/turn_deliver.rs:36,59,70` | remote caller+명시 author 검증된 사람 입력. source/origin/actual child 유지. API라는 transport 이름을 Discord original로 위장하지 않음 |
 | routine/scheduled 자동 입력 | `src/services/routines/agent_executor/launch.rs:198`; `src/services/scheduled_messages.rs:429`; `src/services/discord/queue_io/input_owner/origin.rs:31,42,59`; `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:887` | `Routine`/own turn; imessage source여도 routine/scheduled metadata가 있으면 imessage_identity 제외. #8184 early/late person 관측으로 강제 승격 금지 |
@@ -149,7 +149,7 @@ runtime owner의 parent 이름을 actual child의 `channel_name_hint`로 무조�
 
 | 판정/행동 | 재사용하는 기존 권위·코드 좌표 | 새로 만들지 않는 것 |
 |---|---|---|
-| 실행 claim | `src/services/discord/router/turn_start.rs:142,249,262`의 mailbox claim·episode nonce | session map/HTTP200만으로 별도 active 권위 |
+| 실행 claim | `src/services/discord/router/turn_start.rs:142,161,174`의 mailbox claim·episode nonce | session map/HTTP200만으로 별도 active 권위 |
 | 원본 보유·retry | `src/services/discord/queue_io/input_owner/start.rs:43,47,51`, `src/services/discord/queue_io/input_owner/origin.rs:48` 및 기존 owner queue | parent별 dedupe cache·본문 fingerprint dedupe |
 | 배치/원격 인계 | `src/services/discord/router/intake_dispatch.rs:229,442`, 기존 routed outbox/worker claim | 새 transport·비영속 전달 경로·local 선제 launch |
 | 물리 입력 | `src/services/discord/health/turn_deliver/inject.rs:427,644,656`, `inject/herdr.rs:41,79`, 기존 provider dispatch owner | API direct pane key 전송·ACK 불명 blind retry |

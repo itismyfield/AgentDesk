@@ -170,7 +170,7 @@ runtime witness가 있어야 한다. witness가 없으면 `UNEVALUABLE(precondit
 | --- | --- |
 | routing | `cluster.enabled=true`, instance ID는 receipt node; `cluster.intake_routing.enabled=true`, mode=enforce. owner-authority scope를 쓰는 경로는 parent 두 ID만 명시(`src/config/runtime_profile.rs:274`) |
 | agent/node | paired agent의 두 channel binding과 default_execution_node_id=receipt node. 독립 PG의 그 node만 online/ready로 광고; execution_slots unset으로 무슬롯 primary 조합 생성. runner의 활성 턴1 제한은 슬롯 광고와 별개 |
-| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:36` |
+| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:35` |
 | host/output | tmux 및 Herdr parent-only map을 별도 boot 프로필로 생성(§3.5). O/Legacy도 분리. fresh thread에는 host 예외·미리 만든 session을 넣지 않음 |
 
 위 busy 양성 계약은 우선 Claude 대상이다. queued_head_ready의 Codex 확장은 현재 test cfg에만 있다

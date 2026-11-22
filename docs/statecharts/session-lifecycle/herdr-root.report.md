@@ -34,7 +34,7 @@
 | 3 | pane root R0→R1, old process 종료 | `src/services/session_host/herdr_gate/root_replaced.rs:38–56`: 다른 root의 lone shell 및 원래 프로세스 부재를 개별 확인 |
 | 4 | reconcile 완료 | `src/services/discord/herdr_terminate/root_replaced.rs:345–350`: reconcile 완료 전에는 보류 |
 | 5 | reader가 RootReplaced candidate 유지 | `src/services/discord/recovery_engine/herdr_reader.rs:304–324`: exact candidate 또는 앞 pass candidate를 보존 |
-| 6 | installed owner 경로에 producer 없음 | `src/services/discord/queue_dispatch/kickoff.rs:122–126`: owner 설치 시 기존 server-replaced 요청 경로 전에 반환; base `recover_inner:375–378`은 관측 없이 target 생성 |
+| 6 | installed owner 경로에 producer 없음 | `src/services/discord/queue_dispatch/kickoff.rs:120–124`: owner 설치 시 기존 server-replaced 요청 경로 전에 반환; base `recover_inner:375–378`은 관측 없이 target 생성 |
 | 7 | startup 없음·old grant W0를 새 target에 복사 | `src/services/session_host/herdr/launch_host.rs:300–317`: target evidence를 값으로 획득; `src/services/discord/herdr_terminate/root_replaced.rs:378–384` target으로 첫 증명 |
 | 8 | `PolicyUnverified(Identity)` Held | `src/services/session_host/herdr/policy/permit.rs:176–185`: startup/grant 어느 것도 W1이 아니면 Identity; `src/services/discord/herdr_terminate/root_replaced.rs:389`에서 Held |
 | 9 | 정상 입력 Q 수락, custody 보존 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:440–447`: 기존 front를 claim 경로로 전달 |

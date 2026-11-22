@@ -28,7 +28,7 @@
 | standby `runtime_bootstrap.rs:380 spawn_execution` | worker와 같음 | 위와 같음 | 같은 permit 시작 행동, standby 대칭 REST 시험 |
 | 재spawn `owner_cleanup.rs:23 refresh→:26 spawn_execution` | Some(Ok) permit만; 기존 claim 있으면 중복 시작 생략 | None/Err 새 host 없음; same 기존 gate 보존; different retire | `SpawnExecution`; same permit gate/claim 유지 시험 |
 | 공통 `o_writer_host.rs:398,:639` | constructor 기본은 lease, spawn_execution은 permit만 실제 시작 | 위 모든 진입점의 gate 선택 정본 | `hg=0` lease, `hg>0` permit |
-| `gateway_lease.rs:566`와 caller `gateway_runtime.rs:92-101` | host 생성이 아니라 lease acquired. release/handback/shutdown close, keepalive 실패 uncertain, 재획득 reacquired, peer 소유 lost | refresh는 lease gate 자체를 열거나 닫지 않음 | lease가 정상 Owned인 구간. lease 장애는 별도 조건으로 범위 밖 명시 |
+| `gateway_lease.rs:566`와 caller `gateway_runtime.rs:91-100` | host 생성이 아니라 lease acquired. release/handback/shutdown close, keepalive 실패 uncertain, 재획득 reacquired, peer 소유 lost | refresh는 lease gate 자체를 열거나 닫지 않음 | lease가 정상 Owned인 구간. lease 장애는 별도 조건으로 범위 밖 명시 |
 | `host.rs:785-817` 내부 store 재개 | 기존 host/claim/같은 gate 재사용 | gate 종류를 새로 만들지 않으며 위 행렬 유지 | tracked host의 gate identity 보존, resident same permit 시험 |
 
 `hk`는 gate 종류만 뜻하지 않는다. `none`은 claim 없음, `claim`은 start_managed가 claim을 얻은 뒤 Live 등록 전, `lease`/`permit`은 각각의 gate를 등록한 live host, `stale`는 abnormal exit 뒤 Live는 제거되고 claim만 남은 상태다. claim lifecycle의 근거는 `host.rs:549,:855-859,:988` 및 `ReadinessClaim::clear` :127-143이다. **stale은 세 번째 gate가 아니다.**
