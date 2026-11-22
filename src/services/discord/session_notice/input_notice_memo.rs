@@ -23,7 +23,7 @@ thread_local! {
 }
 
 /// `classify`'s answer for `prompt`, reused while the history keeps the state it was made under.
-pub(super) fn content(
+pub(in crate::services::discord) fn content(
     prompt: &str,
     classify: impl FnOnce(&str) -> Option<String>,
 ) -> Option<String> {

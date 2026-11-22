@@ -2127,6 +2127,7 @@ src/
 │   │   │   │   ├── content.rs
 │   │   │   │   ├── frontier.rs
 │   │   │   │   ├── owner_context.rs
+│   │   │   │   ├── parked_owner.rs
 │   │   │   │   ├── rollout.rs
 │   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
@@ -2876,6 +2877,11 @@ src/
 │   │   │   ├── durable_stores_tests.rs
 │   │   │   ├── record_lock.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── session_notice/
+│   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice.rs
+│   │   │   ├── input_notice_memo.rs
+│   │   │   └── observed_prompt_decision.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
@@ -2940,6 +2946,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   ├── retired_metadata.rs
 │   │   │   │   └── terminal_footer.rs
+│   │   │   ├── background_child_completion.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
 │   │   │   ├── card_render_tests.rs
@@ -3262,7 +3269,6 @@ src/
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
-│   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
 │   │   │   ├── claude_idle_bridge.rs
@@ -3281,12 +3287,8 @@ src/
 │   │   │   ├── hook_observer.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_transcript_scan.rs
-│   │   │   ├── injected_prompt_policy.rs
-│   │   │   ├── input_notice.rs
-│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
-│   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs

@@ -840,7 +840,7 @@ pub(in crate::services::discord) fn consume_stale_restart_marker_if_identity_unc
         || state.user_msg_id == 0
         || state.request_owner_user_id == 0
         || state.request_owner_user_id
-            == super::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+            == super::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
         || state.rebind_origin
         || expected.rebind_origin
         || state.readopted_from_inflight

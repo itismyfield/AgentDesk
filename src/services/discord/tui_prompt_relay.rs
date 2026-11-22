@@ -24,7 +24,6 @@ use crate::services::tui_prompt_dedupe::{
 };
 use tracing::Instrument;
 
-mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
     format_ssh_direct_prompt_notification, format_system_continuation_note,
@@ -34,6 +33,7 @@ use self::injected_prompt_policy::{
 use self::injected_prompt_policy::{
     format_subagent_notification_card, is_start_anchored_task_notification,
 };
+use super::session_notice::injected_prompt_policy;
 mod hook_observer;
 mod task_notification_prompt;
 use self::hook_observer::spawn_tui_prompt_relay_observer;
@@ -42,21 +42,12 @@ use self::hook_observer::{
     HookObserverProbe, hook_observation_target, spawn_tui_prompt_relay_observer_inner,
 };
 
-mod input_notice_memo;
-mod observed_prompt_decision;
 mod scheduled_prompt;
 mod slash_command_output;
-pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
 use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
-
-mod input_notice;
-#[cfg(test)]
-pub(crate) use self::input_notice::INPUT_NOTICE_RUNS;
-pub(crate) use self::input_notice::{
-    input_notice_content, input_notice_line, scheduled_input_notice_content,
-};
+use super::session_notice::observed_prompt_decision;
 
 /// Routes dedupe's binding publications to the observer wake; `HealthRegistry::new` installs it.
 pub(super) fn install_observer_publication() {
@@ -172,7 +163,7 @@ use self::synthetic_start::{
 pub(in crate::services::discord) use super::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches;
 
 #[cfg(unix)]
-pub(in crate::services::discord) mod background_child_completion;
+pub(in crate::services::discord) use super::task_notification_delivery::background_child_completion;
 #[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]

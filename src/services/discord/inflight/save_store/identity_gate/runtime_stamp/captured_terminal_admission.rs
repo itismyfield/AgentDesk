@@ -403,7 +403,7 @@ impl TuiTerminalRange {
                     })
             });
             if !settled {
-                crate::services::discord::tui_prompt_relay::rehydration::codex_marker::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
+                crate::services::discord::outbound::delivery_record::parked_owner::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
             }
         }
     }
