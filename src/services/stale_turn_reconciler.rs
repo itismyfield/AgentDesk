@@ -578,7 +578,9 @@ async fn destructive_warrant_bind(
 ) -> bool {
     match registry {
         Some(registry) => {
-            (registry.automatic_stale_sweep_warrants(session_key, provider, site)).await
+            registry
+                .automatic_stale_sweep_warrants(session_key, provider, site)
+                .await
         }
         None => {
             crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
