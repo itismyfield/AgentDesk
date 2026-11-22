@@ -254,6 +254,8 @@ class ProdTestSplitTest(unittest.TestCase):
             "any(test, unix)": False,
             'any(test, feature = "test-support", unix)': False,
             'all(not(test), any(test, feature = "test-support"))': False,
+            "/* test-support helpers */ unix": False,
+            'any(test, feature = "production" /* "test-support" */)': False,
         }
         for predicate, expected in table.items():
             raw = f"#[cfg({predicate})]\nmod m {{}}\n"

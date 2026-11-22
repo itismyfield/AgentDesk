@@ -15,9 +15,13 @@ from typing import Callable, Iterable
 from pathlib import Path
 
 try:
+    from rust_cfg import cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
 except ModuleNotFoundError:  # loaded by path from another cwd
     sys.path.append(str(Path(__file__).resolve().parent))
+    from rust_cfg import cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -185,6 +189,9 @@ class ModuleFileDeclaration:
     name: str
     child_paths: tuple[Path, ...]
     requires_test: bool
+    # Raw cfg bodies on the declaration and its enclosing inline modules.
+    conditions: tuple[str, ...] = ()
+    feature_dependent: bool = False
 
 
 class ParseError(RuntimeError):
@@ -697,13 +704,7 @@ class _InlineModuleContext:
     end: int
     module_dir: Path
     requires_test: bool
-
-
-def _attrs_require_test(attrs: str) -> bool:
-    return any(
-        cfg_requires_test(match.group("predicate"))
-        for match in _CFG_ATTR_RE.finditer(attrs)
-    )
+    conditions: tuple[str, ...] = ()
 
 
 def _path_attr(attrs: str) -> str | None:
@@ -744,11 +745,12 @@ def _module_file_declarations(
     for match in _MOD_DECL_RE.finditer(text):
         start = match.start()
         contexts = [context for context in contexts if start < context.end]
-        inherited_test = parent_requires_test or any(
-            context.requires_test for context in contexts
-        )
         attrs = match.group("attrs") or ""
-        requires_test = inherited_test or _attrs_require_test(attrs)
+        conditions = (contexts[-1].conditions if contexts else ()) + tuple(
+            cfg.group("predicate") for cfg in _CFG_ATTR_RE.finditer(attrs)
+        )
+        gate = cfg_conditions_gate(conditions)
+        requires_test = parent_requires_test or gate is not None
         name = match.group("name")
 
         if match.group("kind") == "{":
@@ -762,6 +764,7 @@ def _module_file_declarations(
                     end=end,
                     module_dir=base / name,
                     requires_test=requires_test,
+                    conditions=conditions,
                 )
             )
             continue
@@ -778,6 +781,8 @@ def _module_file_declarations(
                     path_attr=_path_attr(attrs),
                 ),
                 requires_test=requires_test,
+                conditions=conditions,
+                feature_dependent=gate == "feature" and not parent_requires_test,
             )
         )
     return declarations
@@ -815,6 +820,7 @@ def test_only_module_files(
             text,
             parent_requires_test=is_test_file(path),
         )
+    declarations_by_parent = demote_uncomposed_feature_mounts(declarations_by_parent, read_text_fn)
 
     result: set[Path] = set()
     while True:
