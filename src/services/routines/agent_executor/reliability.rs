@@ -294,7 +294,6 @@ impl RoutineAgentExecutor {
 mod tests {
     use super::super::tests::{completion_with_evidence, running_run};
     use super::*;
-    use crate::services::discord::health::HealthRegistry;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::json;
 
@@ -433,6 +432,7 @@ mod tests {
         use crate::db::dispatched_sessions::hosted_execution::tests::{
             TOKEN, owner, pending, wire,
         };
+        use crate::services::discord::health::HealthRegistry;
         use crate::services::discord::host_key_derivation::tests::seed_row;
         use crate::services::platform::tmux::PaneLiveness;
         use crate::services::tmux_diagnostics::PaneLivenessOverrideGuard;
