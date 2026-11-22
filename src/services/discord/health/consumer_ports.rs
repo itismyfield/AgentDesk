@@ -1,6 +1,5 @@
-//! The registry's side of the KE queue-cancel, stale-sweep, headless-turn, routine-process,
-//! resume-runtime and slot-reset ports, and its binding as the application's registry: each call
-//! runs the health function KE called before, with the same arguments.
+//! The registry's side of the KE health ports and its binding as the application's registry:
+//! each call runs the health function KE called before, with the same arguments.
 
 use std::sync::Arc;
 
