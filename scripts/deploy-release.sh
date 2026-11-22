@@ -3258,8 +3258,21 @@ end
 RUBY
 }
 
+# Homebrew upgrades drop the forced /opt/homebrew/bin link of keg-only postgresql@17;
+# its opt/ path survives version bumps.
+PG_PSQL_FALLBACK=/opt/homebrew/opt/postgresql@17/bin/psql
+
+_pg_psql_bin() {
+    if type -P psql; then
+        return 0
+    fi
+    [ -x "$PG_PSQL_FALLBACK" ] || return 1
+    echo "  psql not on PATH; using $PG_PSQL_FALLBACK" >&2
+    printf '%s\n' "$PG_PSQL_FALLBACK"
+}
+
 _pg_sql_probe() {
-    local local_port=$1 minimum_wait_secs=${2:-5} conninfo_dir password_file
+    local local_port=$1 minimum_wait_secs=${2:-5} conninfo_dir password_file psql_bin
     local attempt=0 max_attempts name value connect_timeout_seen=0
     local -a psql_env=(env -u DATABASE_URL)
     local -a clear_names=(
@@ -3279,7 +3292,7 @@ _pg_sql_probe() {
         PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE
         PGSSLROOTCERT PGTARGETSESSIONATTRS PGUSER PGDATABASE
     )
-    command -v psql >/dev/null 2>&1 || { echo "  psql not found in PATH (Homebrew postgresql/libpq unlinked?)" >&2; return 1; }
+    psql_bin=$(_pg_psql_bin) || { echo "  psql not found on PATH or at $PG_PSQL_FALLBACK" >&2; return 1; }
     for name in "${clear_names[@]}"; do
         psql_env+=(-u "$name")
     done
@@ -3312,7 +3325,7 @@ _pg_sql_probe() {
     max_attempts=$((minimum_wait_secs * 4))
     [ "$max_attempts" -ge 20 ] || max_attempts=20
     while [ "$attempt" -lt "$max_attempts" ]; do
-        if "${psql_env[@]}" psql --no-psqlrc \
+        if "${psql_env[@]}" "$psql_bin" --no-psqlrc \
           -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null 2>&1; then
             rm -rf "$conninfo_dir"
             rm -f "$password_file"
