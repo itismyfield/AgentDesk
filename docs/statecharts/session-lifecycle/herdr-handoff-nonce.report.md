@@ -137,7 +137,7 @@ End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = H
 | Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:266-288`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
 | Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:588-610`, `herdr_launch/unplaced.rs:453-456`, `prepared.rs:25,53` |
 | Herdr return, CLI | after `/exit` end, operator end check | `claude/herdr_return.rs:79-90`, `cli/herdr.rs:305-326` |
-| Readers | `herdr_launch.rs:440-453` (retired hold), `host_reconcile.rs:127`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
+| Readers | `herdr_launch.rs:440-453` (retired hold), `host_reconcile.rs:63`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
 
 | Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
 |---|---|---|---|

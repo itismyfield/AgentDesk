@@ -3,7 +3,9 @@ use std::sync::Mutex;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
 use crate::db::dispatched_sessions::hosted_execution::tests::{location, owner, record};
-use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrMismatch;
+use crate::services::discord::tmux::execution_identity::herdr_observation::{
+    HerdrMismatch, HerdrUnknown,
+};
 use HerdrExecutionMatch::{Match, Mismatch, Unknown};
 
 /// Answers every read with one scripted reading and records which panes it was asked for.

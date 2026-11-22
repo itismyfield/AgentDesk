@@ -79,6 +79,8 @@ impl HerdrExecutionReader for Pane {
 
     fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
         assert_eq!(pane_id, self.id, "only the stored pane is read");
+        let ported = crate::services::session_host::recover_in_effect();
+        assert!(ported, "the pane is read only through the recover port");
         self.reading.clone()
     }
 }

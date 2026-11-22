@@ -37,6 +37,11 @@ pub(crate) trait InteractiveSessionHost: Send + Sync {
     ) -> crate::services::termination_audit::host_terminate::HostTerminateEffect {
         super::termination::terminate(self.kind(), warrant)
     }
+    /// Reads a durable execution on its stored endpoint again; nothing is created, sent or closed.
+    #[cfg(unix)]
+    fn recover(&self, request: super::recover::HostRecover<'_>) -> super::recover::HostRecovery {
+        super::recover::recover(self.kind(), request)
+    }
     /// `scroll_back` follows `platform::tmux::capture_pane` (negative = history).
     fn capture_screen(
         &self,

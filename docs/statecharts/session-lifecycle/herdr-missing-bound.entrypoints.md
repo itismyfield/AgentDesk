@@ -23,8 +23,8 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 13 | `src/services/discord/tui_prompt_relay/herdr_source.rs:197` source bind | `Reconnect`, `row = Bound` | Verified attach of Pending; not a replacement execution |
 | 14 | `src/services/discord/tui_prompt_relay/herdr_source.rs:272` clear-chain bind | `Reconnect`, `row = Bound` | Same nonce after an authentic clear chain |
 | 15 | `src/services/discord/recovery_engine/herdr_reader.rs:235` restart pass | `Reconnect` | Local rows; Claude and Codex passes, no pane creation |
-| 16 | `src/services/discord/recovery_engine/herdr_reader.rs:457` reconnect candidate | `Reconnect` / `Read` / proposed `Retire` | Missing currently omitted; transition lease and current-row check already exist |
-| 17 | `src/services/discord/recovery_engine/host_reconcile.rs:142` absent exact pane | `pane = Missing`; `Read` | Complete endpoint-matching snapshot only |
+| 16 | `src/services/discord/recovery_engine/herdr_reader.rs:456` reconnect candidate | `Reconnect` / `Read` / proposed `Retire` | Missing currently omitted; transition lease and current-row check already exist |
+| 17 | `src/services/session_host/recover.rs:299` absent exact pane (recover port `Gone`) | `pane = Missing`; `Read` | Complete endpoint-matching snapshot only |
 | 18 | `src/cli/herdr.rs:241` retire CLI | `Read` / `Retire` | Explicit local ended execution; existing authority, no pane write |
 | 19 | `src/cli/herdr.rs:326` retirement CAS | `Retire` | Proposed common proof/CAS extraction; preserves the CLI's existing shell-ended cases |
 | 20 | `src/services/discord/herdr_terminate.rs:223` shared confirmed retirement | `Retire` | Existing strict end authority, unchanged |
