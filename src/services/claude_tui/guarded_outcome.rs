@@ -1,7 +1,7 @@
 //! Typed submission stops and preparation holds reach the attempt's owner through nested adapters.
 
 use super::host_input::InputRun;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::input;
 use super::input::{PreparationHold, UserReceipt};
 use crate::services::provider::CancelToken;
@@ -296,7 +296,7 @@ pub(crate) fn readiness_error(session: &str, error: String) -> SubmissionError {
     preparation.map_or(SubmissionError::Legacy(error), SubmissionError::Held)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn send_fresh_prompt(
     session: &str,
     prompt: &str,
@@ -310,7 +310,7 @@ pub fn send_fresh_prompt(
     )
     .map_err(SubmissionError::into_legacy)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn send_warm_followup(
     session: &str,
     prompt: &str,

@@ -299,7 +299,7 @@ fn replace_file(path: &Path, contents: &str) -> std::io::Result<()> {
     temp.persist(&target).map(drop).map_err(|error| error.error)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use std::path::Path;
 
