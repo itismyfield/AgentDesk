@@ -4040,6 +4040,7 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── mentions.rs
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
 │   │   ├── routine_incident.rs
@@ -5063,6 +5064,7 @@ src/
 │   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
+│   │   ├── terminal_custody.rs
 │   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   ├── claude_meta.rs

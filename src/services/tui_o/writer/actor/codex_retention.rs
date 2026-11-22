@@ -236,8 +236,9 @@ pub(crate) fn historical(
         return Err("codex_retention_old_context_not_local");
     }
     use crate::services::session_host::HostLiveness;
-    let liveness = crate::services::discord::host_liveness::historical_execution_liveness(pane)
-        .ok_or("codex_retention_historical_not_local")?;
+    let liveness =
+        crate::services::session_host::operation_policy::historical_execution_liveness(pane)
+            .ok_or("codex_retention_historical_not_local")?;
     if liveness != HostLiveness::DeadOrAbsent {
         return Err("codex_retention_historical_not_ended");
     }

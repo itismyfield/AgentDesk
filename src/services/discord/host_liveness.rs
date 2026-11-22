@@ -7,11 +7,11 @@ use super::inflight::{InflightTurnState, KeyedTeardown};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 use crate::services::provider::session_probe::SessionLiveness;
+use crate::services::session_host::operation_policy::historical_execution_liveness;
 use crate::services::session_host::{
-    HostKind, HostLiveness, HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
-    host_for,
+    HostLiveness, HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
 };
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+use crate::services::tmux_common::host_marker::read_host_kind_marker;
 
 /// Tmux only when neither the `.host_kind` marker nor the inflight row records another
 /// host; only the hosted binding writes a row locator, so any locator is such a record.
@@ -88,14 +88,4 @@ pub(in crate::services::discord) async fn tmux_verdict_gate(
 /// A known historical host must confirm death; missing evidence never stands for absence.
 pub(in crate::services::discord) fn historical_execution_ended(name: &str) -> bool {
     historical_execution_liveness(name) == Some(HostLiveness::DeadOrAbsent)
-}
-
-/// Only an explicit local tmux/process marker permits a historical liveness probe.
-pub(crate) fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
-    let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
-        read_host_kind_marker(name)
-    else {
-        return None;
-    };
-    Some(host_for(kind).liveness(HostSessionRef { kind, name }))
 }

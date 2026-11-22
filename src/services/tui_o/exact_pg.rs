@@ -35,6 +35,32 @@ pub(crate) struct DurableEvidenceAck {
     pub digest: String,
 }
 
+/// One strict record's append to the delivery journal, as a plain fn the journal can hand over.
+#[cfg(unix)]
+pub(crate) type AppendExact = for<'a> fn(
+    sqlx::PgPool,
+    &'a EpisodeMetadata,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>,
+>;
+
+#[cfg(unix)]
+static APPEND: std::sync::OnceLock<AppendExact> = std::sync::OnceLock::new();
+
+/// Installs the delivery journal's strict append beside the health registry; the first install wins.
+#[cfg(unix)]
+pub(crate) fn install_append(append: AppendExact) {
+    let _ = APPEND.set(append);
+}
+
+#[cfg(unix)]
+async fn append_exact(pool: sqlx::PgPool, metadata: &EpisodeMetadata) -> Result<(), String> {
+    #[cfg(test)]
+    crate::services::discord::install_exact_append();
+    let append = APPEND.get().ok_or("strict journal append not installed")?;
+    append(pool, metadata).await
+}
+
 // The disabled producer returns before acquiring a connection or creating a writer.
 pub(crate) async fn record_episode_evidence(
     enabled: bool,
@@ -58,7 +84,7 @@ pub(crate) async fn record_episode_evidence(
     }
     #[cfg(unix)]
     {
-        crate::services::discord::append_exact_metadata(pool.clone(), &metadata).await?;
+        append_exact(pool.clone(), &metadata).await?;
         use sha2::{Digest, Sha256};
         let bytes = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
         Ok(Some(DurableEvidenceAck {

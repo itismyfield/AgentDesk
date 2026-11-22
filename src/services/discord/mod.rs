@@ -83,8 +83,8 @@ pub(crate) mod response_sanitizer;
 mod session_banner;
 #[cfg(unix)]
 mod session_relay_sink;
-#[cfg(unix)]
-pub(crate) use session_relay_sink::journal::append_exact_metadata;
+#[cfg(all(test, unix))]
+pub(crate) use session_relay_sink::journal::{append_exact_metadata, install_exact_append};
 #[cfg(all(test, unix))]
 pub(crate) use session_relay_sink::journal::{
     exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
