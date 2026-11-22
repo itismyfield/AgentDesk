@@ -271,6 +271,9 @@ pub(crate) struct ReadinessHold {
     pub(crate) cause: String,
     pub(crate) started_at_ms: u64,
     pub(crate) due_at_ms: u64,
+    /// The original's identity check owns this wait across queue adoption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity_held_at_ms: Option<u64>,
     /// The first held unit in queue order, including the front. Legacy holds cover the front only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) members: Option<Vec<RefusedMember>>,

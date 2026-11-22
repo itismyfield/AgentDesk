@@ -334,7 +334,7 @@ jobs:
       ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
-      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
+      '["self-hosted","linux","x64","adk-wsl-lint"]' || '["ubuntu-latest"]') }}
     env:
       # Also bounds the non-lib builds in this job.
       CARGO_BUILD_JOBS: "2"

@@ -119,14 +119,15 @@ def write_tool(directory: Path, name: str, body: str) -> None:
 
 class SwapStepWiring(unittest.TestCase):
     def test_rust_build_routes_only_trusted_events_to_wsl(self):
-        wsl = ["self-hosted", "linux", "x64", "adk-wsl-rust"]
+        # The test build and lint run on separate WSL runners so neither queues behind the other.
+        wsl_labels = {"rust_build": "adk-wsl-rust", "lint": "adk-wsl-lint"}
         hosted = ["ubuntu-latest"]
         repo = "owner/project"
         cases = (
-            ("push", "refs/heads/main", None, wsl),
+            ("push", "refs/heads/main", None, None),
             ("push", "refs/heads/topic", None, hosted),
-            ("workflow_dispatch", "refs/heads/main", None, wsl),
-            ("pull_request", "refs/pull/1/merge", repo, wsl),
+            ("workflow_dispatch", "refs/heads/main", None, None),
+            ("pull_request", "refs/pull/1/merge", repo, None),
             ("pull_request", "refs/pull/2/merge", "fork/project", hosted),
             ("pull_request", "refs/pull/3/merge", None, hosted),
             ("pull_request_target", "refs/heads/main", repo, hosted),
@@ -152,7 +153,8 @@ class SwapStepWiring(unittest.TestCase):
                         "github.event.pull_request.head.repo.full_name": head_repo,
                         "github.repository": repo,
                     })
-                    self.assertEqual(json.loads(selected), expected)
+                    wsl = ["self-hosted", "linux", "x64", wsl_labels[job_id]]
+                    self.assertEqual(json.loads(selected), expected or wsl)
 
     def test_wsl_jobs_use_only_the_caches_and_swap_for_their_runner(self):
         sccache = ("./.github/actions/sccache-or-nothing", "mozilla-actions/sccache-action@v0.0.10")

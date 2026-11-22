@@ -24,3 +24,26 @@ pub(crate) async fn hold(drive: Arc<Drive>, front: &Front) {
         }
     }
 }
+
+/// Why the owner holds the front: the pane is not proven gone, so its identity is read again.
+#[cfg(unix)]
+const IDENTITY_CAUSE: &str = "busy_identity_unproven";
+
+/// Holds `front` while its pane identity is read again, under the same deadline as above.
+#[cfg(unix)]
+pub(crate) async fn hold_identity(drive: Arc<Drive>, front: &Front) {
+    let (front, now) = (
+        front.clone(),
+        chrono::Utc::now().timestamp_millis().max(0) as u64,
+    );
+    let held = drive.mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("V2 not adopted")?;
+        owner.hold_identity(&front, IDENTITY_CAUSE, now).map(drop)
+    });
+    match held.await {
+        Ok(()) => arm_deadline(drive),
+        Err(error) => {
+            tracing::warn!(channel_id = drive.channel, %error, "identity hold has no deadline")
+        }
+    }
+}
