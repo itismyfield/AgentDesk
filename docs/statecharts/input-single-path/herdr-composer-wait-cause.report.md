@@ -93,3 +93,39 @@ Entry points and the model:
 | FixedTmuxLost | Resolution | expected: tmux keeps waiting as in base |
 
 TLC 22/22 as expected.
+
+## #8128 U: the session's own turn during the wait
+
+11-21 adk-dash-cc: a front held in `Waits(Pending)` saw the session start its own turn (presence
+idle→busy). The moved transcript ended `Unproven(Refused)` and the original was dropped with its
+notice; the next input ended `Unproven(Retained)` with a resend ask and no retry.
+
+Added: Policy `U`; scenarios `own_moved`, `own_screen`, `own_restart`, `own_stop`, `own_clear`,
+`quiet_idle`; variables `own`, `moved`, `restarts`; actions `OwnTurnEnd`, `StopCommand`, `Restart`,
+`ClearCommand`; invariant `NoSilentLoss`; properties `OwnDelivers`, `ClearResolves`.
+
+| Transition | Code |
+|---|---|
+| `Attempt` cause `Refused` (moved, windows spent, screen shows no turn) | `claude_tui/readiness/watched.rs:170` |
+| `Attempt` cause `Unproven`/`UnprovenTurn` (unmoved, screen not read) | `watched.rs:159` |
+| `Attempt` cause `NoSource` settled for an older launch (`Unproven::Lost`) | `watched.rs:100` |
+| U: `OwnTurn` from a moved transcript or a busy screen; held | `claude/herdr_turn/composer.rs:231` → `own_turn` `composer.rs:272` |
+| held front keeps the preparation watch, no retained or refused record | `claude/herdr_turn/first_input.rs:232`, `:273`; `queue_io/input_owner/effect.rs:128` (`hold_not_sent`) |
+| `settled` (resend ask) / `refused` | `effect.rs:204-210` → `queued_head/v2/retained.rs:201` / `v2/refused.rs:12` |
+| `OwnTurnEnd` wake (turn boundary, held watch) | `queue_io/input_owner/drive.rs:113`, `held_watch.rs:65`; probe `first_input.rs:232-260` |
+| `StopCommand` | `discord/commands/stop.rs:191` (pending queue drain) |
+| `Restart` | durable owner queue; boot recovery `queue_io/input_owner/recovery.rs:8` |
+| `ClearCommand` | `discord/commands/control.rs:542` |
+
+| cfg | Before | U | meaning |
+|---|---|---|---|
+| BeforeOwnMoved | NoSilentLoss, OwnDelivers | - | the incident: the moved wait is refused for good |
+| BeforeOwnScreen | NoSilentLoss, OwnDelivers | - | the incident's next input: retained with a resend ask |
+| UOwnMoved / UOwnScreen / UOwnRestart / UOwnStop | - | all hold | held, then delivered once after the turn |
+| UOwnClear | - | all hold | `ClearResolves`: delivered or disposed of by /clear |
+| UQuietIdle / USourceNone | - | all hold | no own turn: the resend ask stays |
+| UOwnMovedNoWake | - | OwnDelivers | without a turn-boundary or watch wake the held front never delivers |
+| UOwnMovedMutRefuseMoved | - | NoSilentLoss, OwnDelivers | U without the moved check |
+| UOwnScreenMutRetainScreen | - | NoSilentLoss, OwnDelivers | U without the screen check |
+
+TLC 34/34 as expected (`scripts/ci/statecharts_tlc.py --base`).

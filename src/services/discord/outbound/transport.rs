@@ -28,7 +28,7 @@ pub(crate) async fn post_serenity_message_with_nonce(
     nonce: &str,
     enforce_nonce: bool,
 ) -> Result<String, serenity::Error> {
-    let mut message = serenity::CreateMessage::new()
+    let mut message = super::notification_policy::scoped_message(channel_id.get())
         .content(content)
         .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
         .enforce_nonce(enforce_nonce)

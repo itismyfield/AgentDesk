@@ -123,14 +123,25 @@ async fn rowless_watcher_death_wakes_the_v2_owner_waiting_input_once() {
     with_isolated_runtime_root(|| async move {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = Arc::new(poise::serenity_prelude::Http::new("test-token"));
-        for (channel, waiting) in [(9_633_401_u64, true), (9_633_402, false)] {
+        // The last row is a dead session whose name says nothing: only the watcher's provider
+        // can route its recovery.
+        for (channel, waiting, session) in [
+            (9_633_401_u64, true, "AgentDesk-codex-v2-rowless-9633401"),
+            (9_633_402, false, "AgentDesk-codex-v2-rowless-9633402"),
+            (9_633_403, true, "스마트홈-cc-i8119-dead"),
+        ] {
             let channel_id = ChannelId::new(channel);
             support::set_owner_wake_for_tests(channel_id, Some(Arc::new(|| {})));
             let completion = support::KickoffCompletion::install(channel_id);
             v2_attempted_front(&shared, &ProviderKind::Codex, channel_id, waiting).await;
-            let session = format!("AgentDesk-codex-v2-rowless-{channel}");
-            let resume =
-                super::resume_aborted_restart_turn(channel_id, &http, &shared, &session, "");
+            let resume = super::resume_aborted_restart_turn(
+                channel_id,
+                &http,
+                &shared,
+                &ProviderKind::Codex,
+                session,
+                "",
+            );
             assert!(!resume.await);
             completion
                 .processed(0, std::time::Duration::from_secs(5))

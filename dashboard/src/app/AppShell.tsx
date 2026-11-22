@@ -28,6 +28,7 @@ import {
 import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
+import { ShellFocusContext, type ShellFocus } from "./shellFocus";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
@@ -104,6 +105,11 @@ export default function AppShell({
     if (typeof window === "undefined") return false;
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
+  // A page asked for the whole desktop window (the relations editor) or for the phone top bar's row (an audit detail).
+  // Phones keep their tab bar either way.
+  const [focusRequest, setFocusRequest] = useState<ShellFocus | null>(null);
+  const focused = focusRequest === "window" && !isMobileViewport;
+  const showTopBar = !focused && !(focusRequest === "topBar" && isMobileViewport);
 
   const unreadCount = notifications.filter(
     (notification) => Date.now() - notification.ts < 60_000,
@@ -296,7 +302,7 @@ export default function AppShell({
         background: "var(--th-bg-primary)",
       }}
     >
-      {!isMobileViewport && (
+      {!isMobileViewport && !focused && (
         <AppSidebar
           currentRouteId={currentRoute?.id ?? null}
           iconForRoute={iconForRoute}
@@ -311,23 +317,25 @@ export default function AppShell({
       )}
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <AppTopBar
-          wsConnected={wsConnected}
-          currentRoute={currentRoute ?? null}
-          dismissNotification={dismissNotification}
-          headerZIndex={SHELL_HEADER_Z_INDEX}
-          isKo={isKo}
-          isMobileViewport={isMobileViewport}
-          notificationBadgeCount={unreadCount}
-          popoverZIndex={SHELL_POPOVER_Z_INDEX}
-          recentNotifications={recentNotifications}
-          resolvedTheme={resolvedTheme}
-          setShowCommandPalette={setShowCommandPalette}
-          setShowNotificationPanel={setShowNotificationPanel}
-          setShowTweaksPanel={setShowTweaksPanel}
-          showNotificationPanel={showNotificationPanel}
-          toggleShellTheme={toggleShellTheme}
-        />
+        {showTopBar && (
+          <AppTopBar
+            wsConnected={wsConnected}
+            currentRoute={currentRoute ?? null}
+            dismissNotification={dismissNotification}
+            headerZIndex={SHELL_HEADER_Z_INDEX}
+            isKo={isKo}
+            isMobileViewport={isMobileViewport}
+            notificationBadgeCount={unreadCount}
+            popoverZIndex={SHELL_POPOVER_Z_INDEX}
+            recentNotifications={recentNotifications}
+            resolvedTheme={resolvedTheme}
+            setShowCommandPalette={setShowCommandPalette}
+            setShowNotificationPanel={setShowNotificationPanel}
+            setShowTweaksPanel={setShowTweaksPanel}
+            showNotificationPanel={showNotificationPanel}
+            toggleShellTheme={toggleShellTheme}
+          />
+        )}
 
         <main
           data-testid="app-main-scroll"
@@ -351,31 +359,33 @@ export default function AppShell({
               />
             }
           >
-            <AppShellRoutes
-              ctx={{
-                agents,
-                agentsPageTab,
-                agentsWithDispatched,
-                departments,
-                handleSettingsSave,
-                isKo,
-                isMobileViewport,
-                navigateToRoute,
-                notifications,
-                openDefaultAgentInfo,
-                pushNotification,
-                setAgentsPageTab,
-                setSessions,
-                settings,
-                stats,
-                updateNotification,
-                visibleDispatchedSessions,
-                wsConnected,
-                wsLastEventTs,
-                refreshAgents,
-                refreshDepartments,
-              }}
-            />
+            <ShellFocusContext.Provider value={setFocusRequest}>
+              <AppShellRoutes
+                ctx={{
+                  agents,
+                  agentsPageTab,
+                  agentsWithDispatched,
+                  departments,
+                  handleSettingsSave,
+                  isKo,
+                  isMobileViewport,
+                  navigateToRoute,
+                  notifications,
+                  openDefaultAgentInfo,
+                  pushNotification,
+                  setAgentsPageTab,
+                  setSessions,
+                  settings,
+                  stats,
+                  updateNotification,
+                  visibleDispatchedSessions,
+                  wsConnected,
+                  wsLastEventTs,
+                  refreshAgents,
+                  refreshDepartments,
+                }}
+              />
+            </ShellFocusContext.Provider>
           </Suspense>
         </main>
       </div>

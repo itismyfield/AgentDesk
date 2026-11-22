@@ -368,18 +368,20 @@ class FastCheckCiWiringTests(unittest.TestCase):
         job = jobs["lint"]
 
         self.assertEqual(job["name"], "Lint runner")
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], jobs["rust_build"]["runs-on"])
         self.assertEqual(job["if"], _LINT_FILTER)
         # Clippy over every target and feature is the compile `cargo check` used to repeat.
         self.assertEqual(
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
+                "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "just fmt-check",
                 "npm run test:policies",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"',
                 "sccache --show-stats || true",
             ],
@@ -586,7 +588,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     path.chmod(0o755)
                 env = {**os.environ, **job["env"], **step.get("env", {}),
                        "PATH": f"{temp}:{os.environ['PATH']}", "LIMIT_LOG": str(Path(temp) / "limit")}
-                result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=temp, env=env,
+                run = re.sub(r"\$\{\{ [^{}]+ \}\}", lambda m: eval_expression(m[0], {"runner.environment": "self-hosted"}), step["run"])
+                result = subprocess.run(["bash", "-e", "-c", run], cwd=temp, env=env,
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((Path(temp) / "limit").read_text(), "2\n")
@@ -912,11 +915,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 if line.strip()
             ],
             [
+                "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "npm run test:policies",
                 "just fmt-check",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
                 *non_lib,
                 "sccache --show-stats || true",
@@ -955,7 +960,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
         self.assertEqual(mutation["needs"], "changes")
         self.assertEqual(mutation["runs-on"], "ubuntu-latest")
-        self.assertEqual(mutation["timeout-minutes"], 60)
+        self.assertEqual(mutation["timeout-minutes"], 80)
         self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
@@ -974,7 +979,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"        shell: bash\n"
-            r"        timeout-minutes: 60\n"
+            r"        timeout-minutes: 75\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
@@ -2626,7 +2631,7 @@ jobs:
             ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
-            ("job timeout leading zero is not decimal 60", mutations, "    timeout-minutes: 60\n", "    timeout-minutes: 074\n"),
+            ("job timeout octal alias is not decimal 80", mutations, "    timeout-minutes: 80\n", "    timeout-minutes: 0120\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):

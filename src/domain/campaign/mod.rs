@@ -1,6 +1,7 @@
 pub mod candidate_seal;
 pub mod decision_item;
 pub mod definition;
+pub mod deployment;
 pub mod evidence;
 pub mod evidence_gate;
 pub mod execution_pin;

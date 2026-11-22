@@ -538,6 +538,8 @@ pub(crate) async fn start_agent_handoff_turn(
     source: Option<String>,
     metadata: Option<Value>,
 ) -> Result<AgentHandoffTurnResponse, AgentHandoffError> {
+    super::queue_io::decision_drain::reject_handoff_source(source.as_deref(), metadata.as_ref())
+        .map_err(AgentHandoffError::bad_request)?;
     let to_agent_id_trimmed = to_agent_id.trim();
     let bindings = crate::db::agents::load_agent_channel_bindings_pg(pg_pool, to_agent_id_trimmed)
         .await

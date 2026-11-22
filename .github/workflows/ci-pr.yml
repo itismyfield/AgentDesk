@@ -1097,7 +1097,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh dc62fa5b50c85c85e2d55a08e2b0ab93725df06ac9315cd98cb658d1546622f0
+          pin scripts/check-ci-runner-hardening.sh de8f490df873c36add978916e8f12d5a2cb82614467a58f696af0f4c6e1a40bc
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1278,9 +1278,13 @@ jobs:
     # Relay-contract changes, doc-only included, run this job too: its clippy
     # compile is the existence proof for the `relay_state_contract_refs` blocks.
     if: ${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
+      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
     env:
-      # Limit simultaneous workspace target checks on the 4-CPU hosted runner.
+      # Limit simultaneous workspace target checks on either runner.
       CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
@@ -1305,6 +1309,7 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/sccache-or-nothing
 
       # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
@@ -1313,12 +1318,19 @@ jobs:
       # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
       # docs/ci/sccache-setup.md §4.2.
       - name: Cache Cargo dependencies
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Disable remote compiler cache
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"
 
       - name: just fmt-check
         run: just fmt-check
@@ -1333,6 +1345,7 @@ jobs:
 
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/ensure-swap
 
       - name: Save runner memory checkpoint
@@ -1366,7 +1379,7 @@ jobs:
           set -o pipefail
           mkdir -p target/clippy-observation
           cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
-          python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
+          ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
       - name: End runner memory step
         if: always()
@@ -1726,7 +1739,7 @@ jobs:
     needs: changes
     if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -1830,7 +1843,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 75
         run: bash scripts/run_relay_authority_mutations.sh
       - name: End runner memory step
         if: always()

@@ -21,7 +21,8 @@ import uuid
 
 from .discord_http import USER_AGENT
 
-from .files import InstanceError, LIVE_CREDENTIAL_NAMES, _open_parent, _token_bytes
+from .files import ADMISSION_NAME_SETS, InstanceError, _open_parent, _token_bytes
+from .profile import spec_for_bots
 
 RUN_ENV = 'AGENTDESK_TEST_RUN'
 _FIELDS = ('device', 'inode', 'size', 'mtime_ns', 'ctime_ns')
@@ -30,12 +31,12 @@ _FIELDS = ('device', 'inode', 'size', 'mtime_ns', 'ctime_ns')
 def parse_admission(frame):
     if (type(frame) is not dict or set(frame) != {'kind', 'schema', 'identities'}
             or frame['kind'] != 'admission' or type(frame['schema']) is not int or frame['schema'] != 1
-            or type(frame['identities']) is not dict or set(frame['identities']) != LIVE_CREDENTIAL_NAMES):
+            or type(frame['identities']) is not dict or set(frame['identities']) not in ADMISSION_NAME_SETS):
         raise InstanceError('invalid explicit identity admission')
     values = list(frame['identities'].values())
     if any(type(value) is not str or not re.fullmatch(r'[1-9][0-9]{0,19}', value)
-           or int(value) > 2**64-1 for value in values) or len(set(values)) != 4:
-        raise InstanceError('four distinct explicit application IDs are required')
+           or int(value) > 2**64-1 for value in values) or len(set(values)) != len(values):
+        raise InstanceError('distinct explicit application IDs are required')
     return frame['identities']
 
 
@@ -177,10 +178,12 @@ def request_json(url, deadline, token=None):
 
 def probe(root, frame, deadline, request=None, declared_roles=None):
     expected = parse_admission(frame)
-    if (type(declared_roles) is not dict or any(expected[role+'_bot_token'] != declared_roles.get(role)
-                                              for role in ('claude', 'codex'))):
+    spec = spec_for_bots(declared_roles)
+    # The validated profile pins the app ID; admission and the Discord answer below must match it.
+    if (set(expected) != spec['credentials']
+            or any(expected[role+'_bot_token'] != declared_roles[role] for role in spec['providers'])):
         raise InstanceError('identity admission differs from declared provider roles')
-    recheck_credentials(root, [])
+    recheck_credentials(root, [], names=set(expected))
     request = request or (lambda token, end: request_json(
         'https://discord.com/api/v10/users/@me', end, token).get('id'))
     observed, tokens = [], set()
@@ -200,11 +203,12 @@ def probe(root, frame, deadline, request=None, declared_roles=None):
     return observed
 
 
-def recheck_credentials(root, observed):
+def recheck_credentials(root, observed, names=None):
+    names = set(names) if names is not None else {item['name'] for item in observed}
     parent, _ = _open_parent(root, 'credential/entry', private=True)
     try:
-        if set(os.listdir(parent)) != LIVE_CREDENTIAL_NAMES:
-            raise InstanceError('explicit live mode requires exactly four credentials')
+        if names not in ADMISSION_NAME_SETS or set(os.listdir(parent)) != names:
+            raise InstanceError('explicit live mode requires exactly the profile credentials')
     finally:
         os.close(parent)
     for item in observed:
@@ -268,9 +272,10 @@ class _ControlEOF(ControlRefused):
 
 def _control_key(root, observed):
     try:
-        if (type(observed) is not list or len(observed) != 4
+        if (type(observed) is not list
                 or any(type(item) is not dict or set(item) != {'name','application_id', *_FIELDS} for item in observed)
-                or {item['name'] for item in observed} != LIVE_CREDENTIAL_NAMES
+                or {item['name'] for item in observed} not in ADMISSION_NAME_SETS
+                or len(observed) != len({item['name'] for item in observed})
                 or any(type(item[field]) is not int or item[field] < 0
                        for item in observed for field in _FIELDS)):
             raise ControlRefused('control credential inventory is invalid')

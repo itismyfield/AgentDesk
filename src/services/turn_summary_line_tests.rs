@@ -1,7 +1,14 @@
 use super::*;
 
 fn render(outcome: Outcome, elapsed: Option<u64>, context: Option<u8>) -> String {
-    super::render(outcome, elapsed, context, None)
+    super::render(
+        outcome,
+        Footer {
+            elapsed_ms: elapsed,
+            context_pct: context,
+            ..Footer::default()
+        },
+    )
 }
 
 #[test]
@@ -135,4 +142,135 @@ fn canonical_grammar_requires_the_completed_space_and_rejects_extra_status_text(
     ] {
         assert!(!pattern.is_match(rejected), "{rejected:?}");
     }
+}
+
+#[test]
+fn end_date_changes_at_kst_midnight_only() {
+    for (start, end, expected) in [
+        (
+            "2026-12-31T14:59:59Z",
+            "2026-12-31T15:00:01Z",
+            "01/01 00:00",
+        ),
+        ("2026-10-19T23:59:59Z", "2026-10-20T00:00:01Z", "09:00"),
+    ] {
+        for (outcome, prefix) in [
+            (Outcome::Completed, "-# ⏱️ 2초"),
+            (Outcome::Cancelled, "-# ⏹ 중단 · 2초"),
+            (Outcome::Failed, "-# ⚠️ 오류 · 2초"),
+        ] {
+            assert_eq!(
+                super::render(
+                    outcome,
+                    Footer {
+                        elapsed_ms: Some(2000),
+                        started: Some(start.parse().unwrap()),
+                        ended: Some(end.parse().unwrap()),
+                        model: Model {
+                            name: Some("Opus 4.6"),
+                            effort: Some("high"),
+                            fast: true
+                        },
+                        context_pct: Some(45),
+                        ..Footer::default()
+                    }
+                ),
+                format!("{prefix} ({expected}) · Opus 4.6 (high, fast) · 📦 45%")
+            );
+        }
+    }
+}
+
+#[test]
+fn footer_omits_unknown_or_unsafe_model_fields_and_keeps_independent_metadata() {
+    for (model, expected) in [
+        (Model::default(), "-# ⏱️ 1초"),
+        (
+            Model {
+                name: Some("  "),
+                effort: Some(" "),
+                fast: false,
+            },
+            "-# ⏱️ 1초",
+        ),
+        (
+            Model {
+                name: Some("a\n-# injection"),
+                effort: Some("()"),
+                fast: false,
+            },
+            "-# ⏱️ 1초",
+        ),
+        (
+            Model {
+                name: Some("gpt-6.2-sol"),
+                effort: None,
+                fast: false,
+            },
+            "-# ⏱️ 1초 · gpt-6.2-sol",
+        ),
+        (
+            Model {
+                name: None,
+                effort: Some("ultra"),
+                fast: false,
+            },
+            "-# ⏱️ 1초 · ultra",
+        ),
+        (
+            Model {
+                name: Some("Opus"),
+                effort: None,
+                fast: true,
+            },
+            "-# ⏱️ 1초 · Opus (fast)",
+        ),
+    ] {
+        let line = super::render(
+            Outcome::Completed,
+            Footer {
+                elapsed_ms: Some(1000),
+                model,
+                quota: Some(quota::Quota::default()),
+                ..Footer::default()
+            },
+        );
+        assert!(!line.contains("()"));
+        assert_eq!(line, expected);
+    }
+}
+
+pub(crate) fn assert_completed_footer(footer: &str) {
+    let mut lines = footer.lines();
+    let first = lines.next().expect("completed footer");
+    let time = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]";
+    let day_time = format!(r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) {time}");
+    let percent = r"(?:100|[1-9]?[0-9])%";
+    let mode = r"[A-Za-z0-9-]{1,16}";
+    let name = r"[A-Za-z0-9][A-Za-z0-9 ._+/\-:@\[\]]{0,63}";
+    let shape = format!(
+        concat!(
+            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
+            r" \((?:{0}|{1})\)(?: · (?:{2}(?: \({3}(?:, fast)?\))?|{3}, fast))?",
+            r"(?: · 📦 {4})?\z"
+        ),
+        time, day_time, name, mode, percent
+    );
+    assert!(
+        regex::Regex::new(&shape).unwrap().is_match(first),
+        "{footer:?}"
+    );
+    if let Some(quota) = lines.next() {
+        let five = format!(r"5h {percent} \({time}\)");
+        let seven = format!(r"7d {percent} \({day_time}\)");
+        let fable = format!("Fable {seven}");
+        let shape = format!(
+            r"\A-# (?:{five}(?: · {seven})?(?: · {fable})?|{seven}(?: · {fable})?|{fable})\z"
+        );
+        assert!(
+            regex::Regex::new(&shape).unwrap().is_match(quota),
+            "{footer:?}"
+        );
+    }
+    assert_eq!(lines.next(), None, "{footer:?}");
 }

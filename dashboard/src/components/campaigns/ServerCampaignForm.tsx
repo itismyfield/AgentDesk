@@ -3,7 +3,12 @@ import {
   createServerCampaign, editServerCampaignDefinition, getServerCampaign, isDefinitiveAnswer, serverCampaignRejection,
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
-import { Select } from "../common/Select";
+import { Button } from "../../kit/free/button-clean";
+import { Checkbox } from "../../kit/free/checkbox-clean";
+import { Select } from "../../kit/free/select-clean";
+import { TextArea } from "../../kit/free/text-area-clean";
+import { TextField } from "../../kit/free/text-field-clean";
+import { Eyebrow, Well } from "../common/KitPrimitives";
 import type { Tr } from "./campaignPresentation";
 import { changedDefinitionValues, newIdempotencyKey, nodeDefinitionText, rejectionText } from "./serverCampaignModel";
 
@@ -196,81 +201,83 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
   };
 
   const status = draft.status;
-  return <form ref={form} className="campaign-server-form grid min-w-0 gap-4 rounded-lg border border-th-border-subtle bg-th-bg-surface p-4" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
-    <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
-      <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
-      <label>{tr("저장소", "Repository")}<Select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></Select></label>
-    </div>
-    <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>
-    {definition.nodes.map((node, index) => {
-      const others = definition.nodes.map((other, at) => ({ other, at })).filter(({ at }) => at !== index);
-      // A dependency naming no other task (left by a rename, copied, or this task's own ID) stays visible to
-      // re-point or remove; renames never rewrite dependencies, so a link cannot move to another task unseen.
-      const missing = node.dependencies.filter((id) => !others.some(({ other }) => other.id === id));
-      return <fieldset key={index} className="campaign-server-task">
-        <legend>{tr(`작업 ${index + 1}`, `Task ${index + 1}`)}</legend>
-        <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-          <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={draft.saved[index] === true} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} /></label>
-          <label>{tr("작업 제목", "Task title")}<input aria-label={tr("작업 제목", "Task title")} value={node.title} onChange={(event) => setNode(index, { title: event.target.value })} /></label>
-          <label>{tr("이슈 링크", "Issue link")}<input aria-label={tr("이슈 링크", "Issue link")} inputMode="url" value={node.issue_url} onChange={(event) => setNode(index, { issue_url: event.target.value })} /></label>
-          <label>{tr("그룹", "Group")}<input aria-label={tr("그룹", "Group")} value={node.group ?? ""} placeholder={tr("미분류", "Ungrouped")} onChange={(event) => setNode(index, { group: event.target.value || null })} /></label>
-        </div>
-        {(definition.nodes.length > 1 || missing.length > 0) && <div className="campaign-server-dependencies" role="group" aria-label={tr("선행 작업", "Dependencies")}>
-          <span>{tr("선행 작업", "Dependencies")}</span>
-          {/* Rows are keyed by position: IDs are free text and may repeat while being typed. */}
-          {others.map(({ other, at }) => <label key={`task:${at}`} className="campaign-check">
-            <input type="checkbox" aria-label={tr(`${node.id}의 선행: ${other.id}`, `${node.id} depends on ${other.id}`)} checked={node.dependencies.includes(other.id)}
-              onChange={(event) => setNode(index, { dependencies: event.target.checked ? [...node.dependencies, other.id] : node.dependencies.filter((id) => id !== other.id) })} />{other.id}
-          </label>)}
-          {missing.map((id, at) => {
-            const marker = id === node.id ? tr("(이 작업)", "(this task)") : tr("(없는 작업)", "(no such task)");
-            return <label key={`missing:${at}`} className="campaign-check">
-              <input type="checkbox" aria-label={tr(`${node.id}의 선행: ${id} ${marker}`, `${node.id} depends on ${id} ${marker}`)} checked
-                onChange={() => setNode(index, { dependencies: node.dependencies.filter((dependency) => dependency !== id) })} />{id} {marker}
-            </label>;
-          })}
-        </div>}
-        {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac items-end">
-          <label>{tr("수용조건 ID", "Acceptance ID")}<input aria-label={tr("수용조건 ID", "Acceptance ID")} value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} /></label>
-          <label>{tr("수용조건 설명", "Acceptance description")}<input aria-label={tr("수용조건 설명", "Acceptance description")} value={ac.description} onChange={(event) => setAcceptance(index, acIndex, { description: event.target.value })} /></label>
-          <label>{tr("검증 종류", "Verification")}<Select aria-label={tr("검증 종류", "Verification")} value={ac.verification} onChange={(event) => setAcceptance(index, acIndex, { verification: event.target.value as Acceptance["verification"] })}>
-            {VERIFICATIONS.map(([value, label]) => <option key={value} value={value}>{tr(...label)}</option>)}
-          </Select></label>
-          <button type="button" onClick={() => setNode(index, { acceptance: node.acceptance.filter((_, at) => at !== acIndex) })}>{tr("수용조건 삭제", "Remove acceptance")}</button>
-        </div>)}
-        <div className="campaign-actions">
-          <button type="button" onClick={() => setNode(index, { acceptance: [...node.acceptance, { id: "", description: "", verification: "test" }] })}>{tr("수용조건 추가", "Add acceptance")}</button>
-          <button type="button" onClick={() => removeNode(index)}>{tr("작업 삭제", "Remove task")}</button>
-        </div>
-      </fieldset>;
-    })}
-    <button type="button" onClick={addNode}>{tr("작업 추가", "Add task")}</button>
-    {draft.mode === "edit" && <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-      <label>{tr("변경 근거 링크", "Change reference")}<input aria-label={tr("변경 근거 링크", "Change reference")} inputMode="url" aria-invalid={reasonMissing} value={draft.change.reference} onChange={(event) => update({ change: { ...draft.change, reference: event.target.value } })} /></label>
-      <label>{tr("변경 설명", "Change explanation")}<input aria-label={tr("변경 설명", "Change explanation")} aria-invalid={reasonMissing} value={draft.change.explanation} onChange={(event) => update({ change: { ...draft.change, explanation: event.target.value } })} /></label>
-    </div>}
-    {status?.kind === "lost" && <p role="status" className="campaign-filter-note">{tr("응답을 받지 못했습니다. 같은 내용으로 다시 보내도 두 번 적용되지 않습니다.", "No answer arrived. Saving again with the same content cannot apply it twice.")}</p>}
-    {status?.kind === "saved" && <p role="status" className="campaign-filter-note">{tr(`revision ${status.revision}에 저장했습니다. 그 뒤 고친 내용은 아직 저장되지 않았습니다.`, `Saved as revision ${status.revision}. Changes made since then are not saved yet.`)}</p>}
-    {status?.kind === "error" && <p role="alert" className="campaign-filter-note">{status.text}</p>}
-    {status?.kind === "conflict" && <div role="alert" className="campaign-filter-note">
-      <p>{tr(`다른 곳에서 정의가 바뀌었습니다 (revision ${status.revision}). 초안은 그대로 둡니다.`, `This definition changed (revision ${status.revision}). Your draft is kept.`)}</p>
-      <p>{tr("다른 곳에서 바뀐 항목", "Changed elsewhere")}: {status.changed.map(({ field }) => field).join(", ") || tr("없음", "none")}</p>
-      {status.changed.length > 0 && <dl className="campaign-server-latest" aria-label={tr(`revision ${status.revision}의 값`, `Values in revision ${status.revision}`)}>
-        {status.changed.map(({ field, value }) => <div key={field}><dt>{field}</dt><dd>{value || "—"}</dd></div>)}
-      </dl>}
-      <details className="campaign-server-latest-definition">
-        <summary>{tr(`revision ${status.revision}의 전체 정의`, `Full definition in revision ${status.revision}`)}</summary>
-        <p>{status.latest.title} · {status.latest.repository} · {status.latest.goal}</p>
-        <dl className="campaign-server-latest">
-          {status.latest.nodes.map((node) => <div key={node.id}><dt>{node.id}</dt><dd>{nodeDefinitionText(node)}</dd></div>)}
-        </dl>
-      </details>
-      <button type="button" disabled={saving || disabled} onClick={() => void save(status.revision, status.latest)}>{tr(`revision ${status.revision} 위에 저장`, `Save over revision ${status.revision}`)}</button>
-    </div>}
-    <div className="campaign-actions">
-      <button type="submit" disabled={saving || disabled}>{saving ? tr("저장 중…", "Saving…") : draft.mode === "create" ? tr("생성", "Create") : tr("저장", "Save")}</button>
-      <button type="button" disabled={saving} onClick={onCancel}>{tr("취소", "Cancel")}</button>
-    </div>
-  </form>;
+  return <Well className="p-4">
+    <form ref={form} className="campaign-server-form grid min-w-0 gap-4" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+        {draft.mode === "create" && <TextField label={tr("캠페인 ID", "Campaign ID")} aria-label={tr("캠페인 ID", "Campaign ID")} size="lg" disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} />}
+        <TextField label={tr("이름", "Name")} aria-label={tr("이름", "Name")} size="lg" value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} />
+        <Select label={tr("저장소", "Repository")} aria-label={tr("저장소", "Repository")} size="lg" value={definition.repository}
+          options={[{ value: "adk", label: "AgentDesk" }, { value: "cooking_heart", label: "CookingHeart" }]}
+          onChange={(value) => setDefinition({ repository: value as Definition["repository"] })} />
+      </div>
+      <TextArea label={tr("목표", "Goal")} aria-label={tr("목표", "Goal")} minRows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} />
+      {definition.nodes.map((node, index) => {
+        const others = definition.nodes.map((other, at) => ({ other, at })).filter(({ at }) => at !== index);
+        // A dependency naming no other task (left by a rename, copied, or this task's own ID) stays visible to
+        // re-point or remove; renames never rewrite dependencies, so a link cannot move to another task unseen.
+        const missing = node.dependencies.filter((id) => !others.some(({ other }) => other.id === id));
+        return <fieldset key={index} className="campaign-server-task rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-2)] p-3">
+          <legend>{tr(`작업 ${index + 1}`, `Task ${index + 1}`)}</legend>
+          <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+            <TextField label={tr("작업 ID", "Task ID")} aria-label={tr("작업 ID", "Task ID")} size="lg" readOnly={draft.saved[index] === true} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} />
+            <TextField label={tr("작업 제목", "Task title")} aria-label={tr("작업 제목", "Task title")} size="lg" value={node.title} onChange={(event) => setNode(index, { title: event.target.value })} />
+            <TextField label={tr("이슈 링크", "Issue link")} aria-label={tr("이슈 링크", "Issue link")} size="lg" inputMode="url" value={node.issue_url} onChange={(event) => setNode(index, { issue_url: event.target.value })} />
+            <TextField label={tr("그룹", "Group")} aria-label={tr("그룹", "Group")} size="lg" value={node.group ?? ""} placeholder={tr("미분류", "Ungrouped")} onChange={(event) => setNode(index, { group: event.target.value || null })} />
+          </div>
+          {(definition.nodes.length > 1 || missing.length > 0) && <div className="campaign-server-dependencies" role="group" aria-label={tr("선행 작업", "Dependencies")}>
+            <Eyebrow>{tr("선행 작업", "Dependencies")}</Eyebrow>
+            {/* Rows are keyed by position: IDs are free text and may repeat while being typed. */}
+            {others.map(({ other, at }) => <Checkbox key={`task:${at}`} label={other.id}
+              aria-label={tr(`${node.id}의 선행: ${other.id}`, `${node.id} depends on ${other.id}`)} checked={node.dependencies.includes(other.id)}
+              onChange={(event) => setNode(index, { dependencies: event.target.checked ? [...node.dependencies, other.id] : node.dependencies.filter((id) => id !== other.id) })} />)}
+            {missing.map((id, at) => {
+              const marker = id === node.id ? tr("(이 작업)", "(this task)") : tr("(없는 작업)", "(no such task)");
+              return <Checkbox key={`missing:${at}`} label={`${id} ${marker}`}
+                aria-label={tr(`${node.id}의 선행: ${id} ${marker}`, `${node.id} depends on ${id} ${marker}`)} checked
+                onChange={() => setNode(index, { dependencies: node.dependencies.filter((dependency) => dependency !== id) })} />;
+            })}
+          </div>}
+          {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac items-end">
+            <TextField label={tr("수용조건 ID", "Acceptance ID")} aria-label={tr("수용조건 ID", "Acceptance ID")} size="lg" value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} />
+            <TextField label={tr("수용조건 설명", "Acceptance description")} aria-label={tr("수용조건 설명", "Acceptance description")} size="lg" value={ac.description} onChange={(event) => setAcceptance(index, acIndex, { description: event.target.value })} />
+            <Select label={tr("검증 종류", "Verification")} aria-label={tr("검증 종류", "Verification")} size="lg" value={ac.verification}
+              options={VERIFICATIONS.map(([value, label]) => ({ value, label: tr(...label) }))}
+              onChange={(value) => setAcceptance(index, acIndex, { verification: value as Acceptance["verification"] })} />
+            <Button variant="ghost" size="sm" onClick={() => setNode(index, { acceptance: node.acceptance.filter((_, at) => at !== acIndex) })}>{tr("수용조건 삭제", "Remove acceptance")}</Button>
+          </div>)}
+          <div className="campaign-actions">
+            <Button variant="secondary" size="sm" onClick={() => setNode(index, { acceptance: [...node.acceptance, { id: "", description: "", verification: "test" }] })}>{tr("수용조건 추가", "Add acceptance")}</Button>
+            <Button variant="ghost" size="sm" onClick={() => removeNode(index)}>{tr("작업 삭제", "Remove task")}</Button>
+          </div>
+        </fieldset>;
+      })}
+      <div><Button variant="secondary" size="sm" onClick={addNode}>{tr("작업 추가", "Add task")}</Button></div>
+      {draft.mode === "edit" && <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+        <TextField label={tr("변경 근거 링크", "Change reference")} aria-label={tr("변경 근거 링크", "Change reference")} size="lg" inputMode="url" aria-invalid={reasonMissing} value={draft.change.reference} onChange={(event) => update({ change: { ...draft.change, reference: event.target.value } })} />
+        <TextField label={tr("변경 설명", "Change explanation")} aria-label={tr("변경 설명", "Change explanation")} size="lg" aria-invalid={reasonMissing} value={draft.change.explanation} onChange={(event) => update({ change: { ...draft.change, explanation: event.target.value } })} />
+      </div>}
+      {status?.kind === "lost" && <p role="status" className="campaign-filter-note">{tr("응답을 받지 못했습니다. 같은 내용으로 다시 보내도 두 번 적용되지 않습니다.", "No answer arrived. Saving again with the same content cannot apply it twice.")}</p>}
+      {status?.kind === "saved" && <p role="status" className="campaign-filter-note">{tr(`revision ${status.revision}에 저장했습니다. 그 뒤 고친 내용은 아직 저장되지 않았습니다.`, `Saved as revision ${status.revision}. Changes made since then are not saved yet.`)}</p>}
+      {status?.kind === "error" && <p role="alert" className="campaign-filter-note">{status.text}</p>}
+      {status?.kind === "conflict" && <div role="alert" className="campaign-filter-note grid gap-2">
+        <p>{tr(`다른 곳에서 정의가 바뀌었습니다 (revision ${status.revision}). 초안은 그대로 둡니다.`, `This definition changed (revision ${status.revision}). Your draft is kept.`)}</p>
+        <p>{tr("다른 곳에서 바뀐 항목", "Changed elsewhere")}: {status.changed.map(({ field }) => field).join(", ") || tr("없음", "none")}</p>
+        {status.changed.length > 0 && <dl className="campaign-server-latest" aria-label={tr(`revision ${status.revision}의 값`, `Values in revision ${status.revision}`)}>
+          {status.changed.map(({ field, value }) => <div key={field}><dt>{field}</dt><dd>{value || "—"}</dd></div>)}
+        </dl>}
+        <details className="campaign-server-latest-definition">
+          <summary>{tr(`revision ${status.revision}의 전체 정의`, `Full definition in revision ${status.revision}`)}</summary>
+          <p>{status.latest.title} · {status.latest.repository} · {status.latest.goal}</p>
+          <dl className="campaign-server-latest">
+            {status.latest.nodes.map((node) => <div key={node.id}><dt>{node.id}</dt><dd>{nodeDefinitionText(node)}</dd></div>)}
+          </dl>
+        </details>
+        <div><Button variant="secondary" size="sm" disabled={saving || disabled} onClick={() => void save(status.revision, status.latest)}>{tr(`revision ${status.revision} 위에 저장`, `Save over revision ${status.revision}`)}</Button></div>
+      </div>}
+      <div className="campaign-actions">
+        <Button type="submit" variant="primary" size="sm" disabled={saving || disabled}>{saving ? tr("저장 중…", "Saving…") : draft.mode === "create" ? tr("생성", "Create") : tr("저장", "Save")}</Button>
+        <Button variant="secondary" size="sm" disabled={saving} onClick={onCancel}>{tr("취소", "Cancel")}</Button>
+      </div>
+    </form>
+  </Well>;
 }

@@ -142,11 +142,10 @@ class SwapStepWiring(unittest.TestCase):
                 else {"pull_request": {"types": ["opened", "synchronize", "reopened", "ready_for_review"]}}
             )
             self.assertEqual(document[True], expected_events, workflow)
-            runs_on = jobs["rust_build"]["runs-on"]
-            expression = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", str(runs_on))
-            self.assertIsNotNone(expression, workflow)
-            for event, ref, head_repo, expected in cases:
-                with self.subTest(workflow=workflow, event=event, ref=ref, head_repo=head_repo):
+            for job_id, event, ref, head_repo, expected in ((j, *case) for j in ("rust_build", "lint") for case in cases):
+                expression = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", str(jobs[job_id]["runs-on"]))
+                self.assertIsNotNone(expression, (workflow, job_id))
+                with self.subTest(workflow=workflow, job=job_id, event=event, ref=ref, head_repo=head_repo):
                     selected = eval_expression(expression[1], {
                         "github.event_name": event,
                         "github.ref": ref,
@@ -155,16 +154,17 @@ class SwapStepWiring(unittest.TestCase):
                     })
                     self.assertEqual(json.loads(selected), expected)
 
-    def test_rust_build_uses_only_the_caches_and_swap_for_its_runner(self):
-        actions = {SWAP_ACTION, "Swatinem/rust-cache@v2", "./.github/actions/sccache-or-nothing"}
-        for workflow in DUAL_RUNNER_WORKFLOWS:
-            job = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))["jobs"]["rust_build"]
-            hosted_steps = [step for step in job["steps"] if step.get("uses") in actions]
+    def test_wsl_jobs_use_only_the_caches_and_swap_for_their_runner(self):
+        sccache = ("./.github/actions/sccache-or-nothing", "mozilla-actions/sccache-action@v0.0.10")
+        for workflow, job_id in ((w, j) for w in DUAL_RUNNER_WORKFLOWS for j in ("rust_build", "lint")):
+            job = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))["jobs"][job_id]
+            actions = {SWAP_ACTION, "Swatinem/rust-cache@v2", sccache[workflow.endswith("ci-main.yml") and job_id == "lint"]}
+            hosted_steps = [step for step in job["steps"] if step.get("uses") in {*actions, *sccache}]
             self.assertEqual({step["uses"] for step in hosted_steps}, actions)
             self.assertEqual(len(hosted_steps), len(actions))
             uncached, = [step for step in job["steps"] if step.get("name") == "Disable remote compiler cache"]
             for environment, hosted in (("github-hosted", True), ("self-hosted", False)):
-                with self.subTest(workflow=workflow, environment=environment):
+                with self.subTest(workflow=workflow, job=job_id, environment=environment):
                     context = {"runner.environment": environment}
                     for step in hosted_steps:
                         self.assertEqual(eval_step_if(step.get("if"), context), hosted, step["name"])
@@ -229,7 +229,7 @@ class SwapStepWiring(unittest.TestCase):
                     first_build = next(s for s in steps if needs_swap(s, jobs[job_id]))
                     expected_gate = (
                         ("runner.environment == 'github-hosted'",)
-                        if relative in DUAL_RUNNER_WORKFLOWS and job_id == "rust_build"
+                        if relative in DUAL_RUNNER_WORKFLOWS and job_id in ("rust_build", "lint")
                         else (None, first_build.get("if"))
                     )
                     self.assertIn(steps[swap].get("if"), expected_gate)

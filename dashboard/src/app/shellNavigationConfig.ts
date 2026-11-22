@@ -8,5 +8,5 @@ export const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "audit",
 ];
 
-// Sections render without headings; the gap alone separates system pages.
+// Sections render without headings; a horizontal separator divides workspace and system pages.
 export const SIDEBAR_SECTION_ORDER: AppSectionId[] = ["workspace", "system"];

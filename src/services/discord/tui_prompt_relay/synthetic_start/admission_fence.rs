@@ -165,7 +165,10 @@ impl<'a> AdmissionFence<'a> {
     }
 
     async fn read_current(&self) -> Result<Option<HostedObservation>, String> {
-        let endpoint = crate::config::session_hosts::herdr_endpoint(self.channel.get());
+        let endpoint = crate::services::session_host::thread_host::current_execution_cached(
+            self.channel.get(),
+        )
+        .endpoint();
         let pin = self.lease.hosted_source.as_ref();
         let herdr = tui_prompt_dedupe::hosted_source::herdr_evidence(
             self.channel.get(),

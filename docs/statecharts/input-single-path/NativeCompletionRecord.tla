@@ -1,12 +1,15 @@
 -------------------- MODULE NativeCompletionRecord --------------------
-\* Completion records of a native-owned turn: transcript, scheduled outcome, work, cleanup order.
+\* Completion records of a native-owned turn: transcript, channel session selector, scheduled
+\* outcome, work, cleanup order.
 EXTENDS Naturals
 CONSTANTS Mode, Scenario
 
 VARIABLES outcome, row, cleared, stage, ended, recorded, rows, scope, sched, schedWrites,
-          afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry
+          afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry,
+          selector
 vars == <<outcome, row, cleared, stage, ended, recorded, rows, scope, sched, schedWrites,
-          afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry>>
+          afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry,
+          selector>>
 
 Primary == Scenario # "Follower"
 EmptyBody == Scenario = "Empty"
@@ -40,22 +43,23 @@ Init == /\ outcome = "None" /\ row = TRUE /\ cleared = FALSE
         /\ afterClear = FALSE /\ deleted = FALSE /\ acked = FALSE
         /\ booted = TRUE /\ crashed = FALSE
         /\ nativeWork = FALSE /\ watcherWork = FALSE /\ registry = "Free"
+        /\ selector = "Empty"
 
 Commit == /\ booted /\ outcome = "None"
           /\ outcome' = IF Scenario = "Cancelled" THEN "Cancelled" ELSE "Executed"
           /\ UNCHANGED <<row, cleared, stage, ended, recorded, rows, scope, sched, schedWrites,
-                         afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry>>
+                         afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry, selector>>
 
 AdjacentClear == /\ ClearScenario /\ row /\ ~deleted /\ stage = "Pending"
                  /\ row' = FALSE /\ cleared' = TRUE
                  /\ UNCHANGED <<outcome, stage, ended, recorded, rows, scope, sched, schedWrites,
-                                afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry>>
+                                afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, registry, selector>>
 
 \* The watcher's terminal-commit epilogue clears the row it re-read by identity and nonce.
 WatcherClear == /\ WatcherMayClear /\ booted /\ row /\ ~deleted
                 /\ row' = FALSE /\ deleted' = TRUE
                 /\ UNCHANGED <<outcome, cleared, stage, ended, recorded, rows, scope, sched, schedWrites,
-                               afterClear, acked, booted, crashed, nativeWork, watcherWork, registry>>
+                               afterClear, acked, booted, crashed, nativeWork, watcherWork, registry, selector>>
 
 \* The watcher's streaming finalizer completes a work dispatch with its own body. Without a row
 \* id that is the pre-existing path, whose body choice this model leaves out of scope.
@@ -64,7 +68,7 @@ WatcherCompleteWork == /\ WatcherMayComplete /\ booted /\ outcome = "Executed" /
                        /\ scope' = IF RowHasId THEN "Foreign" ELSE scope
                        /\ UNCHANGED <<outcome, row, cleared, stage, ended, recorded, rows, sched,
                                       schedWrites, afterClear, deleted, acked, booted, crashed,
-                                      nativeWork, registry>>
+                                      nativeWork, registry, selector>>
 
 \* Live and boot share one rule: the current matching row, never a stale capture.
 RowAvailable == row \/ (Mode = "CapturedFallback" /\ cleared)
@@ -74,6 +78,9 @@ SessionMapReady == ~crashed
 WritesText == Eligible /\ Readable /\ WriteOk /\ ~EmptyBody
               /\ (Scenario # "BootEmptySessionMap" \/ SessionMapReady \/ Mode # "MemorySessionOnly")
 SettlesScheduled == Eligible /\ Readable /\ WriteOk /\ (Mode # "EmptyGate" \/ ~EmptyBody)
+\* The run's own session becomes the channel's selector, with or without a body or a session map
+\* entry; a channel cleared since the turn began keeps its empty selector.
+StoresSelector == Eligible /\ Readable /\ WriteOk /\ ~cleared /\ Mode # "NoSelector"
 \* Native completes only the dispatch its row names.
 CompletesWork == Eligible /\ Readable /\ ~EmptyBody /\ DispatchTurn
                  /\ (RowHasId \/ Mode = "NativeWithoutId")
@@ -92,19 +99,20 @@ Record == /\ booted /\ outcome # "None" /\ stage = "Pending" /\ ~acked
           /\ afterClear' = (afterClear \/ (Eligible /\ cleared))
           \* A re-run sees its own earlier completion; a second writer is counted separately.
           /\ nativeWork' = (nativeWork \/ CompletesWork)
+          /\ selector' = IF StoresSelector THEN "Run" ELSE selector
           /\ UNCHANGED <<outcome, row, cleared, deleted, acked, booted, crashed, watcherWork, registry>>
 
 DeleteRow == /\ booted /\ outcome # "None" /\ row /\ registry # "Held"
              /\ (stage = "Done" \/ Mode = "NoRecordOrdering")
              /\ row' = FALSE /\ deleted' = TRUE
              /\ UNCHANGED <<outcome, cleared, stage, ended, recorded, rows, scope, sched,
-                            schedWrites, afterClear, acked, booted, crashed, nativeWork, watcherWork, registry>>
+                            schedWrites, afterClear, acked, booted, crashed, nativeWork, watcherWork, registry, selector>>
 
 Ack == /\ booted /\ outcome # "None" /\ ~row /\ ~acked
        /\ (stage = "Done" \/ Mode = "NoRecordOrdering")
        /\ acked' = TRUE
        /\ UNCHANGED <<outcome, row, cleared, stage, ended, recorded, rows, scope, sched,
-                      schedWrites, afterClear, deleted, booted, crashed, nativeWork, watcherWork, registry>>
+                      schedWrites, afterClear, deleted, booted, crashed, nativeWork, watcherWork, registry, selector>>
 
 \* A crash loses the in-memory stage; boot replays Record from the durable result.
 Crash == /\ ~crashed /\ booted /\ ~acked
@@ -113,21 +121,21 @@ Crash == /\ ~crashed /\ booted /\ ~acked
              \/ (Scenario = "CrashAfterDelete" /\ deleted))
          /\ crashed' = TRUE /\ booted' = FALSE /\ stage' = "Pending"
          /\ UNCHANGED <<outcome, row, cleared, ended, recorded, rows, scope, sched, schedWrites,
-                        afterClear, deleted, acked, nativeWork, watcherWork, registry>>
+                        afterClear, deleted, acked, nativeWork, watcherWork, registry, selector>>
 
 Boot == /\ crashed /\ ~booted /\ booted' = TRUE
         /\ UNCHANGED <<outcome, row, cleared, stage, ended, recorded, rows, scope, sched,
-                       schedWrites, afterClear, deleted, acked, crashed, nativeWork, watcherWork, registry>>
+                       schedWrites, afterClear, deleted, acked, crashed, nativeWork, watcherWork, registry, selector>>
 
 \* A foreign publication holds the shared history lock across the optional recorder read.
 HoldRegistry == /\ Scenario = "RegistryContended" /\ outcome = "Executed" /\ registry = "Free"
                 /\ registry' = "Held"
                 /\ UNCHANGED <<outcome, row, cleared, stage, ended, recorded, rows, scope, sched,
-                               schedWrites, afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork>>
+                               schedWrites, afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, selector>>
 
 ReleaseRegistry == /\ registry = "Held" /\ stage = "Done" /\ registry' = "Released"
                    /\ UNCHANGED <<outcome, row, cleared, stage, ended, recorded, rows, scope, sched,
-                                  schedWrites, afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork>>
+                                  schedWrites, afterClear, deleted, acked, booted, crashed, nativeWork, watcherWork, selector>>
 
 Next == Commit \/ AdjacentClear \/ WatcherClear \/ WatcherCompleteWork \/ Record \/ DeleteRow
         \/ Ack \/ Crash \/ Boot \/ HoldRegistry \/ ReleaseRegistry
@@ -154,4 +162,8 @@ ScheduledEventuallySettles == (outcome = "Executed" /\ Primary /\ Readable /\ Wr
 TranscriptEventuallyRecorded == (outcome = "Executed" /\ Primary /\ Readable /\ WriteOk
                                  /\ ~ClearScenario /\ ~EmptyBody) ~> rows = 1
 WorkEventuallyCompleted == (outcome = "Executed" /\ DispatchTurn) ~> WorkCount >= 1
+SelectorNotRevivedAfterClear == cleared => selector = "Empty"
+\* A fresh session's first turn is the only writer of its selector: the bridge postlude is skipped.
+SelectorEventuallyStored == (outcome = "Executed" /\ Primary /\ Readable /\ WriteOk /\ ~ClearScenario)
+                            ~> selector = "Run"
 =============================================================================

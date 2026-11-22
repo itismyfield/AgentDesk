@@ -8,7 +8,18 @@ const MAX_SUBMISSION_ROWS: usize = 40;
 
 /// One bracketed paste avoids digit actions and preserves the plan's normalized payload bytes.
 pub(crate) fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
-    let text = plan_prompt_submit(prompt)?
+    one_paste(plan_prompt_submit(prompt)?)
+}
+
+/// The owner's plan for an approved Decision opinion, from the planner that keeps its bytes.
+pub fn owned_preserved_plan(
+    frame: &crate::services::tui_input::human_frame::PreservedFrame,
+) -> Result<Vec<TuiInputAction>, String> {
+    one_paste(plan_preserved_submit(frame)?)
+}
+
+fn one_paste(plan: Vec<TuiInputAction>) -> Result<Vec<TuiInputAction>, String> {
+    let text = plan
         .into_iter()
         .filter_map(|action| match action {
             TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => Some(text),

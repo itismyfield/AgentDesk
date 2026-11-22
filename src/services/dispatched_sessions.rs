@@ -35,6 +35,10 @@ pub use output::tmux_output;
 #[path = "dispatched_sessions/tmux_cleanup.rs"]
 mod tmux_cleanup;
 use tmux_cleanup::kill_tmux_session_impl;
+mod current_key;
+pub(crate) use current_key::current_session_key_pg;
+#[cfg(all(test, unix))]
+mod raw_alias_pg_tests;
 
 mod force_kill;
 #[cfg(unix)]
@@ -584,8 +588,8 @@ pub(crate) struct ProviderOutputEvidence {
 pub(crate) fn provider_output_evidence(tmux_session_name: &str) -> ProviderOutputEvidence {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     let mut evidence = ProviderOutputEvidence::default();
-    let Some((provider, _)) =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    let Some(provider) =
+        crate::services::provider::session_source::tmux_session_provider(tmux_session_name)
     else {
         return evidence;
     };

@@ -329,8 +329,12 @@ jobs:
   lint:
     # The rest of `just check`: fmt, clippy (covers `cargo check`), policy JS, and
     # the non-lib `test-non-pg` lines. The env matches the PR `Lint runner`.
-    name: Main lint and non-lib tests (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Main lint and non-lib tests
+    runs-on: >-
+      ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
+      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
     env:
       # Also bounds the non-lib builds in this job.
       CARGO_BUILD_JOBS: "2"
@@ -357,16 +361,24 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
+        if: runner.environment == 'github-hosted'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # `target/` is not cached: sccache holds compiled output (docs/ci/sccache-setup.md §4.2).
       - name: Cache Cargo dependencies
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Disable remote compiler cache
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -381,6 +393,7 @@ jobs:
 
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/ensure-swap
 
       - name: Save runner memory checkpoint
@@ -412,7 +425,7 @@ jobs:
           set -o pipefail
           mkdir -p target/clippy-observation
           cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
-          python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
+          ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
 
       - name: End runner memory step
         if: always()

@@ -58,6 +58,8 @@ pub(crate) struct RepostEnvelope {
     additional: bool,
     pub(crate) output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    /// The re-posted unit's push decision, made by the notification policy.
+    pub(crate) silent: bool,
 }
 
 impl RepostEnvelope {
@@ -69,6 +71,7 @@ impl RepostEnvelope {
             ids,
             additional: false,
             output_origin: None,
+            silent: false,
         }
     }
 
@@ -86,11 +89,14 @@ impl RepostEnvelope {
 
     pub(crate) fn message(&self) -> CreateMessage {
         let nonce = serenity::model::channel::Nonce::String(self.ids.nonce.clone());
-        let message = CreateMessage::new()
-            .content(self.content.clone())
-            .allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
-            .nonce(nonce)
-            .enforce_nonce(true);
+        let message = crate::services::discord::outbound::notification_policy::silence(
+            CreateMessage::new(),
+            self.silent,
+        )
+        .content(self.content.clone())
+        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
+        .nonce(nonce)
+        .enforce_nonce(true);
         if !self.additional {
             return message;
         }

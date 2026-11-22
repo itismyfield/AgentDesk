@@ -29,6 +29,7 @@ mod boot_custody;
 mod home_order_tests;
 #[cfg(test)]
 mod initial_fresh_tests;
+mod local_turn;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -822,42 +823,12 @@ pub(crate) async fn finish_admitted_local(
     {
         return intake.live();
     }
-    local_turn(deps, submission, preserve_on_cancel).await
+    local_turn::run(deps, submission, preserve_on_cancel).await
 }
 
 type BoxedIntake<'a, T = ()> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<T, super::super::Error>> + Send + 'a>,
 >;
-
-/// Boxed inside a plain function so the turn's large future never sits in the intake frames above it.
-fn local_turn<'a, 'b: 'a>(
-    deps: &'a IntakeDeps<'b>,
-    submission: IntakeSubmission,
-    preserve_on_cancel: bool,
-) -> BoxedIntake<'a, super::IntakeExecution> {
-    #[cfg(all(test, unix))]
-    if let Some(result) = super::herdr_consent::admission::tests::final_local(&submission) {
-        return Box::pin(async move {
-            if matches!(&result, Ok(super::IntakeExecution::Executed))
-                && let Some(owner) = submission.owner
-            {
-                owner.complete_locally().await;
-            }
-            result
-        });
-    }
-    let (queued_drain, queued) = match submission.origin {
-        IntakeOrigin::QueuedDrain(route) => (true, route),
-        _ => (false, None),
-    };
-    Box::pin(message_handler::finish_admitted_local(
-        deps,
-        submission.request,
-        preserve_on_cancel,
-        (queued_drain, queued, submission.owner),
-        submission.preloaded_uploads,
-    ))
-}
 
 /// Queues a deferred input with every absorbed source; an Err leaves its checkpoint unread.
 async fn hold_in_custody(

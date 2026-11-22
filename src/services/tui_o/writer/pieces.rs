@@ -118,8 +118,9 @@ impl UnitDeriver {
         source: &crate::services::tui_o::shadow::SourceId,
         version: u32,
         origin: Result<super::input_notices::NoticeOrigin, String>,
+        logical_session: impl Fn() -> Option<String>,
     ) -> Vec<Derived> {
-        let mut derived = self.derive_with_version(record, version);
+        let mut derived = self.derive_with_session(record, version, logical_session);
         if self.notices.enabled() {
             match self
                 .notices
@@ -195,6 +196,15 @@ impl UnitDeriver {
         record: &CapturedRecord,
         identity_version: u32,
     ) -> Vec<Derived> {
+        self.derive_with_session(record, identity_version, || None)
+    }
+
+    pub(crate) fn derive_with_session(
+        &mut self,
+        record: &CapturedRecord,
+        identity_version: u32,
+        logical_session: impl Fn() -> Option<String>,
+    ) -> Vec<Derived> {
         if record.line.iter().all(u8::is_ascii_whitespace) {
             return Vec::new();
         }
@@ -235,6 +245,7 @@ impl UnitDeriver {
                             .and_then(serde_json::Value::as_bool)
                             .filter(|failed| *failed)
                             .or_else(|| code_mode_exec_failed(&value)),
+                        ShadowProvider::Antigravity => None,
                     };
                     out.extend(self.unit(unit_key, content, meta, failed));
                 }
@@ -262,7 +273,7 @@ impl UnitDeriver {
                             RecordFact::Prompt(true, _) => summary.prompt(&value),
                             RecordFact::TurnStart(id) => summary.start(&value, id),
                             RecordFact::Idle(id) => {
-                                out.extend(summary.close(&value, id.as_deref()))
+                                out.extend(summary.close(&value, id.as_deref(), &logical_session))
                             }
                             _ => {}
                         }

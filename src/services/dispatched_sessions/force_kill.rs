@@ -16,9 +16,12 @@ pub(super) enum Entry {
 
 /// What the session read and the forward fence settled for a force-kill run on this node.
 pub(super) struct Prepared<'a> {
-    pub(super) session_key: &'a str,
+    /// The row's current primary key; the tmux name and every write follow it.
+    pub(super) session_key: String,
+    /// The key as asked, which may be an alias the row kept from an earlier name.
+    pub(super) requested_key: &'a str,
     pub(super) tmux_name: String,
-    pub(super) provider_info: Option<(ProviderKind, String)>,
+    pub(super) provider: Option<ProviderKind>,
     pub(super) pool: &'a sqlx::PgPool,
     pub(super) active_dispatch_id: Option<String>,
     pub(super) agent_id: Option<String>,
@@ -69,28 +72,16 @@ async fn prepare<'a>(
     reason: &str,
     hosted: bool,
 ) -> Result<Prepared<'a>, Reply> {
-    let session_key = session_key;
-
-    let tmux_name = match tmux_name_from_session_key(session_key) {
-        Some(name) => name,
-        None => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux"}),
-                ),
-            ));
-        }
+    let malformed = || {
+        let error = "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux";
+        (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
     };
-
-    // Parse provider from tmux name
-    let provider_info =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
+    if tmux_name_from_session_key(session_key).is_none() {
+        return Err(malformed());
+    }
+    let requested_key = session_key;
 
     // Query session from the authoritative store.
-    let provider_name = provider_info
-        .as_ref()
-        .map(|(provider, _)| provider.as_str());
     let Some(pool) = state.pg_pool_ref() else {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -99,22 +90,24 @@ async fn prepare<'a>(
     };
     #[cfg(unix)]
     let loaded = if hosted {
-        dispatched_sessions_db::load_force_kill_session_hosted_pg(pool, session_key, provider_name)
+        dispatched_sessions_db::load_force_kill_session_hosted_pg(pool, requested_key)
             .await
-            .map(|row| row.map(|(session, record)| (session, Some(record))))
+            .map(|row| {
+                row.map(|(session, record)| (record.session_key.clone(), session, Some(record)))
+            })
     } else {
-        dispatched_sessions_db::load_force_kill_session_pg(pool, session_key, provider_name)
+        dispatched_sessions_db::load_force_kill_session_pg(pool, requested_key)
             .await
-            .map(|row| row.map(|session| (session, None)))
+            .map(|row| row.map(|(current, session)| (current, session, None)))
     };
     #[cfg(not(unix))]
     let loaded = {
         let _ = hosted;
-        dispatched_sessions_db::load_force_kill_session_pg(pool, session_key, provider_name)
+        dispatched_sessions_db::load_force_kill_session_pg(pool, requested_key)
             .await
-            .map(|row| row.map(|session| (session, ())))
+            .map(|row| row.map(|(current, session)| (current, session, ())))
     };
-    let (session, _record) = match loaded {
+    let (session_key, session, _record) = match loaded {
         Ok(Some(selected)) => selected,
         Ok(None) => {
             return Err((
@@ -129,6 +122,8 @@ async fn prepare<'a>(
             ));
         }
     };
+    // An alias names the row; only the row's current primary names the live tmux session.
+    let tmux_name = tmux_name_from_session_key(&session_key).ok_or_else(malformed)?;
     let (active_dispatch_id, agent_id, runtime_channel_id, session_provider, owner_instance_id) =
         session;
 
@@ -153,7 +148,7 @@ async fn prepare<'a>(
                 return Err(crate::services::session_forwarding::forward_force_kill(
                     &forward_context,
                     &target,
-                    session_key,
+                    &session_key,
                     retry,
                     reason,
                 )
@@ -168,10 +163,16 @@ async fn prepare<'a>(
         }
     }
 
+    let provider = crate::services::provider::session_source::session_provider(
+        session_provider.as_deref(),
+        Some(&session_key),
+        &tmux_name,
+    );
     Ok(Prepared {
         session_key,
+        requested_key,
         tmux_name,
-        provider_info,
+        provider,
         pool,
         active_dispatch_id,
         agent_id,
@@ -191,7 +192,7 @@ async fn legacy_force_kill(
     let Prepared {
         session_key,
         tmux_name,
-        provider_info,
+        provider,
         pool,
         active_dispatch_id,
         agent_id,
@@ -199,6 +200,7 @@ async fn legacy_force_kill(
         session_provider,
         ..
     } = prepared;
+    let session_key = session_key.as_str();
     let termination_reason_code = classify_session_termination_reason(reason);
 
     let row = ForceKillRow {
@@ -209,10 +211,7 @@ async fn legacy_force_kill(
     let lifecycle = force_kill_turn_for_row(
         state.health_registry.as_deref(),
         &TurnLifecycleTarget {
-            provider: provider_info
-                .as_ref()
-                .map(|(provider, _)| provider.clone())
-                .or_else(|| session_provider.as_deref().and_then(ProviderKind::from_str)),
+            provider,
             channel_id: runtime_channel_id
                 .as_deref()
                 .and_then(|channel_id| channel_id.parse::<u64>().ok())

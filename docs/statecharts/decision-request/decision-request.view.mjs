@@ -19,5 +19,6 @@ export const step = (action) => ({
  Crash:"dcserver 재시작", Boot:"선택만 저장됐으면 한 번 시작",
  Archive:"글 자동 archive", ArchiveLocked:"글 잠김·archive", Unlock:"기존 권한으로 unlock",
  Unarchive:"같은 글 unarchive", Render:"같은 starter message에 최신 상태 PATCH",
- HandoffDecision:"잘못된 handoff 우회 대조", WakeFailed:"실패 원본 재큐잉 대조"
+ HandoffDecision:"잘못된 handoff 우회 대조", WakeFailed:"실패 원본 재큐잉 대조",
+ SelfDeclared:"승인 event 없이 source=decision을 자기 선언한 요청 대조"
 })[action] ?? action;

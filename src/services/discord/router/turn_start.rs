@@ -77,7 +77,7 @@ pub(crate) struct HeadlessTurnReservation {
 }
 
 impl HeadlessTurnReservation {
-    /// Names a new iMessage admission before its reply episode binds; restored owner fronts keep their ID.
+    /// Names a new iMessage or Decision admission by its origin (iMessage before its reply episode binds); restored owner fronts keep their ID.
     pub(in crate::services::discord) fn for_input(
         self,
         channel: ChannelId,
@@ -85,7 +85,7 @@ impl HeadlessTurnReservation {
         metadata: Option<&serde_json::Value>,
     ) -> Self {
         use crate::services::discord::queue_io::input_owner::origin::InputOrigin;
-        match InputOrigin::imessage_identity(channel.get(), source, metadata) {
+        match InputOrigin::stable_identity(channel.get(), source, metadata) {
             Some((message, _)) => Self {
                 user_msg_id: MessageId::new(message),
                 ..self

@@ -237,7 +237,16 @@ async fn settle_row(
     let seen = observe(pool, &shared.token_hash, provider, &row).await?;
     let o_owned = o_owns_output(&row).ok_or("o_owner_unreadable")?;
     let settle = outcome::settle(provider, &row, &seen.outcome, seen.idle, o_owned);
-    let silent = settle == Settle::Silent;
+    // A restart-cut O turn hands its notice to the writer durably and then ends as a silent one.
+    if let Settle::Restart(intent) = &settle {
+        diagnostics::phase(provider, channel.get(), "restart_notice");
+        let root = crate::config::runtime_root().ok_or("runtime_root_unavailable")?;
+        if let Err(error) = crate::services::tui_o::store::restart_notice::record(&root, intent) {
+            tracing::warn!(channel_id = row.channel_id, %error, "restart notice not recorded");
+            return Err("restart_notice_unrecorded");
+        }
+    }
+    let silent = matches!(settle, Settle::Silent | Settle::Restart(_));
     if silent {
         diagnostics::phase(provider, channel.get(), "commit");
         commit(pool, &seen).await?;
@@ -311,7 +320,7 @@ async fn notice(
             return relay_recovery_body_notice(http, shared, provider, row, &text).await;
         }
         Settle::Neutral(text) => text,
-        Settle::Silent => return RecoveryRelayOutcome::Delivered,
+        Settle::Silent | Settle::Restart(_) => return RecoveryRelayOutcome::Delivered,
     };
     let channel = ChannelId::new(row.channel_id);
     let card = inflight::opt_message_id(row.current_msg_id);

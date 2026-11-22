@@ -107,6 +107,7 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 mod composer_content;
 mod composer_lock;
 mod submission;
+pub use submission::owned_preserved_plan;
 pub(crate) use submission::{
     notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,
     submission_draft_in_pane, submission_modal_in_pane, submission_readiness_from_ansi_pane,
@@ -479,6 +480,17 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     } else {
         prompt
     };
+    plan_submit_bytes(prompt)
+}
+
+/// The plan for an approved Decision opinion: its frame's bytes go out with no line-ending rewrite.
+pub(crate) fn plan_preserved_submit(
+    frame: &crate::services::tui_input::human_frame::PreservedFrame,
+) -> Result<Vec<TuiInputAction>, String> {
+    plan_submit_bytes(frame.as_str())
+}
+
+fn plan_submit_bytes(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     validate_prompt_text(prompt)?;
     validate_prompt_not_empty(prompt)?;
     let mut actions = if prompt.contains('\n') {

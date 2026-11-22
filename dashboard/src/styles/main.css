@@ -124,14 +124,23 @@
   --th-accent-success: var(--ok);
   /* Badge fills are the v3 *-soft colors. Text mixes in oklab so amber stays amber
      (an oklch mix with the bluish fg turned it olive). */
-  --th-badge-sky-bg: oklch(0.3 0.05 230);
-  --th-badge-sky-text: color-mix(in oklab, var(--info) 74%, var(--fg));
+  --ok-soft: oklch(0.3 0.06 150);
+  --warn-soft: oklch(0.32 0.06 85);
+  --err-soft: oklch(0.3 0.08 22);
+  --info-soft: oklch(0.3 0.05 230);
+  --ok-fg: color-mix(in oklab, var(--ok) 74%, var(--fg));
+  --warn-fg: color-mix(in oklab, var(--warn) 70%, var(--fg));
+  --err-fg: color-mix(in oklab, var(--err) 74%, var(--fg));
+  --info-fg: color-mix(in oklab, var(--info) 74%, var(--fg));
+  --accent-fg: color-mix(in oklab, var(--accent) 55%, var(--fg));
+  --th-badge-sky-bg: var(--info-soft);
+  --th-badge-sky-text: var(--info-fg);
   --th-badge-blue-bg: var(--accent-soft);
-  --th-badge-blue-text: color-mix(in oklab, var(--accent) 55%, var(--fg));
-  --th-badge-emerald-bg: oklch(0.3 0.06 150);
-  --th-badge-emerald-text: color-mix(in oklab, var(--ok) 74%, var(--fg));
-  --th-badge-amber-bg: oklch(0.32 0.06 85);
-  --th-badge-amber-text: color-mix(in oklab, var(--warn) 70%, var(--fg));
+  --th-badge-blue-text: var(--accent-fg);
+  --th-badge-emerald-bg: var(--ok-soft);
+  --th-badge-emerald-text: var(--ok-fg);
+  --th-badge-amber-bg: var(--warn-soft);
+  --th-badge-amber-text: var(--warn-fg);
 }
 
 [data-theme="light"] {
@@ -152,11 +161,23 @@
   --accent-indigo: oklch(0.55 0.2 274);
   --shadow-sm: 0 10px 24px rgb(0 0 0 / 0.08);
   --shadow-md: 0 18px 40px rgb(0 0 0 / 0.14);
-  --th-badge-sky-bg: oklch(0.94 0.03 230);
+  --ok-soft: oklch(0.94 0.04 150);
+  --warn-soft: oklch(0.95 0.05 85);
+  --err-soft: oklch(0.94 0.04 22);
+  --info-soft: oklch(0.94 0.03 230);
+  --ok-fg: color-mix(in oklab, var(--ok) 74%, var(--fg));
+  --warn-fg: color-mix(in oklab, var(--warn) 70%, var(--fg));
+  --err-fg: color-mix(in oklab, var(--err) 74%, var(--fg));
+  --info-fg: color-mix(in oklab, var(--info) 74%, var(--fg));
   /* 50% keeps every accent preset (amber, lime included) above 4.5:1 on light surfaces. */
-  --th-badge-blue-text: color-mix(in oklab, var(--accent) 50%, var(--fg));
-  --th-badge-emerald-bg: oklch(0.94 0.04 150);
-  --th-badge-amber-bg: oklch(0.95 0.05 85);
+  --accent-fg: color-mix(in oklab, var(--accent) 50%, var(--fg));
+  --th-badge-sky-bg: var(--info-soft);
+  --th-badge-sky-text: var(--info-fg);
+  --th-badge-blue-text: var(--accent-fg);
+  --th-badge-emerald-bg: var(--ok-soft);
+  --th-badge-emerald-text: var(--ok-fg);
+  --th-badge-amber-bg: var(--warn-soft);
+  --th-badge-amber-text: var(--warn-fg);
   --th-modal-overlay: color-mix(in oklch, black 22%, transparent);
   --th-nav-bg: color-mix(in oklch, var(--bg-1) 88%, white 12%);
   --th-overlay-subtle: color-mix(in oklch, black 4%, transparent);

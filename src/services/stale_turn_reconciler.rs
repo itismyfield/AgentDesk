@@ -308,10 +308,7 @@ fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightOb
     if identity.host != crate::services::platform::session_host_label() {
         return InflightObservation::Unknown;
     }
-    let Some((tmux_provider, _)) = identity.provider_and_channel() else {
-        return InflightObservation::Unknown;
-    };
-    if tmux_provider != db_provider {
+    if !identity.records_provider(&db_provider) {
         return InflightObservation::Unknown;
     }
     use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
@@ -728,15 +725,7 @@ fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLi
     let Some(db_provider) = ProviderKind::from_str(provider) else {
         return IndependentLiveness::RemoteOrInvalid;
     };
-    let Some((tmux_provider, _)) = identity.provider_and_channel() else {
-        return IndependentLiveness::RemoteOrInvalid;
-    };
-    if tmux_provider != db_provider
-        || identity
-            .provider_from_key
-            .as_deref()
-            .is_some_and(|key_provider| key_provider != db_provider.as_str())
-    {
+    if !identity.records_provider(&db_provider) {
         return IndependentLiveness::RemoteOrInvalid;
     }
 

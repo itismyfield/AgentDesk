@@ -518,10 +518,7 @@ async fn assert_settled_answer(requests: &Requests, codex: &CodexChannel, anchor
         summary.0 > last.0,
         "summary follows the final body call: {requests:?}"
     );
-    assert!(
-        !summary.3.contains('\n'),
-        "summary stays one line: {requests:?}"
-    );
+    crate::services::turn_summary_line::assert_completed_footer(&summary.3);
 }
 
 fn tail_starts(channel: ChannelId) -> usize {

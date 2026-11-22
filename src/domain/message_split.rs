@@ -1,6 +1,7 @@
 mod literal_code_block;
 pub(crate) mod semantic_boundaries;
 pub(crate) use literal_code_block::bounded_raw_code_block_notice;
+use std::ops::Range;
 
 pub(crate) const DISCORD_MSG_LIMIT: usize = 2000;
 /// Plain-text budget after the shared splitter reserves its repair margin.
@@ -49,6 +50,18 @@ pub(crate) fn byte_index_at_discord_message_units(s: &str, max_units: usize) -> 
 /// the tail of a long agent message fails to reach Discord (e.g. option block
 /// A/B/C sections disappearing near the 2000-char boundary).
 pub(crate) fn split_message(text: &str) -> Vec<String> {
+    split(text, false)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// Keep every original byte while adding display-only fence repairs.
+pub(crate) fn split_with_source_ranges(text: &str) -> Vec<(String, Range<usize>)> {
+    split(text, true)
+}
+
+fn split(text: &str, preserve_newline: bool) -> Vec<(String, Range<usize>)> {
     let total_bytes = text.len();
     let mut chunks = Vec::new();
     let mut remaining = text;
@@ -57,6 +70,7 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
     let mut code_block_lang = String::new();
 
     while !remaining.is_empty() {
+        let start = total_bytes - remaining.len();
         // Reserve space for code block tags we may need to add
         let tag_overhead = if in_code_block {
             // closing ``` + opening ```lang\n
@@ -84,7 +98,7 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
             chunk.push_str(remaining);
             let byte_len = chunk.len();
             let was_in_code_block = in_code_block;
-            chunks.push(chunk);
+            chunks.push((chunk, start..total_bytes));
             tracing::debug!(
                 target: "discord::chunker",
                 chunk_index = chunks.len() - 1,
@@ -119,9 +133,13 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
             boundary_kind = "hard_after_leading_newline";
         }
 
+        // The splitter's repair margin has room for the boundary LF.
+        if preserve_newline && remaining[split_at..].starts_with('\n') {
+            split_at += 1;
+        }
         let (raw_chunk, rest) = remaining.split_at(split_at);
         let raw_chunk_units = discord_message_units(raw_chunk);
-        let stripped_boundary_units = usize::from(rest.starts_with('\n'));
+        let stripped_boundary_units = usize::from(!preserve_newline && rest.starts_with('\n'));
 
         let mut chunk = String::new();
         if in_code_block {
@@ -173,10 +191,10 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
             remaining_units = remaining_units
                 .saturating_sub(raw_chunk_units)
                 .saturating_sub(stripped_boundary_units);
-            remaining = rest.strip_prefix('\n').unwrap_or(rest);
+            remaining = &rest[stripped_boundary_units..];
             continue;
         }
-        chunks.push(chunk);
+        chunks.push((chunk, start..start + split_at));
         tracing::debug!(
             target: "discord::chunker",
             chunk_index = chunks.len() - 1,
@@ -189,7 +207,7 @@ pub(crate) fn split_message(text: &str) -> Vec<String> {
         remaining_units = remaining_units
             .saturating_sub(raw_chunk_units)
             .saturating_sub(stripped_boundary_units);
-        remaining = rest.strip_prefix('\n').unwrap_or(rest);
+        remaining = &rest[stripped_boundary_units..];
     }
 
     tracing::debug!(

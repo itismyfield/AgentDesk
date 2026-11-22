@@ -5,11 +5,12 @@ import {
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { PageFrame } from "../../app/PageFrame";
-import { Badge as KitBadge } from "../../kit/free/badge-clean";
+import { useShellFocus } from "../../app/shellFocus";
 import { Button } from "../../kit/free/button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
+import { Cap, Chip, KitCard, Num, ROW_HOVER_CLASS, cn } from "../common/KitPrimitives";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
@@ -297,8 +298,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const openNode = node && (campaign?.nodes.find((value) => value.id === node) ?? (mode === "server" ? serverDoc?.definition.nodes.find((value) => value.id === node) : undefined));
   const legacyDetail = campaign && <CampaignDetail key={`legacy:${campaign.id}`} title={campaign.title} showTitle={!phone} tr={tr}
     chips={!phone && <span className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-muted)]">
-      <KitBadge title={tr("작업 기록부로 관리하는 캠페인", "Campaign kept as a task ledger")}>{tr("원장", "Ledger")}</KitBadge>
-      <span className="tabular-nums">{tr("라운드", "Round")} {campaign.round}</span>
+      <Chip title={tr("작업 기록부로 관리하는 캠페인", "Campaign kept as a task ledger")}>{tr("원장", "Ledger")}</Chip>
+      <Num>{tr("라운드", "Round")} {campaign.round}</Num>
     </span>}
     sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
     notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
@@ -328,7 +329,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     const commands = <ServerCampaignControls view={view} connection={connection} stopIntent={stops[id] ?? null} busy={busy.has(id)} error={commandErrors[id] ?? null} onCommand={(name) => void runCommand(serverDoc, name)} tr={tr} />;
     return <CampaignDetail key={`server:${id}`} title={definition.title} showTitle={!phone} tr={tr}
       chips={(!phone || view.unknown) && <span className="flex flex-wrap items-center gap-2 text-xs">
-        {!phone && <><KitBadge>{tr("서버", "Server")}</KitBadge><KitBadge className="font-mono">{definition.repository}</KitBadge></>}
+        {!phone && <><Chip>{tr("서버", "Server")}</Chip><Chip className="font-mono">{definition.repository}</Chip></>}
         {view.unknown && <Badge status="blocked" label={tr("확인 불가", "Unknown")} tr={tr} />}
       </span>}
       sentence={statusSentence(tr(...DISPLAY_LABELS[view.display]), serverTaskViews, tr)}
@@ -352,6 +353,17 @@ export default function CampaignsPanel({ language }: { language: string }) {
       onCloseTask={() => setNode(null)} />;
   })();
 
+  const legacyError = error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<Button variant="secondary" size="sm" onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</Button>} />;
+  // On desktop the relations editor takes the whole window: the shell drops its rail and top bar, and no page title shows.
+  const fullEditor = tab === "campaigns" && editing && !phone && campaign;
+  useShellFocus(!!fullEditor);
+  if (fullEditor) return <section data-testid="campaigns-page" className={`${CAMPAIGN_SCOPE} h-full min-w-0 text-sm`}>
+    <div className="flex h-full min-h-0 flex-col">
+      {legacyError}
+      <CampaignRelationsEditor key={fullEditor.id} campaign={fullEditor} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
+    </div>
+  </section>;
+
   // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
   const folded = !phone && !!openNode;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
@@ -368,18 +380,19 @@ export default function CampaignsPanel({ language }: { language: string }) {
           selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
-      {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
+      {legacyError}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      {editing && !phone && campaign ? <CampaignRelationsEditor key={campaign.id} campaign={campaign} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
-        : <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
-        {(phone || folded) && <button type="button" className={`campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left ${folded ? "min-[1280px]:!hidden" : ""}`} aria-haspopup="dialog" onClick={() => setPicking(true)}>
+      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+        {(phone || folded) && <KitCard pad="none" className={folded ? "min-[1280px]:!hidden" : undefined}>
+          <button type="button" className={cn("campaign-picker m-0 flex min-h-14 w-full min-w-0 cursor-pointer items-center gap-2.5 border-0 bg-transparent px-3 py-2.5 text-left font-inherit text-inherit", ROW_HOVER_CLASS, folded && "min-[1280px]:!hidden")} aria-haspopup="dialog" onClick={() => setPicking(true)}>
             <span className="grid min-w-0 flex-1 gap-0.5">
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
-              <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{[selectedEntry && (selectedEntry.kind === "legacy" ? tr("원장", "Ledger") : selectedEntry.repo),
-                selectedEntry?.total != null && tr(`작업 ${selectedEntry.done}/${selectedEntry.total} 완료`, `${selectedEntry.done}/${selectedEntry.total} done`), tr(`캠페인 ${entries.length}개 중`, `of ${entries.length} campaigns`)].filter(Boolean).join(" · ")}</span>
+              <Cap className="truncate"><Num>{[selectedEntry && (selectedEntry.kind === "legacy" ? tr("원장", "Ledger") : selectedEntry.repo),
+                selectedEntry?.total != null && tr(`작업 ${selectedEntry.done}/${selectedEntry.total} 완료`, `${selectedEntry.done}/${selectedEntry.total} done`), tr(`캠페인 ${entries.length}개 중`, `of ${entries.length} campaigns`)].filter(Boolean).join(" · ")}</Num></Cap>
             </span>
             <ChevronDown aria-hidden className="size-4 shrink-0 text-[var(--fg-muted)]" />
-          </button>}
+          </button>
+        </KitCard>}
         {phone ? <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
           : <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
         {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
@@ -391,7 +404,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
             ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
               : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}
         </div>
-      </div>}
+      </div>
     </div>}
   </section>
   </PageFrame>;

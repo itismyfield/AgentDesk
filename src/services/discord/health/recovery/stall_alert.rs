@@ -23,9 +23,13 @@ fn session_key_tmux_for_provider(session_key: &str, provider: &ProviderKind) -> 
     let Some(identity) = discord::session_identity::SessionIdentity::parse(session_key) else {
         return None;
     };
-    crate::services::provider::parse_provider_and_channel_from_tmux_name(&identity.tmux_name)
-        .filter(|(parsed, _)| parsed == provider)
-        .map(|_| identity.tmux_name)
+    crate::services::provider::session_source::session_provider(
+        None,
+        Some(session_key),
+        &identity.tmux_name,
+    )
+    .filter(|recorded| recorded == provider)
+    .map(|_| identity.tmux_name)
 }
 
 fn namespaced_key_for_tmux(
@@ -33,8 +37,8 @@ fn namespaced_key_for_tmux(
     provider: &ProviderKind,
     tmux_name: &str,
 ) -> Option<String> {
-    crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
-        .filter(|(parsed, _)| parsed == provider)
+    crate::services::provider::session_source::tmux_session_provider(tmux_name)
+        .filter(|recorded| recorded == provider)
         .map(|_| {
             discord::adk_session::build_namespaced_session_key(
                 &shared.token_hash,

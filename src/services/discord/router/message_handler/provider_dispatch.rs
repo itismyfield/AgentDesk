@@ -2,6 +2,7 @@
 //! Keep their provider selection, cancellation and session options identical.
 
 use std::sync::{Arc, mpsc::Sender};
+#[cfg(test)]
 use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
@@ -11,9 +12,6 @@ use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::router::intake_dispatch::replay_admission::ReplayStart;
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
 use crate::services::provider_teardown::TeardownClearance;
-use crate::services::stream_json_cli::{
-    ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
-};
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, opencode, qwen};
 
@@ -33,6 +31,8 @@ pub(in crate::services::discord) use owner_input::{
     wake_drive_for_test,
 };
 pub(super) mod replay_scope;
+mod stream_json_turn;
+pub(super) use stream_json_turn::AgyForeground;
 
 /// No input owner runs a turn off unix.
 #[cfg(not(unix))]
@@ -53,6 +53,7 @@ impl OwnerTurn {
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
     pub registration_origin: Option<bool>,
+    pub agy_foreground: Option<AgyForeground>,
     /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
     pub shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     pub provider: &'a ProviderKind,
@@ -510,7 +511,7 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
             None,
         ),
         LegacyDispatchKind::StreamJsonCli(dialect) => {
-            execute_streaming(dialect, stream_json_request(&turn)?, sender)
+            stream_json_turn::execute(dialect, &turn, sender)
         }
         LegacyDispatchKind::Unsupported(name) => {
             let _ = sender.send(StreamMessage::Error {
@@ -848,23 +849,6 @@ mod herdr {
     }
 }
 
-fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, String> {
-    ProviderTurnRequest::for_discord_turn(
-        turn.provider.clone(),
-        turn.prompt.to_string(),
-        turn.system_prompt.map(str::to_string),
-        ConfiguredToolPolicy::from_legacy_allowed_tools(turn.allowed_tools),
-        turn.model.map(str::to_string),
-        None,
-        turn.working_dir.into(),
-        turn.session_id,
-        turn.force_fresh,
-        Duration::from_secs(300),
-        Some(Arc::clone(&turn.cancel)),
-        Some(turn.channel_id),
-    )
-}
-
 #[cfg(test)]
 #[path = "provider_dispatch_herdr_tests.rs"]
 pub(crate) mod herdr_tests;
@@ -887,6 +871,7 @@ pub(super) mod producer_error_test_support;
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::services::stream_json_cli::ConfiguredToolPolicy;
 
     static INPUT_RESULT: std::sync::Mutex<Option<(u64, String)>> = std::sync::Mutex::new(None);
 
@@ -938,6 +923,7 @@ pub(super) mod tests {
         let mut turn = StreamingTurn {
             pool: None,
             registration_origin: None,
+            agy_foreground: None,
             shared: None,
             provider: &provider,
             prompt: "question",
@@ -967,7 +953,7 @@ pub(super) mod tests {
             provider.legacy_streaming_dispatch_kind(),
             LegacyDispatchKind::StreamJsonCli(crate::services::provider::StreamJsonDialectId::Agy)
         ));
-        let request = stream_json_request(&turn).expect("stream json request");
+        let request = stream_json_turn::request(&turn).expect("stream json request");
         assert_eq!(request.provider, ProviderKind::Antigravity);
         assert_eq!(request.prompt, "question");
         assert_eq!(request.system_prompt.as_deref(), Some("role"));
@@ -987,7 +973,7 @@ pub(super) mod tests {
         assert!(Arc::ptr_eq(request.cancel.as_ref().unwrap(), &cancel));
         turn.force_fresh = true;
         assert!(
-            stream_json_request(&turn)
+            stream_json_turn::request(&turn)
                 .expect("fresh stream json request")
                 .session
                 .is_none()
@@ -1035,6 +1021,7 @@ pub(super) mod tests {
             let turn = StreamingTurn {
                 pool: Some(&pool),
                 registration_origin: None,
+                agy_foreground: None,
                 shared: None,
                 provider: &provider,
                 prompt: "question",

@@ -3,21 +3,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useSearchParams } from "react-router";
 import { PageFrame } from "../app/PageFrame";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "../app/breakpoints";
-import { Button } from "../kit/free/button-clean";
 import ClusterNodesPanel from "./cluster/ClusterNodesPanel";
+import { Cap, Well } from "./common/KitPrimitives";
 import { Modal } from "./common/overlay/Modal";
 import { connectionItems, connectionStatusRows } from "./settings/SettingsConnectionsModel";
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings/SettingsCopy";
 import { SettingsMachinePanel } from "./settings/SettingsMachinePanel";
 import {
   SETTINGS_CATEGORY_QUERY_KEY,
+  appItems,
   catalogCounts,
   configItems,
+  configValue,
   draftProblem,
   filterCatalog,
   matchesQuery,
-  appItems,
-  configValue,
   resetsOnRestart,
   resolveCategory,
   runtimeItems,
@@ -31,7 +31,7 @@ import {
 import { SettingsEditSheet, SettingsPhoneCatalog } from "./settings/SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./settings/SettingsOnboardingOverlay";
 import { SettingsPipelineEditorSection } from "./settings/SettingsPipelineEditorSection";
-import { SETTINGS_TRAY_CLASS, SettingsAction, SettingsNotice, SettingsSection, SettingsTextField } from "./settings/SettingsPrimitives";
+import { SettingsAction, SettingsButton, SettingsNotice, SettingsSectionHead, SettingsTextField } from "./settings/SettingsPrimitives";
 import { SettingsProvidersPanel } from "./settings/SettingsProvidersPanel";
 import { SettingsSaveBar } from "./settings/SettingsSaveBar";
 import { SettingsDesktopCatalog, type CatalogGroup } from "./settings/SettingsViewLayout";
@@ -258,14 +258,18 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
   const blocks: Partial<Record<SettingsCategory, ReactNode>> = {
     workflow: <SettingsPipelineEditorSection tr={tr} isKo={isKo} open={editorOpen} onToggle={() => setEditorOpen((open) => !open)} notify={notify} />,
     usage: (
-      <SettingsSection title={tr("AI 계정", "AI accounts")} description={tr("기본 계정과 추가 계정의 사용량을 봐요.", "Usage of the default and additional accounts.")} variant="open" testId="settings-section-ai-accounts">
+      <section className="min-w-0 space-y-3" data-testid="settings-section-ai-accounts">
+        <SettingsSectionHead
+          title={tr("AI 계정", "AI accounts")}
+          description={tr("기본 계정과 추가 계정의 사용량을 봐요.", "Usage of the default and additional accounts.")}
+        />
         <SettingsProvidersPanel
           accounts={accounts}
           warningPct={Number(runtime.values.rateLimitWarningPct ?? runtime.defaults.rateLimitWarningPct ?? 80)}
           dangerPct={Number(runtime.values.rateLimitDangerPct ?? runtime.defaults.rateLimitDangerPct ?? 95)}
           tr={tr}
         />
-      </SettingsSection>
+      </section>
     ),
     system: <SettingsMachinePanel tr={tr} />,
     connections: (
@@ -314,10 +318,17 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
         ref={searchRef}
         type="search"
         size="lg"
+        className="[--fs:13px]! [--h:40px]! pointer-coarse:[--fs:16px]! pointer-coarse:[--h:44px]!"
         aria-label={tr("설정 찾기", "Search settings")}
         placeholder={tr("이름·키·설명으로 찾기", "Search by name, key or description")}
         prefix={<Search aria-hidden />}
-        suffix={phone ? undefined : <kbd className={`px-1.5 font-mono text-[11px] text-th-text-muted ${SETTINGS_TRAY_CLASS}`}>/</kbd>}
+        suffix={
+          phone ? undefined : (
+            <kbd className="rounded-[5px] border border-[var(--line)] px-[5px] font-mono text-[11px] leading-4 text-[var(--fg-muted)]">
+              /
+            </kbd>
+          )
+        }
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         data-testid="settings-search-input"
@@ -325,10 +336,15 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     </div>
   );
 
+  const description = loading
+    ? tr("서버·런타임·연결 설정이에요. 값마다 기본값·출처·적용 시점을 함께 보여 줘요.", "Server, runtime, and connection settings, each with its default, source, and when it applies.")
+    : tr(`서버·런타임·연결 설정 ${counts.total}개예요. 값마다 기본값·출처·적용 시점을 함께 보여 줘요.`, `${counts.total} server, runtime, and connection settings, each with its default, source, and when it applies.`);
+
   return (
     <PageFrame
       testId="settings-page"
       title={tr("설정", "Settings")}
+      description={description}
       actions={search}
     >
       {phone ? (
@@ -339,6 +355,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
             onCategory={setCategory}
             differing={items.filter((item) => item.overridden)}
             rows={filtered}
+            selectedKey={sheetKey}
             searching={query.trim() !== ""}
             loading={loading}
             notice={notice}
@@ -406,16 +423,16 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
             )}
           </SettingsNotice>
           <div>
-            <div className="text-xs font-medium text-th-text-muted">{tr("바뀌는 설정", "Changing")}</div>
-            <div className={`mt-2 px-3 py-2 text-[13px] leading-5 break-keep ${SETTINGS_TRAY_CLASS}`}>
+            <Cap className="block font-medium">{tr("바뀌는 설정", "Changing")}</Cap>
+            <Well className="mt-2 px-3 py-2 text-[13px] leading-5 break-keep">
               {pendingDangerous?.keys.map((key) => getDangerousConfigLabel(key, isKo)).join(", ")}
-            </div>
+            </Well>
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button variant="secondary" onClick={() => setPendingDangerous(null)}>
+            <SettingsButton variant="secondary" onClick={() => setPendingDangerous(null)}>
               {tr("취소", "Cancel")}
-            </Button>
-            <Button
+            </SettingsButton>
+            <SettingsButton
               variant="primary"
               icon={<Check />}
               loading={saving}
@@ -427,7 +444,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
               }}
             >
               {tr("확인하고 저장", "Confirm and save")}
-            </Button>
+            </SettingsButton>
           </div>
         </div>
       </Modal>

@@ -157,6 +157,8 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── test_instance/
+│   │   ├── agy_cell.rs
+│   │   ├── agy_cell_tests.rs
 │   │   ├── api_boundary_tests.rs
 │   │   ├── bound_health_tests.rs
 │   │   ├── environment.rs
@@ -201,6 +203,8 @@ src/
 │   │   │   ├── dispatch_failure.rs
 │   │   │   └── status_write.rs
 │   │   ├── phase_gates/
+│   │   │   ├── current_batch_phase_pg_tests.rs
+│   │   │   ├── reconcile_phase_gate_pg_tests.rs
 │   │   │   └── reconcile_write.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -296,6 +300,8 @@ src/
 │   ├── o_piece_delivery/
 │   │   └── input_notice_tests.rs
 │   ├── postgres/
+│   │   ├── tests/
+│   │   │   └── mod.rs
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
@@ -376,6 +382,7 @@ src/
 │   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
 │   ├── decision_forums.rs
+│   ├── decisions.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -438,6 +445,7 @@ src/
 │   │   ├── candidate_seal.rs
 │   │   ├── decision_item.rs
 │   │   ├── definition.rs
+│   │   ├── deployment.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
@@ -720,6 +728,8 @@ src/
 │   │   │   ├── runtime_profile/
 │   │   │   │   ├── managed_herdr.rs
 │   │   │   │   └── managed_herdr_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── mod.rs
 │   │   │   ├── boot_incarnation_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
@@ -920,6 +930,8 @@ src/
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
+│   │   ├── delegation.rs
+│   │   ├── delegation_tests.rs
 │   │   ├── input_result.rs
 │   │   ├── input_result_tests.rs
 │   │   ├── mod.rs
@@ -1030,8 +1042,12 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_executor.rs
+│   │   ├── deploy_executor_tests.rs
 │   │   ├── deploy_observe.rs
 │   │   ├── deploy_observe_tests.rs
+│   │   ├── deploy_policy.rs
+│   │   ├── deploy_policy_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -1041,6 +1057,8 @@ src/
 │   │   ├── execution_pin_tests.rs
 │   │   ├── failure_budget.rs
 │   │   ├── failure_budget_tests.rs
+│   │   ├── final_acceptance.rs
+│   │   ├── final_acceptance_tests.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── host_identity.rs
@@ -1479,6 +1497,8 @@ src/
 │   │   │   ├── herdr_cancel.rs
 │   │   │   ├── inline_banner.rs
 │   │   │   └── submission.rs
+│   │   ├── rollout_index/
+│   │   │   └── summary_context.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
 │   │   │   │   ├── handoff_binding_tests.rs
@@ -1721,7 +1741,8 @@ src/
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tool_call.rs
 │   │   │   ├── tool_call_tests.rs
-│   │   │   └── tui_passthrough.rs
+│   │   │   ├── tui_passthrough.rs
+│   │   │   └── usage_footer.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   └── tests.rs
@@ -1861,6 +1882,8 @@ src/
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   ├── test_hook.rs
 │   │   │   │   │   └── turn_mode_reading_tests.rs
+│   │   │   │   ├── decision_target.rs
+│   │   │   │   ├── decision_target_tests.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
@@ -2088,6 +2111,8 @@ src/
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
+│   │   │   ├── o_writer_io/
+│   │   │   │   └── agy.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -2110,6 +2135,7 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── notification_policy.rs
 │   │   │   ├── o_delivery_evidence.rs
 │   │   │   ├── o_delivery_evidence_tests.rs
 │   │   │   ├── o_delivery_manifest.rs
@@ -2261,6 +2287,8 @@ src/
 │   │   │   ├── backstop.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
+│   │   │   ├── decision_drain.rs
+│   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
@@ -2461,6 +2489,7 @@ src/
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
+│   │   │   │   ├── local_turn.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -2470,7 +2499,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_inject/
-│   │   │   │   │   └── payload_tests.rs
+│   │   │   │   │   ├── payload_tests.rs
+│   │   │   │   │   └── thread_host_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
@@ -2564,12 +2594,15 @@ src/
 │   │   │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   ├── busy_turn.rs
 │   │   │   │   │   │   └── native_input.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
 │   │   │   │   │   │   ├── metadata_hold.rs
 │   │   │   │   │   │   └── restart_gate_tests.rs
+│   │   │   │   │   ├── stream_json_turn/
+│   │   │   │   │   │   └── admission_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_bootstrap_tests.rs
@@ -2605,7 +2638,8 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   ├── start_failure_missing_tests.rs
-│   │   │   │   │   └── start_failure_state_tests.rs
+│   │   │   │   │   ├── start_failure_state_tests.rs
+│   │   │   │   │   └── stream_json_turn.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests/
@@ -2709,7 +2743,8 @@ src/
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
 │   │   │   │   ├── slash_command_tests/
-│   │   │   │   │   └── cancel_queued_tests.rs
+│   │   │   │   │   ├── cancel_queued_tests.rs
+│   │   │   │   │   └── usage_footer_tests.rs
 │   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
@@ -2756,6 +2791,8 @@ src/
 │   │   │   │   │   └── n3bc_tests.rs
 │   │   │   │   ├── scoped_recovery_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── queued_recovery/
+│   │   │   │   └── agy_shadow.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
@@ -2805,7 +2842,8 @@ src/
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
 │   │   │   ├── durable_publish_tests.rs
-│   │   │   └── durable_stores_tests.rs
+│   │   │   ├── durable_stores_tests.rs
+│   │   │   └── usage_footer.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
@@ -2885,6 +2923,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
 │   │   │   ├── retired_metadata.rs
+│   │   │   ├── send_stage_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
@@ -3654,6 +3693,7 @@ src/
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── decision_forums.rs
 │   │   ├── decision_forums_tests.rs
+│   │   ├── delegation_card.rs
 │   │   ├── delivery_lease_cell.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
@@ -3829,6 +3869,7 @@ src/
 │   │   │   │   └── tests_pg.rs
 │   │   │   └── thread_gc.rs
 │   │   ├── canonical_identity.rs
+│   │   ├── current_key.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
@@ -3836,6 +3877,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── listing_tests.rs
 │   │   ├── output.rs
+│   │   ├── raw_alias_pg_tests.rs
 │   │   ├── resume_fence_api_tests.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -4089,7 +4131,8 @@ src/
 │   │   ├── registry.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
-│   │   └── session_prompt.rs
+│   │   ├── session_prompt.rs
+│   │   └── session_source.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
@@ -4166,6 +4209,8 @@ src/
 │   │   ├── execution_mode/
 │   │   │   └── provider_choice.rs
 │   │   ├── loader/
+│   │   │   ├── tests/
+│   │   │   │   └── mod.rs
 │   │   │   └── discovery.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
@@ -4349,6 +4394,8 @@ src/
 │   │   ├── surface_policy.rs
 │   │   ├── termination.rs
 │   │   ├── test_support.rs
+│   │   ├── thread_host.rs
+│   │   ├── thread_host_tests.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
 │   ├── session_resume/
@@ -4374,10 +4421,15 @@ src/
 │   │   ├── policy_maintenance.rs
 │   │   └── test_barriers.rs
 │   ├── stream_json_cli/
+│   │   ├── codec/
+│   │   │   └── agy_capture.rs
 │   │   ├── dialects/
 │   │   │   ├── agy.rs
 │   │   │   ├── grok.rs
 │   │   │   └── mod.rs
+│   │   ├── runner/
+│   │   │   ├── agy_recording.rs
+│   │   │   └── agy_recording_tests.rs
 │   │   ├── codec.rs
 │   │   ├── mod.rs
 │   │   ├── policy.rs
@@ -4476,11 +4528,13 @@ src/
 │   │   │   │   ├── child_run.rs
 │   │   │   │   ├── child_run_tests.rs
 │   │   │   │   ├── first_turn.rs
-│   │   │   │   └── first_turn_tests.rs
+│   │   │   │   ├── first_turn_tests.rs
+│   │   │   │   └── send_stage.rs
 │   │   │   ├── children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── agy.rs
 │   │   │   ├── children.rs
 │   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
@@ -4538,6 +4592,8 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
+│   │   │   ├── agy_spool/
+│   │   │   │   └── replay.rs
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
 │   │   │   │   ├── p5a2_projection_tests.rs
@@ -4562,6 +4618,8 @@ src/
 │   │   │   ├── thread_children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
+│   │   │   ├── agy_delivery.rs
+│   │   │   ├── agy_spool.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4580,6 +4638,7 @@ src/
 │   │   │   ├── operator_resume_ledger_tests.rs
 │   │   │   ├── restart_end.rs
 │   │   │   ├── restart_end_tests.rs
+│   │   │   ├── restart_notice.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
@@ -4619,6 +4678,10 @@ src/
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
 │   │   │   │   └── child_debt.rs
+│   │   │   ├── agy_delivery/
+│   │   │   │   ├── agy_delivery_tests.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── plan.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/
@@ -4631,10 +4694,15 @@ src/
 │   │   │   │   ├── probe.rs
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
+│   │   │   ├── deliver/
+│   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
 │   │   │   │   └── authority_contention_tests.rs
 │   │   │   ├── host/
+│   │   │   │   ├── agy_host/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── agy_host.rs
 │   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
@@ -4806,6 +4874,9 @@ src/
 │   │   │   ├── restart_end.rs
 │   │   │   ├── restart_end_repair_tests.rs
 │   │   │   ├── restart_end_tests.rs
+│   │   │   ├── restart_notice.rs
+│   │   │   ├── restart_notice_actor_tests.rs
+│   │   │   ├── restart_notice_tests.rs
 │   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
