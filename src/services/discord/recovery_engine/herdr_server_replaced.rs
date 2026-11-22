@@ -25,7 +25,7 @@ use crate::services::session_host::{GrantedServer, PaneProvider, PaneReading, he
 
 /// The channel's user_default endpoint, only when this node executes it.
 pub(in crate::services::discord) fn local_endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
-    let launch = crate::services::herdr_launch::user_default_endpoint(channel)?;
+    let launch = crate::services::discord::router::herdr_consent::endpoint(channel)?;
     let local = crate::config::session_hosts::local_node();
     (local.as_deref() == Some(launch.execution_node.as_str())).then_some(launch)
 }
