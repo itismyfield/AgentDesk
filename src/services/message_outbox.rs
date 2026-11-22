@@ -7,6 +7,7 @@ mod attachments;
 pub(crate) mod body_census;
 mod diagnostics;
 mod identity;
+pub(crate) mod mentions;
 mod plain;
 pub(crate) mod routine_incident;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};

@@ -350,6 +350,7 @@ mod runtime_binding;
 mod session_rotation;
 mod shadow_peek;
 mod state;
+pub(crate) mod terminal_custody;
 
 pub(crate) use session_rotation::*;
 #[cfg(test)]

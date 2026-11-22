@@ -1,5 +1,7 @@
 //! Read-only host policy observations. These values grant no execution or teardown authority.
 
+use crate::services::session_host::{HostKind, HostLiveness, HostSessionRef, host_for};
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 pub(crate) use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
 
 /// A provider-auth login target: only the auth namespace with no other host's marker.
@@ -14,6 +16,16 @@ pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
 pub(crate) fn terminate_enabled() -> bool {
     crate::config_live_reload::current()
         .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
+}
+
+/// Only an explicit local tmux/process marker permits a historical liveness probe.
+pub(crate) fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
+    let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
+        read_host_kind_marker(name)
+    else {
+        return None;
+    };
+    Some(host_for(kind).liveness(HostSessionRef { kind, name }))
 }
 
 #[cfg(test)]

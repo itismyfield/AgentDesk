@@ -152,6 +152,15 @@ impl OperatorNotice {
     }
 }
 
+/// Delivers one home's notice for `cause` and returns where it stands; the Discord runtime owns
+/// delivery, so the caller that starts the upkeep passes it in.
+pub(crate) type ObserveNotice = for<'a> fn(
+    &'a OperatorNotice,
+    Option<&'static str>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = &'static str> + Send + 'a>,
+>;
+
 /// A home's confirmed cause after a pass, and the notice that cause moves.
 pub(crate) struct Fault {
     keys: Vec<String>,
@@ -256,12 +265,12 @@ fn pass_with(
 
 /// Moves each home's notice episode to its confirmed cause; without a channel or a poster the
 /// notice stays pending and nothing counts as sent.
-pub(crate) async fn notify(faults: Vec<Fault>) {
+pub(crate) async fn notify(faults: Vec<Fault>, observe: ObserveNotice) {
     for fault in faults {
         let state = match (&fault.notice, fault.cause) {
             // A restart's first unverifiable reading has no cause yet and must not end the episode.
             (Some(_), None) if !fault.cleared => continue,
-            (Some(notice), cause) => notice.observe(cause).await,
+            (Some(notice), cause) => observe(notice, cause).await,
             (None, Some(_)) => "pending",
             (None, None) => "none",
         };
@@ -282,7 +291,7 @@ pub(crate) fn boot() {
 }
 
 /// Starts the process's one upkeep task when the booted snapshot has a local dedicated home.
-pub(crate) fn spawn() -> bool {
+pub(crate) fn spawn(observe: ObserveNotice) -> bool {
     let Some(boot) = with_boot(|boot| boot.cloned()) else {
         return false;
     };
@@ -298,7 +307,7 @@ pub(crate) fn spawn() -> bool {
             let upkept =
                 tokio::task::spawn_blocking(move || pass(&boot, &PersonalPaths::current(), true));
             if let Ok(faults) = upkept.await {
-                notify(faults).await;
+                notify(faults, observe).await;
             }
         }
     });

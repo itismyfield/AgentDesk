@@ -13,9 +13,7 @@ use crate::db::auto_queue::{
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 
-pub(crate) use crate::db::auto_queue::{
-    EntryDispatchFailureResult, reconcile_failed_entry_done_on_pg,
-};
+pub(crate) use crate::db::auto_queue::reconcile_failed_entry_done_on_pg;
 
 /// Pool-scoped writer: stale-retry loop and one tx per changed attempt, committed here.
 pub(crate) async fn update_entry_status_on_pg(

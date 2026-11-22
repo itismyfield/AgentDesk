@@ -113,8 +113,10 @@ pub(crate) fn reserve_resume(
                 }
                 let (started, finished) = child.candidate.sends();
                 if started != finished
-                    || crate::services::discord::terminal_delivery_custody::retains_channel(channel)
-                        .map_err(std::io::Error::other)?
+                    || crate::services::tui_prompt_dedupe::terminal_custody::retains_channel(
+                        channel,
+                    )
+                    .map_err(std::io::Error::other)?
                 {
                     return Err(std::io::Error::other(
                         "the earlier turn still owns delivery",
