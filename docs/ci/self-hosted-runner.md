@@ -1,9 +1,13 @@
 # Self-hosted Rust CI runner
 
-The **Rust tests build and plan** job uses the self-hosted runner for pushes to
+The **Rust tests build and plan** job and the lint jobs (**Lint runner** in PRs,
+**Main lint and non-lib tests** on main) use self-hosted runners for pushes to
 main, manual dispatches, and pull requests from branches in this repository.
 The workflow routes fork pull requests to `ubuntu-latest`. The test workers
 stay on GitHub-hosted runners and consume the nextest archive.
+
+Two WSL runners split the work: label `adk-wsl-rust` takes the test build and
+label `adk-wsl-lint` takes lint, so a lint run never queues the test build.
 
 ## Fork workflow approval
 

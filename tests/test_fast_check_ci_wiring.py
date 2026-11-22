@@ -368,7 +368,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         job = jobs["lint"]
 
         self.assertEqual(job["name"], "Lint runner")
-        self.assertEqual(job["runs-on"], jobs["rust_build"]["runs-on"])
+        # Same trusted-event routing as rust_build, on the separate lint runner.
+        self.assertEqual(job["runs-on"], jobs["rust_build"]["runs-on"].replace("adk-wsl-rust", "adk-wsl-lint"))
         self.assertEqual(job["if"], _LINT_FILTER)
         # Clippy over every target and feature is the compile `cargo check` used to repeat.
         self.assertEqual(
