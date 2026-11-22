@@ -6,7 +6,9 @@ diags-residue.json holds the residue a variant with a hard cut, a foreign impl a
 The end-to-end case runs the real tool on a throwaway copy outside the repository (cargo required).
 """
 
+import contextlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import vistool  # noqa: E402
+import vistool_real  # noqa: E402
+import vistool_testcfg  # noqa: E402
 
 FX = HERE / "fixtures" / "vistool"
 MINI = FX / "mini"
@@ -234,6 +238,29 @@ class RecordedDiagnostics(unittest.TestCase):
         self.assertEqual(got[0], {})
         self.assertEqual(got[1][0], "cut_residue")
 
+    def test_through_use_follows_an_alias(self):
+        # VT1 fix1 review P2-2: `{orig as Deep}` is looked up as `orig` behind the path.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use self::inner::{Orig as Deep};\nmod inner;\n",
+                                "src/a/inner.rs": "pub(crate) struct Orig;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 0): ("item",), ("src/a/mod.rs", 0): ("item",)}, "edit"))
+
+    def test_through_use_follows_nested_braces(self):
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use self::{Other, inner::{Deep}};\nmod inner;\n"
+                                                "pub(crate) struct Other;\n",
+                                "src/a/inner.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 0): ("item",), ("src/a/mod.rs", 0): ("item",)}, "edit"))
+
+    def test_alias_of_an_above_item_is_cut_residue(self):
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::{app::{Secret as Deep}};\n",
+                                "src/app.rs": "pub(crate) struct Secret;\n"}, sides={"src/app.rs": "above"})
+        self.assertEqual((got[0], got[1][0]), ({}, "cut_residue"))
+
+    def test_use_entries_flatten_the_tree(self):
+        self.assertEqual(vistool.use_entries("pub(crate) use crate::a::{b::{C as D, self}, e::*, F};"),
+                         [(("crate", "a", "b"), "C", "D"), (("crate", "a"), "b", "b"), (("crate", "a", "e"), "*", "*"),
+                          (("crate", "a"), "F", "F")])
+        self.assertEqual(vistool.use_entries("use ::std::fmt;"), [(("std",), "fmt", "fmt")])
+
     def test_use_line_must_bind_the_name(self):
         lines = ["use std::fmt;", "pub(crate) struct Foo;"]
         self.assertEqual(vistool.find_item_line(lines, 0, 1, "Foo", "item"), 1)
@@ -335,6 +362,16 @@ class GlobSafety(unittest.TestCase):
         self.assertTrue(risks and all(r["fail"] and r["kind"] == "glob" for r in risks))
         self.assertEqual(self.risks("pub(crate) use inner::*;"), [])
 
+    def test_glob_inside_braces_is_scanned(self):
+        # VT1 review P2-4 (4): `use crate::a::{b::*, x::Y};` imports a::b's names too.
+        layout, read = glob_layout()
+        text = {"src/c.rs": ["use crate::a::{x::Y, b::*};"], "src/a/x.rs": [], "src/a/b/tests.rs": [], "src/lib.rs": [],
+                "src/a/mod.rs": [], "src/a/b.rs": []}
+        risks = vistool.glob_check([edit("pub(super) struct Thing;")], layout, lambda rel: text[rel])
+        self.assertEqual([r["importer"] for r in risks], ["src/c.rs:1"])
+        imports = vistool.glob_imports(layout, lambda rel: {"src/c.rs": ["use crate::a::{", "    b::*,", "};"]}.get(rel, []))
+        self.assertEqual(imports, [(("c",), "src/c.rs", 1, ("a", "b"))])
+
     def test_mutant_without_glob_scan_is_caught(self):
         with mock.patch.object(vistool, "glob_imports", lambda layout, read: []):
             self.assertFalse(any(r["fail"] for r in self.risks("struct Error;")))
@@ -368,6 +405,14 @@ class Partition(unittest.TestCase):
         self.assertIn('x = { path = "../lower/crates/x" }', up)
         self.assertIn("members = []", up)
         self.assertIn("[[bin]]", up)
+
+    def test_multiline_members_are_emptied(self):
+        # VT1 review P2-4 (1): a wrapped `members = [...]` must not keep the members in upper.
+        text = '[package]\nname = "agentdesk"\n\n[workspace]\nmembers = [\n    "crates/a",\n    "crates/b",\n]\n' \
+               'resolver = "3"\n\n[dependencies]\na = { path = "crates/a" }\n'
+        up = vistool.upper_manifest(text)
+        self.assertIn("members = []\nresolver", up)
+        self.assertNotIn('"crates/b"', up)
 
 
 def fixture_repo(root):
@@ -430,6 +475,134 @@ class Probe(unittest.TestCase):
         self.assertEqual(vistool.decl_hits(lines, "tui_o", ("services",), ("services",)), [1])
 
 
+class LoopGuard(unittest.TestCase):
+    def test_unrepaired_lower_visibility_error_fails_closed(self):
+        # VT1 fix1 review P2-1: a lower visibility error that resolves to no edit keeps upper from running,
+        # so the run must stop as lower_probe_broken (not no_progress, never VISTOOL_OK).
+        broken = {"level": "error", "code": {"code": "E0603"}, "message": "struct `Gone` is private", "spans": [],
+                  "children": []}
+        calls = []
+
+        def fake(cargo, cwd, args, target_dir, own_root, manifest=None):
+            calls.append(cwd.name)
+            return ([dict(broken, _root=str(cwd), _test=False)] if cwd.name == "lower" else []), 0.1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = fixture_repo(Path(tmp))
+            with mock.patch.object(vistool, "run_check", fake):
+                ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
+                                                     apply=True, log=lambda *a, **k: None)
+            self.assertFalse(ok)
+            self.assertTrue(line.startswith("VISTOOL_FAIL lower_probe_broken "), line)
+            self.assertEqual(calls, ["lower"])
+            self.assertFalse((Path(tmp) / "out" / "vistool-LOW.patch").exists())
+            status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
+            self.assertEqual(status, "")
+
+
+class TestCfgList(unittest.TestCase):
+    def test_recorded_test_cfg_diagnostic_becomes_a_row(self):
+        w, r = widener()
+        diag = next(d for d in load("diags-residue.json") if "fixture_value" in d["message"])
+        self.assertEqual(vistool.classify_residue(diag, vistool.restricted_defs(Mini.get(), w.lines)), "test_cfg")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "list.json"
+            summary = vistool_testcfg.write_list(out, [diag], r, Mini.get(), w.lines, {"crate": "LOW"})
+            doc = json.loads(out.read_text())
+        self.assertEqual(summary, {"file": "list.json", "count": 1, "resolved": 1})
+        self.assertEqual(doc["by_code"], {"E0425": 1})
+        self.assertEqual(doc["items"], [{
+            "use_site": "src/app.rs:41", "use_source": "", "item": "crate::core::fixture_value",
+            "name": "fixture_value", "definition": "src/core.rs:52", "definition_from": "rustc",
+            "definition_candidates": 0, "code": "E0425",
+            "message": "cannot find function `fixture_value` in module `crate::core`"}])
+
+    def test_item_paths_per_code(self):
+        cases = [("E0432", "unresolved import `crate::a::helper`", ("helper", "crate::a::helper")),
+                 ("E0433", "failed to resolve: could not find `fixtures` in `support`", ("fixtures", "support::fixtures")),
+                 ("E0412", "cannot find type `Rig` in module `crate::a`", ("Rig", "crate::a::Rig")),
+                 ("E0599", "no function or associated item named `for_test` found for struct `Store` in the current "
+                           "scope", ("for_test", "Store::for_test")),
+                 ("E0425", "cannot find function `h` in this scope", ("h", "h"))]
+        for code, msg, want in cases:
+            self.assertEqual(vistool_testcfg.item_path({"code": {"code": code}, "message": msg}), want, msg)
+
+    def test_gated_declarations_by_scan(self):
+        src = ["pub(crate) fn plain() {}", "#[cfg(all(test, unix))]", "mod tests {", "    pub(crate) fn h() {}", "}",
+               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"x\"))]",
+               "pub(crate) fn either() {}", "#[cfg(test)]", "pub(crate) fn h() {}"]
+        layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set(), module_at=lambda rel, line: ("a",))
+        defs = vistool_testcfg.gated_defs(layout, lambda rel: src)
+        self.assertEqual({k: [x[1] for x in v] for k, v in defs.items()},
+                         {"tests": [3], "h": [4, 13], "for_test": [8]})
+        self.assertEqual(vistool_testcfg.definition("for_test", "Store::for_test", defs)[0][1], 8)
+        self.assertEqual(vistool_testcfg.definition("h", "h", defs), (None, 2))
+
+
+def real_repo(root, extra=None):
+    repo = root / "realws"
+    shutil.copytree(FX / "realws", repo)
+    for rel, text in (extra or {}).items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    git = ["git", "-C", str(repo), "-c", "user.name=vistool", "-c", "user.email=vistool@example.invalid"]
+    subprocess.run(git[:3] + ["init", "-q"], check=True)
+    subprocess.run(git[:3] + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-qm", "fixture"], check=True)
+    return repo, git
+
+
+class RealMode(unittest.TestCase):
+    def run_real(self, lower, upper=".", extra=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = real_repo(Path(tmp), extra)
+            with mock.patch.object(vistool, "run_check", side_effect=AssertionError("cargo must not run")):
+                return vistool_real.real(repo, lower, upper, out_dir=Path(tmp) / "out", log=lambda *a, **k: None)
+
+    def test_missing_member_fails_without_falling_back_to_shadow(self):
+        for lower, upper, extra in (("crates/nope", "upper", None), ("upper", "upper", None),
+                                    ("stray", "upper", {"stray/Cargo.toml": '[package]\nname = "stray"\n',
+                                                        "stray/src/lib.rs": ""})):
+            ok, line, manifest = self.run_real(lower, upper, extra)
+            self.assertFalse(ok)
+            self.assertTrue(line.startswith("VISTOOL_FAIL no_member mode=real "), line)
+            self.assertEqual(manifest["rounds"], [])
+
+    def test_cli_real_mode_needs_a_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = real_repo(Path(tmp))
+            for argv in (["--real", str(repo), "--out-dir", tmp],
+                         ["--real", str(repo), "--lower", "crates/adk-krx", "--out-dir", tmp]):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.object(vistool, "run_check", side_effect=AssertionError("cargo must not run")):
+                    self.assertEqual(vistool.main(argv), 2)
+                self.assertTrue(buf.getvalue().startswith("VISTOOL_FAIL no_member mode=real "), buf.getvalue())
+
+    def test_layout_and_resolver_split_by_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = real_repo(Path(tmp))
+            members = vistool_real.workspace_members(repo)
+            self.assertEqual(sorted(members), ["lower", "upper"])
+            layout = vistool_real.RealLayout(repo, members, "lower", "upper", "lower")
+            self.assertEqual(layout.x_files, {"lower/src/lib.rs", "lower/src/core.rs"})
+            self.assertEqual(layout.module_of["lower/src/core.rs"], ("core",))
+            self.assertEqual(layout.side_of("lower/src/core.rs", 3), "x")
+            self.assertEqual(layout.side_of("upper/src/lib.rs", 3), "above")
+            self.assertIsNone(layout.side_of("Cargo.toml"))
+            res = vistool_real.RealResolver(repo, members, "lower", "upper")
+            self.assertEqual(res.rel("lower/src/core.rs", repo), ("lower", "lower/src/core.rs"))
+            self.assertEqual(res.rel("upper/src/lib.rs", repo), ("upper", "upper/src/lib.rs"))
+            self.assertEqual(res.rel("/rustc/x/lib.rs", repo)[0], None)
+
+    def test_residue_left_after_convergence_fails(self):
+        probe = vistool_real.RealProbe(Path("/nonexistent"), "lower", "upper")
+        probe.accept({"residue": {k: {"count": 0} for k in vistool.RESIDUES}})
+        with self.assertRaises(vistool.VisFail) as caught:
+            probe.accept({"residue": dict({k: {"count": 0} for k in vistool.RESIDUES}, test_cfg={"count": 2})})
+        self.assertEqual((caught.exception.reason, caught.exception.detail), ("residue", "test_cfg=2"))
+
+
 # Wrappers and incremental settings of the caller (CI's global RUSTC_WRAPPER=sccache, cargo-shim's
 # CARGO_INCREMENTAL=1, a ~/.cargo/config.toml rustc-wrapper) must not reach the throwaway fixture build.
 CLEAN_CARGO_ENV = {"RUSTC_WRAPPER": "", "CARGO_BUILD_RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": "",
@@ -467,6 +640,54 @@ class EndToEnd(unittest.TestCase):
             check = subprocess.run(["cargo", "check", "--all-targets", "--quiet"], cwd=repo, capture_output=True,
                                    text=True, env=dict(os.environ, CARGO_TARGET_DIR=str(Path(tmp) / "t")))
             self.assertEqual(check.returncode, 0, check.stderr[-2000:])
+
+    def test_real_workspace_converges_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = real_repo(Path(tmp))
+            out = Path(tmp) / "out"
+            ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=out, apply=True,
+                                                   log=lambda *a, **k: None)
+            self.assertTrue(ok, (line, manifest.get("fail"), manifest.get("unresolved"), manifest.get("residue")))
+            self.assertRegex(line, r"^VISTOOL_OK mode=real crate=lower upper=upper base=[0-9a-f]{40} iters=\d+ "
+                                   r"files=2 edits=5 residue=0 glob_risk=0$")
+            self.assertTrue(manifest["equiv"].startswith("class=vis"), manifest["equiv"])
+            core = (repo / "lower/src/core.rs").read_text()
+            for widened in ("pub struct Config {", "    pub limit: u32,", "    pub fn new() -> Self {",
+                            "pub fn helper() -> u32 {", "#[cfg(test)]\npub(crate) fn fixture_value"):
+                self.assertIn(widened, core)
+            self.assertIn("pub mod core;", (repo / "lower/src/lib.rs").read_text())
+            diff = subprocess.run(git[:3] + ["diff", "--stat", "--", "upper", "Cargo.toml"], capture_output=True, text=True)
+            self.assertEqual(diff.stdout, "")
+            self.assertEqual(json.loads((out / "vistool-real-lower-test-cfg.json").read_text())["count"], 0)
+            self.assertFalse((repo / "target" / "crate_split_probe").exists())
+            check = subprocess.run(["cargo", "check", "--workspace", "--all-targets", "--quiet"], cwd=repo,
+                                   capture_output=True, text=True, env=dict(os.environ, CARGO_TARGET_DIR=str(Path(tmp) / "t")))
+            self.assertEqual(check.returncode, 0, check.stderr[-2000:])
+            subprocess.run(git + ["commit", "-qam", "widened"], check=True)
+            ok, line, _ = vistool_real.real(repo, "lower", "upper", out_dir=out, log=lambda *a, **k: None)
+            self.assertTrue(ok, line)
+            self.assertIn(" iters=1 files=0 edits=0 residue=0 ", line)
+
+    def test_real_test_cfg_residue_fails_with_the_list(self):
+        upper = (FX / "realws/upper/src/lib.rs").read_text().replace(
+            "assert_eq!(super::total(), 5);", "assert_eq!(super::total() + lower::core::fixture_value(), 12);")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = real_repo(Path(tmp), {"upper/src/lib.rs": upper})
+            out = Path(tmp) / "out"
+            ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=out, apply=True,
+                                                   log=lambda *a, **k: None)
+            self.assertFalse(ok)
+            self.assertTrue(line.startswith("VISTOOL_FAIL residue mode=real crate=lower "), line)
+            self.assertEqual(manifest["fail"]["detail"], "test_cfg=1")
+            doc = json.loads((out / "vistool-real-lower-test-cfg.json").read_text())
+            self.assertEqual([(i["use_site"], i["item"], i["definition"], i["definition_from"], i["code"])
+                              for i in doc["items"]],
+                             [("upper/src/lib.rs:11", "lower::core::fixture_value", "lower/src/core.rs:16", "rustc",
+                               "E0425")])
+            self.assertIn("| test_cfg | 1 | T/M test-support |", "\n".join(vistool_real.residue_table(manifest)))
+            status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
+            self.assertEqual(status, "")
+            self.assertTrue((out / "vistool-real-lower-partial.patch").read_text())
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
