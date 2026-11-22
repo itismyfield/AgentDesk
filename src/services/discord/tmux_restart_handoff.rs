@@ -355,9 +355,8 @@ pub(super) async fn start_restart_handoff_from_state(
         }
     }
 
-    // The dead turn's terminal commits before any cleanup can drop its row: failed unless its
-    // answer was delivered. A planned restart or rebind row, or one whose origins a same-id
-    // retry carries, ends nothing here.
+    // The dead turn's terminal (failed unless its answer was delivered) commits before cleanup;
+    // a planned restart, rebind, or a row whose origins a same-id retry carries ends nothing.
     let ended = if state.terminal_delivery_completed() {
         super::receipt_settle::body_outcome(&state.full_response)
     } else {
