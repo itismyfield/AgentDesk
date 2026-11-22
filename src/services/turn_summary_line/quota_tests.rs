@@ -741,6 +741,7 @@ fn fable_bucket_is_available_for_claude_profiles_and_ignored_for_codex() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_session() {
     use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};

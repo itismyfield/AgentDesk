@@ -180,6 +180,7 @@ impl Rig {
             .collect()
     }
 
+    #[cfg(unix)]
     async fn front(&self) -> Front {
         let read = self
             .mailbox
@@ -245,6 +246,7 @@ fn context(row: &Unsettled) -> serde_json::Value {
 }
 
 /// An idle handoff that answers `result` and counts its calls; it reads the journal it runs under.
+#[cfg(unix)]
 fn idle(
     pool: &PgPool,
     row: &Unsettled,
@@ -277,6 +279,7 @@ fn idle(
 
 /// A Decision front is written under the PG journal taken just before it and never twice; an
 /// input box in use only makes the same original wait for its one later write.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn decision_front_is_journaled_before_its_one_write_pg() {
     let rig = Rig::new().await;
@@ -349,6 +352,7 @@ async fn decision_front_is_journaled_before_its_one_write_pg() {
 
 /// A closed event's original never runs: whichever closed state PG holds, the front is removed
 /// unrun, another user's input behind it stays, and no notice asks anyone to send it again.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn decision_closed_event_is_removed_unrun_and_never_asks_for_a_resend_pg() {
     let rig = Rig::new().await;
