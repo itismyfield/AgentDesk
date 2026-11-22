@@ -3279,7 +3279,7 @@ _pg_sql_probe() {
         PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE
         PGSSLROOTCERT PGTARGETSESSIONATTRS PGUSER PGDATABASE
     )
-    command -v psql >/dev/null 2>&1 || return 1
+    command -v psql >/dev/null 2>&1 || { echo "  psql not found in PATH (Homebrew postgresql/libpq unlinked?)" >&2; return 1; }
     for name in "${clear_names[@]}"; do
         psql_env+=(-u "$name")
     done

@@ -676,12 +676,6 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "prompt is required"})),
         );
     }
-    let declared = (body.source.as_deref(), body.metadata.as_ref());
-    if let Some(refused) =
-        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
-    {
-        return refused;
-    }
     let metadata = match super::agents_turn_target::start_metadata(body.metadata, body.origin_id) {
         Ok(metadata) => metadata,
         Err(response) => {
@@ -694,6 +688,13 @@ pub async fn start_agent_turn(
             return response;
         }
     };
+    // Checked on the metadata the turn stores, so a top-level origin is refused like a nested one.
+    let declared = (body.source.as_deref(), metadata.as_ref());
+    if let Some(refused) =
+        super::agents_turn_deliver::refuse_decision_source(declared.0, declared.1)
+    {
+        return refused;
+    }
 
     let provider_override = body
         .provider

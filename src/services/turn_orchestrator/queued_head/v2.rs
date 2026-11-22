@@ -13,6 +13,7 @@ pub(crate) mod clear;
 mod cold_source;
 mod commit;
 pub(crate) mod control;
+pub(crate) mod decision;
 mod effort_continue;
 mod migration;
 pub(crate) mod origin;

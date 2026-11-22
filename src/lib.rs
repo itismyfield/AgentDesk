@@ -313,11 +313,12 @@ pub mod campaign_adapter {
     };
 }
 
-/// Dormant Decision input contracts: an approved event's single delivery and its byte-keeping
-/// plans. The service that approves events calls them; no request reaches them on its own.
+/// Dormant Decision input contracts: an approved event's single delivery, its boot recovery and
+/// its byte-keeping plans. The service that approves events calls them; no request reaches them.
 pub mod decision_input {
     pub use crate::services::claude_tui::input::plan_preserved_submit as claude_preserved_plan;
     pub use crate::services::codex_tui::input::owned_preserved_plan as codex_preserved_plan;
+    pub use crate::services::discord::decision_drain::recover_boot;
     pub use crate::services::discord::health::decision_target::{
         FirstAttempt, Normalized, Normalizer, deliver_once,
     };

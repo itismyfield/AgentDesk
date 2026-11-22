@@ -139,6 +139,15 @@ class WiringDigestTests(unittest.TestCase):
         head = edit(REAL_WORKFLOW, "      - relay_authority_mutations", "      - relay_authority_mutations_renamed")
         self.assertEqual(self.judge(REAL_WORKFLOW, head), "wiring_changed=true\n")
 
+    def test_hardening_repin_alone_does_not_run_the_gate(self) -> None:
+        pin = next(line for line in REAL_WORKFLOW.split("\n")
+                   if line.strip().startswith("pin scripts/check-ci-runner-hardening.sh "))
+        for new, expected in ((pin[:-64] + "0" * 64, "false"), (pin + " || true", "true")):
+            with self.subTest(new=new.strip()):
+                self.setUp()
+                self.assertEqual(self.judge(REAL_WORKFLOW, edit(REAL_WORKFLOW, pin, new)),
+                                 f"wiring_changed={expected}\n")
+
     def test_anchor_edit_outside_the_relay_job_is_read_through_the_alias(self) -> None:
         shared = edit(ANCHORED, '      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "3"',
                       '      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "1"')

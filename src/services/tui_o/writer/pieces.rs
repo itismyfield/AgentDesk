@@ -356,6 +356,8 @@ impl UnitDeriver {
         match self.seals.seal(&unit_key, &planned) {
             SealOutcome::First => {}
             SealOutcome::Repeat => return Vec::new(),
+            // Tool output is never posted: a later result for the same call keeps the first seal.
+            SealOutcome::Conflict if unit_key.kind == UnitKind::ToolResult => return Vec::new(),
             SealOutcome::Conflict => {
                 let reason = format!("sealed unit {} reappeared changed", unit_key.native_key);
                 return vec![Derived::Blocked { reason }];

@@ -131,11 +131,11 @@ def _selection(state, config, request):
     return cursor, bundle, profile, rows, amounts
 
 
-def _preflight(state, config, request, recovering=False):
+def _preflight(state, config, request, now, recovering=False, prune=False):
     amounts = _selection(state, config, request)[-1]
     if refused := budget.configured(config.get("budget") or {}, amounts):
         return refused
-    paused = read_json(state / "budget" / "paused.json", {})
+    paused = budget.active_pauses(state, now, prune)
     for provider in amounts:
         if (provider in paused and not recovering) or not {f"usage:{provider}", f"turn_budget:{provider}"} <= set(config["capabilities"]):
             return f"{provider} usage or native-turn budget capability unavailable"
@@ -205,13 +205,15 @@ def _execute(lease, config, record, row, remaining):
         row["tokens"] = None
     if row["elapsed_s"] >= remaining["time_s"]:
         row["timeout"] = True
-    if isinstance(report, dict) and row["native_turns"] is not None and (report.get("budget_checked") != row["native_turns"]
-            or row["native_turns"] > remaining["turns"] or (row["tokens"] is not None and row["tokens"] > remaining["tokens"])):
+    over = row["native_turns"] is not None and (row["native_turns"] > remaining["turns"]
+                                                or (row["tokens"] is not None and row["tokens"] > remaining["tokens"]))
+    if isinstance(report, dict) and row["native_turns"] is not None and (report.get("budget_checked") != row["native_turns"] or over):
         row.update(status="FAIL" if row["status"] == "FAIL" else "UNEVALUABLE", native_turns=None,
                    reason="native-turn budget witness missing")
     if row["native_turns"] is None or row["tokens"] is None:
         row["status"] = "FAIL" if row["status"] == "FAIL" else "UNEVALUABLE"
         row.setdefault("reason", "USAGE_UNKNOWN")
+    return over  # The driver reported more turns or tokens than this occurrence was granted.
 
 
 def _run(lease, state, config, request, run_id, now):
@@ -236,7 +238,7 @@ def _run(lease, state, config, request, run_id, now):
         inbox.record(state, {**{rid: "SUPERSEDED" for rid in request["superseded"]},
                              **{stem: "REJECTED" for stem in request["rejected"]}, request["request_id"]: "RUNNING"})
     publication.heartbeat(state, config, now, run_id)
-    spent, turned, tokens, unknown = {}, {}, {}, set()
+    spent, turned, tokens, unknown, over = {}, {}, {}, set(), set()
     for row in runnable:
         provider = row["cell"].split("-")[0]
         if (provider in unknown or spent.get(provider, 0) >= amounts[provider]["time_s"]
@@ -246,7 +248,8 @@ def _run(lease, state, config, request, run_id, now):
         remaining = {"turns": amounts[provider]["turns"] - turned.get(provider, 0),
                      "tokens": amounts[provider]["tokens"] - tokens.get(provider, 0),
                      "time_s": amounts[provider]["time_s"] - spent.get(provider, 0)}
-        _execute(lease, config, record, row, remaining)
+        if _execute(lease, config, record, row, remaining):
+            over.add(provider)
         spent[provider] = spent.get(provider, 0) + row["elapsed_s"]
         if row["native_turns"] is None or row["tokens"] is None:
             unknown.add(provider)
@@ -261,6 +264,8 @@ def _run(lease, state, config, request, run_id, now):
         measured[provider] = {"time_s": round(spent.get(provider, 0), 3),
                               "tokens": None if provider in unknown else tokens.get(provider, 0),
                               "turns": sum(turns) if None not in turns else None}
+        if provider in over:
+            measured[provider]["over_budget"] = True
     usage = {}
     for provider in amounts:
         mine = [row for row in rows if row.get("cell", "") and row["cell"].startswith(provider + "-") and "elapsed_s" in row]
@@ -292,7 +297,7 @@ def tick(config_path, now=None, overrides=None):
         if budget.configured(config.get("budget") or {}, amounts) is None:
             publication.heartbeat(state, config, now)
         return {"status": "NOT_DUE"}
-    if refused := _preflight(state, config, request or {"kind": "scheduled"}, recovering=recovery):
+    if refused := _preflight(state, config, request or {"kind": "scheduled"}, now, recovering=recovery):
         return _deferred(state, config, request or {"kind": "scheduled"}, now, refused)
     run_id = str(uuid.uuid4())
     try:
@@ -306,7 +311,8 @@ def tick(config_path, now=None, overrides=None):
         if request is None:
             publication.heartbeat(state, config, now)
             return {"status": "NOT_DUE"}
-        if refused := _preflight(state, config, request):
+        # Expired pauses are dropped only under the lock, so a concurrent settle is never overwritten.
+        if refused := _preflight(state, config, request, now, prune=True):
             return _deferred(state, config, request, now, refused, run_id)
         record = _run(lease, state, config, request, run_id, now)
         return {"status": record["result"], "run_id": run_id}

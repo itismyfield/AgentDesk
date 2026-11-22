@@ -4,7 +4,7 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FixSafety {
+pub enum FixSafety {
     ReadOnly,
     SafeLocalRepair,
     SafeIdleTmuxRepair,
@@ -14,7 +14,7 @@ pub(crate) enum FixSafety {
 }
 
 impl FixSafety {
-    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+    pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "read_only" => Some(Self::ReadOnly),
             "safe_local_repair" => Some(Self::SafeLocalRepair),
@@ -26,7 +26,7 @@ impl FixSafety {
         }
     }
 
-    pub(crate) fn restriction_rank(self) -> u8 {
+    pub fn restriction_rank(self) -> u8 {
         match self {
             Self::ReadOnly => 0,
             Self::SafeLocalRepair => 1,
@@ -37,7 +37,7 @@ impl FixSafety {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read_only",
             Self::SafeLocalRepair => "safe_local_repair",

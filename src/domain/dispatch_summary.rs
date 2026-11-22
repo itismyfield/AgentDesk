@@ -19,7 +19,7 @@ fn normalize_dispatch_summary_text(value: &str) -> Option<String> {
     Some(summary)
 }
 
-pub(crate) fn parse_dispatch_json_text(raw: Option<&str>) -> Option<Value> {
+pub fn parse_dispatch_json_text(raw: Option<&str>) -> Option<Value> {
     raw.and_then(|text| serde_json::from_str::<Value>(text).ok())
 }
 
@@ -194,7 +194,7 @@ fn summarize_verdict(values: &[Option<&Value>]) -> Option<String> {
     Some(format!("Review verdict: {detail}"))
 }
 
-pub(crate) fn summarize_dispatch_result(
+pub fn summarize_dispatch_result(
     dispatch_type: Option<&str>,
     status: Option<&str>,
     result: Option<&Value>,
@@ -227,7 +227,7 @@ pub(crate) fn summarize_dispatch_result(
         .or_else(|| context.and_then(extract_fallback_text))
 }
 
-pub(crate) fn summarize_dispatch_from_text(
+pub fn summarize_dispatch_from_text(
     dispatch_type: Option<&str>,
     status: Option<&str>,
     result_raw: Option<&str>,

@@ -189,7 +189,7 @@ fn requeued(owner: &mut Owner, pick: impl Fn(&RetainedInput) -> bool) -> Snapsho
 }
 
 /// Takes only the cancelled original; an unrelated retained input stays where it is.
-fn cancel(
+pub(super) fn cancel(
     owner: &mut Owner,
     message_id: MessageId,
     reject_ambiguous: bool,
