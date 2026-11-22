@@ -231,11 +231,11 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E38 | 기존 src/services/tui_input/target_epoch.rs:51, src/services/turn_host.rs:182 | 현재 물리 실행기 fence만 유지. 요청 시점 session fence 제거. Herdr start는 #8125 |
 | E39 | 기존 src/services/discord/router/message_handler/intake_turn/adk_thread.rs:82 | thread의 현재 부모/category·정확한 thread 세션 시작은 #8125 계약 소비 |
 | E40 | 기존 src/config.rs:195, src/db/postgres.rs:25 | 새 설정 타입 연결·migration 부팅. 운영 설정 파일을 읽거나 바꾸지 않음 |
-| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:115, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
+| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:116, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
 | E42 | 기존 src/services/discord/router/intake_dispatch/queued.rs:85, :291 | 원본 origin으로 PG 선택/논리 route 복원. queued_submission의 metadata 소실을 source=queued로 우회하지 않음 |
 | E43 | 기존 src/services/discord/router/intake_dispatch/queued.rs:337, :46; src/services/discord/router/intake_dispatch/queued/race_loss.rs:17 | finish/restore/race loss 경로. 정상 busy만 원본 복귀, 확정 실패는 Finalize |
 | E44 | 기존 src/services/discord/queue_io/queued_head_inject.rs:122 | 현재 source=queued/metadata=None. decision origin 감지 후 검증 context 복원과 closed 검사 |
-| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:378, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
+| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:380, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
 | E46 | 기존 src/server/routes/agents.rs:1077, :1120 | handoff HTTP source 전달. decision source 명시 거절 |
 | E47 | 기존 src/services/discord/agent_handoff.rs:529, :564, src/services/discord/health/headless_turn.rs:100 | handoff 내부 source ingress→공통 headless. HTTP 우회 호출도 앞에서 decision 거절; HandoffDecision 대조 |
 | E48 | 기존 src/services/discord/router/thread_binding.rs:80, :89, :95; src/services/discord/http.rs:306 | 기존 helper는 locked 거부/unarchive만, edit helper는 message PATCH만. 새 transport가 Unlock→Unarchive→Render 수행 |

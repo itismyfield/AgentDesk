@@ -24,7 +24,7 @@
 | transition lease | `src/services/discord/session_transition.rs:136`, `src/services/discord/session_transition.rs:157` | Drop 뒤 기존 owner wake를 동일 시점에 실행; map 이전과 wake 구현 이전을 구별 |
 | finalizer | `src/services/discord/turn_finalizer.rs:350`, `src/services/discord/turn_finalizer.rs:618` | 한 actor·기존 Weak 순환 방지·토큰 해제 뒤 완료 발행을 보존 |
 | 완료 버스 | `src/services/discord/turn_completion_events.rs:13`, `src/services/discord/turn_completion_events.rs:82` | capacity 64·phase·lag 후 reconcile 동작 유지 |
-| HTTP fallback | `src/services/discord/shared_state.rs:65` | ready ctx 우선, token REST fallback, 둘 다 없으면 hard failure 유지 |
+| HTTP fallback | `src/services/discord/shared_state.rs:67` | ready ctx 우선, token REST fallback, 둘 다 없으면 hard failure 유지 |
 | answer flush | `src/services/discord/mod.rs:1041`, `src/services/discord/gateway/outbound_messages.rs` | RAII 해제와 queued notice bounded wait의 위치 유지 |
 | 실제 nonce | `src/services/discord/outbound/transport.rs:22` | nonce 문자열·enforce_nonce 플래그를 요청까지 보존 |
 | 관측 scope | `src/services/discord/outbound/raw_output.rs:26`, `src/services/discord/outbound/transport.rs:292` | task-local census를 현재 future·tx/savepoint에서 실행; spawn/선관측 금지 |
@@ -78,7 +78,7 @@
 | `turn_view_reconciler` (1137) | `turn_view_reconciler::TurnViewReconciler` | 40/40 | M 유지. reaction/view reconciliation 실행 객체; engine 완료 bus와 구별. |
 | `readopted_mailbox_ledger` (1138) | `readopted_mailbox_ledger::ReadoptedMailboxLedger` | 0/1 | E 저장/M 접근 경계로 잔류. 값 필드는 ProviderKind/u64/String/bool뿐이고 엔진 원장이다. 단 from_state(26행)는 D 범위 InflightTurnState를 읽고 SharedData helper가 private entries를 갱신하므로 이번 P0의 pure state 폐쇄에서 보류; 봇 전용이라고 분류하지 않음. |
 
-분류의 추가 좌표: `src/services/discord/shared_state.rs:29`(ui), `src/services/discord/shared_state.rs:51`(http), `src/services/discord/shared_state.rs:61`(policy), `src/services/discord/shared_state.rs:413`(override UI 혼합), `src/services/discord/shared_state.rs:443`(dispatch), `src/services/discord/shared_state.rs:625`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:14`(lease 포함), `src/services/discord/inflight.rs:939`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
+분류의 추가 좌표: `src/services/discord/shared_state.rs:31`(ui), `src/services/discord/shared_state.rs:53`(http), `src/services/discord/shared_state.rs:63`(policy), `src/services/discord/shared_state.rs:415`(override UI 혼합), `src/services/discord/shared_state.rs:445`(dispatch), `src/services/discord/shared_state.rs:627`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:14`(lease 포함), `src/services/discord/inflight.rs:939`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
 
 ### 1.2 기존 송신 port와 구현
 
@@ -97,7 +97,7 @@
 
 | prod 구현 5개 | impl 좌표 | override | 기본값을 통해 남는 의미 |
 |---|---|---|---|
-| SerenityTurnOutboundClient | `src/services/discord/gateway.rs:323` | post, reference, nonce, reference+nonce, edit | DM Err |
+| SerenityTurnOutboundClient | `src/services/discord/gateway.rs:324` | post, reference, nonce, reference+nonce, edit | DM Err |
 | HttpOutboundClient | `src/services/discord/outbound/transport.rs:286` | post, edit, DM | reference/nonce 무시하는 기존 fallback |
 | SerenityManualOutboundClient | `src/services/discord/outbound/manual_delivery.rs:185` | post, nonce, DM | edit Err; reference default는 post/nonce 보존 조합에 주의 |
 | SerenityReferenceOutboundClient | `src/services/discord/outbound/serenity_reference.rs:92` | post, reference, reference+nonce | nonce 단독은 default plain post; edit/DM Err |
@@ -176,7 +176,7 @@ P0-C2는 기존 mixed coord map의 단일 entry 생성 경로와 바깥 Arc를 D
 | post_message_with_reference_and_nonce (118) | send_message(..., reply_to + idempotency) | nonce 미지원 client에서도 reference를 잃지 않는 dispatch 분기 |
 | edit_message (136) | edit_message(conv, message, body) → MessageRef | target/returned ID 및 typed length/transient error 유지 |
 | resolve_dm_channel (150) | open_dm(user_ref) → ConversationId | 미지원 Err/실제 DM 생성 동작 보존 |
-| TurnGateway::output_pool (`src/services/discord/gateway.rs:60`) | 기존 TurnContext의 관측 accessor | 송신 caps가 아님. pool handle/None 유지 |
+| TurnGateway::output_pool (`src/services/discord/gateway.rs:61`) | 기존 TurnContext의 관측 accessor | 송신 caps가 아님. pool handle/None 유지 |
 | has_raw_output_boundaries (64) | TurnContext의 관측 accessor | task-local scope 존재 여부를 static caps로 캐시하지 않음 |
 | output_provider (68) | TurnContext 관측 accessor | bot_owner_provider default 위임 보존 |
 | send_message (72) | MessengerOutbound::send_message | send wrapper의 policy/dedup/raw boundary를 기존 위치에서 실행 |
@@ -593,7 +593,7 @@ main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**
 
 행동 변경이 없는 이전이라도 ID/옵션/closure wiring을 실제로 틀리게 만드는 뮤턴트는 유효하다. 같은 Arc 대신 새 registry 생성, nonce 옵션 누락, reference+nonce→nonce 단독 dispatch, UTF16→bytes, rollback 실패→성공, partial continuation→Edited, deferred fallback을 권한 재검증 전에 실행하는 변이를 각각 해당 대상 시험에서 RED로 확인하고 원복 SHA256를 남긴다. 재현 가능한 기존 결함을 수정하게 되면 별도 RED→GREEN→원인 제거 뮤턴트 RED가 필요하며 문서만으로 수정됐다고 하지 않는다.
 
-기존 결함을 넓히지 않는 범위: nonce 미지원 client default(`src/domain/outbound/port.rs:106`), fake delete default Ok(`src/services/discord/gateway.rs:155`), bounded flush timeout, transitional SDK ID map, provider당 bot 배치 관계는 이번에 강한 보장으로 바꾸지 않는다. 신규 Slack delivery의 exactly-once/ledger 보장은 아직 설계하지 않았으며 지금 nonce를 일반 멱등 보장으로 이름만 바꾸지 않는다.
+기존 결함을 넓히지 않는 범위: nonce 미지원 client default(`src/domain/outbound/port.rs:106`), fake delete default Ok(`src/services/discord/gateway.rs:156`), bounded flush timeout, transitional SDK ID map, provider당 bot 배치 관계는 이번에 강한 보장으로 바꾸지 않는다. 신규 Slack delivery의 exactly-once/ledger 보장은 아직 설계하지 않았으며 지금 nonce를 일반 멱등 보장으로 이름만 바꾸지 않는다.
 
 코디네이터는 2026-11-17 혼합 실행 객체 잔류와 P0-C1/C2 분할, cancel-handoff custody의 Discord wrapper 잔류를 승인했다. C1에서 private 폐쇄나 파일/층 승인이 추가로 필요하면 DESIGN_DELTA/FILES를 따로 보고한다. C2는 C1 리뷰 뒤 진행하며, P2의 실행 확장 보존과 나머지 공유 파일 슬롯은 각 조각의 입력을 따른다.
 

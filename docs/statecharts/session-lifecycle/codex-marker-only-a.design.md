@@ -252,7 +252,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `provider_dispatch/owner_input.rs:699,704,852,859,875` | A prelude, 나머지 rest/target/claim 관문 유지. global Unknown→Idle 변경 없음 | AAdmission/AGrant |
 | `turn_presence/activity/unbound.rs:199,319`, `live.rs:1084` | 기존 일반 판정 유지, 새 start 전용 projection은 fresh Reading에만 적용 | lookup 분리·AAdmission |
 | `input_owner/drive.rs:88`, `queued_head/v2.rs:398,411` | 중복 wake는 직렬 drive/front claim에 합류 | ARedeliver/ANoDuplicateEffects |
-| `input_owner/ingress.rs:445,458`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
+| `input_owner/ingress.rs:440,453`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
 | `claude/tui_session_launch.rs:34,67`, `claude.rs:2594,2677,2707` | cleanup 앞에서 outer guard, 실제 create/respawn·spawn stamp까지 운반 | AFenceContender의 실제 구현 의무 |
 | `provider_dispatch.rs:52,609`, `owner_input.rs:439,1025`, `headless_turn.rs:1068`, `intake_turn.rs:2179`, `codex/herdr_turn.rs:65` | Clone carrier와 한번 take, 실제 생성 경계 누락 없이 전달 | AGrant/ACreate 연결·구현 시험 |
 | `queued_head/v2/retained.rs:78`, `source_admission.rs:618` | 직접 terminal/bind TTL에서 A debt pin | 모델 범위 밖 실제 TTL 회귀 |

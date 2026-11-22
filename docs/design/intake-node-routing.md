@@ -137,7 +137,7 @@ function on a worker. We need a refactor that separates
 | Adaptive 500ms→5s polling backoff | `src/services/dispatches/outbox_queue.rs:397` | Same loop tempo |
 | `sessions.instance_id` column (already exists) | `migrations/postgres/0040_sessions_instance_id.sql` | Affinity routing |
 | `session_owner_routing_status()` foreign-detection | `src/services/cluster/session_routing.rs` (`session_owner_routing_status`) | Reuse verbatim |
-| `serenity::http::Http` REST client | `src/services/discord/gateway.rs:95` | Worker-side response posting |
+| `serenity::http::Http` REST client | `src/services/discord/gateway.rs:96` | Worker-side response posting |
 | `credential::read_bot_token()` | `src/credential.rs:1-25` | Worker-side token (no IDENTIFY needed for REST) |
 
 ### Confirmed feasibility constraints
