@@ -244,6 +244,13 @@ class RecordedDiagnostics(unittest.TestCase):
                                 "src/a/inner.rs": "pub(crate) struct Orig;\n"})
         self.assertEqual(got, ({("src/a/inner.rs", 0): ("item",), ("src/a/mod.rs", 0): ("item",)}, "edit"))
 
+    def test_reexport_error_naming_the_original_of_an_alias(self):
+        # KRX round 2: E0364 on `pub use super::{advance_checked as advance_codex_offset_checked};` names
+        # `advance_checked` (the original), not the alias.
+        got = self.glob_follow({"src/a/mod.rs": "pub use self::inner::{Deep as Alias};\nmod inner;\n",
+                                "src/a/inner.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/inner.rs", 0): ("item",)}, "edit"))
+
     def test_through_use_follows_nested_braces(self):
         got = self.glob_follow({"src/a/mod.rs": "pub(crate) use self::{Other, inner::{Deep}};\nmod inner;\n"
                                                 "pub(crate) struct Other;\n",

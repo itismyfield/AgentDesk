@@ -760,7 +760,9 @@ class Widener:
         own = {(rel, index): ("item",)} if widen_line(lines[index]) else {}
         # The flattened tree names the original item behind an alias and the full nested path (P2-2).
         entries = use_entries(text)
-        named = [(path, orig) for path, orig, bound in entries if bound == name and orig != "*"]
+        # E0364/E0365 on an aliased re-export name the original item, other diagnostics the bound name.
+        named = [(path, orig) for path, orig, bound in entries if bound == name and orig != "*"] or \
+            [(path, orig) for path, orig, bound in entries if orig == name]
         targets = named or [(path, name) for path, orig, _ in entries if orig == "*"]
         edits, reached, outcome = {}, False, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
         for segs, orig in targets:
