@@ -21,6 +21,8 @@ rules = [
   { prefix = "", root = "src/db/adk_store_lib.rs", layer = "adapter", reason = "독립 PostgreSQL 저장소를 하나의 Cargo 라이브러리로 노출한다.", evidence = ["src/db/adk_store_lib.rs:1"] },
   { prefix = "cancel_tombstones", root = "src/db/adk_store_lib.rs", layer = "adapter", reason = "취소 tombstone의 pool 결합과 PostgreSQL 단회 소비를 소유한다.", evidence = ["src/db/cancel_tombstones.rs:17", "src/db/cancel_tombstones.rs:86"] },
   { prefix = "provider_session_prompts", root = "src/db/adk_store_lib.rs", layer = "adapter", reason = "provider 프롬프트 조회와 저장 트랜잭션·advisory lock을 소유한다.", evidence = ["src/db/provider_session_prompts.rs:15", "src/db/provider_session_prompts.rs:34"] },
+  { prefix = "", root = "src/adk_test_support_lib.rs", layer = "adapter", reason = "시험 helper를 dev-dependency로만 링크하는 Cargo 라이브러리 root이며 모듈 선언만 둔다.", evidence = ["src/adk_test_support_lib.rs:8"] },
+  { prefix = "test_support", root = "src/adk_test_support_lib.rs", layer = "adapter", reason = "시험의 상한 대기·직렬 tokio runtime·잠금 보유자 watchdog thread와 stderr 보고를 실행하고 소스 렉서를 둔다.", evidence = ["src/test_support.rs:4", "src/test_support/serial_runtime.rs:5", "src/test_support/wait.rs:15"] },
   { prefix = "", root = "src/adk_base_lib.rs", layer = "vocabulary", reason = "공유 값 계약과 순수 helper를 부모 없이 빌드하는 Cargo 라이브러리 root이며 모듈 선언만 둔다.", evidence = ["src/adk_base_lib.rs:8", "src/adk_base_lib.rs:27"] },
   { prefix = "domain", root = "src/adk_base_lib.rs", layer = "vocabulary", reason = "부모가 같은 경로로 재노출하는 seed 값 계약 모듈만 등록한다.", evidence = ["src/adk_base_lib.rs:8", "src/domain/mod.rs:2"] },
   { prefix = "utils", root = "src/adk_base_lib.rs", layer = "foundation", reason = "주어진 값의 DAG·문자열·링크·비밀값 제거 계산 helper를 제공한다.", evidence = ["src/adk_base_lib.rs:27", "src/utils/dag.rs:11"] },

@@ -1,0 +1,31 @@
+[package]
+name = "adk-test-support"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "../../src/adk_test_support_lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+# The crate's own paused-clock tests; the parent's dev-dependency unifies the same feature.
+tokio = { version = "1", features = ["test-util"] }
+
+# The root package's lint table is not inherited by workspace members; keep the
+# same gates here so the test helpers stay under them after leaving the parent.
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+correctness = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+drop_non_drop = "deny"
+mistyped_literal_suffixes = "deny"
+large_enum_variant = "deny"
+result_large_err = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"

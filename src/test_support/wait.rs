@@ -7,12 +7,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Default cap, far below the CI worker limit so one stuck test fails alone; longer caps are explicit.
-pub(crate) const WAIT_CAP: Duration = Duration::from_secs(30);
+pub const WAIT_CAP: Duration = Duration::from_secs(30);
 
 /// Joins `handle` within `cap`, re-raising the thread's own panic; past the cap the thread is left behind.
 /// The cap covers the thread body: thread-local destructors run after it and are not cut.
 #[track_caller]
-pub(crate) fn join_within<T>(handle: JoinHandle<T>, cap: Duration) -> T {
+pub fn join_within<T>(handle: JoinHandle<T>, cap: Duration) -> T {
     let caller = Location::caller();
     let started = Instant::now();
     while !handle.is_finished() {
@@ -29,7 +29,7 @@ pub(crate) fn join_within<T>(handle: JoinHandle<T>, cap: Duration) -> T {
 
 /// Receives one value within `cap`; a dropped sender is also a failure, not a hang.
 #[track_caller]
-pub(crate) fn recv_within<T>(rx: &Receiver<T>, cap: Duration) -> T {
+pub fn recv_within<T>(rx: &Receiver<T>, cap: Duration) -> T {
     let caller = Location::caller();
     let started = Instant::now();
     match rx.recv_timeout(cap) {
@@ -44,7 +44,7 @@ pub(crate) fn recv_within<T>(rx: &Receiver<T>, cap: Duration) -> T {
 /// Awaits `fut` within `cap` on the current tokio runtime; the cap acts only when the future yields,
 /// so a blocking poll or Drop is not cut and runtime teardown stays the caller's.
 #[track_caller]
-pub(crate) fn await_within<F: Future>(fut: F, cap: Duration) -> impl Future<Output = F::Output> {
+pub fn await_within<F: Future>(fut: F, cap: Duration) -> impl Future<Output = F::Output> {
     let caller = Location::caller();
     async move {
         let started = Instant::now();
@@ -58,7 +58,7 @@ pub(crate) fn await_within<F: Future>(fut: F, cap: Duration) -> impl Future<Outp
 /// Polls until `sample` succeeds; each pending sample supplies the failure context.
 /// Wall time bounds cooperative samples even when tokio's clock auto-advances; blocking polls are not cut.
 #[track_caller]
-pub(crate) fn poll_within<T>(
+pub fn poll_within<T>(
     mut sample: impl AsyncFnMut() -> Result<T, String>,
     cap: Duration,
     what: &str,
