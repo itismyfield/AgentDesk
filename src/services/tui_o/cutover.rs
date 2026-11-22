@@ -710,7 +710,7 @@ pub(crate) mod test_override {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", qualified, "--nocapture"])
             .env(CHANNELS_ENV, "[]")
-            // Debug-build intake futures sit near libtest's 2 MiB thread stack; CI codegen overflowed it (11-22 #8320).
+            // Debug-build intake futures can exceed libtest's 2 MiB thread stack under CI codegen.
             .env("RUST_MIN_STACK", "8388608")
             .output()
             .unwrap();
