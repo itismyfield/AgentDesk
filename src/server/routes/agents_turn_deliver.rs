@@ -159,9 +159,6 @@ pub async fn deliver_turn_input(
         return bad_request("invalid_author_id");
     };
     let source = non_empty(body.source).unwrap_or_else(|| "external".to_string());
-    if let Some(refused) = refuse_decision_source(Some(&source), None) {
-        return refused;
-    }
     if source.len() > MAX_SOURCE_LEN {
         return bad_request("source_too_long");
     }
@@ -189,6 +186,15 @@ pub async fn deliver_turn_input(
     {
         super::imessage_input_notice::not_echoed(notice.as_deref(), 0, "deliver", "invalid_origin");
         return bad_request("origin_id_too_long");
+    }
+    // The input as the delivery stores it; the Decision source is refused on exactly these fields.
+    let human_input = json!({"human_input": {
+        "source": source,
+        "origin_id": origin_id,
+        "author_discord_user_id": author_id.to_string(),
+    }});
+    if let Some(refused) = refuse_decision_source(Some(&source), Some(&human_input)) {
+        return refused;
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -243,11 +249,7 @@ pub async fn deliver_turn_input(
         text: text.to_string(),
         author_id,
         source: source.clone(),
-        metadata: Some(json!({"human_input": {
-            "source": source,
-            "origin_id": origin_id,
-            "author_discord_user_id": author_id.to_string(),
-        }})),
+        metadata: Some(human_input),
         channel_name_hint,
     };
     if let Some(selection) = imsg_reply::agy_input::selected(&target.provider, channel_id) {

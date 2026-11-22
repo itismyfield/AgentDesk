@@ -44,7 +44,16 @@ async fn busy_rig(channel: u64, pool: sqlx::PgPool) -> IntakeRig {
 }
 
 async fn start_input(rig: &IntakeRig, source: &str, origin: &str) {
-    let turn = format!("discord:{}:9100095826424066539", rig.channel);
+    // A Decision original takes its event's stable id, as `start::original` gives it.
+    let metadata = json!({"human_input": {"origin_id": origin}});
+    let stable =
+        crate::services::discord::queue_io::input_owner::origin::InputOrigin::decision_identity(
+            rig.channel.get(),
+            Some(source),
+            Some(&metadata),
+        );
+    let message = stable.map_or(9_100_095_826_424_066_539, |(message, _)| message);
+    let turn = format!("discord:{}:{message}", rig.channel);
     let (original, ticket) =
         routine::synthetic_original(&turn, rig.channel.get(), PROMPT, 1).unwrap();
     let context = start::HeadlessProvenance {
@@ -391,6 +400,125 @@ async fn imessage_joins_a_native_busy_pane_without_a_mailbox_turn_pg() {
         .unwrap()
         .unwrap();
     assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// An approved Decision event waiting on this rig's channel, and the origin that names it.
+async fn decision_event(rig: &IntakeRig, pool: &sqlx::PgPool) -> (uuid::Uuid, String) {
+    use crate::db::decisions::{EventKind, test_support::insert_event};
+    let event = (EventKind::Selection, rig.channel.get(), 7);
+    let event = insert_event(pool, event, PROMPT, "normal_wait").await;
+    (event, format!("decision:{event}"))
+}
+
+const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
+
+/// A Decision never enters a running turn: no key reaches the pane, so a draft there is
+/// untouched, and its one original keeps its ticket for the turn boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_decision_waits_as_one_original_without_a_key_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::person_origin::",
+        "busy_decision_waits_as_one_original_without_a_key_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig = busy_rig(7_896_418, pool.clone()).await;
+    let (event, origin) = decision_event(&rig, &pool).await;
+    start_input(&rig, "decision", &origin).await;
+    let admitted = rig.state().await;
+    let (drive, mut settled) = rig.drive();
+    for round in 0..2 {
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+        assert_eq!(
+            next_settle(&mut settled, &rig.trace).await,
+            Err(START_WAITS.into()),
+            "round {round}: {}",
+            rig.trace.text()
+        );
+        assert!(
+            events(&rig.renderer).is_empty(),
+            "no key while the turn runs"
+        );
+        let state = rig.state().await;
+        assert_eq!(state["items"], admitted["items"], "{state}");
+        assert_eq!(state["admission_binds"], admitted["admission_binds"]);
+        assert!(state["head_injection"].is_null(), "{state}");
+        assert_eq!(state["retained_inputs"], json!([]));
+    }
+    assert_eq!(
+        crate::db::decisions::test_support::row(&pool, event)
+            .await
+            .0,
+        "normal_wait"
+    );
+    assert_eq!(rig.mailbox.has_active_turn().await, Ok(true));
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A pane running a turn AgentDesk did not start is busy too: the Decision gets no key there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_never_joins_a_native_busy_pane_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::person_origin::",
+        "decision_never_joins_a_native_busy_pane_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig =
+        IntakeRig::with_storage(7_896_419, true, ProviderKind::Claude, Some(pool.clone())).await;
+    let generation = discord::runtime_store::generation_path().unwrap();
+    fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    fs::write(generation, "1").unwrap();
+    let persistence =
+        QueuePersistenceContext::new(&ProviderKind::Claude, &rig.shared.token_hash, None);
+    rig.mailbox.clear(persistence).await;
+    let native = rig.renderer.join("transcript");
+    fs::write(&native, BUSY).unwrap();
+    fs::remove_file(&rig.transcript).unwrap();
+    fs::hard_link(&native, &rig.transcript).unwrap();
+    let key = discord::adk_session::build_adk_session_key(
+        &rig.shared,
+        rig.channel,
+        &ProviderKind::Claude,
+        None,
+    )
+    .await
+    .unwrap();
+    discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
+    assert_eq!(rig.mailbox.has_active_turn().await, Ok(false));
+    let (event, origin) = decision_event(&rig, &pool).await;
+    start_input(&rig, "decision", &origin).await;
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let waited = next_settle(&mut settled, &rig.trace).await;
+    assert!(
+        waited
+            .as_ref()
+            .is_err_and(|error| error.starts_with("NotSent(")),
+        "{waited:?} {}",
+        rig.trace.text()
+    );
+    assert!(events(&rig.renderer).is_empty(), "no key on a busy pane");
+    let state = rig.state().await;
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert_eq!(state["retained_inputs"], json!([]), "{state}");
+    assert_eq!(
+        crate::db::decisions::test_support::row(&pool, event)
+            .await
+            .0,
+        "normal_wait"
+    );
     drop(rig);
     pool.close().await;
     db.drop().await;

@@ -383,6 +383,7 @@ src/
 │   ├── channel_home_preferences.rs
 │   ├── decision_forums.rs
 │   ├── decisions.rs
+│   ├── decisions_support_tests.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -5107,6 +5108,7 @@ src/
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
+│   │   │   │   ├── decision.rs
 │   │   │   │   ├── effort_continue.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs

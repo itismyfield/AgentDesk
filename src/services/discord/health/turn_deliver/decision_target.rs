@@ -22,8 +22,9 @@ pub enum FirstAttempt {
     AlreadyReserved,
     /// Real activity holds the channel: the one original waits for the turn boundary.
     NormalWait { turn_id: String },
-    /// An idle target took the input as its first prompt; no further deliver follows.
-    Delivered { turn_id: String },
+    /// A start took the input as its first prompt and answered before the provider read it:
+    /// the row stays `may_have_sent` until that turn's receipt settles it. No deliver follows.
+    Started { turn_id: String },
     /// Confirmed not sent and closed with this reason; the input is not kept for a retry.
     Failed(String),
     /// A write may have happened: the row stays `may_have_sent` and nothing is sent again.
@@ -32,8 +33,9 @@ pub enum FirstAttempt {
 
 /// What one normalization of an absent or refusing session reported.
 pub enum Normalized {
-    /// The session started with this input as its first prompt.
-    Delivered(String),
+    /// The session start carried this input as its first prompt, under this turn. Like any
+    /// start it is no receipt: the event settles from the evidence that turn leaves.
+    FirstPrompt(String),
     /// A session is up and the input still has to be delivered.
     Started,
     NotSentRefused(String),
@@ -76,6 +78,7 @@ enum Tried {
 struct Workflow<'a> {
     pool: &'a PgPool,
     event: Uuid,
+    approved: &'a DecisionProvenance,
 }
 
 impl Workflow<'_> {
@@ -95,8 +98,23 @@ impl Workflow<'_> {
         Ok(FirstAttempt::Failed(reason))
     }
 
+    /// Ends an event whose original the owner may have admitted: the closing fence first, then
+    /// exactly that original leaves the owner's queue, so no later wake or restart runs it.
+    async fn close_admitted(&self, reason: String) -> FirstAttempt {
+        let event = (
+            self.event,
+            self.approved.origin(),
+            self.approved.channel_id(),
+        );
+        let closed = crate::services::discord::decision_drain::close_admitted;
+        if let Err(error) = closed(self.pool, event, &reason).await {
+            tracing::warn!(event_id = %self.event, %error, "decision close left for settlement");
+        }
+        FirstAttempt::Failed(reason)
+    }
+
     async fn try_once<P: DeliveryPorts>(&self, ports: &P) -> Result<Tried, sqlx::Error> {
-        use AttemptState::{Delivered, MayHaveSent, NormalWait, Resolving};
+        use AttemptState::{MayHaveSent, NormalWait, Resolving};
         if ports.owner_takes().await {
             // The owner only admits the original under the event's ticket; its pump writes later.
             return Ok(Tried::Done(match ports.try_start().await {
@@ -106,19 +124,16 @@ impl Workflow<'_> {
                     FirstAttempt::NormalWait { turn_id }
                 }
                 StartAttempt::Started(turn_id) => {
-                    self.step((Resolving, Delivered), Some(&turn_id), None)
+                    self.step((Resolving, MayHaveSent), Some(&turn_id), None)
                         .await?;
-                    FirstAttempt::Delivered { turn_id }
+                    FirstAttempt::Started { turn_id }
                 }
                 // Pending and refused admissions answer alike, and an owner start's own errors
                 // are not proof that nothing was admitted: neither continues into normalization.
-                StartAttempt::Busy => {
-                    self.fail(Resolving, "owner_admission_pending".into())
-                        .await?
-                }
+                StartAttempt::Busy => self.close_admitted("owner_admission_pending".into()).await,
                 StartAttempt::Unavailable(error) | StartAttempt::InvalidTarget(error) => {
-                    self.fail(Resolving, format!("owner_start_refused: {error}"))
-                        .await?
+                    self.close_admitted(format!("owner_start_refused: {error}"))
+                        .await
                 }
             }));
         }
@@ -128,10 +143,12 @@ impl Workflow<'_> {
                 return Ok(Tried::Done(FirstAttempt::AlreadyReserved));
             }
             let not_sent = match ports.try_start().await {
+                // The start spawned its worker; whether the provider took the prompt is not
+                // known here, so the journal only gains the turn its receipt will name.
                 StartAttempt::Started(turn_id) | StartAttempt::Accepted(turn_id) => {
-                    self.step((MayHaveSent, Delivered), Some(&turn_id), None)
+                    self.step((MayHaveSent, MayHaveSent), Some(&turn_id), None)
                         .await?;
-                    return Ok(Tried::Done(FirstAttempt::Delivered { turn_id }));
+                    return Ok(Tried::Done(FirstAttempt::Started { turn_id }));
                 }
                 // Each reserved-start error is returned before anything is spawned.
                 StartAttempt::Busy => None,
@@ -175,7 +192,7 @@ where
     R: Fn(&DecisionProvenance) -> RF,
     RF: Future<Output = Result<P, HumanInputError>>,
 {
-    use AttemptState::{Delivered, MayHaveSent, Normalizing, Resolving};
+    use AttemptState::{MayHaveSent, Normalizing, Resolving};
     let Some(event) = decisions::load_event(pool, event_id).await? else {
         return Ok(FirstAttempt::NotApproved);
     };
@@ -190,9 +207,11 @@ where
     if !decisions::reserve_first_attempt(pool, event_id, &ticket).await? {
         return Ok(FirstAttempt::AlreadyReserved);
     }
+    crate::services::discord::decision_drain::note_open();
     let workflow = Workflow {
         pool,
         event: event_id,
+        approved: &event,
     };
     loop {
         let refusal = match resolve(&event).await {
@@ -209,11 +228,11 @@ where
             return workflow.fail(Resolving, refusal).await;
         }
         match normalizer.normalize_once().await {
-            Normalized::Delivered(turn_id) => {
+            Normalized::FirstPrompt(turn_id) => {
                 workflow
-                    .step((Normalizing, Delivered), Some(&turn_id), None)
+                    .step((Normalizing, MayHaveSent), Some(&turn_id), None)
                     .await?;
-                return Ok(FirstAttempt::Delivered { turn_id });
+                return Ok(FirstAttempt::Started { turn_id });
             }
             Normalized::Started => {
                 if !workflow.step((Normalizing, Resolving), None, None).await? {
