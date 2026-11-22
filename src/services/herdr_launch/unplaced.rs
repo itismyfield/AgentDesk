@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
+use futures::future::BoxFuture;
 use sqlx::PgPool;
 
 use super::{
@@ -219,6 +220,9 @@ pub(crate) struct Unplaced<'a> {
     pub endpoint: &'a HerdrLaunchEndpoint,
     pub host: Arc<dyn HerdrLaunchHost>,
     pub quiet: Duration,
+    /// Closes an orphan no row records while `holds` still reads true under its fence.
+    pub close_unrecorded:
+        for<'b> fn(&'b HostedExecution, BoxFuture<'b, bool>) -> BoxFuture<'b, Result<(), String>>,
 }
 
 /// Resolves the Pending while `lease` holds its channel; every write is a CAS on what was read.
@@ -414,30 +418,12 @@ async fn close_orphans(
                 source_ref(target.owner, &nonce),
             )
         };
-        let holds = async { unplaced(target).await == Ok(true) };
-        close_unrecorded(&orphan, holds)
+        let holds = Box::pin(async { unplaced(target).await == Ok(true) });
+        (target.close_unrecorded)(&orphan, holds)
             .await
             .map_err(|why| format!("orphan {nonce} not closed: {why}"))?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-async fn close_unrecorded(
-    orphan: &HostedExecution,
-    holds: impl std::future::Future<Output = bool>,
-) -> Result<(), String> {
-    let closed = crate::services::discord::herdr_terminate::close_unrecorded(orphan, holds).await;
-    closed.map_err(|result| format!("{result:?}"))
-}
-
-/// The terminate service is Unix only; elsewhere an orphan is never closed and the row holds.
-#[cfg(not(unix))]
-async fn close_unrecorded(
-    _: &HostedExecution,
-    _: impl std::future::Future<Output = bool>,
-) -> Result<(), String> {
-    Err("unsupported on this platform".into())
 }
 
 /// Records the pane and its probed provider in one CAS; a failed probe writes nothing.

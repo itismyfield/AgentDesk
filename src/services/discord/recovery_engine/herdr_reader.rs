@@ -426,6 +426,7 @@ fn resolve_unplaced_rows(
             endpoint: &crate::services::turn_host::launch_endpoint(endpoint),
             host,
             quiet: quiet(),
+            close_unrecorded: crate::services::discord::HERDR_OWNER_PORT.close_unrecorded,
         };
         runtime.block_on(resolve_unplaced(&lease, &target));
     }

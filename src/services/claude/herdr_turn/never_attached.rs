@@ -20,7 +20,7 @@ pub(super) fn probe_again(
     };
     launched(runtime.block_on(launch_herdr_session(
         turn.pool,
-        launch(turn, None, false),
+        launch(turn, None, false, ports.owner_port()),
         never,
         host,
     )))

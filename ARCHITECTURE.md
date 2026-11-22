@@ -3734,6 +3734,7 @@ src/
 │   │   ├── gateway_lease_diagnostics_tests.rs
 │   │   ├── gateway_queue_owner.rs
 │   │   ├── health.rs
+│   │   ├── herdr_owner_port.rs
 │   │   ├── herdr_terminate.rs
 │   │   ├── herdr_terminate_exit_tests.rs
 │   │   ├── herdr_terminate_route_tests.rs
@@ -3963,6 +3964,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── clear_epoch.rs
 │   │   ├── codex_resume.rs
+│   │   ├── owner_port.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
@@ -5357,6 +5359,7 @@ src/
 │   ├── input_validation.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
+│   ├── observed_task.rs
 │   ├── parsed_bytes.rs
 │   ├── redact.rs
 │   ├── secret_file.rs

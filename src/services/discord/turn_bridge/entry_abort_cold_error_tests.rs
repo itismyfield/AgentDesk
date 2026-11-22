@@ -102,6 +102,9 @@ impl Launches {
 }
 
 impl crate::services::claude::herdr_turn::HerdrTurnPorts for Launches {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
         self.host()
     }
@@ -127,6 +130,9 @@ impl crate::services::claude::herdr_turn::HerdrTurnPorts for Launches {
 }
 
 impl crate::services::codex::herdr_turn::CodexHerdrPorts for Launches {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
         self.host()
     }

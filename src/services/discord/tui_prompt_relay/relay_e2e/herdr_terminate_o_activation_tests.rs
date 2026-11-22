@@ -177,6 +177,7 @@ async fn launch(
         resume: false,
         provider_root: None,
         resume_start: None,
+        takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
     };
     let host = Arc::new(Successor("claude"));
     let outcome = launch_herdr_session(pool, launch, prepare, host).await;

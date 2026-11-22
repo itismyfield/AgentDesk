@@ -41,7 +41,7 @@ use crate::services::codex_tui::session::{
 use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint;
 use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
-    HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, clear_epoch,
+    HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, OwnerPort, clear_epoch,
     launch_herdr_session,
     unplaced::{self, Resolution, Unplaced},
 };
@@ -108,6 +108,8 @@ pub(crate) trait CodexHerdrPorts {
     fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
         Err("no channel lease".into())
     }
+    /// The owner runtime's side of this turn's launch and unplaced resolution.
+    fn owner_port(&self) -> OwnerPort;
 }
 
 /// Why a pane took no prompt; nothing was written to it.
@@ -193,7 +195,11 @@ fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
         .with_cwd(Some(turn.working_dir))
 }
 
-fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLaunch {
+fn launch_of(
+    turn: &CodexHerdrTurn<'_>,
+    provider_root: Option<&Path>,
+    owner_port: OwnerPort,
+) -> HerdrLaunch {
     // Only a new execution of a restart's greeting resumes; a selector alone never does.
     #[cfg(unix)]
     let resume = provider_root.and_then(|_| restart_intent::resume_of(turn));
@@ -208,6 +214,7 @@ fn launch_of(turn: &CodexHerdrTurn<'_>, provider_root: Option<&Path>) -> HerdrLa
         resume: resume_start.is_some(),
         provider_root: provider_root.map(|home| home.join("sessions")),
         resume_start,
+        takeover_ended: owner_port.takeover_ended,
     }
 }
 
@@ -239,7 +246,7 @@ fn fresh_launch(
         write_codex_tui_launch_options_fingerprint(logical, &kept_options(nonce, &options))?;
         Ok(command)
     };
-    let launch = launch_of(turn, Some(&home));
+    let launch = launch_of(turn, Some(&home), ports.owner_port());
     launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
 }
 
@@ -265,6 +272,7 @@ fn pending_launch(
             endpoint: &turn.endpoint,
             host: ports.launch_host().ok_or("herdr turn: no launch host")?,
             quiet: unplaced::quiet(),
+            close_unrecorded: ports.owner_port().close_unrecorded,
         };
         let lease = ports.unplaced_lease(&turn.owner);
         return match unplaced::resolve_for_turn(runtime, lease, target)? {
@@ -277,7 +285,7 @@ fn pending_launch(
         let never = |_: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
             Err("a pending pane is never created again".into())
         };
-        let launch = launch_of(turn, None);
+        let launch = launch_of(turn, None, ports.owner_port());
         launched(runtime.block_on(launch_herdr_session(turn.pool, launch, never, host)))?;
     }
     Ok(nonce.clone())

@@ -608,7 +608,7 @@ mod herdr {
     use crate::services::discord::tui_prompt_relay::herdr_source::{
         HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
     };
-    use crate::services::herdr_launch::HerdrLaunchHost;
+    use crate::services::herdr_launch::{HerdrLaunchHost, OwnerPort};
     use crate::services::provider::ProviderKind;
     use crate::services::session_host::HerdrTarget;
     use crate::services::tui_prompt_dedupe::binding_events::SourceId;
@@ -738,6 +738,10 @@ mod herdr {
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
         }
+
+        fn owner_port(&self) -> OwnerPort {
+            crate::services::discord::HERDR_OWNER_PORT
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -777,6 +781,10 @@ mod herdr {
 
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
+        }
+
+        fn owner_port(&self) -> OwnerPort {
+            crate::services::discord::HERDR_OWNER_PORT
         }
 
         fn hold_notice(&self) -> Option<Arc<herdr_turn::HoldNotice>> {
