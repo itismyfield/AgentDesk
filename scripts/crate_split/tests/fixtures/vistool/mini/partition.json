@@ -1,0 +1,1 @@
+{"base": "fixture", "order": ["LOW", "HIGH"], "crates": {"LOW": ["core", "services::store"], "HIGH": ["(root)", "app", "services", "services::web"]}}

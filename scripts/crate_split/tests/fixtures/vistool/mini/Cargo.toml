@@ -1,0 +1,13 @@
+[package]
+name = "mini"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mini"
+path = "src/main.rs"

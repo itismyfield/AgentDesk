@@ -1,0 +1,93 @@
+--- a/src/core.rs
++++ b/src/core.rs
+@@ -1,46 +1,46 @@
+-pub(crate) mod util;
++pub mod util;
+ 
+ use crate::services::store::*;
+ 
+-pub(crate) use self::util::Shared;
++pub use self::util::Shared;
+ 
+-pub(crate) struct Config {
+-    pub(crate) name: String,
+-    pub(crate) limit: u32,
++pub struct Config {
++    pub name: String,
++    pub limit: u32,
+ }
+ 
+ impl Config {
+-    pub(crate) fn new(name: &str) -> Self {
++    pub fn new(name: &str) -> Self {
+         Config { name: name.to_string(), limit: COUNT }
+     }
+ 
+-    pub(crate) fn limit(&self) -> u32 {
++    pub fn limit(&self) -> u32 {
+         self.limit
+     }
+ }
+ 
+-pub(crate) struct Point {
+-    pub(crate) x: u32,
+-    pub(crate) y: u32,
++pub struct Point {
++    pub x: u32,
++    pub y: u32,
+ }
+ 
+-pub(crate) struct Span {
+-    pub(crate) lo: u32,
++pub struct Span {
++    pub lo: u32,
+ }
+ 
+-pub(crate) fn span_lo(span: &Span) -> u32 {
++pub fn span_lo(span: &Span) -> u32 {
+     span.lo
+ }
+ 
+-pub(crate) struct Id(pub(crate) u32);
++pub struct Id(pub u32);
+ 
+-pub(crate) struct Token;
++pub struct Token;
+ 
+-pub(crate) fn make_token() -> Token {
++pub fn make_token() -> Token {
+     Token
+ }
+ 
+-pub(crate) fn helper() -> u32 {
++pub fn helper() -> u32 {
+     3
+ }
+ 
+--- a/src/core/util.rs
++++ b/src/core/util.rs
+@@ -1,6 +1,6 @@
+-pub(crate) struct Shared(pub(crate) u32);
++pub struct Shared(pub u32);
+ 
+-pub(crate) fn tidy(value: u32) -> u32 {
++pub fn tidy(value: u32) -> u32 {
+     value + 1
+ }
+ 
+--- a/src/services/store.rs
++++ b/src/services/store.rs
+@@ -1,10 +1,10 @@
+ pub(crate) const COUNT: u32 = 2;
+ 
+-pub(super) struct Thing {
+-    pub(super) size: u32,
++pub struct Thing {
++    pub size: u32,
+ }
+ 
+-pub(super) fn thing() -> Thing {
++pub fn thing() -> Thing {
+     Thing { size: COUNT }
+ }
+ 
