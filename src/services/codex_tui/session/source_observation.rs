@@ -469,7 +469,7 @@ pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
         mode
     })
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { pub(crate) static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
 
 /// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.

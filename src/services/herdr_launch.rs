@@ -280,7 +280,7 @@ pub(crate) enum HerdrLaunchError {
     Evidence(EvidenceGap),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static WRITER_ACCEPTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -288,10 +288,10 @@ thread_local! {
 }
 
 /// Stands in for the writer's readiness on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct WriterAcceptsGuard(Option<bool>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAcceptsGuard {
     WriterAcceptsGuard(WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)))
 }

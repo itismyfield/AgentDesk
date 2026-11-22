@@ -168,7 +168,7 @@ fn pop_front(tmux_session_name: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn adopt_from_hook(
     command_session_id: &str,
     payload_session_id: &str,
@@ -543,7 +543,7 @@ pub(crate) fn set_artifact_probe(probe: Option<ArtifactProbe>) {
     *ARTIFACT_PROBE.lock().unwrap_or_else(|p| p.into_inner()) = probe;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn deferred_adoption_count() -> usize {
     deferred().values().map(VecDeque::len).sum()
 }

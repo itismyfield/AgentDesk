@@ -369,14 +369,14 @@ pub(crate) fn local_node() -> Option<String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED: std::cell::RefCell<Option<BootSessionHosts>> = const { std::cell::RefCell::new(None) };
     static FORCED_MIGRATION: std::cell::RefCell<Option<BootMigration>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replaces the boot section on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
 
 /// Installs a real selection's hosts and migration metadata on this thread until dropped.
@@ -391,7 +391,7 @@ pub(crate) fn force_selected_for_test(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_for_test(
     local_node: Option<&str>,
     channels: &[(u64, &str)],
