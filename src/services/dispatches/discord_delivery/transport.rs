@@ -214,7 +214,7 @@ pub(crate) async fn post_raw_message_once(
     message: &str,
 ) -> Result<String, DispatchMessagePostError> {
     let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
-    let payload = crate::services::discord::http::relay_message_payload(message);
+    let payload = crate::services::message_outbox::mentions::relay_message_payload(message);
     let response = send_with_rate_limit_retry(|| {
         client
             .post(&message_url)
@@ -718,7 +718,11 @@ pub(crate) async fn archive_duplicate_slot_threads(
             continue;
         }
 
-        match crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await {
+        match crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg(
+            pg_pool, thread_id,
+        )
+        .await
+        {
             Ok(true) => {
                 tracing::warn!(
                     "[dispatch] Skipping duplicate slot thread archive for {thread_id}: active turn or fresh inflight still present"

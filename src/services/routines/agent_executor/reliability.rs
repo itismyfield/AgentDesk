@@ -274,9 +274,7 @@ impl RoutineAgentExecutor {
                 }
                 PaneLiveness::Live | PaneLiveness::ProbeError => return None,
             };
-        let channel_id = crate::services::discord::host_key_derivation::recorded_channel_id(
-            result_json.get("channel_id"),
-        );
+        let channel_id = recorded_channel_id(result_json.get("channel_id"));
         crate::services::discord::host_key_derivation::routine_session_failure_admitted(
             self.health_registry.as_deref(),
             &self.pool,
@@ -287,6 +285,15 @@ impl RoutineAgentExecutor {
         )
         .await
         .then_some(message)
+    }
+}
+
+/// The turn channel a routine run recorded: a decimal string as the executor writes it.
+fn recorded_channel_id(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    match value.as_str() {
+        Some(text) => text.parse().ok(),
+        None => value.as_u64(),
     }
 }
 

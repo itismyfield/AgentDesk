@@ -15,6 +15,8 @@ mod agent_memory;
 pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
+mod channel_alias;
+pub(crate) use channel_alias::resolve_channel_alias;
 pub(crate) mod runtime_profile;
 pub(crate) mod test_instance;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};

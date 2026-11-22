@@ -39,11 +39,11 @@ mod id_bridge;
 mod idle_detector;
 mod idle_relay_drift;
 mod inflight;
-pub(crate) use inflight::install_codex_absence_reader;
 #[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
+pub(crate) use inflight::{install_codex_absence_reader, install_engine_probes};
 mod inflight_heartbeat_sweeper;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
@@ -659,42 +659,8 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     )
 }
 
-async fn has_active_session_for_thread_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    let Some(pool) = pg_pool else {
-        return Ok(false);
-    };
-
-    let row = sqlx::query(
-        "SELECT 1
-         FROM sessions
-         WHERE thread_channel_id = $1
-           AND LOWER(COALESCE(status, '')) IN ('turn_active', 'working')
-           AND COALESCE(last_heartbeat, created_at) > NOW() - INTERVAL '10 minutes'
-         LIMIT 1",
-    )
-    .bind(thread_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load active session for thread {thread_id}: {error}"))?;
-
-    Ok(row.is_some())
-}
-
-pub(crate) async fn should_defer_thread_archive_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    if let Ok(channel_id) = thread_id.parse::<u64>()
-        && has_fresh_inflight_for_channel(channel_id)
-    {
-        return Ok(true);
-    }
-
-    has_active_session_for_thread_pg(pg_pool, thread_id).await
-}
+#[cfg(test)]
+pub(crate) use crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg;
 
 /// Consume a legacy deferred-restart signal.
 ///

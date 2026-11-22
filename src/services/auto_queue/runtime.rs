@@ -521,7 +521,11 @@ async fn filter_safe_slot_thread_reset_targets(
             );
             continue;
         }
-        match crate::services::discord::should_defer_thread_archive_pg(Some(pool), &thread_id).await
+        match crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg(
+            Some(pool),
+            &thread_id,
+        )
+        .await
         {
             Ok(true) => {
                 tracing::warn!(
