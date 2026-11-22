@@ -288,6 +288,6 @@ pub(crate) async fn clock(pool: &PgPool) -> Result<chrono::DateTime<chrono::Utc>
     sqlx::query_scalar("SELECT NOW()").fetch_one(pool).await
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[path = "decisions_support_tests.rs"]
 pub(crate) mod test_support;

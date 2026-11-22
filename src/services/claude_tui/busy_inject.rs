@@ -62,9 +62,9 @@ mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
 pub(crate) mod stash;
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 mod stash_tests;
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub(crate) use stash_tests::{FAKE_TUI as FAKE_STASH_TUI, StashChannelGuard};
 
 use std::io::{BufRead, Seek, SeekFrom};

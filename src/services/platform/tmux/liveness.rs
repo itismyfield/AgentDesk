@@ -2,7 +2,7 @@ use super::*;
 
 const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) mod tests;
 
 pub(super) fn pane_liveness_using(

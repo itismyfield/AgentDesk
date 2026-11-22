@@ -96,7 +96,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/provider/restart_report_env.rs`, `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | Default ON; standard false tokens disable the live panel. |

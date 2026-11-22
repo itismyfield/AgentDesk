@@ -142,7 +142,6 @@ pub(crate) fn assert_test_config_write_within_root(root: &std::path::Path, path:
     );
 }
 
-#[cfg(test)]
 fn probe_root_config_isolation(prior_present: bool, owning: bool) {
     crate::test_env_panic_probe::assert_restores_on_return_and_panic(
         &["AGENTDESK_ROOT_DIR", "AGENTDESK_CONFIG"],

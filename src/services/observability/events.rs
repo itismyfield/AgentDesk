@@ -20,7 +20,7 @@ mod capture_stress_tests;
 mod capture_tests;
 #[cfg(test)]
 mod overflow_tests;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) mod test_capture;
 
 use serde::Serialize;

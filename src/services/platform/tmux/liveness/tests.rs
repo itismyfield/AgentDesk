@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(test)]
 use std::cell::RefCell;
 
 pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Result<Output, String> {
