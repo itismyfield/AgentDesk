@@ -1153,6 +1153,61 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertEqual(status, 0, events)
         self.assertEqual(events, "timeout=5\n")
 
+    def _run_psql_resolver(self, path_dir: Path, fallback: Path):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("PG_PSQL_FALLBACK=")
+        end = deploy.index("_pg_sql_probe() {", start)
+        script = (
+            "set -euo pipefail\n"
+            + deploy[start:end]
+            + f"PG_PSQL_FALLBACK={shlex.quote(str(fallback))}\n"
+            + f"PATH={shlex.quote(str(path_dir))}\n"
+            + "_pg_psql_bin\n"
+        )
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=10
+        )
+
+    @staticmethod
+    def _fake_psql(directory: Path) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        psql = directory / "psql"
+        psql.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        psql.chmod(0o755)
+        return psql
+
+    def test_psql_resolver_prefers_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            on_path = self._fake_psql(root / "bin")
+            fallback = self._fake_psql(root / "opt")
+            p = self._run_psql_resolver(root / "bin", fallback)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout, f"{on_path}\n")
+            self.assertEqual(p.stderr, "")
+
+    def test_psql_resolver_falls_back_to_opt_path_when_link_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            fallback = self._fake_psql(root / "opt")
+            p = self._run_psql_resolver(root / "bin", fallback)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout, f"{fallback}\n")
+            self.assertIn("psql not on PATH; using", p.stderr)
+        self.assertIn(
+            '"${psql_env[@]}" "$psql_bin" --no-psqlrc',
+            DEPLOY.read_text(encoding="utf-8"),
+        )
+
+    def test_psql_resolver_fails_without_path_or_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            p = self._run_psql_resolver(root / "bin", root / "opt" / "psql")
+            self.assertEqual(p.returncode, 1)
+            self.assertEqual(p.stdout, "")
+
     def test_probe_preserves_explicit_connect_timeout(self):
         status, events = self._run_production_probe(
             "postgresql://agentdesk@db.internal/agentdesk?connect_timeout=17"
