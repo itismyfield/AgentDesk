@@ -68,6 +68,7 @@ pub(super) async fn queued_attempt(
                 request.channel_id,
                 parent,
                 gate,
+                super::Origin::queued_head_gate_enabled,
             )
             .await;
         let held = match held {

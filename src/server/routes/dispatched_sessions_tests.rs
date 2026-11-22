@@ -846,7 +846,8 @@ async fn force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg() {
             stored_provider,
         };
         let kill = crate::services::turn_lifecycle::force_kill_turn_for_row;
-        let lifecycle = kill(None, &target, row, "operator cleanup", "force_kill_api").await;
+        let registry = None::<&crate::services::discord::health::HealthRegistry>;
+        let lifecycle = kill(registry, &target, row, "operator cleanup", "force_kill_api").await;
         assert!(
             lifecycle.host_guard_kept(),
             "{condition:?}: a missing row is kept"
