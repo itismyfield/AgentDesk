@@ -319,7 +319,7 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .0
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use router::TurnKind;
 pub(crate) use router::{
     HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
