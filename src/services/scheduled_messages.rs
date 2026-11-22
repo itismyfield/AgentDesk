@@ -1220,7 +1220,7 @@ mod accepted_classification_tests {
     fn accepted_is_never_a_consumed_command() {
         assert!(!matches!(
             start_disposition(
-                crate::services::discord::HeadlessTurnStartStatus::Accepted,
+                crate::services::turn_orchestrator::HeadlessTurnStartStatus::Accepted,
                 "same-turn"
             ),
             AgentTurnStartDisposition::Consumed(_)

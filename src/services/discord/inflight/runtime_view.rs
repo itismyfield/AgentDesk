@@ -1,7 +1,9 @@
-//! The inflight row as runtime replay and Codex absence checks read it, without naming this store.
+//! The inflight row as runtime replay, follow-up retries and Codex absence checks read it,
+//! without naming this store.
 
 use super::{InflightTurnIdentity, InflightTurnState};
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 use crate::services::discord::codex_absence::row::{self, CodexRow, TurnIdentity};
 use crate::services::discord::replay_policy::row::ReplayRow;
 use crate::services::provider::ProviderKind;
@@ -83,5 +85,38 @@ impl ReplayRow for InflightTurnState {
     }
     fn current_version() -> u32 {
         super::inflight_state_version()
+    }
+}
+
+impl crate::services::discord::busy_followup_retry_store::FollowupRetryRow for InflightTurnState {
+    fn user_msg_id(&self) -> u64 {
+        self.user_msg_id
+    }
+    fn effective_busy_followup_retry_user_msg_id(&self) -> u64 {
+        InflightTurnState::effective_busy_followup_retry_user_msg_id(self)
+    }
+    fn request_owner_user_id(&self) -> u64 {
+        self.request_owner_user_id
+    }
+    fn source_message_ids(&self) -> &[u64] {
+        &self.source_message_ids
+    }
+    fn user_text(&self) -> &str {
+        &self.user_text
+    }
+    fn followup_reply_context(&self) -> &Option<String> {
+        &self.followup_reply_context
+    }
+    fn followup_has_reply_boundary(&self) -> bool {
+        self.followup_has_reply_boundary
+    }
+    fn followup_merge_consecutive(&self) -> bool {
+        self.followup_merge_consecutive
+    }
+    fn followup_pending_uploads(&self) -> &PendingUploads {
+        &self.followup_pending_uploads
+    }
+    fn followup_preserve_on_cancel(&self) -> bool {
+        self.followup_preserve_on_cancel
     }
 }

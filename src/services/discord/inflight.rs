@@ -534,15 +534,7 @@ pub(in crate::services::discord) fn delete_inflight_state_file_checked(
     result.into_inner()
 }
 
-/// The JS `agentdesk.inflight.remove` result; only `Removed` means the row was unlinked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PolicyOpRemoveOutcome {
-    Removed,
-    Missing,
-    ProtectedReceipt,
-    Busy,
-    Io(String),
-}
+pub(crate) use crate::engine::ops::PolicyOpRemoveOutcome;
 /// Unlinks one row for the JS policy op: under the row lock a fresh read refuses a receipt row.
 pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOutcome {
     use PolicyOpRemoveOutcome as Outcome;
@@ -603,10 +595,10 @@ pub(crate) mod policy_op_unlink_hook {
 /// The one path the JS policy op names from outside this store.
 pub(crate) mod policy_op {
     #[cfg(test)]
+    pub(crate) use super::PolicyOpRemoveOutcome as RemoveOutcome;
+    #[cfg(test)]
     pub(crate) use super::policy_op_unlink_hook as unlink_hook;
-    pub(crate) use super::{
-        PolicyOpRemoveOutcome as RemoveOutcome, remove_inflight_row_for_policy_op as remove_row,
-    };
+    pub(crate) use super::remove_inflight_row_for_policy_op as remove_row;
 }
 
 fn bump_save_generation_for_write(

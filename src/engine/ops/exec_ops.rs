@@ -13,6 +13,16 @@ use std::time::Duration;
 
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
+/// The JS `agentdesk.inflight.remove` result; only `Removed` means the row was unlinked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyOpRemoveOutcome {
+    Removed,
+    Missing,
+    ProtectedReceipt,
+    Busy,
+    Io(String),
+}
+
 #[cfg(test)]
 #[path = "exec_ops/circuit_evidence_tests.rs"]
 mod circuit_evidence_tests;
@@ -320,7 +330,7 @@ fn register_exec_ops_with_runner<'js>(
                         .join(&provider)
                         .join(format!("{channel_id}.json"));
                     if path.exists() {
-                        use crate::services::discord::policy_op::RemoveOutcome as Outcome;
+                        use self::PolicyOpRemoveOutcome as Outcome;
                         let refused = |error: &str, reason: &str| {
                             serde_json::json!({"ok": false, "error": error, "reason": reason})
                                 .to_string()
