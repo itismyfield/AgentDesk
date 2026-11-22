@@ -7,9 +7,9 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::admin_host_guard::{ManagedResetVerdict, managed_reset_verdict};
-use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::admin_host_guard::ManagedResetVerdict;
 use crate::services::discord::host_teardown_gate::row_host_refusal;
+use crate::services::engine_runtime::health_port::ManagedResetPort;
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
 
@@ -202,8 +202,19 @@ async fn clear_slot_sessions_with_owner_pg(
     .map_err(|error| format!("clear postgres slot sessions for {thread_count} thread(s): {error}"))
 }
 
+/// The one runtime capability a slot clear takes from the health registry: a reset verdict.
+pub(crate) type SlotRuntimeHealth = Arc<dyn ManagedResetPort<ManagedResetVerdict>>;
+
+/// The registry as the slot-clear port, so callers in KE never name the registry type.
+pub(crate) fn slot_runtime_health<R>(registry: Option<Arc<R>>) -> Option<SlotRuntimeHealth>
+where
+    R: ManagedResetPort<ManagedResetVerdict> + 'static,
+{
+    registry.map(|registry| registry as SlotRuntimeHealth)
+}
+
 pub async fn clear_slot_threads_for_slot_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -212,7 +223,7 @@ pub async fn clear_slot_threads_for_slot_pg(
 }
 
 pub(super) async fn clear_slot_threads_for_runs_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -222,7 +233,7 @@ pub(super) async fn clear_slot_threads_for_runs_pg(
 }
 
 async fn clear_slot_threads_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -469,7 +480,7 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
 /// check only reads and finishes before the caller's first write.
 async fn filter_safe_slot_thread_reset_targets(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<&dyn ManagedResetPort<ManagedResetVerdict>>,
     target: &SlotClearTarget,
 ) -> Result<(Vec<u64>, Vec<ManagedResetVerdict>), String> {
     let (mut safe_to_reset, mut verdicts) = (Vec::new(), Vec::new());
@@ -498,7 +509,9 @@ async fn filter_safe_slot_thread_reset_targets(
             (Some(registry), Some(runtime)) => {
                 let channel = poise::serenity_prelude::ChannelId::new(*thread_channel_id);
                 let key = runtime.session_key.as_deref();
-                managed_reset_verdict(registry, &runtime.provider_name, channel, key).await
+                registry
+                    .managed_reset_verdict(&runtime.provider_name, channel, key)
+                    .await
             }
             _ => None,
         };
