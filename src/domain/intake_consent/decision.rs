@@ -1,12 +1,12 @@
 use super::{IntentRef, RowProjection};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const PREFIX: &str = "herdr-consent-custody:v1:";
-pub(crate) const REARM_PREFIX: &str = "herdr-consent-rearm:v1:";
+pub const PREFIX: &str = "herdr-consent-custody:v1:";
+pub const REARM_PREFIX: &str = "herdr-consent-rearm:v1:";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RearmMarker {
+pub struct RearmMarker {
     pub row: i64,
     pub payload: String,
     pub owner: Option<String>,
@@ -17,7 +17,7 @@ pub(crate) struct RearmMarker {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Marker {
+pub struct Marker {
     pub nonce: String,
     pub consent: String,
     pub row: i64,
@@ -28,7 +28,7 @@ pub(crate) struct Marker {
     pub released: bool,
 }
 
-pub(crate) fn marker(error: Option<&str>) -> Result<Marker, String> {
+pub fn marker(error: Option<&str>) -> Result<Marker, String> {
     let encoded = error.and_then(|error| error.strip_prefix(PREFIX)).ok_or(
         "outbox has no durable before-effects consent custody marker; preserve its original row",
     )?;
@@ -36,10 +36,7 @@ pub(crate) fn marker(error: Option<&str>) -> Result<Marker, String> {
         .map_err(|error| format!("invalid consent custody marker: {error}"))
 }
 
-pub(crate) fn permits_custody(
-    error: Option<&str>,
-    row: &RowProjection<'_>,
-) -> Result<bool, String> {
+pub fn permits_custody(error: Option<&str>, row: &RowProjection<'_>) -> Result<bool, String> {
     let Some(error) = error else {
         return Ok(true);
     };
@@ -57,13 +54,13 @@ pub(crate) fn permits_custody(
         && marker.rearmed_at > 0)
 }
 
-pub(crate) enum IntentResolution {
+pub enum IntentResolution {
     Returned,
     Adopted,
     Settled,
 }
 
-pub(crate) fn is_unresolved(resolution: Option<IntentResolution>) -> bool {
+pub fn is_unresolved(resolution: Option<IntentResolution>) -> bool {
     matches!(
         resolution,
         None | Some(IntentResolution::Returned | IntentResolution::Adopted)
@@ -71,7 +68,7 @@ pub(crate) fn is_unresolved(resolution: Option<IntentResolution>) -> bool {
 }
 
 /// A checked source binding accompanies custody authority but cannot issue it.
-pub(crate) struct HoldInput {
+pub struct HoldInput {
     consent: String,
     row: i64,
     payload: String,
@@ -81,7 +78,7 @@ pub(crate) struct HoldInput {
 }
 
 impl HoldInput {
-    pub(crate) fn checked(
+    pub fn checked(
         row: &RowProjection<'_>,
         intent: &IntentRef,
         consent: String,
@@ -109,11 +106,11 @@ impl HoldInput {
         })
     }
 
-    pub(crate) fn consent(&self) -> &str {
+    pub fn consent(&self) -> &str {
         &self.consent
     }
 
-    pub(crate) fn matches(&self, row: &RowProjection<'_>) -> Result<bool, String> {
+    pub fn matches(&self, row: &RowProjection<'_>) -> Result<bool, String> {
         Ok(row.spawned
             && self.row == row.id
             && self.payload == row.payload.digest()?

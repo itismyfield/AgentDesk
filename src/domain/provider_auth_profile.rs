@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::provider::ProviderKind;
 
 mod inputs;
-pub(crate) use inputs::ProfileOverrides;
+pub use inputs::ProfileOverrides;
 
 pub const DEFAULT_PROFILE_ID: &str = "default";
 
@@ -61,7 +61,7 @@ impl fmt::Debug for ProviderAuthOverlay {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ProfileBinding {
+pub struct ProfileBinding {
     pub agent_id: String,
     pub provider: String,
     pub profile_id: String,

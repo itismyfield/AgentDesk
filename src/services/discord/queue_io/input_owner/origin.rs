@@ -31,6 +31,12 @@ impl InputOrigin {
         matches!(self, Self::Discord | Self::Imessage | Self::Decision)
     }
 
+    /// Whether the input may enter a turn that already runs. A Decision is a person's instruction
+    /// and still waits, as its one original, for the turn boundary and a ready input.
+    pub(crate) fn joins_running_turn(self) -> bool {
+        self.is_person() && self != Self::Decision
+    }
+
     /// Old headless iMessage contexts and new ones follow the same person policy as the queue.
     pub(crate) fn from_context(context: Option<&serde_json::Value>) -> Self {
         if super::effort_continue::is_continuation(context) {

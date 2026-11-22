@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
-pub(super) fn current_home_dir() -> Option<PathBuf> {
-    dirs::home_dir()
-}
+pub(super) use crate::utils::home_path::current_home_dir;
+pub use crate::utils::home_path::expand_user_path;
 
 pub fn config_dir(root: &Path) -> PathBuf {
     root.join("config")
@@ -85,25 +84,6 @@ pub fn resolve_memory_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-pub fn expand_user_path(raw: &str) -> Option<PathBuf> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(stripped) = trimmed
-        .strip_prefix("~/")
-        .or_else(|| trimmed.strip_prefix("~\\"))
-    {
-        let home = current_home_dir()?;
-        let stripped = stripped.trim_start_matches(|ch| ch == '/' || ch == '\\');
-        return Some(home.join(stripped));
-    }
-    if trimmed == "~" {
-        return current_home_dir();
-    }
-    Some(PathBuf::from(trimmed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,13 +108,5 @@ mod tests {
         let root = temp.path();
         let resolved = resolve_memory_path(root, "relative/path");
         assert_eq!(resolved, config_dir(root).join("relative/path"));
-    }
-
-    #[test]
-    fn test_expand_user_path_keeps_double_slash_under_home() {
-        let home = current_home_dir().unwrap();
-        let expanded = expand_user_path("~//agentdesk").unwrap();
-        assert!(expanded.starts_with(&home));
-        assert!(expanded.ends_with("agentdesk"));
     }
 }

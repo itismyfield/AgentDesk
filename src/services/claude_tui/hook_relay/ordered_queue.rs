@@ -1036,6 +1036,10 @@ mod tests {
 
     use super::*;
 
+    /// How long a wait for something that must happen polls before failing: a hang detector, not a
+    /// bound of the contract, so a slow runner only makes a broken build fail later.
+    const LIVENESS: Duration = Duration::from_secs(10);
+
     thread_local! {
         static SYNC_FAULT: std::cell::RefCell<Option<(&'static str, &'static str)>> = const { std::cell::RefCell::new(None) };
     }
@@ -1280,7 +1284,7 @@ mod tests {
         );
         let (request_tx, request_rx) = mpsc::sync_channel(expected.max(1));
         let receiver = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + LIVENESS;
             let mut observed = 0usize;
             while observed < expected && Instant::now() < deadline {
                 let (mut socket, _) = match listener.accept() {
@@ -1304,7 +1308,7 @@ mod tests {
                     .set_nonblocking(false)
                     .expect("restore blocking mode on accepted socket");
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(LIVENESS))
                     .expect("set receiver read timeout");
                 let mut encoded = Vec::new();
                 let mut buffer = [0u8; 4096];
@@ -1361,9 +1365,7 @@ mod tests {
             let mut observed = 0usize;
             for status in statuses {
                 let (mut socket, _) = listener.accept().expect("accept status relay");
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
+                socket.set_read_timeout(Some(LIVENESS)).unwrap();
                 let mut encoded = Vec::new();
                 let mut buffer = [0u8; 4096];
                 loop {
@@ -1481,10 +1483,7 @@ mod tests {
                     process_ordered_hook_relay_request(&path).unwrap(),
                     OrderedHookRelayProcessOutcome::TooEarly
                 ));
-                assert_eq!(
-                    requests.recv_timeout(Duration::from_secs(3)).unwrap()["header"],
-                    expected
-                );
+                assert_eq!(requests.recv_timeout(LIVENESS).unwrap()["header"], expected);
             }
             std::fs::remove_file(p.path).unwrap();
             let next = prepared();
@@ -1492,7 +1491,7 @@ mod tests {
                 Guard::set_path_after_shared_test_env_lock("AGENTDESK_BINDING_CONTEXT", &next.path);
             drop(lock);
             let mut worker = spawn_worker_process(&queue);
-            let observed = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+            let observed = requests.recv_timeout(LIVENESS).unwrap();
             assert_eq!(
                 observed["header"], expected,
                 "{mode}: replay must retain the enqueue bytes"
@@ -1540,7 +1539,7 @@ mod tests {
                 .unwrap();
                 assert_eq!(stdout, b"{\"suppressOutput\":true}\n");
                 assert!(stderr.is_empty());
-                let observed = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+                let observed = requests.recv_timeout(LIVENESS).unwrap();
                 assert_eq!(observed["body"], json!({}));
                 let envelope = decode_binding_header(observed["header"].as_str().unwrap()).unwrap();
                 assert_eq!(
@@ -1564,11 +1563,11 @@ mod tests {
             "Stop",
             "response-conflict",
             json!({}),
-            Duration::from_millis(750),
+            LIVENESS,
         )
         .unwrap_err();
         assert!(error.contains("HTTP 409"));
-        requests.recv_timeout(Duration::from_secs(3)).unwrap();
+        requests.recv_timeout(LIVENESS).unwrap();
         assert_eq!(receiver.join().unwrap(), 1);
         let queue = relay_queue_dir("claude", "response-conflict").unwrap();
         wait_until(
@@ -1583,7 +1582,7 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_until(mut predicate: impl FnMut() -> bool, label: &str) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + LIVENESS;
         while !predicate() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -1805,7 +1804,7 @@ mod tests {
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
         assert_eq!(
             requests
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(LIVENESS)
                 .expect("first request delivered")["ordinal"],
             1
         );
@@ -1948,7 +1947,7 @@ mod tests {
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
         assert_eq!(
             requests
-                .recv_timeout(Duration::from_secs(3))
+                .recv_timeout(LIVENESS)
                 .expect("later valid request must drain despite corrupt oldest")["ordinal"],
             2
         );
@@ -2038,7 +2037,7 @@ mod tests {
 
         assert_eq!(
             requests
-                .recv_timeout(Duration::from_secs(3))
+                .recv_timeout(LIVENESS)
                 .expect("standing receiver owner must discover a stranded publication")["published_before_exit"],
             true
         );
@@ -2106,7 +2105,7 @@ mod tests {
         );
 
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
-        let delivered = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+        let delivered = requests.recv_timeout(LIVENESS).unwrap();
         assert_eq!(receiver.join().unwrap(), 1);
         assert_eq!(delivered["ordinal"].as_u64(), Some(1));
     }
@@ -2152,7 +2151,7 @@ mod tests {
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
         let observed = (0..8)
             .map(|_| {
-                requests.recv_timeout(Duration::from_secs(3)).unwrap()["ordinal"]
+                requests.recv_timeout(LIVENESS).unwrap()["ordinal"]
                     .as_u64()
                     .unwrap()
             })
@@ -2220,7 +2219,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            requests.recv_timeout(Duration::from_secs(3)).unwrap()["single_effect"],
+            requests.recv_timeout(LIVENESS).unwrap()["single_effect"],
             true
         );
         assert_eq!(receiver.join().unwrap(), 1);
@@ -2272,7 +2271,7 @@ mod tests {
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
         let observed = (0..3)
             .map(|_| {
-                requests.recv_timeout(Duration::from_secs(3)).unwrap()["ordinal"]
+                requests.recv_timeout(LIVENESS).unwrap()["ordinal"]
                     .as_u64()
                     .unwrap()
             })
@@ -2309,7 +2308,7 @@ mod tests {
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
         let observed = (0..2)
             .map(|_| {
-                requests.recv_timeout(Duration::from_secs(3)).unwrap()["ordinal"]
+                requests.recv_timeout(LIVENESS).unwrap()["ordinal"]
                     .as_u64()
                     .unwrap()
             })
@@ -2542,11 +2541,10 @@ mod tests {
                 })
             })
         });
-        let (first_path, first_body) =
-            tokio::time::timeout(Duration::from_secs(3), accepted_rx.recv())
-                .await
-                .expect("first receiver acceptance timeout")
-                .expect("first receiver acceptance");
+        let (first_path, first_body) = tokio::time::timeout(LIVENESS, accepted_rx.recv())
+            .await
+            .expect("first receiver acceptance timeout")
+            .expect("first receiver acceptance");
         assert_eq!(first_path, request_id);
         if let Some(worker) = first_worker.as_mut() {
             worker
@@ -2565,11 +2563,10 @@ mod tests {
             "crash point must precede request removal"
         );
         let mut recovery_worker = spawn_worker_process(&queue_dir);
-        let (second_path, second_body) =
-            tokio::time::timeout(Duration::from_secs(3), accepted_rx.recv())
-                .await
-                .expect("recovery receiver acceptance timeout")
-                .expect("recovery receiver acceptance");
+        let (second_path, second_body) = tokio::time::timeout(LIVENESS, accepted_rx.recv())
+            .await
+            .expect("recovery receiver acceptance timeout")
+            .expect("recovery receiver acceptance");
         assert_eq!(second_path, request_id);
         let recovery_status = tokio::task::spawn_blocking(move || recovery_worker.wait())
             .await

@@ -163,7 +163,7 @@ static KNOWN_SECRETS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| RwLock::n
 
 const MIN_REGISTERED_SECRET_LEN: usize = 6;
 
-pub(crate) fn mask_dsn_password(input: &str) -> String {
+pub fn mask_dsn_password(input: &str) -> String {
     let Ok(mut url) = Url::parse(input) else {
         return input.to_string();
     };
@@ -184,7 +184,7 @@ fn dsn_password(input: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub(crate) fn register_known_secret(secret: &str) {
+pub fn register_known_secret(secret: &str) {
     let secret = secret.trim();
     if secret.len() < MIN_REGISTERED_SECRET_LEN || secret == "***" {
         return;
@@ -206,7 +206,7 @@ pub(crate) fn register_secret_or_dsn(value: &str) {
     register_known_secret(value);
 }
 
-pub(crate) fn register_common_env_secrets() {
+pub fn register_common_env_secrets() {
     for key in [
         "DATABASE_URL",
         "POSTGRES_TEST_DATABASE_URL_BASE",
@@ -343,7 +343,7 @@ fn replace_generic_cookie_headers(input: &str, marker: &str) -> String {
 /// always masked in full because their first token is secret material, not a
 /// scheme. `marker` lets each presentation surface retain its existing
 /// redaction vocabulary without duplicating the parsing rules.
-pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
+pub fn redact_sensitive_headers(input: &str, marker: &str) -> String {
     let redacted = replace_header_value(input, &AUTH_HEADER_RE, marker);
     redact_cookie_headers(&redacted, marker)
 }
@@ -352,7 +352,7 @@ pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
 ///
 /// Compact command renderers use their own token-aware Authorization display
 /// rules, but still share this stricter whole-cookie contract.
-pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
+pub fn redact_cookie_headers(input: &str, marker: &str) -> String {
     let redacted = replace_quoted_header_value(input, &ANSI_C_QUOTED_COOKIE_HEADER_RE, marker);
     let redacted = replace_quoted_header_value(&redacted, &SINGLE_QUOTED_COOKIE_HEADER_RE, marker);
     let redacted = replace_quoted_header_value(&redacted, &DOUBLE_QUOTED_COOKIE_HEADER_RE, marker);
@@ -361,7 +361,7 @@ pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
     replace_generic_cookie_headers(&redacted, marker)
 }
 
-pub(crate) fn contains_sensitive_header_prefix(input: &str) -> bool {
+pub fn contains_sensitive_header_prefix(input: &str) -> bool {
     SENSITIVE_HEADER_PREFIX_RE.is_match(input)
         || (CURL_COMMAND_RE.is_match(input) && CURL_COOKIE_OPTION_PREFIX_RE.is_match(input))
 }
@@ -379,7 +379,7 @@ fn is_cookie_header_name(name: &str) -> bool {
 /// when the value itself lacks a header prefix. Writing directly to the output
 /// also avoids cloning the complete Value, and sanitizes object keys without
 /// key-collision loss.
-pub(crate) fn serialize_json_with_redacted_cookie_headers(
+pub fn serialize_json_with_redacted_cookie_headers(
     value: &serde_json::Value,
     marker: &str,
 ) -> String {
@@ -465,7 +465,7 @@ pub(crate) fn serialize_json_with_redacted_cookie_headers(
     output
 }
 
-pub(crate) fn redact_assignments(input: &str) -> String {
+pub fn redact_assignments(input: &str) -> String {
     ASSIGNMENT_RE
         .replace_all(input, |captures: &regex::Captures<'_>| {
             let key_sep = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
@@ -495,7 +495,7 @@ pub(crate) fn redact_assignments(input: &str) -> String {
         .into_owned()
 }
 
-pub(crate) fn redact_known_secrets(input: &str) -> String {
+pub fn redact_known_secrets(input: &str) -> String {
     // Mask whole PEM private-key blocks first so later single-token rules cannot
     // leave the key body behind, and so the registered-secret pass is unaffected.
     let redacted = PRIVATE_KEY_BLOCK_RE.replace_all(input, "***");
@@ -516,7 +516,7 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
     redacted
 }
 
-pub(crate) fn contains_registered_secret(input: &str) -> bool {
+pub fn contains_registered_secret(input: &str) -> bool {
     let secrets = match KNOWN_SECRETS.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),

@@ -4,12 +4,12 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AgentExecutionNode {
+pub struct AgentExecutionNode {
     pub default_node_id: Option<String>,
 }
 
 impl AgentExecutionNode {
-    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<(), &'static str> {
         if self.default_node_id.as_ref().is_some_and(|id| {
             id.is_empty()
                 || id.len() > 128
@@ -25,7 +25,7 @@ impl AgentExecutionNode {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct ExecutionRequirements {
+pub struct ExecutionRequirements {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub os: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -41,11 +41,11 @@ pub(crate) struct ExecutionRequirements {
 }
 
 impl ExecutionRequirements {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
 
-    pub(crate) fn parse(value: Value) -> Result<Self, String> {
+    pub fn parse(value: Value) -> Result<Self, String> {
         let policy: Self = serde_json::from_value(value)
             .map_err(|e| format!("invalid execution requirements: {e}"))?;
         for values in [
@@ -108,9 +108,9 @@ impl ExecutionRequirements {
     }
 }
 
-pub(crate) const ATTACHMENT_CAPABILITY: &str = "attachment_bundle_v1";
+pub const ATTACHMENT_CAPABILITY: &str = "attachment_bundle_v1";
 
-pub(crate) fn supports_attachment_transfer(node: &serde_json::Value) -> bool {
+pub fn supports_attachment_transfer(node: &serde_json::Value) -> bool {
     node.pointer("/capabilities/intake_worker/features")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|features| {

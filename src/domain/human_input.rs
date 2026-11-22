@@ -1,4 +1,4 @@
-pub(crate) mod native_source;
+pub mod native_source;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HumanInputDelivery {
@@ -29,6 +29,17 @@ pub enum HumanInputError {
     RuntimeUnavailable(String),
     QueueRefused(String),
     InvalidTarget(String),
+}
+
+impl HumanInputError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::AuthorNotAllowed => "author_not_allowed",
+            Self::RuntimeUnavailable(_) => "runtime_unavailable",
+            Self::QueueRefused(_) => "queue_refused",
+            Self::InvalidTarget(_) => "invalid_target",
+        }
+    }
 }
 
 /// Queue reason when a turn that never claimed the mailbox holds the channel.

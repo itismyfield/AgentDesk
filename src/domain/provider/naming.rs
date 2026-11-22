@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 static TEST_PREFIX: OnceLock<String> = OnceLock::new();
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
 
-pub(crate) fn install_test_prefix(prefix: &str) -> Result<(), String> {
+pub fn install_test_prefix(prefix: &str) -> Result<(), String> {
     let id = prefix
         .strip_prefix("AdkTest-")
         .ok_or("invalid test tmux prefix")?;

@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const IDENTITY_ENV: &str = "AGENTDESK_IDENTITY";
+pub const IDENTITY_ENV: &str = "AGENTDESK_IDENTITY";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ManagedIdentity {
+pub struct ManagedIdentity {
     pub v: u32,
     pub owner_scope: String,
     pub provider: Option<String>,
@@ -22,7 +22,7 @@ pub(crate) struct ManagedIdentity {
 }
 
 impl ManagedIdentity {
-    pub(crate) fn decode_environment(output: &str) -> Option<Self> {
+    pub fn decode_environment(output: &str) -> Option<Self> {
         let value = output
             .trim_end_matches(['\r', '\n'])
             .strip_prefix("AGENTDESK_IDENTITY=")?;
@@ -34,7 +34,7 @@ impl ManagedIdentity {
         .then_some(identity)
     }
 
-    pub(crate) fn environment_assignment(&self) -> Result<String, String> {
+    pub fn environment_assignment(&self) -> Result<String, String> {
         serde_json::to_string(self)
             .map(|json| format!("{IDENTITY_ENV}={json}"))
             .map_err(|error| format!("encode managed session identity: {error}"))

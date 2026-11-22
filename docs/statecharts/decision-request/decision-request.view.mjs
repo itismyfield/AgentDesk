@@ -20,5 +20,7 @@ export const step = (action) => ({
  Archive:"글 자동 archive", ArchiveLocked:"글 잠김·archive", Unlock:"기존 권한으로 unlock",
  Unarchive:"같은 글 unarchive", Render:"같은 starter message에 최신 상태 PATCH",
  HandoffDecision:"잘못된 handoff 우회 대조", WakeFailed:"실패 원본 재큐잉 대조",
- SelfDeclared:"승인 event 없이 source=decision을 자기 선언한 요청 대조"
+ SelfDeclared:"승인 event 없이 source=decision을 자기 선언한 요청 대조",
+ Journal:"쓰기 직전 may_have_sent 기록 한 번", ReleaseHeld:"입력창 사용 중: 미전송 증명 뒤 같은 원본으로 다시 대기",
+ OwnerPending:"owner 수용 응답 불명: 닫고 그 원본만 제거", PreserveApproved:"승인된 의견의 원문 보존 frame"
 })[action] ?? action;

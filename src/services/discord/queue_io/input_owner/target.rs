@@ -73,8 +73,8 @@ pub(crate) fn route(
     if execution == Execution::RemoteTui {
         return Some(Route::Held("remote_placement"));
     }
-    // Machine starts complete on their own turn; people join the turn already running.
-    if !origin.is_person() && phase == Phase::Busy {
+    // Machine starts and Decisions complete on their own turn; people join the one running.
+    if !origin.joins_running_turn() && phase == Phase::Busy {
         return Some(Route::Held("synthetic_waits_idle"));
     }
     Some(match (provider, host, phase) {
@@ -187,6 +187,37 @@ mod tests {
             }
         }
     }
+    /// A Decision is a person's input and still never takes a busy route.
+    #[test]
+    fn a_decision_is_held_on_every_busy_pane_and_runs_on_an_idle_one() {
+        let origin = InputOrigin::Decision;
+        assert!(origin.is_person() && !origin.joins_running_turn());
+        for provider in ["claude", "codex"] {
+            for host in ["tmux", "herdr"] {
+                let route_at = |phase| route(Execution::LocalTui, origin, provider, host, phase);
+                assert_eq!(
+                    route_at(Phase::Busy),
+                    Some(Route::Held("synthetic_waits_idle"))
+                );
+                for phase in [Phase::Idle, Phase::Absent] {
+                    assert_eq!(
+                        route_at(phase),
+                        route(
+                            Execution::LocalTui,
+                            InputOrigin::Discord,
+                            provider,
+                            host,
+                            phase
+                        )
+                    );
+                }
+            }
+        }
+        for origin in [InputOrigin::Discord, InputOrigin::Imessage] {
+            assert!(origin.joins_running_turn(), "{origin:?}");
+        }
+    }
+
     #[test]
     fn imessage_joins_busy_panes_as_discord_does() {
         for provider in ["claude", "codex"] {

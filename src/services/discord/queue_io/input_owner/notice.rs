@@ -11,6 +11,8 @@ pub(crate) async fn drain(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
+    // A failed Decision original leaves here, before its record could owe a resend notice.
+    crate::services::discord::decision_drain::settle_channel(pool, handle, channel).await;
     let (namespace, owed) = owed(handle).await?;
     if owed.iter().any(|entry| {
         entry["input"]["attempt"].is_null()
@@ -111,6 +113,7 @@ pub(crate) async fn drain_synchronously_for_tests(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
+    crate::services::discord::decision_drain::settle_channel(pool, handle, channel).await;
     let (namespace, owed) = owed(handle).await?;
     finish(pool, handle, provider, channel, &namespace, &owed).await
 }
