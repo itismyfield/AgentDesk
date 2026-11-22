@@ -673,7 +673,7 @@ where
         // #3099: user_msg_id==0 recovery completes this turn's own injected
         // prompt anchor, not the shared slot a later turn may own.
         if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
-            let _ = super::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
+            let _ = super::turn_view_reconciler::anchor_completion::complete_tui_direct_anchor_lifecycle_for_inflight(
                 shared,
                 provider.as_str(),
                 tmux_session_name,

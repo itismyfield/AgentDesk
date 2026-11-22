@@ -23,6 +23,7 @@ use crate::services::provider::ProviderKind;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
+mod managed_reset_port;
 pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
@@ -427,8 +428,10 @@ impl HealthRegistry {
     pub fn new() -> Self {
         // A live registry implies the observer hook, so every registry install path publishes.
         super::tui_prompt_relay::install_observer_publication();
-        // Custody readers below Discord need the same registry-time install.
+        // Runtime readers below Discord reach custody and the strict journal through these hooks.
         super::terminal_delivery_custody::install_runtime_reads();
+        #[cfg(unix)]
+        super::session_relay_sink::journal::install_exact_append();
         Self {
             channel_home_seed_issues: tokio::sync::Mutex::new(Vec::new()),
             providers: tokio::sync::Mutex::new(Vec::new()),

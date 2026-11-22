@@ -1,5 +1,6 @@
 //! Engine-owned runtime state shared by messenger adapters.
 
+pub(crate) mod health_port;
 pub(crate) mod legacy_state;
 pub(crate) mod relay_state;
 pub(crate) mod session;

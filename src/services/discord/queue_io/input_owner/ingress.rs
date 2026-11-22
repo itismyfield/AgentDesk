@@ -2,7 +2,7 @@
 #[cfg(test)]
 use super::admission::Admission;
 use super::admission::AdmissionTicket;
-use crate::services::discord::router::IntakeExecution;
+use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::discord::{Intervention, MailboxEnqueueOutcome, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};

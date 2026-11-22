@@ -472,7 +472,7 @@ async fn post_dispatch_completion_summary(
         DeliveryResult, DiscordOutboundPolicy, OutboundChannelId, OutboundDelivery, OutboundIntent,
         OutboundTargetKey,
     };
-    use crate::services::discord::outbound::HttpOutboundClient;
+    use crate::services::dispatches::http_outbound::HttpOutbound;
 
     let Some(token) = config.notify_bot_token.as_deref() else {
         return Err("no notify bot token".to_string());
@@ -486,7 +486,7 @@ async fn post_dispatch_completion_summary(
         .map(OutboundChannelId::new)
         .map_err(|error| format!("invalid dispatch summary thread id {thread_id}: {error}"))?;
     let outbound_client =
-        HttpOutboundClient::new(client, token.to_string(), config.discord_api_base.clone());
+        HttpOutbound::new(client, token.to_string(), config.discord_api_base.clone());
     let outbound_msg = OutboundIntent::new(
         format!("dispatch:{dispatch_id}"),
         format!("dispatch:{dispatch_id}:completion-summary"),

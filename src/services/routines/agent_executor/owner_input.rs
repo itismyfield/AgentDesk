@@ -1,6 +1,6 @@
 //! One exhaustive start consumer; owner custody stays running until an exact observer is bound.
 use super::*;
-use crate::services::discord::HeadlessTurnStartStatus;
+use crate::services::turn_orchestrator::HeadlessTurnStartStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AgentStartDisposition {
@@ -55,7 +55,7 @@ pub(super) async fn reconcile_run(
     Ok(Some(bound))
 }
 
-fn intent_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
+pub(super) fn intent_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
     run.attempts
         .as_array()
         .and_then(|events| {
@@ -142,7 +142,7 @@ pub(super) mod custody {
     use super::*;
     use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
-    async fn handle(
+    pub(in crate::services::routines::agent_executor) async fn handle(
         executor: &RoutineAgentExecutor,
         provider: &str,
         channel: u64,
@@ -182,7 +182,14 @@ pub(super) mod custody {
         let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
             return Ok(None);
         };
-        let started = self::start(store, start, &handle, original, &namespace, planned.clone());
+        let mut planned = planned.clone();
+        if store
+            .run_forbids_retry_after_start(&start.claimed.run_id)
+            .await?
+        {
+            super::super::settlement::pin_delivery_deadline(executor, start.claimed, &mut planned);
+        }
+        let started = self::start(store, start, &handle, original, &namespace, planned);
         let started = started.await?;
         if started.disposition == AgentStartDisposition::Accepted {
             wake(executor, provider, channel).await;

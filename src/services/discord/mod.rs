@@ -86,6 +86,8 @@ mod session_relay_sink;
 #[cfg(unix)]
 pub(crate) use session_relay_sink::journal::append_exact_metadata;
 #[cfg(all(test, unix))]
+pub(crate) use session_relay_sink::journal::install_exact_append;
+#[cfg(all(test, unix))]
 pub(crate) use session_relay_sink::journal::{
     exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
     exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged,
@@ -185,7 +187,12 @@ mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
+#[cfg(any(unix, test))]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::note_ended as note_takeover_ended;
+#[cfg(any(unix, test))]
+mod herdr_owner_port;
+#[cfg(any(unix, test))]
+pub(crate) use herdr_owner_port::HERDR_OWNER_PORT;
 #[cfg(test)]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
@@ -318,12 +325,12 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .0
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
+pub(crate) use crate::services::cluster::intake_turn::{IntakeExecution, IntakeRequest};
+pub(crate) use crate::services::turn_orchestrator::HeadlessTurnStartError;
 #[cfg(all(test, unix))]
 pub(crate) use router::TurnKind;
-pub(crate) use router::{
-    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
-    IntakeRequest, checkpoint_waits_for_admission, execute_intake_turn_core,
-};
+#[cfg(test)]
+pub(crate) use router::{checkpoint_waits_for_admission, execute_intake_turn_core};
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 pub(in crate::services::discord) use shared_state::{
@@ -384,7 +391,6 @@ use queue_dispatch::{
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
-use router::handle_event;
 use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;

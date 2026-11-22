@@ -172,6 +172,9 @@ impl Owner {
         proof: crate::services::claude_tui::owner_input::NotSentProof,
         now: Option<u64>,
     ) -> Result<(), String> {
+        if self.routine_delivery_closed(key) {
+            return self.refuse_not_sent(key, proof);
+        }
         proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
         let mut next = self.snapshot.clone();
         let head = next
@@ -203,6 +206,9 @@ impl Owner {
         key: &AttemptRef,
         proof: crate::services::claude_tui::owner_input::NotSentProof,
     ) -> Result<(), String> {
+        if self.routine_delivery_closed(key) {
+            return self.refuse_not_sent(key, proof);
+        }
         let reason = proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
         let mut next = self.snapshot.clone();
         if !next.head_injection.as_ref().is_some_and(|h| key.matches(h)) {

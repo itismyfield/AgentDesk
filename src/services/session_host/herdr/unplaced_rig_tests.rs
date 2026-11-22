@@ -354,6 +354,7 @@ impl Rig {
             resume: false,
             provider_root: None,
             resume_start: None,
+            takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
         };
         let prepare = |prepared: &PreparedIncarnation| {
             Ok(HerdrLaunchCommand {
@@ -375,6 +376,7 @@ impl Rig {
             endpoint: &endpoint,
             host: host.clone(),
             quiet: Duration::ZERO,
+            close_unrecorded: crate::services::discord::HERDR_OWNER_PORT.close_unrecorded,
         };
         resolve_unplaced(&lease, &target).await
     }
@@ -514,6 +516,7 @@ async fn a_pre_marker_launch_whose_provider_started_is_adopted_after_a_restart_p
                 resume: false,
                 provider_root: None,
                 resume_start: None,
+                takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
             };
             let prepare = |prepared: &PreparedIncarnation| {
                 Ok(HerdrLaunchCommand {
@@ -797,6 +800,7 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
                 endpoint: &endpoint,
                 host: paused_host,
                 quiet: Duration::ZERO,
+                close_unrecorded: crate::services::discord::HERDR_OWNER_PORT.close_unrecorded,
             };
             resolve_unplaced(&lease, &target).await
         })

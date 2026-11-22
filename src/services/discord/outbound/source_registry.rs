@@ -7,7 +7,7 @@ pub(crate) fn is_static_notice_kind(source: &str) -> bool {
 
 pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
 
-pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
+pub(crate) use crate::domain::outbound::outbox::source::RETIRED_SEND_SOURCES;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {

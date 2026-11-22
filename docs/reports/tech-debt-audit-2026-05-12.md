@@ -56,7 +56,7 @@
 | 5 | `dispatch_context.rs` 4,033줄 → `ReviewContextBuilder` trait + `WorktreeResolver`/`TargetRepoResolver` 추출 | Dispatch | `src/dispatch/dispatch_context.rs` | L |
 | 6 | `dispatch_create.rs:739-950` 170줄 mega 함수 4단계 분할 (`validate`/`resolve`/`build`/`persist`) | Dispatch | `src/dispatch/dispatch_create.rs:739` | M |
 | 7 | `router/message_handler.rs:228-310` watchdog deadlock 로직 → `watchdog_prealert.rs` 추출 | Discord | `src/services/discord/router/message_handler.rs:228` | M |
-| 8 | `discord/mod.rs:2035-2200` mailbox 보일러플레이트(140줄) 매크로/trait로 통합 | Discord | `src/services/discord/mod.rs:2035` | M |
+| 8 | `discord/mod.rs:2039-2204` mailbox 보일러플레이트(140줄) 매크로/trait로 통합 | Discord | `src/services/discord/mod.rs:2039` | M |
 | 9 | High-Risk Recovery 상태 머신 명시화 (`enum RecoveryPhase { Pending, Investigating, Claimed, Resolved, Orphaned }`) | Voice/Recovery | `src/high_risk_recovery.rs` | L |
 | 10 | Voice Receiver 모듈 분리 (EventHandler / WavWriter / SessionManager) | Voice | `src/voice/receiver.rs:286` | L |
 | 11 | Voice provider 매핑 가드(#2054 v6) 분산 lock 기반 전환 | Voice | `src/voice/...` | M |

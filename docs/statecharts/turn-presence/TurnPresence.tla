@@ -241,7 +241,7 @@ TUILaunch ==
     /\ history.stage = "empty" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "tui", !.runtime = "codex_tui"]
     /\ UNCHANGED coreVars
-\* herdr_launch.rs:472-488 commits Pending before stamping the host and nonce.
+\* herdr_launch.rs:474-490 commits Pending before stamping the host and nonce.
 HerdrFreshLaunch ==
     /\ history.stage = "tui" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "fresh-cleanup", !.row = "pending",
@@ -266,7 +266,7 @@ ExecutionEnds ==
     /\ history.stage = "running" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "ended"]
     /\ UNCHANGED coreVars
-\* herdr_terminate.rs:224-237 changes the hosted state after an end proof.
+\* herdr_terminate.rs:223-236 changes the hosted state after an end proof.
 ConfirmRetired ==
     /\ history.stage = "ended" /\ HistoryQuiet /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "retired", !.row = "retired"]

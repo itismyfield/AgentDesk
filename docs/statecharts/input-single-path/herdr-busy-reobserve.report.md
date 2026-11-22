@@ -13,7 +13,7 @@
 | `Drive`, early/late Entry | 공통 대상 관측을 early tmux diagnostic 앞과 late 실행에서 사용 | Entry는 caller 위치이며 host selector가 아님 |
 | `SourceExact`, `observer` | source native/path/dev/ino/nonce-current 근거를 합친 술어; 실제 O는 `tui_o/turn_mode.rs:41` confirmed와 `writer/host.rs:372` accepts가 필요 | Ready source와 실제 producer capability가 함께 있을 때만 Busy |
 | `Publish`, `Reobserve`, `Reevaluate` | 기존 held_watch의 read-only probe→같은 원문 재평가; `held_watch.rs:146 leads`는 unattempted front만 봄 | 같은 nonce/target/front/generation의 아직 dispatchable한 원문만 wake |
-| 새 verified clear | `claude/herdr_turn.rs:320 awaited_clear`가 검증한 현재 실행의 Pending | Busy 권한이 아니며 기존 Idle로 재평가 위임 |
+| 새 verified clear | `claude/herdr_turn.rs:322 awaited_clear`가 검증한 현재 실행의 Pending | Busy 권한이 아니며 기존 Idle로 재평가 위임 |
 | `terminal`, `terminalEffects` | 기존 UnknownKeep/clear-discard 정산 상태를 표현하는 ghost 값 | 새 DB column/가드/receipt 프로토콜이 아님; 늦은 probe도 원문을 부활시키지 않음 |
 | `Write`, `Receipt`, `Settle` | 고정된 S1의 per-write exact-target gate/transport 경계와 별도 native receipt | transport ACK와 provider receipt는 다름; existing Idle readiness는 외부 계약 |
 

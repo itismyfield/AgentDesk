@@ -4,6 +4,7 @@
 pub(crate) mod clear_epoch;
 #[cfg(unix)]
 mod codex_resume;
+mod owner_port;
 pub(crate) mod policy;
 mod prepared;
 #[cfg(unix)]
@@ -40,6 +41,8 @@ use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, execution_context, stable_host_identity,
 };
+#[cfg(any(unix, test))]
+pub(crate) use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
@@ -227,6 +230,8 @@ pub(crate) struct HerdrLaunch {
     pub resume_start: Option<crate::services::tui_prompt_dedupe::binding_context::ResumeStart>,
     /// Where the provider's hooks may name a transcript; a Claude launch reads its own setting.
     pub provider_root: Option<PathBuf>,
+    /// Keeps the end of execution `nonce` when it is the one a Claude takeover of `channel` took.
+    pub takeover_ended: fn(u64, &str, &str),
 }
 
 pub(crate) struct HerdrLaunchCommand {
@@ -422,6 +427,7 @@ pub(crate) async fn launch_herdr_session(
         None
     };
     let owner = launch.owner;
+    let takeover_ended = launch.takeover_ended;
     let fence = crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence::acquire_async(
         &owner.logical_key,
     )
@@ -464,11 +470,7 @@ pub(crate) async fn launch_herdr_session(
         HostedRecord::Known(record) if record.state == HostedState::Retired => {
             // The successor overwrites the row, so a Claude takeover keeps this end first.
             if let Ok(channel) = owner.channel_id.parse() {
-                crate::services::discord::note_takeover_ended(
-                    channel,
-                    &record.execution_nonce,
-                    "herdr_retired",
-                );
+                takeover_ended(channel, &record.execution_nonce, "herdr_retired");
             }
             #[cfg(unix)]
             {

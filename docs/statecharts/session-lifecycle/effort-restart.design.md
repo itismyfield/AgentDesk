@@ -28,7 +28,7 @@ Discord /effort는 Claude와 Codex TUI 채널에서 현재 작업의 종료를 �
 
 Herdr /effort는 재기동 경로가 아니다. tui_passthrough/herdr_settings.rs:195-233에서 transition/composer lock과 정확한 실행을 확인한 뒤, ready pane의 /effort overlay를 조작하고 저장한다. :225가 명시하듯 relaunch를 예약하지 않는다. 이 준비 상태 대기와 키 조작을 새 즉시 restart의 실행 수단으로 쓰지 않는다. /fast의 기존 overlay 동작은 유지한다.
 
-기존 busy 거절문 한 줄을 지우거나 /clear를 호출하는 방식은 채택하지 않는다. clear는 control.rs:551-573에서 큐·provider session·selector를 버린다. 기존 HostTerminated는 exact execution을 닫고 큐를 보존하지만 알림/상태 패널을 생략한다(herdr_terminate.rs:337-369, turn_finalizer/cleanup.rs:278). 또한 현재 clear_end는 fresh launch만 증명하므로 same-session resume의 증거로 사용할 수 없다(tui_o/writer/rotation/clear_end.rs:167-179).
+기존 busy 거절문 한 줄을 지우거나 /clear를 호출하는 방식은 채택하지 않는다. clear는 control.rs:551-573에서 큐·provider session·selector를 버린다. 기존 HostTerminated는 exact execution을 닫고 큐를 보존하지만 알림/상태 패널을 생략한다(herdr_terminate.rs:336-368, turn_finalizer/cleanup.rs:278). 또한 현재 clear_end는 fresh launch만 증명하므로 same-session resume의 증거로 사용할 수 없다(tui_o/writer/rotation/clear_end.rs:167-179).
 
 effort 재기동이 이미 저장된 /fast·/model pending과 겹치면 같은 launch snapshot으로 함께 적용하고 그 값에 대응하는 pending만 소비한다. 다음 사용자 턴에서 같은 변경을 이유로 두 번 재기동하지 않는다. launch 준비 중 effective model이 바뀌면 capability를 새 모델로 재검증하고, 아직 종료하지 않았으면 mutation 없이 다시 준비한다. 이미 old TUI가 끝났으면 같은 intent/C ticket을 유지한 채 마지막 유효 snapshot으로 준비한다. 모델의 무관한 자동 교체는 없다. 수용 시험은 model/fast pending + effort 즉시 변경→same-session restart1 및 최신 모델의 capability 재검증이다.
 
@@ -110,7 +110,7 @@ S4b 첫 리뷰의 P1 3건을 반영한 계약이다. 근거와 cutpoint별 표�
 - slash/text stop: tmux_runtime/judged_stop.rs:345 begin_user_stop 직전의 사용자 stop 목적에서 해당 채널 pending C intent의 cancel revision을 기록한다. text_commands.rs:20도 같은 의미를 따른다.
 - HTTP nonforce Cancel: queue/herdr_stop.rs:12와 cancel_effects.rs:78의 local/holder 경로에서 같은 pending intent를 닫는다. stop은 기존 사용자 B를 purge하지 않는다.
 - clear: control.rs:510 및 control/clear_teardown.rs:138의 기존 discard 지점과 함께 그 native session에 묶인 C만 취소한다. explicit clear의 원래 discard 범위는 보존한다.
-- force Cancel/Terminate: queue/http_force.rs:52와 herdr_terminate scoped postlude가 capture한 operation/exec와 일치할 때만 닫는다. old nonce 요청으로 새 execution/intent를 취소하지 않는다.
+- force Cancel/Terminate: queue/http_force.rs:51와 herdr_terminate scoped postlude가 capture한 operation/exec와 일치할 때만 닫는다. old nonce 요청으로 새 execution/intent를 취소하지 않는다.
 
 cancel revision과 owner barrier/debt terminal 상태는 같은 owner commit에서 선형화한다. launch 직전 및 continuation admission/first reserve 직전 같은 revision을 재확인한다. 물리 종료/계정/selector 권한을 추가하지 않는다. 수용 시험은 'A 정산→사용자 stop→resume 성공→C=0, B 보존'과 'stale Terminate→새 C 보존'이다.
 
@@ -162,7 +162,7 @@ effort notice child는 old interrupted episode에 묶인 stable event/nonce와 �
 아래는 193a57168f의 구현을 재사용한다. 이 이슈 전체가 이미 완료된 것은 아니다.
 
 - Claude 채널 effort 저장/복원 및 같은 session/account resume 검증: config/provider_settings.rs:266-310, relaunch.rs:136-161, tmux_recreate.rs:80-109.
-- 정확한 Herdr execution 종료·captured token 정산·큐 보존: herdr_terminate.rs:437-604 및 :337-369.
+- 정확한 Herdr execution 종료·captured token 정산·큐 보존: herdr_terminate.rs:436-603 및 :337-369.
 - 기존 owner ticket/custody/MayHaveSent 처리와 synthetic original 복원: queue_io/input_owner/admission.rs:25-33, start.rs:12-51, turn_orchestrator/queued_head/v2/source_admission.rs:43-79.
 - O writer의 Prepared/ledger/lease/uncertain-history 규칙: tui_o/writer/deliver.rs:1-125.
 - transition 해제 뒤 owner wake: session_transition.rs:120-153.
@@ -354,8 +354,8 @@ prod 파일(신규 child 포함):
 | local effort 저장 | `commands/tui_passthrough.rs:146` | CurrentTmux는 변경을 저장하고 다음 새 턴에 재기동; 현재 즉시 중단 행동은 없음 |
 | local restart busy 거절 | `commands/tmux_recreate.rs:93` | 현재 busy Deferred; Design은 confirmed end 뒤 동일 session launch |
 | Herdr effort | `commands/tui_passthrough/herdr_settings.rs:195`, `:203`, `:216`, `:225` | CurrentHerdr는 old task 종료/ready 후 overlay 적용; restart 0 |
-| exact hosted end | `herdr_terminate.rs:437`, `:453`, `:580`, `:596`, `:603` | EffortInterrupt는 시도가 아닌 exact nonce/TurnKey confirmed end와 cutoff 경계의 oracle |
-| old inflight 정산 | `herdr_terminate.rs:337`, `turn_finalizer.rs:277`, `turn_finalizer/finalize_context.rs:37` | captured old row만 mute close; reader output 소유 유지 |
+| exact hosted end | `herdr_terminate.rs:436`, `:453`, `:580`, `:596`, `:603` | EffortInterrupt는 시도가 아닌 exact nonce/TurnKey confirmed end와 cutoff 경계의 oracle |
+| old inflight 정산 | `herdr_terminate.rs:336`, `turn_finalizer.rs:277`, `turn_finalizer/finalize_context.rs:37` | captured old row만 mute close; reader output 소유 유지 |
 | owner Held | `queue_io/input_owner/drive.rs:118`, `queue_io/input_owner/held_watch.rs:62` | waiting users는 queue에 남는다. Gone는 End여서 completion wake가 별도로 필요 |
 | transition 종료/wake | `session_transition.rs:120`, `:136`, `:147` | physical resume 후 owner wake; NoWake mutant에서 continuation/사용자 둘 다 멈춤 |
 | 자동 입력/재시도 | `queue_io/input_owner/origin.rs:6`, `queue_io/input_owner/start.rs:13`, `:48`, `:56` | continuation은 사용자 원문 재전송이 아닌 stable synthetic ticket; 실패 재시도는 같은 root |
@@ -426,7 +426,7 @@ Second는 790 states로 그림 예산 500을 넘겨 chart를 생성하지 않는
 | NoContinuation: resume 후 pending root가 남아 영구 대기(10단계 lasso) | 새 자동 continuation port는 아직 없음. `start::admit_synthetic`의 Accepted/Pending/Rejected를 구별해야 함 | 설계 mutant만 확인. main 결함/실재 버그로 올리지 않음 |
 | NoNotice/DuplicateNotice | 기존 HostTerminated가 mute인 사실은 확인. 새로운 durable effort interruption notice의 구현은 없음 | 설계 obligation; main 결함으로 올리지 않음 |
 | NoInterrupt: 원 작업이 끝나지 않는 request 대기(4단계 lasso) | 기존 `commands/tmux_recreate.rs:93` busy Deferred는 현재 next-turn 계약이다. 새 즉시 명령은 이 대기에 남으면 안 됨 | 코드로 확인한 현재 분기와 설계 회귀 mutant; `busy_effort_restarts_while_original_never_finishes` 수용 시험 |
-| NoClose: confirmed end 뒤 정산 정지(7단계 lasso) | 기존 `herdr_terminate.rs:603`은 exact old turn 정산을 호출한다. 새 adapter에서 이를 빼는 구현을 모델로 제거 | 설계 obligation. 실제 main에서 정산 omission을 재현했다고 주장하지 않음 |
+| NoClose: confirmed end 뒤 정산 정지(7단계 lasso) | 기존 `herdr_terminate.rs:602`은 exact old turn 정산을 호출한다. 새 adapter에서 이를 빼는 구현을 모델로 제거 | 설계 obligation. 실제 main에서 정산 omission을 재현했다고 주장하지 않음 |
 | Repost: 동일 old body를 resume 뒤 재게시(6단계) | 기존 replay가 acked record만 제외함을 확인했으며 실제 main에서 duplicate가 발생함을 확인한 것은 아님 | 설계 guard mutant. live 반례로 인계하지 않음 |
 
 ## 범위 밖과 외부 가정
@@ -549,7 +549,7 @@ Claude binary: `/Users/itismyfield/.local/share/claude-stable/claude`, SHA256 `a
 | effort read | discord/commands/config/provider_settings.rs:261-281 | Claude만, channel_effort_levels raw channel key, low..max whitelist |
 | effort save | discord/commands/config/provider_settings.rs:285-311 | Claude local tmux만, candidate try_save 후 relaunch pending |
 | fast save | discord/commands/config/provider_settings.rs:314-375 | provider별 pending key, candidate try_save 후 overrides |
-| settings 구조 | discord/mod.rs:906-908,937-938 | channel_relaunch_pending set + channel_effort_levels map |
+| settings 구조 | discord/mod.rs:910-912,942-943 | channel_relaunch_pending set + channel_effort_levels map |
 | effort restore | discord/settings/read.rs:127-138,308-309 | 저장 string을 복원(읽기 시 whitelist와 구분됨) |
 | effort persist | discord/settings/write.rs:461-471 | pending + effort를 같은 저장면에서 직렬화 |
 | boot | discord/runtime_bootstrap.rs:215-216,273 | load_bot_settings→shared bot_settings |
@@ -601,14 +601,14 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | Codex tmux TUI resume argv | codex/tui_session_launch/launch_policy.rs:147-164 | resume 먼저, common options, ID 마지막 |
 | Codex warm/absence launch | codex/absence_launch.rs:121-138,171-198,326-395 | env effort, same session selection/preflight, new incarnation, launch, resume proof |
 | Codex process launch | codex/process_session_launch.rs:110 | env effort로만 시작 |
-| Codex Herdr launch options | codex/herdr_turn.rs:174-185 | turn.model + env effort; channel effort 없음 |
-| Codex Herdr identity | codex/herdr_turn.rs:188-195 | expected_native_session_id=None, resume=false |
+| Codex Herdr launch options | codex/herdr_turn.rs:176-187 | turn.model + env effort; channel effort 없음 |
+| Codex Herdr identity | codex/herdr_turn.rs:190-197 | expected_native_session_id=None, resume=false |
 | Codex Herdr fresh guard | codex/tui_session_launch/launch_policy.rs:178-182,210-214,229-260 | resume launch 거절(다음 단락 참조) |
 | Codex warm fingerprint | codex_tui/warm_followup.rs:125-126 | reasoning_effort도 launch fingerprint에 포함 |
 | wrapper default | codex_tmux_wrapper/input.rs:279-290 | explicit effort 없고 model 지정이면 high, 양쪽 없으면 None |
 | incarnation 새 nonce | tui_prompt_dedupe/binding_context.rs:333-363 | 새 UUID execution_nonce, expected_native_session_id, launch_mode resume/fresh |
 | incarnation durable | tui_prompt_dedupe/binding_context.rs:366-401 | temp write/fsync/hard-link/parent sync 후 immutable publish; verified Codex archive |
-| Herdr incarnation | herdr_launch.rs:463-494,729 | command 생성 전 durable evidence; stamp spawn markers |
+| Herdr incarnation | herdr_launch.rs:469-496,731 | command 생성 전 durable evidence; stamp spawn markers |
 
 ### Codex Herdr resume는 별도 구현 의존
 
@@ -667,16 +667,16 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | `/stop` slash | `src/services/discord/commands/control.rs:617`, `:637`, `:668`, `:682`; `commands/stop.rs:84` | 원격 holder cancel forwarding/revalidate 이후 begin_user_stop. acknowledgement 뒤 finish에서 실제 stop 후 queue consequence |
 | text `!stop` / `!clear` | `src/services/discord/commands/text_commands.rs:20`, `:102` | 같은 begin_user_stop·clear 본체를 사용. 자동 continuation 중 이 입력이 들어와도 기존 stop 정책을 넓히지 말 것 |
 | HTTP 일반 Cancel | `src/services/queue/herdr_stop.rs:12`, `:24`; `src/services/queue/cancel_effects.rs:78` | nonforce live Herdr는 holder `/stop`; confirmed publish 뒤 기존 queue drain. 강제 cancel은 별도 purge 계약 |
-| HTTP force Cancel | `src/services/queue/http_force.rs:31`, `:52`; `src/services/queue/cancel_effects.rs:256` | 선택한 Herdr 실행을 terminate exclusion 안에서 retire하고 큐 purge하는 사용자 의도. effort에서 호출하면 큐 보존 계약 위반 |
-| HTTP Terminate | `src/server/routes/herdr_terminate.rs:40`, `:93`; `src/services/discord/herdr_terminate.rs:401`, `:679` | exact execution nonce 대상 종료. 이 서비스의 scoped core만 재사용 가능하며 force cancel/dispatch fail/retry postlude는 붙이지 않음 |
-| physical Herdr terminate core | `src/services/discord/herdr_terminate.rs:437`, `:453`, `:478`, `:486`, `:568`, `:580`, `:600` | row/owner/nonce 일치→captured token/actor→transition→fence→row 재확인→end 관찰→retire CAS→hold 해제→captured finalizer. successor를 잘못 끊지 않도록 identity를 매 단계 고정 |
-| Herdr turn settlement | `src/services/discord/herdr_terminate.rs:314`, `:337`, `:355`, `:382` | release_hold는 exact execution nonce, finalizer는 captured TurnKey/episode nonce/snapshot. AlreadyFinalized도 exact token이 실제 해제됐는지 다시 확인 |
+| HTTP force Cancel | `src/services/queue/http_force.rs:30`, `:52`; `src/services/queue/cancel_effects.rs:256` | 선택한 Herdr 실행을 terminate exclusion 안에서 retire하고 큐 purge하는 사용자 의도. effort에서 호출하면 큐 보존 계약 위반 |
+| HTTP Terminate | `src/server/routes/herdr_terminate.rs:40`, `:93`; `src/services/discord/herdr_terminate.rs:400`, `:679` | exact execution nonce 대상 종료. 이 서비스의 scoped core만 재사용 가능하며 force cancel/dispatch fail/retry postlude는 붙이지 않음 |
+| physical Herdr terminate core | `src/services/discord/herdr_terminate.rs:436`, `:453`, `:478`, `:486`, `:568`, `:580`, `:600` | row/owner/nonce 일치→captured token/actor→transition→fence→row 재확인→end 관찰→retire CAS→hold 해제→captured finalizer. successor를 잘못 끊지 않도록 identity를 매 단계 고정 |
+| Herdr turn settlement | `src/services/discord/herdr_terminate.rs:313`, `:337`, `:355`, `:382` | release_hold는 exact execution nonce, finalizer는 captured TurnKey/episode nonce/snapshot. AlreadyFinalized도 exact token이 실제 해제됐는지 다시 확인 |
 | clear teardown | `src/services/discord/commands/control.rs:510`, `:521`, `:550`, `:561`, `:574`; `control/clear_teardown.rs:70` | queue discard, native session memory clear, provider selector forget. effort에서 clear 본체 재사용 금지 |
 | `/clear` Herdr | `src/services/discord/commands/control/clear_teardown.rs:138`, `:192` | terminate의 after_retire 안에서 selector를 지워 successor 경합 방지. effort는 selector를 지우지 않는 새 postlude 필요 |
 | legacy managed process 종료 | `src/services/discord/commands/control/managed_reset.rs:75`, `:110`, `:146` | runtime hint fence 아래 process handle/tree + exact tmux end, kill 확인 후 temp cleanup. 임의 name kill 권한을 새로 만들면 안 됨 |
 | verified Codex reset refusal | `src/services/discord/commands/control/managed_reset.rs:13`, `:45`, `:60` | verified incarnation output proof 전 reset 불가. effort라는 이름으로 우회하지 말고 종료·writer proof 연동 수용 시험 필요 |
 | process resume launch | `src/services/claude/tui_session_launch.rs:12`, `:154`, `:166`; `src/services/codex/tui_session_launch.rs` | Claude Herdr prepare는 context.launch_mode=resume 및 expected_native_session_id 일치 요구. 새 native session으로 fallback하는 즉시 restart 성공 보고 금지 |
-| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:234`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:124`, `:174`, `:188` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
+| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:236`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:126`, `:174`, `:188` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
 | 부팅 시 Herdr 재획득 | `src/services/discord/recovery_engine/herdr_reader.rs:220`, `:228`, `:506` | Bound Herdr row read/reconnect→existing source attach. effort pending debt도 attach 성공과 구분해야 함 |
 | 부팅 시 watcher 재획득 | `src/services/discord/watchers/lifecycle/restore_retry.rs:83`, `:93`; `runtime_bootstrap/recovery_flush.rs:55`, `:73` | recovery handled channel skip으로 duplicate watcher 방지. restart local command도 같은 registry fences 보존 |
 | stream active inflight 재생성 | `src/services/discord/tmux_watcher/liveness.rs:462`, `:473`, `:486`; `tmux_watcher/loop_poll_prologue.rs:483`; `tmux_watcher/streaming_status_tick.rs:268` | turn-mode 채널은 synthetic reacquire 안 함. legacy active stream은 recovery gate + save-if-absent. old watcher가 restart 후 원치 않는 inflight를 다시 만들지 않도록 exact generation 종료 필요 |
@@ -698,7 +698,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | presence nonce | `src/services/discord/turn_presence/activity/unbound/live_ownership.rs:80`, `:176`, `:253`, `:307`; `unbound/binding_metadata.rs:107`, `:128` | spawn nonce/registry generation/source binding이 바뀌면 이전 measurement로 admission 못 함. 새 incarnation publish 필요 |
 | queue front/custody | `src/services/turn_orchestrator/queued_head/v2.rs:26`, `:123`, `:369`, `:482`; `queue_io/input_owner/effect.rs:19`, `:105` | original/ticket/attempt를 owner가 보존. Held=정확히 no-key proof인 재시도 가능 front, WriteUncertain=may-have-sent로 자동 재전송 금지 |
 | Held wake | `queue_io/input_owner/drive.rs:118`; `held_watch.rs:73`, `:104` | no-key hold는 real wake 대기. Gone pane은 watcher를 끝내며 wake하지 않음. restart completion 및 writer ready에서 owner wake가 반드시 필요 |
-| legacy stop preserve | `src/services/turn_lifecycle.rs:96`, `:104`, `:123` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
+| legacy stop preserve | `src/services/turn_lifecycle.rs:98`, `:104`, `:123` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
 
 위 표에서 약칭 `turn_finalizer`, `queue_io`, `tmux_watcher`, `runtime_bootstrap`는 `src/services/discord/` 아래다.
 

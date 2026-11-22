@@ -254,7 +254,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/discord/health/recovery/stall_alert.rs:36` | provider가 일치하는 tmux key만 stall 복구 후보로 선택 | S/I/M |
 | `src/services/discord/health/watcher_respawn/idle_relay_absence.rs:84` | provider별 watchdog이 자기 provider 세션만 관측 | I/B/M |
 | `src/services/discord/host_defer_gate.rs:255` | idle mirror eviction에서 이름으로 provider row 선택 | S/B/M |
-| `src/services/discord/host_teardown_gate.rs:199` | row provider 없을 때 teardown gate provider 보충 | S/M |
+| `src/services/discord/host_teardown_gate.rs:190` | row provider 없을 때 teardown gate provider 보충 | S/M |
 | `src/services/discord/inflight_heartbeat_sweeper.rs:97` | provider별 sweeper가 다른 bot watcher를 건드리지 않도록 제한 | I/B/M |
 | `src/services/discord/org_schema.rs:447` | binding context channel 누락 시 숫자 채널명에서 channel ID 보충; auth overlay 라우팅 | B/S/M |
 | `src/services/discord/org_schema.rs:467` | binding context channel 누락 시 숫자 채널명에서 channel ID 보충; auth overlay 라우팅 | B/S/M |
@@ -296,8 +296,8 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/provider/cancel_token_cleanup/executor.rs:327` | channel을 추출하여 unified-thread cleanup 억제 여부 조회 | T/S/M |
 | `src/services/session_activity.rs:69` | provider/runtime_kind로 input-ready 판정기 선택 | B/I/S/M |
 | `src/services/session_resume.rs:236` | resume의 canonical row/provider 및 owner host 조회 | S/M |
-| `src/services/stale_turn_reconciler.rs:311` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
-| `src/services/stale_turn_reconciler.rs:731` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:313` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:732` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
 | `src/services/tmux_turn_liveness.rs:64` | idle cleanup 전에 provider별 native rollout 근거 검사 | S/B/I/M |
 
 ## 3. -t<숫자> decoder와 전체 helper 소비자
@@ -479,7 +479,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K18 | `services/dispatched_sessions/output.rs:153` | row id로 읽은 primary→capture/output name 및 host guard | **자동(A)**. row primary에서 새 name을 얻음. 과거 explicit transcript pin은 별도 원문 보존. |
 | K19 | `services/dispatched_sessions/tmux_cleanup.rs:27` | raw 요청 key→name을 먼저 만들고 DB row/provider/host를 읽어 kill-tmux | 새 primary 요청은 **자동(A)**. old-alias HTTP 입력은 **S3**에서 current primary resolve 후 name/marker/probe/kill. |
 | K20 | `services/queue.rs:137,453,735` | active dispatch/channel cancel이 `SELECT s.session_key`(primary)→tmux name→lifecycle stop | **자동(A)**. queue cancel 대상이 새 name. PG+host fake 또는 격리 tmux 회귀에서 새 세션 중지·queue 보존 효과를 확인. |
-| K21 | `services/queue/http_force.rs:152` | selected row의 primary에서 응답 `tmux_session` 표시(Herdr termination 응답 포함) | **자동(A)**. 표시/현재 row key 일치. Herdr pane 제어는 원래 pane ID여서 key tail로 바꾸지 않음. |
+| K21 | `services/queue/http_force.rs:148` | selected row의 primary에서 응답 `tmux_session` 표시(Herdr termination 응답 포함) | **자동(A)**. 표시/현재 row key 일치. Herdr pane 제어는 원래 pane ID여서 key tail로 바꾸지 않음. |
 | K22 | `services/routines/session_control.rs:251,431,476,853` | local helper가 ownership token 또는 latest thread row key의 tail을 추출 | latest current primary는 **자동(A)**. persisted fresh-run ownership token은 **실행 pin**이므로 그대로 유지, alias로 successor 물리 이름을 강제로 선택하지 않음. synthetic routine row를 canonical channel 승격에 섞지 않는 S6 계약과 함께 검증. |
 | K23 | `services/session_host/resolve.rs:162` | supplied matched key 꼬리의 host_kind marker로 host evidence 구성 | current primary는 **자동(A)**. **S2**에서 임의 HTTP alias가 SessionKey 증거로 들어오는 경계는 current primary로 정규화. pinned inflight host locator/nonce는 유지. |
 | K24 | `services/session_resume.rs:226` | raw resume key의 name으로 provider/owner load와 local rebind 대상 결정 | 새 primary는 **자동(A)**. **S3**에서 old alias→current primary를 먼저 resolve; old name으로 rebind하지 않음. |
@@ -575,9 +575,9 @@ API·UI는 코드 조사만 수행했다. 실제 빌드/운영 API 접근을 했
 - `src/domain/provider/naming.rs:16-50`: 현재 `char::is_alphanumeric()` 또는 `-`/`_` 유지, 나머지를 `-`로 치환. 문서의 `[A-Za-z0-9_-]` 설명은 실제와 다르며 한글은 유지된다. `safe_prefix(...,44)`는 **byte** 예산이고 `src/utils/format.rs:4-12,38-43`이 UTF-8 char boundary로 내리므로 panic은 피하나 앞 14음절(42byte)이 같은 두 15음절 이름은 충돌한다.
 - `Cargo.toml:87`에 `unicode-normalization` 의존성이 이미 있다. 현 naming 모듈에 `.nfc()`/`.nfd()` 적용 없음. 신형 writer에는 NFC 정규화 후 허용문자 치환/길이 계산을 넣고, 옛 경로 lookup은 저장된 원문을 사용해야 한다. APFS가 정규화 등가 파일을 같은 inode로 처리하는지 부모 실측 결과에 맞춰 이름 기반 파일 충돌을 방지한다.
 - `src/services/tmux_common.rs:1113-1140`: 경로 basename에 `session_name` 원문 삽입. NFC/NFD가 tmux에서 별개여도 파일시스템에서는 같은 경로일 수 있다. 신형 locator 전환과 함께 NFC 정규화 + canonical ownership 충돌 확인 필요. 살아 있는 옛 파일명은 rewrite/rename하지 않는다.
-- `src/services/herdr_launch.rs:342-345`: workspace label은 `logical_key#nonce`. `prepared.rs:37,58`이 create 요청에 전달. `src/services/herdr_launch/unplaced.rs:100-112`는 정확한 logical_key 또는 `logical_key#32hex`만 자기 후보로 읽는다. **표시용 label을 단순 에이전트명으로 바꾸면 orphan/adopt 판정이 깨진다.** 새 display label을 identity marker와 분리하거나 이 naming 이슈에서는 workspace ownership label을 보존해야 한다.
+- `src/services/herdr_launch.rs:347-350`: workspace label은 `logical_key#nonce`. `prepared.rs:37,58`이 create 요청에 전달. `src/services/herdr_launch/unplaced.rs:101-113`는 정확한 logical_key 또는 `logical_key#32hex`만 자기 후보로 읽는다. **표시용 label을 단순 에이전트명으로 바꾸면 orphan/adopt 판정이 깨진다.** 새 display label을 identity marker와 분리하거나 이 naming 이슈에서는 workspace ownership label을 보존해야 한다.
 - `src/services/session_host/herdr/model.rs:238-243,268-293`: label/cwd는 JSON String, pane 제어는 별도 `pane_id`/`workspace_id` 기반. 이 프로토콜에는 pane name이나 rename 요청이 없다. 한글 label 실물 생성은 부모의 격리 herdr에서 검증하며 사용자 herdr는 조작하지 않는다.
-- `src/services/herdr_launch.rs:350-358`: launch command는 절대 cwd/한 줄 non-control 조건. shell line의 Unicode 자체를 거부하지 않음.
+- `src/services/herdr_launch.rs:355-363`: launch command는 절대 cwd/한 줄 non-control 조건. shell line의 Unicode 자체를 거부하지 않음.
 - `src/services/process.rs:596-600`: POSIX `shell_escape`는 단따옴표로 감싸고 내부 `'`를 `'\''`로 치환, Unicode 바이트 보존. `src/services/claude/tui_session_launch/prepared.rs:82`가 script 경로에 적용. 외부 명령은 argv 사용, session-target과 pane-target 문법을 구분하며 pane-target에는 `=name:`를 사용. r2 정확 target 실측은 부록 D.
 - `dashboard/src/components/settings/SettingsProvidersModel.ts:57-58`의 attach 문자열은 quoting이 없지만 **provider login 전용 `adk-login-*` 이름**이다. worker naming 변경에 확대하지 않으며 일반 사용자 이름 shell 문자열에 재사용하지 않는다.
 
@@ -971,7 +971,7 @@ HashedV2 basename = "adk-v2-" + lowercase_hex(SHA256(domain, runtime, host, exac
 
 ## 입력 소유 범위 — token logical key 함정과 non-prefix 이름
 
-- Herdr `HostedOwner.logical_key`는 namespaced key 전체가 아니다. `discord/router/message_handler/provider_dispatch.rs:648-664`은 SessionIdentity로 parse한 뒤 **tmux_name tail**을 logical_key에 넣는다. `herdr_launch.rs:393,742,772`의 fence/context/host marker는 그 tail을 사용하므로 현재 운영 producer가 만든 legacy Herdr artifact도 `AgentDesk-` class다.
+- Herdr `HostedOwner.logical_key`는 namespaced key 전체가 아니다. `discord/router/message_handler/provider_dispatch.rs:648-664`은 SessionIdentity로 parse한 뒤 **tmux_name tail**을 logical_key에 넣는다. `herdr_launch.rs:398,744,774`의 fence/context/host marker는 그 tail을 사용하므로 현재 운영 producer가 만든 legacy Herdr artifact도 `AgentDesk-` class다.
 - tmux·process wrapper의 실제 production 생성은 기존 provider builder를 경유한다. `claude/process_session_launch.rs:119`, `codex/process_session_launch.rs:117`, `qwen/session_lifecycle.rs:396`의 SessionConfig는 이미 선택된 session_name을 전달한다. process 모드라는 이유로 namespaced `provider/token/host:` 전체를 artifact key로 바꾸면 안 된다.
 - generic `session_temp_path(&str, ext)` 자체는 임의 문자열을 허용한다. 따라서 **모든 임의 non-prefix 옛 파일 경로까지 byte-identical라고 쓰면 틀린다.** 기존 main이 제공한 managed `AgentDesk-*` 이름의 live compatibility를 보장하고, 사용자/외부 non-prefix 세션은 S1 소유 관문에서 조작하지 않는 범위다. 외부에서 임의 non-prefix raw artifact를 이미 만들었다는 운영 가정은 이번 금지 범위상 조회하지 않았다.
 - 소문자 `agentdesk-claude-channel-*`는 `domain/session_identity.rs:131-145`의 key parsing 호환 fixture와 API inventory 예제에서 확인했다. 현재 production managed builder로 생성하는 경로는 확인되지 않았다. lower-case parser fixture가 있다는 사실만으로 과거 운영 artifact가 있었다고 단정하거나 old files를 지우지 않는다. 구현에서 새 legacy writer가 발견되면 추가 frozen class 또는 별도 호환 계약을 잡고 활성화 전에 해결한다.
@@ -1083,8 +1083,8 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/discord/health/recovery/runtime_lookup.rs:130` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/health/turn_deliver/inject.rs:283` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/host_defer_gate.rs:71` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/host_teardown_gate.rs:105` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/host_teardown_gate.rs:302` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/host_teardown_gate.rs:96` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/host_teardown_gate.rs:293` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/manual_rebind/mod.rs:265` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/manual_rebind/watcher_claim.rs:74` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/restore_inflight.rs:307` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |

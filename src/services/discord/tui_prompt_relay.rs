@@ -1,3 +1,5 @@
+// Only the unix-only rehydration and idle-rollout children use it, via `use super::*`.
+#[cfg(unix)]
 use std::collections::HashSet;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -64,8 +66,9 @@ pub(super) fn install_observer_publication() {
     );
 }
 
-mod idle_tail_state;
-pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
+use super::tmux_watcher_registry::idle_tail_state::CLAUDE_IDLE_RESPONSE_TAILS;
+#[cfg(all(test, unix))]
+use super::tmux_watcher_registry::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,
@@ -92,19 +95,14 @@ pub(in crate::services::discord) use rehydration::claude_pass_tests::rehydrate_o
 #[cfg(all(unix, test))]
 pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
-mod anchor_completion;
 mod bridge_completion;
 pub(in crate::services::discord) mod bridge_gateway;
-use self::anchor_completion::{
-    DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
-};
-pub(in crate::services::discord) use self::anchor_completion::{
-    complete_tui_direct_anchor_lifecycle_for_inflight,
-    complete_tui_direct_prompt_anchor_lifecycle_if_present,
-    should_complete_tui_direct_anchor_lifecycle,
-};
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
+use super::turn_view_reconciler::anchor_completion::{
+    DeferredAnchorCompletionDrain, complete_tui_direct_prompt_anchor_lifecycle_if_present,
+    decide_deferred_anchor_completion_drain,
+};
 #[cfg(unix)]
 pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]
@@ -153,7 +151,6 @@ mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-not
 use self::synthetic_start::build_tui_direct_synthetic_inflight_state;
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
-pub(in crate::services::discord) use self::synthetic_start::tui_direct_watcher_synthetic_inflight_matches;
 #[cfg(unix)]
 #[allow(unused_imports)]
 use self::synthetic_start::{
@@ -171,6 +168,8 @@ use self::synthetic_start::{
 use self::synthetic_start::{
     restore_pending_starts, tui_direct_synthetic_inflight_active_for_prompt,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use super::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches;
 
 #[cfg(unix)]
 pub(in crate::services::discord) mod background_child_completion;
@@ -242,11 +241,9 @@ const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
-pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
+pub(in crate::services::discord) use super::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
 static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
-static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// #3178: dedupe window for the machine slash-command control turn. The #3153
 /// `/loop` double-post arrives as TWO independent observed prompts — the raw
@@ -862,6 +859,15 @@ fn slash_command_control_turn_is_duplicate_external_replay(
         .as_deref()
         .expect("external slash command control decisions carry a kind");
     !slash_command_control_turn_is_first_sighting(tmux_session_name, kind)
+}
+
+impl hosted_source::AdoptionRuntime for SharedData {
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        self.pg_pool.as_ref()
+    }
+    fn token_hash(&self) -> &str {
+        &self.token_hash
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -280,15 +280,14 @@ pub(super) mod herdr {
     use futures::FutureExt;
     use futures::future::BoxFuture;
 
-    use crate::services::discord::TmuxCleanupPolicy;
-    use crate::services::discord::herdr_terminate::RetiredExclusion;
-    use crate::services::discord::herdr_terminate::http_force::Released;
+    use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
     use crate::services::turn_cancel_finalizer::{
         FinalizeTurnCancelRequest, FinalizedTurnCancel, TurnCancelCorrelation, finalize_turn_cancel,
     };
     use crate::services::turn_cancel_queue_guard::{CancelQueueLoss, record_purge_receipt_on};
     use crate::services::turn_lifecycle::cleanup_policy_observability_surface;
     use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
+    use crate::services::turn_orchestrator::{Released, RetiredExclusion};
 
     pub(in crate::services::queue) const HERDR_TERMINATE: &str = "herdr-terminate";
 

@@ -122,7 +122,7 @@ pub(crate) enum TuiDirectAdoptOffsets {
 /// bridge-owned `Managed` turns, so the owner alone does not identify one.
 fn is_tui_direct_row(row: &inflight::InflightTurnState) -> bool {
     row.request_owner_user_id
-        == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        == crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
         && row.turn_source == inflight::TurnSource::ExternalInput
 }
 

@@ -93,7 +93,7 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
 ) -> bool {
     state.request_owner_user_id != 0
         && state.request_owner_user_id
-            != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+            != crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
         && state.user_msg_id != 0
 }
 

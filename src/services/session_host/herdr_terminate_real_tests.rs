@@ -616,6 +616,7 @@ pub(crate) async fn launch(
         resume: false,
         provider_root: None,
         resume_start: None,
+        takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
     };
     let work = real.work("providers");
     // macOS keeps a platform binary's environment from other processes; python's is readable.

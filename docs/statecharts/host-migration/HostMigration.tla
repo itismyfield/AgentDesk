@@ -84,7 +84,7 @@ ForwardEndsTmux ==
     /\ UNCHANGED <<mapping, row, tmuxSid, herdrP, herdrSid, marker, listed, chanSid, named,
                    regName, pending, inputs, restarts, badResume, authSid>>
 
-\* herdr_turn.rs:571 launch_herdr_session (Pending CAS, marker herdr at herdr_launch.rs:684, create)
+\* herdr_turn.rs:571 launch_herdr_session (Pending CAS, marker herdr at herdr_launch.rs:686, create)
 \* resuming chanSid; end_by_exit answered Ended (session_handoff.rs:65).
 ForwardLaunchResume ==
     /\ ForwardReady /\ (tmuxP /= "run" \/ Mut = "noExitBeforeLaunch")

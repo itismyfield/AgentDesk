@@ -340,14 +340,13 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     dispatch_id: Option<&str>,
 ) -> Result<DispatchMessagePostOutcome, DispatchMessagePostError> {
     use crate::domain::outbound::policy::DiscordOutboundPolicy;
-    use crate::domain::outbound::result::{DeliveryResult, FallbackUsed};
-    use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
-    use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::{HttpOutboundClient, shared_outbound_deduper};
+    use crate::domain::outbound::result::{DeliveryResult, FallbackUsed, first_raw_message_id};
+    use crate::domain::outbound::{OutboundIntent, OutboundTargetKey};
+    use crate::services::dispatches::http_outbound::HttpOutbound;
     use poise::serenity_prelude::ChannelId;
 
     let outbound_client =
-        HttpOutboundClient::new(client.clone(), token.to_string(), base_url.to_string());
+        HttpOutbound::new(client.clone(), token.to_string(), base_url.to_string());
     let correlation_id = dispatch_id.map(dispatch_delivery_correlation_id);
     let semantic_event_id = dispatch_id.map(dispatch_delivery_semantic_event_id);
     let mut policy = DiscordOutboundPolicy::dispatch_outbox();
@@ -373,22 +372,17 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
                 format!("invalid dispatch outbound channel id {channel_id}: {error}"),
             )
         })?;
-    let outbound_msg = DiscordOutboundMessage::new(
+    let outbound_msg = OutboundIntent::new(
         delivery_correlation_id,
         delivery_semantic_event_id,
         message,
-        OutboundTarget::Channel(target_channel_id),
+        OutboundTargetKey::channel(target_channel_id.get()),
         policy,
-    )
-    .with_summary(minimal_message.to_string());
+    );
 
-    match deliver_outbound(
-        &outbound_client,
-        shared_outbound_deduper(),
-        outbound_msg,
-        None,
-    )
-    .await
+    match outbound_client
+        .deliver_with_summary(outbound_msg, Some(minimal_message.to_string()))
+        .await
     {
         DeliveryResult::Sent { messages, .. } => {
             let message_id = first_raw_message_id(&messages).unwrap_or_default();

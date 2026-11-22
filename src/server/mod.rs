@@ -548,7 +548,7 @@ async fn policy_tick_loop(
                 // Resume post-commit cleanup a previous process left owed; this is how a
                 // restarted process converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
-                    health_registry.clone(),
+                    crate::services::auto_queue::runtime::slot_runtime_health(health_registry.clone()),
                     pool,
                 )
                 .await
@@ -2409,7 +2409,7 @@ async fn routine_runtime_loop(
     let agent_executor =
         RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
             .with_headless_fresh_agents(routines_config.headless_fresh_agents);
-    match store.recover_stale_running_runs().await {
+    match agent_executor.recover_stale_running_runs(&store).await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
                 // Reap owned orphaned fresh sessions before they look like abrupt exits.
@@ -2435,7 +2435,7 @@ async fn routine_runtime_loop(
         let routines_config = crate::config_live_reload::current()
             .map(|cfg| cfg.routines.clone())
             .unwrap_or_else(|| routines_config.clone());
-        match store.recover_stale_running_runs().await {
+        match agent_executor.recover_stale_running_runs(&store).await {
             Ok(recovered) if !recovered.is_empty() => {
                 for run in &recovered {
                     // No fresh-session reap here: a concurrent re-claim can reuse the same tmux

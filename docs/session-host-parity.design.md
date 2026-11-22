@@ -18,7 +18,7 @@
 
 | 진입점 | tmux 채널 현재 | herdr 채널 현재 | tmux 스레드 현재 | herdr 스레드 현재 | 목표 동작 | 담당 조각 | 불가피한 차이·보존할 사유 |
 |---|---|---|---|---|---|---|---|
-| Discord 새 메시지·새 세션 | intake→provider launch | intake용 host admission 뒤 Herdr 실행 | 부모 path bootstrap 후 tmux | child ID exact lookup으로 tmux 선택 | 같은 intake, 새 child는 부모 host 정책, 실제 child target 사용 | #8118 H1, #8115 | host IO·admission 수단만 다름. `D=session_runtime.rs:505,513`, `S=herdr_launch.rs:56`, `S=turn_host.rs:151` |
+| Discord 새 메시지·새 세션 | intake→provider launch | intake용 host admission 뒤 Herdr 실행 | 부모 path bootstrap 후 tmux | child ID exact lookup으로 tmux 선택 | 같은 intake, 새 child는 부모 host 정책, 실제 child target 사용 | #8118 H1, #8115 | host IO·admission 수단만 다름. `D=session_runtime.rs:505,513`, `S=herdr_launch.rs:59`, `S=turn_host.rs:151` |
 | 일하는 중 사람 입력 | owner가 busy paste, source 불명은 Held | 기존에는 일부 defer; #8114가 공통 operation으로 교체 예정 | 새 owner 경로 사용. 이슈 실측 source-not-bound 실패도 있음 | launch는 tmux인데 busy gate는 부모 H로 배제하는 불일치 | #8114 operation을 동일 소비; child의 source/history를 먼저 bind | #8114 뒤 #8118 O/H | tmux server guard, Herdr exact pin/physical writer lease 보존. `D=router/intake_gate/busy_inject.rs:82`, `D=router/message_handler/intake_turn.rs:1110,1754`(전체 경로는 부록) |
 | 터미널에서 시작된 턴 합류 | Claude live transcript→owner busy | endpoint 존재 시 제외 | child ID 기준으로 tmux 합류 | 설정과 actual host가 어긋남 | 정책 host가 아닌 actual operation 관측으로 같은 사람 입력 합류 | #8114, #8118 H1 | native unknown은 key0 Held, post-key 불명은 no-resend. `D=router/message_handler/intake_turn.rs:1751` |
 | 출력 본문·placeholder·도구 카드·푸터 | O 선택 채널은 O writer | O-ready가 Herdr launch 선행 | boot selection에 child가 없어 legacy로 빠짐 | 동일; parent O여도 child O 0이라는 이슈 관측 | 부모 O selection·kind·site를 상속, child별 writer/store/adoption/usage | **#8118 O-a→O-b 첫 출력 묶음**, #7651 자체 관문 별도 | legacy 증상 개별 수리 금지. `S=tui_o/channel_policy.rs:74,346`, `S=tui_o/cutover/channel_gate.rs:433`, `D=runtime_bootstrap/owner_execution.rs:79` |
@@ -26,7 +26,7 @@
 | API turn/start | headless owner admission 후 시작 | 일반 refusal→422 executor_not_wired | target 단계 403 | 403; 우회하면 child direct endpoint가 host 오판 | idle 시작, 사람 origin busy는 #8114, 기계 start는 자기 턴 순서 유지 | #8125 T1→T2 | API라는 이유로 모든 입력을 사람으로 분류하지 않음. `R=agents.rs:781,892`, `D=router/message_handler/headless_turn.rs:159` |
 | API turn/deliver | preflight→inject/start/queue | **busy Herdr inject는 이미 있음**, idle start는 위 거절 | target 403 | target 403; direct endpoint로 Herdr leaf 누락 | owner/execution ID를 분리해 기존 경로 재사용 | #8125 T1→T2 | injected/queued/unconfirmed, origin obligation 유지. `R=agents_turn_deliver.rs:192,236`, `D=health/turn_deliver/inject/herdr.rs:41,79` |
 | API no-session thread | 해당 없음 | 해당 없음 | 403 | 403 | Discord 첫 thread 메시지와 같은 bootstrap·placement 후 시작 | #8115 뒤 #8125 T2 | capacity preferred fallback은 #8115 책임, 무제한 overflow 금지 |
-| iMessage 답장 | GUID 원본 identity로 owner 입력 | start 거절; busy deliver는 기존 경로 있음 | API 거부로 본 채널 우회(이슈 실측) | 동일 | 발신 세션의 child/native target에 1회 전달 | #8125 T1/T2 뒤 외부 스킬 | 스킬 예외 제거는 저장소 밖. `D=router/turn_start.rs:79`, `D=queue_io/input_owner/start.rs:18`, `R=agents_turn_deliver.rs:236` |
+| iMessage 답장 | GUID 원본 identity로 owner 입력 | start 거절; busy deliver는 기존 경로 있음 | API 거부로 본 채널 우회(이슈 실측) | 동일 | 발신 세션의 child/native target에 1회 전달 | #8125 T1/T2 뒤 외부 스킬 | 스킬 예외 제거는 저장소 밖. `D=router/turn_start.rs:27`, `D=queue_io/input_owner/start.rs:18`, `R=agents_turn_deliver.rs:236` |
 | 루틴 primary/fallback/retry | agent_executor→start_turn | channel headless 거절 | thread 생성/재사용, parent metadata 및 owner-channel starter 이미 있음 | child host를 tmux로 오판 | 동일 정책 resolver·공통 external start 사용 | #8118 H1, #8125 T1/T2, #8117 | process fresh 실행을 TUI로 강제하지 않음. `S=routines/agent_executor.rs:129,268,582,731`, `agent_executor/launch.rs:72,144,198` |
 | scheduled agent fire | pinned target 또는 primary | headless 거절 | parent metadata 있음 | host 상속 누락 | 예약의 original/commit fence를 유지하고 child 실행 | #8118 H1, #8125 T1/T2 | `D=scheduled_messages.rs:287,308,379,390`의 snapshot scope 불변 |
 | `/restart` | cancel→PreserveSession stop→reset→완료 seed | cancel 전 managed_reset_refusal | target name 기반 경로 | child direct 판정으로 tmux 처리 가능 | cancel→exact pane 종료 확인→동일 native session resume→완료 seed 1회 | #8128 R **첫 관리 조각** | #8119 S8b1 뒤, #8125 T1 seed 시작 경계 선행. `D=commands/restart.rs:150,216,218,293` |
@@ -40,7 +40,7 @@
 | tmux_recreate | managed reset 뒤 재생성 | refusal | name 기반 | raw child 판정 위험 | 명령의 사용자 결과인 재생성을 host operation으로 수행 | #8128 R2 | **#8119 S8b1 뒤**. `D=commands/tmux_recreate.rs:91` |
 | provider_reset·자동 큐 관리 reset·health recovery | reset/clear 재확인 뒤 처리 | configured refusal | actual locator 의존 | direct endpoint 불일치 | R의 exact end/relaunch를 소비, 기존 recheck 보존 | #8128 R2 | #8119 뒤. `D=commands/control/provider_reset.rs:16`, `S=auto_queue/runtime.rs:485`, `D=health/recovery.rs:267` |
 | `/resume` | explicit session rebind | 하위 session_resume에서 refusal | name 기반 | raw child host 누락 가능 | actual host 대상 rebind, R 계약 재사용 | #8128 R2 | **#8119 S8b1 뒤**. `D=commands/session.rs:80`, `S=session_resume.rs:402` |
-| `/stop`·`!stop`·HTTP cancel | 기존 turn/token/host stop | Herdr 중단키 전달·settlement 경로 있음 | child target이어야 함 | H 정책과 actual T가 다를 수 있음 | actual host·nonce에 대해 기존 stop 의미 유지 | #8118 H2, #8128 검증 | host 상속만으로 pane close 권한 새로 부여하지 않음. `D=commands/stop.rs:39,75,134`, `D=herdr_terminate.rs:186` |
+| `/stop`·`!stop`·HTTP cancel | 기존 turn/token/host stop | Herdr 중단키 전달·settlement 경로 있음 | child target이어야 함 | H 정책과 actual T가 다를 수 있음 | actual host·nonce에 대해 기존 stop 의미 유지 | #8118 H2, #8128 검증 | host 상속만으로 pane close 권한 새로 부여하지 않음. `D=commands/stop.rs:39,75,134`, `D=herdr_terminate.rs:185` |
 | `/stop`·`!stop` 작업 중 중단(Claude) | 됨. 단 Code Mode 비동기 도구 실행 중은 같은 분류기라 코드상 같은 거절(실기 미확인) | Code Mode 비동기 도구 실행 중·생성 초반에 안 됨 → #8081 이 수리 | 실제 실행 host가 tmux면 tmux 채널과 같음 | 실제 실행 host가 herdr면 herdr 채널과 같음 | 화면이 active면 제출 상태여도 Esc 1회, 식별을 못 읽은 턴은 `esc to interrupt`가 보일 때만, 유휴 화면에는 0회 | #8081 /stop 수리 | 판정은 두 host가 같은 분류기를 쓰고 화면 읽기 수단만 다름. 배포 뒤 실기 A·B 재현 필요. `D=turn_bridge/tmux_runtime/claude_stop_delivery.rs:179`, `D=turn_bridge/tmux_runtime/codex_stop_delivery.rs:720`, [모델](statecharts/claude-stop/claude-stop.report.md) |
 | `!clear`·`/clear` 세션 종료 | stop·기록·selector clear, 다음 입력에서 새 실행 | end_herdr 전용 경로 이미 있음 | child 기록·locator | child가 부모 pane에 매핑되면 안 됨 | 현재 clear 의미 유지, child exact 실행 종료 | #8118 H2, #8128 E | #8119 뒤. `D=commands/control/clear_teardown.rs:70,81,115`, `commands/control/herdr_recovery.rs:28` |
 | `!clear` 이전 세션 종료 기록 | Claude/Codex tmux capture/기록 | 일부 기록 수집·Codex capture skip | tmux 기록 | host 판정 불일치 | 이미 보유한 native history/usage로 같은 결과 기록 | #8128 E | tmux 화면을 Herdr로 합성하지 않음. `D=commands/control/clear_teardown/clear_end_record.rs:45`, `codex_end_record.rs:15` |
@@ -130,7 +130,7 @@ GC의 **실제 row delete 성공** 뒤 같은 child/init provenance·row/nonce/g
 
 | 소유·소비 묶음 | 대표 좌표와 전수 범위 | 공통 함수/operation으로 가는 조각 |
 |---|---|---|
-| boot 원천·host factory | `config/session_hosts.rs:158,349,350`, `herdr_launch.rs:56,62`, `turn_host.rs:157,186` | 원천은 경계 내부로 한정, policy resolver를 통과. H1 |
+| boot 원천·host factory | `config/session_hosts.rs:158,349,350`, `herdr_launch.rs:59,65`, `turn_host.rs:157,186` | 원천은 경계 내부로 한정, policy resolver를 통과. H1 |
 | launch·absence | `claude.rs:2607`, `claude/tui_session_launch.rs:38,53`, `codex.rs:1426,1527`, `codex/absence_launch.rs:78,294`, `codex/tui_session_launch/{first_input.rs:216,launch_policy.rs:70}`, `discord/codex_absence.rs:30` | H1; 기존 admission/refusal 유지 |
 | intake·queue·actual source | `discord/router/intake_gate/busy_inject.rs:86`, `router/message_handler/intake_turn.rs:1110,1754`, `queue_dispatch.rs:253`, `queue_io/input_owner/claude_handoff.rs:219`, `router/message_handler/tui_followup/nameless_gate.rs:79`, `session_runtime.rs:513` | #8114가 없앨 중복 재구현 금지. H1 |
 | synthetic source·O actor·notice | `discord/tui_prompt_relay.rs:757`, `tui_prompt_relay/synthetic_start/admission_fence.rs:168`, `tui_prompt_dedupe/hosted_source.rs:64`, `tui_o/writer/actor.rs:423`, `tui_o/writer/input_notices/admission.rs:104`, `tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:67` | O 조각은 필요한 output adapter만, 나머지 H2. actual source pin 유지 |
@@ -186,7 +186,7 @@ O RED에는 dispatch·routine TUI의 thread 등록과 모든 `check_tui_o_writer
 
 서버가 기록한 S6 BindingContext parent를 1차 증거로, init.policy_parent와 provenance를 대조한다. 기록이 없는 옛 child에만 checked REST를 사용한다. 현재 요청 agent의 bound parent 소유 확인은 기록 유무와 별개다. 확정된 남의 parent·실제 non-thread/category·확정 parent 없음은403, timeout/REST 오류/손상·상충으로 관계 미확정이면 **`503 {"status":"thread_parent_unverified","retryable":true}`**다. 미확정 응답은 admission·GUID 소비·queue·bootstrap·launch0이며 재시도는 같은 origin을 유지한다. 503 표시는 새 자동 전송기를 만들지 않는다. 기존 bound-channel·provider422 계약은 그대로다.
 
-T2 경합 RED는 **세션 없는 같은 child에 고유 origin의 API deliver2건+Discord 첫 메시지1건 동시 도착**이다. 기존 child transition/mailbox claim·owner admission·physical grant 아래 native session/worktree 시작1회, original3개는 각각 기존 queue/inject/자기 턴으로1회·유실0·중복 세션0이어야 한다. native 세션 시작1회는 model turn 전체를1회로 합친다는 뜻이 아니다. 같은 GUID 재시도 변형은 그 original만1회다. bootstrap 직전 current child 재확인, parent/sibling 영향0을 검증한다(`session_runtime.rs:527`, `session_transition.rs:165`, `router/turn_start.rs:703`, `health/turn_deliver/inject.rs:427`).
+T2 경합 RED는 **세션 없는 같은 child에 고유 origin의 API deliver2건+Discord 첫 메시지1건 동시 도착**이다. 기존 child transition/mailbox claim·owner admission·physical grant 아래 native session/worktree 시작1회, original3개는 각각 기존 queue/inject/자기 턴으로1회·유실0·중복 세션0이어야 한다. native 세션 시작1회는 model turn 전체를1회로 합친다는 뜻이 아니다. 같은 GUID 재시도 변형은 그 original만1회다. bootstrap 직전 current child 재확인, parent/sibling 영향0을 검증한다(`session_runtime.rs:527`, `session_transition.rs:165`, `router/turn_start.rs:615`, `health/turn_deliver/inject.rs:427`).
 
 runtime/settings/binding 선택의 policy는 parent, mailbox/session/turn-ID/output/origin identity는 child다. 기존 `health/headless_turn.rs:100-139` owner-channel starter, `health/runtime_resolve.rs:167-224`의 runtime parent 수용을 재사용한다. no-session은 Discord 첫 메시지의 bootstrap/worktree/placement를 공통 호출하며 새 thread 전용 launch 구현을 복제하지 않는다. #8115의 ready preferred fallback은 그 이슈에서 고친 것을 전제로 통합시험한다. API가 child를 받는다는 이유로 routine process fresh·scheduled snapshot scope를 일반 channel 세션에 합치지 않는다.
 
@@ -194,13 +194,13 @@ runtime/settings/binding 선택의 policy는 parent, mailbox/session/turn-ID/out
 
 R은 기존 lifecycle owner가 operation을 조립하고 host adapter가 exact pane IO를 맡는다. `InteractiveSessionHost` 기본 Herdr registry는 read-only(`session_host/herdr_registry.rs:49-87`)이므로 그 `send_text`/sole_host를 mutation factory로 쓰지 않는다. #8114의 actual target/observation·host input, `!clear`의 exact end, #8077 close·existing nonce/CAS를 재사용하고 공통 명령 파일에 새 `if herdr` 분기를 늘리지 않는다. creation/destruction 권한은 현 owner에게 남긴다(`session_host.rs:1-3`).
 
-순서는 기존 admission/직렬화 확보→same actual execution pin→cancel→PreserveSession stop→exact close/end 확인→old row retire 확인→같은 native session을 resume하는 새 execution launch→O ready/source binding→완료 seed다. clear는 대화 기록·selector를 지우는 다른 operation이므로 통째로 호출하지 않는다. 특히 `clear_teardown.rs:175-186`의 after_retire는 `clear_retired_selector_pg`를 호출하므로 R이 재사용할 대상이 아니다. `herdr_terminate::OperatorTerminate`와 exact end/RetiredExclusion을 재사용하고 `retired_exclusion.rs:99-104 disconnect_session_keeping_provider`처럼 native ID를 보존하는 postlude를 고른다. provider_reset에서는 별도 reset 플래그에 따라 native ID/history clear 의미를 유지한다. close가 Unknown/Pending/stale/replaced이면 spawn·retire 강행0, 명시 실패로 끝낸다. 새 launch의 ACK 불명도 기존 pending/unplaced 복구를 쓰며 재생성 반복을 하지 않는다. `herdr_terminate.rs:118-120,446-447`의 기존 terminate live switch/명시 사용자 권한은 사전 admission에서 확인한다. Disabled/refused이면 cancel·close·row·launch0으로 반환하고 성공을 표시하지 않는다. 값은 이 레인에서 읽지 않았으며 가드 우회/새 스위치/자동 권한 확대는 하지 않는다. 실제 적용 범위가 R과 충돌하면 구현 전에 DESIGN_DELTA다. 사전 통과 뒤 경합으로 종료가 거절되면 기존 cancel 완료 여부를 있는 그대로 보고하고 후속 launch0으로 끝낸다. tmux의 현재 stop/reset 의미·held queue 처리도 바꾸지 않는다. `/restart`만 열고 `restart.rs:150`의 headless seed가 거절되는 미완성은 금지다.
+순서는 기존 admission/직렬화 확보→same actual execution pin→cancel→PreserveSession stop→exact close/end 확인→old row retire 확인→같은 native session을 resume하는 새 execution launch→O ready/source binding→완료 seed다. clear는 대화 기록·selector를 지우는 다른 operation이므로 통째로 호출하지 않는다. 특히 `clear_teardown.rs:175-186`의 after_retire는 `clear_retired_selector_pg`를 호출하므로 R이 재사용할 대상이 아니다. `herdr_terminate::OperatorTerminate`와 exact end/RetiredExclusion을 재사용하고 `retired_exclusion.rs:101-106 disconnect_session_keeping_provider`처럼 native ID를 보존하는 postlude를 고른다. provider_reset에서는 별도 reset 플래그에 따라 native ID/history clear 의미를 유지한다. close가 Unknown/Pending/stale/replaced이면 spawn·retire 강행0, 명시 실패로 끝낸다. 새 launch의 ACK 불명도 기존 pending/unplaced 복구를 쓰며 재생성 반복을 하지 않는다. `herdr_terminate.rs:117-119,445-446`의 기존 terminate live switch/명시 사용자 권한은 사전 admission에서 확인한다. Disabled/refused이면 cancel·close·row·launch0으로 반환하고 성공을 표시하지 않는다. 값은 이 레인에서 읽지 않았으며 가드 우회/새 스위치/자동 권한 확대는 하지 않는다. 실제 적용 범위가 R과 충돌하면 구현 전에 DESIGN_DELTA다. 사전 통과 뒤 경합으로 종료가 거절되면 기존 cancel 완료 여부를 있는 그대로 보고하고 후속 launch0으로 끝낸다. tmux의 현재 stop/reset 의미·held queue 처리도 바꾸지 않는다. `/restart`만 열고 `restart.rs:150`의 headless seed가 거절되는 미완성은 금지다.
 
 `RestartAction`의 기존 세 분기(`restart.rs:17-25,45-50,68-82`)도 보존한다. actual old execution이 확인된 resumable은 위 순서, sid 없는 active는 exact end 뒤 기존 안내에 따라 fresh, **NoActiveSession은 아래 resolver의 hosted row·marker와 기존 cold-launch admission으로 absence가 검증된 경우에만 close/retire RPC 없이 fresh seed**다. missing sid를 이유로 history를 추가로 삭제하지 않는다. unknown/Pending/nonce 충돌은 NoActiveSession이 아니며 known-retired 재시도도 현재 successor 부재·권한을 확인한다. M/S 설정 적용은 R의 취소 정책을 복사하지 않는다. 기존 `control/relaunch.rs:288-293`처럼 busy면 pending을 두고 idle/다음 턴 경계에서 적용하며 현재 턴 cancel/close는 0이다. R에서 재사용하는 것은 same-native relaunch 수단이다.
 
 absence는 `resolve_session_target`(`session_host/resolve.rs:239`) 경계가 읽는 hosted row·inflight/marker의 authoritative 증거와 기존 cold-launch admission으로만 확인한다. **`core.sessions=None`은 absence가 아니다.** 이 resolver의 `TargetHost::Unknown/Conflict`, `UnknownHost::NoSessionRow/NoHostEvidence`는 VerifiedAbsent가 아니므로 fresh 권한으로 승격하지 않는다(`resolve.rs:184-210,304-305`). core None+Bound live fixture는 exact old end 완료 뒤1회 또는 명시 거절/spawn0이어야 한다. 단순 sid 부재도 provider 부재가 아니다.
 
-종료 결과의 전수 매핑(`herdr_terminate.rs:74-112`)은 다음과 같다. low-level ACK/Indeterminate가 서비스 내부 `read_end:186-203`→retire/settle을 거쳐 최종 Retired가 될 수 있는 기존 복구는 보존하며, ACK만 받은 시점에는 진행하지 않는다.
+종료 결과의 전수 매핑(`herdr_terminate.rs:73-111`)은 다음과 같다. low-level ACK/Indeterminate가 서비스 내부 `read_end:186-203`→retire/settle을 거쳐 최종 Retired가 될 수 있는 기존 복구는 보존하며, ACK만 받은 시점에는 진행하지 않는다.
 
 | 최종 TerminationResult/Close 세부 | R의 relaunch·seed |
 |---|---|
@@ -383,7 +383,7 @@ src/services/discord/health/recovery.rs:273:    discord::admin_host_guard::run_b
 src/services/discord/health/turn_deliver/inject.rs:312:        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
 src/services/discord/health/turn_deliver/inject/herdr.rs:48:        || crate::config::session_hosts::herdr_endpoint(channel).is_none()
 src/services/discord/herdr_terminate/http_force_writer_tests.rs:129:        let configured = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/herdr_terminate/missing_marker_turn_tests.rs:113:                crate::services::discord::admin_host_guard::managed_reset_refusal(
+src/services/discord/herdr_terminate/missing_marker_turn_tests.rs:116:                crate::services::discord::admin_host_guard::managed_reset_refusal(
 src/services/discord/herdr_terminate/root_replaced.rs:249:        crate::config::session_hosts::herdr_endpoint(channel).ok_or("endpoint unavailable")?;
 src/services/discord/herdr_terminate/root_replaced/preclaim.rs:22:    let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel.get()) else {
 src/services/discord/inflight/host_recovery_guard.rs:103:    if crate::services::discord::admin_host_guard::configured_refusal(channel_id).is_some() {
@@ -435,7 +435,7 @@ src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs:2
 src/services/discord/router/message_handler/intake_turn/worker_entry/dispatch_guard_pg_tests.rs:6:use crate::services::discord::admin_host_guard::tests::api_child;
 src/services/discord/router/message_handler/intake_turn/worker_entry/goal_fresh_pg_tests.rs:21:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
 src/services/discord/router/message_handler/intake_turn/worker_entry/preserve_cancel_tests.rs:5:use crate::services::discord::admin_host_guard::tests::api_child;
-src/services/discord/router/message_handler/provider_dispatch.rs:1070:            "herdr turn refused: executor_not_wired"
+src/services/discord/router/message_handler/provider_dispatch.rs:1078:            "herdr turn refused: executor_not_wired"
 src/services/discord/router/message_handler/provider_dispatch/owner_input_codex_tests.rs:629:    crate::services::discord::admin_host_guard::tests::api_child(test)
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:54:    _api: discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch/owner_input_rollback_tests.rs:183:        let api = discord::admin_host_guard::tests::Recorder::start().await;
@@ -443,7 +443,7 @@ src/services/discord/router/message_handler/provider_dispatch/owner_input_turn_m
 src/services/discord/router/message_handler/provider_dispatch/owner_input_turn_mode_tests.rs:478:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
 src/services/discord/router/message_handler/provider_dispatch/owner_provenance_tests.rs:5:use crate::services::discord::admin_host_guard::tests::{ModeTmux, Tmux, api_child};
 src/services/discord/router/message_handler/provider_dispatch/owner_start_failure_tests.rs:84:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
-src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:1366:    let refused = Err("herdr turn refused: executor_not_wired".to_string());
+src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:1369:    let refused = Err("herdr turn refused: executor_not_wired".to_string());
 src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs:201:                discord::admin_host_guard::turn_release_refusal(shared, provider, channel);
 src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs:55:    api: &'a crate::services::discord::admin_host_guard::tests::Recorder,
 src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs:223:    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
@@ -463,8 +463,8 @@ src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_
 src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:61:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:126:    assert!(crate::config::session_hosts::herdr_endpoint(CHANNEL).is_none());
 src/services/discord/router/message_handler/root_replaced_recovery_tests/policy_tests.rs:97:        let configured = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:105:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:963:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:108:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+src/services/discord/router/message_handler/root_replaced_recovery_tests/preclaim_tests.rs:966:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs:154:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/root_replaced_recovery_tests/wake_tests.rs:260:    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
 src/services/discord/router/message_handler/s1_entry_tests.rs:206:    if !discord::admin_host_guard::tests::api_child(concat!(
@@ -506,7 +506,7 @@ src/services/discord/tui_prompt_relay/tests.rs:6885:    use crate::services::dis
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:56:        let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).unwrap();
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs:878:    assert!(crate::config::session_hosts::herdr_endpoint(SOURCE_CHANNEL).is_none());
 src/services/discord/tui_prompt_relay/writer_notice_owner_tests.rs:44:    use crate::services::discord::admin_host_guard::tests::Recorder;
-src/services/discord/turn_bridge/before_start_stop_tests.rs:1308:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
+src/services/discord/turn_bridge/before_start_stop_tests.rs:1314:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
 src/services/discord/turn_bridge/runtime_handoff_loop/codex_replacement_tests.rs:2:use crate::services::discord::admin_host_guard::tests::Recorder;
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs:697:    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:924:    let alive = crate::services::discord::admin_host_guard::tests::process(&name, pid);
@@ -523,8 +523,8 @@ src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:52:    
 src/services/discord/turn_presence/activity/unbound/retired_codex_runtime_marker_tests.rs:53:        let endpoint = crate::config::session_hosts::herdr_endpoint(id).unwrap();
 src/services/discord/turn_presence/activity/unbound/retired_codex_runtime_marker_tests.rs:145:    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).unwrap();
 src/services/dispatched_sessions/output.rs:171:    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
-src/services/herdr_launch.rs:56:pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
-src/services/herdr_launch.rs:62:    crate::config::session_hosts::herdr_endpoint(channel).is_some()
+src/services/herdr_launch.rs:59:pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
+src/services/herdr_launch.rs:65:    crate::config::session_hosts::herdr_endpoint(channel).is_some()
 src/services/provider/cancel_token_cleanup/executor.rs:162:        let marker = crate::services::discord::admin_host_guard::marker_refusal;
 src/services/provider_cli/session_guard.rs:199:        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
 src/services/routines/session_control.rs:8:use crate::services::discord::admin_host_guard::ManagedReset;

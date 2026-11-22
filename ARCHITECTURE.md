@@ -506,6 +506,8 @@ src/
 │   ├── session_identity/
 │   │   ├── managed.rs
 │   │   └── naming.rs
+│   ├── tool_summary/
+│   │   └── code_mode.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs
@@ -530,6 +532,8 @@ src/
 │   ├── provider_auth_profile.rs
 │   ├── replay_evidence.rs
 │   ├── session_identity.rs
+│   ├── tmux_cleanup.rs
+│   ├── tool_summary.rs
 │   └── tool_text.rs
 ├── engine/
 │   ├── ops/
@@ -1579,7 +1583,9 @@ src/
 │   │   ├── agent_handoff/
 │   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
+│   │   │   ├── draft_release_watch.rs
 │   │   │   ├── hold_release_tests.rs
+│   │   │   ├── inflight_row.rs
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
@@ -1920,6 +1926,7 @@ src/
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── managed_reset_port.rs
 │   │   │   ├── o_transition.rs
 │   │   │   ├── presence_unknown.rs
 │   │   │   ├── presence_unknown_tests.rs
@@ -1969,7 +1976,6 @@ src/
 │   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
-│   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
@@ -2187,8 +2193,6 @@ src/
 │   │   │   ├── status_panel/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
-│   │   │   ├── tool_summary/
-│   │   │   │   └── code_mode.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs
@@ -2379,6 +2383,7 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── herdr_admitted_restart.rs
 │   │   │   ├── herdr_admitted_restart_tests.rs
+│   │   │   ├── herdr_attach.rs
 │   │   │   ├── herdr_before_start_restart.rs
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
@@ -2861,11 +2866,13 @@ src/
 │   │   │   ├── spawns_tests.rs
 │   │   │   └── startup_doctor.rs
 │   │   ├── runtime_store/
+│   │   │   ├── completed_turn_ledger_model.rs
 │   │   │   ├── durable_ancestors.rs
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
 │   │   │   ├── durable_publish_tests.rs
 │   │   │   ├── durable_stores_tests.rs
+│   │   │   ├── record_lock.rs
 │   │   │   └── usage_footer.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
@@ -3116,6 +3123,7 @@ src/
 │   │   │   ├── owner_observation/
 │   │   │   │   └── tests.rs
 │   │   │   ├── fences.rs
+│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── owner_observation.rs
 │   │   │   └── session_binding.rs
 │   │   ├── tui_direct_abort_marker/
@@ -3252,7 +3260,6 @@ src/
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
-│   │   │   ├── anchor_completion.rs
 │   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
@@ -3271,7 +3278,6 @@ src/
 │   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── hook_observer.rs
 │   │   │   ├── idle_offset_resolution.rs
-│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── input_notice.rs
@@ -3654,6 +3660,7 @@ src/
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
+│   │   │   ├── anchor_completion.rs
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── injected.rs
@@ -3734,6 +3741,7 @@ src/
 │   │   ├── gateway_lease_diagnostics_tests.rs
 │   │   ├── gateway_queue_owner.rs
 │   │   ├── health.rs
+│   │   ├── herdr_owner_port.rs
 │   │   ├── herdr_terminate.rs
 │   │   ├── herdr_terminate_exit_tests.rs
 │   │   ├── herdr_terminate_route_tests.rs
@@ -3914,6 +3922,7 @@ src/
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
 │   │   ├── dtos.rs
+│   │   ├── http_outbound.rs
 │   │   ├── mod.rs
 │   │   ├── notify_recovery.rs
 │   │   ├── outbox_claiming.rs
@@ -3929,6 +3938,7 @@ src/
 │   ├── engine_runtime/
 │   │   ├── relay_state/
 │   │   │   └── coord.rs
+│   │   ├── health_port.rs
 │   │   ├── legacy_state.rs
 │   │   ├── mod.rs
 │   │   ├── relay_state.rs
@@ -3963,6 +3973,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── clear_epoch.rs
 │   │   ├── codex_resume.rs
+│   │   ├── owner_port.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
@@ -4227,6 +4238,7 @@ src/
 │   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   ├── run_policy.rs
+│   │   │   ├── settlement.rs
 │   │   │   ├── start_deferral.rs
 │   │   │   └── surface.rs
 │   │   ├── discord_log/
@@ -4250,6 +4262,7 @@ src/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
 │   │   │   ├── failure_escalation.rs
+│   │   │   ├── recovery.rs
 │   │   │   ├── session_interrupt.rs
 │   │   │   └── thread_choices.rs
 │   │   ├── action.rs
@@ -4417,6 +4430,7 @@ src/
 │   │   ├── model.rs
 │   │   ├── operation_policy.rs
 │   │   ├── process_host.rs
+│   │   ├── recover.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
 │   │   ├── submit.rs
@@ -4446,6 +4460,7 @@ src/
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
+│   │   ├── inflight_episode.rs
 │   │   ├── owner_boundary_tests.rs
 │   │   ├── policy_maintenance.rs
 │   │   └── test_barriers.rs
@@ -5145,6 +5160,7 @@ src/
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
 │   │   │   │   ├── start_failure.rs
@@ -5175,7 +5191,9 @@ src/
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
+│   │   ├── headless_start.rs
 │   │   ├── herdr_user_stop.rs
+│   │   ├── http_terminate.rs
 │   │   ├── inbound_order.rs
 │   │   ├── inbound_order_restore_tests.rs
 │   │   ├── incarnation.rs
@@ -5203,6 +5221,7 @@ src/
 │   │   ├── reply_results.rs
 │   │   ├── restart_operation.rs
 │   │   ├── restart_operation_tests.rs
+│   │   ├── retired_exclusion.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs
@@ -5359,6 +5378,7 @@ src/
 │   ├── input_validation.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
+│   ├── observed_task.rs
 │   ├── parsed_bytes.rs
 │   ├── redact.rs
 │   ├── secret_file.rs

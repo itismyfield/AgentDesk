@@ -46,7 +46,7 @@ ReaderWrite(s) ==
          /\ lostWrite' = (lostWrite \/ (seen /\ ~Blocked(s, 0)))
          /\ oldOverNew' = (oldOverNew \/ (nonce = 2 /\ ~Blocked(s, 0)))
 
-\* herdr_terminate.rs:607 retire_confirmed; queue.rs:464 force or herdr_row_end_live.rs:67. A force
+\* herdr_terminate.rs:606 retire_confirmed; queue.rs:464 force or herdr_row_end_live.rs:67. A force
 \* cancel removes the reader's inflight row; the reader's first guarded save to read that is either
 \* its tick preflight (stream_tick/runtime.rs) or its dirty flush (stream_tick.rs dirty_flush).
 Retire ==
@@ -77,7 +77,7 @@ ToolUse ==
             /\ oldOverNew' = (oldOverNew \/ nonce = 2)
     /\ UNCHANGED <<exec, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase, lost, seen>>
 
-\* cancel_effects.rs:383 -> http_force.rs:34 disconnect_retired_pg; the reader is not cancelled.
+\* cancel_effects.rs:382 -> http_force.rs:34 disconnect_retired_pg; the reader is not cancelled.
 ForcePostlude ==
     /\ phase = "postlude" /\ phase' = "done" /\ row' = "disconnected" /\ ended' = TRUE
     /\ UNCHANGED <<exec, nonce, fresh, bridge, refused, turns, restarts, pres, readerVars>>
@@ -118,7 +118,7 @@ StaleTick ==
     /\ fresh' = FALSE
     /\ UNCHANGED <<exec, row, nonce, bridge, ended, refused, turns, restarts, pres, phase, readerVars>>
 
-\* stale_turn_reconciler.rs:698/766: no dispatch, stale heartbeat, no tmux pane -> idle.
+\* stale_turn_reconciler.rs:699/766: no dispatch, stale heartbeat, no tmux pane -> idle.
 Sweep ==
     /\ row = "turn_active" /\ ~fresh /\ row' = "idle"
     /\ ended' = (ended \/ exec = "retired")

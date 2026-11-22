@@ -170,7 +170,7 @@ runtime witness가 있어야 한다. witness가 없으면 `UNEVALUABLE(precondit
 | --- | --- |
 | routing | `cluster.enabled=true`, instance ID는 receipt node; `cluster.intake_routing.enabled=true`, mode=enforce. owner-authority scope를 쓰는 경로는 parent 두 ID만 명시(`src/config/runtime_profile.rs:274`) |
 | agent/node | paired agent의 두 channel binding과 default_execution_node_id=receipt node. 독립 PG의 그 node만 online/ready로 광고; execution_slots unset으로 무슬롯 primary 조합 생성. runner의 활성 턴1 제한은 슬롯 광고와 별개 |
-| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:35` |
+| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:36` |
 | host/output | tmux 및 Herdr parent-only map을 별도 boot 프로필로 생성(§3.5). O/Legacy도 분리. fresh thread에는 host 예외·미리 만든 session을 넣지 않음 |
 
 위 busy 양성 계약은 우선 Claude 대상이다. queued_head_ready의 Codex 확장은 현재 test cfg에만 있다
@@ -317,7 +317,7 @@ ready primary 무슬롯/ready primary 슬롯 있음/primary offline의 세 통�
 기존 health/status는 channel→endpoint join이 부족하다고 명시한다(`herdr.py:155`). 새 관측 adapter는
 expected와 observed host를 별도 필드로 유지하고 exact nonce로 join한다. config에 Herdr라고 적힌 사실을
 actual host로 복사하면 안 된다. binding DB만 있고 provider child가 없거나 모호하면 평가 불가다.
-수정 전 `herdr_launch.rs:56`→`session_hosts.rs:158`은 exact channel 조회, `tui_o/channel_policy.rs:74`도
+수정 전 `herdr_launch.rs:59`→`session_hosts.rs:158`은 exact channel 조회, `tui_o/channel_policy.rs:74`도
 parent 상속이 없어 새 thread가 tmux/legacy로 가면 **응답 본문이 정상이어도 host/output 단언은 RED**다.
 뮤턴트는 thread의 parent 상속을 각각 host·output 쪽에서 제거한다. tmux 대조군은 계속 GREEN이어야 한다.
 부모 필드의 정본/이름 변경은 #8119 소유다(`docs/session-naming.design.md:81`). 새 이름 문자열에 의존하지 않는다.

@@ -2,7 +2,7 @@
 \* The Codex canary channel on Herdr after its Herdr row retired, across one dcserver restart.
 \* AgentDesk 3fa2ab95c8068bb0c4a58bc742f65f0db80c5a71. Each action cites its code.
 \* The durable tmux-era verified pin never changes: Herdr launches write no codex ownership
-\* (herdr_launch.rs:740-757 source_policy None; binding_events/codex.rs:643-679 latest record).
+\* (herdr_launch.rs:742-759 source_policy None; binding_events/codex.rs:643-679 latest record).
 \* Value ranges come from the design entry table (rows W, N, P, R, L, X).
 EXTENDS Naturals
 
@@ -134,7 +134,7 @@ WatchWake ==
     /\ Keep(<<row, cleanup, marker, listing, tmuxLive, writer, resumedBy, viaBoot, exec, pub,
               fails, boots>>)
 
-\* herdr_launch.rs:482-492: Pending CAS, then the listing (nonce, false). A bootstrap
+\* herdr_launch.rs:484-494: Pending CAS, then the listing (nonce, false). A bootstrap
 \* rechecks vacancy under the runtime hint fence first (:396, prepare at :474).
 LaunchCAS ==
     /\ intake = "admitted" /\ row = "retired" /\ exec = "none"
@@ -150,13 +150,13 @@ LaunchRefused ==
     /\ Keep(<<row, cleanup, marker, listing, tmuxLive, writer, resumedBy, viaBoot, exec, pub,
               fails, boots>>)
 
-\* herdr_launch.rs:493-503 then the create: the spawn marker is published.
+\* herdr_launch.rs:495-505 then the create: the spawn marker is published.
 MarkerOk ==
     /\ intake = "cas" /\ marker' = "n2" /\ intake' = "launched"
     /\ Keep(<<row, cleanup, listing, tmuxLive, writer, resumedBy, watch, viaBoot, exec, pub,
               fails, boots>>)
 
-\* tmux_session_files.rs:326-355 removes the torn marker; herdr_launch.rs:506-508,588-630
+\* tmux_session_files.rs:326-355 removes the torn marker; herdr_launch.rs:508-510,590-632
 \* retire_unsent: the Pending goes back to Retired, the listing (n2, false) stays, no hold.
 MarkerFail ==
     /\ intake = "cas" /\ fails < FailBudget
@@ -164,7 +164,7 @@ MarkerFail ==
     /\ fails' = fails + 1
     /\ Keep(<<marker, listing, tmuxLive, writer, resumedBy, watch, viaBoot, pub, boots>>)
 
-\* codex/herdr_turn.rs:156-160: a Pending row of this owner is reused.
+\* codex/herdr_turn.rs:158-162: a Pending row of this owner is reused.
 AdmitPending ==
     /\ intake = "admitted" /\ row = "pending" /\ exec = "pending"
     /\ intake' = "launched"
@@ -190,7 +190,7 @@ LaunchNotSent ==
     /\ fails' = fails + 1
     /\ Keep(<<marker, listing, tmuxLive, writer, resumedBy, watch, viaBoot, pub, boots>>)
 
-\* unplaced.rs:468: a Pending row no live launch holds is retired.
+\* unplaced.rs:454: a Pending row no live launch holds is retired.
 Unplaced ==
     /\ exec = "pending" /\ intake \notin {"cas", "launched", "admitted"}
     /\ row' = "retired" /\ cleanup' = "done" /\ exec' = "none"
@@ -207,7 +207,7 @@ PublishOld ==
     /\ Keep(<<row, cleanup, marker, listing, tmuxLive, writer, resumedBy, intake, watch,
               viaBoot, exec, fails, boots>>)
 
-\* herdr_terminate.rs:224-229 retire_confirmed (Terminate, stop, clear, row end). Design
+\* herdr_terminate.rs:223-228 retire_confirmed (Terminate, stop, clear, row end). Design
 \* withholds the exact nonce after the CAS; the base leaves an admitted listing.
 Retire ==
     /\ exec = "bound"
@@ -234,7 +234,7 @@ TmuxEnds ==
 
 \* Out-of-band tmux of the same logical key in the bootstrap window: no new incarnation, no
 \* marker, the writer not ready. Outside it the ordinary launch has no vacancy check at all
-\* (herdr_launch.rs:497 before :502), a pre-existing gap left out of this model (design F1).
+\* (herdr_launch.rs:499 before :502), a pre-existing gap left out of this model (design F1).
 TmuxAppears ==
     /\ Appear /\ ~tmuxLive /\ exec = "none" /\ intake # "cas"
     /\ marker = "absent" /\ writer # "resumed"

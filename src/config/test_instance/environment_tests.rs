@@ -1236,6 +1236,9 @@ mod login_admission_tests {
         environment::set_metadata_program_for_tests(home.join("metadata-probe"));
         struct Ports(std::sync::atomic::AtomicUsize);
         impl HerdrTurnPorts for Ports {
+            fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+                crate::services::discord::HERDR_OWNER_PORT
+            }
             fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 None

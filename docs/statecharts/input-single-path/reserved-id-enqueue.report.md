@@ -53,32 +53,32 @@ RED configuration rather than describing the fixed production path.
 Paths below are relative to `src/services/`. Raw `git grep` output is retained in
 `/home/adk/adk/lane-runs/i8091/logs/entrypoints-3.txt`. Calls inside test modules
 are omitted: `foreign_row.rs:90`, `catch_up.rs:631`, `queue_effects.rs:320` and
-`discord/mod.rs:2273` begin relevant test modules.
+`discord/mod.rs:2277` begin relevant test modules.
 
 | Production code coordinate | Model action / role |
 |---|---|
 | `discord/catch_up/phase1_sweep.rs:689`, `phase2_sweep.rs:458` | Replay through the catch-up API. |
 | `discord/catch_up/api.rs:95` | Replay with the classifying snapshot's claim observation. |
 | `discord/health/turn_deliver.rs:373` | Ordinary receipt through the shared adapter. |
-| `discord/mod.rs:2071` | Replay of the same original id for internal history recovery. |
+| `discord/mod.rs:2075` | Replay of the same original id for internal history recovery. |
 | `discord/router/intake_dispatch.rs:930` | Deferred live input, including absorbed sources; refusal leaves checkpoint unread. |
 | `discord/router/intake_gate/queue_effects.rs:121` | Replay of a soft intake input. |
 | `discord/router/message_handler/intake_turn/race_loss.rs:51,62` | Ordinary receipt; refusal no longer abandons the pending owner. |
 | `discord/router/message_handler/intake_turn.rs:1081` | A legacy queued claim loser hands uploads to its existing restore owner. |
 | `discord/router/intake_dispatch/queued.rs:361`, `queued/race_loss.rs:30` | Authorized owner return; reuse original and lease, then existing race-loss wake. |
-| `discord/mod.rs:1635`, `queue_io/turn_admission.rs:312` | Shared adapters preserving the refusal reason. |
+| `discord/mod.rs:1639`, `queue_io/turn_admission.rs:312` | Shared adapters preserving the refusal reason. |
 | `turn_orchestrator/registry_purge.rs:260,270` | Enqueue through resolved actor; retry only a closed actor. |
 | `turn_orchestrator/claim_observation.rs:214` | Send the actor Enqueue command. |
-| `turn_orchestrator.rs:2081,2092`, `claim_observation.rs:176` | Replay guard before hydrate; refuse a reserved primary or absorbed id. |
+| `turn_orchestrator.rs:2093,2100`, `claim_observation.rs:176` | Replay guard before hydrate; refuse a reserved primary or absorbed id. |
 | `turn_orchestrator/queue_enqueue.rs:25` | Existing queued-source duplicate check. |
 | `turn_orchestrator/queued_head/v2/control.rs:69,86` | Separate V2 enqueue; legacy Take is withheld, outside this reservation model. |
-| `turn_orchestrator.rs:2279`, `dispatch_reservation.rs:38,49` | Take: the only production setter of `pending_user_dispatch`. |
-| `turn_orchestrator.rs:2002`, `dispatch_reservation.rs:90,112` | Release by matching claim; absorbed ids become active. Completion follows claim, with no remaining reservation. |
+| `turn_orchestrator.rs:2291`, `dispatch_reservation.rs:38,49` | Take: the only production setter of `pending_user_dispatch`. |
+| `turn_orchestrator.rs:2014`, `dispatch_reservation.rs:90,112` | Release by matching claim; absorbed ids become active. Completion follows claim, with no remaining reservation. |
 | `turn_orchestrator/front_requeue.rs:69,101,106,129,144,152,186` | Authorized return: lease checked, queue persisted, reservation cleared. New return preserves marker; old restore keeps its prior settlement. |
 | `discord/queue_dispatch.rs:487,501` | Existing authorized restore adapter for admission defer, transition busy, promoted busy and dispatch errors. |
-| `turn_orchestrator.rs:2320`, `dispatch_reservation.rs:234,241` | Release by explicit abandon or reservation-only clear. |
+| `turn_orchestrator.rs:2332`, `dispatch_reservation.rs:234,241` | Release by explicit abandon or reservation-only clear. |
 | `turn_orchestrator/dispatch_cleanup.rs:8,17,24,34,41,50` | Abandon APIs choose marker consumption; ordinary abandon has no lease requirement. |
-| `turn_orchestrator.rs:2182`, `dispatch_reservation.rs:256,274` | Release orphan reservation before marker self-heal. |
+| `turn_orchestrator.rs:2194`, `dispatch_reservation.rs:256,274` | Release orphan reservation before marker self-heal. |
 | `turn_orchestrator/inbound_order.rs:105,114,160` | Existing stalled-reservation valves. |
 | `turn_orchestrator/clear_channel.rs:210`, `checked_purge.rs:55` | Explicit clear/purge, excluded from eventual-execution assumptions. |
 

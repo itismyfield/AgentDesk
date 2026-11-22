@@ -1,5 +1,6 @@
 //! Session host boundary: where an interactive provider session lives and the observation, input,
-//! create and terminate effects on it. Admission, identity and cancel routing stay with owners.
+//! create, terminate and restart-read effects on it. Admission, identity and cancel routing stay
+//! with owners.
 
 mod herdr {
     #[cfg(unix)]
@@ -41,6 +42,18 @@ pub(crate) mod legacy_collapse;
 mod model;
 pub(crate) mod operation_policy;
 mod process_host;
+// Only unix keeps a Herdr execution to read again after a restart.
+#[cfg(unix)]
+mod recover;
+#[cfg(all(test, unix))]
+pub(crate) use recover::{
+    HerdrCurrentExecution, HerdrMarkerEvidence, compare_herdr_execution, recover_in_effect,
+};
+#[cfg(unix)]
+pub(crate) use recover::{
+    HerdrEndpointId, HerdrExecutionMatch, HerdrExecutionReader, HerdrMismatch, HerdrPaneEvidence,
+    HerdrPaneReading, HerdrUnknown, HostRecover, HostRecovery, NoHerdrEndpoint, SocketHerdrReader,
+};
 mod resolve;
 mod session_record;
 mod submit;
@@ -103,8 +116,9 @@ pub(crate) use traits::InteractiveSessionHost;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use {
     consumer_guard::{
-        AutomaticEffect, ClearedHostSession, DeferReason, GuardRefusal, GuardVerdict, PolicyProbe,
-        StateChange, clear_legacy_session, guard_first_state_change, probe_for_policy,
+        AutomaticEffect, ChannelTeardown, ClearedHostSession, DeferReason, GuardRefusal,
+        GuardVerdict, PolicyProbe, StateChange, clear_legacy_session, guard_first_state_change,
+        probe_for_policy,
     },
     resolve::{
         ResolvedSessionTarget, SessionTargetEvidenceSource, SessionTargetInput, TargetHost,

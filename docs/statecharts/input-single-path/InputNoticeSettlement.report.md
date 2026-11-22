@@ -16,7 +16,7 @@ An enqueue receipt never counts as a native user receipt. Census completion prec
 |---|---|---|
 | Channel start | `src/server/routes/agents.rs:659`, `:768`, `:801`, `:816` | all backend Ok statuses accept; rejected start has no echo |
 | DM start | `src/server/routes/agents.rs:694`, `:787` | excluded from channel echo; delegated to HTTP tests |
-| Start status domain | `src/services/discord/router/turn_start.rs:47` | accepted, started, consumed are abstracted as Ok |
+| Start status domain | `src/services/turn_orchestrator/headless_start.rs:37` | accepted, started, consumed are abstracted as Ok |
 | Deliver, origin, obligations ON | `src/server/routes/agents_turn_deliver.rs:212`, `:223` | only winner executes and enqueues; replay has no enqueue |
 | Deliver, origin, obligations OFF | `src/server/routes/agents_turn_deliver.rs:208`; `agents_turn_deliver/legacy_origin.rs:18`, `:23`, `:26`, `:35` | preflight, existing replay, race replay, winner |
 | Deliver, no origin, obligations OFF | `src/server/routes/agents_turn_deliver.rs:227` | accepted request enqueues; per-request identity delegated to tests |

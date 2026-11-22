@@ -21,7 +21,7 @@ Source495b의 이전 전체63검사는615 TLC/529.2초/exit1로 SeedlessClear fa
 
 | 결정 | 모델 행동/규칙·cfg | canonical 기존 연결 자리 / proposed B2 포트 |
 |---|---|---|
-| dispatch 중에도 restart | DispatchRestart/DispatchCrash, NoInheritedDispatch/NoDispatchRepost, operation별 close/create/seed admission 계수 | src/services/discord/commands/restart.rs:259, :218; herdr_terminate.rs:401, :217, :224; retired_exclusion.rs:100. `src/services/discord/commands/restart/herdr.rs`(proposed)·`src/services/discord/herdr_terminate/restart.rs`(proposed)가 exact 종료·seed-only disconnect를 소유 |
+| dispatch 중에도 restart | DispatchRestart/DispatchCrash, NoInheritedDispatch/NoDispatchRepost, operation별 close/create/seed admission 계수 | src/services/discord/commands/restart.rs:259, :218; herdr_terminate.rs:400, :217, :224; retired_exclusion.rs:102. `src/services/discord/commands/restart/herdr.rs`(proposed)·`src/services/discord/herdr_terminate/restart.rs`(proposed)가 exact 종료·seed-only disconnect를 소유 |
 | clear가 이김 | ClearBegin→기존 grant 배수→exact teardown→PublishClearResult. RequestResolves/ClearedSeedResolves | src/services/discord/commands/control.rs:523; control/clear_teardown.rs:73, :164, :199. proposed seed ticket/attempt의 exact successor와 관측한 clear 결과 연결 |
 | seed가 대기 입력보다 먼저 | 보호 prefix 뒤 seed, 그 뒤 tail·late arrival. SeedQueueOrder, HeadBusy/Concurrent/Crash | src/services/turn_orchestrator/queued_head/v2.rs:398, :444, :456; source_admission.rs:1007. `src/services/turn_orchestrator/queued_head/v2/source_admission/restart_seed.rs`(proposed)가 삽입과 bind index 이동을 소유 |
 | Full이어도 restart | SeedMode none에서도 종료·인사말 실패 안내. SeedlessRestartCompletes | source_admission.rs:7의 Full/Pending/Conflict 구별, effort_continue.rs:200의 기존30/31. `src/services/discord/queue_io/input_owner/restart_seed.rs`(proposed)와 명령 결과 분류 |

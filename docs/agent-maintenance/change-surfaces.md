@@ -1235,8 +1235,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     the `DeferredAnchorCompletionDrain` enum + `decide_deferred_anchor_completion_drain`
     drain decision, `complete_tui_direct_prompt_anchor_lifecycle_if_present`,
     `pinned_anchor_cleanup_target`, and `complete_tui_direct_anchor_lifecycle_for_inflight` —
-    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (deps reached via
-    `use super::*;`, only `super::formatting` becomes `super::super::formatting`).
+    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (removed; later moved under turn_view_reconciler).
+    Deps were reached via `use super::*;`, only `super::formatting` became `super::super::formatting`.
     The three helpers reached from sibling discord modules (`tmux_watcher.rs`,
     `recovery_engine.rs`) are re-exported at `pub(in crate::services::discord)`;
     the relay-internal drain decision/enum are re-imported privately, so the call
@@ -1289,15 +1289,15 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     cwd-based fallback only when exactly one live markerless Codex TUI session
     owns that cwd. This file is still below the giant-file threshold, but split
     before adding another provider/recovery policy cluster).
-  - `src/services/discord/tui_prompt_relay/anchor_completion.rs` (213 prod lines;
-    #3479 item-2: the live-relay TUI-direct prompt anchor COMPLETION lifecycle
-    (`⏳ → ✅`) — the visibility gate, the deferred `⏳`-completion drain decision,
-    and the reaction-swap completers (shared-slot + pinned-injected-message paths)
-    — extracted verbatim from `tui_prompt_relay.rs`. Deps reached via
-    `use super::*;` (only `super::formatting` becomes `super::super::formatting`);
-    the three externally-called helpers are `pub(in crate::services::discord)` and
-    re-exported by the parent, the relay-internal drain decision/enum stay
-    `pub(super)`; below the giant-file threshold).
+  - `src/services/discord/turn_view_reconciler/anchor_completion.rs` (#3479 item-2:
+    the live-relay TUI-direct prompt anchor COMPLETION lifecycle (`⏳ → ✅`) — the
+    visibility gate, the deferred `⏳`-completion drain decision, and the
+    reaction-swap completers (shared-slot + pinned-injected-message paths) —
+    extracted verbatim from `tui_prompt_relay.rs`, later moved under
+    `turn_view_reconciler` so the watcher and recovery callers do not name the relay.
+    The relay imports the drain decision/enum and its shared-slot completer from
+    there; the log lines keep the `tui_prompt_relay::anchor_completion` target;
+    below the giant-file threshold).
   - `src/services/discord/tui_prompt_relay/launch_script.rs` (107 prod lines;
     #3479 launch-script: the Claude TUI launch-*script* parsing helpers — the
     parsed `ClaudeTuiLaunchInfo` record, `parse_claude_tui_launch_script` +

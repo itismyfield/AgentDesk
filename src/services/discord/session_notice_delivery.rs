@@ -58,6 +58,19 @@ pub(crate) async fn channel_http(
     session_notice::provider_http(registry, &provider, channel).await
 }
 
+impl session_notice::ChannelRuntimeHttp for HealthRegistry {
+    async fn channel_runtime_http(
+        &self,
+        provider: &ProviderKind,
+        channel: ChannelId,
+    ) -> Option<Option<Arc<Http>>> {
+        let shared = self
+            .shared_for_provider_on_channel(provider, channel)
+            .await?;
+        Some(shared.serenity_http_or_token_fallback())
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct TestProviderHttp {
     _rest: super::shared_state::test_rest::Guard,

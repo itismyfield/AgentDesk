@@ -47,7 +47,7 @@ RetireAndSettle == /\ s.phase = "retiring"
                                     !.q = IF Mutant = "DropQueue"
                                       THEN [i \in Ids |-> IF i \in s.accepted THEN "lost" ELSE s.q[i]]
                                       ELSE @]
-\* herdr_launch.rs:466-492 prepares a fresh nonce and commits Pending before
+\* herdr_launch.rs:472-494 prepares a fresh nonce and commits Pending before
 \* physical create. Transfer of the restart exclusion is a design port, not code.
 InstallPending == /\ s.phase = "preparing" /\ s.row \in {"Retired", "Legacy"}
                   /\ s' = [s EXCEPT !.nonce = IF Mutant = "ReuseNonce" THEN 0 ELSE 1,

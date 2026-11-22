@@ -35,7 +35,7 @@
 | E10 Idle drive와 composer | `input_owner/drive.rs:97`–`:115`, `:174`; `src/services/claude/herdr_turn/composer.rs:137`–`:205` | wake는 전송권 아님. driver가 재관측·예약·current·first-key gate. `phase=reserved,sent,done`; `keys=0..1` |
 | E11 prepare 안의 대기와 거절 | `readiness/watched.rs:54`–`:127`; `input_owner/effect.rs:109`–`:135` | #8217 재평가를 보존. typed 원본 deadline이 있으면 재대기로 연장하지 않음. `refusals=0..1`, `reason`은 아래 거절 사유 |
 | E12 Cancel·clear·큐 삭제 | `v2/clear.rs:230`–`:234`; `owned_busy.rs:350`; `composer.rs:204` | 같은 actor gate에서 취소/기존 정산이 이기면 늦은 probe/deadline은 no-op. `gate=false`, `owned=false` |
-| E13 Terminate·pane 소멸 | `src/services/discord/herdr_terminate.rs:535`, `:603`, `:664`; `busy/herdr.rs:234` | 기존 termination fence와 종료 권한만 사용. 새 close/kill 없음. 미시작 front가 남으면 사유 정산; 이전 실행 증거로 새 pane 전달 금지 |
+| E13 Terminate·pane 소멸 | `src/services/discord/herdr_terminate.rs:534`, `:603`, `:664`; `busy/herdr.rs:234` | 기존 termination fence와 종료 권한만 사용. 새 close/kill 없음. 미시작 front가 남으면 사유 정산; 이전 실행 증거로 새 pane 전달 금지 |
 | E14 `/stop`·first-key 경쟁 | `src/services/turn_orchestrator/herdr_user_stop.rs:55`; `src/services/provider/herdr_before_start.rs:115`; `src/services/claude_tui/owner_input.rs:114`, `:121` | stop 의도와 cancel은 다름. 기존 gate 소유자가 정산. keyed/possibly-sent이면 새 최종 미전송 대상 제외 |
 | E15 prompt·tool·Stop continuation | `src/services/tui_turn_state/claude_meta.rs:50`, `:76`; `readiness/evidence.rs:136`, `:184`; `readiness/mod.rs:185`, `:611`–`:636` | 복원 불가. `turn=prompt,tool,stop-context`, `fence=true` |
 | E16 pending·compact·clear 제어 | `readiness/mod.rs:57`, `:215`–`:223`, `:265`; `host_input/busy/herdr.rs:315` | 기존 control은 복원으로 해제하지 않음. `fence` boolean; clear는 자신의 인증 경로만 사용 |

@@ -10,7 +10,7 @@ use crate::domain::outbound::{
     OutboundOperationKey, OutboundTargetKey, first_raw_message_id,
 };
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
-use crate::services::discord::outbound::HttpOutboundClient;
+use crate::services::dispatches::http_outbound::HttpOutbound;
 
 use super::provider_choice::AgentProviderChannels;
 use super::run_diagnostics::formatting::*;
@@ -423,7 +423,7 @@ impl RoutineDiscordLogger {
                     target.bot
                 )
             })?;
-        let client = HttpOutboundClient::new(
+        let client = HttpOutbound::new(
             reqwest::Client::new(),
             token,
             crate::services::dispatches::discord_delivery::discord_api_base_url(),

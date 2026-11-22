@@ -19,7 +19,10 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod headless_start;
 mod herdr_user_stop;
+#[cfg(unix)]
+mod http_terminate;
 mod inbound_order;
 mod incarnation;
 mod injected_inputs;
@@ -28,6 +31,8 @@ mod lease_release;
 mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
+#[cfg(unix)]
+pub(crate) use http_terminate::{Expected, HttpTerminate, Released};
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 pub(crate) mod checked_purge;
 mod overflow;
@@ -41,8 +46,12 @@ mod recovery_kickoff;
 mod recovery_kickoff_tests;
 pub(crate) mod registry_purge;
 pub(crate) use registry_purge::PurgeQueueResult;
+#[cfg(unix)]
+pub(crate) use retired_exclusion::RetiredExclusion;
 mod remint_fence;
 mod reply_results;
+#[cfg(unix)]
+mod retired_exclusion;
 mod source_generation;
 mod turn_finished_signal;
 pub(crate) mod witnessed_release;
@@ -68,6 +77,9 @@ use dispatch_reservation::{
 pub(crate) use episode_identity::TokenFinish;
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
+pub(crate) use headless_start::{
+    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus,
+};
 #[cfg(test)]
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
@@ -116,8 +128,8 @@ pub(crate) use queued_head::HandoffHeld;
 pub(crate) use queued_head::PreKeyPin;
 pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{
-    DecisionHeld, OwedDrop, RESTART_SEED_SOURCE, SeedStatus, TurnBind, Waiting, v2_queue,
-    waiting_origin,
+    DecisionHeld, OwedDrop, RESTART_SEED_SOURCE, RoutineInputSettlement, SeedStatus, TurnBind,
+    Waiting, v2_queue, waiting_origin,
 };
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 #[cfg(unix)]

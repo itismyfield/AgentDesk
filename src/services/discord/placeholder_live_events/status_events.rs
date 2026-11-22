@@ -134,12 +134,7 @@ fn background_bash_task_slots_enabled() -> bool {
     slots_enabled_by_footer_flag()
 }
 
-pub(super) fn tool_input_value(input: &str) -> Value {
-    match serde_json::from_str::<Value>(input).unwrap_or(Value::Null) {
-        Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)),
-        value => value,
-    }
-}
+pub(super) use crate::domain::tool_summary::tool_input_value;
 
 pub(in crate::services::discord) fn status_events_from_tool_result(
     tool_name: Option<&str>,

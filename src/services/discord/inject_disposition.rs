@@ -372,7 +372,7 @@ pub(crate) fn record_terminal(
     let path = ring_path(provider).ok_or("runtime root unavailable")?;
     #[cfg(test)]
     test_support::before_lock(&path);
-    let _lock = super::outbound::delivery_record::lock_record_path(&path)?;
+    let _lock = super::runtime_store::record_lock::lock_record_path(&path)?;
     let (mut entries, readable) = load(&path);
     if !readable {
         // An unreadable ring is replaced; the terminals it held stop blocking replays.

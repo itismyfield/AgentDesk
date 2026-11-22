@@ -1,5 +1,7 @@
 //! Shared queue dispatch for Gateway and REST runtimes.
 use super::super::*;
+use crate::services::cluster::intake_turn::IntakeExecution;
+use crate::services::discord::queue_io::transport::IntakeDeps;
 
 #[cfg(test)]
 #[path = "cancel_backstop_race_support_tests.rs"]
@@ -90,7 +92,7 @@ pub(in crate::services::discord) enum KickoffLane {
 }
 
 pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
-    deps: &router::IntakeDeps<'_>,
+    deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> IdleQueueKickoffChannelOutcome {
@@ -98,7 +100,7 @@ pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
 }
 
 pub(in crate::services::discord) async fn kickoff_queue_channel(
-    deps: &router::IntakeDeps<'_>,
+    deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     lane: KickoffLane,
@@ -111,7 +113,7 @@ pub(in crate::services::discord) async fn kickoff_queue_channel(
 }
 
 async fn kickoff_queue_channel_inner(
-    deps: &router::IntakeDeps<'_>,
+    deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     lane: KickoffLane,
@@ -303,11 +305,11 @@ async fn kickoff_queue_channel_inner(
             drop(dispatch_lease);
             IdleQueueKickoffChannelOutcome { started: false }
         }
-        Ok(router::IntakeExecution::Deferred | router::IntakeExecution::ConsumedProtected) => {
+        Ok(IntakeExecution::Deferred | IntakeExecution::ConsumedProtected) => {
             drop(dispatch_lease);
             IdleQueueKickoffChannelOutcome { started: false }
         }
-        Ok(router::IntakeExecution::Executed) => {
+        Ok(IntakeExecution::Executed) => {
             if late_settlement {
                 queue_dispatch::settle_executed_queued_intake(
                     shared,
@@ -361,7 +363,7 @@ pub(in crate::services::discord) async fn kickoff_idle_queues(
     provider: &ProviderKind,
 ) -> usize {
     kickoff_idle_queues_with_deps(
-        &router::IntakeDeps {
+        &IntakeDeps {
             http: &ctx.http,
             cache: Some(&ctx.cache),
             ctx_for_chained_dispatch: Some(ctx),
@@ -374,7 +376,7 @@ pub(in crate::services::discord) async fn kickoff_idle_queues(
 }
 
 pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
-    deps: &router::IntakeDeps<'_>,
+    deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
 ) -> usize {
     let shared = deps.shared;

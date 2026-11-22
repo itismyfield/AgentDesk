@@ -32,7 +32,7 @@ pub(crate) async fn execute_intake_turn_core(
     {
         let proof = crate::services::cluster::intake_worker::take_before_effects(
             &request,
-            crate::services::discord::checkpoint_waits_for_admission,
+            crate::services::discord::router::checkpoint_waits_for_admission,
         );
         let deps = IntakeDeps {
             http,

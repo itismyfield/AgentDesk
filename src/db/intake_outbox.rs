@@ -24,7 +24,7 @@ pub(crate) mod owner_fence_pg_tests;
 
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then
-/// hands it to `services::discord::execute_intake_turn_core` after
+/// hands it to `services::discord::router::execute_intake_turn_core` after
 /// converting `into_intake_request()`.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub(crate) struct IntakeOutboxRow {
