@@ -22,6 +22,7 @@ pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;
 pub(crate) mod intake_routing_config;
 pub(crate) mod intake_routing_telemetry;
+pub(crate) mod intake_turn;
 pub(crate) mod intake_worker;
 pub(crate) mod intake_worker_capabilities;
 pub(crate) mod machine_resources;

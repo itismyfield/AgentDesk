@@ -68,7 +68,17 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
         .unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let not_cancelled = || false;
-    let tick = || run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    let tick = || {
+        run_intake_worker_tick(
+            &pool,
+            &shared,
+            "worker-1",
+            "claude",
+            "o",
+            &not_cancelled,
+            super::test_executor::PORT,
+        )
+    };
 
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
     let (o_row, legacy_row) = (seed(&pool, O, 2).await, seed(&pool, LEGACY, 3).await);
@@ -145,7 +155,15 @@ async fn readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_l
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
     let row = seed(&pool, O, 1).await;
     let _claim_then_first_check_then_lost = test_probe::answers(&[true, true, false]);
-    let outcome = run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    let outcome = run_intake_worker_tick(
+        &pool,
+        &shared,
+        "worker-1",
+        "claude",
+        "o",
+        &not_cancelled,
+        super::test_executor::PORT,
+    );
     assert!(matches!(outcome.await, Ok(TickOutcome::Held)));
     let (status, owner, error): (String, Option<String>, Option<String>) = state(&pool, row).await;
     assert_eq!((status, owner, error), pending(), "returned before accept");
@@ -273,7 +291,17 @@ async fn canary_topology(commit: bool) {
     let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
     let (_registry, shared) = owner.await;
     let not_cancelled = || false;
-    let tick = || run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
+    let tick = || {
+        run_intake_worker_tick(
+            &pool,
+            &shared,
+            "worker-1",
+            "claude",
+            "o",
+            &not_cancelled,
+            super::test_executor::PORT,
+        )
+    };
     let ran = |outcome: Result<TickOutcome, sqlx::Error>| match commit {
         true => matches!(outcome, Ok(TickOutcome::Processed)),
         false => reached_accept_attempt(outcome),
