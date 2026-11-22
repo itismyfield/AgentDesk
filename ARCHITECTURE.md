@@ -530,6 +530,7 @@ src/
 │   ├── provider_auth_profile.rs
 │   ├── replay_evidence.rs
 │   ├── session_identity.rs
+│   ├── tmux_cleanup.rs
 │   └── tool_text.rs
 ├── engine/
 │   ├── ops/
@@ -1579,6 +1580,7 @@ src/
 │   │   ├── agent_handoff/
 │   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
+│   │   │   ├── draft_release_watch.rs
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs

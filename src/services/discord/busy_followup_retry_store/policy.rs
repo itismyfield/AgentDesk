@@ -357,8 +357,10 @@ impl CheckedInputView {
                 let Some(session) = budget.draft_session.as_deref() else {
                     continue;
                 };
-                match crate::services::discord::turn_bridge::followup_requeue::draft_release::idle_release_pending(self.channel_id, session) {
-                    Some(true) => return RetryClass::Unavailable(UnavailableReason::IdleDraftRelease),
+                match super::draft_release_watch::idle_release_pending(self.channel_id, session) {
+                    Some(true) => {
+                        return RetryClass::Unavailable(UnavailableReason::IdleDraftRelease);
+                    }
                     Some(false) => observed = true,
                     None => {}
                 }

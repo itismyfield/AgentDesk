@@ -9,7 +9,7 @@ use super::super::force_kill::{activates_auto_queue, fail_or_retry};
 use super::super::spawn_auto_queue_activate_for_agent;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::prepare_force_kill_retry_pg;
-use crate::services::discord::TmuxCleanupPolicy;
+use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::herdr_terminate::RetiredExclusion;
 use crate::services::discord::herdr_terminate::http_force::Released;
 use crate::services::queue::schedule_post_cancel_queue_drain;

@@ -63,33 +63,7 @@ pub(in crate::services::discord) fn tmux_generation_file_mtime_ns(_tmux_session_
     0
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TmuxCleanupPolicy {
-    PreserveSession,
-    PreserveSessionAndInflight {
-        restart_mode: InflightRestartMode,
-    },
-    CleanupSession {
-        termination_reason_code: Option<&'static str>,
-    },
-}
-
-impl TmuxCleanupPolicy {
-    pub(crate) const fn preserves_inflight(self) -> Option<InflightRestartMode> {
-        match self {
-            Self::PreserveSessionAndInflight { restart_mode } => Some(restart_mode),
-            Self::PreserveSession | Self::CleanupSession { .. } => None,
-        }
-    }
-
-    pub(crate) const fn should_cleanup_tmux(self) -> bool {
-        matches!(self, Self::CleanupSession { .. })
-    }
-
-    pub(crate) const fn should_clear_inflight(self) -> bool {
-        !matches!(self, Self::PreserveSessionAndInflight { .. })
-    }
-}
+pub(crate) use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 
 /// Upper bound for how long we wait for the provider CLI to exit on its own
 /// after the C-c / SIGINT-fallback interrupt was delivered. #2426: this used

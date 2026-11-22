@@ -14,6 +14,7 @@ use super::{
 };
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
+pub(in crate::services::discord) mod draft_release_watch;
 #[cfg(test)]
 mod hold_release_tests;
 mod policy;
