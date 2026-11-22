@@ -3,11 +3,24 @@
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
-use super::{
-    RetryDispatchMeta, fail_force_killed_dispatch_without_retry_pg, resolve_session_locator_pg,
-};
+use futures::future::BoxFuture;
+use serde_json::json;
+
+use super::{RetryDispatchMeta, resolve_session_locator_pg};
 use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::session_agent_resolution::normalize_thread_channel_id;
+
+/// The canonical dispatch status transition (`dispatch::set_dispatch_status_on_pg_async`); the
+/// dispatch service owns it, so the force-kill caller hands it in.
+pub(crate) type SetDispatchStatus = for<'a> fn(
+    &'a PgPool,
+    &'a str,
+    &'a str,
+    Option<&'a serde_json::Value>,
+    &'a str,
+    Option<&'a [&'a str]>,
+    bool,
+) -> BoxFuture<'a, anyhow::Result<usize>>;
 
 /// Active dispatch, agent, runtime channel, stored provider and owner instance of a session.
 type ForceKillSession = (
@@ -144,6 +157,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     session_key: &str,
     active_dispatch_id: Option<&str>,
     retry: bool,
+    set_status: SetDispatchStatus,
 ) -> Result<Option<RetryDispatchMeta>, String> {
     // Session disconnect is independently durable. Dispatch failure still
     // goes through the canonical pipeline, either standalone or in the retry
@@ -169,7 +183,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             .await
             .map_err(|error| format!("commit postgres force-kill transaction: {error}"))?;
     }
-    prepare_force_kill_retry_pg(pool, session_key, active_dispatch_id, retry).await
+    prepare_force_kill_retry_pg(pool, session_key, active_dispatch_id, retry, set_status).await
 }
 
 /// Fails the force-killed session's dispatch or, with `retry`, reads what its retry copies; a
@@ -179,6 +193,7 @@ pub(crate) async fn prepare_force_kill_retry_pg(
     session_key: &str,
     active_dispatch_id: Option<&str>,
     retry: bool,
+    set_status: SetDispatchStatus,
 ) -> Result<Option<RetryDispatchMeta>, String> {
     let mut retry_meta = None;
     if let Some(dispatch_id) = active_dispatch_id {
@@ -234,9 +249,13 @@ pub(crate) async fn prepare_force_kill_retry_pg(
                 format!("decode postgres retry metadata {dispatch_id}: {error}")
             })?;
         } else if !is_terminal {
-            let changed =
-                fail_force_killed_dispatch_without_retry_pg(pool, dispatch_id, Some(session_key))
-                    .await?;
+            let changed = fail_force_killed_dispatch_without_retry_pg(
+                pool,
+                dispatch_id,
+                Some(session_key),
+                set_status,
+            )
+            .await?;
             if changed == 0 {
                 return Ok(None);
             }
@@ -249,4 +268,29 @@ pub(crate) async fn prepare_force_kill_retry_pg(
     }
 
     Ok(retry_meta)
+}
+
+pub(crate) async fn fail_force_killed_dispatch_without_retry_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    session_key: Option<&str>,
+    set_status: SetDispatchStatus,
+) -> Result<usize, String> {
+    let reason = json!({
+        "reason": "force_kill_session",
+        "session_key": session_key,
+    });
+    set_status(
+        pool,
+        dispatch_id,
+        "failed",
+        Some(&reason),
+        "force_kill_session",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+    .await
+    .map_err(|error| {
+        format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
+    })
 }

@@ -524,9 +524,14 @@ async fn cancel_first_rejects_retry_and_retry_without_flag_preserves_finalizatio
     )
     .await;
     assert_eq!(
-        fail_force_killed_dispatch_without_retry_pg(&pool, &origin_id, None)
-            .await
-            .expect("standalone failure"),
+        fail_force_killed_dispatch_without_retry_pg(
+            &pool,
+            &origin_id,
+            None,
+            crate::dispatch::set_dispatch_status_on_pg_boxed
+        )
+        .await
+        .expect("standalone failure"),
         1
     );
     let run_status: String = sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
@@ -649,10 +654,16 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
     .execute(&pool)
     .await
     .expect("seed retry session");
-    let meta = disconnect_session_and_prepare_retry_pg(&pool, session_key, Some(&origin_id), true)
-        .await
-        .expect("disconnect and prepare retry")
-        .expect("retry metadata");
+    let meta = disconnect_session_and_prepare_retry_pg(
+        &pool,
+        session_key,
+        Some(&origin_id),
+        true,
+        crate::dispatch::set_dispatch_status_on_pg_boxed,
+    )
+    .await
+    .expect("disconnect and prepare retry")
+    .expect("retry metadata");
 
     let mut tx = pool.begin().await.expect("begin doomed retry tx");
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_retry:' || $1))")
@@ -708,9 +719,14 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
     assert_eq!(session.get::<String, _>("status"), "disconnected");
     assert_eq!(session.get::<Option<String>, _>("active_dispatch_id"), None);
     assert_eq!(
-        fail_force_killed_dispatch_without_retry_pg(&pool, &origin_id, None)
-            .await
-            .expect("standalone failure fallback"),
+        fail_force_killed_dispatch_without_retry_pg(
+            &pool,
+            &origin_id,
+            None,
+            crate::dispatch::set_dispatch_status_on_pg_boxed
+        )
+        .await
+        .expect("standalone failure fallback"),
         1
     );
     assert_eq!(dispatch_status(&pool, &origin_id).await, "failed");
