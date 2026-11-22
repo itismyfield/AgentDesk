@@ -1,0 +1,2 @@
+key: agy-acp-session
+| `agy-acp` human agy channel over `agy acp` (#8339 design) | `5021d25794` (design; no ACP code yet) | Mutants: load replay posted twice, boot re-sends a written prompt, a killed child's late response settles the next input, `/clear` keeps the old session, dropped steered `end_turn` and missing cancel/inactivity deadline leave an input unsettled | Design, steer, load fallback and per-turn alternative GREEN; 6 single mutants + combined chart config expected RED. [Report](agy-acp/agy-acp.report.md) |

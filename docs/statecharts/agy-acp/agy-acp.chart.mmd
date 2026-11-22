@@ -1,0 +1,52 @@
+---
+title: "agy acp channel session: one terminal post per person input"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Process
+    lg2: Turn
+    lg3: Session
+    lg4: Breaks AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession in some cases
+    lg5: Path to the AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession bug
+  }
+  class lg0 pink
+  class lg1 tan
+  class lg2 blue
+  class lg3 teal
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: No agy child
+  s1: Child up, no session
+  s2: Session idle
+  s3: Prompt open
+  s4: AgentDesk restarting
+  s5: Session loading (replay)
+  [*] --> s0
+  s0 --> s0: a person sends a message or writer posts the one terminal message
+  s0 --> s1: AgentDesk starts agy acp
+  s1 --> s2: session/new or agy refuses the stored id#59; session/new
+  s2 --> s2: person runs /clear
+  s2 --> s3: session/prompt for the next input
+  s3 --> s4: AgentDesk restarts
+  s4 --> s0: boot settles orphaned prompts
+  s3 --> s0: agy exits#59; stdout EOF fails open prompts or deadline passes#59; process group killed
+  s1 --> s5: reattach the stored id (resume, or load)
+  s3 --> s2: late response from the killed child
+  s5 --> s5: load replays an old answer
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 tan
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 mayBreak
+  class s2 bugPath
+  class s3 blue
+  class s3 mayBreak
+  class s3 bugPath
+  class s4 pink
+  class s4 bugPath
+  class s5 teal
+  class s5 mayBreak
+  class s5 bugPath
