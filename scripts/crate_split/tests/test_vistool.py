@@ -255,6 +255,37 @@ class RecordedDiagnostics(unittest.TestCase):
                                 "src/app.rs": "pub(crate) struct Secret;\n"}, sides={"src/app.rs": "above"})
         self.assertEqual((got[0], got[1][0]), ({}, "cut_residue"))
 
+    def test_through_use_follows_a_module_reexport(self):
+        # KRX round 2: `crate::a::moved::Deep` where `a` re-exports `moved` from its child `inner`.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::a::moved::Deep;\nmod inner;\n"
+                                                "pub(crate) use self::inner::moved;\n",
+                                "src/a/inner.rs": "pub(crate) mod moved;\n",
+                                "src/a/inner/moved.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/mod.rs", 0): ("item",), ("src/a/mod.rs", 2): ("item",),
+                                ("src/a/inner.rs", 0): ("item",), ("src/a/inner/moved.rs", 0): ("item",)}, "edit"))
+
+    def test_through_use_follows_a_module_behind_a_glob(self):
+        # KRX `tui_prompt_dedupe`: `pub use runtime_binding::*;` re-exports `pub(crate) mod pane_registration;`.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::a::moved::Deep;\nmod inner;\n"
+                                                "pub use inner::*;\n",
+                                "src/a/inner.rs": "pub(crate) mod moved;\n",
+                                "src/a/inner/moved.rs": "pub(crate) struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/mod.rs", 0): ("item",), ("src/a/inner.rs", 0): ("item",),
+                                ("src/a/inner/moved.rs", 0): ("item",)}, "edit"))
+
+    def test_through_use_of_a_module_from_another_crate(self):
+        # `crate::a::host::Kind` where `a` has `pub(crate) use adk_base::host;` (an extracted member's public item).
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::a::host::Deep;\npub(crate) use adk_base::host;\n"})
+        self.assertEqual(got, ({("src/a/mod.rs", 0): ("item",), ("src/a/mod.rs", 1): ("item",)}, "edit"))
+
+    def test_restricted_reexport_of_an_already_pub_chain_is_widened(self):
+        # KRX `platform/shell.rs`: `pub(crate) use crate::services::git::{git_branch_name, ..}` whose target is
+        # `pub use branch_resolver::{..}` over `pub fn`: only the restricted front line needs `pub`.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use self::inner::{Other, Deep};\nmod inner;\n",
+                                "src/a/inner.rs": "pub use self::deep::Deep;\npub mod deep;\npub struct Other;\n",
+                                "src/a/inner/deep.rs": "pub struct Deep;\n"})
+        self.assertEqual(got, ({("src/a/mod.rs", 0): ("item",)}, "edit"))
+
     def test_use_entries_flatten_the_tree(self):
         self.assertEqual(vistool.use_entries("pub(crate) use crate::a::{b::{C as D, self}, e::*, F};"),
                          [(("crate", "a", "b"), "C", "D"), (("crate", "a"), "b", "b"), (("crate", "a", "e"), "*", "*"),

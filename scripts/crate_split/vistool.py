@@ -59,6 +59,7 @@ QUALS = r"(?:(?:async|const|unsafe|default|safe|extern(?:\s+\"[^\"]*\")?)\s+)*"
 ITEM = re.compile(r"^(?P<indent>\s*)(?:(?P<vis>" + VIS + r")\s+)?(?P<quals>" + QUALS + r")(?P<kw>" + ITEM_KW + r")"
                   r"(?:\s+|$)(?P<rest>.*)$")
 MOD_DECL = r"^(?P<indent>\s*)(?:(?P<vis>" + VIS + r")\s+)?mod\s+{name}\s*(?P<end>[;{{])"
+ALREADY_PUB = "is already pub"
 NAME_IN_MSG = re.compile(r"`([^`]+)`")
 SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "I", "macro_path": "macro",
          "glob_hidden": "glob", "unclassified": "?"}
@@ -764,15 +765,27 @@ class Widener:
         edits, reached, outcome = {}, False, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
         for segs, orig in targets:
             segs = list(segs)
-            module = () if segs and segs[0] == "crate" else base
-            for seg in segs[1:] if segs and segs[0] == "crate" else segs:
-                module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
+            module = module_path(segs, base)
             found = self.layout.locate(module)
             if found is None:
                 if named and segs and segs[0] not in ("crate", "self", "super") and \
                         self.layout.locate(base + (segs[0],)) is None:
                     reached = True  # another crate's (public) item: only this line may need `pub`
-                continue
+                    continue
+                # A module named only through a re-export (`pub(crate) use inner::moved;`, an extracted member's
+                # `use adk_base::domain::x;`): follow it, widening the re-export chain with the item.
+                real, via, out = self._resolve_module(module, hops) if hops else (None, {}, outcome)
+                if out != "edit":
+                    if out[0] != "unresolved":
+                        return {}, out
+                    continue
+                if real is None:
+                    reached = True  # the module lives in another crate: its items are already public
+                    edits.update(via)
+                    continue
+                module, found = real, self.layout.locate(real)
+            else:
+                via = {}
             target, first, last = found
             if self._place(target, first):
                 return {}, self._place(target, first)
@@ -795,14 +808,55 @@ class Widener:
                 if out == "edit":
                     reached = True
                     edits.update(sub)
+                elif ALREADY_PUB in out[1]:
+                    reached = True  # the rest of the chain is public: only the restricted lines in front widen
                 elif out[0] != "unresolved":
                     return {}, out
+            if reached:
+                edits.update(via)
         if not reached:
             return {}, outcome
         edits.update(own)
         if not edits:
-            return {}, ("unresolved", f"`{name}` behind {rel}:{index + 1} is already pub")
+            return {}, ("unresolved", f"`{name}` behind {rel}:{index + 1} {ALREADY_PUB}")
         return edits, "edit"
+
+    def _resolve_module(self, module, hops):
+        """(module that locates, or None when it lives in another crate; ops widening the `use` lines that
+        re-export it; 'edit' or a failure outcome) for a module path no file or inline block declares."""
+        miss = ("unresolved", f"no module {'::'.join(module)}")
+        for cut in range(len(module) - 1, -1, -1):
+            found = self.layout.locate(module[:cut])
+            if found is None:
+                continue
+            rel, first, last = found
+            tl, levels = self.lines(rel), self._levels(rel)
+            is_use = lambda line: (lambda m: bool(m) and m.group("kw") == "use")(ITEM.match(line))
+            uses = [j for j in range(max(first - 1, 0), min(last, len(tl)))
+                    if j in levels and is_use(tl[j]) and self.layout.module_at(rel, j + 1) == module[:cut]]
+            # An explicit binding of the module name first; else a visible glob over a module declaring it.
+            picks = [(j, [(p, o) for p, o, b in use_entries(use_text(tl, j)) if b == module[cut] and o != "*"])
+                     for j in uses]
+            picks = [(j, hit) for j, hit in picks if hit] or [
+                (j, [(p, module[cut])]) for j in uses if ITEM.match(tl[j]).group("vis")
+                for p, o, _ in use_entries(use_text(tl, j))
+                if o == "*" and self.layout.locate(module_path(list(p), module[:cut]) + (module[cut],))]
+            for j, hit in picks[:1]:
+                sub, out = self._through_use(rel, j, module[cut], hops - 1)
+                if out != "edit" and ALREADY_PUB not in out[1]:
+                    return None, {}, out
+                segs = list(hit[0][0]) + [hit[0][1]]
+                if segs[0] not in ("crate", "self", "super") and self.layout.locate(module[:cut] + (segs[0],)) is None:
+                    return None, sub, "edit"
+                target = module_path(segs, module[:cut]) + module[cut + 1:]
+                if self.layout.locate(target) is None:
+                    real, more, out = self._resolve_module(target, hops - 1) if hops > 1 else (None, {}, miss)
+                    if out != "edit":
+                        return None, {}, out
+                    return real, {**sub, **more}, "edit"
+                return target, sub, "edit"
+            return None, {}, miss
+        return None, {}, miss
 
     def _field(self, rel, sline, field, owner):
         lines = self.lines(rel)
@@ -829,6 +883,14 @@ class Widener:
             for root in (self.lower, self.upper):
                 write_lines(root / rel, self.lines(rel))
         return out
+
+
+def module_path(segs, base):
+    """Module a `use` path prefix names from module `base` (`crate::`, `self::`, `super::`, child)."""
+    module = () if segs and segs[0] == "crate" else base
+    for seg in segs[1:] if segs and segs[0] == "crate" else segs:
+        module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
+    return module
 
 
 def restricted_defs(layout, read):
