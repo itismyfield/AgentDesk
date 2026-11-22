@@ -18,6 +18,7 @@ use crate::domain::outbound::port::{
 };
 use crate::domain::outbound::result::DeliveryResult;
 use crate::services::discord::SharedData;
+use crate::services::dispatches::http_outbound::HttpOutbound;
 
 pub(crate) async fn post_serenity_message_with_nonce(
     http: &Arc<serenity::Http>,
@@ -281,6 +282,23 @@ impl OutboundDelivery for HttpOutboundClient {
             None,
         )
     }
+}
+
+/// Engine producers reach this client and the process-wide deduper through this port.
+pub(super) fn engine_http_deliver(
+    conn: HttpOutbound,
+    intent: OutboundIntent,
+    summary: Option<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeliveryResult> + Send>> {
+    Box::pin(async move {
+        let client = HttpOutboundClient::new(conn.client, conn.token, conn.discord_api_base);
+        let mut message = super::message::DiscordOutboundMessage::from(intent);
+        if let Some(summary) = summary {
+            message = message.with_summary(summary);
+        }
+        super::delivery::deliver_outbound(&client, super::shared_outbound_deduper(), message, None)
+            .await
+    })
 }
 
 impl DiscordOutboundClient for HttpOutboundClient {

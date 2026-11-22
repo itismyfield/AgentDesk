@@ -156,7 +156,7 @@ pub(super) fn settle_completed_sources(
     channel_id: poise::serenity_prelude::ChannelId,
 ) -> Vec<QueueExitEvent> {
     let committed = provider.map_or_else(Default::default, |provider| {
-        crate::services::discord::outbound::completed_turn_ledger::settled_commit_ms_by_user_msg_id(
+        crate::services::discord::runtime_store::completed_turn_ledger_model::settled_commit_ms_by_user_msg_id(
             provider,
             channel_id.get(),
         )

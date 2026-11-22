@@ -1460,10 +1460,8 @@ async fn send_review_result_message_via_http(
     // as dispatch outbox.
     use crate::domain::outbound::policy::DiscordOutboundPolicy;
     use crate::domain::outbound::result::DeliveryResult;
-    use crate::services::discord::outbound::HttpOutboundClient;
-    use crate::services::discord::outbound::delivery::deliver_outbound;
-    use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::shared_outbound_deduper;
+    use crate::domain::outbound::{OutboundDelivery, OutboundIntent, OutboundTargetKey};
+    use crate::services::dispatches::http_outbound::HttpOutbound;
     use poise::serenity_prelude::ChannelId;
 
     let client = reqwest::Client::new();
@@ -1478,7 +1476,7 @@ async fn send_review_result_message_via_http(
     .await?;
 
     let outbound_client =
-        HttpOutboundClient::new(client, token.to_string(), discord_api_base.to_string());
+        HttpOutbound::new(client, token.to_string(), discord_api_base.to_string());
     let event_kind = match kind {
         ReviewFollowupKind::Pass => "pass",
         ReviewFollowupKind::Unknown => "unknown",
@@ -1489,22 +1487,15 @@ async fn send_review_result_message_via_http(
         .map_err(|error| {
             format!("invalid review followup target channel {target_channel}: {error}")
         })?;
-    let outbound_msg = DiscordOutboundMessage::new(
+    let outbound_msg = OutboundIntent::new(
         format!("review:{card_id}"),
         format!("review:{review_dispatch_id}:{event_kind}:{discord_api_base}"),
         message,
-        OutboundTarget::Channel(target_channel_id),
+        OutboundTargetKey::channel(target_channel_id.get()),
         DiscordOutboundPolicy::review_notification(),
     );
 
-    match deliver_outbound(
-        &outbound_client,
-        shared_outbound_deduper(),
-        outbound_msg,
-        None,
-    )
-    .await
-    {
+    match outbound_client.deliver(outbound_msg).await {
         DeliveryResult::Sent { .. }
         | DeliveryResult::Fallback { .. }
         | DeliveryResult::Duplicate { .. }

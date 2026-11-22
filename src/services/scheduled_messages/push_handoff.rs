@@ -86,7 +86,7 @@ pub(super) async fn commit(
         let rendered = render_discord_content(&message.content, &message.discord_mention_user_ids);
         if message.content.trim().is_empty()
             || rendered.encode_utf16().count()
-                > crate::services::discord::outbound::DISCORD_HARD_LIMIT_CHARS
+                > crate::domain::outbound::policy::DISCORD_MESSAGE_HARD_LIMIT_CHARS
         {
             return Err(PushHandoffError::Invalid("invalid image content length"));
         }
