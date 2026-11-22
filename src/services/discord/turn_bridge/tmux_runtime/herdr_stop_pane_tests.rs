@@ -144,14 +144,39 @@ fn stop_after(
     screen: &str,
     records: &[serde_json::Value],
 ) -> (&'static str, usize, Vec<String>) {
+    let rows: String = records.iter().map(|record| format!("{record}\n")).collect();
+    let edit = Edit::Append(rows.as_bytes());
+    stop_over(pool, root, runtime, provider, n, screen, edit)
+}
+
+/// What a case writes to its fresh turn's transcript before the stop.
+enum Edit<'a> {
+    Append(&'a [u8]),
+    /// The same file, inode kept, holding only these bytes.
+    Replace(&'a [u8]),
+}
+
+fn stop_over(
+    pool: &sqlx::PgPool,
+    root: &Path,
+    runtime: &tokio::runtime::Runtime,
+    provider: ProviderKind,
+    n: u64,
+    screen: &str,
+    edit: Edit<'_>,
+) -> (&'static str, usize, Vec<String>) {
     let case = runtime.block_on(Case::new(pool, root, provider, n));
+    let (append, bytes) = match edit {
+        Edit::Append(bytes) => (true, bytes),
+        Edit::Replace(bytes) => (false, bytes),
+    };
     let mut transcript = std::fs::OpenOptions::new()
-        .append(true)
+        .append(append)
+        .write(!append)
+        .truncate(!append)
         .open(&case.path)
         .unwrap();
-    for record in records {
-        writeln!(transcript, "{record}").unwrap();
-    }
+    transcript.write_all(bytes).unwrap();
     let _registry = case.rig.registry_on_this_thread();
     let strips = HerdrStrips::over(&case.rig);
     case.rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":screen,"revision":3,"truncated":false}}));
@@ -450,7 +475,8 @@ fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
 }
 
 // A live screen decides whatever the transcript reads or leaves unread. An idle screen gets no
-// Escape though its text carries the chrome's words; an unread turn needs the interrupt offer.
+// Escape though its text carries the chrome's words; a turn without a prompt row to read needs
+// the interrupt offer.
 #[test]
 fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript() {
     let live =
@@ -505,15 +531,89 @@ fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript()
         let (mut observed, mut expected) = (Vec::new(), Vec::new());
         for (n, (name, screen, records, reply, escapes)) in rows.into_iter().enumerate() {
             let (logs, _capture) = capture_stop_events();
-            let seen = stop_after(
-                pool,
-                root,
-                runtime,
-                ProviderKind::Claude,
-                760 + n as u64,
-                screen,
-                records,
-            );
+            // An unread turn's transcript holds no prompt row at all, only the reply after it.
+            let rows: String = records.iter().map(|record| format!("{record}\n")).collect();
+            let edit = match name.starts_with("unread") {
+                true => Edit::Replace(rows.as_bytes()),
+                false => Edit::Append(rows.as_bytes()),
+            };
+            let n = 760 + n as u64;
+            let seen = stop_over(pool, root, runtime, ProviderKind::Claude, n, screen, edit);
+            let named = logs.lock().unwrap().iter().any(|event| {
+                event.contains("herdr_stop_unobserved")
+                    && event.contains(&format!("{:?}", "unread=\"turn_identity\""))
+            });
+            observed.push((name, seen.0, seen.1, named));
+            expected.push((name, reply, escapes, reply == unread));
+        }
+        assert_eq!(observed, expected);
+    });
+}
+
+/// A Code Mode turn as Claude Code 2.1.328 writes it after the case's own: its prompt, the
+/// turn's context attachments, a `REPL` call that returns at once and its tool's progress.
+fn code_mode_turn(context_bytes: usize) -> String {
+    let prompt = json!({"type":"user","uuid":"turn-b","sessionId":"s1","message":{"role":"user","content":"[User: tester (ID: 1)] Run a 90s foreground Bash."}});
+    let context = json!({"type":"attachment","sessionId":"s1","attachment":{"type":"deferred_tools_delta","addedLines":["x".repeat(32 * 1024)]}});
+    let call = json!({"type":"assistant","sessionId":"s1","message":{"content":[{"type":"tool_use","id":"t1","name":"REPL","input":{"code":"await Bash({command: 'sleep 90'})"}}]}});
+    let returned = json!({"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"started"}]}});
+    let mut rows = vec![prompt];
+    rows.extend(std::iter::repeat_n(
+        context,
+        context_bytes.div_ceil(32 * 1024),
+    ));
+    rows.extend([call, returned]);
+    rows.extend((1..=5).map(|s| json!({"type":"progress","sessionId":"s1","data":{"type":"bash_progress","elapsedTimeSeconds":s}})));
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+// #8081: a live Code Mode turn gets its one Escape while its tool runs past a prompt the turn's
+// context pushed out of the last 256 KiB, and while its reply row is half written inside a
+// character. Without a prompt row to read, the same live screen still gets none.
+#[test]
+fn herdr_claude_code_mode_stop_reads_a_running_or_generating_turn() {
+    let live =
+        include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.328-code-mode-tool.txt");
+    let tool = "⏺ Running 75s sleep per scenario · 4s\n  ⎿  $ python3 -c \"import time; time.sleep(75)\" (3s)\n";
+    let spinner = "✽ Ideating… (Run 75s sleep per scenario · 7s ·\n  ↓ 300 tokens)";
+    assert!(live.contains(tool) && live.contains(spinner));
+    let generating = live
+        .replace(tool, "")
+        .replace(spinner, "✽ Ideating… (7s · ↓ 300 tokens)");
+    assert_eq!(
+        claude_tui_stop_pane_evidence(&generating),
+        (true, true, false)
+    );
+    let unread = HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved)).reply();
+    let running = code_mode_turn(300 * 1024);
+    let reply =
+        r#"{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"작업"#;
+    let mut written = code_mode_turn(0).into_bytes();
+    written.extend_from_slice(&reply.as_bytes()[..reply.len() - 1]);
+    let (_, promptless) = running.split_once('\n').unwrap();
+    with_pool(|pool, root, runtime| {
+        let rows = [
+            (
+                "tool running",
+                live,
+                Edit::Append(running.as_bytes()),
+                sent(),
+                1,
+            ),
+            ("generating", &generating, Edit::Append(&written), sent(), 1),
+            (
+                "no prompt row",
+                live,
+                Edit::Replace(promptless.as_bytes()),
+                unread,
+                0,
+            ),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (n, (name, screen, edit, reply, escapes)) in rows.into_iter().enumerate() {
+            let (logs, _capture) = capture_stop_events();
+            let n = 790 + n as u64;
+            let seen = stop_over(pool, root, runtime, ProviderKind::Claude, n, screen, edit);
             let named = logs.lock().unwrap().iter().any(|event| {
                 event.contains("herdr_stop_unobserved")
                     && event.contains(&format!("{:?}", "unread=\"turn_identity\""))

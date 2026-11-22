@@ -849,16 +849,15 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
             if n == 3 {
                 eprintln!("NATIVE_TAIL_UNOBSERVED bytes=300000 same_recorded_input=true");
                 fx.pane(&running());
-                append(
-                    &transcript,
-                    serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"x".repeat(300_000)}]}}),
-                );
+                // The same file, its prompt row gone: only the long reply is left to read.
+                let reply = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"x".repeat(300_000)}]}});
+                std::fs::write(&transcript, format!("{reply}\n")).unwrap();
                 assert!(
                     super::super::super::claude_stop_delivery::ClaudeStopTurnIdentity::capture(
                         transcript.to_str().unwrap()
                     )
                     .is_none(),
-                    "current user is beyond the bounded tail"
+                    "no current user row is read"
                 );
             }
             start(&shared, channel, &token).await;
