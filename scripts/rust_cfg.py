@@ -15,9 +15,10 @@ attribute is absent when ``test`` is disabled.  A form such as
 ``cfg_attr(not(test), cfg(any()))`` is test-only because it applies an
 always-false cfg gate to non-test builds.
 
-``any(test, feature = "test-support")`` counts as ``test``: the feature is
-enabled only by test builds.  The feature alone, or with any third option,
-stays production-visible.
+``feature = "test-support"`` is off in production and on only where an upper
+crate's tests link this one, so a gate is also test-only when every such
+feature-linked build that includes it is matched by the plain test build:
+``any(test, feature = "test-support")`` qualifies, the feature alone does not.
 
 Callers must blank comments and strings before using the attribute finder.  It
 preserves the conservative convention established by
@@ -140,38 +141,36 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
     return node
 
 
-def _is_test_support_alias(node: _CfgNode) -> bool:
-    """Whether a node is exactly ``any(test, feature = "test-support")``."""
-    if node.kind != "any" or len(node.children) != 2:
-        return False
-    atoms = sorted((child.name or "", child.value or "") for child in node.children if child.kind == "atom")
-    return atoms == [("feature", TEST_SUPPORT_FEATURE), ("test", "")]
+def _is_test_support_feature(node: _CfgNode) -> bool:
+    return node.kind == "atom" and node.name == "feature" and node.value == TEST_SUPPORT_FEATURE
 
 
-def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bool:
-    if _is_test_support_alias(node):
-        return test_enabled
+def _cfg_eval(
+    node: _CfgNode, values: dict[int, bool], test_enabled: bool, feature_enabled: bool = False
+) -> bool:
     if node.kind == "atom":
         if node.name == "test":
             return test_enabled
+        if _is_test_support_feature(node):
+            return feature_enabled
         return values[id(node)]
+    children = (_cfg_eval(child, values, test_enabled, feature_enabled) for child in node.children)
     if node.kind == "all":
-        return all(_cfg_eval(child, values, test_enabled) for child in node.children)
+        return all(children)
     if node.kind == "any":
-        return any(_cfg_eval(child, values, test_enabled) for child in node.children)
+        return any(children)
     if node.kind == "not" and len(node.children) == 1:
-        return not _cfg_eval(node.children[0], values, test_enabled)
+        return not next(children)
     return True
 
 
 def _can_be_true_without_test(node: _CfgNode) -> bool:
+    """Reachable in a production build, or in a feature-linked build but not the plain test build."""
     unknowns: list[_CfgNode] = []
 
     def collect(current: _CfgNode) -> None:
-        if _is_test_support_alias(current):
-            return
         if current.kind == "atom":
-            if current.name != "test":
+            if current.name != "test" and not _is_test_support_feature(current):
                 unknowns.append(current)
             return
         for child in current.children:
@@ -185,6 +184,8 @@ def _can_be_true_without_test(node: _CfgNode) -> bool:
             id(atom): bool(mask & (1 << bit)) for bit, atom in enumerate(unknowns)
         }
         if _cfg_eval(node, values, test_enabled=False):
+            return True
+        if _cfg_eval(node, values, False, feature_enabled=True) and not _cfg_eval(node, values, True):
             return True
     return False
 
