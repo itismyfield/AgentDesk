@@ -6,9 +6,9 @@ use serenity::ChannelId;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, MissedTickBehavior};
 
-use super::super::SharedData;
-use super::super::inflight::InflightSignal;
-use super::super::turn_completion_events::TurnCompletionEvent;
+use super::super::super::SharedData;
+use super::super::super::inflight::InflightSignal;
+use super::super::super::turn_completion_events::TurnCompletionEvent;
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 const TYPING_MAX_LIFETIME: Duration = Duration::from_secs(6 * 60 * 60);
@@ -39,7 +39,7 @@ pub(in crate::services::discord) fn spawn_native_typing_indicator(
     turn_id: u64,
 ) {
     let finalize_rx =
-        super::super::turn_completion_events::subscribe_turn_completion_events(shared);
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(shared);
     let producer_rx = shared.inflight_signals.subscribe();
     spawn_typing_indicator_task(
         SerenityTypingTransport { http },
@@ -62,7 +62,7 @@ fn spawn_typing_indicator_task<T>(
 where
     T: TypingTransport + 'static,
 {
-    super::super::task_supervisor::spawn_observed(
+    super::super::super::task_supervisor::spawn_observed(
         "discord_native_typing_indicator",
         run_native_typing_indicator(
             transport,
@@ -111,7 +111,6 @@ async fn run_native_typing_indicator<T: TypingTransport>(
             _ = refresh.tick() => {
                 if let Err(error) = transport.broadcast_typing(channel_id).await {
                     tracing::warn!(
-                        target: "agentdesk::services::discord::router::message_handler::typing_indicator",
                         channel_id = channel_id.get(),
                         error = %error,
                         "Discord typing indicator broadcast failed; stopping refresh loop"

@@ -2,4 +2,3 @@
 
 pub(in crate::services::discord) mod activity;
 pub(in crate::services::discord) mod supervisor;
-pub(in crate::services::discord) mod typing_indicator;
