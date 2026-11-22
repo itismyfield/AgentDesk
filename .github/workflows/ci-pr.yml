@@ -344,6 +344,7 @@ jobs:
               - 'src/services/discord/inject_disposition_test_support.rs'
               - 'src/services/discord/inject_disposition_tests.rs'
               - 'src/services/discord/jsonl_watcher.rs'
+              - 'src/services/discord/krx_claude_tests.rs'
               - 'src/services/discord/live_bridge.rs'
               - 'src/services/discord/mailbox_probe.rs'
               - 'src/services/discord/mcp_credential_watcher.rs'
