@@ -1,7 +1,7 @@
 //! The argv-bearing create returns a ticket before rollout discovery and response tailing.
 use super::*;
 
-pub(in crate::services::codex) struct Create<'a> {
+pub(crate) struct Create<'a> {
     pub tmux_session_name: &'a str,
     pub working_dir: &'a str,
     pub prompt: &'a str,
@@ -13,14 +13,14 @@ pub(in crate::services::codex) struct Create<'a> {
         &'a mut crate::services::codex_tui::execution_end::producer::LaunchObservation,
 }
 
-pub(in crate::services::codex) struct Submitted {
+pub(crate) struct Submitted {
     pub prepared: PreparedIncarnation,
     pub validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
     pub rollout_modified_since: std::time::SystemTime,
     pub handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
-pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted, String> {
+pub(crate) fn create(input: Create<'_>) -> Result<Submitted, String> {
     let Create {
         tmux_session_name,
         working_dir,
@@ -146,7 +146,7 @@ pub(in crate::services::codex) fn spawn_owned(
     output.ok_or_else(|| "owner spawned without the create's result".into())
 }
 
-pub(in crate::services::codex) struct Observe<'a> {
+pub(crate) struct Observe<'a> {
     pub submitted: Submitted,
     pub working_dir: &'a str,
     pub sender: Sender<StreamMessage>,
@@ -155,7 +155,7 @@ pub(in crate::services::codex) struct Observe<'a> {
     pub prompt: &'a str,
 }
 
-pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), String> {
+pub(crate) fn observe(input: Observe<'_>) -> Result<(), String> {
     let Observe {
         submitted,
         working_dir,
@@ -348,6 +348,3 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
         handoff,
     })
 }
-
-#[cfg(test)]
-mod tests;

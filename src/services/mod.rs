@@ -184,6 +184,8 @@ pub(crate) mod turn_summary_line;
 pub use remote_stub as remote;
 
 #[cfg(test)]
+mod krx_claude_tests;
+#[cfg(test)]
 mod provider_output_guard_tests;
 
 pub(crate) mod session_identity_metadata;

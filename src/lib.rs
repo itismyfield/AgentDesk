@@ -292,6 +292,8 @@ pub fn run_from_args() -> Result<()> {
 }
 
 #[cfg(test)]
+mod krx_claude_tests;
+#[cfg(test)]
 mod test_env_panic_probe;
 #[cfg(test)]
 use adk_test_support::test_support;

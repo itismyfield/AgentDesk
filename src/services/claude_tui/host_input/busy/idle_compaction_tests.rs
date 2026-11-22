@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::claude_tui::busy_inject::Request;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
@@ -41,7 +42,7 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
     );
     let hosted = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
     let context = hosted.context.as_ref().unwrap();
-    let observation = super::super::observe(
+    let observation = crate::services::claude_tui::host_input::busy::herdr::observe(
         (CHANNEL, LOGICAL, N1),
         (
             context.target.clone(),

@@ -1,8 +1,8 @@
 //! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
-mod first_input;
-mod handoff;
+pub(crate) mod first_input;
+pub(crate) mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
 use handoff::launched_source;
@@ -204,15 +204,15 @@ pub(crate) trait HerdrTurnPorts {
 pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 /// The source a prompt goes to.
-struct Attached {
-    nonce: String,
-    session_id: String,
-    transcript: PathBuf,
-    target: HerdrTarget,
-    bound: bool,
-    awaiting_clear: bool,
+pub(crate) struct Attached {
+    pub(crate) nonce: String,
+    pub(crate) session_id: String,
+    pub(crate) transcript: PathBuf,
+    pub(crate) target: HerdrTarget,
+    pub(crate) bound: bool,
+    pub(crate) awaiting_clear: bool,
     /// The record's socket and pane, which the gate fences as `socket#pane`.
-    physical: Option<(String, String)>,
+    pub(crate) physical: Option<(String, String)>,
 }
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.

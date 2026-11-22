@@ -1,5 +1,8 @@
 use super::*;
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::provider::CancelToken;
 use crate::services::tui_o::channel_policy::first_prompt_digest;
+use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
 use std::io::Write;
 
