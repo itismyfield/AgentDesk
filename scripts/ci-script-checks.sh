@@ -569,7 +569,8 @@ if run_check guards "PR infrastructure failure rerun classifier (#4392/#5207)"; 
 # the discriminating matrix and proves drift detection actually discriminates.
 ./scripts/ci/infra-failure-rerun.sh --self-test
 "$PYTHON" -m unittest tests.test_known_flaky_retry
-"$PYTHON" -m unittest tests.test_nextest_ci tests.test_nextest_required tests.test_nextest_timings
+"$PYTHON" -m unittest tests.test_nextest_ci tests.test_nextest_required tests.test_nextest_timings \
+  tests.test_nextest_scope tests.test_pr_scope_core tests.test_pr_nextest tests.test_aggregate_pr_scope
 bash scripts/main-ci-triage.sh --self-test
 
 # Nightly notification contract (#6006).
