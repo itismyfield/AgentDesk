@@ -649,7 +649,8 @@ pub async fn agent_turn(
     Path(id): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
-    match load_agent_turn_status_pg(pool, &id).await {
+    let refusal = crate::services::discord::admin_host_guard::row_refusal_port;
+    match load_agent_turn_status_pg(pool, &id, refusal).await {
         Ok(mut body) => {
             body["turn_presence"] = super::agents_turn_target::turn_presence(pool, &id).await;
             Ok((StatusCode::OK, Json(body)))

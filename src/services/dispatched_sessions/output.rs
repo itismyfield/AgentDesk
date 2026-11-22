@@ -78,11 +78,21 @@ mod tests {
 /// GET /api/sessions/{id}/output?lines=N (legacy alias: tmux-output).
 /// Resolves the authoritative owner before reading its bound process output
 /// or tmux pane. Native process handles cannot be reattached after a restart.
+/// Why a session may not be read by its tmux name; the owner runtime supplies it.
+pub(crate) type SessionKeyRefusal = for<'a> fn(
+    &'a sqlx::PgPool,
+    Option<&'a ProviderKind>,
+    Option<u64>,
+    &'a str,
+    &'a str,
+) -> futures::future::BoxFuture<'a, Option<String>>;
+
 pub async fn tmux_output(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Query(params): Query<TmuxOutputQuery>,
+    refusal: SessionKeyRefusal,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let requested_lines = params.lines.unwrap_or(TMUX_OUTPUT_DEFAULT_LINES);
     let effective_lines = requested_lines.max(1).min(TMUX_OUTPUT_MAX_LINES);
@@ -168,7 +178,6 @@ pub async fn tmux_output(
 
     // Refused before any capture by name: another host's output is not this tmux pane.
     let provider_kind = provider.as_deref().and_then(ProviderKind::from_str);
-    let refusal = crate::services::discord::admin_host_guard::session_key_refusal;
     if let Some(reason) =
         refusal(pool, provider_kind.as_ref(), None, &session_key, &tmux_name).await
     {

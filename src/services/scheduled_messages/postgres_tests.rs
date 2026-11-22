@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::health::HealthRegistry;
 use chrono::Duration;
 use serde_json::json;
 use sqlx::Row;
@@ -274,7 +275,7 @@ async fn postgres_scheduled_message_default_notify_reaches_push_outbox() {
     assert_eq!(claims.len(), 1);
     fire_claimed(
         &pool,
-        None,
+        None::<&HealthRegistry>,
         claims.pop().expect("claimed default-notify fire"),
         Utc::now(),
     )
@@ -354,8 +355,8 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     .expect("insert multi-channel scheduled push");
     let fire = claim_one(&pool, "provider-fanout-worker").await;
 
-    fire_claimed(&pool, None, fire.clone(), Utc::now()).await;
-    fire_claimed(&pool, None, fire, Utc::now()).await;
+    fire_claimed(&pool, None::<&HealthRegistry>, fire.clone(), Utc::now()).await;
+    fire_claimed(&pool, None::<&HealthRegistry>, fire, Utc::now()).await;
 
     let terminal = db::get_scheduled_message_pg(&pool, &message.id)
         .await
@@ -442,7 +443,13 @@ async fn postgres_scheduled_message_retry_exhaustion_terminalizes_recurring_defi
     let failed_message =
         insert_recurring_agent_message(&pool, "scheduled-retry-fail-agent", "fail").await;
     let failed_fire = claim_after_exhausting_rearms(&pool).await;
-    fire_claimed(&pool, None, failed_fire.clone(), Utc::now()).await;
+    fire_claimed(
+        &pool,
+        None::<&HealthRegistry>,
+        failed_fire.clone(),
+        Utc::now(),
+    )
+    .await;
 
     let failed_parent = db::get_scheduled_message_pg(&pool, &failed_message.id)
         .await
@@ -469,7 +476,13 @@ async fn postgres_scheduled_message_retry_exhaustion_terminalizes_recurring_defi
     let fallback_message =
         insert_recurring_agent_message(&pool, "scheduled-retry-fallback-agent", "push_raw").await;
     let fallback_fire = claim_after_exhausting_rearms(&pool).await;
-    fire_claimed(&pool, None, fallback_fire.clone(), Utc::now()).await;
+    fire_claimed(
+        &pool,
+        None::<&HealthRegistry>,
+        fallback_fire.clone(),
+        Utc::now(),
+    )
+    .await;
 
     let fallback_parent = db::get_scheduled_message_pg(&pool, &fallback_message.id)
         .await
@@ -561,7 +574,7 @@ async fn postgres_scheduled_message_retry_exhaustion_terminalizes_recurring_defi
         .expect("count outbox rows before expired fire");
     fire_claimed(
         &pool,
-        None,
+        None::<&HealthRegistry>,
         expired_fire.clone(),
         expires_at + Duration::seconds(1),
     )
@@ -669,7 +682,7 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
         "a manual retry must retain the definition's regular cadence anchor"
     );
 
-    fire_claimed(&pool, None, retry, Utc::now()).await;
+    fire_claimed(&pool, None::<&HealthRegistry>, retry, Utc::now()).await;
     let resumed = db::get_scheduled_message_pg(&pool, &message.id)
         .await
         .expect("read resumed recurring definition")
@@ -1360,7 +1373,7 @@ async fn postgres_runtime_absence_defers_terminal_agent_fallback_polling() {
     .expect("seed terminal no-reply evidence");
 
     assert!(
-        !tick_once(&pool, None, "runtime-absent-poller").await,
+        !tick_once(&pool, None::<&HealthRegistry>, "runtime-absent-poller").await,
         "a Postgres-only process must not consume terminal agent evidence"
     );
     let waiting_parent = db::get_scheduled_message_pg(&pool, &message.id)
@@ -1433,7 +1446,7 @@ async fn postgres_missing_runtime_waits_without_consuming_agent_retry() {
     assert!(without_runtime.is_empty());
 
     let first = claim_one(&pool, "runtime-missing-direct-fire").await;
-    fire_claimed(&pool, None, first, Utc::now()).await;
+    fire_claimed(&pool, None::<&HealthRegistry>, first, Utc::now()).await;
     let waiting = db::get_scheduled_message_pg(&pool, &message.id)
         .await
         .expect("read runtime-deferred parent")
@@ -1519,7 +1532,7 @@ async fn postgres_cancel_before_push_handoff_enqueues_nothing() {
         }
     ));
 
-    fire_claimed(&pool, None, fire, Utc::now()).await;
+    fire_claimed(&pool, None::<&HealthRegistry>, fire, Utc::now()).await;
 
     let canceled = db::get_scheduled_message_pg(&pool, &message.id)
         .await

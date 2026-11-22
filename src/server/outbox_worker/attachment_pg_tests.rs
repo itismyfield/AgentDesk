@@ -652,7 +652,7 @@ async fn image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg() {
     assert_eq!(fires.len(), 1);
     crate::services::scheduled_messages::fire_claimed(
         &pool,
-        None,
+        None::<&crate::services::discord::health::HealthRegistry>,
         fires.pop().unwrap(),
         chrono::Utc::now(),
     )

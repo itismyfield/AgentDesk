@@ -136,7 +136,7 @@ GC의 **실제 row delete 성공** 뒤 같은 child/init provenance·row/nonce/g
 | synthetic source·O actor·notice | `discord/tui_prompt_relay.rs:757`, `tui_prompt_relay/synthetic_start/admission_fence.rs:168`, `tui_prompt_dedupe/hosted_source.rs:64`, `tui_o/writer/actor.rs:423`, `tui_o/writer/input_notices/admission.rs:104`, `tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:67` | O 조각은 필요한 output adapter만, 나머지 H2. actual source pin 유지 |
 | API 주입·presence | `discord/health/turn_deliver/inject.rs:312`, `inject/herdr.rs:48`, `turn_presence/activity/unbound.rs:305,525`, `unbound/completed_scheduled.rs:162`, `unbound/herdr_bound.rs:18` | API T1/T2와 H2 |
 | 명령 설정·clear | `discord/commands/config/provider_settings.rs:117,190,326`, `control.rs:466`, `control/clear_teardown.rs:70,81,115`, `clear_end_record.rs:45`, `codex_end_record.rs:15`, `control/herdr_recovery.rs:28`, `fast_mode.rs:108`, `tui_passthrough.rs:128` | H2 판정만, 기능 차이는 #8128 R/M/C/E; #8119 뒤 |
-| consent·exact recovery | `discord/router/herdr_consent.rs:34`, `herdr_consent/return_input.rs:14`, `herdr_terminate/root_replaced.rs:249`, `root_replaced/preclaim.rs:22`, `admin_host_guard.rs:94` | H3; stored exact endpoint와 current policy를 혼동하지 않음 |
+| consent·exact recovery | `discord/router/herdr_consent.rs:34`, `herdr_consent/return_input.rs:14`, `herdr_terminate/root_replaced.rs:249`, `root_replaced/preclaim.rs:22`, `admin_host_guard.rs:95` | H3; stored exact endpoint와 current policy를 혼동하지 않음 |
 | admin guard 소비자 | 부록의 `admin_host_guard` 전부: cli·agents API·auth·auto_queue·restart·tmux_recreate·diagnostics·health/recovery·inflight·stale_turn·idle_cleanup·tmux_watcher·dispatched output·provider guard·routines·session_activity/resume | 설정/실행 판정 중복은 H3로, 관리 기능 개방은 R/R2/D. guard 호출 자체가 저수준 endpoint 직접 사용인 것은 아님 |
 | SQL selector 정책 | `config/session_hosts.rs:354`, `src/db/dispatched_sessions.rs:2212,2249` | **H2**: configured 부모+검증된 child 관계를 공통 SQL/bind로 전달. H child selector clear0·unknown no-clear, child predicate 제거 mutant RED |
 | raw boot inventory·consent | `discord/router/herdr_consent.rs:32,395`, `herdr_consent/return_input.rs:171`, `herdr_consent/startup.rs:27`, `src/cli/doctor/orchestrator/managed_herdr_config.rs:19,30`, `src/server/routes/health_api/runtime_profile.rs:20,61` | H3: child 정책은 shared view, 전역 endpoint inventory는 boot owner 안. registry/maintenance/policy diagnostics 내부 원천은 허용 owner(부록 A2) |
@@ -294,7 +294,7 @@ src/config/session_hosts_tests.rs:54:    assert!(boot.herdr_endpoint(43).is_none
 src/server/routes/agents.rs:186:    let diag = crate::services::discord::admin_host_guard::row_unsupported;
 src/server/routes/agents_crud.rs:1037:                crate::services::discord::admin_host_guard::row_is_legacy_tmux(
 src/server/routes/provider_auth_profiles.rs:511:    let refusal = crate::services::discord::admin_host_guard::auth_login_refusal;
-src/services/agents/turn.rs:309:    let refusal = crate::services::discord::admin_host_guard::row_refusal;
+src/services/agents/turn.rs:321:    let refusal = crate::services::discord::admin_host_guard::row_refusal;
 src/services/auto_queue/runtime.rs:10:use crate::services::discord::admin_host_guard::{ManagedResetVerdict, managed_reset_verdict};
 src/services/auto_queue/runtime.rs:239:        crate::services::discord::admin_host_guard::run_before_verified_clear_recheck_for_tests(
 src/services/auto_queue/runtime.rs:485:        let configured = crate::services::discord::admin_host_guard::configured_refusal;
@@ -321,9 +321,9 @@ src/services/codex/absence_launch.rs:294:    if crate::services::herdr_launch::h
 src/services/codex/tui_session_launch/first_input.rs:214:    use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
 src/services/codex/tui_session_launch/first_input.rs:216:    if herdr_configured_for_tui_launch(report_channel_id) {
 src/services/codex/tui_session_launch/launch_policy.rs:70:    if crate::services::herdr_launch::herdr_configured_for_tui_launch(channel) {
-src/services/discord/admin_host_guard.rs:94:    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
-src/services/discord/admin_host_guard.rs:387:#[path = "admin_host_guard_tests.rs"]
-src/services/discord/admin_host_guard.rs:392:#[path = "admin_host_guard_verified_reset_tests.rs"]
+src/services/discord/admin_host_guard.rs:95:    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
+src/services/discord/admin_host_guard.rs:422:#[path = "admin_host_guard_tests.rs"]
+src/services/discord/admin_host_guard.rs:427:#[path = "admin_host_guard_verified_reset_tests.rs"]
 src/services/discord/admin_host_guard_tests.rs:13:use crate::services::discord::admin_host_guard::ManagedReset;
 src/services/discord/admin_host_guard_tests.rs:306:    let test = "services::discord::admin_host_guard::tests::a_refused_dispatch_reset_stops_before_the_turn_pg";
 src/services/discord/admin_host_guard_tests.rs:617:    let test = "services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg";

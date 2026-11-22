@@ -297,11 +297,11 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/db/o_channel_activation_fence_tests.rs:53`|dto.git-grep.txt|`message`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/db/status_check_migration_tests.rs:148`|i7353-d1314-calls.txt|`base_row`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/db/status_check_migration_tests.rs:150`|dto.git-grep.txt|`base_row`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1780`|i7353-d1314-inserts.txt|`old_owner_completion_after_stale_reclaim_is_noop_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1851`|i7353-d1314-calls.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1853`|dto.git-grep.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1939`|extra-calls.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1941`|dto.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:1782`|i7353-d1314-inserts.txt|`old_owner_completion_after_stale_reclaim_is_noop_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:1853`|i7353-d1314-calls.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:1855`|dto.git-grep.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:1941`|extra-calls.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:1943`|dto.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/server/outbox_worker.rs:133`|i7353-d1314-calls.txt|`output_origin_stampless_current_owner_outbox_pg`|src/server/outbox_worker.rs:132|
 |`src/server/outbox_worker.rs:135`|dto.git-grep.txt|`output_origin_stampless_current_owner_outbox_pg`|src/server/outbox_worker.rs:132|
 |`src/server/outbox_worker/attachment_pg_tests.rs:28`|dto.git-grep.txt|`message`|fixture가 pool API에 위임; fixture 자체 관측 없음|

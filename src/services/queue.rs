@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::QueueCancelPort;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
-    ForceKillRow, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
+    ForceKillRow, LifecycleStopPort, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
     stop_turn_preserving_queue_without_cancel_event,
 };
 use poise::serenity_prelude::ChannelId;
@@ -29,6 +29,23 @@ pub(crate) use cancel_effects::set_pre_purge_hook_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use cancel_effects::set_pre_purge_probe_for_test;
 pub(crate) use cancel_effects::settle_v2_drops;
+
+/// What a queue cancel drives: the lifecycle stop, the queue effects and, on unix, the Herdr
+/// terminate.
+#[cfg(unix)]
+pub(crate) trait CancelRegistry:
+    LifecycleStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
+{
+}
+#[cfg(unix)]
+impl<T> CancelRegistry for T where
+    T: LifecycleStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
+{
+}
+#[cfg(not(unix))]
+pub(crate) trait CancelRegistry: LifecycleStopPort + QueueCancelPort {}
+#[cfg(not(unix))]
+impl<T: LifecycleStopPort + QueueCancelPort> CancelRegistry for T {}
 
 #[derive(Clone)]
 pub struct QueueService {
@@ -54,9 +71,9 @@ impl QueueService {
         Self { pg_pool }
     }
 
-    pub async fn cancel_dispatch(
+    pub async fn cancel_dispatch<R: CancelRegistry>(
         &self,
-        health_registry: Option<&Arc<HealthRegistry>>,
+        health_registry: Option<&Arc<R>>,
         dispatch_id: &str,
     ) -> ServiceResult<Value> {
         let Some(pool) = self.pg_pool.as_ref() else {
@@ -71,10 +88,10 @@ impl QueueService {
             .await
     }
 
-    async fn cancel_dispatch_pg(
+    async fn cancel_dispatch_pg<R: CancelRegistry>(
         &self,
         pool: &PgPool,
-        health_registry: Option<&Arc<HealthRegistry>>,
+        health_registry: Option<&Arc<R>>,
         dispatch_id: &str,
     ) -> ServiceResult<Value> {
         let current_status =
@@ -334,9 +351,9 @@ impl QueueService {
 
     /// Cancels `channel_id`'s turn: `force` hard-kills it or, with terminate on, retires its Herdr
     /// execution; otherwise session and queue stay, and a live Herdr turn takes `/stop`.
-    pub async fn cancel_turn(
+    pub async fn cancel_turn<R: CancelRegistry>(
         &self,
-        health_registry: Option<&Arc<HealthRegistry>>,
+        health_registry: Option<&Arc<R>>,
         channel_id: &str,
         force: bool,
         headers: &HeaderMap,
@@ -779,6 +796,7 @@ mod tests {
     use poise::serenity_prelude::{MessageId, UserId};
 
     use super::*;
+    use crate::services::discord::health::HealthRegistry;
     use crate::services::turn_orchestrator::{
         ChannelMailboxRegistry, EnqueueRefusalReason, Intervention, InterventionMode,
         QueuePersistenceContext, save_channel_queue,
@@ -846,7 +864,8 @@ mod tests {
                 tmux_name: String::new(),
             };
 
-            let purged = force_purge_channel_mailbox(None, &target, None).await;
+            let purged =
+                force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await;
 
             assert_eq!(purged.map(|c| c.drained), Some(1));
             assert!(handle.snapshot().await.intervention_queue.is_empty());
@@ -903,7 +922,8 @@ mod tests {
                 channel_id: Some(channel_id),
                 tmux_name: String::new(),
             };
-            let purged = force_purge_channel_mailbox(None, &target, None).await;
+            let purged =
+                force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await;
 
             assert_eq!(purged.map(|c| c.drained), Some(1));
             assert!(handle.snapshot().await.intervention_queue.is_empty());

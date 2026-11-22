@@ -177,9 +177,14 @@ async fn boot_preserves_broad_backfill_and_typed_marker_recovery_pg() {
     marker(&pool, "notified", "notified").await;
     marker(&pool, "reserving", "reserving").await;
     outbox(&pool, "existing", "notify", "done").await;
-    let stats = crate::reconcile::reconcile_boot_db_pg(&pool, "test-boot", None)
-        .await
-        .unwrap();
+    let stats = crate::reconcile::reconcile_boot_db_pg(
+        &pool,
+        "test-boot",
+        None,
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.missing_notify_outbox_backfilled, 5);
     let rows = notify_rows(&pool).await;
     assert_eq!(rows.len(), 6);
@@ -223,7 +228,7 @@ async fn boot_preserves_broad_backfill_and_typed_marker_recovery_pg() {
     assert_eq!(tick(&pool)["warnings"], json!([]));
     assert_eq!(notify_rows(&pool).await, rows);
     assert_eq!(
-        crate::reconcile::reconcile_boot_db_pg(&pool, "test-restart", None)
+        crate::reconcile::reconcile_boot_db_pg(&pool, "test-restart", None, crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
             .await
             .unwrap()
             .missing_notify_outbox_backfilled,
@@ -249,7 +254,7 @@ async fn boot_and_policy_compete_for_the_same_missing_notify_pg() {
     let policy_task = tokio::task::spawn_blocking(move || tick(&tick_pool));
     let boot_pool = pool.clone();
     let boot_task = tokio::spawn(async move {
-        crate::reconcile::reconcile_boot_db_pg(&boot_pool, "race-boot", None)
+        crate::reconcile::reconcile_boot_db_pg(&boot_pool, "race-boot", None, crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
             .await
             .unwrap()
     });

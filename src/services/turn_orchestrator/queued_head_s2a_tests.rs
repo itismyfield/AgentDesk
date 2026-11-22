@@ -627,9 +627,13 @@ fn s2a_force_purge_refusal_does_not_finalize_a_cancelled_holder() {
         };
         let key = format!("claude/{TOKEN}/test:inactive-fixture");
         assert!(
-            crate::services::queue::force_purge_channel_mailbox(None, &target, Some(&key))
-                .await
-                .is_none()
+            crate::services::queue::force_purge_channel_mailbox(
+                None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
+                &target,
+                Some(&key)
+            )
+            .await
+            .is_none()
         );
         assert_eq!(bytes(channel), before);
         assert_eq!(queue(&handle).await, [(281, "H".into()), (282, "B".into())]);
@@ -680,9 +684,13 @@ fn s2a_actorless_purge_preserves_valid_unknown_and_terminal_namespaces() {
             channel_id: Some(channel),
             tmux_name: String::new(),
         };
-        let purged = crate::services::queue::force_purge_channel_mailbox(None, &target, None)
-            .await
-            .unwrap();
+        let purged = crate::services::queue::force_purge_channel_mailbox(
+            None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
+            &target,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(purged.disk_files_removed, 1);
         assert_eq!(bytes(channel), unknown);
         for (token, body) in fixtures.into_iter().filter(|(token, _)| *token != "legacy") {

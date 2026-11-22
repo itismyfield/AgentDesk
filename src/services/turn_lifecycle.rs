@@ -4,9 +4,6 @@ use poise::serenity_prelude::ChannelId;
 
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::SharedData;
-use crate::services::discord::host_teardown_gate::{
-    backfill_inflight_after_guard, row_gate, runtime_target_holds,
-};
 use crate::services::engine_runtime::health_port::{
     FINISH_UNOBSERVED_PATH, PendingQueueView, TOKEN_SUPERSEDED_PATH, TurnStopJudgement,
     TurnStopPort,
@@ -15,6 +12,10 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::ChannelTeardown;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
+
+/// A registry this lifecycle stops turns through, for a caller that does not name the runtime.
+pub(crate) trait LifecycleStopPort: TurnStopPort<SharedData> {}
+impl<T: TurnStopPort<SharedData>> LifecycleStopPort for T {}
 
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
 const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
@@ -367,7 +368,12 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
         (cleanup_policy.should_cleanup_tmux(), keys.0, keys.1, keys.2)
     {
         let holds = match approved {
-            Some((shared, name)) => runtime_target_holds(shared, provider, channel, name).await,
+            Some((shared, name)) => {
+                <R as TurnStopPort<SharedData>>::runtime_target_holds(
+                    shared, provider, channel, name,
+                )
+                .await
+            }
             None => false,
         };
         if !holds {
@@ -379,7 +385,7 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
         }
     }
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
-        backfill_inflight_after_guard(provider, channel);
+        <R as TurnStopPort<SharedData>>::backfill_inflight_after_guard(provider, channel);
     }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
@@ -946,7 +952,8 @@ async fn force_kill_host_gate<R: TurnStopPort<SharedData>>(
             Some(row) => {
                 let (provider, key) = (row.stored_provider, row.session_key);
                 let channel = target.channel_id.map_or(0, ChannelId::get);
-                let gate = row_gate(row.pool, provider, channel, key, tmux_name, caller);
+                let gate = <R as TurnStopPort<SharedData>>::row_gate;
+                let gate = gate(row.pool, provider, channel, key, tmux_name, caller);
                 ForceKillHost::Gate(gate.await.0, None)
             }
             None => {

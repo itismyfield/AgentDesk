@@ -1,4 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
+use futures::future::BoxFuture;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -186,9 +187,19 @@ fn resolve_agent_turn_session_rows(rows: Vec<AgentTurnSessionRow>) -> Option<Age
     latest
 }
 
+/// Why a stored session row may not be probed by its tmux name; the owner runtime supplies it.
+pub(crate) type RowRefusal = for<'a> fn(
+    &'a sqlx::PgPool,
+    Option<&'a str>,
+    Option<&'a str>,
+    &'a str,
+    &'a str,
+) -> BoxFuture<'a, Option<String>>;
+
 pub async fn find_agent_turn_session_pg(
     pool: &sqlx::PgPool,
     agent_id: &str,
+    row_refusal: RowRefusal,
 ) -> Result<Option<AgentTurnSession>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT COALESCE(s.session_key, '') AS session_key,
@@ -238,7 +249,7 @@ pub async fn find_agent_turn_session_pg(
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     for row in &mut rows {
-        row.host_unsupported = turn_host_refusal(pool, row).await;
+        row.host_unsupported = turn_host_refusal(pool, row, row_refusal).await;
     }
 
     Ok(resolve_agent_turn_session_rows(rows))
@@ -247,12 +258,13 @@ pub async fn find_agent_turn_session_pg(
 pub async fn load_agent_turn_status_pg(
     pool: &sqlx::PgPool,
     agent_id: &str,
+    row_refusal: RowRefusal,
 ) -> Result<serde_json::Value, AgentTurnLookupError> {
     if !agent_exists_pg(pool, agent_id).await? {
         return Err(AgentTurnLookupError::AgentNotFound);
     }
 
-    let session = find_agent_turn_session_pg(pool, agent_id).await?;
+    let session = find_agent_turn_session_pg(pool, agent_id, row_refusal).await?;
     Ok(build_agent_turn_status(agent_id, session).await)
 }
 
@@ -361,12 +373,15 @@ async fn build_agent_turn_status(
 }
 
 /// Why the row's session may not be probed or captured by its tmux name, if it may not.
-async fn turn_host_refusal(pool: &sqlx::PgPool, session: &AgentTurnSessionRow) -> Option<String> {
+async fn turn_host_refusal(
+    pool: &sqlx::PgPool,
+    session: &AgentTurnSessionRow,
+    refusal: RowRefusal,
+) -> Option<String> {
     let tmux_name = extract_tmux_name(&session.session_key)?;
     let runtime = session.runtime_channel_id.as_deref();
     let channel = runtime.or(session.thread_channel_id.as_deref());
     let (provider, key) = (session.provider.as_deref(), &session.session_key);
-    let refusal = crate::services::discord::admin_host_guard::row_refusal;
     refusal(pool, provider, channel, key, &tmux_name).await
 }
 

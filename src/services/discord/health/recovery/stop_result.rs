@@ -1,6 +1,7 @@
 //! Results from canonical provider runtime stop and repair.
 pub use crate::services::engine_runtime::health_port::{
-    FINISH_UNOBSERVED_PATH, InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
+    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, InflightDisposition,
+    RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
 impl super::HardStopRuntimeResult {
@@ -26,13 +27,5 @@ pub struct IdleTmuxStaleTurnRepairResult {
     pub had_active_turn: bool,
     pub has_pending_queue: bool,
     pub persistent_inflight_cleared: bool,
-    pub runtime_session_cleared: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FinishCancelledMailboxResult {
-    pub cleared_active_turn: bool,
-    pub global_active_decremented: bool,
-    pub has_pending_queue: bool,
     pub runtime_session_cleared: bool,
 }

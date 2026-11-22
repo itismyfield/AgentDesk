@@ -296,8 +296,8 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/provider/cancel_token_cleanup/executor.rs:327` | channel을 추출하여 unified-thread cleanup 억제 여부 조회 | T/S/M |
 | `src/services/session_activity.rs:69` | provider/runtime_kind로 input-ready 판정기 선택 | B/I/S/M |
 | `src/services/session_resume.rs:236` | resume의 canonical row/provider 및 owner host 조회 | S/M |
-| `src/services/stale_turn_reconciler.rs:313` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
-| `src/services/stale_turn_reconciler.rs:732` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:328` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
+| `src/services/stale_turn_reconciler.rs:744` | DB provider와 이름 provider 일치 여부로 independent liveness/inflight 조회 허용 | S/I/B/M |
 | `src/services/tmux_turn_liveness.rs:64` | idle cleanup 전에 provider별 native rollout 근거 검사 | S/B/I/M |
 
 ## 3. -t<숫자> decoder와 전체 helper 소비자
@@ -462,11 +462,11 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K01 | `domain/session_identity.rs:88` | legacy/namespaced key의 마지막 `:` 꼬리를 tmux name으로 추출 | **자동(A)**. 문법 parser는 유지. 새 primary tail이 현재 물리 이름이므로 opaque tail로 해석해도 맞음. |
 | K02 | `engine/ops/timeouts_ops/host_repair.rs:74` | 정책이 받은 key의 tmux name으로 host target/evidence를 만듦 | 일반 policy SELECT primary는 **자동(A)**. explicit alias 입력 경계는 **S3**에서 기존 locator resolver 결과 primary로 정규화한 뒤 probe/kill. |
 | K03 | `server/routes/agents_crud.rs:1032` | dashboard listing의 row/session key→name→restart gate local tmux 판정 | **자동(A)**. S9에서 출력 primary가 신형이고 실제 중지로 신형 세션이 사라지는 회귀를 추가. |
-| K04 | `server/routes/dispatched_sessions.rs:192` | stale-turn reconcile 후 요청 key 꼬리로 mailbox foreground release | 현재 listing primary 요청은 **자동(A)**. **S3**에서 old-alias 요청을 reconcile이 선택한 current primary로 변환한 뒤 release, 이름을 raw 요청에서 다시 만들지 않음. |
-| K05 | `services/agents/turn.rs:399` | `extract_tmux_name` facade: turn/event 표시·조회에 key tail 제공 | **자동(A)**. 신규 current primary는 새 이름. 역사 event key는 원문 보존, current로 일괄 rewrite하지 않음. |
+| K04 | `server/routes/dispatched_sessions.rs:195` | stale-turn reconcile 후 요청 key 꼬리로 mailbox foreground release | 현재 listing primary 요청은 **자동(A)**. **S3**에서 old-alias 요청을 reconcile이 선택한 current primary로 변환한 뒤 release, 이름을 raw 요청에서 다시 만들지 않음. |
+| K05 | `services/agents/turn.rs:414` | `extract_tmux_name` facade: turn/event 표시·조회에 key tail 제공 | **자동(A)**. 신규 current primary는 새 이름. 역사 event key는 원문 보존, current로 일괄 rewrite하지 않음. |
 | K06 | `services/auto_queue/runtime.rs:124,565` | provider fallback과 thread row의 name을 얻어 slot reset host guard 검사 | current row name은 **자동(A)**. provider 역파싱 제거는 기존 **S3**, structured provider 우선. |
 | K07 | `services/cluster/session_discovery.rs:390` | 저장 key의 tmux name→provider/channel segment directory 구성 | 이름 위치는 **자동(A)**. 의미 역파싱은 기존 **S2** metadata directory 전환으로 수정. |
-| K08 | `services/discord/admin_host_guard.rs:111,182` | explicit key→approved name, managed reset에서 channel 이름 재생성 우선 후 key fallback | **S2/S8b1**: 저장 current row/actual locator 우선으로 lookup 순서 수정. explicit old alias는 current primary를 resolve. pure tail parser 자체는 유지. |
+| K08 | `services/discord/admin_host_guard.rs:112,183` | explicit key→approved name, managed reset에서 channel 이름 재생성 우선 후 key fallback | **S2/S8b1**: 저장 current row/actual locator 우선으로 lookup 순서 수정. explicit old alias는 current primary를 resolve. pure tail parser 자체는 유지. |
 | K09 | `services/discord/health/recovery.rs:265` | health recovery에서 생성한 이름 없을 때 저장 key의 name 사용 | stored primary 부분은 **자동(A)**. 생성명 우선 문제는 기존 **S8b1**에서 row 우선 전환. |
 | K10 | `services/discord/host_defer_gate.rs:107,132` | canonical row에서 derive한 key/name으로 hold/defer/recovery 판단 | **자동(A)**. query가 반환하는 primary가 신형이며 row ambiguity/Unknown 정책은 그대로. |
 | K11 | `services/discord/host_key_derivation.rs:105,111,117,164` | canonical row resolver가 돌려준 primary를 그대로 반환하고 name 추출 | **자동(A)**. r1 effective descriptor 대체기계를 삭제해도 `primary tail=current physical name` 불변식으로 정합. |
@@ -476,7 +476,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K15 | `services/dispatched_sessions/force_kill.rs:73` | HTTP/CLI raw 요청 key를 DB load 전에 parse해 kill 물리 이름으로 보관 | 새 listing primary는 **자동(A)**. **S3**에서 alias load가 찾은 current primary로 물리 name 결정 후 Prepared 생성. raw old tail로 kill하지 않음. provider도 row/marker에서 읽음. |
 | K16 | `services/dispatched_sessions/hosted_cleanup/thread_gc.rs:15` | GC row.session_key의 name 하나에 owner marker와 session_presence 보호 probe | **자동(A)**. 새 primary→새 실제 name probe. old 이름 부재가 새 live session 부재로 오인되지 않는 회귀 시험. |
 | K17 | `services/dispatched_sessions/listing.rs:236` | API listing의 key→tmux_session_name 표시 helper | **자동(A)**. primary가 새 name을 표시. S9는 단순 “동일 key 전달” 대신 실제 stop 효과 단언. |
-| K18 | `services/dispatched_sessions/output.rs:153` | row id로 읽은 primary→capture/output name 및 host guard | **자동(A)**. row primary에서 새 name을 얻음. 과거 explicit transcript pin은 별도 원문 보존. |
+| K18 | `services/dispatched_sessions/output.rs:163` | row id로 읽은 primary→capture/output name 및 host guard | **자동(A)**. row primary에서 새 name을 얻음. 과거 explicit transcript pin은 별도 원문 보존. |
 | K19 | `services/dispatched_sessions/tmux_cleanup.rs:27` | raw 요청 key→name을 먼저 만들고 DB row/provider/host를 읽어 kill-tmux | 새 primary 요청은 **자동(A)**. old-alias HTTP 입력은 **S3**에서 current primary resolve 후 name/marker/probe/kill. |
 | K20 | `services/queue.rs:137,453,735` | active dispatch/channel cancel이 `SELECT s.session_key`(primary)→tmux name→lifecycle stop | **자동(A)**. queue cancel 대상이 새 name. PG+host fake 또는 격리 tmux 회귀에서 새 세션 중지·queue 보존 효과를 확인. |
 | K21 | `services/queue/http_force.rs:148` | selected row의 primary에서 응답 `tmux_session` 표시(Herdr termination 응답 포함) | **자동(A)**. 표시/현재 row key 일치. Herdr pane 제어는 원래 pane ID여서 key tail로 바꾸지 않음. |
@@ -1066,9 +1066,9 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/cluster/session_matcher.rs:233` | C: parent segment에서 thread의 parent locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/cluster/session_matcher.rs:426` | C: public expected_session_name helper: 이름/숫자 raw basis | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/adk_session.rs:84` | C/R/S: override가 있으면 synthetic basis, 없으면 channel basis로 sessions key 생성 | 명시 kind/ID를 producer부터 전달; raw hint 분류 금지 |
-| `src/services/discord/admin_host_guard.rs:144` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/admin_host_guard.rs:184` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/admin_host_guard.rs:299` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:145` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:185` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:300` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control.rs:205` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control.rs:537` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control/managed_reset.rs:27` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
