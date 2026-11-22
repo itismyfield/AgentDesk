@@ -116,7 +116,7 @@ async fn scoped_calls_with_group_change(
             current_path: repo.to_str().unwrap(),
             channel_id: 4242,
             memory_scope_channel_id: 4242,
-            role_binding: Some(&binding),
+            role_id: Some(binding.role_id.as_str()),
             session_id: Some("scope-anchor-session"),
             fresh,
         };
@@ -127,7 +127,7 @@ async fn scoped_calls_with_group_change(
             changed_binding.memory.memory_group = Some(group.to_owned());
             load_session_anchor_prompt(SessionAnchorRequest {
                 settings: &changed_binding.memory,
-                role_binding: Some(&changed_binding),
+                role_id: Some(changed_binding.role_id.as_str()),
                 ..request(false)
             })
             .await;

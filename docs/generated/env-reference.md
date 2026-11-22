@@ -92,8 +92,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_RECOVERY_ANCHOR_REPOST` | `src/services/discord/recovery_paths/shared.rs` | #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`). |
 | `AGENTDESK_RELAY_CIRCUIT_STAMP` | `src/services/discord/relay_recovery_circuit_alert_producer.rs` |  |
 | `AGENTDESK_RELEASE_TMUX_SESSION` | `src/cli/dcserver.rs` |  |
-| `AGENTDESK_REPORT_CHANNEL_ID` | `src/services/discord/restart_report.rs` |  |
-| `AGENTDESK_REPORT_PROVIDER` | `src/services/discord/restart_report.rs` |  |
+| `AGENTDESK_REPORT_CHANNEL_ID` | `src/services/provider/restart_report_env.rs`, `src/services/discord/restart_report.rs` |  |
+| `AGENTDESK_REPORT_PROVIDER` | `src/services/provider/restart_report_env.rs`, `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |

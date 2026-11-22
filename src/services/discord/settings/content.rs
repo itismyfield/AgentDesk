@@ -115,7 +115,6 @@ mod role_prompt_cache_tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
-            auth_profile: "default".to_string(),
             memory: ResolvedMemorySettings::default(),
         }
     }

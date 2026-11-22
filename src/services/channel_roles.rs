@@ -17,6 +17,13 @@ pub(crate) struct RoleProjection {
     pub memory: ResolvedMemorySettings,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredChannelBinding {
+    pub channel_id: u64,
+    pub owner_provider: ProviderKind,
+    pub fallback_name: Option<String>,
+}
+
 fn org_schema_path() -> Option<std::path::PathBuf> {
     crate::config::runtime_root().map(|root| crate::runtime_layout::org_schema_path(&root))
 }
