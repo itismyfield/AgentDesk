@@ -1,3 +1,5 @@
+// Only the unix-only rehydration and idle-rollout children use it, via `use super::*`.
+#[cfg(unix)]
 use std::collections::HashSet;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
