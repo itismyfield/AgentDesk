@@ -9,9 +9,8 @@ use serde_json::{Value, json};
 use super::force_kill::{FORCE_KILL_RETRY_LIMIT, Prepared};
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
-use crate::services::discord::herdr_terminate::OperatorTerminate;
-use crate::services::discord::herdr_terminate::http_force::{Expected, terminate_for_http};
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::{Expected, HttpTerminate};
 
 mod effects;
 use effects::{HERDR_TERMINATE, HerdrKillEffects, KillInput, herdr_force_kill_effects};
@@ -48,22 +47,19 @@ pub(super) async fn herdr_force_kill(
         retry,
         reason: reason.to_string(),
     };
-    let request = OperatorTerminate {
-        session_key: hosted.session_key.clone(),
-        execution_nonce: record.execution_nonce,
-    };
     let expected = Expected {
         owner: record.owner,
         dispatch: dispatch.clone(),
         captured_dispatch: true,
     };
-    let bound = (request, expected);
+    let bound = (hosted.session_key.clone(), record.execution_nonce, expected);
     let pool = prepared.pool.clone();
-    let (result, effects) = terminate_for_http(registry, pool, bound, reason, {
-        move |exclusion| herdr_force_kill_effects(exclusion, input).boxed()
-    })
-    .await;
-    Some(answer(key, dispatch, result.outcome(), effects))
+    let (outcome, effects) = registry
+        .terminate_for_http(pool, bound, reason, {
+            move |exclusion| herdr_force_kill_effects(exclusion, input).boxed()
+        })
+        .await;
+    Some(answer(key, dispatch, outcome, effects))
 }
 
 /// Only a retire whose effects all applied is success; a run or effect that cannot say what it

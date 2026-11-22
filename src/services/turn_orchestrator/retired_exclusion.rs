@@ -1,16 +1,18 @@
-//! What a scoped terminate holds once it retired its execution and settled the captured turn:
-//! [`super::terminate_scoped`] and the restart's ended-execution recovery build one, and the
-//! channel stays excluded until it drops.
+//! What a scoped terminate holds once it retired its execution and settled the captured turn;
+//! the channel stays excluded until it drops.
 
 use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use super::{ChannelId, HostedObservation, HostedRecord, ProviderKind};
+use poise::serenity_prelude::ChannelId;
+
+use super::ChannelMailboxHandle;
 use crate::db::dispatched_sessions::hosted_execution::http_force::disconnect_retired_pg;
+use crate::db::dispatched_sessions::hosted_execution::{HostedObservation, HostedRecord};
 use crate::services::provider::CancelToken;
+use crate::services::provider::ProviderKind;
 use crate::services::session_host::TerminationFence;
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
 /// The transition, the execution fence, the channel's actor seen under the transition with the
 /// captured turn's token, the row as read and the dispatch the run was bound to.
@@ -25,7 +27,7 @@ pub(crate) struct RetiredExclusion {
     channel: ChannelId,
 }
 
-pub(super) type Held = (
+pub(crate) type Held = (
     tokio::sync::OwnedMutexGuard<()>,
     Arc<TerminationFence>,
     Option<ChannelMailboxHandle>,
@@ -33,7 +35,7 @@ pub(super) type Held = (
 );
 
 impl RetiredExclusion {
-    pub(super) fn new(
+    pub(crate) fn new(
         (transition, fence, actor, token): Held,
         row: HostedObservation,
         dispatch: Option<String>,

@@ -9,23 +9,8 @@ use super::{
     HealthRegistry, HostedObservation, Logged, OperatorTerminate, RetiredExclusion,
     TerminationResult, runtime_of, terminate_enabled, terminate_scoped,
 };
-use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
-
-/// A postlude's outcome, finished once the exclusion is gone: work that must not run while the
-/// channel is excluded, such as a drain of the queue the termination kept.
-pub(crate) trait Released: Send + Sized + 'static {
-    fn released(self) -> BoxFuture<'static, Self>;
-}
-
-/// The selected owner and row dispatch. HTTP force also binds the captured dispatch; restart
-/// can leave another dispatch on the row while settling only the captured turn.
-#[derive(Clone)]
-pub(crate) struct Expected {
-    pub(crate) owner: HostedOwner,
-    pub(crate) dispatch: Option<String>,
-    pub(crate) captured_dispatch: bool,
-}
+pub(crate) use crate::services::turn_orchestrator::{Expected, Released};
 
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion
 /// and then its released step before the result is logged.
@@ -98,6 +83,30 @@ pub(super) async fn dispatch_holds(
         return true;
     };
     active_dispatch_pg(pool, row.session_id()).await.as_ref() == Ok(&expected.dispatch)
+}
+
+impl crate::services::turn_orchestrator::HttpTerminate for HealthRegistry {
+    fn terminate_for_http<T, P>(
+        &self,
+        pool: PgPool,
+        (session_key, execution_nonce, expected): (String, String, Expected),
+        reason: &str,
+        postlude: P,
+    ) -> impl Future<Output = ((&'static str, String), Option<T>)> + Send
+    where
+        T: Released,
+        P: for<'a> FnOnce(&'a RetiredExclusion) -> BoxFuture<'a, T> + Send + 'static,
+    {
+        let request = OperatorTerminate {
+            session_key,
+            execution_nonce,
+        };
+        async move {
+            let bound = (request, expected);
+            let (result, applied) = terminate_for_http(self, pool, bound, reason, postlude).await;
+            (result.outcome(), applied)
+        }
+    }
 }
 
 #[cfg(test)]

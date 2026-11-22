@@ -10,13 +10,12 @@ use super::super::spawn_auto_queue_activate_for_agent;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::prepare_force_kill_retry_pg;
 use crate::services::discord::TmuxCleanupPolicy;
-use crate::services::discord::herdr_terminate::RetiredExclusion;
-use crate::services::discord::herdr_terminate::http_force::Released;
 use crate::services::queue::schedule_post_cancel_queue_drain;
 use crate::services::turn_cancel_finalizer::{
     FinalizeTurnCancelRequest, TurnCancelCorrelation, finalize_turn_cancel,
 };
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, cleanup_policy_observability_surface};
+use crate::services::turn_orchestrator::{Released, RetiredExclusion};
 
 pub(super) const HERDR_TERMINATE: &str = "herdr-terminate";
 
