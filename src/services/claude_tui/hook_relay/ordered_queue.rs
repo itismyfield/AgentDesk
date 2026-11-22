@@ -1035,6 +1035,10 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(unix)]
+    use crate::services::claude_tui::hook_relay::relay_probe_tests::{
+        accept_relay_request, not_a_relay, read_relay_request,
+    };
 
     /// How long a wait for something that must happen polls before failing: a hang detector, not a
     /// bound of the contract, so a slow runner only makes a broken build fail later.
@@ -1310,18 +1314,11 @@ mod tests {
                 socket
                     .set_read_timeout(Some(LIVENESS))
                     .expect("set receiver read timeout");
-                let mut encoded = Vec::new();
-                let mut buffer = [0u8; 4096];
-                loop {
-                    let read = socket.read(&mut buffer).expect("read test relay request");
-                    assert!(read > 0, "relay closed before request body");
-                    encoded.extend_from_slice(&buffer[..read]);
-                    if let Some((body_start, body_len)) = http_body_bounds(&encoded)
-                        && encoded.len() >= body_start + body_len
-                    {
-                        break;
-                    }
-                }
+                let Some(encoded) =
+                    read_relay_request(&mut socket, "relay closed before request body")
+                else {
+                    continue;
+                };
                 request_tx
                     .send(request_body(&encoded))
                     .expect("publish observed relay request");
@@ -1364,20 +1361,8 @@ mod tests {
         let receiver = std::thread::spawn(move || {
             let mut observed = 0usize;
             for status in statuses {
-                let (mut socket, _) = listener.accept().expect("accept status relay");
-                socket.set_read_timeout(Some(LIVENESS)).unwrap();
-                let mut encoded = Vec::new();
-                let mut buffer = [0u8; 4096];
-                loop {
-                    let read = socket.read(&mut buffer).expect("read status relay");
-                    assert!(read > 0);
-                    encoded.extend_from_slice(&buffer[..read]);
-                    if let Some((body_start, body_len)) = http_body_bounds(&encoded)
-                        && encoded.len() >= body_start + body_len
-                    {
-                        break;
-                    }
-                }
+                let (mut socket, encoded) =
+                    accept_relay_request(&listener, LIVENESS, "status relay ended before its body");
                 request_tx.send(observe(&encoded)).unwrap();
                 let reason = if status == 409 {
                     "Conflict"
@@ -2346,8 +2331,11 @@ mod tests {
         let mut buffer = [0u8; 4096];
         loop {
             let read = socket.read(&mut buffer).await.expect("read proxy request");
+            // A connection that is not a relay ends here; the caller's task holds that panic.
+            assert!(read > 0 || !encoded.is_empty(), "not a relay request");
             assert!(read > 0, "worker closed before proxy request body");
             encoded.extend_from_slice(&buffer[..read]);
+            assert!(!not_a_relay(&encoded), "not a relay request");
             if let Some((body_start, body_len)) = http_body_bounds(&encoded)
                 && encoded.len() >= body_start + body_len
             {
