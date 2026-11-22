@@ -37,7 +37,7 @@ VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
 VIS_LINTS = {"private_interfaces", "private_bounds"}
-TEST_CFG_CODES = {"E0425", "E0412", "E0433", "E0599"}
+TEST_CFG_CODES = {"E0425", "E0412", "E0433", "E0599", "E0432", "E0422"}
 IMPL_CODES = {"E0116", "E0117", "E0390"}
 # Two copies of an above type (one compiled inside lower, one in upper) surface as these.
 CUT_CODES = {"E0308", "E0277", "E0271", "E0631", "E0053", "E0369", "E0614", "E0605", "E0606", "E0282", "E0283"}
@@ -453,9 +453,10 @@ def definition_span(diag, marks=DEF_MARKS):
 def message_target(diag):
     """(kind, name, owner) parsed from the message: kind in item/method/field/ctor/reexport/interface."""
     code, msg = code_of(diag), diag.get("message", "")
-    names = NAME_IN_MSG.findall(msg)
+    # `session_probe::SessionProbe`, `Foo<T>`: the declaration carries the last segment only.
+    names = [re.sub(r"<.*", "", n).split("::")[-1] for n in NAME_IN_MSG.findall(msg)]
     if code == "E0616" or code == "E0451":
-        owner = re.sub(r"<.*", "", names[1]).split("::")[-1] if len(names) > 1 else ""
+        owner = names[1] if len(names) > 1 else ""
         return "field", names[0] if names else "", owner
     if code in CTOR_CODES:
         return "ctor", "", ""
@@ -680,6 +681,9 @@ class Widener:
             return {}, ("unresolved", f"no item `{name}` at {rel}:{start + 1}")
         if ITEM.match(lines[index]).group("kw") == "macro_rules!":
             return {}, ("macro_path", f"macro_rules! {name} at {rel}:{index + 1}")
+        if widen_line(lines[index]) is None and ITEM.match(lines[index]).group("kw") == "use":
+            # An already-`pub` re-export (often `pub use inner::*;`): the blocker is behind it.
+            return self._through_use(rel, index, name)
         return self._edit(rel, index, ("item",), name)
 
     def _reexport(self, diag, name, resolver, run_root):
@@ -688,32 +692,45 @@ class Widener:
         side, rel = resolver.rel(span["file_name"], run_root)
         if self._place(rel, span["line_start"]):
             return {}, self._place(rel, span["line_start"])
-        lines = self.lines(rel)
         i = span["line_start"] - 1
-        start = find_item_line(lines, i, i, name, "item")
-        text = " ".join(lines[i if start is None else start:][:40]).split(";")[0]
+        start = find_item_line(self.lines(rel), i, i, name, "item")
+        return self._through_use(rel, i if start is None else start, name)
+
+    def _through_use(self, rel, index, name, hops=6):
+        """Ops for the declarations a `use` at rel:index binds `name` to, by explicit path or by glob;
+        an already-`pub` re-export on the way is followed (at most `hops` deep)."""
+        text = " ".join(self.lines(rel)[index:index + 40]).split(";")[0]
+        base = self.layout.module_at(rel, index + 1)
         m = re.search(r"((?:[A-Za-z_]\w*::)+)" + re.escape(name) + r"\b", text) or \
             re.search(r"((?:[A-Za-z_]\w*::)+)\{[^}]*\b" + re.escape(name) + r"\b", text)
-        if not m:
-            return {}, ("unresolved", f"no path to `{name}` at {rel}:{i + 1}")
-        segs = [x for x in re.sub(r"^.*\buse\s+", "", m.group(1)).split("::") if x]
-        module = () if segs and segs[0] == "crate" else self.layout.module_at(rel, i + 1)
-        for seg in segs[1:] if segs and segs[0] == "crate" else segs:
-            module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
-        found = self.layout.locate(module)
-        if found is None:
-            return {}, ("unresolved", f"module {'::'.join(module)} of `{name}` has no file")
-        target, first, last = found
-        if self._place(target, first):
-            return {}, self._place(target, first)
-        tl = self.lines(target)
-        hits = [j for j, line in enumerate(tl) if first <= j + 1 <= last and find_item_line(tl, j, j, name, "item") == j
-                and self.layout.module_at(target, j + 1) == module
-                and (ITEM.match(line).group("kw") != "use" or name in use_leaf_names(" ".join(tl[j:j + 40])))]
-        edits = {(target, j): ("item",) for j in hits if widen_line(tl[j])}
-        if not edits:
-            return {}, ("unresolved", f"no restricted top-level `{name}` in {target}")
-        return edits, "edit"
+        prefixes = [m.group(1)] if m else [g.group(1) for g in re.finditer(r"((?:[A-Za-z_]\w*::)+)\*", text)]
+        edits, outcome = {}, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
+        for prefix in prefixes:
+            segs = [x for x in re.sub(r"^.*\buse\s+", "", prefix).split("::") if x]
+            module = () if segs and segs[0] == "crate" else base
+            for seg in segs[1:] if segs and segs[0] == "crate" else segs:
+                module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
+            found = self.layout.locate(module)
+            if found is None:
+                continue
+            target, first, last = found
+            tl = self.lines(target)
+            hits = [j for j in range(max(first - 1, 0), min(last, len(tl)))
+                    if find_item_line(tl, j, j, name, "item") == j and self.layout.module_at(target, j + 1) == module
+                    and (ITEM.match(tl[j]).group("kw") != "use" or name in use_leaf_names(" ".join(tl[j:j + 40]))
+                         or re.search(r"::\*", tl[j]))]
+            for j in hits:
+                if self._place(target, j + 1):
+                    outcome = self._place(target, j + 1)
+                elif widen_line(tl[j]):
+                    edits[(target, j)] = ("item",)
+                elif ITEM.match(tl[j]).group("kw") == "use" and hops and (target, j) != (rel, index):
+                    sub, out = self._through_use(target, j, name, hops - 1)
+                    edits.update(sub)
+                    outcome = outcome if out == "edit" else out
+            if hits and not edits and outcome[0] == "unresolved":
+                outcome = ("unresolved", f"`{name}` in {target} is already pub")
+        return (edits, "edit") if edits else ({}, outcome)
 
     def _field(self, rel, sline, field, owner):
         lines = self.lines(rel)
@@ -755,20 +772,27 @@ def restricted_defs(layout, read):
             gated = rel in layout.test_only or any("cfg(test)" in lines[j].replace(" ", "")
                                                    for j in range(attr_start(lines, i), i))
             out[m.group(2)].append(gated)
+        for i, line in enumerate(lines):
+            mm = re.match(r"^\s*macro_rules!\s+(\w+)", line)
+            if mm and any("macro_export" in lines[j] for j in range(attr_start(lines, i), i)):
+                out[mm.group(1)].append("macro")
     return out
 
 
 def classify_residue(diag, restricted):
     code, msg = code_of(diag), diag.get("message", "")
     rendered = diag.get("rendered") or ""
-    if "$crate" in rendered or "macro" in msg:
+    names = [n.split("::")[-1] for n in NAME_IN_MSG.findall(msg)]
+    if "$crate" in rendered or "macro" in msg or any("macro" in restricted.get(n, []) for n in names):
         return "macro_path"
     if code in IMPL_CODES:
         return "impl_residue"
-    if code in ("E0425", "E0412"):
-        names = NAME_IN_MSG.findall(msg)
-        if names and any(not gated for gated in restricted.get(names[0], [])):
-            return "glob_hidden"
+    if code == "E0408":
+        # `use Enum::*` skipped restricted variants, so a pattern binds the variant name as a variable.
+        return "glob_hidden"
+    if code in TEST_CFG_CODES and names and any(g is False for g in restricted.get(names[0], [])):
+        # A glob import silently skips a restricted item, so the use site reports "not found".
+        return "glob_hidden"
     if code in TEST_CFG_CODES and diag.get("_test"):
         return "test_cfg"
     if code in CUT_CODES:

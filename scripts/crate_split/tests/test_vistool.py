@@ -164,8 +164,36 @@ class RecordedDiagnostics(unittest.TestCase):
         self.assertEqual(vistool.classify_residue(hidden, restricted), "glob_hidden")
         self.assertEqual(vistool.classify_residue(test_only, restricted), "test_cfg")
         self.assertEqual(vistool.classify_residue(macro, restricted), "macro_path")
+        exported = {"code": {"code": "E0433"}, "message": "failed to resolve: could not find `log_q` in the crate root"}
+        self.assertEqual(vistool.classify_residue(exported, {"log_q": ["macro"]}), "macro_path")
+        self.assertEqual(vistool.classify_residue({"code": {"code": "E0408"}, "message": "variable `Modal` is not "
+                                                   "bound in all patterns"}, restricted), "glob_hidden")
         self.assertEqual(vistool.classify_residue({"code": {"code": "E0599"}, "message": "x", "_test": False},
                                                   restricted), "unclassified")
+
+    def test_already_pub_glob_reexport_is_followed(self):
+        # `pub use inner::*;` re-exports only what is visible; the note points at the glob line.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src/a").mkdir(parents=True)
+            (root / "src/a/mod.rs").write_text("pub use inner::*;\nmod inner;\n")
+            (root / "src/a/inner.rs").write_text("pub(crate) struct Deep;\n")
+            files = {"src/a/mod.rs": ("a",), "src/a/inner.rs": ("a", "inner")}
+            by_module = {m: f for f, m in files.items()}
+            layout = SimpleNamespace(
+                crate="LOW", x_files=set(files), module_at=lambda rel, line: files[rel],
+                side_of=lambda rel, line=None: "x",
+                locate=lambda m: (by_module[m], 1, 10 ** 9) if m in by_module else None)
+            w = vistool.Widener(layout, root, UPPER)
+            r = vistool.Resolver(root, UPPER, "src/probe_lower_lib.rs", "src/lib.rs")
+            diag = {"code": {"code": "E0603"}, "message": "struct `Deep` is private", "spans": [],
+                    "children": [{"message": "the struct `Deep` is defined here",
+                                  "spans": [{"file_name": str(root / "src/a/mod.rs"), "line_start": 1, "line_end": 1}]}]}
+            self.assertEqual(w.resolve(diag, r, UPPER), ({("src/a/inner.rs", 0): ("item",)}, "edit"))
+
+    def test_lint_type_path_uses_last_segment(self):
+        lint = {"code": {"code": "private_interfaces"}, "message": "type `probe::SessionProbe<T>` is more private"}
+        self.assertEqual(vistool.message_target(lint), ("item", "SessionProbe", ""))
 
     def test_mutant_ignoring_defined_here_is_caught(self):
         with mock.patch.object(vistool, "definition_span", lambda diag, marks=None: None):
