@@ -16,7 +16,7 @@ use super::{
 
 /// Shared state for the Discord bot — split into independently-lockable groups.
 ///
-/// Phase 2-pre.3 of intake-node-routing: widened from `pub(in crate::services)` to
+/// Phase 2-pre.3 of intake-node-routing: widened from `pub(super)` to
 /// `pub(crate)` so the public worker entry point `execute_intake_turn_core`
 /// can accept `&Arc<SharedData>` from a non-`services::discord` caller
 /// (Phase 3 worker polling loop).

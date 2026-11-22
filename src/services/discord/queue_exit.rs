@@ -2,9 +2,10 @@
 
 use super::{
     Arc, ChannelId, HashMap, Instant, Intervention, InterventionMode, MessageId, ProviderKind,
-    QueueExitEvent, QueueExitKind, QueuedCardDisposition, QueuedCardTeardown, SharedData, UserId,
-    mailbox_enqueue_intervention, queue_dispatch, queue_marker, queue_overflow_dlq,
-    queued_card_gate, queued_placeholders_store, schedule_deferred_idle_queue_kickoff, serenity,
+    QueueExitEvent, QueueExitKind, QueueExitPendingPlaceholderDeleter, QueuedCardDisposition,
+    QueuedCardTeardown, SharedData, UserId, mailbox_enqueue_intervention, queue_dispatch,
+    queue_marker, queue_overflow_dlq, queued_card_gate, queued_placeholders_store,
+    schedule_deferred_idle_queue_kickoff,
 };
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
@@ -199,26 +200,6 @@ pub(super) async fn apply_queue_exit_feedback(
         let message_id = event.intervention.message_id;
         let emoji = queue_exit_feedback_emoji(event.kind);
         queue_marker::note_exit_feedback_added(shared, &http, channel_id, message_id, emoji).await;
-    }
-}
-
-pub(super) struct QueueExitPendingPlaceholderDeleter {
-    pub(super) http: Arc<serenity::Http>,
-}
-
-impl queued_card_gate::StalePlaceholderDeleter for QueueExitPendingPlaceholderDeleter {
-    fn delete<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        placeholder_msg_id: MessageId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move {
-            channel_id
-                .delete_message(&self.http, placeholder_msg_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
     }
 }
 
