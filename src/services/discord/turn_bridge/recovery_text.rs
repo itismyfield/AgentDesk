@@ -898,7 +898,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n\n{}",
         user_text
     );
-    let enqueued = super::super::enqueue_internal_followup(
+    let outcome = super::super::enqueue_internal_followup(
         shared,
         provider,
         channel_id,
@@ -907,8 +907,29 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         "auto-retry with history",
     )
     .await;
-    if !enqueued {
+    if !outcome.enqueued || outcome.persistence_error.is_some() {
         tracing::info!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
+    }
+    // Only a source already queued, reserved or claimed still runs; any other refusal ends the
+    // execution whose origins this retry carries.
+    use crate::services::turn_orchestrator::EnqueueRefusalReason as Refusal;
+    if !outcome.enqueued
+        && !matches!(
+            outcome.refusal_reason,
+            Some(
+                Refusal::SourceIdAlreadyQueued
+                    | Refusal::SourceIdPendingOrActive
+                    | Refusal::ClaimedSinceObservation
+            )
+        )
+    {
+        crate::services::discord::receipt_settle::retry_refused(
+            shared.pg_pool.as_ref(),
+            provider,
+            channel_id.get(),
+            user_message_id.get(),
+        )
+        .await;
     }
 }
 

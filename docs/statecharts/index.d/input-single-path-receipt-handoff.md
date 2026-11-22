@@ -1,0 +1,2 @@
+key: input-single-path-receipt-handoff
+| `input-single-path` receipt handoff across restart and same-id retry (#8289) | `e1ef00a08500e1e2b4e6b040bdd0446873e4ff06` | Before: a receipt-pending native row holds boot after restart; watcher cleanup fails an execution its retry completes | `NativeReceiptRestart` 2cfg, `WatcherRetryReceipt` 3cfg: GREEN 2, expected RED 3 (incl. known gap CarryLost); see [report](input-single-path/receipt-handoff.report.md) |

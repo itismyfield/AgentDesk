@@ -320,7 +320,9 @@ impl RestoredInput {
                     )
                     .await
                     {
-                        return Err("native boot receipt pending".into());
+                        // The row stays marked and unsettled; boot goes on and the writer
+                        // retries this debt once the receipt can commit.
+                        return Ok(());
                     }
                     let (cleared, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,

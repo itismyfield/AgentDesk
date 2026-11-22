@@ -356,15 +356,18 @@ pub(super) async fn start_restart_handoff_from_state(
     }
 
     // The dead turn's terminal commits before any cleanup can drop its row: failed unless its
-    // answer was delivered. A planned restart or rebind row ends nothing here.
+    // answer was delivered. A planned restart or rebind row, or one whose origins a same-id
+    // retry carries, ends nothing here.
     let ended = if state.terminal_delivery_completed() {
         super::receipt_settle::body_outcome(&state.full_response)
     } else {
         crate::db::turns::TerminalOutcome::Failed
     };
+    let pool = shared.pg_pool.as_ref();
     if state.restart_mode.is_none()
         && !state.rebind_origin
-        && !super::receipt_settle::record_or_stamp(shared.pg_pool.as_ref(), &state, ended).await
+        && !super::receipt_settle::retry_owns(pool, &state).await
+        && !super::receipt_settle::record_or_stamp(pool, &state, ended).await
     {
         return false;
     }

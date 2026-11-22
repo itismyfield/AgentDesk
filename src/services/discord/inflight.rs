@@ -773,7 +773,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
 /// draining watcher advanced between the unlocked enumeration and this write is
 /// preserved) and persists it with only `restart_mode` / `restart_generation`
 /// changed, under the same lock-then-read pattern as the other row clears.
-/// A row holding a policy receipt is left byte-identical. Deliberately does NOT route through
+/// A row holding a policy or terminal receipt is left byte-identical. Deliberately does NOT route through
 /// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
 /// whole point is to keep the on-disk frontier rather than carry a stale one.
 fn set_inflight_restart_mode_under_lock(
@@ -794,6 +794,10 @@ fn set_inflight_restart_mode_under_lock(
     let Some(mut state) = read_inflight_state_content(path) else {
         return Failed;
     };
+    // An execution whose terminal awaits its receipt has nothing to resume after the restart.
+    if state.terminal_receipt.is_some() {
+        return SkippedPolicyReceipt;
+    }
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();

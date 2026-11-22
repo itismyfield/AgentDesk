@@ -61,11 +61,7 @@ pub(in crate::services::discord) async fn record(
     if state.user_msg_id == 0 {
         return true;
     }
-    let turn_id = format!("discord:{}:{}", state.channel_id, state.user_msg_id);
-    let channel = state
-        .logical_channel_id
-        .unwrap_or(state.channel_id)
-        .to_string();
+    let (turn_id, channel) = execution_key(state);
     let receipt = TurnReceipt {
         turn_id: &turn_id,
         channel_id: &channel,
@@ -77,16 +73,99 @@ pub(in crate::services::discord) async fn record(
         outcome,
         confirmed_at,
     };
+    commit(pool, &receipt).await
+}
+
+fn execution_key(state: &InflightTurnState) -> (String, String) {
+    let turn_id = format!("discord:{}:{}", state.channel_id, state.user_msg_id);
+    let channel = state.logical_channel_id.unwrap_or(state.channel_id);
+    (turn_id, channel.to_string())
+}
+
+async fn commit(pool: &PgPool, receipt: &TurnReceipt<'_>) -> bool {
+    let turn_id = receipt.turn_id;
     for delay in RECORD_RETRY_DELAYS {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        match record_turn_receipt(pool, &receipt).await {
+        match record_turn_receipt(pool, receipt).await {
             Ok(()) => return true,
             Err(error) => tracing::warn!(%error, turn_id, "turn receipt not committed"),
         }
     }
     false
+}
+
+/// Hands the origins of the execution a same-id retry continues to its receipt row before the
+/// dead attempt's row can go, so the retry's own terminal settles them.
+pub(in crate::services::discord) async fn carry_retry_origins(
+    pool: Option<&PgPool>,
+    state: &InflightTurnState,
+) {
+    let (Some(pool), Some(provider)) = (pool, state.provider_kind()) else {
+        return;
+    };
+    let (turn_id, channel) = execution_key(state);
+    let receipt = TurnReceipt {
+        turn_id: &turn_id,
+        channel_id: &channel,
+        agent_id: None,
+        provider: provider.as_str(),
+        session_key: state.session_key.as_deref(),
+        started_at: Some(state.started_at.as_str()),
+        consumed_origin_ids: &state.input_origin_ids,
+        outcome: TerminalOutcome::Failed,
+        confirmed_at: Utc::now(),
+    };
+    if let Err(error) = crate::db::turns::carry_turn_origins(pool, &receipt).await {
+        tracing::warn!(%error, turn_id, "retry origins not carried; cleanup will fail them");
+    }
+}
+
+/// Whether a same-id retry carries this execution's origins and so owns its terminal.
+pub(in crate::services::discord) async fn retry_owns(
+    pool: Option<&PgPool>,
+    state: &InflightTurnState,
+) -> bool {
+    let Some(pool) = pool.filter(|_| !state.input_origin_ids.is_empty()) else {
+        return false;
+    };
+    let (turn_id, _) = execution_key(state);
+    crate::db::turns::turn_origins_carried(pool, &turn_id, &state.input_origin_ids)
+        .await
+        .unwrap_or(false)
+}
+
+/// A same-id retry that will never run fails the execution whose origins it carries.
+pub(in crate::services::discord) async fn retry_refused(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    let turn_id = format!("discord:{channel_id}:{user_msg_id}");
+    if !crate::db::turns::turn_origins_carried(pool, &turn_id, &[])
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let channel = channel_id.to_string();
+    let receipt = TurnReceipt {
+        turn_id: &turn_id,
+        channel_id: &channel,
+        agent_id: None,
+        provider: provider.as_str(),
+        session_key: None,
+        started_at: None,
+        consumed_origin_ids: &[],
+        outcome: TerminalOutcome::Failed,
+        confirmed_at: Utc::now(),
+    };
+    commit(pool, &receipt).await;
 }
 
 /// Records the terminal before the caller removes the row. False when the row must stay: the

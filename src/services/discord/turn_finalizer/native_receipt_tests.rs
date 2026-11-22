@@ -51,3 +51,91 @@ async fn native_completion_commits_the_row_origin_before_removing_it_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A native completion whose receipt could not commit keeps its row marked through a restart:
+/// boot proceeds while PG is still down, and the next boot settles the receipt and the row.
+#[tokio::test]
+async fn native_receipt_debt_survives_restart_without_holding_boot_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::inflight;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let root = runtime.path().join("runtime");
+    let f = Fixture::at(root.join("injected_frames.json"), 8289002, true);
+    let live = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &live).await;
+    let mut row = b2b_row(&f);
+    row.input_origin_ids = vec!["dlg:8289:restart".into()];
+    inflight::save_inflight_state(&row).unwrap();
+    let outage = "CREATE OR REPLACE FUNCTION i8289_down() RETURNS trigger LANGUAGE plpgsql AS
+        $$ BEGIN RAISE EXCEPTION 'pg down'; END $$;
+        CREATE TRIGGER i8289_down BEFORE INSERT OR UPDATE ON turns
+        FOR EACH ROW EXECUTE FUNCTION i8289_down();";
+    sqlx::raw_sql(outage).execute(&pool).await.unwrap();
+    let prepared = NativePrepared::capture(
+        &f.history,
+        "native-fixture",
+        f.ticket.clone(),
+        key,
+        Some(actor),
+        &live,
+    )
+    .await
+    .unwrap();
+    prepared.any_key(&f.history).unwrap();
+    let (batch, target) = (b2b_batch(&f), &f.ticket.source.as_ref().unwrap().target);
+    let cleanup = prepared
+        .admit(&batch, &batch, 0, target, &f.history, &live)
+        .await
+        .unwrap();
+    assert!(!b2b_submit(&live, cleanup, &f.history).await.unwrap());
+    inflight::mark_restart_mode_blocking(
+        ProviderKind::Claude,
+        crate::services::discord::InflightRestartMode::DrainRestart,
+    )
+    .await;
+    let on_disk = || inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id);
+    assert!(on_disk().is_some_and(|row| row.terminal_receipt.is_some()));
+    for (generation, down) in [(2, true), (3, false)] {
+        if !down {
+            sqlx::raw_sql("DROP TRIGGER i8289_down ON turns")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut shared = b2b_shared(Some(pool.clone()));
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .restart
+            .current_generation = generation;
+        let plan = super::super::native_prepare::BootInputs::prepare(&root, generation).unwrap();
+        let reaped = inflight::reap_inflight_rows_at_boot_blocking(
+            &ProviderKind::Claude,
+            Some(pool.clone()),
+        )
+        .await;
+        assert!(reaped.native_preparation_complete());
+        plan.restore(&shared).await.unwrap();
+        assert_eq!(on_disk().is_some(), down, "boot {generation}");
+    }
+    let receipt: (Vec<String>, Option<String>) = sqlx::query_as(
+        "SELECT consumed_origin_ids, terminal_outcome FROM turns WHERE turn_id = $1",
+    )
+    .bind(format!("discord:{}:{}", key.channel_id, key.user_msg_id))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        receipt,
+        (vec!["dlg:8289:restart".into()], Some("completed".into()))
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .cleanup_complete
+    );
+    pool.close().await;
+    db.drop().await;
+}
