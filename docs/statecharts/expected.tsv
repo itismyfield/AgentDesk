@@ -467,6 +467,10 @@ input-single-path/HerdrBusyReobserveRestartDraft.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartDueRace.cfg	HerdrBusyReobserve	RHNoFrontDueRace,RHNoLeafDueRace,RHNoDeadlineWin,RHNoKeyAtDue	-
 input-single-path/HerdrBusyReobserveRestartEpochNoticeKey.cfg	HerdrBusyReobserve	RHOneNoticeRecord	-
 input-single-path/HerdrBusyReobserveRestartFallbackIdle.cfg	HerdrBusyReobserve	RHRunningContract	-
+input-single-path/HerdrBusyReobserveRestartIdleNeverResolved.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartIdleNeverResolvedBefore.cfg	HerdrBusyReobserve	RHNoDiscardBeforeLook	-
+input-single-path/HerdrBusyReobserveRestartIdleUnresolved.cfg	HerdrBusyReobserve	RHIdentityNeverDelivers	-
+input-single-path/HerdrBusyReobserveRestartIdleUnresolvedBefore.cfg	HerdrBusyReobserve	RHNoDiscardBeforeLook	-
 input-single-path/HerdrBusyReobserveRestartIgnoreFront.cfg	HerdrBusyReobserve	RHStaleNoop	-
 input-single-path/HerdrBusyReobserveRestartIgnoreGeneration.cfg	HerdrBusyReobserve	RHStaleNoop	-
 input-single-path/HerdrBusyReobserveRestartInode.cfg	HerdrBusyReobserve	-	-
@@ -479,6 +483,9 @@ input-single-path/HerdrBusyReobserveRestartNoArm.cfg	HerdrBusyReobserve	-	RHNoIn
 input-single-path/HerdrBusyReobserveRestartNoDeadline.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoFirstKeyGate.cfg	HerdrBusyReobserve	RHOneDisposition	RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoHolder.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartNoHolderBusy.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartNoHolderBusyBefore.cfg	HerdrBusyReobserve	-	RHIdentityHoldEnds,RHEndExactlyOnce
+input-single-path/HerdrBusyReobserveRestartNoHolderBusyIdle.cfg	HerdrBusyReobserve	RHIdentityNeverDelivers	-
 input-single-path/HerdrBusyReobserveRestartNoReservedExpire.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoWiring.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNonce.cfg	HerdrBusyReobserve	-	-
@@ -1566,6 +1573,8 @@ session-lifecycle/HerdrMissingBoundBeforeEffectActive.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundBeforeEffectIdle.cfg	HerdrMissingBound	-	InputResolves,WatchResolves
 session-lifecycle/HerdrMissingBoundBeforeInput.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeNoticeRetry.cfg	HerdrMissingBound	NoticeOnce	InputResolves,ReasonDelivered
+session-lifecycle/HerdrMissingBoundBeforeRegistration.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
+session-lifecycle/HerdrMissingBoundBeforeReobserveDue.cfg	HerdrMissingBound	RegistrationSafety	RegistrationResolves
 session-lifecycle/HerdrMissingBoundBeforeRestart.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeRestored.cfg	HerdrMissingBound	MissingRetired,NoIdleHeld	InputResolves
 session-lifecycle/HerdrMissingBoundBeforeUnknown.cfg	HerdrMissingBound	NoIdleHeld	InputResolves
@@ -1581,6 +1590,8 @@ session-lifecycle/HerdrMissingBoundFixedLaunchFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNonceRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedNoticeRetry.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedReboot.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedRegistration.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundFixedReobserveDue.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRepairFailure.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestart.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedRestored.cfg	HerdrMissingBound	-	-
@@ -1588,6 +1599,8 @@ session-lifecycle/HerdrMissingBoundFixedRunning.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedStop.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedTerminate.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundFixedUnknown.cfg	HerdrMissingBound	-	-
+session-lifecycle/HerdrMissingBoundHoldsProvenRefusal.cfg	HerdrMissingBound	-	RegistrationResolves
+session-lifecycle/HerdrMissingBoundNoRegistrationWake.cfg	HerdrMissingBound	-	RegistrationResolves
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-
 session-lifecycle/HerdrPendingRegistrationBefore.cfg	HerdrPendingRegistration	-	PendingReuseBound

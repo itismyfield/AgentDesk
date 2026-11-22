@@ -3,6 +3,9 @@
 use super::*;
 use crate::db::turns::TerminalOutcome;
 
+/// How long a held front waits for a ready read before the owner refuses it unsent.
+const READINESS_HOLD_MS: u64 = 10_000;
+
 impl ReadinessHold {
     /// Matches only the surviving prefix of the first held unit, excluding its front.
     pub(super) fn matching_followers<'a>(
@@ -28,7 +31,10 @@ impl Owner {
         if !self.front().is_some_and(|f| is_front(&f, front)) {
             return Err("not the owner's unattempted front".into());
         }
-        if let Some(hold) = self.front_hold() {
+        if let Some(hold) = self
+            .snapshot
+            .hold_for_member(&refused::refused_member(&front.1))
+        {
             return Ok(hold.clone());
         }
         let mut next = self.snapshot.clone();
@@ -39,7 +45,60 @@ impl Owner {
         Ok(hold)
     }
 
-    /// The hold of the queue front while no attempt runs; an attempted front is its leaf's.
+    /// Holds the original for an identity re-read under a readiness due counted from its first
+    /// identity hold: it replaces an older readiness due, and a later identity hold keeps it.
+    #[cfg(unix)]
+    pub(crate) fn hold_identity(
+        &mut self,
+        front: &Front,
+        cause: &str,
+        now: u64,
+    ) -> Result<ReadinessHold, String> {
+        self.hold_front(front)?;
+        let member = refused::refused_member(&front.1);
+        let held = self.snapshot.hold_for_member(&member);
+        if let Some(hold) = held.filter(|hold| hold.identity_held_at_ms.is_some()) {
+            return Ok(hold.clone());
+        }
+        let mut next = self.snapshot.clone();
+        if let Some(old) = held {
+            next.readiness_holds.retain(|saved| saved != old);
+        }
+        let followers = self.followers();
+        let members = std::iter::once(&front.1).chain(followers.iter());
+        next.remember_readiness_hold(members, cause, now);
+        let hold = next
+            .readiness_holds
+            .last_mut()
+            .ok_or("identity hold not recorded")?;
+        hold.identity_held_at_ms = Some(now);
+        let hold = hold.clone();
+        self.commit(next)?;
+        Ok(hold)
+    }
+
+    /// Resolving identity lets any subsequent composer hold record its own deadline.
+    #[cfg(unix)]
+    pub(crate) fn finish_identity_hold(&mut self, front: &Front) -> Result<(), String> {
+        let member = refused::refused_member(&front.1);
+        let Some(hold) = self.snapshot.hold_for_member(&member) else {
+            return Ok(());
+        };
+        if hold.identity_held_at_ms.is_none() {
+            return Ok(());
+        }
+        if !self
+            .front()
+            .is_some_and(|current| is_front(&current, front))
+        {
+            return Err("not the owner's unattempted front".into());
+        }
+        let mut next = self.snapshot.clone();
+        next.readiness_holds.retain(|saved| saved != hold);
+        self.commit(next)
+    }
+
+    /// The timed hold of an unattempted front, an identity hold included.
     pub(crate) fn front_hold(&self) -> Option<&ReadinessHold> {
         if self.snapshot.head_injection.is_some() {
             return None;
@@ -188,7 +247,6 @@ impl SnapshotV2 {
         if let Some(hold) = self.hold_for_member(&original) {
             return hold.clone();
         }
-        const READINESS_HOLD_MS: u64 = 10_000;
         let hold = ReadinessHold {
             identity: original.identity.clone(),
             fingerprint: original.fingerprint.clone(),
@@ -196,6 +254,7 @@ impl SnapshotV2 {
             cause: cause.into(),
             started_at_ms: now,
             due_at_ms: now.saturating_add(READINESS_HOLD_MS),
+            identity_held_at_ms: None,
         };
         self.readiness_holds.push(hold.clone());
         hold
