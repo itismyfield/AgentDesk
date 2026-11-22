@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use poise::serenity_prelude::ChannelId;
+use sqlx::PgPool;
 
 use super::ProviderChannelStop;
+use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::health::{self, HealthRegistry, PendingQueueSnapshot};
 use crate::services::discord::{SharedData, host_teardown_gate};
@@ -166,5 +168,38 @@ impl TurnStopPort<SharedData> for HealthRegistry {
     ) -> BoxFuture<'a, Option<Arc<SharedData>>> {
         let gate = host_teardown_gate::nameless_runtime_teardown;
         Box::pin(gate(self, provider, channel_id, caller))
+    }
+
+    fn runtime_target_holds<'a>(
+        shared: &'a SharedData,
+        provider: &'a ProviderKind,
+        channel_id: ChannelId,
+        approved: Option<&'a str>,
+    ) -> BoxFuture<'a, bool> {
+        let holds = host_teardown_gate::runtime_target_holds;
+        Box::pin(holds(shared, provider, channel_id, approved))
+    }
+
+    fn row_gate<'a>(
+        pool: &'a PgPool,
+        stored_provider: Option<&'a str>,
+        channel_id: u64,
+        session_key: &'a str,
+        tmux_name: &'a str,
+        caller: &'a str,
+    ) -> BoxFuture<'a, (ChannelTeardown, HostedLookup)> {
+        let gate = host_teardown_gate::row_gate;
+        Box::pin(gate(
+            pool,
+            stored_provider,
+            channel_id,
+            session_key,
+            tmux_name,
+            caller,
+        ))
+    }
+
+    fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
+        host_teardown_gate::backfill_inflight_after_guard(provider, channel_id)
     }
 }

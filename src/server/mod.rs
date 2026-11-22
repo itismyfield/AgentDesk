@@ -335,6 +335,7 @@ pub(crate) async fn run(
         startup_pool,
         &cluster_instance_id,
         health_registry.as_deref(),
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
     )
     .await?;
     drop(boot_reconcile_engine);
@@ -528,6 +529,7 @@ async fn policy_tick_loop(
                     pool,
                     health_registry.as_deref(),
                     crate::services::discord::relay_recovery::AxisBSite::PolicyTickStaleSweep,
+                    crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
                 )
                 .await
                 {

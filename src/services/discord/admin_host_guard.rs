@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -358,6 +359,40 @@ pub(crate) async fn session_key_refusal(
     let channel = channel_id.filter(|id| *id != 0).map(ChannelId::new);
     let refusal = super::host_defer_gate::resume_host_refusal;
     refusal(pool, provider, channel, session_key, tmux_name).await
+}
+
+/// [`session_key_refusal`] as the boxed port the session output route hands to KE.
+pub(crate) fn session_key_refusal_port<'a>(
+    pool: &'a PgPool,
+    provider: Option<&'a ProviderKind>,
+    channel_id: Option<u64>,
+    session_key: &'a str,
+    tmux_name: &'a str,
+) -> BoxFuture<'a, Option<String>> {
+    Box::pin(session_key_refusal(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+    ))
+}
+
+/// [`row_refusal`] as the boxed port the agent turn routes hand to KE.
+pub(crate) fn row_refusal_port<'a>(
+    pool: &'a PgPool,
+    provider: Option<&'a str>,
+    channel_id: Option<&'a str>,
+    session_key: &'a str,
+    tmux_name: &'a str,
+) -> BoxFuture<'a, Option<String>> {
+    Box::pin(row_refusal(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+    ))
 }
 
 /// [`session_key_refusal`] on a stored row's provider and channel columns.
