@@ -1,5 +1,6 @@
 //! A forced cancel on a channel whose queue the V2 owner holds.
 use super::*;
+use crate::services::discord::health::HealthRegistry;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem, v2_queue};
 
 fn item(id: u64, channel: u64) -> PendingQueueItem {
@@ -85,9 +86,14 @@ async fn sessionless_force_cancel_without_initial_owner_measures_empty_legacy_qu
     let handle = ChannelMailboxRegistry::default().handle(channel);
     assert!(handle.try_capture_v2().await.unwrap().is_none());
     assert!(handle.snapshot().await.intervention_queue.is_empty());
-    let counts = force_purge_and_settle(None, &target(channel), None, Some(&pool))
-        .await
-        .unwrap();
+    let counts = force_purge_and_settle(
+        None::<&Arc<HealthRegistry>>,
+        &target(channel),
+        None,
+        Some(&pool),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (
             counts.drained,
@@ -234,7 +240,7 @@ async fn a_forced_cancel_purges_the_v2_queue_and_nothing_reruns() {
         channel_id: Some(channel),
         tmux_name: String::new(),
     };
-    let purged = force_purge_channel_mailbox(None, &target, None).await;
+    let purged = force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await;
     assert_eq!(purged.map(|counts| counts.drained), Some(2));
     let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
     assert!(
@@ -372,7 +378,7 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             let probe: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send> =
                 Box::new(move || Box::pin(async move { settle(stopper).await.unwrap() }));
             set_pre_purge_probe_for_test(channel, probe);
-            force_purge_channel_mailbox(None, &target, None).await
+            force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await
         } else {
             // The stop settles between this purge's own capture and its checked purge.
             let stopper = handle.clone();
@@ -395,7 +401,7 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
                 owed.await.unwrap().is_empty(),
                 "the refused purge owes nothing"
             );
-            force_purge_channel_mailbox(None, &target, None).await
+            force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await
         };
         let case = if settle_first {
             "settle first"
@@ -449,7 +455,7 @@ async fn a_refused_v2_purge_answers_with_the_depth_the_owner_kept() {
             channel_id: Some(channel),
             tmux_name: String::new(),
         };
-        let purged = force_purge_channel_mailbox(None, &target, None).await;
+        let purged = force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await;
         let answered = purged.map(|counts| (counts.drained, counts.queue_len_after));
         assert_eq!(
             answered,
@@ -559,7 +565,7 @@ async fn a_purge_on_an_owner_whose_last_save_is_pending_answers_no_depth() {
         purge.failed
     );
     let capture = capture_queue_before_cancel_on(&handle).await;
-    let purged = force_purge_channel_mailbox(None, &target, None).await;
+    let purged = force_purge_channel_mailbox(None::<&Arc<HealthRegistry>>, &target, None).await;
     assert!(
         purged.is_none(),
         "a pending save is no confirmed depth: {purged:?}"

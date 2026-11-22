@@ -751,7 +751,16 @@ async fn force_kill_entry(
     let forward = crate::services::session_forwarding::ForwardCallerContext::from(state);
     let headers = axum::http::HeaderMap::new();
     let cancel = state.queue_service();
-    match cancel.cancel_turn(None, ch, true, &headers, &forward).await {
+    match cancel
+        .cancel_turn(
+            None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
+            ch,
+            true,
+            &headers,
+            &forward,
+        )
+        .await
+    {
         Ok(body) => (StatusCode::OK, body.to_string()),
         Err(error) => (error.status(), error.message().to_string()),
     }

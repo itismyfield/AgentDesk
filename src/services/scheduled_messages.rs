@@ -38,9 +38,8 @@ use timing::{MAX_FIRE_RETRIES, compute_resume, fire_retry_next_at};
 
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::{ClaimedFire, RunningAgentDelivery, ScheduledMessageRow};
-use crate::services::discord::health::{
-    HealthRegistry, reserve_headless_agent_turn,
-    start_reserved_headless_agent_turn_with_owner_channel,
+use crate::services::engine_runtime::health_port::{
+    HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart,
 };
 use crate::services::message_outbox::{
     OutboxEnqueueError, OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
@@ -58,9 +57,9 @@ pub(crate) const OUTBOX_SOURCE: &str = "scheduled_message";
 
 // ── Scheduler loop ──────────────────────────────────────────────────────────
 
-pub async fn scheduled_message_loop(
+pub async fn scheduled_message_loop<R: HeadlessTurnPort>(
     pg_pool: Arc<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<Arc<R>>,
 ) {
     use std::time::Duration;
 
@@ -90,9 +89,9 @@ pub async fn scheduled_message_loop(
 
 /// One scheduler pass: lease recovery, due-claim + fire, agent-turn polling.
 /// Returns true when any row moved (drives the adaptive backoff).
-async fn tick_once(
+async fn tick_once<R: HeadlessTurnPort>(
     pool: &PgPool,
-    health_registry: Option<&HealthRegistry>,
+    health_registry: Option<&R>,
     claim_owner: &str,
 ) -> bool {
     let mut did_work = false;
@@ -148,9 +147,9 @@ async fn tick_once(
 /// Execute one armed fire slot. Every branch leaves the delivery and parent in
 /// a consistent state; errors degrade to `interrupted` so the bounded re-arm
 /// path (claim-time retry cap) owns the retry policy.
-pub async fn fire_claimed(
+pub async fn fire_claimed<R: HeadlessTurnPort>(
     pool: &PgPool,
-    health_registry: Option<&HealthRegistry>,
+    health_registry: Option<&R>,
     fire: ClaimedFire,
     now: DateTime<Utc>,
 ) {
@@ -191,7 +190,11 @@ pub async fn fire_claimed(
     }
 }
 
-async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fire: &ClaimedFire) {
+async fn fire_agent<R: HeadlessTurnPort>(
+    pool: &PgPool,
+    health_registry: Option<&R>,
+    fire: &ClaimedFire,
+) {
     let message = &fire.message;
     let Some(health_registry) = health_registry else {
         let reason = "discord runtime health registry unavailable";
@@ -284,9 +287,9 @@ pub(crate) fn is_runtime_unavailable_message(message: &str) -> bool {
 /// Mirrors `RoutineAgentExecutor::start_turn` minus routine-thread routing:
 /// the turn runs directly in the target channel (or the agent's primary
 /// channel when no target was pinned).
-async fn start_agent_turn(
+async fn start_agent_turn<R: HeadlessTurnPort>(
     pool: &PgPool,
-    health_registry: &HealthRegistry,
+    health_registry: &R,
     fire: &ClaimedFire,
 ) -> anyhow::Result<AgentTurnStartDisposition> {
     use anyhow::anyhow;
@@ -355,7 +358,7 @@ async fn start_agent_turn(
             }
         };
 
-    let reservation = reserve_headless_agent_turn(turn_channel);
+    let reservation = health_registry.reserve_headless_agent_turn(turn_channel);
     let turn_id = reservation.turn_id().to_string();
     let recorded = db::record_delivery_agent_turn_intent_pg(
         pool,
@@ -426,20 +429,20 @@ async fn start_agent_turn(
         return Ok(disposition);
     }
 
-    let outcome = start_reserved_headless_agent_turn_with_owner_channel(
-        health_registry,
-        owner_channel,
-        turn_channel,
-        provider,
+    let start = HeadlessTurnStart {
+        owner_channel_id: owner_channel,
+        turn_channel_id: turn_channel,
+        owner_provider: provider,
         prompt,
-        Some(OUTBOX_SOURCE.to_string()),
+        source: Some(OUTBOX_SOURCE.to_string()),
         metadata,
-        Some(primary_channel.clone()),
-        snapshot_session_label.clone(),
-        reservation,
-    )
-    .await
-    .map_err(|error| anyhow!("start scheduled message turn for {agent_id}: {error}"))?;
+        channel_name_hint: Some(primary_channel.clone()),
+        tmux_session_label: snapshot_session_label.clone(),
+    };
+    let outcome = health_registry
+        .start_reserved_headless_agent_turn_with_owner_channel(start, reservation)
+        .await
+        .map_err(|error| anyhow!("start scheduled message turn for {agent_id}: {error}"))?;
 
     Ok(owner_input::consume_start(pool, fire, &turn_id, outcome).await)
 }

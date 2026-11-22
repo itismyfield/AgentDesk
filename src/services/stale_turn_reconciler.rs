@@ -3,8 +3,8 @@ use sqlx::PgPool;
 
 use crate::domain::lifecycle::STALE_TURN_GRACE;
 use crate::domain::session_identity::SessionIdentity;
-use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::relay_recovery::AxisBSite;
+use crate::services::engine_runtime::health_port::StaleSweepPort;
 use crate::services::provider::ProviderKind;
 
 mod inflight_episode;
@@ -85,7 +85,7 @@ enum IndependentLiveness {
 /// guarded update. A live or ambiguous pane fails closed and remains busy.
 pub(crate) async fn reconcile_stale_turns_pg(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<&dyn StaleSweepPort<AxisBSite>>,
     site: AxisBSite,
 ) -> Result<usize> {
     Ok(reconcile_stale_turns_matching_with_warrant_pg(
@@ -568,18 +568,25 @@ fn structural_candidate_apply(eligible: bool) -> bool {
 }
 
 async fn destructive_warrant_bind(
-    registry: Option<&HealthRegistry>,
+    registry: Option<&dyn StaleSweepPort<AxisBSite>>,
     session_key: &str,
     provider: &str,
     site: AxisBSite,
 ) -> bool {
-    crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
-        registry,
-        session_key,
-        provider,
-        site,
-    )
-    .await
+    match registry {
+        Some(registry) => {
+            (registry.automatic_stale_sweep_warrants(session_key, provider, site)).await
+        }
+        None => {
+            crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
+                None,
+                session_key,
+                provider,
+                site,
+            )
+            .await
+        }
+    }
 }
 
 async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
@@ -587,7 +594,7 @@ async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
     session_key: Option<&str>,
     liveness_probe: L,
     inflight_probe: I,
-    automatic_warrant: Option<(Option<&HealthRegistry>, AxisBSite)>,
+    automatic_warrant: Option<(Option<&dyn StaleSweepPort<AxisBSite>>, AxisBSite)>,
 ) -> Result<ApplySummary>
 where
     L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
@@ -883,7 +890,10 @@ mod tests {
 
         let liveness_probe = |_: &str, _: &str| IndependentLiveness::NoPane;
         let inflight_probe = |_: &str, _: &str| InflightObservation::Unknown;
-        let automatic_warrant = Some((Some(fixture.registry()), AxisBSite::BootReconcileSweep));
+        let automatic_warrant = Some((
+            Some(fixture.registry() as &dyn StaleSweepPort<AxisBSite>),
+            AxisBSite::BootReconcileSweep,
+        ));
         let vetoed = reconcile_stale_turns_matching_with_warrant_pg(
             &pool,
             Some(key),

@@ -16,6 +16,10 @@ use crate::services::session_host::ChannelTeardown;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
+/// A registry this lifecycle stops turns through, for a caller that does not name the runtime.
+pub(crate) trait LifecycleStopPort: TurnStopPort<SharedData> {}
+impl<T: TurnStopPort<SharedData>> LifecycleStopPort for T {}
+
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
 const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
 

@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use super::cancel_effects::herdr::{HERDR_TERMINATE, HerdrForceEffects, herdr_force_effects};
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ServiceError, ServiceResult};
 use crate::services::session_forwarding::{
@@ -51,8 +50,8 @@ pub(super) async fn select(
 
 /// The forced cancel's answer when `selected` is a Herdr execution of this channel, retired only
 /// as that read found it; `None`, decided from that read alone, keeps the rest.
-pub(super) async fn herdr_force(
-    health_registry: Option<&Arc<HealthRegistry>>,
+pub(super) async fn herdr_force<R: HttpTerminate>(
+    health_registry: Option<&Arc<R>>,
     pool: &PgPool,
     channel_id: &str,
     selected: Option<Selected>,
