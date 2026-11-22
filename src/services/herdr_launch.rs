@@ -123,6 +123,23 @@ pub(crate) struct HerdrLaunchEndpoint {
     pub herdr_session: String,
 }
 
+/// The channel's boot Herdr endpoint, only when its mode is user-default; consent checks this
+/// pure guard before custom-ID parsing, command policy and any store lookup.
+#[cfg(unix)]
+pub(crate) fn user_default_endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
+    crate::config::session_hosts::with_boot(|boot| {
+        let boot = boot?;
+        let mapped = boot.herdr_endpoint(channel)?;
+        let configured = boot.config().herdr.endpoints.get(&mapped.key)?;
+        (configured.mode == EndpointMode::UserDefault).then(|| HerdrLaunchEndpoint {
+            execution_node: mapped.execution_node.clone(),
+            config_key: mapped.key.clone(),
+            socket_addr: mapped.socket_path.to_string_lossy().into_owned(),
+            herdr_session: mapped.herdr_session.clone(),
+        })
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrCreateRequest {
     pub endpoint: HerdrLaunchEndpoint,

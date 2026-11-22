@@ -27,20 +27,7 @@ pub(in crate::services::discord) fn store() -> ConsentStore {
     )
 }
 
-/// This pure guard precedes custom-ID parsing, command policy and every store lookup.
-pub(in crate::services::discord) fn endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
-    session_hosts::with_boot(|boot| {
-        let boot = boot?;
-        let mapped = boot.herdr_endpoint(channel)?;
-        let configured = boot.config().herdr.endpoints.get(&mapped.key)?;
-        (configured.mode == EndpointMode::UserDefault).then(|| HerdrLaunchEndpoint {
-            execution_node: mapped.execution_node.clone(),
-            config_key: mapped.key.clone(),
-            socket_addr: mapped.socket_path.to_string_lossy().into_owned(),
-            herdr_session: mapped.herdr_session.clone(),
-        })
-    })
-}
+pub(in crate::services::discord) use crate::services::herdr_launch::user_default_endpoint as endpoint;
 
 fn require_local(endpoint: &HerdrLaunchEndpoint) -> Result<(), String> {
     local_gateway(&endpoint.execution_node, "retry")
