@@ -858,6 +858,10 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 "$PYTHON" -m unittest tests.test_build_token_fairness_5968
 fi
 
+if run_check cargo "vistool end-to-end on a cargo fixture"; then
+AGENTDESK_VISTOOL_E2E=1 "$PYTHON" -m unittest scripts.crate_split.tests.test_vistool
+fi
+
 if run_check cargo "Release Cargo witness cache parity"; then
 "$PYTHON" -m unittest tests.test_release_cargo_freshness
 fi
