@@ -1,5 +1,9 @@
 use super::*;
+use crate::services::discord::inflight::{
+    InflightTurnIdentity, load_inflight_state_read_only_result,
+};
 use crate::services::discord::save_actual_episode_for_tests;
+use crate::services::provider::ProviderKind;
 
 const CHANNEL: u64 = 7_250_101;
 const TMUX: &str = "AgentDesk-codex-replacement-unit";

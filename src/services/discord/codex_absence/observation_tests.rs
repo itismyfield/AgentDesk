@@ -12,6 +12,16 @@ use std::sync::atomic::Ordering;
 const CHANNEL: u64 = 7_163_201;
 const TMUX: &str = "b1-absent-inflight";
 
+/// Observes with the mailbox snapshot the provider dispatch passes.
+async fn observe_turn(channel: u64, tmux: &str, token: &Arc<CancelToken>) -> Option<InflightObs> {
+    let episode = async {
+        crate::services::discord::codex_episode_snapshot(channel, tmux, token)
+            .await
+            .map(|snapshot| snapshot.episode().clone())
+    };
+    super::observe_turn(channel, tmux, token, episode).await
+}
+
 fn with_scope(run: impl FnOnce(&std::path::Path)) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();

@@ -264,6 +264,7 @@ thread_local! {
 pub fn run_from_args() -> Result<()> {
     config::test_instance::initialize().map_err(anyhow::Error::msg)?;
     services::process_boot::initialize();
+    services::discord::install_codex_absence_reader();
     // A failure-marker handoff restarts this executable as a short-lived writer.
     // Dispatch it before Clap so no public/hidden CLI surface is needed and the
     // writer can outlive the one-shot hook relay process that launched it.

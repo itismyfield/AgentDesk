@@ -95,7 +95,15 @@ pub(super) async fn observe_codex_turn(
     if !matches!(provider, ProviderKind::Codex) || !matches!(host, TurnHost::Tmux) {
         return None;
     }
-    crate::services::discord::codex_absence::observe_turn(channel, tmux?, token).await
+    let tmux = tmux?;
+    let episode = async {
+        crate::services::discord::inflight::read_only_owner_snapshot::codex_episode_snapshot(
+            channel, tmux, token,
+        )
+        .await
+        .map(|snapshot| snapshot.episode().clone())
+    };
+    crate::services::discord::codex_absence::observe_turn(channel, tmux, token, episode).await
 }
 
 #[cfg(test)]
