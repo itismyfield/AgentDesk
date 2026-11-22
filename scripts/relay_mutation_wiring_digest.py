@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,9 @@ MUTATION_JOB = "relay_authority_mutations"
 JUDGE_JOB = "required_contexts"
 # Workflow-level keys every job inherits; absent on both sides compares equal.
 TOP_LEVEL_KEYS = ("env", "defaults", "permissions", "concurrency")
+# The judge re-pins the CI structure checker on every CI wiring edit; that hash feeds no mutation
+# run or verdict, so only an exact pin line has its hash masked and any other text still counts.
+HARDENING_PIN = re.compile(r"(?m)^( *pin scripts/check-ci-runner-hardening\.sh )[0-9a-f]{64}$")
 _ABSENT = object()
 
 
@@ -87,7 +91,23 @@ def wiring_subtrees(document: dict) -> dict[str, object]:
         if not isinstance(jobs.get(job), dict):
             raise WiringUnknown(f"jobs.{job} is missing")
         subtrees[f"jobs.{job}"] = jobs[job]
+    subtrees[f"jobs.{JUDGE_JOB}"] = _mask_hardening_pin(jobs[JUDGE_JOB])
     return subtrees
+
+
+def _mask_hardening_pin(job: dict) -> dict:
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return job
+    masked = []
+    for step in steps:
+        run = step.get("run") if isinstance(step, dict) else None
+        if isinstance(run, RawScalar):
+            text = RawScalar(HARDENING_PIN.sub(r"\1<masked>", run))
+            text.kind = run.kind
+            step = {**step, "run": text}
+        masked.append(step)
+    return {**job, "steps": masked}
 
 
 def digest(subtree: object) -> str:
