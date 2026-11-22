@@ -551,6 +551,7 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
 }
 
 /// An effort restart's end spends the Codex goals reset it reflects, as it spends `/fast` and `/model`.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_effort_restart_spends_the_codex_goals_reset() {
     let shared = make_shared_data_for_tests();
