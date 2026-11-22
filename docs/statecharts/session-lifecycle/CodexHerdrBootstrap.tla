@@ -207,7 +207,7 @@ PublishOld ==
     /\ Keep(<<row, cleanup, marker, listing, tmuxLive, writer, resumedBy, intake, watch,
               viaBoot, exec, fails, boots>>)
 
-\* herdr_terminate.rs:224-229 retire_confirmed (Terminate, stop, clear, row end). Design
+\* herdr_terminate.rs:223-228 retire_confirmed (Terminate, stop, clear, row end). Design
 \* withholds the exact nonce after the CAS; the base leaves an admitted listing.
 Retire ==
     /\ exec = "bound"

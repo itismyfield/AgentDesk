@@ -131,7 +131,7 @@ ProviderExits ==
     /\ UNCHANGED <<srv, rec, fresh, stray, launch, input, closing, crashes, lost>>
 
 \* The row ends once its execution is seen gone (recovery_engine/herdr_row_end.rs:1-3, 393-;
-\* herdr_terminate.rs:184-198 retire_confirmed).
+\* herdr_terminate.rs:183-197 retire_confirmed).
 RowEnd ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
     /\ rec \in {"placed", "evidenced", "bound"} /\ pane \in {"shell", "closed"}
@@ -140,7 +140,7 @@ RowEnd ==
     /\ UNCHANGED <<srv, pane, fresh, stray, launch, input, closing, crashes, lost, exits>>
 
 \* Operator terminate: one fresh judgment and one close; then the row is retired
-\* (termination_audit/host_terminate.rs:116-133, herdr_gate.rs:451-491, herdr_terminate.rs:184-198).
+\* (termination_audit/host_terminate.rs:116-133, herdr_gate.rs:451-491, herdr_terminate.rs:183-197).
 OperatorClose ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
     /\ rec = "bound" /\ pane \in {"agent", "shell"}

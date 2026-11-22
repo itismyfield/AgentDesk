@@ -87,7 +87,7 @@ S1의 `HerdrRootBefore.cfg`, `HerdrRootFixed.cfg`, `HerdrSameRoot.cfg`에는 S2 
 | 9 | 새 target | `src/services/discord/herdr_terminate/root_replaced.rs:405` |
 | 10 | strict end proof | `src/services/session_host/herdr_gate/root_replaced.rs:23` |
 | 11 | quiet 확인 뒤 exact Retired CAS | `src/services/discord/herdr_terminate/root_replaced.rs:430–451`; Q Held/front grant는 active/inflight가 아니므로 quiet를 막지 않음 |
-| 12 | cleanup 완료, Q는 여전히 Held | `src/services/discord/herdr_terminate/root_replaced.rs:493`의 old hold release; `src/services/discord/recovery_engine/herdr_reader.rs:326–331`은 성공 시 continue하고 wake가 없음. `src/services/discord/herdr_terminate.rs:325–339`의 `settle_captured(None)`도 바로 반환 |
+| 12 | cleanup 완료, Q는 여전히 Held | `src/services/discord/herdr_terminate/root_replaced.rs:493`의 old hold release; `src/services/discord/recovery_engine/herdr_reader.rs:326–331`은 성공 시 continue하고 wake가 없음. `src/services/discord/herdr_terminate.rs:324–339`의 `settle_captured(None)`도 바로 반환 |
 
 WakeBefore는 마지막 상태에서 영원히 stutter한다. WakeFixed는 pass 결과가 게시된 완료 전이를 한 번 알리고 같은 Q를 다시 queued로 만든 뒤 create 1·submit 1을 완료한다. 이미 완료된 Retired를 매 pass 깨우거나 Held 자체를 깨우는 전이는 없다.
 

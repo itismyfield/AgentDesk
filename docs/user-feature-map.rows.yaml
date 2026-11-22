@@ -716,7 +716,7 @@ host_parity:
     herdr: Herdr holder 응답 뒤 해당 후처리를 건너뜀. 일반 활성 턴 중단과 수동 lease 해제는 기존 경로로 가능
     verdict: 다름
     owner: '#8128 Z. #7583 S07c의 stop 호출부, holder 변경이 필요할 때 S07f와 조율'
-    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/zombie_foreground_release.rs:185–212,355–411,432–442`.
+    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/zombie_foreground_release.rs:188–212,355–411,432–442`.
       동일 시나리오에서 취소된 exact 토큰과 종료 증거가 있으면 pane·native ID·큐를 보존하면서 다음 입력이 진행한다. 새 토큰·활성 턴·불명확한 증거에서는 lease를 유지한다'
   - feature_id: cancel-stop
     scope: 수동 lease 확인·해제 API 및 CLI
@@ -743,7 +743,7 @@ host_parity:
     verdict: 같음
     owner: '명시 권한·대상이 검증된 경우에 종료한다는 계약. lifecycle trait 수렴은 #7583'
     evidence: '`src/server/routes/domains/runtime.rs:79–84,103`, `src/services/dispatched_sessions/force_kill.rs:43,185`,
-      `src/services/dispatched_sessions/herdr_kill.rs:21`, `src/services/discord/herdr_terminate.rs:412,448,692`'
+      `src/services/dispatched_sessions/herdr_kill.rs:20`, `src/services/discord/herdr_terminate.rs:411,447,691`'
   - feature_id: cancel-stop
     scope: '`/cancel-queued`'
     tmux: 큐에서 exact 입력 ID의 취소 결과
@@ -961,7 +961,7 @@ host_parity:
     verdict: 다름
     owner: '#8128 R2c는 R2a 효과와 #7583 actual-owner 종료 포트를 소비'
     evidence: '`src/server/routes/domains/ops.rs:188–189`, `src/server/routes/routines/handlers.rs:539–560`, `src/services/routines/session_control.rs:120–132,676–698`,
-      `src/services/turn_lifecycle.rs:158–166,348–360`'
+      `src/services/turn_lifecycle.rs:159–166,348–360`'
   - feature_id: routines
     scope: fresh 실행 완료 후 정리
     tmux: run을 claim했을 때의 routine 소유권과 result로 해당 실행만 종료

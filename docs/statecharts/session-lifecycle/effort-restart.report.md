@@ -9,8 +9,8 @@
 | local effort 저장 | `commands/tui_passthrough.rs:146` | CurrentTmux는 변경을 저장하고 다음 새 턴에 재기동; 현재 즉시 중단 행동은 없음 |
 | local restart busy 거절 | `commands/tmux_recreate.rs:93` | 현재 busy Deferred; Design은 confirmed end 뒤 동일 session launch |
 | Herdr effort | `commands/tui_passthrough/herdr_settings.rs:195`, `:203`, `:216`, `:225` | CurrentHerdr는 old task 종료/ready 후 overlay 적용; restart 0 |
-| exact hosted end | `herdr_terminate.rs:437`, `:453`, `:580`, `:596`, `:603` | EffortInterrupt는 시도가 아닌 exact nonce/TurnKey confirmed end와 cutoff 경계의 oracle |
-| old inflight 정산 | `herdr_terminate.rs:337`, `turn_finalizer.rs:277`, `turn_finalizer/finalize_context.rs:37` | captured old row만 mute close; reader output 소유 유지 |
+| exact hosted end | `herdr_terminate.rs:436`, `:453`, `:580`, `:596`, `:603` | EffortInterrupt는 시도가 아닌 exact nonce/TurnKey confirmed end와 cutoff 경계의 oracle |
+| old inflight 정산 | `herdr_terminate.rs:336`, `turn_finalizer.rs:277`, `turn_finalizer/finalize_context.rs:37` | captured old row만 mute close; reader output 소유 유지 |
 | owner Held | `queue_io/input_owner/drive.rs:118`, `queue_io/input_owner/held_watch.rs:62` | waiting users는 queue에 남는다. Gone는 End여서 completion wake가 별도로 필요 |
 | transition 종료/wake | `session_transition.rs:120`, `:136`, `:147` | physical resume 후 owner wake; NoWake mutant에서 continuation/사용자 둘 다 멈춤 |
 | 자동 입력/재시도 | `queue_io/input_owner/origin.rs:6`, `queue_io/input_owner/start.rs:13`, `:48`, `:56` | continuation은 사용자 원문 재전송이 아닌 stable synthetic ticket; 실패 재시도는 같은 root |
@@ -81,7 +81,7 @@ Second는 790 states로 그림 예산 500을 넘겨 chart를 생성하지 않는
 | NoContinuation: resume 후 pending root가 남아 영구 대기(10단계 lasso) | 새 자동 continuation port는 아직 없음. `start::admit_synthetic`의 Accepted/Pending/Rejected를 구별해야 함 | 설계 mutant만 확인. main 결함/실재 버그로 올리지 않음 |
 | NoNotice/DuplicateNotice | 기존 HostTerminated가 mute인 사실은 확인. 새로운 durable effort interruption notice의 구현은 없음 | 설계 obligation; main 결함으로 올리지 않음 |
 | NoInterrupt: 원 작업이 끝나지 않는 request 대기(4단계 lasso) | 기존 `commands/tmux_recreate.rs:93` busy Deferred는 현재 next-turn 계약이다. 새 즉시 명령은 이 대기에 남으면 안 됨 | 코드로 확인한 현재 분기와 설계 회귀 mutant; `busy_effort_restarts_while_original_never_finishes` 수용 시험 |
-| NoClose: confirmed end 뒤 정산 정지(7단계 lasso) | 기존 `herdr_terminate.rs:603`은 exact old turn 정산을 호출한다. 새 adapter에서 이를 빼는 구현을 모델로 제거 | 설계 obligation. 실제 main에서 정산 omission을 재현했다고 주장하지 않음 |
+| NoClose: confirmed end 뒤 정산 정지(7단계 lasso) | 기존 `herdr_terminate.rs:602`은 exact old turn 정산을 호출한다. 새 adapter에서 이를 빼는 구현을 모델로 제거 | 설계 obligation. 실제 main에서 정산 omission을 재현했다고 주장하지 않음 |
 | Repost: 동일 old body를 resume 뒤 재게시(6단계) | 기존 replay가 acked record만 제외함을 확인했으며 실제 main에서 duplicate가 발생함을 확인한 것은 아님 | 설계 guard mutant. live 반례로 인계하지 않음 |
 
 ## 범위 밖과 외부 가정

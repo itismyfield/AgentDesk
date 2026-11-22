@@ -266,7 +266,7 @@ ExecutionEnds ==
     /\ history.stage = "running" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "ended"]
     /\ UNCHANGED coreVars
-\* herdr_terminate.rs:224-237 changes the hosted state after an end proof.
+\* herdr_terminate.rs:223-236 changes the hosted state after an end proof.
 ConfirmRetired ==
     /\ history.stage = "ended" /\ HistoryQuiet /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "retired", !.row = "retired"]

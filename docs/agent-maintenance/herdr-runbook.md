@@ -41,7 +41,7 @@
 | `ADK_HERDR_ADMISSION` | 미설정이면 허용 | 최초 사용 시 읽음. 설정된 값 중 `on`만 허용하며 나머지는 거절 |
 | `<runtime_root>/herdr/admission-off` | 파일이 없으면 허용 | 발견하면 해당 프로세스 종료까지 정지 상태를 유지 |
 
-근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs` (`herdr_turn_switched_on`, `herdr_turn_switched_on_for`, `configured_turn`); `src/services/herdr_launch.rs:65`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
+근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs` (`herdr_turn_switched_on`, `herdr_turn_switched_on_for`, `configured_turn`); `src/services/herdr_launch.rs:65`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:68`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
 
 admission 정지는 새 Herdr 작업을 막으며 pane을 종료하지 않는다. 일반 턴 선택과 입력 gate가 모두 admission을 검사하므로 기존 실행의 후속 입력과 시험 입력도 영향을 받는다. 이를 범용 intake pause나 대기 입력의 안전한 동결·이관 기능으로 취급하지 않는다.
 
@@ -270,7 +270,7 @@ CLI는 loopback API에 POST 한 번을 보낸다. redirect·자동 재시도·pr
 
 성공은 HTTP 200과 `result="retired"`뿐이다. 서버는 pane 종료 확인·row retire·hold 해제·포착한 턴의 정산을 수행한다. `retire`와 동시에 실행하지 않는 것을 운영 정책으로 한다. terminate 성공도 legacy 전환 성공이 아니다.
 
-근거: `src/cli/herdr.rs:69`; `src/server/routes/herdr_terminate.rs:102`; `src/services/discord/herdr_terminate.rs:215`, `:250`, `:299`, `:417`.
+근거: `src/cli/herdr.rs:69`; `src/server/routes/herdr_terminate.rs:102`; `src/services/discord/herdr_terminate.rs:214`, `:250`, `:299`, `:417`.
 
 - `disabled`, `refused`, `gate_refused`, `not_sent`: 원인을 해결하고 대상을 재관측한다.
 - `confirmation_required`: 서비스는 확인을 대신 주지 않는다. workspace/group 전체 종료로 확대하지 않는다.
@@ -279,7 +279,7 @@ CLI는 loopback API에 POST 한 번을 보낸다. redirect·자동 재시도·pr
 - 요청 연결이 끊겨도 서버 task는 계속할 수 있다. CLI 오류만 보고 즉시 새 실행을 만들지 않는다.
 - 이미 Retired인데 hold가 남으면 같은 채널의 `herdr retire`로 해당 hold 해제를 재시도한다. `remains`와 durability 미확정 출력은 완료가 아니다.
 
-근거: `src/services/discord/herdr_terminate.rs:37`, `:215`, `:250`, `:441`; `src/cli/herdr.rs:139`, `:229`.
+근거: `src/services/discord/herdr_terminate.rs:36`, `:215`, `:250`, `:441`; `src/cli/herdr.rs:139`, `:229`.
 
 턴 lease가 남으면 먼저 inspect한다. 실제 종료·배달 결과를 확인한 운영자가 inspect의 정확한 identity를 지정해 release할 수 있다. planned restart·identity 변경·메시지 identity 없는 episode 등은 거절될 수 있다. release를 provider 종료나 답변 배달 증거로 쓰지 않는다. “시작되지 않았으면 다시 보낸다”는 자동 대응을 하지 않는다.
 
@@ -304,7 +304,7 @@ pane 위치는 있고 launch 증거가 없으면, 거절하기 전에 기존 lau
 
 operator terminate는 대기열을 건드리지 않으므로 Retired 뒤 남은 큐가 새 launch로 진행한다. `/clear`도 같은 실행을 terminate 서비스로 끝내지만 실행 시점의 대기열을 버린다. 이미 끝난 실행(pane 부재, 기록 root shell만 남음, §3.2 예외의 복원 셸)은 pane을 닫지 않고 retire한다. 스위치가 꺼져 있으면 `/clear`는 pane 종료·row retire를 하지 않고 종료 미확인을 알리지만, 큐 폐기와 세션 초기화는 그대로 한다. 막힌 동안 도착한 입력은 각자 턴으로 거절돼 소비되므로, 보존되는 것은 terminate 시점에 남은 대기열뿐이다.
 
-근거: `src/services/discord/herdr_terminate.rs:28`, `:70`; `src/services/discord/commands/control.rs:376`; `src/services/discord/commands/control/clear_teardown.rs:121`.
+근거: `src/services/discord/herdr_terminate.rs:27`, `:70`; `src/services/discord/commands/control.rs:376`; `src/services/discord/commands/control/clear_teardown.rs:121`.
 
 **B. 위치 있음, provider 미증명 — 꼬리 `its provider in pane <pane> is not proven (...)`** (손 조치, 자동 복구가 아님)
 
@@ -620,7 +620,7 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 | 운영 상태·은퇴를 위한 기록된 pane 조회 | legacy 상태·종료 관측 | `<ADK> herdr status`·`retire`의 CLI 경로 (`src/cli/herdr.rs:171`, `:199`, `:299`) → registry view → `HerdrPaneView::read_execution` → `session.snapshot`·`pane.process_info`. 상태 해석·종료 증명·Retired CAS·hold 해제는 AgentDesk 책임 | **운영 연결됨**. 상태 조회와 진행 턴 완료는 구분. [R-U-02], [R-U-03], [R-U-12] |
 | Codex composer 화면 관측 | legacy tmux 화면 capture `src/services/session_host/tmux_host.rs:116` | Codex dispatch `provider_dispatch.rs:416`, `:433` → Codex first/followup (`src/services/codex/herdr_turn.rs:383`, `:516`) → `empty_composer/composer_ready` (`:310`, `:287`, `:293`) → `HerdrTarget::capture` (`src/services/session_host/herdr_gate.rs:440`) → capture request `src/services/session_host/herdr/contract.rs:209`, `:216` → `pane.read`. composer 준비·draft·modal 판정은 AgentDesk 책임 | **운영 연결됨**. `HerdrHost.capture_screen` 생산 연결과 별개. [R-U-03], [R-U-13] |
 | dcserver 재시작 후 같은 실행에 재접속 | legacy probe·retry `src/services/discord/recovery_engine/tmux_probe.rs:28` | rehydration `rehydration.rs:277`, `:457` → restart reader `herdr_reader.rs:181` → 위 reader/view의 Herdr 관측 → source attach `src/services/discord/tui_prompt_relay/herdr_source.rs:271`, `:300`. source 재등록·cursor·불일치 시 withholding은 AgentDesk 책임 | **운영 연결됨**. 재시작 연속성 [R-U-08]. 책임 전체가 Herdr로 이전된 것은 아님 |
-| 명시적 강제 종료 | tmux kill `src/services/platform/tmux.rs:399` | 운영자 route `src/server/routes/herdr_terminate.rs:37`, `:89` → `terminate_registered_herdr`·`terminate_explicit_herdr` (`src/services/discord/herdr_terminate.rs:443`, `:299`) → nonce·owner 검증 (`:315`) → target 종료 gate `src/services/session_host/herdr_gate.rs:341`, `:352` → `pane.close`. 종료 재조회·Retired 전환·hold 해제·턴 정산은 AgentDesk 책임 (`herdr_terminate.rs:417`, `:420`, `:423`) | **운영 연결됨**, 별도 스위치·운영자 권한 조건부. [R-U-12] |
+| 명시적 강제 종료 | tmux kill `src/services/platform/tmux.rs:399` | 운영자 route `src/server/routes/herdr_terminate.rs:37`, `:89` → `terminate_registered_herdr`·`terminate_explicit_herdr` (`src/services/discord/herdr_terminate.rs:442`, `:299`) → nonce·owner 검증 (`:315`) → target 종료 gate `src/services/session_host/herdr_gate.rs:341`, `:352` → `pane.close`. 종료 재조회·Retired 전환·hold 해제·턴 정산은 AgentDesk 책임 (`herdr_terminate.rs:416`, `:420`, `:423`) | **운영 연결됨**, 별도 스위치·운영자 권한 조건부. [R-U-12] |
 | Claude provider 대화 초기화 | 일반 Discord `/clear`·`!clear` | `src/services/discord/commands/control/clear_teardown.rs`의 일반 clear: 세션 종료·selector 초기화·전사 경계 기록 | native clear는 **은퇴(#7266)**. 일반 clear 경로 유지. [R-U-02] |
 
 위 표의 `provider_dispatch.rs`, `rehydration.rs`, `herdr_reader.rs`, `herdr_terminate.rs` 축약 표기는 같은 행에서 명시한 전체 경로를 가리킨다. 표의 연결 증거는 `cfg(test)` 호출을 생산 연결로 집계하지 않는다.
@@ -657,7 +657,7 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 | Codex hook·source-mode·daemon isolation 사전조건 | `src/services/codex/herdr_turn.rs:188`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:436` |
 | 실행 정체성: owner·nonce·노드·endpoint·named session·pane·process stamp·source | `src/db/dispatched_sessions/hosted_execution.rs:33`, `:44`, `:55`, `:64`, `:74`, `:88` |
 | provider transcript/rollout과 실행의 결합 | `src/services/discord/tui_prompt_relay/herdr_source.rs:154`, `:210`, `:274` |
-| 요청의 terminal·배달 증거·큐 해제 | SentButUncommitted를 별도로 표현하고 강제 종료 뒤에도 AgentDesk 정산을 수행. `src/services/discord/session_relay_sink/terminal_handoff.rs:46`, `:176`; `src/services/discord/herdr_terminate.rs:417`, `:423` |
+| 요청의 terminal·배달 증거·큐 해제 | SentButUncommitted를 별도로 표현하고 강제 종료 뒤에도 AgentDesk 정산을 수행. `src/services/discord/session_relay_sink/terminal_handoff.rs:46`, `:176`; `src/services/discord/herdr_terminate.rs:416`, `:423` |
 | 불명확한 입력의 hold와 복구 거절 | `src/services/claude/herdr_turn.rs:398`, `:417`; `src/services/discord/tui_prompt_relay/herdr_source.rs:281` |
 | legacy 전환의 기록 보존·CAS·표식/row 일관성·중간 입력 차단 | 현재 기능 미확보. runbook §3.5의 후속 요구사항과 [R-U-16]으로 관리 |
 
@@ -690,7 +690,7 @@ H3 probe 이전은 이번 축소 실적으로 계산하지 않는다. 해당 변
 | `src/db/dispatched_sessions/hosted_execution.rs:88`, `:382`, `:423`, `:434` | hosted record와 Pending/Bound/Retired CAS | AgentDesk 저장·동시성 계약. pane ID가 실행 정체성을 대신하지 않음 |
 | `src/services/claude/herdr_turn.rs:123`, `:439`, `:594`; `src/services/codex/herdr_turn.rs:115`, `:139`, `:403` | provider별 cold start·후속 입력·source 대기·결과 처리 | provider 대화·턴 의미는 AgentDesk adapter 책임 |
 | `src/services/discord/tui_prompt_relay/herdr_source.rs:154`, `:210`, `:274`; `src/services/discord/recovery_engine/herdr_reader.rs:26` | native source 결합과 재시작 재조회·재등록 | 기존 source authority·binding 기록 재사용. 새 화면 기반 답변 저장소를 만들지 않음 (`herdr_source.rs:175`, `:186`, `:300`) |
-| `src/services/discord/commands/control/clear_teardown.rs`; `src/services/discord/herdr_terminate.rs:299`; `src/server/routes/herdr_terminate.rs:37`; `src/cli/herdr.rs` | 일반 clear, 운영자 종료, 상태·은퇴 | AgentDesk가 정책·종료 확인·정산·은퇴를 소유하고 Herdr는 허가된 pane I/O 수행 |
+| `src/services/discord/commands/control/clear_teardown.rs`; `src/services/discord/herdr_terminate.rs:298`; `src/server/routes/herdr_terminate.rs:37`; `src/cli/herdr.rs` | 일반 clear, 운영자 종료, 상태·은퇴 | AgentDesk가 정책·종료 확인·정산·은퇴를 소유하고 Herdr는 허가된 pane I/O 수행 |
 | `src/services/cluster/intake_router_hook.rs:165`; `src/services/cluster/intake_worker.rs:550` | 기존 intake 배치·전달 | 멀티노드 배치·전달은 AgentDesk 책임. 대상 노드의 Herdr 제어는 local socket 경계 |
 | `src/services/turn_host.rs:130`, `:261`; `src/services/herdr_admission.rs`; `src/config/session_hosts.rs`; `src/services/tui_o/channel_policy.rs:62` | 실행 host, admission, endpoint·writer 부팅 설정 | AgentDesk 진입 정책. 실제 설정·활성화는 [R-U-01] |
 | `src/services/codex/tui_session_launch.rs:416`, `:427`, `:436` | Codex hook capability와 daemon isolation 준비 | AgentDesk cold-launch 사전조건. 실제 노드 준비 결과는 [R-U-03] |
@@ -703,7 +703,7 @@ H3 probe 이전은 이번 축소 실적으로 계산하지 않는다. 해당 변
 | 공통 `HerdrHost` 입력 메서드와 `HerdrTarget` mutation 경로 | registry의 공개 host는 입력·키·interrupt를 거절. 제품 입력은 대상 실행 gate를 소비. `src/services/session_host/herdr_registry.rs:48`, `:81`, `:89`; `src/services/session_host/herdr_gate.rs:424` | raw host 우회와 각 facade의 생산 소비자는 **호출부 감사**로 확인. [R-U-17]. 실기기 성공만으로 우회 경로 부재를 판정하지 않음 |
 | legacy warm draft 재생성과 Herdr 후속 입력 | legacy warm host는 tmux 전용. Herdr는 provider turn에서 Bound 실행으로 후속 입력. `FollowupHost::herdr` 생성자만으로 legacy 재생성 경로 이전을 인정하지 않음. `src/services/claude_tui/hosting/host_draft.rs:29`, `:40`, `:59`; `src/services/claude/herdr_turn.rs:166`; `src/services/codex/herdr_turn.rs:141` | 사용처·대체 동작을 [R-U-17], [R-U-18]에서 확인. 현재 삭제 대상으로 확정하지 않음 |
 | legacy restart probe와 Herdr restart reader | legacy probe는 다른 host를 probe·retry하지 않는 계약. Herdr reader는 기록된 local pane을 읽음. `src/services/discord/recovery_engine/tmux_probe.rs:28`; `src/services/discord/recovery_engine/herdr_reader.rs:26` | 코드 경계는 [R-U-17], 단절·서버 교체 시 실제 중복 복구는 [R-U-08], [R-U-09], [R-U-10]에서 확인 |
-| 세션 보존형 stop과 운영자 terminate | Escape stop은 production settlement hard-false로 휴면. terminate는 별도 스위치·권한 뒤 close·종료 확인·은퇴·정산 수행. `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:299`, `:417` | stop 연결과 취소 계약은 [R-U-04], terminate는 [R-U-12]. stop을 pane close로 대체하지 않음 |
+| 세션 보존형 stop과 운영자 terminate | Escape stop은 production settlement hard-false로 휴면. terminate는 별도 스위치·권한 뒤 close·종료 확인·은퇴·정산 수행. `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:298`, `:417` | stop 연결과 취소 계약은 [R-U-04], terminate는 [R-U-12]. stop을 pane close로 대체하지 않음 |
 | 기존 intake 전달과 delegated channel home | home row가 있으면 holder·epoch로 기존 `route_to_instance` 사용. worker는 같은 epoch의 intake open을 재확인. Herdr transport는 대상 노드의 Unix socket 사용. `src/services/cluster/intake_router_hook.rs:134`, `:232`; `src/services/cluster/intake_worker.rs:550`; `src/services/session_host/herdr/transport.rs:80` | 확인한 경로는 **기존 intake → 지정 holder → local Herdr socket**. 중앙 원격 Herdr 직접 제어의 필요·부재와 불필요한 이중 경로 여부는 저장소 전체 생산 호출부 감사 [R-U-17]로 판정 |
 
 transport의 재접속과 prompt 재전송을 구분한다. 읽기만 retry하고 mutation은 witness가 일치하는 연결에서 한 번 교환한다. 입력 ACK 유실을 prompt 재송신의 근거로 사용하지 않는다.

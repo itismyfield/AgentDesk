@@ -31,7 +31,7 @@ names another host (`host_gate.rs:20-36`), so a failed Herdr create never reads 
 | Herdr marker write failing during create | `herdr_launch.rs:495-510` (host marker at :493, nonce stamp at :497, then `retire_unsent`) | NOT_MODELED: host may be `herdr` while the nonce is missing or removed |
 | Nonce write failure removes the nonce | `tmux_session_files.rs:346-354` | NOT_MODELED: marker absent, so the judgment refuses as before |
 | kill-tmux API | `dispatched_sessions/tmux_cleanup.rs:338` | `KillTmux` (markers stay) |
-| Session temp cleanup (removes `.spawn_nonce`) | `tmux_common.rs:1186-1260`; callers `tmux_reaper.rs:344,687`, `turn_lifecycle.rs:502`, `tmux_recreate.rs:59`, `clear_teardown/execution_cleanup.rs:311`, `managed_reset.rs:145`, `claude.rs:2605`, `claude/tui_session_launch.rs:57` | marker absent: never refused (unchanged, not modeled) |
+| Session temp cleanup (removes `.spawn_nonce`) | `tmux_common.rs:1186-1260`; callers `tmux_reaper.rs:344,687`, `turn_lifecycle.rs:503`, `tmux_recreate.rs:59`, `clear_teardown/execution_cleanup.rs:311`, `managed_reset.rs:145`, `claude.rs:2605`, `claude/tui_session_launch.rs:57` | marker absent: never refused (unchanged, not modeled) |
 | Input-owner handoff close | `queue_io/input_owner/claude_handoff.rs:138-197,241-258` → `pinned_tmux.rs:224-338` | `Begin`, `Close` (`CloseWorks`) |
 | Launch-time close of a live tmux | `herdr_turn/handoff.rs:74-86` | covered by `Direct` only as a judgment before close |
 | Binding judgment | `herdr_turn/handoff.rs:188-200,223-230` (`ended_tmux_execution`) | `Refused` |
@@ -132,7 +132,7 @@ End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = H
 | Writer of Retired | Precondition | Code |
 |---|---|---|
 | CAS from the same owner and nonce only | `plan_state_change` → `same_execution` | `db/dispatched_sessions/hosted_execution.rs:459-472,545-560` |
-| Terminate | pane end read, then close | `herdr_terminate.rs:224-236,589-597` |
+| Terminate | pane end read, then close | `herdr_terminate.rs:223-235,588-596` |
 | Row end recovery | ended turn read | `recovery_engine/herdr_row_end.rs:488-493`, `herdr_row_end_live.rs:66-67` |
 | Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:266-288`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
 | Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:588-610`, `herdr_launch/unplaced.rs:453-456`, `prepared.rs:25,53` |

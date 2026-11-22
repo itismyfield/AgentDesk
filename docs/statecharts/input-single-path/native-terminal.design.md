@@ -48,7 +48,7 @@ read-only native snapshot에 해당 exact ticket의 기존 Barrier를 선택적�
 ### 생성 순서
 
 1. 기존 `Sources::offer_native`/O poll(`rotation/owe.rs:454`, `actor.rs:419`)이 B source ACK와 일반 complete-line capture를 먼저 처리한다. existing reader/seed가 있는 exact native custody만 요청한다. snapshot 메서드는 계속 read-only다. 별도 typed EOF-proof method를 기존 EvidencePort에 둔다.
-2. Discord domain child `turn_finalizer/native_terminal.rs`가 live/restored custody, current history ticket/source, 원본 Bound/Resolved event, matching HostedExecution을 확인한다. `herdr_terminate.rs:224`의 read-only `execution_end` 판정을 재사용한다. Ended만 허용하며 ProviderAlive/Unconfirmed/unknown endpoint/다른 nonce·root는 Hold다. boolean `Retired` 자체는 proof가 아니다. Retired라도 남아 있는 같은 execution record/target을 다시 확인한다(`db/dispatched_sessions/hosted_execution.rs:562`는 retire 때 record를 보존). 현재 N2만 남아 N1을 검증할 수 없으면 N2에 기대지 않고 진단 가능한 debt다.
+2. Discord domain child `turn_finalizer/native_terminal.rs`가 live/restored custody, current history ticket/source, 원본 Bound/Resolved event, matching HostedExecution을 확인한다. `herdr_terminate.rs:223`의 read-only `execution_end` 판정을 재사용한다. Ended만 허용하며 ProviderAlive/Unconfirmed/unknown endpoint/다른 nonce·root는 Hold다. boolean `Retired` 자체는 proof가 아니다. Retired라도 남아 있는 같은 execution record/target을 다시 확인한다(`db/dispatched_sessions/hosted_execution.rs:562`는 retire 때 record를 보존). 현재 N2만 남아 N1을 검증할 수 없으면 N2에 기대지 않고 진단 가능한 debt다.
 3. 같은 SourceId를 read-only FD로 열고 path/FD identity와 Fingerprint를 요청의 O capture snapshot과 맞춘다. `C..L`만 읽는다. 기존 `MAX_PARTIAL_BYTES`를 재사용하며, 정확한 길이·UTF-8·하나의 완전한 JSON value·내부 newline 없음·현재 canonical strict terminator를 모두 요구한다. 기존 native projection의 parent/subagent·isSidechain·sessionId 일치 관문도 그대로 적용한다. 반쯤 쓴 JSON, 일반 JSON, assistant end_turn, trailing garbage는 proof가 아니다. dev가 재번호화된 파일은 기존 authenticated reopen을 먼저 거쳐야 하며 새 leaf가 stat-only로 승인하지 않는다.
 4. 읽기 전후 FD/path Fingerprint, C/prefix identity, matching execution-end/nonce를 재확인한다. 크기/metadata/대상/등록 stamp가 변하면 후보를 폐기하고 기존 O retry로 재관측한다. 새 전체 transcript scan이나 native cursor reset을 만들지 않는다. 이미 캡처된 prefix와 durable membership receipt는 O의 기존 인증/재평가 계약을 따른다.
 5. producer/RuntimeReady/추가 hook이 없어도 O의 live/boot supply가 같은 method를 호출한다. watcher/기존 recovery가 먼저 E를 관측했어도 wake 힌트일 뿐이며 그 경로의 legacy Done 또는 retirement bit를 native 증거로 바꾸지 않는다. 새 executor/recovery loop는 없다.
@@ -88,7 +88,7 @@ Cancel/Terminate/clear/stop의 기존 control witness는 native strict-closer pr
 | O poll·native offer | `tui_o/writer/actor.rs:419`; `tui_o/writer/rotation/owe.rs:454` | live/boot typed raw proof 요청의 정식 진입점 |
 | port/interface | `tui_o/writer/actor/native_input.rs:18`; `discord/turn_finalizer/native_supply.rs:57,169,578,689` | snapshot read-only, 별도 EOF proof method, observed/current/raw stamp 검증 |
 | B source refinement | `discord/turn_finalizer/native_binding.rs:162,183,264`; `turn_orchestrator/queued_head/v2/cold_source.rs:112,157` | 먼저 기존 B ACK. source None/다른 lineage에 terminal proof 안 줌 |
-| Herdr physical E | `discord/herdr_terminate.rs:193,224`; `db/dispatched_sessions/hosted_execution.rs:545` | read-only Ended 재사용, Retired bit 단독 금지, 새 retire/close 호출 없음 |
+| Herdr physical E | `discord/herdr_terminate.rs:192,223`; `db/dispatched_sessions/hosted_execution.rs:545` | read-only Ended 재사용, Retired bit 단독 금지, 새 retire/close 호출 없음 |
 | producer live reader | `claude/herdr_turn/live_reader.rs:8`; `claude/herdr_turn/first_input.rs:395,436` | 기존 typed terminal/wake 유지, 새 O proof의 필수 생산자로 만들지 않음 |
 | 기존 raw EOF reader | `claude/herdr_turn/terminal_replay.rs:201,217` | whole/strict/gone 의미 참고. ended_tail/ended_turn의 전체 prefix 재독을 새 O 경로에서 호출하지 않음 |
 | watcher | `discord/tmux_watcher/turn_stream_collector.rs:33,400`; `discord/turn_bridge/stream_loop.rs:212` | 관측/wake 가능, unscoped Done으로 native cleanup 우회 불가 |
@@ -101,7 +101,7 @@ Cancel/Terminate/clear/stop의 기존 control witness는 native strict-closer pr
 | boot prepare/custody | `discord/inflight/removal/boot_reaper.rs:75`; `discord/inflight/removal/boot_custody.rs:434` | 기존 기록 보존 순서. 후보 메모리 소실과 durable 결과를 구분 |
 | boot adoption/proof/cleanup | `discord/turn_finalizer/native_restore.rs:72,95,314,388,489` | 결과 전 재검증 / 결과 후 saved proof cleanup; 기존 형식 None 호환 |
 | Cancel/HTTP cancel | `discord/commands/stop.rs:98`; `discord/turn_finalizer/native_policy.rs:41,132`; `turn_orchestrator/policy_close.rs:72` | exact control CAS 우선, native outcome 덮어쓰기 금지 |
-| Terminate/force | `discord/herdr_terminate.rs:354`; `discord/herdr_terminate/http_force.rs:32` | 기존 explicit authority만, raw proof로 종료/정리 권한 증가 없음 |
+| Terminate/force | `discord/herdr_terminate.rs:353`; `discord/herdr_terminate/http_force.rs:17` | 기존 explicit authority만, raw proof로 종료/정리 권한 증가 없음 |
 | clear | `discord/commands/control.rs:546,834`; `discord/commands/control/clear_teardown.rs:63,243`; `turn_orchestrator/queued_head/v2/clear.rs:17` | 기존 boundary/control/retained 입력 정책, terminal overlay와 별도 |
 | stop | `discord/commands/stop.rs:84`; `discord/turn_bridge/tmux_runtime/judged_stop.rs:345,358`; `discord/turn_bridge/tmux_runtime/owned_input_stop.rs:28` | 기존 Stop witness/신호만, proof 생성으로 key/kill 송신 안 함 |
 | foreign barrier/abstention | `tui_input/human_frame/history/v2/native_barrier.rs:58`; `discord/turn_finalizer/native_abstain.rs:54` | genuine foreign/모호성은 계속 Hold/기존 명시 정리. strict interrupt만 오분류 제거 |

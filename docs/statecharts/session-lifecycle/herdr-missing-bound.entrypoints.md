@@ -27,8 +27,8 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 17 | `src/services/discord/recovery_engine/host_reconcile.rs:142` absent exact pane | `pane = Missing`; `Read` | Complete endpoint-matching snapshot only |
 | 18 | `src/cli/herdr.rs:241` retire CLI | `Read` / `Retire` | Explicit local ended execution; existing authority, no pane write |
 | 19 | `src/cli/herdr.rs:326` retirement CAS | `Retire` | Proposed common proof/CAS extraction; preserves the CLI's existing shell-ended cases |
-| 20 | `src/services/discord/herdr_terminate.rs:224` shared confirmed retirement | `Retire` | Existing strict end authority, unchanged |
-| 21 | `src/services/discord/herdr_terminate.rs:411` explicit terminate, `:606` retire | `ControlAction(terminate)` | Explicit request and existing close/end proof; no automatic close proposed |
+| 20 | `src/services/discord/herdr_terminate.rs:223` shared confirmed retirement | `Retire` | Existing strict end authority, unchanged |
+| 21 | `src/services/discord/herdr_terminate.rs:410` explicit terminate, `:606` retire | `ControlAction(terminate)` | Explicit request and existing close/end proof; no automatic close proposed |
 | 22 | `src/services/discord/herdr_terminate/root_replaced.rs:536` recovery | `Retire` projection | Existing RootReplaced/MarkerLost strict proof; not broadened to Unknown |
 | 23 | `src/services/discord/recovery_engine/herdr_row_end.rs:492` row end | `Boundary` / `Retire` projection | Existing terminal source proof |
 | 24 | `src/services/discord/recovery_engine/herdr_row_end_live.rs:67` live row end | `Boundary` / `Retire` projection | Existing managed-turn settlement |
