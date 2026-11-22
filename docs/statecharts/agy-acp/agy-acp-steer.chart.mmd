@@ -6,19 +6,22 @@ stateDiagram-v2
     lg0: Process
     lg1: Turn
     lg2: Session
-    lg3: Breaks AnswerCoversWholeSteer or PostOnlyWithDisposition in some cases
-    lg4: Path to the AnswerCoversWholeSteer or PostOnlyWithDisposition bug
+    lg3: Breaks PostOnlyWithDisposition
+    lg4: Breaks AnswerCoversWholeSteer in some cases
+    lg5: Path to the AnswerCoversWholeSteer or PostOnlyWithDisposition bug
   }
   class lg0 tan
   class lg1 blue
   class lg2 teal
-  class lg3 mayBreak
-  class lg4 bugPath
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
   s0: No agy child
   s1: Child up, no session
   s2: Session idle
   s3: Prompt open
   s4: Turn steered: two prompts open
+  s5: Rejected steer held by Returning record
   [*] --> s0
   s0 --> s0: a person sends a message
   s0 --> s1: AgentDesk starts agy acp
@@ -27,17 +30,20 @@ stateDiagram-v2
   s3 --> s4: session/prompt for the next input (new turn, or steer while a prompt is open)
   s4 --> s3: agy answers the prompt (stopReason)
   s3 --> s3: writer posts the turn's one terminal message (covers steered inputs)
-  s3 --> s2: agy refuses the steer prompt#59; input back to the queue
+  s3 --> s5: steer prompt rejected before execution
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
   class s1 teal
   class s1 bugPath
   class s2 teal
-  class s2 mayBreak
   class s2 bugPath
   class s3 blue
   class s3 mayBreak
   class s3 bugPath
   class s4 blue
   class s4 bugPath
+  class s5 teal
+  class s5 breaks
+  class s5 bugPath

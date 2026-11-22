@@ -4,8 +4,12 @@ const turnHasOpen = (v, t) => v.open.some((j) => v.turnOf[j] === t);
 const stranded = (v) => ids(v).some((i) => v.st[i] === "sent" && !v.open.includes(Number(i))
   && (v.turnOf[i] === 0 || (!v.done[v.turnOf[i]] && !turnHasOpen(v, v.turnOf[i]))));
 const closing = (v) => ids(v).some((i) => v.turnOf[i] === Number(i) && v.done[i] && v.posts[i] === 0);
+const anyIn = (v, f) => ids(v).some((i) => f(i));
 const procLabel = (v) => !v.running ? "AgentDesk restarting"
+  : anyIn(v, (i) => v.returning[i]) ? "Rejected steer held by Returning record"
+  : anyIn(v, (i) => v.retMem[i]) ? "Rejected steer held in memory only"
   : stranded(v) ? "Input sent, nothing will answer it"
+  : v.orphan ? "Old child orphaned, sweep pending"
   : v.proc !== "up" ? "No agy child"
   : v.loading ? "Session loading (replay)"
   : v.attached === 0 ? "Child up, no session"
@@ -25,10 +29,13 @@ const steps = {
   ReplayOld: "load replays an old answer",
   LoadAnswered: "session/load answers",
   SendPrompt: "session/prompt for the next input (new turn, or steer while a prompt is open)",
-  SteerRefused: "agy refuses the steer prompt; input back to the queue",
+  SteerRejected: "steer prompt rejected before execution",
+  SteerErrored: "steer prompt fails with unknown outcome",
+  ReturnToQueue: "rejected steer put back at the queue front",
+  SweepOrphan: "boot kills the old child's process group",
   AgyResponds: "agy answers the prompt (stopReason)",
   AgyDies: "agy exits; stdout EOF fails open prompts",
-  WatchdogKill: "deadline passes; process group killed",
+  WatchdogKill: "deadline passes; the child's own process group killed",
   ZombieResponse: "late response from the killed child",
   UserStop: "person sends !stop",
   SendCancel: "session/cancel",

@@ -1,7 +1,7 @@
 # #8339 antigravity 채널을 `agy acp` 클라이언트로 옮기는 설계
 
 <!-- doc-path-refs: proposed src/services/agy_acp/ src/services/agy_acp/turn.rs src/services/agy_acp/steer.rs src/services/discord/router/intake_gate/acp_steer.rs -->
-<!-- doc-path-refs: external apps/server/ packages/provider-acp/ AcpSessionRuntime.ts AntigravityAcpSupport.ts AntigravityAdapterV2.ts AntigravityProtocol.ts AntigravitySessionFiles.ts AntigravityTurnOutcome.ts AntigravityEditLocation.ts antigravityAuthSupport.ts adapter.ts acp_agent.rs jsonrpc.rs -->
+<!-- doc-path-refs: external src/v1/error.rs apps/server/ packages/provider-acp/ AcpSessionRuntime.ts AntigravityAcpSupport.ts AntigravityAdapterV2.ts AntigravityProtocol.ts AntigravitySessionFiles.ts AntigravityTurnOutcome.ts AntigravityEditLocation.ts antigravityAuthSupport.ts adapter.ts acp_agent.rs jsonrpc.rs -->
 
 저장소 기준은 `5021d25794`(origin/main)이고, 확인한 agy CLI는 1.5.14(`agy --version`)다. 이 문서는 설계만 담는다. Rust 코드는 바꾸지 않는다. 상태 차트는 [agy-acp 모델](../../statecharts/agy-acp/AgyAcpSession.tla)과 [보고서](../../statecharts/agy-acp/agy-acp.report.md)다. 미확인 가정은 [U]로 표시하고 확인 방법을 함께 적는다.
 
@@ -13,10 +13,10 @@
 | 경로 판정 | 다음을 모두 만족하면 ACP 경로로 간다. ① 전역 스위치 `agy_acp.enabled` 켜짐 ② 턴 provider = Antigravity ③ 사람이 쓴 입력(Discord 사람 작성 또는 인증된 iMessage) ④ dispatch가 아님. 그 밖의 입력은 지금 경로(`agy --print`)로 간다. 스위치는 전체 하나이고 기본은 꺼짐이다. 조각 2 운영 확인 뒤 켠다. |
 | 입구 | 분기점은 `stream_json_turn::execute_request`(`src/services/discord/router/message_handler/provider_dispatch/stream_json_turn.rs:181`) 한 곳이다. ACP 이벤트는 기존 `StreamMessage`와 `AgySpool` 기록으로 바꾼다. 그 아래(turn_bridge, agy writer, 스풀, 외부 입력, shadow)는 그대로 둔다. |
 | 프로세스 수명 | **채널 상주**(destination당 `agy acp` 자식 하나). 재부착은 `session/resume`으로 하고 기록을 재전송하지 않는다. `session/load`는 대체 경로로만 쓰며, 이때 응답 전 갱신은 버린다. AgentDesk가 재시작하면 자식도 같이 죽고, 다음 입력이 새 자식을 띄워 resume한다. |
-| 실행 중 입력 | **steering이 ACP 경로의 기본 동작이다**(6절). 턴의 prompt가 열려 있는 동안 들어온 사람 입력은 그 턴에 `session/prompt`로 보내 턴에 합친다. 턴의 답 게시 하나가 그 입력까지 덮는다. steering을 끄는 방법은 전역 스위치뿐이다. |
-| 취소 | `!stop`은 `session/cancel`을 보내고 `stopReason:"cancelled"`를 기다린다. 15초 안에 오지 않으면 process group을 종료한다. |
+| 실행 중 입력 | **steering이 ACP 경로의 기본 동작이다**(6절). steer prompt 오류는 "실행 전 거절 확실"과 "결과 불명"으로 나눈다. 앞의 것만 큐로 돌리며, 그때는 내구 Returning 기록이 원본을 소유한다. 결과 불명은 재실행하지 않고 안내로 닫는다. 턴의 prompt가 열려 있는 동안 들어온 사람 입력은 그 턴에 `session/prompt`로 보내 턴에 합친다. 턴의 답 게시 하나가 그 입력까지 덮는다. steering을 끄는 방법은 전역 스위치뿐이다. |
+| 취소 | `!stop`은 `session/cancel`을 보내고 `stopReason:"cancelled"`를 기다린다. 15초 안에 오지 않으면 **자식 전용** process group만 종료한다. AgentDesk와 다른 destination은 건드리지 않는다(5.2절). |
 | 턴 종료 | 턴은 그 턴에 열린 모든 prompt의 응답(stopReason)이 도착했을 때 끝난다. #8160은 이것만으로 사라지지 않는다(9절). |
-| 권한 | ACP 실행에는 `--dangerously-skip-permissions`를 붙이지 않는다. `session/request_permission`에는 정책으로 답한다. 정책은 D1이 정해질 때까지 기본 (c)다(10절). |
+| 권한 | **D1 = A(사용자 결정).** `agy acp --dangerously-skip-permissions`로 띄우고, 그래도 오는 `session/request_permission`에는 `allow_once`로 자동 답한다(10절). |
 | 모델 | 세션의 `configOptions`(`id:"model"`) 안에서만 고른다(일반 외부 클라이언트는 Gemini만). 목록에 없으면 실패를 한 번 게시하고, `-p`로 몰래 되돌아가지 않는다. |
 | SDK | 공식 crate는 쓰지 않는다. v1의 필요한 부분만 tokio·serde_json으로 직접 구현한다(13절). |
 | 사용 형태 전제(D0) | **사용자 결정(agy-acp-1123)으로 전제를 확정했다.** 사람이 직접 모는 대화형 클라이언트로 `agy acp`를 띄우는 방식을 허용된 형태로 본다. |
@@ -55,7 +55,7 @@
 | 분기 | 코드 | ACP에서 다른 점 |
 |---|---|---|
 | 일반 대화 채널 | 2.1 그대로 | 이 문서의 기본 흐름 |
-| 위임형(비서) 채널 | 턴 안에서 agy가 AgentDesk API로 다른 에이전트에 일을 넘긴다(`src/server/routes/agents.rs:1129` → `src/services/agents/delegation.rs:82-118` `handoff_origin`). 결과 카드는 outbox 봇 게시로 돌아온다(`delegation.rs:243-298`). | ① 위임 호출은 agy의 셸 도구(로컬 API 호출)라서 `session/request_permission` 대상이다. D1 기본 (c)에서는 사람이 관리하는 규칙 파일에 로컬 API 명령 allow 규칙이 있어야 위임이 동작한다. 없으면 거절 안내가 남는다(10절). ② 결과 카드는 봇 게시라 새 agy 입력이 아니다. 지금처럼 ACP 턴을 만들지 않는다. ③ 카드의 [중단]은 작업자 턴을 멈추고, agy 턴과는 무관하다. |
+| 위임형(비서) 채널 | 턴 안에서 agy가 AgentDesk API로 다른 에이전트에 일을 넘긴다(`src/server/routes/agents.rs:1129` → `src/services/agents/delegation.rs:82-118` `handoff_origin`). 결과 카드는 outbox 봇 게시로 돌아온다(`delegation.rs:243-298`). | ① 위임 호출은 agy의 셸 도구(로컬 API 호출)라서 `session/request_permission` 대상이다. D1 = A라서 별도 allow 규칙 없이 동작한다. 사람이 관리하는 규칙 파일에 deny가 있으면 그 규칙이 먼저다(10절). ② 결과 카드는 봇 게시라 새 agy 입력이 아니다. 지금처럼 ACP 턴을 만들지 않는다. ③ 카드의 [중단]은 작업자 턴을 멈추고, agy 턴과는 무관하다. |
 | antigravity 에이전트가 위임 **받는** 쪽 | API handoff로 들어오는 작업 입력 | 시스템 입력이라 ACP 자격이 없다. 지금 경로로 간다. 이 입력은 consumer 로그인으로 도는 자동 agy가 되므로 12절의 후속 F1로 둔다. |
 
 ### 2.3 스위치
@@ -153,17 +153,22 @@ ACP 어댑터(`agy_acp::turn`)는 기존 runner와 같은 두 출구로만 내�
 
 ### 5.2 상주 규칙
 
-1. destination마다 actor 하나가 자식 하나와 세션 하나를 소유한다. 자식은 AgentDesk의 process group 안에 둔다. `--process-per-session`은 쓰지 않는다.
-2. spawn 명령은 `agy acp --app-data-dir <D> [--gemini-dir <P>]`이다. cwd는 채널 작업 폴더, env는 기존 auth overlay에 `AGY_CLI_DISABLE_AUTO_UPDATE=1`을 더한 것이다. 사설 `TMPDIR`을 쓴다. `--dangerously-skip-permissions`는 넣지 않는다.
+1. destination마다 actor 하나가 자식 하나와 세션 하나를 소유한다. 자식은 **자기 전용 process group**으로 띄운다. 기존 `configure_child_process_group`(`src/services/process.rs:84-97`, unix는 `process_group(0)`, windows는 `CREATE_NEW_PROCESS_GROUP`)을 쓰고, 지금 stream-json runner가 이미 이 방식이다(`src/services/stream_json_cli/runner.rs:104-106`). 모든 종료 신호(취소 기한, 무활동 기한, Terminate, clear, 유휴 만료)의 대상은 그 자식의 PGID(`-pgid`) 하나다. AgentDesk 자신의 그룹이나 다른 destination의 그룹에는 신호를 보내지 않는다. `--process-per-session`은 쓰지 않는다.
+2. spawn 명령은 `agy acp --dangerously-skip-permissions --app-data-dir <D> [--gemini-dir <P>]`이다(D1 = A, 10절). cwd는 채널 작업 폴더, env는 기존 auth overlay에 `AGY_CLI_DISABLE_AUTO_UPDATE=1`을 더한 것이다. 사설 `TMPDIR`을 쓴다.
 3. initialize에는 `protocolVersion: 1`, `clientInfo{name:"agentdesk"}`를 보낸다. 다른 클라이언트로 위장하지 않는다(T3 구버전의 `zed` 위장 금지). fs·terminal capability는 false로 둔다. 응답의 capability와 `agentInfo.version`은 기록한다.
 4. authenticate는 보내지 않는다. 캐시된 자격을 쓴다. -32000이면 인증이 필요하다는 안내를 게시하고, 로그인 URL은 중계하지 않는다.
 5. attach는 다음 순서다. 저장 세션이 없으면 `session/new`다. 있으면 resume capability가 있을 때 `session/resume`, `loadSession`만 있을 때 `session/load`를 쓰되 응답 전 갱신은 버린다. 거절되면 `session/new`로 열고, 그 턴의 답 앞에 맥락 손실 안내 한 줄을 붙인다.
 6. prompt는 스풀 예약과 inflight 저장(write-ahead)을 끝낸 뒤에만 쓴다.
 7. 대기 맵 키는 `(incarnation, request id)`다. 리더 task는 자기 incarnation이 아닌 줄을 버린다. steering된 앞 요청은 자기 응답이 올 때까지 맵에 남긴다.
-8. 무활동 15분 또는 취소 15초가 지나면 group을 종료하고 열린 턴을 실패 또는 취소로 닫는다.
-9. 유휴 30분이 지나면 stdin을 닫고, 그 뒤 SIGTERM, SIGKILL 순으로 끝낸다. 저장 세션은 남긴다.
-10. 부팅 때 자식을 미리 띄우지 않는다. 내구 기록이 있고 종료 기록이 없는 턴은, steering 입력까지 포함해 실패 안내로 닫는다. 다시 보내지 않는다. 종료 기록이 있는데 게시가 안 된 턴은 writer가 게시한다.
+8. 무활동 15분 또는 취소 15초가 지나면 자식 그룹(`-pgid`)만 종료하고, 열린 턴을 실패 또는 취소로 닫는다.
+9. 유휴 30분이 지나면 stdin을 닫고, 그 뒤 자식 그룹에 SIGTERM, SIGKILL 순으로 보낸다. 저장 세션은 남긴다.
+10. 부팅 때 자식을 미리 띄우지 않는다. 내구 기록이 있고 종료 기록이 없는 턴은, `Member`·`Uncertain` 입력을 모두 덮는 실패 안내로 닫는다. 다시 보내지 않는다. `Returning` 입력은 그 안내에서 빼고 6.4.2-4로 큐에 돌린다. 종료 기록이 있는데 게시가 안 된 턴은 writer가 게시한다. 첫 spawn 전에 12의 옛 자식 정리를 끝낸다.
 11. incarnation 번호는 actor 메모리에만 둔다. 재시작하면 옛 리더 task가 없으므로 내구 기록이 필요 없다.
+12. **소유 자식 정리.** 자식이 AgentDesk와 다른 그룹에 있으므로, 부모가 죽어도 자식이 같이 죽는다고 가정하지 않는다.
+    - spawn 직후 `<runtime_root>/agy_acp/<destination>/child.json`에 pid, pgid, 시작 시각, 실행 파일 경로를 원자적으로 쓴다.
+    - 정상 종료(서비스 정지, 재시작, 스위치 끄기)에서는 actor가 stdin을 닫고 2초 뒤 `-pgid`에 SIGTERM, 다시 2초 뒤 SIGKILL을 보낸 다음 `child.json`을 지운다.
+    - 비정상 종료(SIGKILL, 크래시) 뒤에는 부팅이 그 destination의 첫 spawn 전에 `child.json`을 읽는다. pid가 살아 있고 pgid, 시작 시각, 실행 파일이 모두 맞을 때만 그 그룹을 정리한다(pid 재사용 오인 방지). 그 뒤 기록을 지운다(모델 `SweepOrphan`).
+    - 정리가 끝나기 전에는 같은 destination에 새 자식을 띄우지 않는다. 옛 자식이 같은 세션을 계속 쓰는 상태에서 새 자식이 resume하는 일을 막기 위해서다.
 
 ### 5.3 시스템 프롬프트와 저장소 분리
 
@@ -186,7 +191,11 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
 
 1. **받기:** 사람이 쓴 Discord 입력 B가 `busy_inject::offered`에 들어온다. provider가 Antigravity이고 스위치가 켜져 있으며 그 destination에 ACP 턴 T가 있으면, `covers` 게이트보다 먼저 `acp_steer::offer(B)`를 부른다.
 2. **판정(actor 안, 원자적):** T에 열린 prompt가 하나라도 있으면 steer를 받는다. 열린 prompt가 없으면(T가 마지막 응답을 받아 닫히는 중이면) `NotSent("turn_closing")`를 낸다. B가 이미 T에서 steer를 거절당한 입력이면 `NotSent`다.
-3. **내구 기록:** 기존 busy inject처럼 원본을 claim한다(`inject_disposition::claim_source`). T의 inflight `input_origin_ids`와 turns `consumed_origin_ids`에 B를 더하고, Discord 메시지 checkpoint를 B 너머로 옮긴다(`busy_inject.rs:393-400`과 같은 의미). 그래서 catch-up이 B를 다시 실행하지 않는다.
+3. **내구 기록:**
+   - `inject_disposition::claim_source`는 메모리 표와 Weak lease라서(`src/services/discord/inject_disposition.rs:239-258`) 부팅 복구의 근거가 될 수 없다. 내구 소유자는 T의 inflight 행에 둔 **steer 기록**이다.
+   - steer 기록은 입력마다 `{origin, message_id, state}`이고, state는 `Member` | `Returning` | `Uncertain` 중 하나다. 한 번의 inflight 저장(행 하나의 원자적 교체)으로 쓴다.
+   - B를 `Member`로 저장한 뒤에만 checkpoint를 B 너머로 옮기고 prompt를 쓴다. 그래서 catch-up은 B를 다시 실행하지 않는다.
+   - turns `consumed_origin_ids`는 전송 전에 바꾸지 않는다. 종료 영수증(`src/services/discord/receipt_settle.rs:69-76`이 inflight `input_origin_ids`를 쓰고, `src/db/turns.rs:239-289`가 합집합으로 누적)에서 `Member`·`Uncertain` 상태의 원본만 확정한다. `Returning`은 넣지 않는다.
 4. **전송:** 같은 세션에 `session/prompt{prompt:[B 본문, 첨부]}`를 새 request id로 보낸다. 시스템 봉투는 붙이지 않는다. B 메시지에 ➕ 반응을 단다(`INJECTED_REACTION`과 같다).
 5. **응답:**
    - T의 앞 prompt A가 `end_turn`으로 응답해도 B의 prompt가 열려 있으면 T는 계속된다. Done을 내지 않는다.
@@ -204,36 +213,62 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
   - `AnswerCoversWholeSteer`: 턴 게시는 구성원의 prompt가 모두 응답한 뒤에만 한다
   - `NoAnswerForRefusedSteer`: 거절된 steer는 그 턴의 답으로 덮이지 않는다
   - `NoDuplicateExecution`: 받아들여진 prompt 쓰기는 입력마다 1회
-- 이 규칙들을 Design에서 확인했다. 도달성 증인 두 가지도 Design에서 실제로 일어남을 확인했다. 하나는 "steering된 입력이 턴의 답으로 덮임", 다른 하나는 "거절된 steer가 다음 턴에서 답을 받음"이다(17절).
+  - `DurableOwner`: 보낸 입력은 언제나 턴 구성원이거나 내구 `Returning` 기록이 있다(메모리로만 돌려놓지 않는다)
+  - `PostOnlyWithDisposition`: 게시 뒤에는 그 턴의 내구 종료 기록이 있다
+- 이 규칙들을 Design에서 확인했다. 도달성 증인 세 가지도 Design에서 실제로 일어남을 확인했다. "steering된 입력이 턴의 답으로 덮임", "거절된 steer가 다음 턴에서 답을 받음", "결과 불명 steer가 턴 게시에 덮임"이다(17절).
 
 ### 6.4 (d) 거절, 무시, 실패의 되돌림
 
 | 경우 | 처리 | 모델 |
 |---|---|---|
 | 턴이 닫히는 중(열린 prompt 없음) | `NotSent` → 지금 BusyActiveTurn 큐로 가서 다음 턴이 된다. 닫히는 턴에 합치지 않는다 | 변이 SteerAfterClose(합치면 `AnswerCoversWholeSteer` 위반) |
-| B의 `session/prompt`가 JSON-RPC 오류로 거절 | B를 T의 구성원과 `consumed_origin_ids`에서 빼고 ➕를 거둔다. 기존 `HandedBack` 경로(큐 앞자리, 대기 반응, checkpoint, `busy_inject.rs:393-400`)로 되돌린다. 같은 T에 다시 steer하지 않는다 | `SteerRefused`, 변이 SteerRefuseDrop |
+| B의 `session/prompt`가 **실행 전 거절이 확실한** 오류(6.4.1 ①) | B를 `Returning`으로 바꾸고 ➕를 거둔다. 6.4.2 순서로 큐 앞자리에 되돌린다. 같은 T에 다시 steer하지 않는다 | `SteerRejected`, `ReturnToQueue`, 변이 SteerRefuseDrop·SteerReturnVolatile |
+| B의 `session/prompt`가 **결과 불명** 오류(6.4.1 ②) | B를 `Uncertain`으로 바꾸고 T의 구성원으로 둔다. 재전송하지 않는다. T의 terminal 게시 하나가 B를 덮고, 그 게시에 "B는 처리 결과를 확인하지 못해 다시 실행하지 않았다"는 안내 한 줄을 붙인다(중복 0 우선) | `SteerErrored`, 변이 SteerErrorRequeue |
 | agy가 앞 응답만 주고 B를 큐잉(1.4) | 6.2-5와 같다. 결과가 같다 | AgyResponds가 가장 오래된 prompt부터 답함 |
 | 앞 응답 `end_turn`을 턴 끝으로 잘못 처리 | 금지한다. 턴 끝은 마지막 열린 prompt의 응답이다 | 변이 SteerEarlyClose |
 | B는 받았지만 답이 B를 반영하지 않음 | 프로토콜로는 감지할 수 없다. 게시 하나에 덮였으므로 유실은 아니다. 사람이 다시 말한다 [U13] | — |
 | 취소, 기한 초과, EOF, 재시작 | 턴 하나의 취소 또는 실패 안내가 A와 B를 함께 덮는다. 다시 보내지 않는다 | Design(Crash·Boot, WatchdogKill, AgyDies) |
 | 전송 전 actor가 죽음(자식 없음) | `NotSent` → 큐 | — |
 
+#### 6.4.1 steer prompt 오류 분류
+
+일반 RPC 오류는 실행되지 않았다는 증거가 아니다. 그래서 큐로 돌리는 것은 **실행 전 거절이 확실한** 경우만 허용하고, 모르는 오류는 모두 결과 불명으로 분류한다.
+
+| 분류 | 응답 | 근거 |
+|---|---|---|
+| ① 실행 전 거절 확실 | `-32700` Parse error, `-32600` Invalid request, `-32601` Method not found, `-32602` Invalid params(요청 해석·검증 단계), `-32000` Authentication required("before this operation can be performed"), `-32002` Resource not found(세션 없음). 로컬에서 요청 줄을 쓰기 **시작하기 전에** 파이프가 닫혀 있었던 경우 | ACP schema `ErrorCode`(`agent-client-protocol-schema` 1.21.2 `src/v1/error.rs:145-200`). JSON-RPC 표준 코드의 의미 |
+| ② 결과 불명 | `-32603` Internal error, `-32800` Request cancelled(정의가 "Execution of the method was aborted"라 일부 실행을 배제하지 않는다), 그 밖의 모든 코드(`Other`), 응답 기한 초과, 요청 줄을 쓰기 시작한 뒤의 EOF·파이프 오류 | 같은 schema. T3도 일반 오류를 턴 실패로 처리한다(`packages/provider-acp/src/server/adapter.ts:9337-9386`). 오류로 답한 에이전트도 이미 시작한 도구는 끝낼 수 있다고 전제한다(`:9359-9365`). T3가 재전송하는 "Agent is already processing"(`:158-185`)은 다른 에이전트(pi-agent-core)의 전용 문구라 agy 근거로 쓰지 않는다 |
+
+agy가 실제로 어느 코드를 쓰는지는 [U13]에서 확정한다. 확정 전에는 ① 목록에 코드를 더하지 않는다. 앞(첫) prompt의 오류는 분류와 상관없이 지금처럼 턴 실패 안내로 닫고 재전송하지 않는다(4.1절).
+
+#### 6.4.2 거절 입력을 큐로 되돌리는 순서
+
+거절된 B가 되돌아가는 동안에도 내구 소유자가 끊기지 않게 다음 순서를 지킨다.
+
+1. **Returning 확정:** 한 번의 inflight 저장으로 B의 state를 `Member`에서 `Returning`으로 바꾼다. 이 기록에는 원본(message id, 출처, 본문을 찾을 키)과 반환 의도가 들어 있다. 이 시점부터 B는 T의 구성원이 아니다. T의 부팅 실패 안내와 종료 영수증 모두 B를 덮지 않는다.
+2. **큐 저장:** 기존 `hand_back_injected_input`(`src/services/turn_orchestrator/injected_inputs.rs:482`, 호출 예 `src/services/discord/health/turn_deliver/inject.rs:709-729`)으로 B를 큐 앞자리에 저장한다. 큐가 같은 message id를 거절하는 것(이미 있음)도 성공으로 본다. 그래서 이 단계는 여러 번 해도 안전하다.
+3. **Returning 해소:** 큐 저장 성공을 확인한 뒤 inflight에서 B의 `Returning` 기록을 지운다. 대기 반응을 달고 checkpoint 처리를 한다(`busy_inject.rs:393-401`).
+4. **부팅 복구:** 부팅이 `Returning` 기록을 찾으면 2와 3을 다시 실행한다. T가 orphan으로 실패 안내를 받는 경우에도 `Returning` 원본은 그 안내에서 뺀다.
+5. **저장 실패:** 2가 실패하면(`HANDBACK_NOT_WRITTEN` 등) `Returning`을 그대로 두고 기존 저장 거부 안내(`input_persistence_refusal_notice`)를 낸다. 다음 부팅 또는 다음 큐 이벤트가 다시 시도한다.
+
+단순히 "큐에 먼저 저장하고 membership을 나중에 제거"하는 순서는 쓰지 않는다. 그 사이에 재시작하면 T의 부팅 실패 안내와 다음 턴이 같은 B를 함께 덮을 수 있기 때문이다. `Returning` 상태는 "T가 소비하지 않음"과 "반환 미완"을 한 기록으로 둔다. 모델에서는 변이 SteerReturnVolatile(메모리로만 반환)이 `DurableOwner`와 `EveryInputSettles`를 깬다.
+
 ### 6.5 범위 밖
 
 - HTTP iMessage의 실행 중 입력은 큐에 남긴다. #8274 1b의 원본별 custody 계약(`prepared.rs:75`, `queued.rs:248-287`)을 바꾸지 않기 위해서다. iMessage steering은 후속 F2로 둔다.
-- 봇이 쓴 입력, dispatch, 명령(`!stop` 등)은 `offerable`(`busy_inject.rs:236-244`)이 이미 걸러 내므로 steering하지 않는다.
+- 명령(`!stop` 등)과 `DISPATCH:` 접두는 `offerable`(`busy_inject.rs:236-244`)이 거른다. 그러나 `offerable`은 봇 여부를 보지 않는다. 그래서 `acp_steer::offer`가 사람 작성 여부(`author_is_bot == false`이고 허용된 자동화 작성자가 아님)를 직접 확인한다. 봇 입력은 steering하지 않고 지금 큐로 보낸다.
 
 ## 7. 인접 경로와 ACP 대응
 
 | 경로 | 좌표 | ACP |
 |---|---|---|
-| `!stop`·API stop/cancel | `control.rs:670`, `turn_lifecycle.rs:98`, `queue_api.rs:209`, `kanban.rs:147` → CancelToken | 열린 prompt가 있으면 `session/cancel`을 보내고 `cancelled`를 기다린다. 15초를 넘기면 group을 종료한다. prompt를 쓰기 전이면 쓰기를 취소하고 입력을 큐로 돌린다. 대기 중인 permission 요청에는 `cancelled`로 답한다. 자식은 남긴다 |
-| Terminate(hard stop) | CancelToken | 기한 없이 곧바로 group을 종료하고 취소 안내를 낸다 |
-| `/clear`·`!clear` | `control.rs:544,831`(큐 폐기, 턴 중단, provider 세션 삭제, agy는 Noop `:90`) | 같은 순서에 다음을 더한다. 턴을 stop하고, 자식을 닫는다(`session/close`가 있으면 그것을 쓰고, 없으면 group 종료). `session.json`을 지운다. 다음 입력은 `session/new`다 |
+| `!stop`·API stop/cancel | `control.rs:670`, `turn_lifecycle.rs:98`, `queue_api.rs:209`, `kanban.rs:147` → CancelToken | 열린 prompt가 있으면 `session/cancel`을 보내고 `cancelled`를 기다린다. 15초를 넘기면 그 자식의 그룹만 종료한다. prompt를 쓰기 전이면 쓰기를 취소하고 입력을 큐로 돌린다. 대기 중인 permission 요청에는 `cancelled`로 답한다. 자식은 남긴다 |
+| Terminate(hard stop) | CancelToken | 기한 없이 곧바로 **그 destination 자식의 그룹**(`-pgid`)만 종료하고 취소 안내를 낸다. AgentDesk와 다른 destination은 계속 돈다 |
+| `/clear`·`!clear` | `control.rs:544,831`(큐 폐기, 턴 중단, provider 세션 삭제, agy는 Noop `:90`) | 같은 순서에 다음을 더한다. 턴을 stop하고, 자식을 닫는다(`session/close`가 있으면 그것을 쓰고, 없으면 자식 그룹만 종료). `session.json`을 지운다. 다음 입력은 `session/new`다 |
 | 자동 재시도 세션 리셋, 호스트 복구 정리 | `retry_state.rs:184`, `host_recovery_guard.rs:94` | `session.json`을 지우고 자식을 detach한다 |
 | 모델 변경 | `model_picker.rs:192` | 다음 턴 첫 prompt 전, 유휴 세션에 `session/set_config_option{configId:"model"}`을 보낸다. 거절되면 그 입력은 실패로 한 번 게시한다 |
 | 효과 수준 | — | `thought_level` 옵션이 있을 때만 쓴다(조각 3) |
-| 재시작·부팅 | `restore_inflight.rs:139`, agy shadow | 5.2-10 |
+| 재시작·부팅 | `restore_inflight.rs:139`, agy shadow | 5.2-10, 5.2-12(옛 자식 그룹 정리), 6.4.2-4(Returning 복구) |
 | 자식 자체 종료 | — | EOF가 열린 턴을 실패로 닫는다. 다음 입력이 respawn과 resume을 한다 |
 
 ## 8. 입력 출처 분류
@@ -247,7 +282,7 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
 | 인증된 iMessage(`/turn/deliver`) | 사람 | `imsg_reply::agy_input` | 있음 | 턴이 없으면 `session/prompt`, 실행 중이면 큐(6.5절) |
 | 루틴, `provider_exec` | 시스템 | 각 호출자 | 없음 | 지금 경로(12절) |
 | 복구·catch-up 재전달 | 원 입력의 작성자 | recovery engine | 원 입력을 따름 | 내구 기록이 있는 입력은 실패 안내로 닫고 다시 보내지 않는다 |
-| 큐 재구성 입력(`queued.rs:496,583`이 `author_is_bot:false`로 채움) | 미상 | intake | 내구 사람 증거가 있을 때만 [U8] | 증거가 없으면 지금 경로 |
+| 큐에서 복원된 입력 | 큐 기록의 작성자(생산 큐 저장·복원은 bot 플래그를 보존한다. `queued.rs:496,583`의 `author_is_bot:false`는 `#[cfg(test)]` fixture다) | intake | 큐 기록의 사람 증거를 `queued_submission`에서 ACP 판정까지 그대로 넘길 때만 [U8]. 출처 필드가 없는 옛 큐는 자격 없음 | 증거가 없으면 지금 경로 |
 
 ## 9. 턴 종료와 #8160
 
@@ -260,14 +295,12 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
 
 ## 10. 권한과 #8299
 
-- 포럼 11-12에 따라 ACP 경로에는 `--dangerously-skip-permissions`를 쓰지 않는다. `agy acp`에는 `--settings`가 없다. 그래서 규칙은 사람이 관리하는 프로필 `settings.json`뿐이고, AgentDesk는 그 파일을 쓰지 않는다.
-- 규칙 밖 요청(`session/request_permission`)에 대한 응답 정책은 D1이다. D1은 코디네이터가 사용자 결정 포럼에 올렸다.
-  - (a) `allow_once` 자동
-  - (b) Discord 승인 버튼과 기한 뒤 `reject_once`(권장)
-  - (c) 규칙 밖은 `reject_once`로 답하고 본문 뒤에 거절 안내를 붙임
-- 결정 전 기본은 **(c)**다. 위임형 채널의 로컬 API 호출(2.2절)은 (c)에서 규칙 파일에 allow가 있어야 동작한다.
-- `interaction_*` 질문(T3 `AntigravityProtocol.ts:68-73`)은 조각 1·2에서 `cancelled`로 답하고 안내를 남긴다. 조각 3에서는 (b)와 같은 경로로 Discord에 보인다.
-- #8299의 `-p` 변경은 지금 경로(남은 시스템 입력)에 그대로 적용한다. ACP 채널은 #8299를 대체하지 않고 비켜 간다.
+- **D1 = A(사용자 결정).** ACP 자식을 `agy acp --dangerously-skip-permissions`로 띄운다(`agy acp --help` 1.5.14에 있는 플래그). 그래도 오는 `session/request_permission`에는 `allow_once`를 고른다. 없으면 `allow_always`를 고른다(T3 `AntigravityAcpSupport.ts:156-220`, `adapter.ts:1626-1634`와 같은 순서). 사람이 관리하는 프로필 `settings.json`의 명시 규칙(특히 deny)은 agy가 계속 먼저 적용한다(1절 권한 규칙 행: 명시 규칙이 실행 모드보다 앞선다). AgentDesk는 그 파일을 쓰지 않는다.
+- Claude·Codex 채널과 같은 권한 수준이다(#8299 A안과 같은 판단). 포럼 11-12 답변은 consumer 로그인에서 이 플래그를 harness 도구에 쓰는 것을 비준수로 적었다. 사용자는 D0·D1 결정에서 이를 감수했다. 이 근거는 1절에 남긴다.
+- 위임형 채널의 로컬 API 호출(2.2절)은 별도 규칙 파일 없이 동작한다.
+- `interaction_*` 질문은 권한이 아니라 선택지 질문이다(T3 `AntigravityProtocol.ts:68-73`). 조각 1·2에서는 `cancelled`로 답하고 안내를 남긴다. 조각 3에서는 Discord에 선택지로 보인다.
+- 취소할 때 대기 중인 permission 요청에는 `{outcome:"cancelled"}`로 답한다(ACP 명세).
+- #8299의 `-p` 변경은 지금 경로(남은 시스템 입력)에 그대로 적용한다. ACP 경로도 같은 플래그를 쓰므로 두 경로의 권한 수준이 같다.
 
 ## 11. 모델
 
@@ -317,7 +350,8 @@ T3 Code(MIT, `c89ca0a2f2c1d996d9b461568860991febaca04f`)는 읽기만 했다. �
 | 업스트림 오류가 `end_turn`으로 옴 | `AntigravityTurnOutcome.ts:88-245` | 조각 3, 읽기 전용 |
 | `refusal`이 쿼터를 뜻함 | `AntigravityTurnOutcome.ts:143-158` | 그대로 |
 | prompt 끝이 턴 끝과 다름(백그라운드) | `AntigravityProtocol.ts:49-66` | 턴은 stopReason으로 닫는다. 턴 밖 출력은 버리고 센다 |
-| 권한과 `interaction_*` | `AntigravityAcpSupport.ts:156-220`, `AntigravityProtocol.ts:68-73` | D1 |
+| 권한과 `interaction_*` | `AntigravityAcpSupport.ts:156-220`, `AntigravityProtocol.ts:68-73` | D1 = A: 플래그와 `allow_once` 자동. `interaction_*`는 조각 3에서 Discord 선택지로 보인다 |
+| prompt 오류 처리 | `adapter.ts:158-185`(다른 에이전트의 busy 재전송), `:9337-9386`(일반 오류는 턴 실패), `:9343-9349`(-32800을 삽입 전 취소로 보는 것은 자체 close 직후에만) | 일반 오류는 재전송하지 않는다. 6.4.1의 ① 목록만 반환한다 |
 | fs read true, write false | `AntigravityAcpSupport.ts:131-139` | 둘 다 false |
 | 모델은 `configOptions`와 `set_config_option` | `AntigravityAcpSupport.ts:238-327` | 그대로 |
 | 편집 위치, 일회용 세션 정리 | `AntigravityEditLocation.ts`, `AntigravitySessionFiles.ts:117-168` | 버림 |
@@ -329,7 +363,7 @@ T3 Code(MIT, `c89ca0a2f2c1d996d9b461568860991febaca04f`)는 읽기만 했다. �
 - **#8274 계속.** ACP 어댑터는 스풀 생산자를 하나 더할 뿐이다. 3절 9~11행은 바뀌지 않는다. 예약 시점 해석(4.3절)만 리뷰 대상이다. steering 입력은 스풀 형식을 바꾸지 않고 턴 영수증의 원본 목록에 들어간다.
 - **#8297 재정의.** 헤드리스 셀(O3~O5)은 보류를 유지한다. agy E2E는 가짜 ACP 에이전트 셀과 사람 확인으로 바꾼다(12절).
 - **#8160 흡수 유지.** #8274 writer로 흡수한다(9절).
-- **#8299 지금 경로에만.** ACP 채널은 D1 정책을 따른다.
+- **#8299 두 경로 모두 같은 권한 수준.** D1 = A로 ACP 경로도 `--dangerously-skip-permissions`와 `allow_once` 자동 응답을 쓴다.
 
 이슈 댓글 초안은 레인 보고서에 있다.
 
@@ -337,38 +371,42 @@ T3 Code(MIT, `c89ca0a2f2c1d996d9b461568860991febaca04f`)는 읽기만 했다. �
 
 | 조각 | 범위 | 소유 파일(prod) | 추정 | 수용 시험 | 운영 확인 |
 |---|---|---|---|---|---|
-| 1. 판정과 ACP 핵심(dormant) | `agy_acp.enabled`(기본 꺼짐), `acp_selected`, JSON-RPC 전송, wire 타입, actor(spawn, initialize, new, prompt, cancel, EOF, 기한, incarnation fence), 4.1절 매핑, 스풀 기록, 사람 작성 플래그 | `agy_acp/{mod,rpc,wire,child,turn}.rs`, `stream_json_turn.rs`, `intake_turn.rs`(인자), `src/config` 한 곳, `services/mod.rs` | 9파일 / +950 | ① **자동 경로 불변:** 스위치가 꺼져 있으면 어떤 agy 턴도 ACP 준비를 부르지 않는다. 켜져 있어도 루틴, `provider_exec`, dispatch, 봇 작성(E2E Test-Announce), 원본 claim이 없는 HTTP 헤드리스, 위임 작업 입력은 `execute_streaming`/`execute_recorded`로 간다. 이것을 생산 진입점 `execute_request`에서 단언한다. ② 가짜 에이전트 fixture로 짧은 답, 긴 답, 빈 답, cancelled, EOF, 기한, 옛 incarnation 응답을 넣어 메시지열과 스풀을 확인한다. ③ 긴 답에서 `-p`와 ACP가 같은 메시지열을 낸다. ④ 공용 세션 칸이 그대로다. | 없음 |
-| 2. 세션 수명과 steering | `session.json`, resume/load/거절, 부팅 orphan 실패, clear·리셋·호스트 복구, 모델, 유휴 만료, **busy 입력 → steering**(`intake_gate/acp_steer.rs`, `busy_inject.rs` 호출, 원본 기록, ➕, 핸드백) | `agy_acp/{store,attach,steer}.rs`, `intake_gate/acp_steer.rs`, `busy_inject.rs`, `control.rs`, `retry_state.rs`, `host_recovery_guard.rs`, `model_picker.rs`, `model_catalog.rs` | 10파일 / +1,000 | 상태 차트 변이와 1:1로 맞춘다. LoadLeak, RerunSent, ClearKeeps, SteerEarlyClose, SteerAfterClose, SteerRefuseDrop을 각각 RED 재현에서 GREEN으로 만든다. steering 입력은 게시 0개 추가, ➕와 `consumed_origin_ids`, 재시작 뒤 catch-up 재실행 0을 확인한다. 거절 resume은 new와 안내 1회, 목록 밖 모델은 실패 1회다. PG 시험은 `pg_throwaway.sh`로 돌린다. | 시험 채널에서 사람이 짧은 답, 긴 답, **실행 중 입력(steer)**, `!stop`, `/clear`, dcserver 재시작 뒤 이어 말하기를 1회씩 확인한다. [U1][U4][U6][U7][U12][U13]을 확정한 뒤 `agy_acp.enabled`를 켠다. |
-| 3. 상호작용과 진단 | permission과 `interaction_*` 중계(D1), 업스트림 오류 판정, `thought_level`, 진단(destination별 자식, incarnation, 턴 밖 출력 수, steer 수와 거절 수) | `agy_acp/{permission,outcome}.rs`, `agy_acp/turn.rs`, 진단 route 한 곳, `model_picker.rs` | 5파일 / +350 | permission 기한 뒤 거절, 취소 때 `cancelled` 응답, 오류 step fixture | 시험 채널에서 권한 승인 1회 |
-| 합계 | | 파일 중복 포함 | 24파일 / +2,300 | | |
+| 1. 판정과 ACP 핵심(dormant) | `agy_acp.enabled`(기본 꺼짐), `acp_selected`, 사람 출처 판정(8절, [U8]), JSON-RPC 전송, wire 타입, actor(spawn, initialize, new, prompt, cancel, EOF, 기한, incarnation fence), **자식 전용 그룹과 `child.json`, 부팅 전 옛 그룹 정리**(5.2-1, 5.2-12), 4.1절 매핑, 스풀 기록 | `agy_acp/{mod,rpc,wire,child,turn}.rs`, `stream_json_turn.rs`, `intake_turn.rs`(인자), `src/config` 한 곳, `services/mod.rs` | 9파일 / +1,050 | ① **자동 경로 불변:** 스위치가 꺼져 있으면 어떤 agy 턴도 ACP 준비를 부르지 않는다. 켜져 있어도 루틴, `provider_exec`, dispatch, 봇 작성(E2E Test-Announce), 원본 claim이 없는 HTTP 헤드리스, 위임 작업 입력은 `execute_streaming`/`execute_recorded`로 간다. 이것을 생산 진입점 `execute_request`에서 단언한다. ② 가짜 에이전트 fixture로 짧은 답, 긴 답, 빈 답, cancelled, EOF, 기한, 옛 incarnation 응답을 넣어 메시지열과 스풀을 확인한다. ③ 긴 답에서 `-p`와 ACP가 같은 메시지열을 낸다. ④ 공용 세션 칸이 그대로다(최초 입력·clear 직후의 None 포함, [U4]). ⑤ **그룹 격리:** 두 destination에 가짜 에이전트(손자 프로세스 하나씩)를 띄우고 한쪽에 hard stop을 하면, 그 자식과 손자만 죽고 시험 부모 프로세스와 다른 destination은 산다. 자식 전용 그룹을 끈 변이에서는 이 시험이 실패한다. ⑥ `child.json`이 맞는 살아 있는 그룹만 부팅 때 정리하고, pid만 같고 시작 시각이 다르면 건드리지 않는다. | 없음 |
+| 2a. 세션 수명 | `session.json`, resume/load/거절, 부팅 orphan 실패, clear·리셋·호스트 복구, 모델, 유휴 만료 | `agy_acp/{store,attach}.rs`, `control.rs`, `retry_state.rs`, `host_recovery_guard.rs`, `model_picker.rs`, `model_catalog.rs`, `recovery_engine/restore_inflight.rs` | 8파일 / +700 | LoadLeak, RerunSent, ClearKeeps를 각각 RED 재현에서 GREEN으로 만든다. 거절 resume은 new와 안내 1회, 목록 밖 모델은 실패 1회다. PG 시험은 `pg_throwaway.sh`로 돌린다. | 시험 채널에서 짧은 답, 긴 답, `!stop`, `/clear`, dcserver 재시작 뒤 이어 말하기를 1회씩 확인한다. [U1][U12]를 닫는다. |
+| 2b. steering | **busy 입력 → steering**(`acp_steer::offer`, 사람 작성 확인), inflight steer 기록(`Member`/`Returning`/`Uncertain`), 오류 분류(6.4.1), Returning 반환과 부팅 복구(6.4.2), 영수증의 원본 확정 | `agy_acp/steer.rs`, `intake_gate/acp_steer.rs`, `busy_inject.rs`, `inflight/model.rs`, `receipt_settle.rs`, `recovery_engine/restore_inflight.rs` | 6파일 / +650 | SteerEarlyClose, SteerAfterClose, SteerRefuseDrop, SteerErrorRequeue, SteerReturnVolatile을 각각 RED에서 GREEN으로 만든다. steering 입력은 게시 0개 추가, ➕와 `consumed_origin_ids`, 재시작 뒤 catch-up 재실행 0. 결과 불명 오류는 재전송 0과 안내 1줄. `Returning`을 쓴 직후 재시작하면 부팅이 그 입력을 큐에 한 번 돌리고 옛 턴의 실패 안내는 그 입력을 덮지 않는다. 봇 작성 입력은 steering하지 않는다. | 시험 채널에서 **실행 중 입력(steer)**과 steer 거절·오류를 프로토콜 로그로 확인한다. [U6][U7][U13]을 닫은 뒤 `agy_acp.enabled`를 켠다. |
+| 3. 상호작용과 진단 | `interaction_*` 중계, 업스트림 오류 판정, `thought_level`, 진단(destination별 자식, incarnation, 턴 밖 출력 수, steer 수, 거절 수, 결과 불명 수) | `agy_acp/{permission,outcome}.rs`, `agy_acp/turn.rs`, 진단 route 한 곳, `model_picker.rs` | 5파일 / +350 | `interaction_*` 기한 뒤 거절, 취소 때 `cancelled` 응답, 오류 step fixture | 시험 채널에서 선택지 질문 1회 |
+| 합계 | | 파일 중복 포함 | 28파일 / +2,750 | | |
 
-- 조각 2의 +1,000은 +1,200 정지선 아래다. 그러나 여유가 적다. 구현 중 +1,100을 넘을 것 같으면 steering(`steer.rs`, `acp_steer.rs`, `busy_inject.rs`)을 조각 2b로 나눈다. 스위치는 2b 운영 확인 뒤 켠다.
+- 조각 1은 +1,050, 2a는 +700, 2b는 +650으로 각각 +1,200 정지선 아래다. 1이 +1,150을 넘을 것 같으면 그룹 격리와 옛 그룹 정리(`child.rs`의 해당 부분)를 1b로 나눈다. 1b가 끝나기 전에는 스위치를 켜지 않는다.
+- 스위치는 2b 운영 확인 뒤 켠다. 2a만 있을 때 실행 중 입력은 지금처럼 큐로 간다(`acp_steer::offer`가 없으므로 기존 `NotSent` 경로).
 - 1,000줄이 넘는 파일(`intake_turn.rs`, `intake_gate.rs`, `provider_dispatch.rs`)에는 인자 전달이나 호출 한 줄만 더하거나 아예 손대지 않는다. 본체는 `agy_acp/`와 `intake_gate/acp_steer.rs`에 둔다.
 - 추정 근거는 #8274 조각 실측(1/+340, 2/+465, 3/+560)과 SDK 조사의 LOC 추정이다. 구현 뒤 `pr_cap_prod.py`로 실측한다.
 
 ## 17. 상태 차트 결과 요약
 
-- **규칙(7개):** 입력마다 게시 1개 이하(`AtMostOnePost`), 받은 입력은 결국 덮임(`EveryInputSettles`), prompt 실행 1회(`NoDuplicateExecution`), 남의 응답으로 닫지 않음(`NoForeignResponse`), clear 뒤 옛 세션 금지(`NoPromptToClearedSession`), 게시에는 내구 종료 기록이 있음(`PostOnlyWithDisposition`), steering 입력 조건 2개(`AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer`).
-- **결과:** 설계 3구성(Design: 상주·resume·steering, DesignLoad, PerTurn)은 7개 규칙을 모두 통과한다. 변이 8개와 합본 1개는 각각 예상한 규칙만 깬다. 12개 구성 모두 `scripts/ci/statecharts_tlc.py`에서 rc=0이다.
-- **도달성:** Design에서 steering 응답과 거절 뒤 재실행이 실제로 일어남을 증인 불변식 위반(rc=12)으로 확인했다.
+- **규칙(안전 8개와 PROPERTY 1개):** 입력마다 게시 1개 이하(`AtMostOnePost`), 받은 입력은 결국 덮임(`EveryInputSettles`, PROPERTY), prompt 실행 1회(`NoDuplicateExecution`), 남의 응답으로 닫지 않음(`NoForeignResponse`), clear 뒤 옛 세션 금지(`NoPromptToClearedSession`), 게시에는 내구 종료 기록이 있음(`PostOnlyWithDisposition`), steering 입력 조건 2개(`AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer`), 보낸 입력의 내구 소유자(`DurableOwner`).
+- **결과:** 설계 3구성(Design: 상주·resume·steering·오류 분류·Returning 반환·옛 자식 정리, DesignLoad, PerTurn)은 모든 규칙을 통과한다. 변이 10개와 합본 1개는 각각 예상한 규칙만 깬다. 14개 구성 모두 `scripts/ci/statecharts_tlc.py`에서 rc=0이다.
+- **1c에 더한 변이:** SteerErrorRequeue(결과 불명 오류를 큐로 돌림)는 `NoDuplicateExecution`을 깬다. SteerReturnVolatile(거절 입력을 메모리로만 돌림)은 `DurableOwner`를 깨고, 재시작 경계를 넘으면 `EveryInputSettles`도 깬다.
+- **도달성:** Design에서 steering 응답, 거절 뒤 재실행, 결과 불명 steer의 턴 게시가 실제로 일어남을 증인 불변식 위반(rc=12)으로 확인했다.
 - 상세는 [보고서](../../statecharts/agy-acp/agy-acp.report.md)에 있다.
 
 ## 18. 사용자 결정과 미확인 가정
 
 - **D0: 닫힘.** 사용자 결정(agy-acp-1123)으로 "사람이 직접 모는 대화형 클라이언트"를 전제로 확정했다. 착수 전 필수 목록에서 뺐다.
-- **D1:** 권한 응답 정책. 사용자 결정 포럼에 올라가 있고, 그 전 기본은 (c)다.
+- **D1: 닫힘, A.** 사용자 결정으로 `--dangerously-skip-permissions`와 `allow_once` 자동 응답을 쓴다(10절).
 - **F1(후속 후보):** antigravity 채널로 들어오는 시스템 입력(위임 작업, dispatch, 봇)의 consumer 로그인 `-p` 실행 처분.
 - **F2(후속 후보):** 실행 중 iMessage의 steering.
-- **[U1]** ACP sessionId가 UUID인가. 조각 2 운영 확인 때 본다.
-- **[U2]** `usage_update`와 `StatusUpdate`의 필드 대응. 프로토콜 로그로 본다.
+- **[U1]** ACP sessionId가 UUID인가. 일반 ACP는 형식을 정하지 않는다. 조각 1의 wire·스풀 경계를 고정하기 전에 실제 `session/new` 결과로 확인한다. 확인 전에는 UUID를 전제하지 않는 문자열로 다룬다.
+- **[U2]** `usage_update`와 `StatusUpdate`의 필드 대응. 프로토콜 로그로 본다. U2·U3·U5·U10은 착수 차단 사유가 아니다. 정해진 fallback과 fixture로 진행하고 실측으로 보완한다.
 - **[U3]** agy가 `max_tokens`·`max_turn_requests`를 실제로 쓰는가. 프로토콜 로그로 본다.
-- **[U4]** 공용 세션 칸이 바이트 단위로 그대로인가. 조각 1 시험으로 본다.
+- **[U4]** 공용 세션 칸이 바이트 단위로 그대로인가. 기존 ID뿐 아니라 최초 입력과 clear 직후의 None도 보존해야 한다. 기존 Init 처리는 `Some(sid)`를 쓰므로 "요청 값을 그대로 돌려줌"의 표현을 조각 1에서 정하고 시험으로 닫는다.
 - **[U5]** spawn 비용. 조각 2에서 측정한다.
-- **[U6]** app-data-dir를 분리할지 공유할지. 조각 2 사람 확인으로 정한다.
-- **[U7]** `_meta.antigravity.systemPrompt.append` 지원 여부. initialize 로그로 본다.
-- **[U8]** 큐 재구성 입력의 사람 증거. 조각 1에서 본다.
-- **[U9]** agy의 ACP v2 이행. initialize의 `protocolVersion`이 1이 아니면 거절하고 경보를 낸다.
+- **[U6]** app-data-dir를 분리할지 공유할지. 기본값인 분리로 진행한다. 공유로 바꾸려면 조각 2a의 세션 store·attach 계약을 고정하기 전에 검증한다.
+- **[U7]** `_meta.antigravity.systemPrompt.append` 지원 여부. 조각 1 fixture에 지원·미지원 분기를 넣고, 실제 capability는 스위치를 켜기 전에 initialize 로그로 본다.
+- **[U8]** 큐에서 복원된 입력의 사람 증거. 조각 1의 자격 판정을 구현하기 전에 내구 증거와 전달 경로(큐 기록 → `queued_submission` → ACP 판정)를 정한다. 1b의 근거로 든 `queued.rs:496,583`은 `#[cfg(test)]` fixture라 근거가 아니다. 출처를 모르면 ACP 미자격이다.
+- **[U9]** agy의 ACP v2 이행. initialize의 `protocolVersion`이 1이 아니면 거절하고 경보를 낸다. 조각 1 fixture에 비호환 분기를 넣는다.
 - **[U10]** `agentInfo.version` 형식. steering을 버전으로 게이트하지 않으므로 기록만 한다.
 - **[U11]** 대화 DB의 위치와 스키마. 조각 3 전에 읽기 전용으로 확인한다.
-- **[U12]** 재시작 전 세션이 새 자식에서 resume되는가. 조각 2 사람 확인으로 본다.
-- **[U13]** 실제 steering 응답 형태(앞 prompt `end_turn`, 새 prompt가 턴을 이어 감). 공식 문서는 한 문장뿐이고, 형태는 T3 코드 주석에 근거한다. 조각 2 운영 확인 때 프로토콜 로그로 확인한다. 어느 형태든 6.2-5 규칙으로 같은 결과가 나도록 설계했다.
+- **[U12]** 재시작 전 세션이 새 자식에서 resume되는가. 조각 2a의 resume 운영 확인에서 닫는다. 스위치를 켜기 전에 끝내야 한다.
+- **[U13]** 실제 steering 응답 형태와 오류 형태. 공식 문서는 한 문장뿐이고, 형태는 T3 코드 주석에 근거한다. 조각 2b 운영 확인 때 프로토콜 로그로 앞 prompt 응답, 새 prompt 응답, 거절, 취소의 실제 wire 순서를 확정한다. 여기에는 6.4.1의 오류 분류가 들어간다. agy가 steer prompt에 어떤 오류 코드를 쓰는지, 그 코드가 실행 전 거절을 뜻하는지 확인한다. 확인 전에는 ① 목록을 넓히지 않는다. 스위치를 켜기 전에 끝내야 한다. 어느 응답 형태든 6.2-5 규칙으로 같은 결과가 나도록 설계했다. 답이 steer를 의미상 무시했는지 자동으로 감지하는 보장은 없다.
+- **[U14]** `agy acp`가 stdin EOF에서 스스로 끝나는가. 끝나지 않아도 5.2-12의 그룹 정리가 처리하지만, 정상 종료 시간(2초 기다림)을 정하는 데 쓴다. 조각 1 운영 전 로컬 확인(prompt 없이 initialize 뒤 stdin 닫기)으로 본다.

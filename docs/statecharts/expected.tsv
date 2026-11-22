@@ -19,7 +19,9 @@ agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution	-
 agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,PostOnlyWithDisposition	-
 agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,PostOnlyWithDisposition	-
+agy-acp/AgyAcpSteerErrorRequeue.cfg	AgyAcpSession	NoDuplicateExecution	-
 agy-acp/AgyAcpSteerRefuseDrop.cfg	AgyAcpSession	NoAnswerForRefusedSteer	-
+agy-acp/AgyAcpSteerReturnVolatile.cfg	AgyAcpSession	DurableOwner	EveryInputSettles
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 campaign-execution/CampaignApprovalGate.cfg	CampaignApprovalGate	-	-
