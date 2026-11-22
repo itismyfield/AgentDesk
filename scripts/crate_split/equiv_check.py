@@ -44,6 +44,9 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import equiv_class  # noqa: E402
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11 falls back to a [features] key scan.
@@ -57,20 +60,6 @@ MINGW_INCLUDE = "/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32
 OLD_MOVED, NEW_MOVED = "\x1b[35m", "\x1b[36m"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-USE_START = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s")
-MOD_DECL = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+\w+\s*;")
-ATTR_LINE = re.compile(r"^\s*#\[.*\]\s*$")
-# String literals stay whole, so `pub` or `a::b` inside one is never normalized away.
-TOKEN = re.compile(r'b?r(#*)"[\s\S]*?"\1|b?"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*|::|\S')
-ITEM_KW = r"(?:fn|struct|enum|union|trait|type|const|static|mod|use|impl|macro_rules!)\b"
-QUALS = r'(?:(?:async|const|unsafe|default|safe|extern(?:\s+"[^"]*")?)\s+)*'
-VIS = r"pub(?:\s*\([^)]*\))?"
-# The one place a declaration carries its visibility: before the item keyword, or before a field name.
-DECL_VIS = {"item": re.compile(r"^(\s*)" + VIS + r"\s+(?=" + QUALS + ITEM_KW + r")"),
-            "field": re.compile(r"^(\s*)" + VIS + r"\s+(?=(?:r#)?[A-Za-z_]\w*\s*:(?!:))")}
-TUPLE_STRUCT = re.compile(r"^\s*(?:" + VIS + r"\s+)?struct\s+\w+(?:<[^(]*>)?\s*\(")
-ITEM_NAME = re.compile(r"^\s*(?:" + VIS + r"\s+)?" + QUALS +
-                       r"(?:fn|struct|enum|union|trait|type|const|static|mod|macro_rules!)\s+(?:r#)?([A-Za-z_]\w*)")
 PLATFORM_WORD = re.compile(r"\b(?:unix|windows|target_os|target_family)\b")
 PLATFORM_CFG = re.compile(
     r"cfg!?\s*\(.*\b(?:unix|windows|target_os|target_family)\b|std::os::(?:unix|windows)"
@@ -104,15 +93,6 @@ class Line:
     text: str
     moved: bool
     kind: str = ""
-    # moved as whole items (functions, impls, modules), not statements reordered inside a body
-    item_move: bool = False
-
-
-@dataclass
-class Run:
-    path: str
-    lines: list = field(default_factory=list)
-    verdict: str = ""
 
 
 def git(repo: str, *args: str, check: bool = True) -> str:
@@ -199,346 +179,38 @@ def diff_lines(repo: str, base: str, head: str, paths) -> list:
     return result
 
 
-def use_mod_lines(lines: list) -> set:
-    """1-based numbers of lines inside use items, mod declarations and their attributes."""
-    marked, i = set(), 0
-    while i < len(lines):
-        start = i
-        while i < len(lines) and ATTR_LINE.match(lines[i]):
-            i += 1
-        if i < len(lines) and (USE_START.match(lines[i]) or MOD_DECL.match(lines[i])):
-            end = i
-            while end < len(lines) and ";" not in lines[end]:
-                end += 1
-            marked.update(range(start + 1, end + 2))
-            i = end + 1
-        else:
-            i = max(i, start + 1)
-    return marked
-
-
-def path_exprs(tokens: list) -> list:
-    """[(prefix, name)] for every token once `a::b::c` paths are folded into ((a, b), c)."""
-    out, prefix, joining = [], (), False
-    for tok in tokens:
-        if tok == "::":
-            if out and not joining:
-                before, name = out.pop()
-                prefix = before + (name,)
-            joining = True
-        elif joining:
-            out.append((prefix, tok))
-            prefix, joining = (), False
-        else:
-            out.append(((), tok))
-    return out
-
-
-def strip_paths(tokens: list) -> list:
-    """Collapses `a::b::c` to `c`, so only the named item has to stay the same."""
-    return [name for _, name in path_exprs(tokens)]
-
-
-def tokens_of(lines: list) -> list:
-    return [m.group(0) for m in TOKEN.finditer(" ".join(line.text for line in lines))]
-
-
-def strip_decl_vis(text: str, context) -> tuple:
-    """Tokens of the line without the visibility of the item or field it declares (and of one-line tuple
-    fields). `context` says what the line is ('item', 'field'); anything else (a macro token tree, an
-    expression) keeps its `pub`. Tokens keep string literals whole, whitespace inside them included."""
-    if context in DECL_VIS:
-        text = DECL_VIS[context].sub(r"\1", text, count=1)
-    m = TUPLE_STRUCT.match(text) if context == "item" else None
-    if m:
-        text = text[:m.end()] + re.sub(r"(^|,)(\s*)" + VIS + r"\s+", r"\1\2", text[m.end():])
-    return tuple(t.group(0) for t in TOKEN.finditer(text))
-
-
-def vis_only(removed: list, added: list, context) -> bool:
-    """Line pairs that differ only in the visibility modifier of a real declaration (vistool's whole output):
-    both lines are an item at item level or a field of a struct body, never inside a macro call or body."""
-    for r, a in zip(removed, added):
-        kind = context(r)
-        if kind is None or context(a) != kind or strip_decl_vis(r.text, kind) != strip_decl_vis(a.text, kind):
-            return False
-    return bool(removed) and len(removed) == len(added)
-
-
-def scopes(lines: list) -> list:
-    """Per line (index 0 = line 1, plus one past the end): (brace depth, every open brace is an item
-    container — module, impl, trait, extern block —, innermost brace kind 'container' | 'struct' | 'other'
-    | None, open `(`/`[` depth). Strings, chars and comments are skipped."""
-    out, stack, header, block, parens = [], [], "", False, 0
-    snap = lambda: (len(stack), all(k == "container" for k in stack), stack[-1] if stack else None, parens)
-    for line in lines:
-        out.append(snap())
-        i = 0
-        while i < len(line):
-            ch, two = line[i], line[i:i + 2]
-            if block:
-                if two == "*/":
-                    block, i = False, i + 2
-                else:
-                    i += 1
-                continue
-            if two == "//":
-                break
-            if two == "/*":
-                block, i = True, i + 2
-                continue
-            lit = re.match(r'b?r(#*)"[\s\S]*?"\1|b?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\\\'])\'', line[i:])
-            if lit:
-                i += lit.end()
-                continue
-            if ch == "{":
-                fn = re.search(r"\bfn\b|!", header)
-                kind = "container" if re.search(r"\b(?:mod|impl|trait)\b|\bextern\b", header) and not fn else \
-                    "struct" if re.search(r"\b(?:struct|union)\b", header) and not fn else "other"
-                stack.append(kind)
-                header = ""
-            elif ch == "}":
-                if stack:
-                    stack.pop()
-                header = ""
-            elif ch in "([":
-                parens += 1
-            elif ch in ")]":
-                parens = max(parens - 1, 0)
-            elif ch == ";":
-                header = ""
+def known_crates(tree: Tree, paths) -> set:
+    """Crate names a path may start with: std's, and every dependency and package of the nearest manifests."""
+    names = set(equiv_class.STD_CRATES)
+    for path in {nearest_manifest(tree, p) for p in paths} | {"Cargo.toml"}:
+        text = tree.text(path) if path else None
+        if not text:
+            continue
+        for table in ("dependencies", "dev-dependencies", "build-dependencies", "package", "workspace"):
+            data = manifest_table(text, table)
+            if table == "package":
+                names.add(str(data.get("name", "")).replace("-", "_"))
+            elif table == "workspace":
+                names.update(k.replace("-", "_") for k in data.get("dependencies", {}))
             else:
-                header += ch
-            i += 1
-        header += " "
-    out.append(snap())
-    return out
+                names.update(k.replace("-", "_") for k in data)
+    return names - {""}
 
 
-def decl_context(info) -> str:
-    """'item' (item level, no open paren), 'field' (directly in a struct body), else None."""
-    depth, item_level, inner, parens = info
-    if parens:
-        return None
-    if item_level:
-        return "item"
-    return "field" if inner == "struct" and depth >= 1 else None
-
-
-def mark_item_moves(entries: list, base: "Tree", head: "Tree") -> dict:
-    """Set `item_move` on moved Rust lines that form whole items at item level; returns {item name:
-    [(old module, new module)]} for names that left one module and arrived in another.
-    git's moved colouring alone also covers statements swapped inside one function (KR-C1 review P2-1)."""
-    blocks, current = [], None
-    for entry in entries:
-        if entry is None or not entry.moved or not entry.path.endswith(".rs"):
-            current = None
+def classify(repo, files, base: Tree, head: Tree) -> "equiv_class.Verdict":
+    """The allow-list class (equiv_class.py) of the Rust files, and C for any manifest or other file."""
+    rust = [p for _, p in files if p.endswith(".rs")]
+    modules = {(side, p): tuple(module_of(tree, p).split("::")) for side, tree in (("-", base), ("+", head))
+               for p in rust}
+    crates = known_crates(base, rust) | known_crates(head, rust)
+    verdict = equiv_class.classify({p: base.text(p) for p in rust}, {p: head.text(p) for p in rust}, modules, crates)
+    for status, path in files:
+        if path.endswith(".rs") or matches(path, GENERATED):
             continue
-        if current and (current[-1].side, current[-1].path, current[-1].lineno + 1) == (entry.side, entry.path, entry.lineno):
-            current.append(entry)
-        else:
-            current = [entry]
-            blocks.append(current)
-    cache, names = {}, {"-": collections.defaultdict(set), "+": collections.defaultdict(set)}
-    for block in blocks:
-        side, path = block[0].side, block[0].path
-        if (side, path) not in cache:
-            cache[(side, path)] = scopes((base if side == "-" else head).lines(path))
-        info = cache[(side, path)]
-        first, last = block[0].lineno, block[-1].lineno
-        if last >= len(info):
-            continue
-        depth, item_level = info[first - 1][:2]
-        inside = [info[k][0] for k in range(first - 1, last + 1)]
-        if item_level and info[last][0] == depth and min(inside) >= depth:
-            module = tuple(module_of(base if side == "-" else head, path).split("::"))
-            for entry in block:
-                entry.item_move = True
-                found = ITEM_NAME.match(entry.text)
-                if found and info[entry.lineno - 1][1]:
-                    names[side][found.group(1)].add(module)
-    return {name: [(old, new) for old in names["-"][name] for new in names["+"][name]]
-            for name in names["-"] if name in names["+"]}
-
-
-def path_fits(prefix, module: tuple, own: tuple) -> bool:
-    """Whether a written path prefix can name `module`: its segments end the module path; an unqualified
-    name only names the module of the file it is written in."""
-    segs = tuple(s for s in prefix if s not in ("crate", "self", "super"))
-    return module[-len(segs):] == segs if segs else module == own
-
-
-def moved_between(name, old_prefix, new_prefix, moves: dict, old_own: tuple, new_own: tuple) -> bool:
-    """A changed path is a move fix-up only when it names the moved item's own old and new module."""
-    return any(path_fits(old_prefix, old, old_own) and path_fits(new_prefix, new, new_own)
-               for old, new in moves.get(name, []))
-
-
-def use_bindings(text: str) -> dict:
-    """{bound name: path} of one `use` statement (braces flattened, `as` honoured); a glob is `*<path>`."""
-    body = re.sub(r"^\s*(?:" + VIS + r"\s+)?use\s+", "", text).split(";")[0]
-    toks = re.findall(r"(?:r#)?\w+|::|[{},*]", body)
-    out = {}
-
-    def tree(i, prefix):
-        path = list(prefix)
-        while i < len(toks):
-            t = toks[i]
-            if t == "::":
-                i += 1
-            elif t == "{":
-                i += 1
-                while i < len(toks) and toks[i] != "}":
-                    i = i + 1 if toks[i] == "," else max(tree(i, path), i + 1)
-                return i + 1
-            elif t == "*":
-                out["*" + "::".join(path)] = "::".join(path)
-                return i + 1
-            elif t in ",}":
-                return i
-            else:
-                path.append(t)
-                i += 1
-                if i < len(toks) and toks[i] == "::":
-                    continue
-                bound = path[-1]
-                if i + 1 < len(toks) and toks[i] == "as":
-                    bound, i = toks[i + 1], i + 2
-                if path[-1] == "self" and len(path) > 1:
-                    path.pop()
-                    bound = path[-1] if bound == "self" else bound
-                out[bound] = "::".join(path)
-                return i
-        return i
-
-    tree(0, ())
-    return out
-
-
-def use_statements(lines: list) -> dict:
-    """1-based line -> text of the `use` statement it belongs to."""
-    out, i = {}, 0
-    while i < len(lines):
-        if USE_START.match(lines[i]):
-            end = i
-            while end < len(lines) and ";" not in lines[end]:
-                end += 1
-            text = " ".join(lines[i:end + 1])
-            for k in range(i, end + 1):
-                out[k + 1] = text
-            i = end + 1
-        else:
-            i += 1
-    return out
-
-
-def rebound_files(entries: list, base: "Tree", head: "Tree", moves: dict) -> set:
-    """Files where a `use` change can resolve a name differently: an existing name bound to another path
-    (unless it is a moved item's own old -> new module), or a glob added, dropped or retargeted in a file
-    that exists on both sides (KR-C1 review P2-1, VT2 review P1-3/P1-4)."""
-    before, after, cache = collections.defaultdict(dict), collections.defaultdict(dict), {}
-    for e in entries:
-        if e is None or e.kind != "usemod":
-            continue
-        key = (e.side, e.path)
-        if key not in cache:
-            cache[key] = use_statements((base if e.side == "-" else head).lines(e.path))
-        if e.lineno in cache[key]:
-            (before if e.side == "-" else after)[e.path].update(use_bindings(cache[key][e.lineno]))
-    out = set()
-    for path in set(before) | set(after):
-        b, a = before.get(path, {}), after.get(path, {})
-        if base.text(path) is not None and head.text(path) is not None and \
-                {k for k in b if k.startswith("*")} != {k for k in a if k.startswith("*")}:
-            out.add(path)
-            continue
-        own = (tuple(module_of(base, path).split("::")), tuple(module_of(head, path).split("::")))
-        for name, target in b.items():
-            if name.startswith("*") or name not in a or a[name] == target:
-                continue
-            if not moved_between(name, target.split("::")[:-1], a[name].split("::")[:-1], moves, *own):
-                out.add(path)
-    return out
-
-
-def classify_runs(entries: list, base: Tree, head: Tree):
-    moves = mark_item_moves(entries, base, head)
-    runs, current = [], None
-    marks, scope_cache = {}, {}
-
-    def context(entry):
-        key = (entry.side, entry.path)
-        if key not in scope_cache:
-            scope_cache[key] = scopes((base if entry.side == "-" else head).lines(entry.path))
-        info = scope_cache[key]
-        return decl_context(info[entry.lineno - 1]) if entry.lineno <= len(info) else None
-
-    for entry in entries:
-        if entry is None:
-            current = None
-            continue
-        if current is None or current.path != entry.path:
-            current = Run(entry.path)
-            runs.append(current)
-        current.lines.append(entry)
-        tree = base if entry.side == "-" else head
-        stripped = entry.text.strip()
-        # Manifests and other files first: git's moved colouring never makes them a move (VT2 review P1-5).
-        if matches(entry.path, GENERATED):
-            entry.kind = "generated"
-        elif matches(entry.path, MANIFESTS):
-            entry.kind = "manifest"
-        elif not entry.path.endswith(".rs"):
-            entry.kind = "other"
-        elif entry.item_move:
-            entry.kind = "moved"
-        elif not stripped or stripped.startswith("//"):
-            entry.kind = "comment"
-        else:
-            key = (entry.side, entry.path)
-            if key not in marks:
-                marks[key] = use_mod_lines(tree.lines(entry.path))
-            entry.kind = "usemod" if entry.lineno in marks[key] else "code"
-    rebound = rebound_files(entries, base, head, moves)
-    for run in runs:
-        rest = [line for line in run.lines if line.kind in ("usemod", "code", "other", "manifest")]
-        removed = [line for line in rest if line.side == "-"]
-        added = [line for line in rest if line.side == "+"]
-        code_r = [line for line in removed if line.kind != "usemod"]
-        code_a = [line for line in added if line.kind != "usemod"]
-        if not rest:
-            run.verdict = "neutral"
-        elif any(line.kind in ("other", "manifest") for line in rest):
-            run.verdict = "C"
-        elif vis_only(removed, added, context):
-            run.verdict = "vis"
-        elif not code_r and not code_a:
-            # A use/mod edit may add or drop bindings; pointing a name at another item is C.
-            run.verdict = "C" if run.path in rebound else "usemod"
-        elif same_items(code_r, code_a, moves, base, head, run.path):
-            run.verdict = "path"
-        else:
-            run.verdict = "C"
-    return runs
-
-
-def same_items(removed: list, added: list, moves: dict, base: Tree, head: Tree, path: str) -> bool:
-    """Path-only rewrite: same tokens once paths fold, and every path that changed names a moved item's own
-    old and new module (a namesake elsewhere is not enough, VT2 review P1-4)."""
-    old, new = path_exprs(tokens_of(removed)), path_exprs(tokens_of(added))
-    if [n for _, n in old] != [n for _, n in new]:
-        return False
-    own = (tuple(module_of(base, path).split("::")), tuple(module_of(head, path).split("::")))
-    return all(p == q or moved_between(n, p, q, moves, *own) for (p, n), (q, _) in zip(old, new))
-
-
-def overall_class(runs: list, entries: list) -> str:
-    verdicts = {run.verdict for run in runs}
-    if "C" in verdicts:
-        return "C"
-    if any(e is not None and e.item_move for e in entries) or verdicts & {"usemod", "path"}:
-        return "move"
-    return "vis" if "vis" in verdicts else "move"
+        kind = "manifest" if matches(path, MANIFESTS) else "non-Rust file"
+        verdict.c(path, 0, f"{kind} changed ({status})")
+        verdict.klass = "C"
+    return verdict
 
 
 def test_names(tree: Tree, path: str) -> list:
@@ -776,8 +448,8 @@ def main(argv=None) -> int:
         print(f"EQUIV_FAIL git ({err})")
         return 2
     lines = [e for e in entries if e is not None]
-    runs = classify_runs(entries, base, head)
-    klass = overall_class(runs, entries)
+    verdict = classify(repo, files, base, head)
+    klass = verdict.klass
     removed, added, moved_tests, test_count = check_tests(files, base, head)
     dest_files = {e.path for e in lines if e.moved and e.side == "+" and e.path.endswith(".rs")}
     dest_files |= {p for s, p in files if s == "A" and p.endswith(".rs")}
@@ -802,12 +474,10 @@ def main(argv=None) -> int:
         rows.append(("a cargo", "PASS" if ok else "FAIL", detail))
         if not ok:
             failed.append("a")
-    counts = collections.Counter(e.kind for e in lines)
-    verdicts = collections.Counter(run.verdict for run in runs)
     class_ok = args.require is None or klass == args.require
     rows.append(("b class", klass if class_ok else f"FAIL ({klass}, required {args.require})",
-                 " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + " | runs "
-                 + " ".join(f"{k}={v}" for k, v in sorted(verdicts.items()))))
+                 f"units moved={verdict.moved} inplace={verdict.inplace} vis={verdict.vis} paths={verdict.paths} "
+                 f"uses={verdict.uses} moddecl={verdict.moddecls} | C={len(verdict.reasons)}"))
     if not class_ok:
         failed.append("b")
     tests_ok = not removed and (args.allow_added_tests or not added)
@@ -834,11 +504,10 @@ def main(argv=None) -> int:
     print("| check | result | detail |\n|---|---|---|")
     for check, result, detail in rows:
         print(f"| {check} | {result} | {detail} |")
-    print("\n## b. non-moved line evidence (run verdict, side, file:line, text)")
-    for run in runs:
-        for line in run.lines:
-            if line.kind in ("code", "usemod", "other"):
-                print(f"{run.verdict:7s} {line.side} {line.path}:{line.lineno} [{line.kind}] {line.text.strip()}")
+    if verdict.reasons:
+        print("\n## b. why not move/vis (file:line, reason)")
+        for path, lineno, why in verdict.reasons:
+            print(f"C       {path}:{lineno} {why}")
     for title, items in (
         ("c. moved tests (name, from, to)", moved_tests),
         ("d. missing features (file, feature, manifest)", missing),

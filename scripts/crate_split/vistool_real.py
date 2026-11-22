@@ -24,6 +24,7 @@ import vistool as vt
 
 def workspace_members(repo):
     """{member dir relative to repo ('.' for the root package): (manifest, parsed toml)}."""
+    repo = Path(repo).resolve()  # a symlinked path (macOS /var -> /private/var) must match resolved manifests
     try:
         packages = vt.rts.workspace_packages(repo)
     except (ValueError, OSError) as exc:

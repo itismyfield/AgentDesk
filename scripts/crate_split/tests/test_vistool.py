@@ -627,6 +627,20 @@ class RealMode(unittest.TestCase):
                     self.assertEqual(vistool.main(argv), 2)
                 self.assertTrue(buf.getvalue().startswith("VISTOOL_FAIL no_member mode=real "), buf.getvalue())
 
+    def test_symlinked_workspace_path(self):
+        # VT2 fix1 review P1-5: macOS temp dirs are symlinks (/var -> /private/var); a symlinked repo path
+        # must resolve like the real one.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = real_repo(Path(tmp))
+            link = Path(tmp) / "ws_link"
+            link.symlink_to(repo, target_is_directory=True)
+            self.assertEqual(sorted(vistool_real.workspace_members(link)), ["lower", "upper"])
+            members = vistool_real.workspace_members(link)
+            layout = vistool_real.RealLayout(link, members, "lower", "upper", "lower")
+            self.assertEqual(layout.side_of("lower/src/core.rs", 3), "x")
+            res = vistool_real.RealResolver(link, members, "lower", "upper")
+            self.assertEqual(res.rel("lower/src/core.rs", link), ("lower", "lower/src/core.rs"))
+
     def test_layout_and_resolver_split_by_member(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, _ = real_repo(Path(tmp))
@@ -752,9 +766,10 @@ class EndToEnd(unittest.TestCase):
             app = (repo / "src/app.rs").read_text()
             ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                  apply=True, log=lambda *a, **k: None)
+            self.assertTrue(ok, (line, manifest.get("fail"), manifest.get("unresolved")))
             self.assertEqual((repo / "src/app.rs").read_text(), app)
             self.assertNotIn("src/app.rs", {e["file"] for e in manifest["final_edits"]})
-            self.assertNotRegex(line, r" cut_residue=0 ", (line, manifest.get("fail")))
+            self.assertEqual(manifest["residue"]["cut_residue"]["count"], 1, line)
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
