@@ -1028,9 +1028,11 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
             log(f"vistool: iter={iters} lower_err={len(low_err)} vis={vis_count} edits={len(edits)} "
                 f"unresolved={len(unresolved)} lower={low_s}s upper={up_s}s", file=sys.stderr)
             manifest["unresolved"] = unresolved
-            manifest["residue"] = {k: {"count": len(residue.get(k, [])), "scope": SCOPE[k],
-                                       "first": [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
-                                                 for d in residue.get(k, [])[:20]]} for k in RESIDUES}
+            if up_s or not manifest["residue"]:
+                # Residue comes from the last round upper ran in; a lower-only round must not erase it.
+                manifest["residue"] = {k: {"count": len(residue.get(k, [])), "scope": SCOPE[k],
+                                           "first": [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
+                                                     for d in residue.get(k, [])[:20]]} for k in RESIDUES}
             if low_err:
                 manifest["lower_errors"] = [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
                                             for d in low_err[:20]]
