@@ -1607,6 +1607,7 @@ src/
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── replacement.rs
 │   │   │   ├── replacement_tests.rs
+│   │   │   ├── row.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
 │   │   │   ├── cancel_backstop_tests/
@@ -2071,6 +2072,7 @@ src/
 │   │   │   ├── restart_mark_tests.rs
 │   │   │   ├── row_removed.rs
 │   │   │   ├── row_removed_tests.rs
+│   │   │   ├── runtime_view.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -2446,7 +2448,8 @@ src/
 │   │   │   ├── permit_tests.rs
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── recovery.rs
-│   │   │   └── recovery_tests.rs
+│   │   │   ├── recovery_tests.rs
+│   │   │   └── row.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
