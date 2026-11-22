@@ -258,3 +258,44 @@ async fn keyed_teardown_admits_only_a_found_legacy_row_pg() {
     assert_eq!(failed.await, None, "a failed lookup is not a legacy answer");
     db.drop().await;
 }
+
+// A thread under a Herdr parent holding a legacy `host:tmux` key is not held for want of a
+// token: with its tmux alive it gets the verdict a plain channel's legacy row gets.
+#[tokio::test]
+async fn a_legacy_keyed_thread_under_a_herdr_parent_is_judged_as_a_plain_channel_pg() {
+    use crate::services::session_host::host_decision::force_presence_for_test;
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (parent, plain, thread) = (8_118_460, 8_118_461, 8_118_462);
+    let _hosts = crate::config::session_hosts::force_for_test(None, &[(parent, "mac-mini")]);
+    let _thread = force_relation_for_test(thread, Relation::Child { parent });
+    let claude = ProviderKind::Claude;
+    let mut verdicts = Vec::new();
+    for (channel, tmux) in [
+        (plain, "s1b-fix-legacy-plain"),
+        (thread, "s1b-fix-legacy-thread"),
+    ] {
+        let key = format!("mac-mini:{tmux}");
+        seed_session_row_keyed(&pool, &key, channel, None).await;
+        force_presence_for_test(
+            tmux,
+            crate::services::platform::tmux::SessionPresence::Present,
+        );
+        let cleared = clear_channel_session(Some(&pool), &claude, channel, Some(&key), tmux, "a6");
+        verdicts.push(cleared.await.map(|session| session.name().to_string()));
+    }
+    assert_eq!(
+        verdicts[0].as_deref(),
+        Some("s1b-fix-legacy-plain"),
+        "the plain legacy row"
+    );
+    assert_eq!(
+        verdicts[1].as_deref(),
+        Some("s1b-fix-legacy-thread"),
+        "the thread is not held"
+    );
+    pool.close().await;
+    db.drop().await;
+}

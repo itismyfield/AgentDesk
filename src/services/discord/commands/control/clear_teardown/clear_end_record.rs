@@ -34,15 +34,15 @@ pub(super) struct Captured {
 }
 
 /// Captures a Claude, non-Herdr pane whose clear holds the channel's transition guard.
+/// `herdr`: the channel's operation acts on a Herdr execution now.
 pub(super) fn capture_for(
     provider: &ProviderKind,
-    channel: u64,
+    (channel, herdr): (u64, bool),
     tmux: &str,
     transition: &Option<OwnedMutexGuard<()>>,
 ) -> Option<Captured> {
     let guarded = transition.is_some();
     let claude = matches!(provider, ProviderKind::Claude);
-    let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
     (guarded && claude && !herdr)
         .then(|| capture(channel, tmux))
         .flatten()

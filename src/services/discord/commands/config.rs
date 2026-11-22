@@ -308,11 +308,12 @@ fn runtime_model_for_turn(
 mod effort;
 mod provider_settings;
 pub(in crate::services::discord) use effort::{
-    channel_effort_level, effort_entry_choices, update_channel_effort, validate_effort_entry,
+    channel_effort_level, effort_entry_choices, herdr_now, update_channel_effort,
+    validate_effort_entry,
 };
 pub(in crate::services::discord) use provider_settings::{
-    claude_local_tui_relaunch_applies, update_channel_codex_goals, update_channel_fast_mode,
-    update_channel_model_override,
+    claude_local_tui_relaunch_applies, pending_relaunch, update_channel_codex_goals,
+    update_channel_fast_mode, update_channel_model_override,
 };
 
 pub(in crate::services::discord) fn would_channel_model_override_change(

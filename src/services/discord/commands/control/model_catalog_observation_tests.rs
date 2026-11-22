@@ -349,7 +349,9 @@ fn model_catalog_new_model_save_cancels_previous_observation_after_failed_launch
         );
         assert!(
             crate::services::discord::commands::config::claude_local_tui_relaunch_applies(
-                &provider, channel
+                &provider,
+                channel,
+                &crate::services::session_host::host_decision::HostDecision::Tmux
             )
         );
         assert!(

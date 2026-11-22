@@ -10,6 +10,13 @@ pub(crate) fn install_policy_channel(read: fn(u64) -> u64) {
 }
 
 pub(crate) fn policy_channel(channel: u64) -> u64 {
+    // A thread forced as a child follows its forced parent, as the boot view's would.
+    #[cfg(test)]
+    if let Some(Relation::Child { parent }) =
+        FORCED_RELATIONS.with(|forced| forced.borrow().get(&channel).copied())
+    {
+        return parent;
+    }
     POLICY_CHANNEL.get().map_or(channel, |read| read(channel))
 }
 
