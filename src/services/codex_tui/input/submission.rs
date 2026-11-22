@@ -72,7 +72,7 @@ async fn enqueue_draft_notice(
     };
     use sha2::{Digest, Sha256};
     let key = format!("codex-draft:{:x}", Sha256::digest(event.as_bytes()));
-    let text = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(
         "Codex에 입력을 전달했습니다. 기존 초안의 보존 여부는 확인하지 못했습니다.",
     );
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(

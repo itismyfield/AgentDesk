@@ -113,7 +113,9 @@ pub(crate) fn user_submitted_is_stale_stranded(
 #[cfg(unix)]
 pub(crate) fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
     let activity_nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name);
+        crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
+            tmux_session_name,
+        );
     if activity_nanos <= 0 {
         return 0;
     }

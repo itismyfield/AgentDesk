@@ -360,11 +360,6 @@ pub(crate) async fn session_key_refusal(
     refusal(pool, provider, channel, session_key, tmux_name).await
 }
 
-/// The marker-only check retained for cancel-token cleanup's separate teardown path.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    crate::services::session_host::operation_policy::marker_refusal(tmux_name)
-}
-
 /// [`session_key_refusal`] on a stored row's provider and channel columns.
 pub(crate) async fn row_refusal(
     pool: &PgPool,

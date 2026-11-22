@@ -24,7 +24,7 @@ dispatch 실행 중에도 재시작하고(3.3), `!clear`는 새 세션이 뜨는
 ## 1. 기준선과 진입점 전수표
 
 선행 O-a의 shared child reader/store 준비는 main의 `aa630a5bbf9179452de42704d60a9b6167aeddcc`에 있으며
-`src/services/tui_o/store/thread_children.rs:15`의 verified surface/activation guard를 그대로 사용한다.
+`src/services/tui_o/store/thread_children.rs:17`의 verified surface/activation guard를 그대로 사용한다.
 S3의 continuation custody/barrier는 main의 `51508b1f8ec75f0cb6254ce49a3d46442ec7e6bc`에 있으며
 `src/services/turn_orchestrator/queued_head/v2/effort_continue.rs:17`은 verified caller만 intent를 만들게 한다.
 두 커밋은 기준 HEAD의 ancestor임을 확인했다. 준비된 store·owner original/ticket·barrier 기구를 재구현하지 않는다.

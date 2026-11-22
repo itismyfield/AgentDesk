@@ -194,14 +194,14 @@ Implementation source SHA `efe1ba3647bea52f0a6dc19b662eaf17219d3316`. B measure 
 
 | Model value/action | Production coordinate |
 |---|---|
-| usage crossing / pending callback | src/services/claude_compact_trigger.rs:356 |
-| generation / occupancy / captured authority | src/services/claude_compact_trigger.rs:229 |
+| usage crossing / pending callback | src/services/claude_compact_trigger.rs:358 |
+| generation / occupancy / captured authority | src/services/claude_compact_trigger.rs:231 |
 | source / Start / file identity capture | src/services/claude_tui/readiness/compact.rs:22 |
 | terminal-only / reserve-current / D / pre-Enter | src/services/claude_tui/readiness/compact.rs:40 |
 | event hint / 250ms timer | src/services/claude_tui/readiness/compact.rs:147 |
 | wake after hook ledger guard release | src/services/claude_tui/readiness/mod.rs:277 |
 | blocking composer witness | src/services/claude_tui/composer_lock.rs:80 |
-| completed absence vs error / successor | src/services/discord/compact_turn_authority.rs:81 |
+| completed absence vs error / successor | src/services/discord/compact_turn_authority.rs:88 |
 
 | Before / after cfg | Actual result | Broken rules |
 |---|---|---|
@@ -233,8 +233,8 @@ Continuation latches and recovery floors remain intact. A recovery floor already
 | closed local-command output classifier | src/services/claude_tui/readiness/compact/completion.rs:13 |
 | exact reservation / Start / recovery publication | src/services/claude_tui/readiness/compact/completion.rs:121 |
 | completion proof consumption | src/services/claude_tui/readiness/mod.rs:158 |
-| generation gate permits same-cycle re-arm | src/services/claude_compact_trigger.rs:243 |
-| memory-only generation guarded publication | src/services/claude_compact_trigger.rs:424 |
+| generation gate permits same-cycle re-arm | src/services/claude_compact_trigger.rs:245 |
+| memory-only generation guarded publication | src/services/claude_compact_trigger.rs:426 |
 | same file new Start invalidates completion | src/services/claude_tui/readiness/mod.rs:376 |
 
 `CompactCompletionEvidence` emits no native terminal. `FinishSelfCompactFence` provides the owned completion proof; PROPERTY `ReadySelfCompactEventuallyReleases` states that a confirmed self compact followed by completion evidence eventually lets the next Idle original execute. Direct TLC: 39 cfg / 111 reported runs, GREEN24 / expected RED15 / unexpected0 / skip0, 104s. All 58 TLA/cfg source files match the executed snapshot. This is a specification check and manual code correspondence, not code extraction. Source/generation invalidation, Unknown transport, recovery, NotSent, and draft admission are caller-test boundaries; unconditional progress is not claimed after an ambiguous write or a foreign generation.

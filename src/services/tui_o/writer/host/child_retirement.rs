@@ -10,9 +10,9 @@ use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
 
 use super::{ManagedWriterHandle, WriterStopped, locked, process_readiness};
-use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::ChildStore;
 use crate::services::tui_o::channel_policy::{BootChannels, RetirementTicket};
 use crate::services::tui_o::cutover;
+use crate::services::tui_o::store::thread_children::ChildStore;
 
 const OWED_READ_LIMIT: Duration = Duration::from_secs(3);
 const STOP_LIMIT: Duration = Duration::from_secs(10);

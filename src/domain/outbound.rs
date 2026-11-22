@@ -1,6 +1,7 @@
 //! Outbound delivery value contracts and transport port, free of Serenity types.
 //! Dedup reservation, nonce use and Serenity id conversion stay in the Discord adapter.
 
+pub(crate) mod alert_origin;
 pub(crate) mod ids;
 pub(crate) mod intent;
 pub(crate) mod key;

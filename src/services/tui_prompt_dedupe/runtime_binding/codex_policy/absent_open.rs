@@ -17,13 +17,13 @@ pub(super) fn capture_under(
 ) -> Option<Captured> {
     let captured = candidate_under(authority)?;
     let clear =
-        crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(&captured);
+        crate::services::tui_prompt_dedupe::terminal_custody::codex_absent_launch_clear(&captured);
     (observation.recheck(CANARY_CHANNEL, authority.session()) && clear).then_some(captured)
 }
 
 pub(super) fn custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool {
     candidate_under(authority).is_some_and(|captured| {
-        !crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(&captured)
+        !crate::services::tui_prompt_dedupe::terminal_custody::codex_absent_launch_clear(&captured)
     })
 }
 

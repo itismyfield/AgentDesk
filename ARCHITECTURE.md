@@ -477,6 +477,7 @@ src/
 │   │   ├── outbox/
 │   │   │   ├── identity.rs
 │   │   │   └── source.rs
+│   │   ├── alert_origin.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
@@ -616,6 +617,7 @@ src/
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
 ├── runtime_layout/
+│   ├── boot_id.rs
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
 │   ├── mod.rs
@@ -1163,6 +1165,8 @@ src/
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
+│   ├── claude_compact_trigger/
+│   │   └── turn_identity.rs
 │   ├── claude_tui/
 │   │   ├── activity/
 │   │   │   ├── background/
@@ -4046,6 +4050,7 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
+│   │   ├── mentions.rs
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
 │   │   ├── routine_incident.rs
@@ -4469,8 +4474,10 @@ src/
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
+│   │   ├── runtime_activity.rs
 │   │   ├── runtime_hint_fence.rs
-│   │   └── session_markers.rs
+│   │   ├── session_markers.rs
+│   │   └── unified_thread.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
@@ -4640,6 +4647,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── child_store.rs
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── agy_delivery.rs
@@ -5071,6 +5079,7 @@ src/
 │   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
+│   │   ├── terminal_custody.rs
 │   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   ├── claude_meta.rs
