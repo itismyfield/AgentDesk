@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DeadSessionCleanupPlan {
     pub(super) preserve_tmux_session: bool,
@@ -208,6 +210,29 @@ pub(in crate::services::discord) fn runtime_activity_heartbeat_at(
         crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name),
     )
     .unwrap_or(fallback_now)
+}
+
+fn tui_direct_watcher_synthetic_inflight_shape_matches(
+    state: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    state.is_some_and(|state| {
+        state.turn_source == TurnSource::ExternalInput
+            && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+            && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
+    })
+}
+
+/// A watcher-owned TUI-direct synthetic row of this session that started before `current_offset`.
+pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matches(
+    state: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> bool {
+    state.is_some_and(|state| {
+        tui_direct_watcher_synthetic_inflight_shape_matches(Some(state), tmux_session_name)
+            && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
+    })
 }
 
 #[cfg(test)]

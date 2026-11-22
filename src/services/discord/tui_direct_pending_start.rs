@@ -37,6 +37,9 @@ use crate::services::tui_prompt_dedupe::{TuiPromptAnchor, clear_prompt_anchor_fo
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
+/// Request owner id stamped on TUI-direct synthetic turn rows in place of a Discord user.
+pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
+
 mod watcher_cancel;
 
 mod restore_gate;

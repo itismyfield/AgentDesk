@@ -16,6 +16,7 @@ pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_
 #[cfg(test)]
 pub(super) use claim::claim_tui_direct_synthetic_turn;
 pub(super) use claim::claim_tui_direct_synthetic_turn_inner;
+pub(in crate::services::discord) use ownership::synthetic_start_offset_carry_forward;
 #[cfg(test)]
 pub(super) use ownership::tui_direct_synthetic_non_bridge_owner_matches;
 pub(super) use ownership::{
@@ -27,9 +28,6 @@ pub(super) use ownership::{
 pub(super) use ownership::{
     codex_ownerless_external_input_inflight_needs_rollout_recovery,
     wait_for_tui_direct_synthetic_non_bridge_claim,
-};
-pub(in crate::services::discord) use ownership::{
-    synthetic_start_offset_carry_forward, tui_direct_watcher_synthetic_inflight_matches,
 };
 #[cfg(test)]
 pub(super) use stale_reclaim::finish_tui_direct_synthetic_pre_save_failure;

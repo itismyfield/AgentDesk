@@ -541,7 +541,7 @@ pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
     if !dispatch_id_present
         && fresh_assistant_text_seen
         && !full_response.trim().is_empty()
-        && crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
+        && crate::services::discord::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches(
             stall_inflight_snapshot,
             tmux_session_name,
             current_offset,

@@ -7,6 +7,7 @@ use super::*;
 // `let _guard = set_...(..)` and never names the type, so re-exporting them
 // would only add an import nothing uses.
 mod fences;
+pub(in crate::services::discord) mod idle_tail_state;
 mod owner_observation;
 mod session_binding;
 

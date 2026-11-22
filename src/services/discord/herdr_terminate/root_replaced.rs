@@ -35,12 +35,12 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
+use crate::services::discord::recovery_engine::herdr_attach::HerdrSourceAttach;
 use crate::services::discord::recovery_engine::host_reconcile::HostReconcile;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tmux::execution_identity::herdr_observation::{
     HerdrExecutionMatch, HerdrMismatch,
 };
-use crate::services::discord::tui_prompt_relay::herdr_source::HerdrSourceAttach;
 use crate::services::herdr_launch::retired_hold::{self, RetiredHoldOutcome};
 use crate::services::tui_prompt_dedupe as dedupe;
 use std::collections::BTreeMap;

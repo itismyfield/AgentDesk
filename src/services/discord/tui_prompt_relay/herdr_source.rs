@@ -33,27 +33,7 @@ use crate::services::tui_prompt_dedupe::{self as dedupe, Persisted, Record, TuiR
 use dedupe::withhold_herdr_execution;
 use dedupe::{admit_herdr_execution, runtime_binding_for_tmux_session_under_source_authority};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::services::discord) enum HerdrSourceAttach {
-    /// The row holds no hosted execution; the tmux path keeps it.
-    NotHerdr,
-    /// The reconcile did not admit this execution; nothing was registered.
-    Refused(HostReconcile),
-    /// The log names no source of this execution to restore.
-    NoBaseline,
-    /// The execution's own canonical clear waits on its new session: input is admitted and no
-    /// source or cursor is restored until that session's record lands.
-    AwaitingClear,
-    /// The binding event was not persisted, the log refused it, or another source is live there;
-    /// nothing was published.
-    NotPublished,
-    /// `bound` once the pane's latest logged source is this execution's. `agent_agrees` compares
-    /// Herdr's reported agent session with that source: a hint for a re-read, never a switch.
-    Published {
-        bound: bool,
-        agent_agrees: Option<bool>,
-    },
-}
+pub(in crate::services::discord) use super::super::recovery_engine::herdr_attach::HerdrSourceAttach;
 
 /// The caller's reader, keeping the agent session of the pane read the verdict came from.
 struct Recorded<'a>(&'a dyn HerdrExecutionReader, RefCell<Option<String>>);
