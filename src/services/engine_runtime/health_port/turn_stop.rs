@@ -309,7 +309,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         channel_id: ChannelId,
         approved: Option<&'a str>,
     ) -> BoxFuture<'a, bool> {
-        T::runtime_target_holds(shared, provider, channel_id, approved)
+        <T as TurnStopPort<S>>::runtime_target_holds(shared, provider, channel_id, approved)
     }
 
     fn row_gate<'a>(
@@ -320,7 +320,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         tmux_name: &'a str,
         caller: &'a str,
     ) -> BoxFuture<'a, (ChannelTeardown, HostedLookup)> {
-        T::row_gate(
+        <T as TurnStopPort<S>>::row_gate(
             pool,
             stored_provider,
             channel_id,
@@ -331,6 +331,6 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
     }
 
     fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
-        T::backfill_inflight_after_guard(provider, channel_id)
+        <T as TurnStopPort<S>>::backfill_inflight_after_guard(provider, channel_id)
     }
 }

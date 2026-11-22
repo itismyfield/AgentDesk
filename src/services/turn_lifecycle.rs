@@ -364,7 +364,12 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
         (cleanup_policy.should_cleanup_tmux(), keys.0, keys.1, keys.2)
     {
         let holds = match approved {
-            Some((shared, name)) => R::runtime_target_holds(shared, provider, channel, name).await,
+            Some((shared, name)) => {
+                <R as TurnStopPort<SharedData>>::runtime_target_holds(
+                    shared, provider, channel, name,
+                )
+                .await
+            }
             None => false,
         };
         if !holds {
@@ -376,7 +381,7 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
         }
     }
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
-        R::backfill_inflight_after_guard(provider, channel);
+        <R as TurnStopPort<SharedData>>::backfill_inflight_after_guard(provider, channel);
     }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
@@ -943,7 +948,8 @@ async fn force_kill_host_gate<R: TurnStopPort<SharedData>>(
             Some(row) => {
                 let (provider, key) = (row.stored_provider, row.session_key);
                 let channel = target.channel_id.map_or(0, ChannelId::get);
-                let gate = R::row_gate(row.pool, provider, channel, key, tmux_name, caller);
+                let gate = <R as TurnStopPort<SharedData>>::row_gate;
+                let gate = gate(row.pool, provider, channel, key, tmux_name, caller);
                 ForceKillHost::Gate(gate.await.0, None)
             }
             None => {
