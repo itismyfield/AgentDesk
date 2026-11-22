@@ -14,16 +14,16 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 4 | `src/db/dispatched_sessions/hosted_execution.rs:449` bind | `row = Bound`; projected `Launch` | Same owner/nonce, complete Pending evidence |
 | 5 | `src/db/dispatched_sessions/hosted_execution.rs:460` retire | `Retire` | Exact owner, nonce and observed row |
 | 6 | `src/db/dispatched_sessions/hosted_execution.rs:573` compare-and-set | `captured`, `nonce`; `Proof` / `Retire` | Raw row and canonical identity predicates; successor cannot be retired |
-| 7 | `src/services/herdr_launch.rs:503` install | `Launch` | Shared launch entry, all input origins |
-| 8 | `src/services/herdr_launch.rs:575` location | Projected `Launch` | Create reply fills only its Pending |
-| 9 | `src/services/herdr_launch.rs:717` evidence | Projected `Launch` | Same incarnation |
-| 10 | `src/services/herdr_launch.rs:649` failed launch retirement | `LaunchFails`; projected `Retire` | Existing own-Pending failure cleanup, unchanged |
-| 11 | `src/services/herdr_launch/unplaced.rs:457` recovered evidence | Projected `Launch` | Boot/next-input resolution of an unplaced Pending, unchanged |
-| 12 | `src/services/claude/herdr_turn.rs:878` initial attach bind | Projected `Launch`; `row = Bound` | First source of the same launched execution |
+| 7 | `src/services/herdr_launch.rs:505` install | `Launch` | Shared launch entry, all input origins |
+| 8 | `src/services/herdr_launch.rs:577` location | Projected `Launch` | Create reply fills only its Pending |
+| 9 | `src/services/herdr_launch.rs:719` evidence | Projected `Launch` | Same incarnation |
+| 10 | `src/services/herdr_launch.rs:651` failed launch retirement | `LaunchFails`; projected `Retire` | Existing own-Pending failure cleanup, unchanged |
+| 11 | `src/services/herdr_launch/unplaced.rs:443` recovered evidence | Projected `Launch` | Boot/next-input resolution of an unplaced Pending, unchanged |
+| 12 | `src/services/claude/herdr_turn.rs:887` initial attach bind | Projected `Launch`; `row = Bound` | First source of the same launched execution |
 | 13 | `src/services/discord/tui_prompt_relay/herdr_source.rs:197` source bind | `Reconnect`, `row = Bound` | Verified attach of Pending; not a replacement execution |
 | 14 | `src/services/discord/tui_prompt_relay/herdr_source.rs:272` clear-chain bind | `Reconnect`, `row = Bound` | Same nonce after an authentic clear chain |
 | 15 | `src/services/discord/recovery_engine/herdr_reader.rs:235` restart pass | `Reconnect` | Local rows; Claude and Codex passes, no pane creation |
-| 16 | `src/services/discord/recovery_engine/herdr_reader.rs:456` reconnect candidate | `Reconnect` / `Read` / proposed `Retire` | Missing currently omitted; transition lease and current-row check already exist |
+| 16 | `src/services/discord/recovery_engine/herdr_reader.rs:457` reconnect candidate | `Reconnect` / `Read` / proposed `Retire` | Missing currently omitted; transition lease and current-row check already exist |
 | 17 | `src/services/discord/recovery_engine/host_reconcile.rs:142` absent exact pane | `pane = Missing`; `Read` | Complete endpoint-matching snapshot only |
 | 18 | `src/cli/herdr.rs:241` retire CLI | `Read` / `Retire` | Explicit local ended execution; existing authority, no pane write |
 | 19 | `src/cli/herdr.rs:326` retirement CAS | `Retire` | Proposed common proof/CAS extraction; preserves the CLI's existing shell-ended cases |
@@ -84,7 +84,7 @@ The frozen 61 rows above remain the exhaustive pre-change census. These seven ro
 | # | Entry / current file:line | Model value / action | Scope and origin |
 |---|---|---|---|
 | 62 | `src/services/herdr_launch/retire.rs:36` exact endpoint read | `Read`, `Proof`, `Retire` | CLI accepts its existing ended-shell proof; automatic callers require complete Missing; raw-row/owner/nonce CAS is shared |
-| 63 | `src/services/discord/recovery_engine/herdr_reader.rs:487` Missing reconnect | `Reconnect`, `Retire` | Existing transition lease/current-row check precedes the common Missing-only proof |
+| 63 | `src/services/discord/recovery_engine/herdr_reader.rs:488` Missing reconnect | `Reconnect`, `Retire` | Existing transition lease/current-row check precedes the common Missing-only proof |
 | 64 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs:172` idle repair | `Read`, `Retire`, `Launch`, `Reject` | Human origin and no active mailbox turn; same Retired row must be re-judged before normal launch |
 | 65 | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:87` exact claim disposal | `Reject`, `NoticeOnce` | Commit once for that claim and its captured merged originals; then one channel reason; a repeated failure cannot discard the next front |
 | 66 | `src/services/herdr_launch/retire.rs:113` restart repair outcome | `Reconnect`, `Restored`, `LaunchFails` | Keeps only exact owner/retired nonce in memory; no input is stored; a new incarnation clears the old outcome |

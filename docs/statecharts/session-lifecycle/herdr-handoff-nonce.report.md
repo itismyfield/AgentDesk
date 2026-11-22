@@ -14,7 +14,7 @@ ran while the tmux lived.
 
 Rule after the change: a mismatch is refused unless the marker names a tmux execution
 (`.host_kind` = tmux) whose session is proven ended. Herdr writes `.host_kind` = herdr
-before its nonce (`herdr_launch.rs:493-497`) and a tmux turn is refused while `.host_kind`
+before its nonce (`herdr_launch.rs:495-499`) and a tmux turn is refused while `.host_kind`
 names another host (`host_gate.rs:20-36`), so a failed Herdr create never reads as tmux.
 
 ## Entrypoint census
@@ -26,18 +26,18 @@ names another host (`host_gate.rs:20-36`), so a failed Herdr create never reads 
 | Claude TUI tmux spawn: host marker, then nonce + context | `claude/tui_session_launch.rs:86,150`; `claude.rs:1833` | Init `marker = t1`, `hostKind = tmux` |
 | Plain tmux provider spawns (nonce only) | `claude.rs:2734`; `codex.rs:1642`; `qwen.rs:62` | same tmux marker; admitted only while `.host_kind` is absent/tmux |
 | Stat registration of the same source | `tui_prompt_dedupe/runtime_binding.rs:240-251` → `binding_events.rs:874-882` | `ResumeLogged = FALSE` (no record, `recorded = t0`) |
-| Herdr create: row Pending, host marker, nonce | `herdr_launch.rs:480-497` | `Launch` success: `marker = h2`, `hostKind = herdr` |
-| Herdr create failing after its markers | `herdr_launch.rs:529-546` (indeterminate / NotSent) | `Start = "failedcreate"` (`h1`, pane may run) |
-| Herdr marker write failing during create | `herdr_launch.rs:493-508` (host marker at :493, nonce stamp at :497, then `retire_unsent`) | NOT_MODELED: host may be `herdr` while the nonce is missing or removed |
+| Herdr create: row Pending, host marker, nonce | `herdr_launch.rs:482-499` | `Launch` success: `marker = h2`, `hostKind = herdr` |
+| Herdr create failing after its markers | `herdr_launch.rs:531-548` (indeterminate / NotSent) | `Start = "failedcreate"` (`h1`, pane may run) |
+| Herdr marker write failing during create | `herdr_launch.rs:495-510` (host marker at :493, nonce stamp at :497, then `retire_unsent`) | NOT_MODELED: host may be `herdr` while the nonce is missing or removed |
 | Nonce write failure removes the nonce | `tmux_session_files.rs:346-354` | NOT_MODELED: marker absent, so the judgment refuses as before |
 | kill-tmux API | `dispatched_sessions/tmux_cleanup.rs:338` | `KillTmux` (markers stay) |
 | Session temp cleanup (removes `.spawn_nonce`) | `tmux_common.rs:1186-1260`; callers `tmux_reaper.rs:344,687`, `turn_lifecycle.rs:502`, `tmux_recreate.rs:59`, `clear_teardown/execution_cleanup.rs:311`, `managed_reset.rs:145`, `claude.rs:2605`, `claude/tui_session_launch.rs:57` | marker absent: never refused (unchanged, not modeled) |
 | Input-owner handoff close | `queue_io/input_owner/claude_handoff.rs:138-197,241-258` → `pinned_tmux.rs:224-338` | `Begin`, `Close` (`CloseWorks`) |
 | Launch-time close of a live tmux | `herdr_turn/handoff.rs:74-86` | covered by `Direct` only as a judgment before close |
-| Binding judgment | `herdr_turn/handoff.rs:183-195,218-225` (`ended_tmux_execution`) | `Refused` |
+| Binding judgment | `herdr_turn/handoff.rs:188-200,223-230` (`ended_tmux_execution`) | `Refused` |
 | dcserver restart / boot census | markers, log and journal are files; the writer fold is rebuilt from the log | `Boot` (restart without cleanup) |
 | Boot orphan sweep (removes stale session files when dead sessions were cleaned) | `watchers/lifecycle/restore.rs:690-719` → `tmux_session_files.rs:850` | NOT_MODELED |
-| Retired row (#8146) | `herdr_launch.rs:440-447` `retired_hold::before_fresh` | not changed; Herdr-side proof |
+| Retired row (#8146) | `herdr_launch.rs:446-453` `retired_hold::before_fresh` | not changed; Herdr-side proof |
 
 Cancel, queue clear, Herdr Terminate, `/clear` and stop do not write `.host_kind` = tmux or
 a tmux nonce, so none of them creates the accepted state. Input classification is untouched.
@@ -92,7 +92,7 @@ Identity census (`git grep -n -E 'judge_pin\(|renumbered\(|under_new_device|file
 | Hook check records a verified identity | `claude_tui/source_verify.rs:332` → `judge_pin` | the recorded identity |
 | Writer re-pins a renumbered verified pin | `binding_events.rs:768-784` → `renumber.rs:24` | not reached for an unverified legacy record |
 | Host reboot renumbers the volume | OS (no AgentDesk code) | `Transcript = "renumbered"` |
-| Handoff identity check | `herdr_turn/handoff.rs:162-178,208-212,230-246` | `IdentityOk` |
+| Handoff identity check | `herdr_turn/handoff.rs:167-183,213-217,235-251` | `IdentityOk` |
 | Other pin checks (unchanged) | `tui_prompt_dedupe/pending.rs:309`, `source_verify.rs:399` | not changed |
 
 A restart reads the same record, first record and file, so a second judgment matches the first
@@ -134,10 +134,10 @@ End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = H
 | CAS from the same owner and nonce only | `plan_state_change` → `same_execution` | `db/dispatched_sessions/hosted_execution.rs:459-472,545-560` |
 | Terminate | pane end read, then close | `herdr_terminate.rs:224-236,589-597` |
 | Row end recovery | ended turn read | `recovery_engine/herdr_row_end.rs:488-493`, `herdr_row_end_live.rs:66-67` |
-| Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:265-287`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
-| Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:586-608`, `herdr_launch/unplaced.rs:467-470`, `prepared.rs:25,53` |
+| Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:266-288`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
+| Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:588-610`, `herdr_launch/unplaced.rs:453-456`, `prepared.rs:25,53` |
 | Herdr return, CLI | after `/exit` end, operator end check | `claude/herdr_return.rs:79-90`, `cli/herdr.rs:305-326` |
-| Readers | `herdr_launch.rs:434-447` (retired hold), `host_reconcile.rs:127`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
+| Readers | `herdr_launch.rs:440-453` (retired hold), `host_reconcile.rs:127`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
 
 | Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
 |---|---|---|---|

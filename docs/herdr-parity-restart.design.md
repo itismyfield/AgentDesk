@@ -71,13 +71,13 @@ O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자�
 | clear의 기존 fallback·기록 | `src/services/discord/commands/control/clear_teardown.rs:150`, `:167`, `:80`, `:94`, `:97` | unknown/pool 없음은 end_unconfirmed 후 managed fallback 가능. tmux 전용 end record 차이는 후속으로 남기고 확대하지 않음 |
 | 소유 입력 종료 cleanup | `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:9`, `:42`, `:63`, `:112` | nonce/receipt/cleanup owner 전용 계약. restart에서 terminal 입력을 되살리는 용도로 쓰지 않음 |
 | hosted 상태·읽기 | `src/db/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228` | `Pending/Bound/Retired`; `Legacy/Known/Unknown`, lookup `Missing/Found/Unknown/Conflict` |
-| herdr 새 launch | `src/services/herdr_launch.rs:378`, `:395`, `:433`, `:466`, `:492`, `:515` | RuntimeHintFence → row → Retired hold 검사 → 새 nonce → Pending CAS/marker → create |
-| create/launch 결과 | `src/services/herdr_launch.rs:111`, `:210`, `:226` | `Created/NotSent/Indeterminate/CreatedUnconfirmed`; `Launched{evidence Ok/Err}/Indeterminate`; 불명 ACK는 Pending 유지, 재생성 금지 |
-| incarnation 준비 | `src/services/herdr_launch.rs:732`, `:758` | 새 UUID, provider/channel/logical/runtime/native session/launch mode를 묶음 |
+| herdr 새 launch | `src/services/herdr_launch.rs:383`, `:395`, `:433`, `:466`, `:492`, `:515` | RuntimeHintFence → row → Retired hold 검사 → 새 nonce → Pending CAS/marker → create |
+| create/launch 결과 | `src/services/herdr_launch.rs:114`, `:210`, `:226` | `Created/NotSent/Indeterminate/CreatedUnconfirmed`; `Launched{evidence Ok/Err}/Indeterminate`; 불명 ACK는 Pending 유지, 재생성 금지 |
+| incarnation 준비 | `src/services/herdr_launch.rs:734`, `:758` | 새 UUID, provider/channel/logical/runtime/native session/launch mode를 묶음 |
 | Claude resume 준비 | `src/services/claude/herdr_turn/handoff.rs:6`, `:17`, `:29`, `:118` | account·transcript·O cursor·최신 binding·inode 검증, core session_id만으로 resume 안 함 |
 | Claude 시작 순서 | `src/services/claude/herdr_turn/handoff.rs:99`, `:103`, `:107`, `:108` | hook 사전 구독 → launch → 자기 SessionStart → attach → prompt |
 | Claude migration 종료 | `src/services/claude/herdr_turn/handoff.rs:60`, `:63` | `earlier_tmux`를 종료하는 migration 분기. Herdr→Herdr restart에서는 실행하지 않을 부분 |
-| Codex 현재 시작 | `src/services/codex/herdr_turn.rs:188`, `:200`, `:277`, `:434` | fresh native selector=None/resume=false, 자기 Startup source, first input 뒤 Source attach |
+| Codex 현재 시작 | `src/services/codex/herdr_turn.rs:190`, `:200`, `:277`, `:434` | fresh native selector=None/resume=false, 자기 Startup source, first input 뒤 Source attach |
 | Codex argv 가드 | `src/services/codex/tui_session_launch/launch_policy.rs:170`, `:178`, `:210`, `:256` | 준비 전과 최종 argv 모두 fresh-only 검증. resume 모드 지원을 따로 추가해야 함 |
 | Codex 출력 경계 | `src/services/codex/herdr_turn/first_input.rs:195`, `:208`, `:211`, `:225` | 첫 입력 뒤 hook/source/attach, 새 rollout 가정 offset=0. resume에 그대로 쓰면 과거 출력 중복 위험 |
 | transition 중 intake | `src/services/discord/router/message_handler/intake_turn/runtime_transition.rs:37`, `:43`, `:78` | 새 입력 durable tail, 기존 owner front는 원본 유지 + release wake |
@@ -192,16 +192,16 @@ r1(현 방향)은 restart 명령이 exclusion 안에서 lower `launch_herdr_sess
 
 | 항목 | 현 방향(r1): restart가 직접 launch | 새 방향(채택): seed를 큐 head에, launch는 owner 턴 |
 |---|---|---|
-| 흐름 | 종료(`src/services/discord/herdr_terminate.rs:401`) → disconnect(`retired_exclusion.rs:100`) → exclusion 안에서 provider 준비·`launch_herdr_session`(`src/services/herdr_launch.rs:378`)·attach → seed permit → 해제·wake | seed 원본을 큐 head에 내구 적재 → 종료 → disconnect → 해제·wake. launch는 owner 턴이 한다: `owner_input.rs:835` start_idle → `provider_dispatch.rs:337` drive → `src/services/claude/herdr_turn.rs:275` 또는 `src/services/codex/herdr_turn.rs:200` → `src/services/herdr_launch.rs:378` |
-| 이미 있는 선례 | 없음. launch를 턴 밖에서 부르는 생산 호출자가 없다 | 세션 강제 종료가 같은 모양이다: 종료 + selector 보존 disconnect(`src/services/dispatched_sessions/herdr_kill/effects.rs:131`), 큐 보존, 해제 뒤 wake(`effects.rs:141`). 그 뒤 첫 입력이 Retired row 위에 successor를 띄운다(`src/services/herdr_launch.rs:433`~`:449`) |
-| 새로 만들 것 | lower launch용 lease accessor, Claude `launched_source`(`handoff.rs:40`) 분해, Codex composer→seed→attach 순서 재현, V2 restart intent + 부팅 census 연결, seed permit | seed 적재·철회·gate·permit 작은 child 1개, typed 연결 3곳. launch·attach·unplaced 해결·Pending 재사용은 기존 경로 그대로(`src/services/codex/herdr_turn.rs:228`~`:264`, `src/services/claude/herdr_turn.rs:395`~`:427`) |
+| 흐름 | 종료(`src/services/discord/herdr_terminate.rs:401`) → disconnect(`retired_exclusion.rs:100`) → exclusion 안에서 provider 준비·`launch_herdr_session`(`src/services/herdr_launch.rs:383`)·attach → seed permit → 해제·wake | seed 원본을 큐 head에 내구 적재 → 종료 → disconnect → 해제·wake. launch는 owner 턴이 한다: `owner_input.rs:835` start_idle → `provider_dispatch.rs:337` drive → `src/services/claude/herdr_turn.rs:277` 또는 `src/services/codex/herdr_turn.rs:206` → `src/services/herdr_launch.rs:383` |
+| 이미 있는 선례 | 없음. launch를 턴 밖에서 부르는 생산 호출자가 없다 | 세션 강제 종료가 같은 모양이다: 종료 + selector 보존 disconnect(`src/services/dispatched_sessions/herdr_kill/effects.rs:131`), 큐 보존, 해제 뒤 wake(`effects.rs:141`). 그 뒤 첫 입력이 Retired row 위에 successor를 띄운다(`src/services/herdr_launch.rs:439`~`:449`) |
+| 새로 만들 것 | lower launch용 lease accessor, Claude `launched_source`(`handoff.rs:40`) 분해, Codex composer→seed→attach 순서 재현, V2 restart intent + 부팅 census 연결, seed permit | seed 적재·철회·gate·permit 작은 child 1개, typed 연결 3곳. launch·attach·unplaced 해결·Pending 재사용은 기존 경로 그대로(`src/services/codex/herdr_turn.rs:235`~`:264`, `src/services/claude/herdr_turn.rs:397`~`:427`) |
 | B 비용 추정 | 리뷰 P2 반영 뒤 prod 14~18파일, 순증 +1050~1400. +1200을 넘겨 2분할 필요. `herdr_terminate.rs`(949줄)에 held-guard 진입점을 더하면 giant 경계(1,000줄)를 넘는다 | prod 13~15파일, 순증 +480~620. 한 리뷰 단위 |
 | clear 경합 | exclusion이 launch·seed까지 길다. clear는 3초 뒤 지나가고(`control.rs:524`) 자기 종료는 `transition busy`로 거절된다(`herdr_terminate.rs:483`). successor가 clear 뒤에도 살아남는다(P2-1). 고치려면 restart가 자기 successor를 exact 종료하는 경로가 새로 필요하다 | exclusion은 종료와 disconnect 동안만이다. 해제 뒤에는 기존 clear가 Retired row를 직접 처리한다(`control/herdr_recovery.rs:58`, `:83`, `:115`). exclusion 중 clear가 지나가면 **seed가 폐기된 것**이 신호가 되어 postlude가 selector를 clear 뜻대로 지운다(3.4). successor가 아직 없으므로 종료할 대상이 없다 |
 | crash 시점별 결과 | intent의 stage와 row를 대조하는 부팅 복구가 새로 필요(종료 뒤·Pending 뒤·seed 뒤 각각) | seed가 큐에 있으므로 기존 부팅이 그대로 몬다(`compat.rs:33`, `pending_queue_persistence/queued_recovery.rs:92`). 적재 뒤·종료 전 crash는 permit이 보이게 거절한다(3.5) |
 | 부팅 census | 입력 0·intent만 있는 파일을 찾도록 `holds_input`·census 연결 필요 | 연결 0. seed는 `items`의 한 항목이다 |
 | 롤백 | 새 V2 필드를 옛 바이너리가 조용히 지운다(P2-6). 버전 표지가 필요하다 | 새 필드·새 serde variant 0. 옛 바이너리는 seed를 headless start로 읽어 `executor_not_wired`로 보이게 거절한다(`headless_turn.rs:159`~`:165`, `provider_dispatch/start_failure.rs:21`) |
 | Ready 표시 | 명령이 launch를 기다리지만 Ready는 여전히 seed receipt로 판정(r1 10단계) | 명령 응답은 "옛 실행 종료 + 인사말 등록"까지. Ready는 인사말 턴의 응답으로 보이고, launch 실패는 owner의 기존 시작 실패 알림으로 보인다 |
-| 해제~launch 사이 경쟁 | 해당 없음(exclusion 안에서 launch) | owner는 채널당 단일 actor이고 seed가 큐 front다(FIFO). HTTP·루틴 시작은 herdr에서 거절(`turn_host.rs:191`), 열려도 owner 큐 뒤로 들어간다(`owner_input.rs:621`). 동시 launch는 `install_pending_pg` CAS가 하나만 남긴다(`herdr_launch.rs:482`~`:487`). 종료 API는 nonce가 정확히 맞아야 한다(`herdr_terminate.rs:453`) |
+| 해제~launch 사이 경쟁 | 해당 없음(exclusion 안에서 launch) | owner는 채널당 단일 actor이고 seed가 큐 front다(FIFO). HTTP·루틴 시작은 herdr에서 거절(`turn_host.rs:191`), 열려도 owner 큐 뒤로 들어간다(`owner_input.rs:621`). 동시 launch는 `install_pending_pg` CAS가 하나만 남긴다(`herdr_launch.rs:484`~`:487`). 종료 API는 nonce가 정확히 맞아야 한다(`herdr_terminate.rs:453`) |
 | 남는 위험 | P2-1 수리 경로(자기 successor 종료)와 lock 순서 | seed의 시작 경로가 headless다. herdr에서 headless 시작은 지금 전부 거절이라(`headless_turn.rs:159`) 그 뒤 구간이 생산에서 돈 적이 없다. B 첫 커밋에서 실제 진입 시험으로 확인한다(3.1 8단계) |
 
 채택 근거는 세 가지다. (1) launch를 새로 조립하지 않고 매일 도는 경로를 쓴다. (2) P2-1의 원인(긴 exclusion 안의 launch)이 구조에서 사라지고,
@@ -279,9 +279,9 @@ Claude는 `launched_source`(`handoff.rs:40`)가 account·transcript·cursor·ino
 | Unknown / Conflict / 다른 owner·node | 없음 | 보이는 거절. 큐·row 변화 0 |
 | Bound, location 이 node | exact terminate | 3.1의 3~10단계 전부 |
 | Pending, location 있음 | exact terminate | Bound와 같다. launch evidence가 없어 서비스가 거절하면(`herdr_terminate.rs:512`) 9단계 |
-| Pending, unplaced(location·expected 없음) | 없음 | 보이는 거절 + 안내(3.8 U4). 이 상태는 다음 입력의 기존 resolver가 푼다(`src/services/claude/herdr_turn.rs:403`, `src/services/codex/herdr_turn.rs:240`~`:253`) |
+| Pending, unplaced(location·expected 없음) | 없음 | 보이는 거절 + 안내(3.8 U4). 이 상태는 다음 입력의 기존 resolver가 푼다(`src/services/claude/herdr_turn.rs:405`, `src/services/codex/herdr_turn.rs:247`~`:253`) |
 | Retired | 없음 | seed 적재 시도 + wake. 옛 실행은 이미 끝났으므로 terminate를 다시 부르지 않는다. gate 없음 |
-| Missing / Legacy | 없음 | seed 적재 시도 + wake. owner 턴이 fresh 또는 검증된 resume으로 띄운다(`src/services/claude/herdr_turn.rs:275`). gate 없음 |
+| Missing / Legacy | 없음 | seed 적재 시도 + wake. owner 턴이 fresh 또는 검증된 resume으로 띄운다(`src/services/claude/herdr_turn.rs:277`). gate 없음 |
 
 ### 3.3 dispatch 실행 중 재시작 (사용자 결정 1)
 
@@ -323,9 +323,9 @@ async task의 TLS를 await 너머 설치하지 않는다. sync execute의 등록
 | 누가 | 하는 일 | 좌표(붙일 자리) |
 |---|---|---|
 | clear | 시작하자마자 epoch을 올린다. 그 뒤 큐 폐기·턴 취소를 한다 | `control.rs:518` 다음 |
-| herdr launch 턴 | 시작할 때 `Launching`을 등록하고 그때의 epoch을 기억한다(RAII, 끝나면 대기자를 깨움) | `src/services/claude/herdr_turn.rs:275`, `src/services/codex/herdr_turn.rs:200`의 launch 직전 |
-| launch | Pending CAS 뒤 CheckEpoch, worker의 실제 create 직전 BeginEffect. 허가 실패면 자기 unsent Pending을 retire하고 끝낸다 | `herdr_launch.rs:482` 뒤, `:588`의 기존 retire |
-| launch 턴 | 첫 입력 CheckEpoch 후 실제 composer mutation 직전 BeginEffect. 허가 없으면 제출하지 않는다 | 기존 취소 확인 옆(`src/services/claude/herdr_turn.rs:252`, `src/services/codex/herdr_turn.rs:358`) |
+| herdr launch 턴 | 시작할 때 `Launching`을 등록하고 그때의 epoch을 기억한다(RAII, 끝나면 대기자를 깨움) | `src/services/claude/herdr_turn.rs:277`, `src/services/codex/herdr_turn.rs:206`의 launch 직전 |
+| launch | Pending CAS 뒤 CheckEpoch, worker의 실제 create 직전 BeginEffect. 허가 실패면 자기 unsent Pending을 retire하고 끝낸다 | `herdr_launch.rs:484` 뒤, `:588`의 기존 retire |
+| launch 턴 | 첫 입력 CheckEpoch 후 실제 composer mutation 직전 BeginEffect. 허가 없으면 제출하지 않는다 | 기존 취소 확인 옆(`src/services/claude/herdr_turn.rs:254`, `src/services/codex/herdr_turn.rs:366`) |
 | clear | 폐기에서 launch 중 턴의 미제출 입력도 terminal로 결산한다(다시 시작 0) | `src/services/discord/mailbox_finish.rs:362` 경로. 기존 동작인지 B-clear 첫 시험이 확인 |
 | clear | 종료 단계에서 등록된 launch가 끝나기를 기다린 뒤(기존 launch I/O 상한) row를 읽어 처리한다 | `clear_teardown.rs:137` |
 | restart | 3단계에서 읽은 epoch을 postlude와 응답에서 대조한다 | 3.1 7·10단계 |
@@ -408,7 +408,7 @@ seed가 적재된 요청에서는 seed 원본과 그 admission context가 **유�
 
 A(Codex resume 경계)는 `0060c4dd50f68a7509217c29986dc58ff5e64d16`에 구현되어 독립 리뷰 중이다. B는 아래 기존 계약을 소비한다. A 리뷰가 계약을 바꾸면 코디의 통보를 받아 DESIGN_DELTA로 멈춘다.
 
-- **resume 요청의 출처**: `HerdrLaunch.resume`은 seed 턴에서만 true가 된다. 일반 Codex 재기동은 지금처럼 fresh다(`src/services/codex/herdr_turn.rs:188`~`:197`).
+- **resume 요청의 출처**: `HerdrLaunch.resume`은 seed 턴에서만 true가 된다. 일반 Codex 재기동은 지금처럼 fresh다(`src/services/codex/herdr_turn.rs:190`~`:197`).
   origin은 `OwnerTurn`까지 보존된다. B-main은 그 `RestartSeed` origin을 Codex 턴의 typed resume 요청으로 넘기는 배선을 갖고, A는 그 요청을 받는 포트를 준다.
   selector가 있다는 것만으로 resume을 켜지 않는다. seed 없는 재시작(3.6) 뒤의 첫 입력은 일반 입력이므로 Codex는 fresh로 시작한다.
 - **시작점**: A가 Pending CAS 전에 immutable incarnation context에 내구 기록하고 Pending의 binding nonce로 연결하는 resume 시작점을 그대로 쓴다. seed가 일반 첫 입력 경로(`first_input.rs:195`~`:225`)로
@@ -538,9 +538,9 @@ tmux와 herdr 각각 idle·busy·queue 2개·resume·실패·동시 clear를 같
 
 | 전제/집중 항목 | 코드 증거와 막을 방법 또는 남은 반례 |
 |---|---|
-| herdr server·정책 | `src/services/herdr_launch.rs:385` LegacyDedicated restore-off fresh witness, UserDefault grant `:456`; `src/services/session_host/herdr_gate.rs:496` 같은 서버. 버전 문자열이 아닌 기존 프로토콜/권한 판정을 사용하며 런타임 설정값은 이 레그에서 확인하지 않음 |
+| herdr server·정책 | `src/services/herdr_launch.rs:390` LegacyDedicated restore-off fresh witness, UserDefault grant `:456`; `src/services/session_host/herdr_gate.rs:496` 같은 서버. 버전 문자열이 아닌 기존 프로토콜/권한 판정을 사용하며 런타임 설정값은 이 레그에서 확인하지 않음 |
 | pane identity | `src/services/discord/herdr_terminate.rs:453`, `:548`, `src/services/session_host/herdr_gate.rs:455` old nonce/owner/location + witnessed exact close. 같은 숫자 pane 재사용은 새 권한 아님 |
-| launch 인자 | Claude `handoff.rs:17/29/85`, Codex `launch_policy.rs:178/210/256`, `herdr_launch.rs:732`. 기존 설정·계정·source 검증을 통과시켜야 하며 resume-only 가드 완화 금지 |
+| launch 인자 | Claude `handoff.rs:17/29/85`, Codex `launch_policy.rs:178/210/256`, `herdr_launch.rs:734`. 기존 설정·계정·source 검증을 통과시켜야 하며 resume-only 가드 완화 금지 |
 | 경계 시각 | request 도착·seed commit(수락)·fence·close effect·retire·해제/wake·owner의 Pending commit·seed submit·source attach를 분리. 이전 uncertain 입력은 replay하지 않음. 직접 native draft는 접수 원본 보장 밖임을 명시 |
 | 동시성 경합 | exclusion은 old fence→retire→old disconnect까지. clear는 timeout 후 진행하므로 postlude와 응답에서 clear epoch을 대조한다(3.4). 해제 뒤 launch까지는 owner 단일 actor·FIFO·Pending CAS가 막는다(3.0). 두 번째 요청은 큐의 seed를 자기 seed로 쓰고, Cancel/Terminate/actor 교체는 nonce·token 불일치로 보이는 실패 |
 | 옛 형식 복원 | 새 V2 필드·variant 0이라 스냅샷 형식이 바뀌지 않는다. seed는 큐 항목이므로 기존 census가 찾는다(`compat.rs:33`). legacy inflight 호환 유지, unknown/newer 오인 복원 금지 |

@@ -241,7 +241,7 @@ TUILaunch ==
     /\ history.stage = "empty" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "tui", !.runtime = "codex_tui"]
     /\ UNCHANGED coreVars
-\* herdr_launch.rs:472-488 commits Pending before stamping the host and nonce.
+\* herdr_launch.rs:474-490 commits Pending before stamping the host and nonce.
 HerdrFreshLaunch ==
     /\ history.stage = "tui" /\ history.up /\ history.reconciled
     /\ history' = [history EXCEPT !.stage = "fresh-cleanup", !.row = "pending",
