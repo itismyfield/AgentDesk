@@ -4,6 +4,7 @@ use super::inflight::{
     InflightTurnState, TurnSource, load_inflight_state_read_only,
     load_inflight_state_read_only_result,
 };
+use crate::services::claude_compact_trigger::CompactTurnIdentity;
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,14 +58,6 @@ impl ManagedCompactTurnIdentity {
         (identity.tmux_session_name == tmux_session_name.trim()).then_some(identity)
     }
 
-    pub(in crate::services) fn channel_id(&self) -> u64 {
-        self.channel_id
-    }
-
-    pub(in crate::services) fn tmux_session_name(&self) -> &str {
-        &self.tmux_session_name
-    }
-
     #[cfg(test)]
     pub(in crate::services) fn test_fixture(channel_id: u64, tmux_session_name: &str) -> Self {
         Self {
@@ -74,6 +67,20 @@ impl ManagedCompactTurnIdentity {
             tmux_session_name: tmux_session_name.to_string(),
             turn_start_offset: Some(42),
         }
+    }
+}
+
+impl CompactTurnIdentity for ManagedCompactTurnIdentity {
+    fn channel_id(&self) -> u64 {
+        self.channel_id
+    }
+
+    fn tmux_session_name(&self) -> &str {
+        &self.tmux_session_name
+    }
+
+    fn pending_turn_matches(&self) -> Result<bool, String> {
+        pending_managed_turn_matches(self)
     }
 }
 

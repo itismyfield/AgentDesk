@@ -477,6 +477,7 @@ src/
 │   │   ├── outbox/
 │   │   │   ├── identity.rs
 │   │   │   └── source.rs
+│   │   ├── alert_origin.rs
 │   │   ├── ids.rs
 │   │   ├── intent.rs
 │   │   ├── key.rs
@@ -616,6 +617,7 @@ src/
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
 ├── runtime_layout/
+│   ├── boot_id.rs
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
 │   ├── mod.rs
@@ -1163,6 +1165,8 @@ src/
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
+│   ├── claude_compact_trigger/
+│   │   └── turn_identity.rs
 │   ├── claude_tui/
 │   │   ├── activity/
 │   │   │   ├── background/
@@ -4460,8 +4464,10 @@ src/
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
+│   │   ├── runtime_activity.rs
 │   │   ├── runtime_hint_fence.rs
-│   │   └── session_markers.rs
+│   │   ├── session_markers.rs
+│   │   └── unified_thread.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs

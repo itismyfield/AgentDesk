@@ -1,3 +1,4 @@
+pub(crate) mod boot_id;
 mod config_merge;
 mod legacy_migration;
 mod paths;

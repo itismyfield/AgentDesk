@@ -359,10 +359,8 @@ use adk_session::{
     build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
     parse_dispatch_id,
 };
+pub(in crate::services) use compact_turn_authority::ManagedCompactTurnIdentity;
 use compact_turn_authority::compact_eligible_turn_source;
-pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, pending_managed_turn_matches,
-};
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
 #[cfg(test)]

@@ -5,7 +5,6 @@ use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::app_state::AppState;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod cancel_lookup;
@@ -48,16 +47,6 @@ pub(crate) struct ForwardCallerContext {
     pub(crate) pg_pool: Option<PgPool>,
     pub(crate) config: std::sync::Arc<crate::config::Config>,
     pub(crate) cluster_instance_id: Option<String>,
-}
-
-impl From<&AppState> for ForwardCallerContext {
-    fn from(state: &AppState) -> Self {
-        Self {
-            pg_pool: state.pg_pool.clone(),
-            config: state.config.clone(),
-            cluster_instance_id: state.cluster_instance_id.clone(),
-        }
-    }
 }
 
 impl ForwardCallerContext {

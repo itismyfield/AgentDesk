@@ -37,7 +37,7 @@ mod transition;
 pub(crate) use super::actor::native_input::RepostTurn;
 use super::actor::native_input::{hold, stopped, unless_stopped};
 pub use activation_io::{Custody, FencedFacts};
-pub(crate) use child_retirement::{ChildStores, keep_stoppable};
+pub(crate) use child_retirement::{ChildStore, ChildStores, keep_stoppable};
 pub(crate) use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
 /// Only pane writers enter the native turn retirement callback.

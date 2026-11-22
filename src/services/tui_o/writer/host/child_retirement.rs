@@ -10,7 +10,6 @@ use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
 
 use super::{ManagedWriterHandle, WriterStopped, locked, process_readiness};
-use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::ChildStore;
 use crate::services::tui_o::channel_policy::{BootChannels, RetirementTicket};
 use crate::services::tui_o::cutover;
 
@@ -32,6 +31,33 @@ pub(crate) fn keep_stoppable(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandl
         }
     }
     detached
+}
+
+/// O's thread child stores as thread GC reaches them: pinned before a row delete and asked to
+/// retire only after that exact delete. The owner decides; GC grants it nothing else.
+pub(crate) trait ChildStore: Sync {
+    type Pinned: Send;
+    fn pin(&self, thread: u64) -> Option<Self::Pinned>;
+    fn retire<'a>(
+        &'a self,
+        pinned: Self::Pinned,
+        successor: BoxFuture<'a, Result<bool, String>>,
+    ) -> BoxFuture<'a, Result<(), String>>;
+}
+
+/// No child store to retire.
+impl ChildStore for () {
+    type Pinned = std::convert::Infallible;
+    fn pin(&self, _thread: u64) -> Option<Self::Pinned> {
+        None
+    }
+    fn retire<'a>(
+        &'a self,
+        pinned: Self::Pinned,
+        _successor: BoxFuture<'a, Result<bool, String>>,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        match pinned {}
+    }
 }
 
 /// What thread_gc pins before its row delete: the child's lifecycle ticket and the writer

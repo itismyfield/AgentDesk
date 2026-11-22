@@ -159,7 +159,7 @@ impl CancelToken {
         let moved = destructive && expected.is_some_and(|expected| expected.name() != name);
         // A force-kill's verdict judged the host once; every other cleanup reads the marker here.
         let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
-        let marker = crate::services::discord::admin_host_guard::marker_refusal;
+        let marker = crate::services::session_host::operation_policy::marker_refusal;
         let refusal = name
             .filter(|_| destructive && !moved && !judged)
             .and_then(marker);
@@ -326,7 +326,9 @@ impl CancelToken {
         {
             crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
                 .map(|(_, channel)| {
-                    crate::dispatch::is_unified_thread_channel_name_active(&channel)
+                    crate::services::tmux_common::unified_thread::is_unified_thread_channel_name_active(
+                        &channel,
+                    )
                 })
                 .unwrap_or(false)
         }
