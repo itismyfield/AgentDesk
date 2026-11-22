@@ -147,13 +147,6 @@ fn event(
         receipt: None,
     }
 }
-/// Hands the strict append to `tui_o::exact_pg`, which cannot name this journal.
-pub(crate) fn install_exact_append() {
-    crate::services::tui_o::exact_pg::install_append(|pool, metadata| {
-        Box::pin(append_exact_metadata(pool, metadata))
-    });
-}
-
 pub(crate) async fn append_exact_metadata(
     pool: sqlx::PgPool,
     metadata: &crate::services::tui_o::exact_episode::EpisodeMetadata,
