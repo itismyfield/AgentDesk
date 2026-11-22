@@ -16,12 +16,13 @@ use super::outbound::result::DeliveryResult;
 use super::outbound::{
     DiscordOutboundClient, post_serenity_message_with_nonce, shared_outbound_deduper,
 };
-use super::router;
+use super::shared_state::{PortFuture, QueuedAdmission, QueuedRun};
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
     Intervention, QueuedCardDisposition, QueuedCardTeardown, SharedData, formatting, queue_marker,
     queued_card_gate, rate_limit_wait, resolve_discord_bot_provider, validate_live_channel_routing,
 };
+use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
@@ -768,12 +769,7 @@ impl TurnGateway for DiscordGateway {
         channel_id: ChannelId,
         retry: crate::services::discord::replay_policy::ExactRetry,
     ) -> GatewayFuture<'a, crate::services::discord::replay_policy::ExactHandoff> {
-        Box::pin(router::start_exact_retry(
-            &self.http,
-            &self.shared,
-            channel_id,
-            retry,
-        ))
+        (self.shared.router_ports.start_exact_retry)(&self.http, &self.shared, channel_id, retry)
     }
 
     fn dispatch_queued_turn<'a>(
@@ -789,7 +785,7 @@ impl TurnGateway for DiscordGateway {
             // the promotion (front-requeue + slow backstop, zero view teardown)
             // BEFORE the marker drain / merged-card deletion below. `Ok` keeps
             // the epilogue from re-arming the fast ~2s kickoff (the #4270 spin).
-            if router::defer_promoted_dispatch_if_hosted_tui_busy(
+            if (self.shared.router_ports.defer_promoted_dispatch)(
                 &self.shared,
                 &self.provider,
                 channel_id,
@@ -817,71 +813,70 @@ impl TurnGateway for DiscordGateway {
                 shared: &self.shared,
                 token: &live_turn.token,
             };
-            let admitted = match router::admit_queued_intake(
-                &deps,
-                self.provider.clone(),
+            let after_admission: PortFuture<'_, bool> = Box::pin(async move {
+                let late_settlement = (self.shared.router_ports.checkpoint_waits)(channel_id);
+                if !late_settlement {
+                    let source_message_generations =
+                        intervention.source_message_queued_generations();
+                    queue_marker::drain_dispatched_queue_markers(
+                        &self.shared,
+                        &self.http,
+                        channel_id,
+                        intervention.message_id,
+                        &source_message_generations,
+                    )
+                    .await;
+
+                    // Dormant queued dispatch keeps the legacy marker/card handoff order.
+                    let drained = drain_merged_queued_placeholders(
+                        &self.shared,
+                        channel_id,
+                        intervention.message_id,
+                        &intervention.source_message_ids,
+                    )
+                    .await;
+                    for teardown in drained {
+                        let placeholder_msg_id = teardown.card();
+                        let result =
+                            queued_card_gate::teardown_delete(&self.http, &self.shared, teardown)
+                                .await;
+                        // #3607: observe the merged-queued-placeholder drain delete.
+                        crate::services::observability::emit_relay_delete_result(
+                            self.provider.as_str(),
+                            channel_id.get(),
+                            placeholder_msg_id.get(),
+                            "gateway_queued_placeholder_drain",
+                            "delete_nonterminal",
+                            &result,
+                        );
+                    }
+                }
+                late_settlement
+            });
+            let admission = QueuedAdmission {
+                provider: self.provider.clone(),
                 channel_id,
                 intervention,
-                dispatch_request_owner,
-                request_owner_name.to_string(),
-                has_more_queued_turns,
-                true,
-                "intake_admission_pre_drain_defer",
-                dispatch_lease.clone(),
-            )
-            .await
-            {
-                router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-                router::QueuedAdmissionDisposition::Deferred
-                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
-                | router::QueuedAdmissionDisposition::ConsumedToHold => {
-                    return Ok(());
-                }
-                router::QueuedAdmissionDisposition::RejectedRestore => {
+                request_owner: dispatch_request_owner,
+                request_owner_name: request_owner_name.to_string(),
+                defer_watcher_resume: has_more_queued_turns,
+                wait_for_completion: true,
+                backstop_reason: "intake_admission_pre_drain_defer",
+                dispatch_lease: dispatch_lease.clone(),
+            };
+            let admit = self.shared.router_ports.admit_and_finish_queued;
+            let (late_settlement, result) = match admit(&deps, admission, after_admission).await {
+                QueuedRun::Finished {
+                    after_admission,
+                    result,
+                } => (after_admission, result),
+                QueuedRun::NotAdmitted => return Ok(()),
+                QueuedRun::RejectedRestore => {
                     return Err("queued admission failed to restore dequeued head".to_string());
                 }
             };
-
-            let late_settlement = router::checkpoint_waits_for_admission(channel_id);
-            if !late_settlement {
-                let source_message_generations = intervention.source_message_queued_generations();
-                queue_marker::drain_dispatched_queue_markers(
-                    &self.shared,
-                    &self.http,
-                    channel_id,
-                    intervention.message_id,
-                    &source_message_generations,
-                )
-                .await;
-
-                // Dormant queued dispatch keeps the legacy marker/card handoff order.
-                let drained = drain_merged_queued_placeholders(
-                    &self.shared,
-                    channel_id,
-                    intervention.message_id,
-                    &intervention.source_message_ids,
-                )
-                .await;
-                for teardown in drained {
-                    let placeholder_msg_id = teardown.card();
-                    let result =
-                        queued_card_gate::teardown_delete(&self.http, &self.shared, teardown).await;
-                    // #3607: observe the merged-queued-placeholder drain delete.
-                    crate::services::observability::emit_relay_delete_result(
-                        self.provider.as_str(),
-                        channel_id.get(),
-                        placeholder_msg_id.get(),
-                        "gateway_queued_placeholder_drain",
-                        "delete_nonterminal",
-                        &result,
-                    );
-                }
-            }
-
-            let result = router::finish_admitted_queued_intake(&deps, admitted)
-                .await
-                .map_err(|e| e.to_string())?;
-            if late_settlement && result == router::IntakeExecution::Executed {
+            let result = result.map_err(|e| e.to_string())?;
+            if late_settlement && result == IntakeExecution::Executed {
                 super::queue_dispatch::settle_executed_queued_intake(
                     &self.shared,
                     &self.http,

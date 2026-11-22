@@ -373,6 +373,7 @@ jobs:
               - 'src/services/discord/replay_policy.rs'
               - 'src/services/discord/replay_policy/**'
               - 'src/services/discord/router/**'
+              - 'src/services/discord/router_ports.rs'
               - 'src/services/discord/runtime_bootstrap.rs'
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'

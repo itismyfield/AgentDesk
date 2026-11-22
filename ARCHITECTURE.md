@@ -2328,6 +2328,8 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
+│   │   ├── queue_reactions/
+│   │   │   └── queue_status_presentation.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── herdr_row_end/
 │   │   │   │   ├── diagnostics.rs
@@ -2748,7 +2750,6 @@ src/
 │   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── turn_mark_admission_tests.rs
-│   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── response_format/
@@ -2764,7 +2765,7 @@ src/
 │   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── queue_status_presentation.rs
+│   │   │   ├── ports.rs
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   ├── transition_wake.rs
@@ -3660,6 +3661,7 @@ src/
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
 │   │   │   ├── supervisor_worker_tests.rs
+│   │   │   ├── typing_indicator.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
@@ -3816,6 +3818,7 @@ src/
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
+│   │   ├── router_ports.rs
 │   │   ├── routine_presentation.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs

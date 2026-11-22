@@ -716,7 +716,7 @@ host_parity:
     herdr: Herdr holder 응답 뒤 해당 후처리를 건너뜀. 일반 활성 턴 중단과 수동 lease 해제는 기존 경로로 가능
     verdict: 다름
     owner: '#8128 Z. #7583 S07c의 stop 호출부, holder 변경이 필요할 때 S07f와 조율'
-    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/zombie_foreground_release.rs:188–212,355–411,432–442`.
+    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/host_liveness.rs:126–153`, `src/services/discord/zombie_foreground_release.rs:250–306,327–337`.
       동일 시나리오에서 취소된 exact 토큰과 종료 증거가 있으면 pane·native ID·큐를 보존하면서 다음 입력이 진행한다. 새 토큰·활성 턴·불명확한 증거에서는 lease를 유지한다'
   - feature_id: cancel-stop
     scope: 수동 lease 확인·해제 API 및 CLI
@@ -794,7 +794,7 @@ host_parity:
     herdr: 공유 reset·recreate 경로는 기존 tmux guard에서 거절. 현재 `/goal --fresh`의 별도 fresh 준비 분기가 있음
     verdict: 다름
     owner: '#8128 R2a. reset·relaunch는 #7583 S07b, recreate는 S07c'
-    evidence: '`src/services/discord/admin_host_guard.rs:94,116,186,227`, `src/services/discord/commands/tmux_recreate.rs:9,104`,
+    evidence: '`src/services/discord/admin_host_guard.rs:73,95,165,206`, `src/services/discord/commands/tmux_recreate.rs:9,104`,
       `src/services/discord/commands/control/provider_reset.rs:16`, `src/services/discord/router/message_handler/goal_lifecycle.rs:34–62,77–85`,
       `src/services/discord/router/message_handler/intake_turn.rs:949–966`, `src/services/discord/router/message_handler/headless_turn.rs:533–556`'
   - feature_id: reset-clear
@@ -819,7 +819,7 @@ host_parity:
     herdr: 현행 자동 reset 및 legacy repair의 hosted 보호·거절
     verdict: 다름
     owner: '#8128 R2c는 R2a 결과와 기존 조건부 SQL 및 exact 실행 fence를 소비. 다음 run으로 재할당된 slot은 보존'
-    evidence: '`src/services/auto_queue/runtime.rs:177–193,346,472`, `src/services/discord/admin_host_guard.rs:227–248`,
+    evidence: '`src/services/auto_queue/runtime.rs:177–193,346,472`, `src/services/discord/admin_host_guard.rs:206–227`,
       `src/services/routines/session_control.rs:103–117`, `src/services/discord/health/recovery.rs:242`, `src/server/routes/domains/runtime.rs:42,87,112`,
       `src/server/routes/health_api/session_repair.rs:17,76,111`'
   - feature_id: reset-clear

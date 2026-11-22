@@ -1,7 +1,11 @@
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use poise::serenity_prelude::ChannelId;
 
+#[cfg(unix)]
+use super::inflight::{InflightTurnState, RelayOwnerKind};
 use crate::services::engine_runtime::relay_state::coord::RelayState;
 
 /// Per-channel coordination for watcher-to-Discord relay emission.
@@ -38,6 +42,40 @@ impl std::ops::Deref for TmuxRelayCoord {
     fn deref(&self) -> &Self::Target {
         &self.relay
     }
+}
+
+/// Set while the session-bound Discord relay supervisor runs.
+#[cfg(unix)]
+pub(in crate::services::discord) static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool =
+    AtomicBool::new(false);
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> bool {
+    SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal_delivery(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    if tmux_session_name.trim().is_empty() {
+        return false;
+    }
+    let Some(state) = inflight else {
+        return true;
+    };
+    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return false;
+    }
+    // A normal Discord-origin inflight already has the watcher as terminal owner;
+    // letting the sink (still attached to the same JSONL) deliver would double-post.
+    // Only rebind/adopted rows are no real foreground turn; scheduled wakeups / idle
+    // background output reach this path with no inflight at all.
+    matches!(
+        state.effective_relay_owner_kind(),
+        RelayOwnerKind::SessionBoundRelay
+    ) || state.rebind_origin
 }
 
 #[cfg(test)]

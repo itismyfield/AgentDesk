@@ -42,8 +42,8 @@ O-a는 child 활성화 전체가 아니고 S3는 command launch/취소 hook 자�
 | 공통 restart | `src/services/discord/commands/restart.rs:259`, `:272`, `:293` | 진행 알림 → reset → seed → 결과. host별 orchestration을 나눌 위치 |
 | 메모리 snapshot | `src/services/discord/commands/restart.rs:17`, `:45` | `NoActiveSession / ActiveSessionWithoutSessionId / ActiveSessionResumable`; 표시용 snapshot이지 실행 권한이 아님 |
 | reset 전 herdr 거절 | `src/services/discord/commands/restart.rs:218` | `managed_reset_refusal(...true,true,None)`가 cancel보다 먼저 실행됨 |
-| 공통 관리 가드 | `src/services/discord/admin_host_guard.rs:93`, `:124`, `:143` | `configured_refusal(:114)`로 herdr 설정 채널 거절. **이 가드를 전역 완화하지 않음** |
-| row·marker 가드 | `src/services/discord/admin_host_guard.rs:15`, `:151`, `:164`, `:334` | legacy tmux 확인, unknown/conflict/hosted 세션의 이름 기반 조작 차단 |
+| 공통 관리 가드 | `src/services/discord/admin_host_guard.rs:72`, `:103`, `:122` | `configured_refusal(:114)`로 herdr 설정 채널 거절. **이 가드를 전역 완화하지 않음** |
+| row·marker 가드 | `src/services/discord/host_defer_gate.rs:298`, `src/services/discord/admin_host_guard.rs:130`, `:143`, `:313` | legacy tmux 확인, unknown/conflict/hosted 세션의 이름 기반 조작 차단 |
 | 현재 active 취소 | `src/services/discord/commands/restart.rs:223`, `:225`, `:227` | 경고 → mailbox cancel → `stop_active_turn(PreserveSession)`. herdr branch에서 이 선취소를 쓰면 exact terminate의 captured token 증거를 잃을 수 있음 |
 | tmux reset 인자 | `src/services/discord/commands/restart.rs:239` | `reset_provider_state=!supports_resume(:245)`, history 보존(`:246`), recreate 요청(`:247`) |
 | 기존 인사말 | `src/services/discord/commands/restart.rs:13`, `:133`, `:151` | `안녕하세요. 세션 재시작 완료.`를 `start_headless_turn`으로 제출 |

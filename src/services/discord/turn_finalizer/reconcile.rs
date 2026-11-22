@@ -165,17 +165,17 @@ async fn reconcile_guarded_finish_residues(shared: &Arc<SharedData>) {
             &residue.provider,
             channel_id.get(),
         );
-        let tui_structurally_idle =
-            crate::services::discord::zombie_foreground_release::tui_structurally_idle(
-                &residue.provider,
-                token,
-            );
-        let release = crate::services::discord::zombie_foreground_release::terminal_evidence_allows_mailbox_release(
-            true,
-            release_authorized,
-            inflight_state_present,
-            tui_structurally_idle,
+        let tui_structurally_idle = crate::services::discord::host_liveness::tui_structurally_idle(
+            &residue.provider,
+            token,
         );
+        let release =
+            crate::services::discord::host_liveness::terminal_evidence_allows_mailbox_release(
+                true,
+                release_authorized,
+                inflight_state_present,
+                tui_structurally_idle,
+            );
         if !release {
             tracing::debug!(
                 provider = residue.provider.as_str(),

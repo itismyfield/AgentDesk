@@ -20,7 +20,8 @@ pub(super) fn apply(
     if should_silence_requeued_response(
         retry_candidate,
         claude_tui_followup_busy_readiness_timeout,
-        super::super::super::router::queue_status_card_enabled(),
+        super::super::super::queue_reactions::queue_status_presentation::queue_status_card_enabled(
+        ),
     ) {
         // Local and durable bodies are blanked together; without a record the readout
         // jumps from `after_len=N` to `before_len=0`, indistinguishable from loss.
