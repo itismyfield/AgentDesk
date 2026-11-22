@@ -10,9 +10,8 @@ use super::{RetryDispatchMeta, resolve_session_locator_pg};
 use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::session_agent_resolution::normalize_thread_channel_id;
 
-/// The canonical dispatch status transition (`dispatch::set_dispatch_status_on_pg_async`): pool,
-/// dispatch id, target status, result, transition source, allowed-from statuses, touch
-/// `completed_at`. The dispatch service owns it, so the force-kill caller hands it in.
+/// The canonical dispatch status transition (`dispatch::set_dispatch_status_on_pg_async`); the
+/// dispatch service owns it, so the force-kill caller hands it in.
 pub(crate) type SetDispatchStatus = for<'a> fn(
     &'a PgPool,
     &'a str,
