@@ -101,7 +101,7 @@ final recheck가 authority를 확인하는 동안만 guard를 얻었다 놓는 �
 
 | 진입점 | `src/services/` 아래 file:line | 모델 사실/범위 |
 |---|---|---|
-| admission→turn mark | `discord/router/turn_start.rs:587`, `tui_o/cutover.rs:99-120`, `tui_o/channel_policy/adoption.rs:204-238` | first prompt/admission된 경계. clean과 secondInput 구분 |
+| admission→turn mark | `discord/router/turn_start.rs:499`, `tui_o/cutover.rs:99-120`, `tui_o/channel_policy/adoption.rs:204-238` | first prompt/admission된 경계. clean과 secondInput 구분 |
 | argv create / observe | `codex/tui_session_launch/first_input.rs:45-55`, `:171`, `codex_tui/tail_launch.rs:104` | modal 유무; provider 출력과 actor는 독립 |
 | fresh discovery | `codex_tui/rollout_tail/handoff.rs:70-89` | binding absent/present; 발견 자체는 권한 아님 |
 | warm/resume discovery | `codex_tui/rollout_tail.rs:295`, `:420`, `:443`, `codex_tui/tail_launch.rs:75-99` | 기존 resume proof/offset 유지 |

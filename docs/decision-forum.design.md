@@ -204,7 +204,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E11 | 기존 src/services/discord/health/turn_deliver.rs:459 | 정상 busy 원본 하나: user_instruction/author_is_bot=false, stable origin 보존 |
 | E12 | 기존 src/services/discord/queue_io/input_owner/origin.rs:25, :49 | 입력 출처·안정 ID. 지금 사람=Discord/Imessage, identity도 imessage 전용 |
 | E13 | 기존 src/services/turn_orchestrator/queued_head/v2.rs:61 | person_input; decision은 현 상태에서 사람 입력으로 분류되지 않음 |
-| E14 | 기존 src/services/discord/queue_io/input_owner/start.rs:13, src/services/discord/router/turn_start.rs:81 | Decision 안정 ticket. 요청 세션 identity로 막지 않음, imessage bytes 유지 |
+| E14 | 기존 src/services/discord/queue_io/input_owner/start.rs:13, src/services/discord/router/turn_start.rs:29 | Decision 안정 ticket. 요청 세션 identity로 막지 않음, imessage bytes 유지 |
 | E15 | 기존 src/services/discord/queue_io/input_owner/admission.rs:85 | Submit/queued; admit_with_context, 같은 ticket 재조회/재접수 |
 | E16 | 기존 src/services/discord/queue_io/input_owner/pump.rs:43 | 실제 reserve/physical writer 경계. 정상 대기 후 현재 session 다시 해석 |
 | E17 | 기존 src/services/turn_orchestrator/queued_head/v2.rs:229, :245 | original/ticket 한 snapshot. decision 실패만 exact original 제거 |
