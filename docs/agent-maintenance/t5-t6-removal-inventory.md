@@ -456,7 +456,7 @@ base `origin/main cfeff89307`. T6-1 이 네 게이트를 무조건화하고 T6-2
 ## §12-2 추가 — T6 도달 불가 분기(슬라이스 3) **철거 보류(HOLD)** (2026-09-17)
 
 base `origin/main d72504ca89`. census `CENSUS-UNRECORDED-2026-09-17.md` 의 `## 도달 불가 분기`
-절은 단일 원인 `queue_status_card_enabled()`(`router/queue_status_presentation.rs:4-6`, 인자 없는
+절은 단일 원인 `queue_status_card_enabled()`(`queue_reactions/queue_status_presentation.rs:4-6`, 인자 없는
 `const fn` 이 `false` 를 반환) 아래 **756줄**을 "컴파일은 되지만 런타임에 도달 불가" 로 올렸다.
 **이 슬라이스는 그 756줄을 한 줄도 철거하지 않는다** — `git diff --numstat origin/main -- src/`
 기준 삭제 0줄이다.
@@ -501,7 +501,7 @@ base `origin/main d72504ca89`. census `CENSUS-UNRECORDED-2026-09-17.md` 의 `## 
 
 코드 삭제 없음. 대신 재발 방지 기록 2건:
 
-1. `router/queue_status_presentation.rs` 의 상수에 **"parked, not retired"** doc 를 붙여
+1. `queue_reactions/queue_status_presentation.rs` 의 상수에 **"parked, not retired"** doc 를 붙여
    #4754·`f680658189`·PR #5107 을 코드 자리에서 가리키게 했다. 다음 census 가 `false` 한 줄만
    읽고 같은 오판을 반복하지 않도록 하는 것이 목적이다. 동작 변경 없음.
 2. 이 절. **이 가족은 인벤토리상 "철거 후보" 가 아니라 "보류(HOLD)" 다.**
