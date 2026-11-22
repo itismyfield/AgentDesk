@@ -98,20 +98,11 @@ impl InflightDisposition {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct PendingQueueSnapshot {
-    pub queue_depth: usize,
-    pub disk_present: Option<bool>,
-    // #3034: populated for diagnostics/observability; not read by the queue
-    // preservation check (which only compares depth + presence).
-    #[allow(dead_code)]
-    pub disk_path: Option<std::path::PathBuf>,
-    /// #5176: the primary Discord message id of every queued intervention, in
-    /// queue order. Depth alone told operators that a cancel lost "one item"
-    /// and nothing else — not which user instruction vanished, and not whether
-    /// a same-depth queue had actually been swapped out underneath them. A
-    /// user-message-lossless contract cannot be audited by counting.
-    pub message_ids: Vec<u64>,
+/// A pending-queue snapshot read only: its memory depth, disk presence and queued message ids.
+pub(crate) trait PendingQueueView {
+    fn queue_depth(&self) -> usize;
+    fn disk_present(&self) -> Option<bool>;
+    fn message_ids(&self) -> &[u64];
 }
 
 /// A provider channel's turn stop, judged before its first write; nothing written.
@@ -128,6 +119,7 @@ pub(crate) trait TurnStopJudgement {
 /// provider runtimes. `S` is the runtime a guard admits; the registry owns its type.
 pub(crate) trait TurnStopPort<S>: Send + Sync {
     type Judged: TurnStopJudgement + Send;
+    type Snapshot: PendingQueueView + Send;
 
     fn judge_provider_channel_stop<'a>(
         &'a self,
@@ -173,7 +165,7 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
         &'a self,
         provider_name: &'a str,
         channel_id: ChannelId,
-    ) -> BoxFuture<'a, Option<PendingQueueSnapshot>>;
+    ) -> BoxFuture<'a, Option<Self::Snapshot>>;
 
     fn guard_tmux_name<'a>(
         &'a self,
@@ -200,14 +192,15 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
 
 /// A shared registry answers as the registry it holds.
 impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
-    type Judged = T::Judged;
+    type Judged = <T as TurnStopPort<S>>::Judged;
+    type Snapshot = <T as TurnStopPort<S>>::Snapshot;
 
     fn judge_provider_channel_stop<'a>(
         &'a self,
         provider_name: &'a str,
         channel: ChannelId,
     ) -> BoxFuture<'a, Self::Judged> {
-        T::judge_provider_channel_stop(self, provider_name, channel)
+        (**self).judge_provider_channel_stop(provider_name, channel)
     }
 
     fn stop_judged_provider_channel<'a>(
@@ -216,7 +209,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         reason: &'a str,
         cleanup_policy: TmuxCleanupPolicy,
     ) -> BoxFuture<'a, Option<RuntimeTurnStopResult>> {
-        T::stop_judged_provider_channel(self, judged, reason, cleanup_policy)
+        (**self).stop_judged_provider_channel(judged, reason, cleanup_policy)
     }
 
     fn stop_channel_runtime<'a>(
@@ -229,7 +222,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         approved: Option<Option<&'a str>>,
     ) -> BoxFuture<'a, RuntimeTurnStopResult> {
         let policy = cleanup_policy;
-        T::stop_channel_runtime(self, shared, provider, channel_id, reason, policy, approved)
+        (**self).stop_channel_runtime(shared, provider, channel_id, reason, policy, approved)
     }
 
     fn stop_runtime_turn_preserving_watcher<'a>(
@@ -239,8 +232,8 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         tmux_name: Option<&'a str>,
         stop_source: &'static str,
     ) -> BoxFuture<'a, &'static str> {
-        let stop = T::stop_runtime_turn_preserving_watcher;
-        stop(self, provider_name, channel_id, tmux_name, stop_source)
+        let (provider, channel, tmux) = (provider_name, channel_id, tmux_name);
+        (**self).stop_runtime_turn_preserving_watcher(provider, channel, tmux, stop_source)
     }
 
     fn resolve_tmux_session_for_cancel<'a>(
@@ -248,15 +241,15 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         provider_name: &'a str,
         channel_id: ChannelId,
     ) -> BoxFuture<'a, Option<String>> {
-        T::resolve_tmux_session_for_cancel(self, provider_name, channel_id)
+        (**self).resolve_tmux_session_for_cancel(provider_name, channel_id)
     }
 
     fn snapshot_pending_queue_state<'a>(
         &'a self,
         provider_name: &'a str,
         channel_id: ChannelId,
-    ) -> BoxFuture<'a, Option<PendingQueueSnapshot>> {
-        T::snapshot_pending_queue_state(self, provider_name, channel_id)
+    ) -> BoxFuture<'a, Option<Self::Snapshot>> {
+        (**self).snapshot_pending_queue_state(provider_name, channel_id)
     }
 
     fn guard_tmux_name<'a>(
@@ -264,7 +257,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         provider: &'a ProviderKind,
         channel_id: ChannelId,
     ) -> BoxFuture<'a, Result<(Option<String>, bool), String>> {
-        T::guard_tmux_name(self, provider, channel_id)
+        (**self).guard_tmux_name(provider, channel_id)
     }
 
     fn runtime_teardown<'a>(
@@ -275,7 +268,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         explicit_key: Option<&'a str>,
         caller: &'a str,
     ) -> BoxFuture<'a, (ChannelTeardown, Option<Arc<S>>)> {
-        T::runtime_teardown(self, provider, channel_id, tmux_name, explicit_key, caller)
+        (**self).runtime_teardown(provider, channel_id, tmux_name, explicit_key, caller)
     }
 
     fn nameless_runtime_teardown<'a>(
@@ -284,6 +277,6 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         channel_id: ChannelId,
         caller: &'a str,
     ) -> BoxFuture<'a, Option<Arc<S>>> {
-        T::nameless_runtime_teardown(self, provider, channel_id, caller)
+        (**self).nameless_runtime_teardown(provider, channel_id, caller)
     }
 }

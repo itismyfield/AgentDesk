@@ -8,7 +8,7 @@ use crate::services::discord::host_teardown_gate::{
     backfill_inflight_after_guard, row_gate, runtime_target_holds,
 };
 use crate::services::engine_runtime::health_port::{
-    FINISH_UNOBSERVED_PATH, PendingQueueSnapshot, TOKEN_SUPERSEDED_PATH, TurnStopJudgement,
+    FINISH_UNOBSERVED_PATH, PendingQueueView, TOKEN_SUPERSEDED_PATH, TurnStopJudgement,
     TurnStopPort,
 };
 use crate::services::provider::ProviderKind;
@@ -555,10 +555,10 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
         queue_preserved,
         termination_recorded,
         tmux_session_observed,
-        queue_depth_before: pre_snapshot.as_ref().map(|s| s.queue_depth),
-        queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth),
-        queue_disk_present_before: pre_snapshot.as_ref().and_then(|s| s.disk_present),
-        queue_disk_present_after: post_snapshot.as_ref().and_then(|s| s.disk_present),
+        queue_depth_before: pre_snapshot.as_ref().map(|s| s.queue_depth()),
+        queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth()),
+        queue_disk_present_before: pre_snapshot.as_ref().and_then(|s| s.disk_present()),
+        queue_disk_present_after: post_snapshot.as_ref().and_then(|s| s.disk_present()),
         mailbox_foreground_free,
         queue_dropped_message_ids,
     };
@@ -893,7 +893,7 @@ pub(crate) mod policy_observability_tests {
 
         // An unobservable side is not evidence of a drop.
         assert!(super::dropped_queue_message_ids(Some(&snapshot(vec![9_001])), None).is_empty());
-        assert!(super::dropped_queue_message_ids(None, None).is_empty());
+        assert!(super::dropped_queue_message_ids::<PendingQueueSnapshot>(None, None).is_empty());
     }
 }
 
@@ -1022,7 +1022,7 @@ async fn resolve_tmux_session_observed<R: TurnStopPort<SharedData>>(
 async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
     health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
-) -> Option<PendingQueueSnapshot> {
+) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
     let registry = health_registry?;
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
@@ -1033,7 +1033,7 @@ async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
 async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
     health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
-) -> Option<PendingQueueSnapshot> {
+) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
     pending_queue_pre_snapshot(health_registry, target).await
 }
 
@@ -1050,30 +1050,27 @@ async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
 ///
 /// Returns empty when either side is unobservable — an unknown queue is not
 /// evidence of a drop.
-fn dropped_queue_message_ids(
-    pre: Option<&PendingQueueSnapshot>,
-    post: Option<&PendingQueueSnapshot>,
-) -> Vec<u64> {
+fn dropped_queue_message_ids<Q: PendingQueueView>(pre: Option<&Q>, post: Option<&Q>) -> Vec<u64> {
     let (Some(pre), Some(post)) = (pre, post) else {
         return Vec::new();
     };
-    pre.message_ids
+    pre.message_ids()
         .iter()
         .copied()
-        .filter(|message_id| !post.message_ids.contains(message_id))
+        .filter(|message_id| !post.message_ids().contains(message_id))
         .collect()
 }
 
 /// Preservation requires measured memory and disk state on both sides of the cancel.
-fn compute_queue_preserved(
+fn compute_queue_preserved<Q: PendingQueueView>(
     cleanup_policy: TmuxCleanupPolicy,
-    pre: Option<&PendingQueueSnapshot>,
-    post: Option<&PendingQueueSnapshot>,
+    pre: Option<&Q>,
+    post: Option<&Q>,
 ) -> Option<bool> {
     let _ = cleanup_policy;
     let (pre, post) = (pre?, post?);
-    let (before, after) = (pre.disk_present?, post.disk_present?);
-    Some((!before || after) && post.queue_depth >= pre.queue_depth)
+    let (before, after) = (pre.disk_present()?, post.disk_present()?);
+    Some((!before || after) && post.queue_depth() >= pre.queue_depth())
 }
 
 #[cfg(all(test, unix))]

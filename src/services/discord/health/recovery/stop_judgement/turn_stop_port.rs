@@ -8,10 +8,10 @@ use poise::serenity_prelude::ChannelId;
 
 use super::ProviderChannelStop;
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
-use crate::services::discord::health::{self, HealthRegistry};
+use crate::services::discord::health::{self, HealthRegistry, PendingQueueSnapshot};
 use crate::services::discord::{SharedData, host_teardown_gate};
 use crate::services::engine_runtime::health_port::{
-    PendingQueueSnapshot, RuntimeTurnStopResult, TurnStopJudgement, TurnStopPort,
+    PendingQueueView, RuntimeTurnStopResult, TurnStopJudgement, TurnStopPort,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::ChannelTeardown;
@@ -30,8 +30,23 @@ impl TurnStopJudgement for ProviderChannelStop {
     }
 }
 
+impl PendingQueueView for PendingQueueSnapshot {
+    fn queue_depth(&self) -> usize {
+        self.queue_depth
+    }
+
+    fn disk_present(&self) -> Option<bool> {
+        self.disk_present
+    }
+
+    fn message_ids(&self) -> &[u64] {
+        &self.message_ids
+    }
+}
+
 impl TurnStopPort<SharedData> for HealthRegistry {
     type Judged = ProviderChannelStop;
+    type Snapshot = PendingQueueSnapshot;
 
     fn judge_provider_channel_stop<'a>(
         &'a self,

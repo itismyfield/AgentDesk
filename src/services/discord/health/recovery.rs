@@ -111,7 +111,21 @@ use watchdog_pass::{
     revalidate_and_clear_explicit_background_inflight,
 };
 
-pub use crate::services::engine_runtime::health_port::PendingQueueSnapshot;
+#[derive(Clone, Debug, Default)]
+pub struct PendingQueueSnapshot {
+    pub queue_depth: usize,
+    pub disk_present: Option<bool>,
+    // #3034: populated for diagnostics/observability; not read by the queue
+    // preservation check (which only compares depth + presence).
+    #[allow(dead_code)]
+    pub disk_path: Option<std::path::PathBuf>,
+    /// #5176: the primary Discord message id of every queued intervention, in
+    /// queue order. Depth alone told operators that a cancel lost "one item"
+    /// and nothing else — not which user instruction vanished, and not whether
+    /// a same-depth queue had actually been swapped out underneath them. A
+    /// user-message-lossless contract cannot be audited by counting.
+    pub message_ids: Vec<u64>,
+}
 
 /// Drain scheduling and measured depth; unresolved runtimes and refused hydration have no depth.
 #[derive(Clone, Copy, Debug, Default)]
