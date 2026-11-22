@@ -1097,7 +1097,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh de8f490df873c36add978916e8f12d5a2cb82614467a58f696af0f4c6e1a40bc
+          pin scripts/check-ci-runner-hardening.sh 3072b914eda8ec329f2c6c619882915a374f8aa4666443b9fe0a353a8f7a08cc
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1282,7 +1282,7 @@ jobs:
       ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
-      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
+      '["self-hosted","linux","x64","adk-wsl-lint"]' || '["ubuntu-latest"]') }}
     env:
       # Limit simultaneous workspace target checks on either runner.
       CARGO_BUILD_JOBS: "2"
