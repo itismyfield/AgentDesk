@@ -1,15 +1,12 @@
-//! The production restart reader of a Herdr pane and the restart pass over this node's Herdr rows.
-//! Every reading goes through the pane's gated target on one server; nothing here writes a pane.
+//! The restart pass over this node's Herdr rows. Every pane reading goes through the session host's
+//! recover port on one server; nothing here writes a pane.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
-use super::host_reconcile::{
-    HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
-    NoHerdrEndpoint, reconcile_hosted,
-};
+use super::host_reconcile::{HostReconcile, NoHerdrEndpoint, reconcile_hosted};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
     list_local_herdr_rows_pg, list_local_unplaced_pending_pg,
@@ -22,56 +19,9 @@ use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_restarted_herdr_source,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::{HerdrPaneView, PaneProvider, PaneReading, herdr_endpoints};
+pub(in crate::services::discord) use crate::services::session_host::SocketHerdrReader;
+use crate::services::session_host::herdr_endpoints;
 use crate::services::tui_prompt_dedupe::herdr_execution_listed;
-
-/// Reads the stored pane on the endpoint this node registered for it; it never lists, searches,
-/// creates or writes panes.
-pub(crate) struct SocketHerdrReader {
-    endpoint: HerdrEndpointId,
-    view: HerdrPaneView,
-    nonce: String,
-}
-
-impl SocketHerdrReader {
-    /// `None` when no registered endpoint holds the record's location.
-    pub(crate) fn of(stored: &HostedExecution) -> Option<Self> {
-        let location = stored.location.as_ref()?;
-        Some(Self {
-            endpoint: HerdrEndpointId::of(location),
-            view: herdr_endpoints().view(stored)?,
-            nonce: stored.execution_nonce.clone(),
-        })
-    }
-}
-
-impl HerdrExecutionReader for SocketHerdrReader {
-    fn endpoint(&self) -> Option<&HerdrEndpointId> {
-        Some(&self.endpoint)
-    }
-
-    fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
-        if pane_id != self.view.pane_id() {
-            return HerdrPaneReading::Unreadable("not the target's pane".into());
-        }
-        let (root, provider) = match self.view.read_execution() {
-            PaneReading::Missing => return HerdrPaneReading::Missing,
-            PaneReading::Unreadable(why) => return HerdrPaneReading::Unreadable(why),
-            PaneReading::Present { root, provider } => (root, provider),
-        };
-        // Only a provider whose environment names this execution reports its nonce.
-        let provider_process = match provider {
-            PaneProvider::Execution(stamp) => Some(stamp),
-            PaneProvider::Exited | PaneProvider::Unverified(_) => None,
-        };
-        HerdrPaneReading::Present(HerdrPaneEvidence {
-            binding_nonce: provider_process.as_ref().map(|_| self.nonce.clone()),
-            root: Some(root),
-            provider_process,
-            agent_session_id: None,
-        })
-    }
-}
 
 /// Captures the exact registered reader before its blocking observation moves to another thread.
 pub(in crate::services::discord) struct RootReplacedProbe {

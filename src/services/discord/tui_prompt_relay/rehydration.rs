@@ -34,10 +34,11 @@ use codex_marker::{codex_rollout_session_id, codex_tui_launch_modified_since};
 #[cfg(any(not(test), not(unix)))]
 use super::resolve_rehydrated_claude_tmux_channel_id as claude_channel;
 #[cfg(any(not(test), not(unix)))]
-use crate::services::{
-    platform::tmux::list_session_names as claude_session_names,
-    tmux_diagnostics::tmux_session_has_live_pane as claude_pane_live,
-};
+use crate::services::tmux_diagnostics::tmux_session_has_live_pane as claude_pane_live;
+#[cfg(any(not(test), not(unix)))]
+fn claude_session_names() -> Result<Vec<String>, String> {
+    crate::services::session_host::TmuxHost.list_session_names()
+}
 #[cfg(all(test, unix))]
 use claude_pass_tests::{claude_channel, claude_pane_live, claude_session_names};
 #[cfg(test)]
@@ -201,7 +202,7 @@ fn codex_pass_tmux_session_names() -> Result<Vec<String>, String> {
     if let Some(sessions) = CODEX_PASS_TMUX_VIEW.with_borrow(Clone::clone) {
         return Ok(sessions);
     }
-    crate::services::platform::tmux::list_session_names()
+    crate::services::session_host::TmuxHost.list_session_names()
 }
 
 #[cfg(unix)]
@@ -961,7 +962,7 @@ fn codex_tui_rehydrate_observations(sessions: &[String]) -> Vec<CodexTuiRehydrat
         }
         let live_pane = codex_pass_pane_is_live(tmux_session_name);
         let canonical_cwd = live_pane
-            .then(|| crate::services::platform::tmux::pane_current_path(tmux_session_name))
+            .then(|| crate::services::session_host::TmuxHost.pane_current_path(tmux_session_name))
             .flatten()
             .map(PathBuf::from)
             .map(|cwd| std::fs::canonicalize(&cwd).unwrap_or(cwd));
@@ -1164,7 +1165,7 @@ pub(in crate::services::discord) fn rehydrated_codex_tui_binding_for_tmux_sessio
         );
         return None;
     }
-    let cwd = crate::services::platform::tmux::pane_current_path(tmux_session_name)?;
+    let cwd = crate::services::session_host::TmuxHost.pane_current_path(tmux_session_name)?;
     let sessions_dir = crate::services::codex_tui::rollout_tail::default_codex_sessions_dir()?;
     let mut excluded_rollout_paths = reserved_rollout_paths.clone();
     excluded_rollout_paths.extend(claimed_rollout_paths.iter().cloned());

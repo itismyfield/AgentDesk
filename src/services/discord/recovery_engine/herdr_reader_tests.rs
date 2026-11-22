@@ -8,6 +8,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::session_host::herdr_socket_rig_tests::{
     HerdrRig, KEY, NODE, PANE, PROVIDER, SESSION, SHELL,
 };
+use crate::services::session_host::{HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading};
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
