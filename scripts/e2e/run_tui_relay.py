@@ -1142,6 +1142,7 @@ def validate_scenario_schema(scenario):
                     raise ValueError("deliver_result requires nonempty delivery allowed values")
     if any("deliver_prompt" in step for step in scenario.get("steps", [])) and not any("deliver_result" in spec for spec in scenario.get("assertions", [])):
         raise ValueError("deliver_prompt requires deliver_result before any POST")
+    known_gap.validate_known_failing(scenario)
 
 
 def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
@@ -3685,6 +3686,7 @@ def run_scenario(
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
     _finish_step_timings(result)
+    known_gap.apply_known_failing(scenario, result, run_id)
     return feature_accounting.annotate(result)
 
 

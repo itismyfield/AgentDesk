@@ -732,3 +732,28 @@ class HerdrStopCases(unittest.TestCase):
         result, statuses, _ = self.run_e54(early_done=True)
         self.assertEqual((statuses[1], result['subcases'][1].get('known_gaps')), ('fail', None), result)
         self.assertIn('inconclusive', result['subcases'][1]['reason'])
+
+
+class ScenarioKnownFailingContract(unittest.TestCase):
+    YAML = YAML.parent / "E-68-claude-tui-discord-during-terminal-turn.yaml"
+
+    def run_e68(self, needle):
+        scenario, record = yaml.safe_load(self.YAML.read_text()), {"agent_mode_actual": "real_live",
+                                                                   "coverage_class_actual": "live"}
+        if needle:
+            record["wait_timeouts"] = [{"needle": needle.replace("{run_id}", RUN)}]
+            outcome = driver.ScenarioStepAssertionError(f"timeout waiting for Discord text {needle!r}", record=record)
+        args = Namespace(cell="claude-tui", channel_id="41", thread_channel_id="42", dry_run=False, allow_destructive=False,
+                         base_url="http://offline.invalid", reset_before_each=False, hard_reset_session_each=False)
+        with patch.object(driver, "run_one_cell", side_effect=outcome if needle else None, return_value=record), \
+             patch.object(driver, "send_teardown_marker"):
+            return driver.run_scenario(scenario, args=args, client=discord.DiscordClient("http://offline.invalid"),
+                                       run_id=RUN)
+
+    def test_only_the_withheld_marker_timeout_is_the_known_gap(self):
+        mark, direct = "[E2E:E68:MARK:{run_id}]", "[E2E:E68:DIRECT]"
+        for needle, status in ((mark, "known_gap"), (direct, "fail"), (None, "unexpected_pass")):
+            with self.subTest(needle=needle):
+                result = self.run_e68(needle)
+                self.assertEqual(result["status"], status, result.get("reason"))
+                self.assertEqual(driver.feature_accounting.totals([result])["fail"], int(status == "fail"))

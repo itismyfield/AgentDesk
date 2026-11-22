@@ -140,6 +140,16 @@ health/queue degradation. `E-26` through `E-28` are explicit
 CronCreate live creation, Codex modern-schema production-parser/live stream,
 and Codex live tool-command coverage.
 
+`E-68` is a `claude-tui` thread scenario for #8323: a prompt typed into the
+thread's tmux pane opens a turn AgentDesk did not start, a Discord message
+arrives while its 75 s Bash call runs, and the message must be answered exactly
+once after that turn rests. It carries `known_failing: {issue, marker}`. Only an
+assertion timeout on that `wait_for_discord_text` marker reports `known_gap`
+(`KNOWN_GAP: #8323`); any other failure stays `fail` and a pass reports
+`unexpected_pass`, the cue to drop the field once the issue is fixed. Neither
+`known_gap` nor `unexpected_pass` counts toward `totals.fail`, so the run's exit
+code stays 0 for the known RED.
+
 `E-35` preserves the headless `E-1` and adds one normal Discord short-response
 turn. It passes only when the newly observed outbound Discord response ID has
 exactly one authoritative receipt and that receipt has a same-generation
