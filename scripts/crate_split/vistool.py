@@ -754,6 +754,10 @@ class Widener:
         - In the target module, a direct declaration or explicit binding of `name` wins; only when there is
           none are its visible `pub(..) use x::*;` globs searched, and a glob is widened only if `name` is
           found behind it. Private `use x::*;` and fn-local `use`s are never touched."""
+        # Every entry (the diagnostic's own line, a hop, a module re-export) obeys the boundary: a `use` the
+        # target crate does not own is never widened, and the chain is that residue.
+        if self._place(rel, index + 1):
+            return {}, self._place(rel, index + 1)
         lines = self.lines(rel)
         text = use_text(lines, index)
         base = self.layout.module_at(rel, index + 1)

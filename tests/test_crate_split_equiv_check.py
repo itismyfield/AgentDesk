@@ -162,6 +162,66 @@ class ClassNarrowingTest(RepoCase):
         self.assertIn("| b class | move |", out)
 
 
+PICK = ("macro_rules! pick {\n    (pub(crate) struct $n:ident;) => {\n        pub fn value() -> u32 { 1 }\n    };\n"
+        "    (pub struct $n:ident;) => {\n        pub fn value() -> u32 { 2 }\n    };\n}\n")
+
+
+class FalseOkTest(RepoCase):
+    """VT2 review P1-1..P1-5: diffs that change behaviour must be C and fail --require vis|move."""
+
+    def assert_c(self, base, head, why):
+        for require in ("move", "vis"):
+            verdict, out = self.check(base, head, "--require", require)
+            self.assertIn("| b class | FAIL (C, required", out, f"{why}\n{out}")
+            self.assertEqual(verdict, "EQUIV_FAIL a,b", why)
+            self.tearDown()
+            self.setUp()
+
+    def test_whitespace_inside_string_literals_is_c(self):
+        for lit, new in (('"a  b"', '"a b"'), ('r"a  b"', 'r"a b"'), ('b"a  b"', 'b"a b"'), ('"a\tb"', '"a b"')):
+            base = f"pub fn value() -> &'static [u8] {{\n    {lit}.as_ref()\n}}\n"
+            self.assert_c({"src/lib.rs": base}, {"src/lib.rs": base.replace(lit, new)}, lit)
+            # On a declaration line the visibility is stripped, so only the token comparison can tell.
+            decl = f"pub(crate) const VALUE: &[u8] = {lit};\n"
+            self.assert_c({"src/lib.rs": decl}, {"src/lib.rs": decl.replace(lit, new)}, "const " + lit)
+            self.assert_c({"src/lib.rs": decl}, {"src/lib.rs": decl.replace(lit, new).replace("pub(crate) ", "pub ")},
+                          "pub const " + lit)
+
+    def test_pub_inside_a_multiline_macro_call_is_c(self):
+        for open_, close in (("pick! {", "}"), ("pick!(", ");")):
+            base = PICK + f"{open_}\n    pub(crate) struct A;\n{close}\n"
+            self.assert_c({"src/lib.rs": base}, {"src/lib.rs": base.replace("    pub(crate) struct A;", "    pub struct A;")},
+                          open_)
+
+    def test_glob_import_target_change_is_c(self):
+        for old, new in (("use old::*;", "use new::*;"), ("use self::{old::*};", "use self::{new::*};")):
+            base = TWO_MODS + old + "\npub fn f() -> u32 {\n    value()\n}\n"
+            self.assert_c({"src/lib.rs": base}, {"src/lib.rs": base.replace(old, new)}, old)
+
+    def test_unrelated_namesake_of_a_moved_item_is_c(self):
+        moved = f"pub fn value() -> u32 {{\n{BODY}}}\n"
+        lib = "mod a;\nmod b;\n" + TWO_MODS + "pub fn run() -> u32 {\n    old::value()\n}\n"
+        self.assert_c({"src/lib.rs": lib, "src/a.rs": moved, "src/b.rs": "\n"},
+                      {"src/lib.rs": lib.replace("    old::value()", "    new::value()"), "src/a.rs": "\n",
+                       "src/b.rs": moved}, "namesake")
+
+    def test_unrelated_namesake_in_a_use_is_c(self):
+        moved = f"pub fn value() -> u32 {{\n{BODY}}}\n"
+        lib = "mod a;\nmod b;\n" + TWO_MODS + "use old::value;\npub fn run() -> u32 {\n    value()\n}\n"
+        self.assert_c({"src/lib.rs": lib, "src/a.rs": moved, "src/b.rs": "\n"},
+                      {"src/lib.rs": lib.replace("use old::value;", "use new::value;"), "src/a.rs": "\n",
+                       "src/b.rs": moved}, "namesake use")
+
+    def test_manifest_lines_moved_by_git_are_c(self):
+        lib = {"src/lib.rs": 'pub fn f() -> bool {\n    cfg!(feature = "feature_a_long_enough")\n}\n'}
+        manifest = ('[package]\nname = "agentdesk"\n\n[features]\ndefault = ["feature_a_long_enough"]\n'
+                    'feature_a_long_enough = []\n\n[package.metadata.spare]\ndefault = ["feature_b_long_enough"]\n')
+        swapped = manifest.replace('default = ["feature_a_long_enough"]', "@A").replace(
+            'default = ["feature_b_long_enough"]', 'default = ["feature_a_long_enough"]').replace(
+            "@A", 'default = ["feature_b_long_enough"]')
+        self.assert_c({"Cargo.toml": manifest, **lib}, {"Cargo.toml": swapped}, "manifest move")
+
+
 class WindowsAutoTest(RepoCase):
     """KR-C1 review P2-4: platform cfgs that span lines or gate the changed body."""
 

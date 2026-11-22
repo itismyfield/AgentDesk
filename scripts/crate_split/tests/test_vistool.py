@@ -280,6 +280,13 @@ class RecordedDiagnostics(unittest.TestCase):
         self.assertEqual(got, ({("src/a/mod.rs", 0): ("item",), ("src/a/inner.rs", 0): ("item",),
                                 ("src/a/inner/moved.rs", 0): ("item",)}, "edit"))
 
+    def test_module_reexport_through_an_above_file_is_cut_residue(self):
+        # VT2 review P1-6: LOW `crate::app::moved::Deep` where UP `app` re-exports LOW's module: no op on app.rs.
+        got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::app::moved::Deep;\npub(crate) mod moved;\n",
+                                "src/a/moved.rs": "pub(crate) struct Deep;\n",
+                                "src/app.rs": "pub(crate) use crate::a::moved;\n"}, sides={"src/app.rs": "above"})
+        self.assertEqual((got[0], got[1][0]), ({}, "cut_residue"))
+
     def test_through_use_of_a_module_from_another_crate(self):
         # `crate::a::host::Kind` where `a` has `pub(crate) use adk_base::host;` (an extracted member's public item).
         got = self.glob_follow({"src/a/mod.rs": "pub(crate) use crate::a::host::Deep;\npub(crate) use adk_base::host;\n"})
@@ -729,6 +736,25 @@ class EndToEnd(unittest.TestCase):
             status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
             self.assertEqual(status, "")
             self.assertTrue((out / "vistool-real-lower-partial.patch").read_text())
+
+    def test_reexport_through_an_above_module_leaves_upper_untouched(self):
+        # VT2 review P1-6: LOW -> UP module re-export -> LOW definition; --apply must not edit the UP file.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = fixture_repo(Path(tmp))
+            with open(repo / "src/app.rs", "a") as f:
+                f.write("\npub(crate) use crate::core::util;\n")
+            with open(repo / "src/core.rs", "a") as f:
+                f.write("\npub(crate) use crate::app::util::tidy as app_tidy;\n")
+            web = (repo / "src/services/web.rs").read_text()
+            (repo / "src/services/web.rs").write_text(
+                web.replace("    made.size\n", "    made.size + crate::core::app_tidy(1)\n"))
+            subprocess.run(git + ["commit", "-qam", "re-export through app"], check=True)
+            app = (repo / "src/app.rs").read_text()
+            ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
+                                                 apply=True, log=lambda *a, **k: None)
+            self.assertEqual((repo / "src/app.rs").read_text(), app)
+            self.assertNotIn("src/app.rs", {e["file"] for e in manifest["final_edits"]})
+            self.assertNotRegex(line, r" cut_residue=0 ", (line, manifest.get("fail")))
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
