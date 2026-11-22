@@ -270,7 +270,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             "monitor/task-notification watcher relays must not use notify-bot outbox"
         );
         let session_bound_discord_delivery_enabled =
-            crate::services::discord::session_relay_sink::session_bound_discord_delivery_enabled();
+            crate::services::discord::relay_coord::session_bound_discord_delivery_enabled();
         let relay_producer_session_name = cached_relay_producer
             .as_ref()
             .map(|producer| producer.session_name());

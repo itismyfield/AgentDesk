@@ -85,4 +85,11 @@ pub(in crate::services::discord) struct RouterPorts {
     pub queued_head_inject_covers: fn(ChannelId, Option<ChannelId>) -> bool,
     /// The intervention an intake request becomes when the input owner admits it.
     pub owned_original: fn(&IntakeRequest, bool, PendingUploads, bool) -> Intervention,
+    /// The session key a kept start's headless turn runs under.
+    #[cfg(unix)]
+    pub owner_start_session_key: for<'a> fn(
+        &'a Arc<SharedData>,
+        ChannelId,
+        &'a serde_json::Value,
+    ) -> PortFuture<'a, Option<String>>,
 }

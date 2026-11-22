@@ -2,29 +2,6 @@
 
 use super::*;
 
-pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal_delivery(
-    inflight: Option<&InflightTurnState>,
-    tmux_session_name: &str,
-) -> bool {
-    if tmux_session_name.trim().is_empty() {
-        return false;
-    }
-    let Some(state) = inflight else {
-        return true;
-    };
-    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
-        return false;
-    }
-    // A normal Discord-origin inflight already has the watcher as terminal owner;
-    // letting the sink (still attached to the same JSONL) deliver would double-post.
-    // Only rebind/adopted rows are no real foreground turn; scheduled wakeups / idle
-    // background output reach this path with no inflight at all.
-    matches!(
-        state.effective_relay_owner_kind(),
-        RelayOwnerKind::SessionBoundRelay
-    ) || state.rebind_origin
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionBoundTerminalDeliveryRoute {
     NewMessage,

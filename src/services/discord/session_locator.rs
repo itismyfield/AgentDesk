@@ -182,7 +182,7 @@ pub(super) async fn channel_key(
     };
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && super::admin_host_guard::configured_refusal(shared, provider, channel)
+        && super::host_defer_gate::configured_refusal(shared, provider, channel)
             .await
             .is_none()
         && unix::observe_old(id, &primary, channel)

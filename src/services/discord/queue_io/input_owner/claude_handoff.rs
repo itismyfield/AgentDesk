@@ -239,7 +239,7 @@ async fn target(
     context: &serde_json::Value,
     journal_key: &str,
 ) -> Target {
-    let key = crate::services::discord::router::message_handler::owner_start_session_key;
+    let key = shared.router_ports.owner_start_session_key;
     match key(shared, channel, context).await {
         None => Target::Unresolved,
         Some(key) if key == journal_key => Target::Same,

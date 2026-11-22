@@ -22,6 +22,8 @@ pub(in crate::services::discord) const ROUTER_PORTS: RouterPorts = RouterPorts {
     defer_promoted_dispatch,
     queued_head_inject_covers: super::queued_head_inject_covers,
     owned_original: super::input_payload::owned_original,
+    #[cfg(unix)]
+    owner_start_session_key,
 };
 
 fn promote_readiness_blocked<'a>(
@@ -104,5 +106,16 @@ fn defer_promoted_dispatch<'a>(
         channel_id,
         intervention,
         dispatch_lease,
+    ))
+}
+
+#[cfg(unix)]
+fn owner_start_session_key<'a>(
+    shared: &'a Arc<SharedData>,
+    channel: ChannelId,
+    context: &'a serde_json::Value,
+) -> PortFuture<'a, Option<String>> {
+    Box::pin(super::message_handler::owner_start_session_key(
+        shared, channel, context,
     ))
 }

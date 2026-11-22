@@ -31,13 +31,19 @@
 //! fails (3). Every hold path is reported with the specific evidence that held
 //! it, so an operator never has to guess which gate refused.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(test)]
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
+
+#[cfg(test)]
+use super::host_liveness::readiness_is_structurally_idle;
+pub(in crate::services::discord) use super::host_liveness::{
+    terminal_evidence_allows_mailbox_release, tui_structurally_idle,
+};
 
 use super::SharedData;
 #[cfg(unix)]
@@ -134,26 +140,6 @@ pub(in crate::services::discord) fn classify_zombie_foreground(
     ZombieForegroundVerdict::HoldTuiNotIdle
 }
 
-/// Shared #5176 terminal-evidence conjunction.
-///
-/// Cancel surfaces pass `release_authorized = token.cancelled`.  The #5068
-/// finalizer reconciler passes an exact episode-nonce match between the
-/// terminal submission and the residual mailbox token.  Both callers must
-/// independently prove that no inflight bridge owns the turn and that the TUI
-/// is structurally terminal. Keeping the conjunction here prevents the two
-/// recovery surfaces from drifting toward different definitions of a zombie.
-pub(in crate::services::discord) const fn terminal_evidence_allows_mailbox_release(
-    mailbox_holds_active_turn: bool,
-    release_authorized: bool,
-    inflight_state_present: bool,
-    tui_structurally_idle: Option<bool>,
-) -> bool {
-    mailbox_holds_active_turn
-        && release_authorized
-        && !inflight_state_present
-        && matches!(tui_structurally_idle, Some(true))
-}
-
 /// What a cancel surface actually accomplished at the mailbox.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ZombieForegroundReleaseOutcome {
@@ -173,46 +159,6 @@ impl ZombieForegroundReleaseOutcome {
         self.verdict
             .map_or("not_probed", ZombieForegroundVerdict::as_str)
     }
-}
-
-/// `Missing` is terminal evidence, not an error: a foreground turn whose tmux
-/// session no longer exists cannot be running.
-fn readiness_is_structurally_idle(readiness: IndependentTmuxReadiness) -> bool {
-    matches!(
-        readiness,
-        IndependentTmuxReadiness::Missing | IndependentTmuxReadiness::ReadyForInput
-    )
-}
-
-/// Probe through the shared readiness authority. An absent or blank binding is
-/// unmeasured, so it cannot authorize releasing foreground ownership.
-pub(in crate::services::discord) fn tui_structurally_idle(
-    provider: &ProviderKind,
-    token: &Arc<CancelToken>,
-) -> Option<bool> {
-    let Some(tmux_session) = token
-        .tmux_session_name()
-        .filter(|session| !session.trim().is_empty())
-    else {
-        return None;
-    };
-    // Another host's session is never read as idle from a tmux probe.
-    if !super::host_liveness::local_tmux(&tmux_session, None) {
-        return None;
-    }
-    let runtime_kind =
-        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session);
-    let output_path =
-        crate::services::tmux_common::resolve_session_temp_path(&tmux_session, "jsonl");
-    Some(readiness_is_structurally_idle(
-        crate::services::tmux_turn_liveness::independent_tmux_readiness(
-            &tmux_session,
-            provider,
-            runtime_kind,
-            output_path.as_deref().map(Path::new),
-            None,
-        ),
-    ))
 }
 
 /// Stable identity of one persisted inflight episode.
