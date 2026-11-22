@@ -2054,7 +2054,7 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
     reply_message_id: MessageId,
     text: impl Into<String>,
     reason: &'static str,
-) -> bool {
+) -> queue_dispatch::MailboxEnqueueOutcome {
     let outcome = mailbox_enqueue_intervention(
         shared,
         provider,
@@ -2086,14 +2086,14 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
             error = %error,
             "internal followup enqueue failed durable pending-queue persistence"
         );
-        return false;
+        return outcome;
     }
 
     if outcome.enqueued {
         schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id, reason);
     }
 
-    outcome.enqueued
+    outcome
 }
 
 async fn mailbox_has_pending_soft_queue(
