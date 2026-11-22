@@ -39,6 +39,7 @@ mod id_bridge;
 mod idle_detector;
 mod idle_relay_drift;
 mod inflight;
+pub(crate) use inflight::install_codex_absence_reader;
 #[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,

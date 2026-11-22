@@ -11,11 +11,12 @@ mod permit_tests;
 #[cfg(test)]
 mod policy_tests;
 pub(crate) mod recovery;
+pub(crate) mod row;
 
 use crate::db::replay_disposition::write::{self, ExactAttempt, NoEffectAck};
-use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::CancelToken;
 use live::{LiveAttempt, RawObservation, Verdict};
+use row::ReplayRow;
 use sqlx::PgPool;
 
 pub(crate) use crate::domain::process_incarnation::incarnation;
@@ -36,7 +37,7 @@ pub(in crate::services::discord) async fn decide_stale(
     pool: &PgPool,
     attempt: Option<ExactAttempt>,
     observation: &RawObservation,
-    capture: Option<&InflightTurnState>,
+    capture: Option<&dyn ReplayRow>,
 ) -> ReplayDecision {
     let Some(attempt) = attempt else {
         return ReplayDecision::NotApplicable;
@@ -62,13 +63,13 @@ async fn withhold(
     pool: &PgPool,
     attempt: &ExactAttempt,
     reason: &str,
-    capture: Option<&InflightTurnState>,
+    capture: Option<&dyn ReplayRow>,
 ) -> bool {
     let mut preserved = serde_json::json!({
         "hold": { "nonce": attempt.nonce(), "reason": reason },
     });
     if let Some(capture) = capture {
-        let Ok(snapshot) = serde_json::to_value(capture) else {
+        let Ok(snapshot) = capture.capture_json() else {
             tracing::warn!(
                 receipt = attempt.receipt_id(),
                 "replay capture could not be preserved"
@@ -81,7 +82,7 @@ async fn withhold(
         pool, attempt, reason, &preserved,
         crate::db::replay_disposition::hold_notice::NoticeRouting {
             bot: "notify",
-            session_key: capture.and_then(|state| state.session_key.as_deref()),
+            session_key: capture.and_then(|state| state.session_key()),
         },
     )
     .await
@@ -224,26 +225,27 @@ static RETRY_CLAIMS: std::sync::LazyLock<dashmap::DashMap<(u64, u64), RetryClaim
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
 /// Whether the turn carries a protected request; reads memory only, so a legacy turn does no IO.
-fn protected(token: &CancelToken, inflight: &InflightTurnState) -> bool {
+fn protected(token: &CancelToken, inflight: &dyn ReplayRow) -> bool {
     token.replay_attempt().is_some()
-        || inflight.replay_receipt_id.is_some()
+        || inflight.replay_receipt_id().is_some()
         || inflight.replay_rerun_blocked()
 }
 
 /// Whether ordinary completion, failure, recovery and session effects may run: always for a
 /// legacy turn, and for a protected one only after its ordinary classification committed.
-fn ordinary_allowed(token: &CancelToken, inflight: &InflightTurnState) -> bool {
+fn ordinary_allowed(token: &CancelToken, inflight: &dyn ReplayRow) -> bool {
     !protected(token, inflight)
         || token.replay_attempt().and_then(|live| live.verdict()) == Some(Verdict::Ordinary)
 }
 
 /// Bars the legacy history retry; true when one already committed, which keeps its claim so no
 /// later decision of the request retries it exactly either.
-fn bar_legacy_retry(inflight: &InflightTurnState) -> bool {
-    let messages = std::iter::once(inflight.user_msg_id).chain(inflight.source_message_ids.clone());
+fn bar_legacy_retry(inflight: &dyn ReplayRow) -> bool {
+    let messages = std::iter::once(inflight.user_msg_id())
+        .chain(inflight.source_message_ids().iter().copied());
     let claims = messages.filter(|&id| id != 0).map(|message| {
         let claim = RETRY_CLAIMS
-            .entry((inflight.channel_id, message))
+            .entry((inflight.channel_id(), message))
             .or_insert(RetryClaim::Barred);
         *claim == RetryClaim::Legacy
     });
