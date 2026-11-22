@@ -16,11 +16,7 @@ use crate::db::dispatched_sessions::{
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::health::{
-    HealthRegistry, channel_has_active_turn, clear_resume_runtime_owner_after_death,
-    rebind_channel_provider_session, resume_runtime_for_channel,
-    retain_resume_runtime_owner_before_teardown,
-};
+use crate::services::engine_runtime::health_port::{AppHealthRegistry, ResumeRuntimePort};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
@@ -217,7 +213,7 @@ pub async fn resume_previous_session(
 /// in-process callers pass `None` and can originate (but never receive) forwarding.
 pub(crate) async fn dispatch_resume_previous(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<&AppHealthRegistry>,
     forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     request_headers: Option<&HeaderMap>,
     session_key: &str,
@@ -328,7 +324,7 @@ pub(crate) async fn dispatch_resume_previous(
 /// still runs.
 pub(crate) async fn perform_resume_rebind(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<&AppHealthRegistry>,
     session_key: &str,
     provider: Option<ProviderKind>,
     channel_id: Option<ChannelId>,
@@ -338,7 +334,9 @@ pub(crate) async fn perform_resume_rebind(
     let resume_runtime = if let (Some(registry), Some(provider), Some(channel_id)) =
         (registry, provider.as_ref(), channel_id)
     {
-        resume_runtime_for_channel(registry, provider, channel_id).await
+        registry
+            .resume_runtime_for_channel(provider, channel_id)
+            .await
     } else {
         None
     };
@@ -393,7 +391,9 @@ pub(crate) async fn perform_resume_rebind(
     // Guard 2: a live interactive turn (no dispatch) is still writing output.
     if let (Some(registry), Some(provider), Some(channel_id)) =
         (registry, provider.as_ref(), channel_id)
-        && channel_has_active_turn(registry, provider.as_str(), channel_id).await
+        && registry
+            .channel_has_active_turn(provider.as_str(), channel_id)
+            .await
     {
         return Err(ResumeRebindError::ActiveTurn);
     }
@@ -409,7 +409,7 @@ pub(crate) async fn perform_resume_rebind(
             return Err(ResumeRebindError::HostUnsupported(reason));
         }
     }
-    let host_refusal = crate::services::discord::host_defer_gate::resume_host_refusal(
+    let host_refusal = <AppHealthRegistry as ResumeRuntimePort>::resume_host_refusal(
         pool,
         provider.as_ref(),
         channel_id,
@@ -554,7 +554,9 @@ pub(crate) async fn perform_resume_rebind(
     // until the resumed turn replaces it; confirmed pane death clears it below.
     let owner_retained_before_teardown =
         if let (Some(shared), Some(channel_id)) = (resume_runtime.as_deref(), channel_id) {
-            retain_resume_runtime_owner_before_teardown(shared, channel_id, tmux_name)
+            <AppHealthRegistry as ResumeRuntimePort>::retain_resume_runtime_owner_before_teardown(
+                shared, channel_id, tmux_name,
+            )
         } else {
             false
         };
@@ -584,7 +586,9 @@ pub(crate) async fn perform_resume_rebind(
     let runtime_binding_clear = match pane_liveness {
         crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => {
             if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
-                clear_resume_runtime_owner_after_death(shared, tmux_name);
+                <AppHealthRegistry as ResumeRuntimePort>::clear_resume_runtime_owner_after_death(
+                    shared, tmux_name,
+                );
             }
             clear_resume_runtime_binding(tmux_name)
         }
@@ -600,7 +604,7 @@ pub(crate) async fn perform_resume_rebind(
     let in_memory_rebound = if let (Some(shared), Some(provider), Some(channel_id)) =
         (resume_runtime.as_deref(), provider.as_ref(), channel_id)
     {
-        rebind_channel_provider_session(
+        <AppHealthRegistry as ResumeRuntimePort>::rebind_channel_provider_session(
             shared,
             provider,
             channel_id,
@@ -654,6 +658,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::services::discord::health::{HealthRegistry, rebind_channel_provider_session};
     use filetime::{FileTime, set_file_mtime};
 
     async fn perform_resume_rebind(

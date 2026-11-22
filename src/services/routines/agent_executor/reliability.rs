@@ -294,6 +294,7 @@ impl RoutineAgentExecutor {
 mod tests {
     use super::super::tests::{completion_with_evidence, running_run};
     use super::*;
+    use crate::services::discord::health::HealthRegistry;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::json;
 
