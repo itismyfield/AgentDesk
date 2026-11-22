@@ -25,8 +25,7 @@ use std::{
 };
 
 use crate::engine::PolicyEngine;
-use crate::services::discord::relay_recovery::AxisBSite;
-use crate::services::engine_runtime::health_port::StaleSweepPort;
+use crate::services::stale_turn_reconciler::SweepWarrantPort;
 
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
 pub(crate) const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
@@ -303,7 +302,7 @@ impl BootReconcileStats {
 pub(crate) async fn reconcile_boot_db_pg(
     pool: &PgPool,
     current_instance_id: &str,
-    health_registry: Option<&dyn StaleSweepPort<AxisBSite>>,
+    health_registry: Option<SweepWarrantPort<'_>>,
 ) -> Result<BootReconcileStats> {
     let notify_recovery::BootNotifyRecoveryStats {
         stale_processing_outbox_reset,
@@ -337,7 +336,7 @@ pub(crate) async fn reconcile_boot_runtime(
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
     current_instance_id: &str,
-    health_registry: Option<&dyn StaleSweepPort<AxisBSite>>,
+    health_registry: Option<SweepWarrantPort<'_>>,
 ) -> Result<BootReconcileStats> {
     let mut stats = if let Some(pool) = pg_pool {
         reconcile_boot_db_pg(pool, current_instance_id, health_registry).await?

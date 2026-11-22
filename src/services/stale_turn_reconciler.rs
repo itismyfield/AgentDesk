@@ -7,6 +7,9 @@ use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::engine_runtime::health_port::StaleSweepPort;
 use crate::services::provider::ProviderKind;
 
+/// The registry an automatic sweep asks for its destructive warrant, as a caller passes it in.
+pub(crate) type SweepWarrantPort<'a> = &'a dyn StaleSweepPort<AxisBSite>;
+
 mod inflight_episode;
 #[cfg(test)]
 pub(crate) mod owner_boundary_tests;
@@ -85,7 +88,7 @@ enum IndependentLiveness {
 /// guarded update. A live or ambiguous pane fails closed and remains busy.
 pub(crate) async fn reconcile_stale_turns_pg(
     pool: &PgPool,
-    registry: Option<&dyn StaleSweepPort<AxisBSite>>,
+    registry: Option<SweepWarrantPort<'_>>,
     site: AxisBSite,
 ) -> Result<usize> {
     Ok(reconcile_stale_turns_matching_with_warrant_pg(
@@ -568,7 +571,7 @@ fn structural_candidate_apply(eligible: bool) -> bool {
 }
 
 async fn destructive_warrant_bind(
-    registry: Option<&dyn StaleSweepPort<AxisBSite>>,
+    registry: Option<SweepWarrantPort<'_>>,
     session_key: &str,
     provider: &str,
     site: AxisBSite,
@@ -594,7 +597,7 @@ async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
     session_key: Option<&str>,
     liveness_probe: L,
     inflight_probe: I,
-    automatic_warrant: Option<(Option<&dyn StaleSweepPort<AxisBSite>>, AxisBSite)>,
+    automatic_warrant: Option<(Option<SweepWarrantPort<'_>>, AxisBSite)>,
 ) -> Result<ApplySummary>
 where
     L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
