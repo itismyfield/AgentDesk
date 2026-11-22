@@ -184,7 +184,7 @@ impl RestoredInput {
                 wake = slot.cancel_token.is_none();
             }
         }
-        self.preserve_terminal(history)?;
+        self.preserve_terminal(history).await?;
         self.settled = true;
         let (ack, rx) = oneshot::channel();
         shared
@@ -253,12 +253,15 @@ impl RestoredInput {
         })
     }
 
-    fn preserve_terminal(&self, history: &Registry) -> Result<(), String> {
+    async fn preserve_terminal(&self, history: &Registry) -> Result<(), String> {
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native boot root unavailable")?;
         let record = history
             .try_native_boot_record(&self.record.namespace, &self.record.settlement.ticket)?;
-        inflight::persist_native_boot_record(&root, &record)
+        // The boot custody notice holds this flock across PG awaits; block for it off the worker.
+        tokio::task::spawn_blocking(move || inflight::persist_native_boot_record(&root, &record))
+            .await
+            .map_err(|error| error.to_string())?
     }
 
     async fn drive(&mut self, shared: &Arc<SharedData>, history: &Registry) -> Result<(), String> {
@@ -269,7 +272,7 @@ impl RestoredInput {
             return Ok(());
         };
         if self.record.settlement.cleanup_complete {
-            self.preserve_terminal(history)?;
+            self.preserve_terminal(history).await?;
             self.settled = true;
             return Ok(());
         }
@@ -347,7 +350,7 @@ impl RestoredInput {
             &self.record.settlement.ticket,
             &outcome,
         )?;
-        self.preserve_terminal(history)?;
+        self.preserve_terminal(history).await?;
         self.settled = true;
         if first && wake {
             super::super::super::turn_completion_events::publish_queue_eligible_completion_event(
