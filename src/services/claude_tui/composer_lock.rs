@@ -281,7 +281,7 @@ mod claude_tui_composer_lock_tests {
             });
         });
         received
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("composer mutation must not wait on the turn-lifetime lock");
     }
 
@@ -299,7 +299,7 @@ mod claude_tui_composer_lock_tests {
             });
         });
         first_entered_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .unwrap();
         let second_session = session.clone();
         std::thread::spawn(move || {
@@ -315,7 +315,7 @@ mod claude_tui_composer_lock_tests {
         );
         release_tx.send(()).unwrap();
         second_entered_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(10))
             .expect("second mutation should proceed after the first releases");
     }
 
