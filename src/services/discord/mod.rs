@@ -687,9 +687,6 @@ use mailbox_ops::mailbox_snapshot;
 use mailbox_ops::mailbox_try_start_turn;
 use mailbox_ops::mailbox_try_start_turn_kinded;
 use mailbox_ops::maybe_schedule_catch_up_retry_after_queue_drain;
-#[cfg(unix)]
-pub(crate) use mailbox_ops::record_turn_stop_tombstone;
-#[cfg(not(unix))]
 pub(crate) use mailbox_ops::record_turn_stop_tombstone;
 
 mod mailbox_stop;
