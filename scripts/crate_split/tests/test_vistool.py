@@ -200,6 +200,21 @@ class RecordedDiagnostics(unittest.TestCase):
             self.assertNotEqual(mismatches(), [])
 
 
+class Patch(unittest.TestCase):
+    def test_patch_applies_at_end_of_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "a.rs").write_text("fn a() {}\npub(crate) fn b() {}\n")
+            (root / "b.rs").write_text("pub(crate) fn c() {}")
+            original = {"a.rs": ["fn a() {}", "pub(crate) fn b() {}", ""], "b.rs": ["pub(crate) fn c() {}"]}
+            final = {"a.rs": ["fn a() {}", "pub fn b() {}", ""], "b.rs": ["pub fn c() {}"]}
+            (root / "p.patch").write_text(vistool.unified_patch(original, final))
+            subprocess.run(["git", "-C", str(root), "apply", "p.patch"], check=True)
+            self.assertEqual((root / "a.rs").read_text(), "fn a() {}\npub fn b() {}\n")
+            self.assertEqual((root / "b.rs").read_text(), "pub fn c() {}")
+
+
 class Widen(unittest.TestCase):
     def test_modifier_only(self):
         cases = {
@@ -375,6 +390,9 @@ class EndToEnd(unittest.TestCase):
             self.assertRegex(line, r"^VISTOOL_OK crate=LOW base=[0-9a-f]{40} iters=\d+ files=3 edits=22 "
                                    r"cut_residue=0 test_cfg=0 impl_residue=0 glob_risk=2$")
             expected = (FX / "mini.expected.patch").read_text("utf-8")
+            check = subprocess.run(git[:3] + ["apply", "--check", "-R", str(out / "vistool-LOW.patch")],
+                                   capture_output=True, text=True)
+            self.assertEqual(check.returncode, 0, check.stderr)  # applied already, so it must reverse cleanly
             self.assertEqual((out / "vistool-LOW.patch").read_text("utf-8"), expected)
             self.assertFalse((repo / "target" / "crate_split_probe").exists())
             self.assertFalse(manifest["privacy_pass_masked"])

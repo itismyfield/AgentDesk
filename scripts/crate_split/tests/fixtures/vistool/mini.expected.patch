@@ -1,6 +1,6 @@
 --- a/src/core.rs
 +++ b/src/core.rs
-@@ -1,46 +1,46 @@
+@@ -1,45 +1,45 @@
 -pub(crate) mod util;
 +pub mod util;
  
@@ -63,10 +63,9 @@
 +pub fn helper() -> u32 {
      3
  }
- 
 --- a/src/core/util.rs
 +++ b/src/core/util.rs
-@@ -1,6 +1,6 @@
+@@ -1,5 +1,5 @@
 -pub(crate) struct Shared(pub(crate) u32);
 +pub struct Shared(pub u32);
  
@@ -74,10 +73,9 @@
 +pub fn tidy(value: u32) -> u32 {
      value + 1
  }
- 
 --- a/src/services/store.rs
 +++ b/src/services/store.rs
-@@ -1,10 +1,10 @@
+@@ -1,9 +1,9 @@
  pub(crate) const COUNT: u32 = 2;
  
 -pub(super) struct Thing {
@@ -90,4 +88,3 @@
 +pub fn thing() -> Thing {
      Thing { size: COUNT }
  }
- 

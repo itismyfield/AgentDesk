@@ -932,13 +932,14 @@ def equiv_verdict(repo, base):
 # ---------------------------------------------------------------------------------------------- run
 
 def unified_patch(original, final):
+    """git-apply-able diff; lines are held split on "\n", so a trailing newline is an empty last element."""
     chunks = []
     for rel in sorted(final):
         if original[rel] == final[rel]:
             continue
-        a = [l + "\n" for l in original[rel]]
-        b = [l + "\n" for l in final[rel]]
-        chunks.append("".join(difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}", n=3)))
+        a, b = ("\n".join(original[rel])).splitlines(True), ("\n".join(final[rel])).splitlines(True)
+        for line in difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}", n=3):
+            chunks.append(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
     return "".join(chunks)
 
 
