@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::auto_queue::runtime::slot_runtime_health;
 use axum::extract::Extension;
 
 use crate::api_caller_observability::{
@@ -208,7 +209,7 @@ pub async fn pause(
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match if force {
-        force_pause_with_pg(state.health_registry.clone(), pool).await
+        force_pause_with_pg(slot_runtime_health(state.health_registry.clone()), pool).await
     } else {
         soft_pause_with_pg(pool).await
     } {
@@ -834,11 +835,15 @@ pub async fn cancel(
         .filter(|value| !value.is_empty())
     {
         service
-            .cancel_run_with_pg(state.health_registry.clone(), pool, run_id)
+            .cancel_run_with_pg(
+                slot_runtime_health(state.health_registry.clone()),
+                pool,
+                run_id,
+            )
             .await
     } else {
         service
-            .cancel_runs_with_pg(state.health_registry.clone(), pool)
+            .cancel_runs_with_pg(slot_runtime_health(state.health_registry.clone()), pool)
             .await
     };
     match result {

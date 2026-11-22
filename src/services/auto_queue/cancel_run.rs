@@ -2,7 +2,6 @@ use super::{AutoQueueLogContext, AutoQueueService};
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use std::sync::Arc;
 
 use crate::db::auto_queue::run_status::is_live_run_status;
 
@@ -29,7 +28,7 @@ pub(crate) async fn terminalize_selected_runs_on_pg_tx_for_test(
 impl AutoQueueService {
     pub async fn cancel_run_with_pg(
         &self,
-        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+        health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
         pool: &PgPool,
         run_id: &str,
     ) -> ServiceResult<Value> {
@@ -78,7 +77,7 @@ impl AutoQueueService {
 
     pub async fn cancel_runs_with_pg(
         &self,
-        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+        health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
         pool: &PgPool,
     ) -> ServiceResult<Value> {
         cancel_with_pg(health_registry, pool)
@@ -321,7 +320,7 @@ async fn self_heal_orphan_dispatched_entries_without_slot_pg(
 }
 
 pub(crate) async fn cancel_and_release_runs_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &PgPool,
     run_ids: &[String],
     reason: &str,
@@ -470,7 +469,7 @@ async fn transition_entry_to_skipped_pg(
 }
 
 async fn terminalize_selected_runs_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
@@ -559,7 +558,7 @@ async fn terminalize_selected_runs_with_pg(
 }
 
 pub(crate) async fn cancel_selected_runs_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
@@ -576,7 +575,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
 }
 
 pub(crate) async fn end_run_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &PgPool,
     run_id: &str,
 ) -> Result<bool, String> {
@@ -635,7 +634,7 @@ pub(crate) async fn skip_dispatched_entries_for_runs_pg(
 }
 
 pub(crate) async fn cancel_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &PgPool,
 ) -> Result<Value, String> {
     let target_run_ids =

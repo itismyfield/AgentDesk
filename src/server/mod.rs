@@ -548,7 +548,7 @@ async fn policy_tick_loop(
                 // Resume post-commit cleanup a previous process left owed; this is how a
                 // restarted process converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
-                    health_registry.clone(),
+                    crate::services::auto_queue::runtime::slot_runtime_health(health_registry.clone()),
                     pool,
                 )
                 .await
