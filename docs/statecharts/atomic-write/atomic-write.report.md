@@ -13,7 +13,7 @@
 | `src/config/session_hosts/approval_store.rs:167` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/config/session_hosts/approval_store.rs:176` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/abandon_request_store.rs:168` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
-| `src/services/discord/busy_followup_retry_store.rs:232` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
+| `src/services/discord/busy_followup_retry_store.rs:233` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/catch_up/consumed_commands.rs:80` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/catch_up/scan_progress.rs:83` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/e2e_control.rs:228` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |

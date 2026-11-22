@@ -11,6 +11,7 @@ use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 use super::{Intervention, MailboxEnqueueOutcome, SharedData, mailbox_requeue_intervention_front};
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
+pub(in crate::services::discord) mod draft_release_watch;
 #[cfg(test)]
 mod hold_release_tests;
 mod inflight_row;

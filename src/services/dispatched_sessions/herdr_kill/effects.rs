@@ -10,7 +10,7 @@ use super::super::spawn_auto_queue_activate_for_agent;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::prepare_force_kill_retry_pg;
 use crate::dispatch::set_dispatch_status_on_pg_boxed;
-use crate::services::discord::TmuxCleanupPolicy;
+use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::queue::schedule_post_cancel_queue_drain;
 use crate::services::turn_cancel_finalizer::{
     FinalizeTurnCancelRequest, TurnCancelCorrelation, finalize_turn_cancel,

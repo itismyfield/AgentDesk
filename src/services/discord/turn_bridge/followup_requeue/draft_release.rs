@@ -5,49 +5,8 @@ pub(super) const DRAFT_RELEASE_POLL: std::time::Duration = std::time::Duration::
 /// A stalled pane is watched for at most one day; unobserved holds stay persisted.
 const DRAFT_RELEASE_WATCH: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-static DRAFT_RELEASE_WATCHES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<(u64, String)>>,
-> = std::sync::LazyLock::new(Default::default);
-
-static OBSERVED_HINTS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<(u64, String), String>>,
-> = std::sync::LazyLock::new(Default::default);
-
-/// An unseen idle observation holds the queue until the existing watch releases its source.
-#[cfg(unix)]
-pub(in crate::services::discord) fn idle_release_pending(
-    channel: u64,
-    session: &str,
-) -> Option<bool> {
-    let key = (channel, session.to_string());
-    if !draft_release_watches().contains(&key) {
-        return None;
-    }
-    let observed = crate::services::claude_tui::input::submission::wake_hint_observed(session);
-    let watches = draft_release_watches();
-    if !watches.contains(&key) {
-        return None;
-    }
-    let hint = match observed {
-        Err(()) => return Some(true),
-        Ok(None) => return None,
-        Ok(Some(hint)) => hint,
-    };
-    Some(
-        OBSERVED_HINTS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-            != Some(&hint),
-    )
-}
-
-pub(super) fn draft_release_watches()
--> std::sync::MutexGuard<'static, std::collections::HashSet<(u64, String)>> {
-    DRAFT_RELEASE_WATCHES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-}
+use crate::services::discord::busy_followup_retry_store::draft_release_watch::OBSERVED_HINTS;
+pub(super) use crate::services::discord::busy_followup_retry_store::draft_release_watch::draft_release_watches;
 
 /// One watch per channel and pane: once the pane protects no draft, the held inputs get a fresh
 /// budget and the queue one kickoff.

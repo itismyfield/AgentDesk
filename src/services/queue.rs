@@ -165,7 +165,7 @@ impl QueueService {
                                 },
                                 "queue-api cancel_dispatch (preserve)",
                                 crate::services::turn_lifecycle::cleanup_policy_observability_surface(
-                                    crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                                    crate::domain::tmux_cleanup::TmuxCleanupPolicy::PreserveSessionAndInflight {
                                         restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
                                     },
                                 ),
@@ -519,11 +519,11 @@ impl QueueService {
                     "queue-api cancel_turn (preserve)"
                 },
                 crate::services::turn_lifecycle::cleanup_policy_observability_surface(if force {
-                    crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                    crate::domain::tmux_cleanup::TmuxCleanupPolicy::CleanupSession {
                         termination_reason_code: Some("queue_api_cancel_turn"),
                     }
                 } else {
-                    crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    crate::domain::tmux_cleanup::TmuxCleanupPolicy::PreserveSessionAndInflight {
                         restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
                     }
                 }),

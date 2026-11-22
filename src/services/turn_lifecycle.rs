@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::SharedData;
 use crate::services::discord::health::{
     FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
@@ -121,7 +122,7 @@ async fn stop_turn_preserving_queue_with_cancel_event(
         target,
         None,
         reason,
-        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+        TmuxCleanupPolicy::PreserveSessionAndInflight {
             restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
         },
         emit_cancel_observability,
@@ -293,7 +294,7 @@ async fn force_kill_on_verdict(
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
     let target = verdict.target.clone();
-    let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+    let policy = TmuxCleanupPolicy::CleanupSession {
         termination_reason_code: Some(termination_reason_code),
     };
     let emit = emit_cancel_observability;
@@ -313,7 +314,7 @@ async fn stop_turn_with_policy(
     target: &TurnLifecycleTarget,
     verdict: Option<ForceKillVerdict>,
     reason: &str,
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    cleanup_policy: TmuxCleanupPolicy,
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
     // #1672: capture the *observed* tmux session name and the disk/memory
@@ -396,15 +397,13 @@ async fn stop_turn_with_policy(
     {
         let runtime = if cleanup_tmux {
             let termination_reason_code = match cleanup_policy {
-                crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                TmuxCleanupPolicy::CleanupSession {
                     termination_reason_code,
                 } => termination_reason_code.unwrap_or("force_kill"),
-                crate::services::discord::TmuxCleanupPolicy::PreserveSession
-                | crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
-                    ..
-                } => "force_kill",
+                TmuxCleanupPolicy::PreserveSession
+                | TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => "force_kill",
             };
-            let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+            let policy = TmuxCleanupPolicy::CleanupSession {
                 termination_reason_code: Some(termination_reason_code),
             };
             let stop = crate::services::discord::health::stop_channel_runtime;
@@ -618,14 +617,12 @@ async fn stop_turn_with_policy(
 }
 
 pub(crate) fn cleanup_policy_observability_surface(
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    cleanup_policy: TmuxCleanupPolicy,
 ) -> &'static str {
     match cleanup_policy {
-        crate::services::discord::TmuxCleanupPolicy::PreserveSession => "preserve_session_cancel",
-        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
-            "queue_cancel_preserve"
-        }
-        crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. } => "force_kill_cancel",
+        TmuxCleanupPolicy::PreserveSession => "preserve_session_cancel",
+        TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => "queue_cancel_preserve",
+        TmuxCleanupPolicy::CleanupSession { .. } => "force_kill_cancel",
     }
 }
 
@@ -1067,7 +1064,7 @@ fn dropped_queue_message_ids(
 
 /// Preservation requires measured memory and disk state on both sides of the cancel.
 fn compute_queue_preserved(
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    cleanup_policy: TmuxCleanupPolicy,
     pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
     post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
 ) -> Option<bool> {

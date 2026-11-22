@@ -280,7 +280,7 @@ pub(super) mod herdr {
     use futures::FutureExt;
     use futures::future::BoxFuture;
 
-    use crate::services::discord::TmuxCleanupPolicy;
+    use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
     use crate::services::turn_cancel_finalizer::{
         FinalizeTurnCancelRequest, FinalizedTurnCancel, TurnCancelCorrelation, finalize_turn_cancel,
     };

@@ -423,7 +423,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs:163` | `handle_cancel_prompt_replace` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs:180` | `handle_cancel_prompt_replace` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs:100` | `handle_delivery_epilogue` | ProjectionSave(Inject / native observation, 기존 identity fence) |
-| `src/services/discord/turn_bridge/tmux_runtime.rs:89` | `should_clear_inflight` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/domain/tmux_cleanup.rs:28` | `should_clear_inflight` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/turn_bridge/tmux_runtime/stop_host.rs:93` | `may_clear_inflight` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/turn_bridge/two_message_panel.rs:314` | `reanchor_bridge_two_message_status_panel_below_answer` | ProjectionSave(Inject / native observation, 기존 identity fence) |
 | `src/services/discord/turn_finalizer/cleanup/already_finalized.rs:53` | `already_finalized_active_state` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
@@ -431,9 +431,9 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_lease.rs:261` | `clear_late_projection` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/turn_lease.rs:309` | `claim` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/watchers/dispatched_origin_ghost.rs:103` | `consume_dispatched_origin_ghost_if_current` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:523` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:525` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:979` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:522` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:524` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:976` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/turn_lifecycle.rs:980` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 
 ## inflight_alias: 64행 (시험·주석 제외 20행)
@@ -625,8 +625,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_bridge/finalize_epilogue.rs:168` | `finalize_and_drain_queued_turns` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_bridge/finalize_epilogue.rs:217` | `finalize_and_drain_queued_turns` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_bridge/followup_requeue.rs:79` | `schedule_retry_if_eligible` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/turn_bridge/followup_requeue/draft_release.rs:145` | `watch_draft_release` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/turn_bridge/followup_requeue/draft_release.rs:149` | `watch_draft_release` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/turn_bridge/followup_requeue/draft_release.rs:104` | `watch_draft_release` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/turn_bridge/followup_requeue/draft_release.rs:108` | `watch_draft_release` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_completion_events.rs:19` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_completion_events.rs:66` | `queue_eligible` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_completion_events.rs:71` | `queue_is_eligible` | Kick(wake/event/queue admission, 같은 head 재검증) |

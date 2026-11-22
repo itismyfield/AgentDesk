@@ -961,7 +961,7 @@ host_parity:
     verdict: 다름
     owner: '#8128 R2c는 R2a 효과와 #7583 actual-owner 종료 포트를 소비'
     evidence: '`src/server/routes/domains/ops.rs:188–189`, `src/server/routes/routines/handlers.rs:539–560`, `src/services/routines/session_control.rs:120–132,676–698`,
-      `src/services/turn_lifecycle.rs:159–166,348–360`'
+      `src/services/turn_lifecycle.rs:160–167,348–360`'
   - feature_id: routines
     scope: fresh 실행 완료 후 정리
     tmux: run을 claim했을 때의 routine 소유권과 result로 해당 실행만 종료

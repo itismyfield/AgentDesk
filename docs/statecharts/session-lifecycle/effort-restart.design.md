@@ -698,7 +698,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | presence nonce | `src/services/discord/turn_presence/activity/unbound/live_ownership.rs:80`, `:176`, `:253`, `:307`; `unbound/binding_metadata.rs:107`, `:128` | spawn nonce/registry generation/source binding이 바뀌면 이전 measurement로 admission 못 함. 새 incarnation publish 필요 |
 | queue front/custody | `src/services/turn_orchestrator/queued_head/v2.rs:26`, `:123`, `:369`, `:482`; `queue_io/input_owner/effect.rs:19`, `:105` | original/ticket/attempt를 owner가 보존. Held=정확히 no-key proof인 재시도 가능 front, WriteUncertain=may-have-sent로 자동 재전송 금지 |
 | Held wake | `queue_io/input_owner/drive.rs:118`; `held_watch.rs:73`, `:104` | no-key hold는 real wake 대기. Gone pane은 watcher를 끝내며 wake하지 않음. restart completion 및 writer ready에서 owner wake가 반드시 필요 |
-| legacy stop preserve | `src/services/turn_lifecycle.rs:97`, `:104`, `:123` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
+| legacy stop preserve | `src/services/turn_lifecycle.rs:98`, `:104`, `:123` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
 
 위 표에서 약칭 `turn_finalizer`, `queue_io`, `tmux_watcher`, `runtime_bootstrap`는 `src/services/discord/` 아래다.
 
