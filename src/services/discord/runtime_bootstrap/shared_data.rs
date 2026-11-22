@@ -64,7 +64,6 @@ pub(super) fn run_bot_build_shared_data(
         pg_pool,
         engine,
     } = services;
-    crate::services::discord::install_observer_publication();
     crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
     let ProcessLifecycleCounters {
         global_active,

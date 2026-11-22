@@ -419,6 +419,8 @@ impl HealthRegistry {
         self.started_at_unix = chrono::Utc::now().timestamp() - seconds;
     }
     pub fn new() -> Self {
+        // A live registry implies the observer hook, so every registry install path publishes.
+        super::tui_prompt_relay::install_observer_publication();
         Self {
             channel_home_seed_issues: tokio::sync::Mutex::new(Vec::new()),
             providers: tokio::sync::Mutex::new(Vec::new()),

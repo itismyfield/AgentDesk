@@ -56,8 +56,8 @@ pub(crate) use self::input_notice::{
     input_notice_content, input_notice_line, scheduled_input_notice_content,
 };
 
-/// Routes dedupe's binding publications to the observer wake, beside the health registry.
-pub(crate) fn install_observer_publication() {
+/// Routes dedupe's binding publications to the observer wake; `HealthRegistry::new` installs it.
+pub(super) fn install_observer_publication() {
     #[cfg(unix)]
     crate::services::tui_prompt_dedupe::observer_publication::install(
         rehydration::observer_binding_published,

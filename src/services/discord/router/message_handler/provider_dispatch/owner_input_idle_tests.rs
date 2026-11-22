@@ -1394,7 +1394,6 @@ struct AttachedOwner {
 
 impl AttachedOwner {
     fn new(name: &str, channel: u64, transcript: &str) -> Self {
-        crate::services::discord::install_observer_publication();
         let registry_restore =
             RestoreObserverRegistry(crate::engine::ops::turn_ops::health_registry());
         let empty = Arc::new(crate::services::discord::health::HealthRegistry::new());
