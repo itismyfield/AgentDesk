@@ -56,11 +56,14 @@ fn parse(value: Option<&str>) -> Gate {
 }
 
 /// Tests never read the process env; a channel is open only while a test opens it.
-fn listed(channel: u64) -> bool {
+fn listed(channel: u64, platform_has_flock: bool) -> bool {
     #[cfg(test)]
-    return test_support::gate_open(channel);
+    return test_support::gate_open(channel, platform_has_flock);
     #[cfg(not(test))]
     {
+        if !platform_has_flock {
+            return false;
+        }
         static PROCESS: std::sync::OnceLock<Gate> = std::sync::OnceLock::new();
         let gate = PROCESS.get_or_init(|| parse(std::env::var(DISCORD_INJECT_ENV).ok().as_deref()));
         match gate {
@@ -74,7 +77,8 @@ fn listed(channel: u64) -> bool {
 /// Whether the gate lists `channel`, or the parent of thread `channel`. Never on Windows, whose
 /// provider file has no flock.
 fn listed_target(channel: ChannelId, parent: Option<ChannelId>) -> bool {
-    !cfg!(windows) && (listed(channel.get()) || parent.is_some_and(|id| listed(id.get())))
+    let is_listed = |channel: ChannelId| listed(channel.get(), !cfg!(windows));
+    is_listed(channel) || parent.is_some_and(is_listed)
 }
 
 /// Whether the legacy live offer may take a message on `channel`: a listed target that no Herdr
