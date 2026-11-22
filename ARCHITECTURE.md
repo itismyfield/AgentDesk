@@ -3571,7 +3571,6 @@ src/
 │   │   │   ├── native_key_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
-│   │   │   ├── native_receipt_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
