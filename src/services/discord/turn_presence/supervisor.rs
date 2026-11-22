@@ -62,6 +62,13 @@ static PROCESS_STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
 mod notice_store;
 #[path = "unknown_notice.rs"]
 mod notices;
+#[cfg(unix)]
+pub(crate) use notices::operator::observe_boxed as observe_operator_notice;
+#[cfg(all(test, unix))]
+pub(crate) use notices::operator::{
+    restart_for_test as restart_operator_notice_for_test,
+    send_on_this_thread as send_operator_notices_on_this_thread,
+};
 
 pub(crate) struct UnknownSnapshot {
     pub channel_id: u64,

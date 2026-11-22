@@ -102,11 +102,17 @@ pub(crate) use super::turn_presence::activity::tests::{
     BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
 };
 mod presence_unknown;
+#[cfg(unix)]
+pub(crate) use super::turn_presence::supervisor::observe_operator_notice;
 pub(crate) use super::turn_presence::supervisor::status as turn_presence_status;
 #[cfg(all(test, unix))]
 pub(crate) use super::turn_presence::supervisor::tests::seed_long_unknown_for_tests;
 #[cfg(test)]
 pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use super::turn_presence::supervisor::{
+    restart_operator_notice_for_test, send_operator_notices_on_this_thread,
+};
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{
