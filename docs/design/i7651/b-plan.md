@@ -69,7 +69,7 @@
 
 | 시점 | main 코드 좌표 | 삭제 뒤의 담당 경로 |
 |---|---|---|
-| dcserver 시작 | `src/cli/dcserver.rs:1269,1362`, `src/server/mod.rs:351`, `src/services/discord/runtime_bootstrap.rs:165,340–343,414`, `src/services/discord/runtime_bootstrap/gateway_runtime.rs:63` | worker와 gateway의 기존 부팅 경계를 유지한다. gateway writer는 기존 채널 권한으로 발송하고, worker는 로컬 입력·행 복구를 계속한다. |
+| dcserver 시작 | `src/cli/dcserver.rs:1269,1362`, `src/server/mod.rs:351`, `src/services/discord/runtime_bootstrap.rs:165,340–343,414`, `src/services/discord/runtime_bootstrap/gateway_runtime.rs:64` | worker와 gateway의 기존 부팅 경계를 유지한다. gateway writer는 기존 채널 권한으로 발송하고, worker는 로컬 입력·행 복구를 계속한다. |
 | 배수와 재시작 경계 | `src/services/discord/runtime_bootstrap/shutdown.rs:114–181`, `src/services/discord/runtime_bootstrap/gateway_lease.rs:627–664`, `src/services/discord/runtime_store.rs:512–516` | 배수의 전·후 snapshot과 세대 fence를 유지한다. O의 현재 turn identity와 세대를 내구화해 끊긴 턴의 근거를 남긴다. |
 | 채널 재부착 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:70–82`, `src/services/discord/tui_prompt_relay/source_tick.rs:27–49,51–99,115–185`, `src/services/tui_o/writer/host.rs:609`, `src/services/tui_o/writer/actor.rs:378–400` | native source discovery·binding/rotation 및 기존 O writer 부팅으로 받는다. legacy watcher 등록은 삭제 대상이다. 소스가 Unknown이면 기존 hold/재관측으로 간다. |
 | 진행 중 턴 판정 | `src/services/tui_o/shadow/seal.rs:89–128`, `src/services/tui_o/writer/input_facts.rs:486–492`, `src/services/discord/recovery_engine/restore_inflight.rs:103–117,210–225`, `src/services/discord/runtime_bootstrap/queued_recovery.rs:185–210` | O의 source/turn 증거에서 직전 세대의 Open을 채택한다. 정확한 과거 inflight 표식은 기존 durable 증거 보조로 읽는다. legacy 본문/offset으로 재생을 시작하지 않는다. |
