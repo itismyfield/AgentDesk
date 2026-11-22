@@ -14,7 +14,9 @@ pub(crate) fn run() {
         crate::services::claude_tui::hook_bundle::run_codex_hook_startup_self_check,
     );
     #[cfg(unix)]
-    crate::services::session_host::managed_config::maintenance::spawn();
+    crate::services::session_host::managed_config::maintenance::spawn(
+        crate::services::discord::health::observe_operator_notice,
+    );
     crate::services::discord::health::spawn_tmux_probe_preflight();
 }
 

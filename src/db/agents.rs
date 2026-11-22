@@ -4,6 +4,7 @@ use anyhow::Result;
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::domain::provider::ProviderKind;
+use crate::services::provider::ProviderRuntimeExt;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentChannelBindings {
@@ -141,6 +142,67 @@ impl AgentChannelBindings {
     fn legacy_primary_channel(&self) -> Option<String> {
         normalized_channel(self.discord_channel_id.clone())
             .or_else(|| normalized_channel(self.discord_channel_cc.clone()))
+    }
+}
+
+impl AgentChannelBindings {
+    fn primary_provider_kind(&self) -> Option<ProviderKind> {
+        if self.retired_provider().is_some() {
+            return None;
+        }
+        self.configured_provider_kind()
+            .or_else(ProviderKind::default_channel_provider)
+    }
+
+    pub(crate) fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
+        self.resolved_primary_provider_kind_with_provider(self.primary_provider_kind())
+    }
+
+    /// The provider a claimed run launches with; a retired provider is refused with its reason.
+    pub(crate) fn require_primary_provider(&self, agent_id: &str) -> anyhow::Result<ProviderKind> {
+        self.resolved_primary_provider_kind()
+            .ok_or_else(|| match self.retired_provider() {
+                Some(retired) => anyhow::anyhow!(
+                    "agent {agent_id} provider '{retired}' is retired; its binding does not run"
+                ),
+                None => anyhow::anyhow!("agent {agent_id} primary provider is not configured"),
+            })
+    }
+
+    pub fn primary_channel(&self) -> Option<String> {
+        self.primary_channel_with_provider(self.primary_provider_kind())
+    }
+
+    pub fn counter_model_channel(&self) -> Option<String> {
+        self.counter_model_channel_with_provider(self.primary_provider_kind())
+    }
+
+    /// Explicit provider columns win over the legacy primary channel.
+    pub(crate) fn provider_for_channel(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<ProviderKind> {
+        let claude = self
+            .discord_channel_cc
+            .as_deref()
+            .is_some_and(|c| matches(c.trim()));
+        let codex = [
+            self.discord_channel_cdx.as_deref(),
+            self.discord_channel_alt.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|c| matches(c.trim()));
+        match (claude, codex) {
+            (true, false) => Some(ProviderKind::Claude),
+            (false, true) => Some(ProviderKind::Codex),
+            (true, true) => None,
+            (false, false) => self
+                .discord_channel_id
+                .as_deref()
+                .filter(|c| matches(c.trim()))
+                .and_then(|_| self.primary_provider_kind()),
+        }
     }
 }
 
