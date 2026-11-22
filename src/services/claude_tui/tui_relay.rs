@@ -635,7 +635,7 @@ fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) struct FakeSendBackend;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SendBackend for FakeSendBackend {
     fn has_session(&self, _session_name: &str) -> bool {
         true
@@ -664,7 +664,7 @@ impl SendBackend for FakeSendBackend {
 }
 
 /// An idle Claude pane with an empty composer, as `capture-pane -e` returns it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn empty_composer_for_tests() -> String {
     let border = "\u{2500}".repeat(60);
     let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";

@@ -518,7 +518,7 @@ fn stash_channels_configured() -> &'static [u64] {
 
 #[cfg(unix)]
 pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
         return stash_channel_listed(channel, &stash_tests::configured_channels());
     }
