@@ -4,6 +4,8 @@
    a turn verified, not the turn's permission (turn_host.rs recorded_execution).
    Written against 2668bdeefd (S1a head) plus the S1b change.
 
+   Mode "S1bFirst" is the first S1b head 9e28c137ae: the key holders A2/A6/A9 derived a token from
+   the key (token_hash_of) and A9 read provider and key only from the slot's thread_channel_id row.
    Mode "Before" is the S1a head (A1-A9, #24 and the consent read the channel's own boot entry;
    a refused turn forgets the record). "Rev4" is design delta 4 taken literally (one Option read
    from the process record by channel only; a thread's input always asks its parent's consent).
@@ -18,7 +20,14 @@
      DeadTmux    thread under a Herdr parent, legacy row, tmux Missing
      ProbeFail   thread under a Herdr parent, legacy row, tmux probe failed
      HerdrBound  thread under a Herdr parent, Bound row at the parent's endpoint (S2 only)
-     Unresolved  thread whose parent the boot view holds unresolved                       *)
+     Unresolved  thread whose parent the boot view holds unresolved
+     SlotGc      slot thread under a Herdr parent whose sessions rows thread_gc deleted
+                 (db/dispatched_sessions/thread_gc.rs:92-118); thread_id_map still names it
+     LegacyKey   thread under a Herdr parent, live tmux, a legacy `host:tmux` session key that
+                 SessionIdentity::parse reads with no token (domain/session_identity.rs:59-64)
+   SlotGc and LegacyKey reach only the key holders: A2 session_resume.rs:408, A6
+   inflight/host_recovery_guard.rs:105, A9 auto_queue/runtime.rs:487 (token_hash_of callers at
+   9e28c137ae: session_resume.rs:406, host_recovery_guard.rs:104, auto_queue/runtime.rs:552). *)
 EXTENDS Naturals
 
 CONSTANTS Mode, Entries
@@ -29,7 +38,8 @@ VARIABLES entry, proof, cache, restarted, sinceRestart, restored,
 vars == <<entry, proof, cache, restarted, sinceRestart, restored,
           restartHost, tmuxOp, relaunch, consent, sync>>
 
-Threads == {"LiveTmux", "DeadTmux", "ProbeFail", "HerdrBound", "Unresolved"}
+Threads == {"LiveTmux", "DeadTmux", "ProbeFail", "HerdrBound", "Unresolved", "SlotGc", "LegacyKey"}
+KeyHolders == {"SlotGc", "LegacyKey"}
 Seeded == Mode \in {"S2Seed", "MutSeedLate"}
 
 \* host_decision.rs decide: own boot entry, else relation, else the execution observed now
@@ -41,6 +51,8 @@ Observed == CASE entry = "BootHerdr" -> "Herdr"
               [] entry = "DeadTmux" -> IF Mode = "MutNoStageGate" THEN "Herdr" ELSE "Tmux"
               [] entry = "ProbeFail" -> "Hold"
               [] entry = "HerdrBound" -> "Herdr"
+              \* A1 and the others read the canonical row under the runtime's token: none here.
+              [] entry \in KeyHolders -> "Tmux"
 \* MutCacheOnly: a thread decided from the process record instead of its execution now.
 FromCache == CASE cache = "Herdr" -> "Herdr" [] cache = "Tmux" -> "Tmux" [] OTHER -> "Hold"
 Decision == IF Mode = "MutCacheOnly" /\ entry \in Threads \ {"Unresolved"}
@@ -61,9 +73,20 @@ RestartOutcome ==
                     [] Decision = "Tmux"  -> "Tmux"
                     [] OTHER -> IF Mode = "MutRestartSome" THEN "Herdr" ELSE "Refused"
 \* A2-A9 tmux_refusal: only Tmux goes on to the tmux path (its row checks are outside).
+\* What the key holders A2/A6/A9 decide for SlotGc and LegacyKey.
+\* S1bFirst: runtime.rs:552 token_hash_of(None key) -> host_decision.rs:119 ProviderUnknown (SlotGc);
+\*   token_hash_of(legacy key) = None -> host_decision.rs:152 "no database or token" (LegacyKey).
+\* After: host_decision.rs:105-117 rows read, none -> :203 Nothing -> Tmux (SlotGc);
+\*   :86 key in hand -> :250 the key finds the row -> tmux probe -> Tmux (LegacyKey).
+KeyHolderDecision ==
+    CASE Mode = "S1bFirst" -> "Hold"
+      [] Mode = "MutRowlessHold" /\ entry = "SlotGc" -> "Hold"
+      [] Mode = "MutKeyDropped" /\ entry = "LegacyKey" -> "Hold"
+      [] OTHER -> "Tmux"
 TmuxOutcome ==
     CASE Mode = "Before" -> IF BootSome THEN "Kept" ELSE "Done"
       [] Mode = "Rev4"   -> IF Rev4Some THEN "Kept" ELSE "Done"
+      [] entry \in KeyHolders -> IF KeyHolderDecision = "Tmux" THEN "Done" ELSE "Kept"
       [] OTHER -> IF Decision = "Tmux" THEN "Done" ELSE "Kept"
 \* #24 provider_settings.rs claude_local_tui_relaunch_applies via R1-R4 (a Claude TUI).
 RelaunchOutcome ==
@@ -149,6 +172,10 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(CmdRestart) /\ WF_vars(CmdTmuxOp)
         /\ WF_vars(CmdRelaunch) /\ WF_vars(Input)
 
 TmuxThread == entry \in {"LiveTmux", "DeadTmux"}
+
+\* P1-1 (S1b review): a GC'd slot thread and a legacy-keyed thread reach the row checks; the
+\* slot binding is released (auto_queue/runtime.rs:380) instead of being refused forever.
+SlotRotationProceeds == entry \in KeyHolders => tmuxOp # "Kept"
 
 \* P1-A: an undecided execution starts no host and changes no tmux session.
 UnknownRunsNoHost == entry \in {"ProbeFail", "Unresolved"} =>

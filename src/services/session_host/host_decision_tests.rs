@@ -130,3 +130,50 @@ async fn a_thread_under_a_herdr_parent_is_decided_by_its_execution_now_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+// A caller holding a legacy `host:tmux` key decides a thread by that key without a token, the
+// provider read from the key; a thread with no row at all is no execution, a failed probe holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_key_in_hand_and_a_rowless_thread_decide_without_a_token_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (parent, child, gone) = (8_118_450, 8_118_451, 8_118_452);
+    let _hosts = force_hosts(Some("test-node"), &[(parent, "test-node")]);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    let _gone = force_relation_for_test(gone, Relation::Child { parent });
+    let (legacy, tmux) = (
+        "test-node:AgentDesk-claude-s1b-legacy",
+        "AgentDesk-claude-s1b-legacy",
+    );
+    sqlx::query(
+        "INSERT INTO sessions (session_key, status, thread_channel_id) VALUES ($1, 'idle', $2)",
+    )
+    .bind(legacy)
+    .bind(child.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    force_presence_for_test(tmux, SessionPresence::Present);
+    let keyed = host_decision_for_key(Some(&pool), legacy, None, child).await;
+    assert_eq!(keyed, HostDecision::Tmux, "the key finds the legacy row");
+    assert_eq!(
+        host_decision_for_rows(&pool, child).await,
+        HostDecision::Tmux
+    );
+    assert_eq!(
+        host_decision_for_rows(&pool, gone).await,
+        HostDecision::Tmux,
+        "no row"
+    );
+    force_presence_for_test(tmux, SessionPresence::ProbeFailed);
+    assert!(held(
+        &host_decision_for_key(Some(&pool), legacy, None, child).await
+    ));
+    assert!(held(&host_decision_for_rows(&pool, child).await));
+    pool.close().await;
+    assert!(
+        held(&host_decision_for_rows(&pool, gone).await),
+        "a failed read holds"
+    );
+    db.drop().await;
+}

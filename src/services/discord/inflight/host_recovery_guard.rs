@@ -100,10 +100,12 @@ pub(in crate::services::discord) async fn clear_channel_session(
     caller: &str,
 ) -> Option<ClearedHostSession> {
     // A Herdr host's session, or one whose host is not decided, is never cleared or killed this way.
-    use crate::services::session_host::host_decision::{host_decision, token_hash_of};
-    let token = session_key.and_then(token_hash_of);
-    let decided = host_decision(pool, token.as_deref(), Some(provider), channel_id);
-    if decided.await.tmux_refusal().is_some() {
+    use crate::services::session_host::host_decision::{host_decision, host_decision_for_key};
+    let decided = match session_key {
+        Some(key) => host_decision_for_key(pool, key, Some(provider), channel_id).await,
+        None => host_decision(pool, None, Some(provider), channel_id).await,
+    };
+    if decided.tmux_refusal().is_some() {
         return None;
     }
     let teardown = keyed_teardown(

@@ -702,4 +702,77 @@ mod host {
         pool.close().await;
         db.drop().await;
     }
+
+    /// Under a Herdr parent, a slot thread whose rows thread_gc deleted, and one whose only row has
+    /// a legacy `host:tmux` key and no provider, release their binding; a failed probe keeps it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_herdr_parents_gc_or_legacy_keyed_slot_thread_releases_its_binding_pg() {
+        use crate::services::platform::tmux::SessionPresence;
+        use crate::services::session_host::host_decision::force_presence_for_test;
+        use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::TempDir::new().unwrap();
+        let _root =
+            TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        let tmux = TmuxEnv::install(Tmux::MissingBinary);
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let parent = 1_480_000_000_000_950;
+        let (gone, legacy, failed) = (parent + 1, parent + 2, parent + 3);
+        let _hosts =
+            crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(parent, "mac-mini")]);
+        let _relations: Vec<_> = [gone, legacy, failed]
+            .into_iter()
+            .map(|thread| force_relation_for_test(thread, Relation::Child { parent }))
+            .collect();
+        for (n, thread) in [(1, gone), (2, legacy), (3, failed)] {
+            slot(&pool, &format!("s1b-fix-slot-{n}"), &[thread]).await;
+        }
+        for (thread, name, presence) in [
+            (
+                legacy,
+                "AgentDesk-claude-s1b-fix-legacy",
+                SessionPresence::Missing,
+            ),
+            (
+                failed,
+                "AgentDesk-claude-s1b-fix-failed",
+                SessionPresence::ProbeFailed,
+            ),
+        ] {
+            let sql = "INSERT INTO sessions (session_key, status, thread_channel_id)
+                       VALUES ($1, 'idle', $2)";
+            let key = format!("mac-mini:{name}");
+            exec(&pool, sql, &[Some(&key), Some(&thread.to_string())]).await;
+            force_presence_for_test(name, presence);
+        }
+        let reset = super::super::reset_slot_thread_bindings_excluding_pg;
+        assert_eq!(
+            reset(&pool, "s1b-fix-slot-1", 0, None, None).await,
+            Ok((0, 0, 1))
+        );
+        assert_eq!(slot_map(&pool, "s1b-fix-slot-1").await, ["{}"], "rows gone");
+        assert_eq!(
+            reset(&pool, "s1b-fix-slot-2", 0, None, None).await,
+            Ok((0, 1, 1))
+        );
+        assert_eq!(
+            slot_map(&pool, "s1b-fix-slot-2").await,
+            ["{}"],
+            "legacy key"
+        );
+        assert_eq!(
+            reset(&pool, "s1b-fix-slot-3", 0, None, None).await,
+            Ok((0, 0, 0))
+        );
+        let kept = format!("{{\"0\": \"{failed}\"}}");
+        assert_eq!(
+            slot_map(&pool, "s1b-fix-slot-3").await,
+            [kept],
+            "probe failed"
+        );
+        assert!(tmux.take_calls().is_empty(), "the resets run no tmux");
+        pool.close().await;
+        db.drop().await;
+    }
 }

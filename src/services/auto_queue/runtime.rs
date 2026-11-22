@@ -482,10 +482,9 @@ async fn filter_safe_slot_thread_reset_targets(
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
         // A Herdr host's thread, or one whose host is not decided, is kept whatever its rows say.
-        let host = match slot_thread_host_decision(pool, target, *thread_channel_id, selected)
-            .await
-            .tmux_refusal()
-        {
+        // Every row of the thread decides it; no row at all goes on to the row checks below.
+        let host_of = crate::services::session_host::host_decision::host_decision_for_rows;
+        let host = match host_of(pool, *thread_channel_id).await.tmux_refusal() {
             Some(reason) => Some(reason),
             None => slot_thread_host_refusal(pool, &thread_id, selected).await,
         };
@@ -530,27 +529,6 @@ async fn filter_safe_slot_thread_reset_targets(
         }
     }
     Ok((safe_to_reset, verdicts))
-}
-
-/// The host decision of a slot thread, by the provider and key of its selected row, else of its
-/// runtime target.
-async fn slot_thread_host_decision(
-    pool: &PgPool,
-    target: &SlotClearTarget,
-    thread: u64,
-    selected: Option<&SlotThreadRow>,
-) -> crate::services::session_host::host_decision::HostDecision {
-    use crate::services::session_host::host_decision::{host_decision, token_hash_of};
-    let runtime =
-        (target.runtime_targets.iter()).find(|runtime| runtime.thread_channel_id == thread);
-    let selected_provider = selected.and_then(|row| row.provider.as_deref());
-    let provider = selected_provider
-        .or(runtime.map(|runtime| runtime.provider_name.as_str()))
-        .and_then(crate::services::provider::ProviderKind::from_str);
-    let selected_key = selected.and_then(|row| row.session_key.as_deref());
-    let key = selected_key.or(runtime.and_then(|runtime| runtime.session_key.as_deref()));
-    let token = key.and_then(token_hash_of);
-    host_decision(Some(pool), token.as_deref(), provider.as_ref(), thread).await
 }
 
 /// Why a slot thread may not be reset: every row the reset idles and the row its runtime

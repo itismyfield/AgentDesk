@@ -20,7 +20,7 @@ async fn an_undecided_threads_restart_is_refused_and_runs_no_host() {
     let http = Arc::new(serenity::Http::new(""));
     for (channel, reason) in [
         (unresolved, "스레드 부모 미확인"),
-        (child, "현재 실행 미확인: no database or token"),
+        (child, "현재 실행 미확인: no database"),
     ] {
         let identity = ("restart-hold", "!restart", 8_118_433);
         let replies =

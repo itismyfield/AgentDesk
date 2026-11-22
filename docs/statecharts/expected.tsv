@@ -1753,9 +1753,12 @@ thread-host/ThreadHostS1bMutRefusedForgets.cfg	ThreadHostS1b	RefusalKeepsLivePan
 thread-host/ThreadHostS1bMutRestartSome.cfg	ThreadHostS1b	UnknownRunsNoHost	-
 thread-host/ThreadHostS1bMutSeedLate.cfg	ThreadHostS1b	RestoredBeforeRead	-
 thread-host/ThreadHostS1bMutUnknownSkipsTmux.cfg	ThreadHostS1b	TmuxThreadKeepsTmuxPath	-
-thread-host/ThreadHostS1bRev4All.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,RestoredBeforeRead,S1bChildInputKeepsMain,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
-thread-host/ThreadHostS1bRev4S1b.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,S1bChildInputKeepsMain,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
+thread-host/ThreadHostS1bRev4All.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,RestoredBeforeRead,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
+thread-host/ThreadHostS1bRev4S1b.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bS2SeedAll.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bMutKeyDropped.cfg	ThreadHostS1b	SlotRotationProceeds	-
+thread-host/ThreadHostS1bMutRowlessHold.cfg	ThreadHostS1b	SlotRotationProceeds	-
+thread-host/ThreadHostS1bS1bFirstAll.cfg	ThreadHostS1b	RestoredBeforeRead,SlotRotationProceeds	-
 tui-o-turn-mode/CodexTakeoverAfter.cfg	CodexTakeover	-	-
 tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverNoArchive.cfg	CodexTakeover	-	TakeoverEventuallyConfirms

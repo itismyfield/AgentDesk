@@ -71,11 +71,6 @@ impl HostDecision {
     }
 }
 
-/// The token hash a full session key names, for a caller holding only the key.
-pub(crate) fn token_hash_of(session_key: &str) -> Option<String> {
-    crate::domain::session_identity::SessionIdentity::parse(session_key)?.token_hash
-}
-
 /// The decision for `channel`. Only a thread under a Herdr parent reads its row and tmux session.
 pub(crate) async fn host_decision(
     pool: Option<&PgPool>,
@@ -83,7 +78,72 @@ pub(crate) async fn host_decision(
     provider: Option<&ProviderKind>,
     channel: u64,
 ) -> HostDecision {
-    decide(pool, token_hash, provider, channel, true).await
+    decide(pool, Source::Token(token_hash), provider, channel, true).await
+}
+
+/// The decision for a caller holding `channel`'s session key: its row is read by that key, a
+/// legacy `host:tmux` key included, and a missing provider is read from the key.
+pub(crate) async fn host_decision_for_key(
+    pool: Option<&PgPool>,
+    session_key: &str,
+    provider: Option<&ProviderKind>,
+    channel: u64,
+) -> HostDecision {
+    let derived = provider.cloned().or_else(|| provider_of_key(session_key));
+    decide(
+        pool,
+        Source::Key(session_key),
+        derived.as_ref(),
+        channel,
+        true,
+    )
+    .await
+}
+
+/// The decision for a slot thread from every row it has (`channel_id` or `thread_channel_id`).
+/// No row at all, read without error, is no execution; any row decides by its own key.
+pub(crate) async fn host_decision_for_rows(pool: &PgPool, channel: u64) -> HostDecision {
+    if let Err(decided) = thread_endpoint(channel) {
+        return decided;
+    }
+    let rows: Result<Vec<(Option<String>, Option<String>)>, _> = sqlx::query_as(
+        "SELECT provider, session_key FROM sessions
+         WHERE channel_id = $1 OR thread_channel_id = $1",
+    )
+    .bind(channel.to_string())
+    .fetch_all(pool)
+    .await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return HostDecision::Hold(HoldReason::Execution(format!("rows: {error}"))),
+    };
+    let mut decided = HostDecision::Tmux;
+    for (provider, key) in rows {
+        let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
+            return HostDecision::Hold(HoldReason::Execution("row without session key".into()));
+        };
+        let provider = provider.as_deref().and_then(ProviderKind::from_str);
+        match host_decision_for_key(Some(pool), &key, provider.as_ref(), channel).await {
+            hold @ HostDecision::Hold(_) => return hold,
+            herdr @ HostDecision::Herdr { .. } => decided = herdr,
+            HostDecision::Tmux => {}
+        }
+    }
+    decided
+}
+
+/// The provider a session key names, else the one its tmux name carries.
+fn provider_of_key(session_key: &str) -> Option<ProviderKind> {
+    let identity = crate::domain::session_identity::SessionIdentity::parse(session_key)?;
+    if let Some(provider) = identity
+        .provider_from_key
+        .as_deref()
+        .and_then(ProviderKind::from_str)
+    {
+        return Some(provider);
+    }
+    let parsed = crate::services::provider::parse_provider_and_channel_from_tmux_name;
+    parsed(&identity.tmux_name).map(|(provider, _)| provider)
 }
 
 /// Whether an input of `channel` runs on Herdr now: the same decision, without the tmux probe
@@ -94,31 +154,47 @@ pub(crate) async fn input_runs_herdr(
     provider: &ProviderKind,
     channel: u64,
 ) -> bool {
-    decide(pool, Some(token_hash), Some(provider), channel, false)
+    let source = Source::Token(Some(token_hash));
+    decide(pool, source, Some(provider), channel, false)
         .await
         .is_herdr()
 }
 
+/// How a thread's row is found: by its canonical identity under a token, or by a key in hand.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Token(Option<&'a str>),
+    Key(&'a str),
+}
+
+/// The parent endpoint of a thread under a Herdr parent; any other channel is decided here.
+fn thread_endpoint(channel: u64) -> Result<ChannelEndpoint, HostDecision> {
+    match thread_host::parent_policy(channel) {
+        PolicyHost::Herdr {
+            endpoint,
+            via_parent: None,
+        } => Err(HostDecision::herdr(endpoint)),
+        PolicyHost::Tmux => Err(HostDecision::Tmux),
+        PolicyHost::Unknown(_) => Err(HostDecision::Hold(HoldReason::RelationUnresolved)),
+        PolicyHost::Herdr { endpoint, .. } => Ok(endpoint),
+    }
+}
+
 async fn decide(
     pool: Option<&PgPool>,
-    token_hash: Option<&str>,
+    source: Source<'_>,
     provider: Option<&ProviderKind>,
     channel: u64,
     probe_tmux: bool,
 ) -> HostDecision {
-    let endpoint = match thread_host::parent_policy(channel) {
-        PolicyHost::Herdr {
-            endpoint,
-            via_parent: None,
-        } => return HostDecision::herdr(endpoint),
-        PolicyHost::Tmux => return HostDecision::Tmux,
-        PolicyHost::Unknown(_) => return HostDecision::Hold(HoldReason::RelationUnresolved),
-        PolicyHost::Herdr { endpoint, .. } => endpoint,
+    let endpoint = match thread_endpoint(channel) {
+        Ok(endpoint) => endpoint,
+        Err(decided) => return decided,
     };
     let Some(provider) = provider else {
         return HostDecision::Hold(HoldReason::ProviderUnknown);
     };
-    let observed = observe_thread(pool, token_hash, provider, channel, &endpoint, probe_tmux);
+    let observed = observe_thread(pool, source, provider, channel, &endpoint, probe_tmux);
     match observed.await {
         Observed::Herdr => HostDecision::herdr(endpoint),
         Observed::Tmux => HostDecision::Tmux,
@@ -127,6 +203,25 @@ async fn decide(
         Observed::Nothing => HostDecision::Tmux,
         Observed::Unknown(detail) => HostDecision::Hold(HoldReason::Execution(detail)),
     }
+}
+
+/// The key of `channel`'s canonical row under `token_hash`, if it has one.
+async fn canonical_key(
+    pool: &PgPool,
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Result<Option<String>, String> {
+    let channel_text = channel.to_string();
+    let identity = CanonicalSessionIdentity {
+        kind: SessionIdentityKind::DiscordChannel,
+        discord_token_hash: token_hash,
+        channel_id: &channel_text,
+    };
+    resolve_session_row_pg(pool, None, Some(provider.as_str()), Some(identity))
+        .await
+        .map(|row| row.map(|(_, key)| key))
+        .map_err(|error| format!("session row: {error:?}"))
 }
 
 /// A thread's execution now, from its own row and its tmux session.
@@ -142,26 +237,25 @@ enum Observed {
 
 async fn observe_thread(
     pool: Option<&PgPool>,
-    token_hash: Option<&str>,
+    source: Source<'_>,
     provider: &ProviderKind,
     channel: u64,
     endpoint: &ChannelEndpoint,
     probe_tmux: bool,
 ) -> Observed {
-    let (Some(pool), Some(token_hash)) = (pool, token_hash) else {
-        return Observed::Unknown("no database or token".into());
+    let Some(pool) = pool else {
+        return Observed::Unknown("no database".into());
     };
-    let channel_text = channel.to_string();
-    let identity = CanonicalSessionIdentity {
-        kind: SessionIdentityKind::DiscordChannel,
-        discord_token_hash: token_hash,
-        channel_id: &channel_text,
-    };
-    let resolved = resolve_session_row_pg(pool, None, Some(provider.as_str()), Some(identity));
-    let key = match resolved.await {
-        Ok(Some((_, key))) => key,
-        Ok(None) => return Observed::Nothing,
-        Err(error) => return Observed::Unknown(format!("session row: {error:?}")),
+    let key = match source {
+        Source::Key(key) => key.to_owned(),
+        Source::Token(None) => return Observed::Unknown("no token".into()),
+        Source::Token(Some(token_hash)) => {
+            match canonical_key(pool, token_hash, provider, channel).await {
+                Ok(Some(key)) => key,
+                Ok(None) => return Observed::Nothing,
+                Err(detail) => return Observed::Unknown(detail),
+            }
+        }
     };
     let row = turn_host::read_row(Some(pool), Some(&key)).await;
     match &row {

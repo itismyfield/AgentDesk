@@ -830,3 +830,7 @@ pub(super) fn local_tui_for_test(channel: u64) -> crate::config::session_hosts::
 #[cfg(test)]
 #[path = "provider_settings_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "provider_settings_thread_owner_tests.rs"]
+mod thread_owner_tests;

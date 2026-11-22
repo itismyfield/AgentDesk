@@ -1,5 +1,8 @@
 stateDiagram-v2
-    [*] --> Entry: BootHerdr / BootTmux / LiveTmux / DeadTmux / ProbeFail / HerdrBound / Unresolved
+    [*] --> Entry: BootHerdr / BootTmux / LiveTmux / DeadTmux / ProbeFail / HerdrBound / Unresolved / SlotGc / LegacyKey
+    Entry --> KeyHolder: A2 / A6 / A9 hold a session key or the slot's thread id
+    KeyHolder --> Tmux: After: the key finds the row (legacy key too); no row at all is nothing
+    KeyHolder --> Hold: S1bFirst: token from the key or ProviderUnknown (slot binding refused)
 
     state "host_decision (row + tmux now, no cache)" as Decide
     Entry --> Decide: CmdRestart / CmdTmuxOp / CmdRelaunch / Input
