@@ -253,7 +253,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/services/discord/health/recovery/stall_alert.rs:26` | provider가 일치하는 tmux key만 stall 복구 후보로 선택 | S/I/M |
 | `src/services/discord/health/recovery/stall_alert.rs:36` | provider가 일치하는 tmux key만 stall 복구 후보로 선택 | S/I/M |
 | `src/services/discord/health/watcher_respawn/idle_relay_absence.rs:84` | provider별 watchdog이 자기 provider 세션만 관측 | I/B/M |
-| `src/services/discord/host_defer_gate.rs:255` | idle mirror eviction에서 이름으로 provider row 선택 | S/B/M |
+| `src/services/discord/host_defer_gate.rs:256` | idle mirror eviction에서 이름으로 provider row 선택 | S/B/M |
 | `src/services/discord/host_teardown_gate.rs:199` | row provider 없을 때 teardown gate provider 보충 | S/M |
 | `src/services/discord/inflight_heartbeat_sweeper.rs:97` | provider별 sweeper가 다른 bot watcher를 건드리지 않도록 제한 | I/B/M |
 | `src/services/discord/org_schema.rs:447` | binding context channel 누락 시 숫자 채널명에서 channel ID 보충; auth overlay 라우팅 | B/S/M |
@@ -466,9 +466,9 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K05 | `services/agents/turn.rs:399` | `extract_tmux_name` facade: turn/event 표시·조회에 key tail 제공 | **자동(A)**. 신규 current primary는 새 이름. 역사 event key는 원문 보존, current로 일괄 rewrite하지 않음. |
 | K06 | `services/auto_queue/runtime.rs:124,565` | provider fallback과 thread row의 name을 얻어 slot reset host guard 검사 | current row name은 **자동(A)**. provider 역파싱 제거는 기존 **S3**, structured provider 우선. |
 | K07 | `services/cluster/session_discovery.rs:390` | 저장 key의 tmux name→provider/channel segment directory 구성 | 이름 위치는 **자동(A)**. 의미 역파싱은 기존 **S2** metadata directory 전환으로 수정. |
-| K08 | `services/discord/admin_host_guard.rs:132,203` | explicit key→approved name, managed reset에서 channel 이름 재생성 우선 후 key fallback | **S2/S8b1**: 저장 current row/actual locator 우선으로 lookup 순서 수정. explicit old alias는 current primary를 resolve. pure tail parser 자체는 유지. |
+| K08 | `services/discord/admin_host_guard.rs:111,182` | explicit key→approved name, managed reset에서 channel 이름 재생성 우선 후 key fallback | **S2/S8b1**: 저장 current row/actual locator 우선으로 lookup 순서 수정. explicit old alias는 current primary를 resolve. pure tail parser 자체는 유지. |
 | K09 | `services/discord/health/recovery.rs:265` | health recovery에서 생성한 이름 없을 때 저장 key의 name 사용 | stored primary 부분은 **자동(A)**. 생성명 우선 문제는 기존 **S8b1**에서 row 우선 전환. |
-| K10 | `services/discord/host_defer_gate.rs:106,131` | canonical row에서 derive한 key/name으로 hold/defer/recovery 판단 | **자동(A)**. query가 반환하는 primary가 신형이며 row ambiguity/Unknown 정책은 그대로. |
+| K10 | `services/discord/host_defer_gate.rs:107,132` | canonical row에서 derive한 key/name으로 hold/defer/recovery 판단 | **자동(A)**. query가 반환하는 primary가 신형이며 row ambiguity/Unknown 정책은 그대로. |
 | K11 | `services/discord/host_key_derivation.rs:105,111,117,164` | canonical row resolver가 돌려준 primary를 그대로 반환하고 name 추출 | **자동(A)**. r1 effective descriptor 대체기계를 삭제해도 `primary tail=current physical name` 불변식으로 정합. |
 | K12 | `services/discord/session_identity.rs:3` | central `SessionIdentity`/tail helper의 re-export | **자동(A)**. re-export 유지, 실행 효과/별도 parse 없음. |
 | K13 | `services/discord/tmux_reaper/host_guard.rs:89` | owned key가 구조적으로 parse되는지 확인한 뒤 keyed teardown guard | current stored primary는 **자동(A)**. old execution pin은 current 이름으로 느슨하게 alias 합치지 않고 기존 nonce/host guard 유지(S5 계약). |
@@ -1066,9 +1066,9 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/cluster/session_matcher.rs:233` | C: parent segment에서 thread의 parent locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/cluster/session_matcher.rs:426` | C: public expected_session_name helper: 이름/숫자 raw basis | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/adk_session.rs:84` | C/R/S: override가 있으면 synthetic basis, 없으면 channel basis로 sessions key 생성 | 명시 kind/ID를 producer부터 전달; raw hint 분류 금지 |
-| `src/services/discord/admin_host_guard.rs:165` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/admin_host_guard.rs:205` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/admin_host_guard.rs:320` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:144` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:184` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/admin_host_guard.rs:299` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control.rs:205` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control.rs:537` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/commands/control/managed_reset.rs:27` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
@@ -1082,7 +1082,7 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/discord/health/recovery/channel_runtime.rs:284` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/health/recovery/runtime_lookup.rs:130` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/health/turn_deliver/inject.rs:283` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
-| `src/services/discord/host_defer_gate.rs:71` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
+| `src/services/discord/host_defer_gate.rs:72` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/host_teardown_gate.rs:105` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/host_teardown_gate.rs:302` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/discord/recovery_engine/manual_rebind/mod.rs:265` | C: core/등록 channel_name에서 조회·guard·복구용 locator 재구성 | 저장 locator 우선; typed Channel/Thread/Dm 경로 |

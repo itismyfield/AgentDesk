@@ -34,7 +34,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
-| `src/services/discord/admin_host_guard.rs:256` | `apply` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/admin_host_guard.rs:235` | `apply` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/catch_up/retry_state.rs:538` | `clear_channel_discarding_catch_up_backlog` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/health/recovery.rs:285` | `clear_provider_channel_runtime` | BootRestore / Reconstruct |
 | `src/services/discord/health/recovery/inflight_repair.rs:188` | `clear_idle_tmux_stale_turn` | BootRestore / Reconstruct |
@@ -128,7 +128,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_finalizer/finalize.rs:189` | `do_finalize_with_probe` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/turn_finalizer/guarded_finish_residue.rs:164` | `release` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/turn_lease.rs:299` | `claim` | OperatorRelease |
-| `src/services/discord/zombie_foreground_release.rs:405` | `release_zombie_foreground_turn_guarded` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/zombie_foreground_release.rs:351` | `release_zombie_foreground_turn_guarded` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/queue/cancel_effects.rs:212` | `purge_on` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator.rs:638` | `try_start_turn` | Inject(배타 lease claim) |
 | `src/services/turn_orchestrator.rs:645` | `try_start_turn` | Inject(배타 lease claim) |
@@ -662,7 +662,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_presence/supervisor.rs:858` | `kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_presence/supervisor.rs:869` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_presence/supervisor.rs:874` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/zombie_foreground_release.rs:437` | `release_zombie_foreground_turn_guarded` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/zombie_foreground_release.rs:383` | `release_zombie_foreground_turn_guarded` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:134` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:821` | `recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:1149` | `wait` | Kick(wake/event/queue admission, 같은 head 재검증) |

@@ -264,7 +264,7 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/discord/outbound/raw_output.rs:144`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/source_registry.rs:58`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/outbound/source_registry.rs:71`|관측 leaf/경로: 위 표 참조|
-|`src/services/discord/session_relay_sink.rs:294`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
+|`src/services/discord/session_relay_sink.rs:292`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/settings/content.rs:493`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/settings/content.rs:494`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/settings/content.rs:498`|관측 leaf/경로: 위 표 참조|
