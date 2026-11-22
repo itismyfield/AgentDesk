@@ -1176,6 +1176,7 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
         "claude",
         "token",
         &|| false,
+        crate::services::cluster::intake_worker::test_executor::PORT,
     )
     .await;
     assert!(
@@ -1547,6 +1548,7 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
         "claude",
         "token",
         &|| false,
+        crate::services::cluster::intake_worker::test_executor::PORT,
     )
     .await;
     drop(checkpoint);
@@ -1613,6 +1615,7 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
         "claude",
         "token",
         &|| false,
+        crate::services::cluster::intake_worker::test_executor::PORT,
     )
     .await;
     assert!(
@@ -1695,6 +1698,7 @@ async fn actual_worker_persistent_consent_error_rearms_once_then_preserves_spawn
             "claude",
             "token",
             &|| false,
+            crate::services::cluster::intake_worker::test_executor::PORT,
         )
         .await
         .unwrap();
@@ -1940,3 +1944,6 @@ pub(in crate::services::discord::router) fn override_final_local_probe(
 ) -> impl Drop {
     FinalOverride(FINAL.with(|slot| slot.borrow_mut().replace(Box::new(callback))))
 }
+
+#[path = "admission_thread_tests.rs"]
+mod thread;

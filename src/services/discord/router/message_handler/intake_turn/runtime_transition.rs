@@ -56,7 +56,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                             return;
                         }
                         drop(lock.lock_owned().await);
-                        crate::services::discord::session_transition::wake_installed_owner(
+                        crate::services::discord::router::wake_installed_owner(
                             &waker,
                             original_channel_id,
                         )

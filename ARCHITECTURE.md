@@ -1420,6 +1420,7 @@ src/
 │   │   ├── intake_routing.rs
 │   │   ├── intake_routing_config.rs
 │   │   ├── intake_routing_telemetry.rs
+│   │   ├── intake_turn.rs
 │   │   ├── intake_worker.rs
 │   │   ├── intake_worker_capabilities.rs
 │   │   ├── machine_resources.rs
@@ -1628,7 +1629,8 @@ src/
 │   │   │   │   ├── effort.rs
 │   │   │   │   ├── effort_settings_tests.rs
 │   │   │   │   ├── provider_settings.rs
-│   │   │   │   └── provider_settings_snapshot_tests.rs
+│   │   │   │   ├── provider_settings_snapshot_tests.rs
+│   │   │   │   └── provider_settings_thread_owner_tests.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
@@ -1709,6 +1711,7 @@ src/
 │   │   │   │   └── home_pg_tests.rs
 │   │   │   ├── restart/
 │   │   │   │   ├── herdr.rs
+│   │   │   │   ├── host_hold_tests.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -2472,6 +2475,7 @@ src/
 │   │   │   │   ├── admission_notice_tests.rs
 │   │   │   │   ├── admission_refusal.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── admission_thread_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
 │   │   │   │   ├── return_input.rs
@@ -2694,6 +2698,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_pending_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_retired_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
@@ -2750,6 +2755,7 @@ src/
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
 │   │   │   ├── thread_binding.rs
+│   │   │   ├── transition_wake.rs
 │   │   │   └── turn_start.rs
 │   │   ├── routine_presentation/
 │   │   │   └── tests.rs
@@ -4401,6 +4407,8 @@ src/
 │   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
+│   │   ├── host_decision.rs
+│   │   ├── host_decision_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── operation_policy.rs

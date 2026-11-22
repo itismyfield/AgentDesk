@@ -19,7 +19,9 @@ pub(in crate::services::discord) async fn before_idle(
     if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
         return Ok(false);
     }
-    let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel.get()) else {
+    // A thread's Bound execution runs on its parent's endpoint.
+    use crate::services::session_host::thread_host::{PolicyHost, parent_policy};
+    let PolicyHost::Herdr { endpoint, .. } = parent_policy(channel.get()) else {
         return Ok(false);
     };
     if crate::config::session_hosts::local_node().as_deref()

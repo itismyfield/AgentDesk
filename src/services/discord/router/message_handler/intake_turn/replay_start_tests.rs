@@ -1295,7 +1295,15 @@ mod worker_entry_tests {
     async fn tick(host: &Host, channel: ChannelId, owner: &str) -> Option<SubmittedPrompt> {
         let (result, submitted) = start(
             channel,
-            run_intake_worker_tick(&host.pool, &host.shared, WORKER, "claude", owner, &|| false),
+            run_intake_worker_tick(
+                &host.pool,
+                &host.shared,
+                WORKER,
+                "claude",
+                owner,
+                &|| false,
+                crate::services::cluster::intake_worker::test_executor::PORT,
+            ),
         )
         .await;
         result.unwrap();
@@ -1607,7 +1615,7 @@ mod worker_entry_tests {
             let receipt = registered(&host,channel,&[message+1]).await;
             sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld',replay_hold_reason='between forward and claim' WHERE id=$1")
                 .bind(receipt).execute(&host.pool).await.unwrap();
-            let (result,provider) = start(channel,run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","claim-owner",&|| false)).await;
+            let (result,provider) = start(channel,run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","claim-owner",&|| false, crate::services::cluster::intake_worker::test_executor::PORT)).await;
             if let Some((_,release)) = provider { let _=release.send(()); panic!("the SQL claim fence must prevent the absorbed source from reaching a provider"); }
             assert_eq!(result.unwrap(),TickOutcome::QueueEmpty);
             let pending: (String,bool,bool,bool) = sqlx::query_as("SELECT status::TEXT,claimed_at IS NULL,accepted_at IS NULL,spawned_at IS NULL FROM intake_outbox WHERE id=$1")
@@ -1804,7 +1812,7 @@ mod worker_entry_tests {
             *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE.lock().unwrap()
                 = Some((channel,completed));
 
-            let worker = Box::pin(run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","race-worker",&|| false));
+            let worker = Box::pin(run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","race-worker",&|| false, crate::services::cluster::intake_worker::test_executor::PORT));
             let leader_entry = Box::pin(async {
                 at_spawn.await.unwrap();
                 let admitted = admit_text_intake(&deps,&submission).await;

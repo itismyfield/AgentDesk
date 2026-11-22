@@ -132,9 +132,17 @@ async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
         .await;
         let (registry, shared) = owner_runtime_for_tests::registered("claude").await;
         assert_eq!(
-            run_intake_worker_tick(&pool, &shared, target, "claude", "old-owner", &|| false)
-                .await
-                .unwrap(),
+            run_intake_worker_tick(
+                &pool,
+                &shared,
+                target,
+                "claude",
+                "old-owner",
+                &|| false,
+                super::test_executor::PORT
+            )
+            .await
+            .unwrap(),
             TickOutcome::QueueEmpty,
             "{disposition} excludes every absorbed source before claim"
         );
@@ -143,9 +151,17 @@ async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
             owner_runtime_for_tests::registered("claude").await;
         for owner in ["replacement-owner", "another-node-owner"] {
             assert_eq!(
-                run_intake_worker_tick(&pool, &replacement, target, "claude", owner, &|| false)
-                    .await
-                    .unwrap(),
+                run_intake_worker_tick(
+                    &pool,
+                    &replacement,
+                    target,
+                    "claude",
+                    owner,
+                    &|| false,
+                    super::test_executor::PORT
+                )
+                .await
+                .unwrap(),
                 TickOutcome::QueueEmpty,
                 "a fresh runtime or foreign claim owner cannot forget {disposition}"
             );
@@ -197,8 +213,16 @@ async fn replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg(
         })
     }));
     let recorder = test_executor::record();
-    let outcome =
-        run_intake_worker_tick(&pool, &shared, WORKER, "claude", "race-owner", &|| false).await;
+    let outcome = run_intake_worker_tick(
+        &pool,
+        &shared,
+        WORKER,
+        "claude",
+        "race-owner",
+        &|| false,
+        super::test_executor::PORT,
+    )
+    .await;
     assert_eq!(
         outcome.unwrap(),
         TickOutcome::LostClaimBeforeAccept,
@@ -275,9 +299,17 @@ async fn replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_bu
     .await
     .unwrap();
     assert_eq!(
-        run_intake_worker_tick(&pool, &shared, WORKER, "claude", "normal-owner", &|| false)
-            .await
-            .unwrap(),
+        run_intake_worker_tick(
+            &pool,
+            &shared,
+            WORKER,
+            "claude",
+            "normal-owner",
+            &|| false,
+            super::test_executor::PORT
+        )
+        .await
+        .unwrap(),
         TickOutcome::Processed
     );
     let delivered: (String, bool, bool, bool, i32) = sqlx::query_as(
@@ -307,9 +339,17 @@ async fn replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_bu
         .unwrap();
     for attempt in 1..=3 {
         assert_eq!(
-            run_intake_worker_tick(&pool, &shared, WORKER, "claude", "retry-owner", &|| false)
-                .await
-                .unwrap(),
+            run_intake_worker_tick(
+                &pool,
+                &shared,
+                WORKER,
+                "claude",
+                "retry-owner",
+                &|| false,
+                super::test_executor::PORT
+            )
+            .await
+            .unwrap(),
             TickOutcome::Processed
         );
         let failed: (String, i32, i32, bool, bool, String) = sqlx::query_as(

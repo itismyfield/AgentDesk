@@ -205,13 +205,7 @@ impl ReplayStart {
     }
 }
 
-/// Execution and replay custody remain separate outcomes through queued and worker settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntakeExecution {
-    Executed,
-    Deferred,
-    ConsumedProtected,
-}
+pub(crate) use crate::services::cluster::intake_turn::IntakeExecution;
 
 impl IntakeExecution {
     pub(crate) fn deferred(channel: poise::serenity_prelude::ChannelId) -> Self {

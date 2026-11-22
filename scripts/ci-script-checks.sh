@@ -355,6 +355,7 @@ fi
 
 if run_check guards "Test wait cap source check"; then
 "$PYTHON" -m unittest tests.test_rust_test_wait_caps
+"$PYTHON" -m unittest scripts.crate_split.tests.test_vistool
 fi
 
 if run_check guards "CI setup-node reads .nvmrc"; then
@@ -574,7 +575,8 @@ if run_check guards "PR infrastructure failure rerun classifier (#4392/#5207)"; 
 # the discriminating matrix and proves drift detection actually discriminates.
 ./scripts/ci/infra-failure-rerun.sh --self-test
 "$PYTHON" -m unittest tests.test_known_flaky_retry
-"$PYTHON" -m unittest tests.test_nextest_ci tests.test_nextest_required tests.test_nextest_timings
+"$PYTHON" -m unittest tests.test_nextest_ci tests.test_nextest_required tests.test_nextest_timings \
+  tests.test_nextest_scope tests.test_pr_scope_core tests.test_pr_nextest tests.test_aggregate_pr_scope
 "$PYTHON" -m unittest tests.test_rust_test_failure_history
 bash scripts/main-ci-triage.sh --self-test
 
@@ -855,6 +857,10 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 # a lane that released and re-entered starved a waiter for 49 minutes. Same
 # reason as above -- Python, so only this unittest run gates it.
 "$PYTHON" -m unittest tests.test_build_token_fairness_5968
+fi
+
+if run_check cargo "vistool end-to-end on a cargo fixture"; then
+AGENTDESK_VISTOOL_E2E=1 "$PYTHON" -m unittest scripts.crate_split.tests.test_vistool
 fi
 
 if run_check cargo "Release Cargo witness cache parity"; then

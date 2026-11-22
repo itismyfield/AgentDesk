@@ -267,16 +267,26 @@ async fn normal_end(
 ) -> Response {
     let transition = Some(transition);
     #[cfg(unix)]
+    let channel: u64 = row.raw_channel_id.parse().unwrap();
+    #[cfg(unix)]
+    let herdr = crate::services::discord::admin_host_guard::host_decision_of(
+        shared,
+        &shared.provider,
+        channel,
+    )
+    .await
+    .is_herdr();
+    #[cfg(unix)]
     let claude = super::clear_end_record::capture_for(
         &shared.provider,
-        row.raw_channel_id.parse().unwrap(),
+        (channel, herdr),
         owner,
         &transition,
     );
     #[cfg(unix)]
     let codex = super::codex_end_record::capture_for(
         &shared.provider,
-        row.raw_channel_id.parse().unwrap(),
+        (channel, herdr),
         owner,
         &transition,
     );

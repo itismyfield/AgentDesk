@@ -479,9 +479,10 @@ async fn filter_safe_slot_thread_reset_targets(
             .selected_rows
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
-        // A Herdr-configured thread is kept whatever its rows say, with or without a registry.
-        let configured = crate::services::session_host::operation_policy::configured_refusal;
-        let host = match configured(*thread_channel_id) {
+        // A Herdr host's thread, or one whose host is not decided, is kept whatever its rows say.
+        // Every row of the thread decides it; no row at all goes on to the row checks below.
+        let host_of = crate::services::session_host::host_decision::host_decision_for_rows;
+        let host = match host_of(pool, *thread_channel_id).await.tmux_refusal() {
             Some(reason) => Some(reason),
             None => slot_thread_host_refusal(pool, &thread_id, selected).await,
         };

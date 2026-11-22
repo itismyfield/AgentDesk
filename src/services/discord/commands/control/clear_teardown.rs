@@ -69,8 +69,10 @@ pub(super) async fn end_session(
     clear_epoch: &crate::services::herdr_launch::clear_epoch::ClearGuard,
     report: &mut ClearReport,
 ) {
+    let host = crate::services::discord::admin_host_guard::host_decision_of;
+    let herdr = host(shared, provider, channel_id.get()).await.is_herdr();
     #[cfg(unix)]
-    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+    if herdr {
         drop(transition.take());
         clear_epoch.wait_idle().await;
         if end_herdr(shared, session_key, &mut transition, report).await {
@@ -88,9 +90,7 @@ pub(super) async fn end_session(
     let managed = managed_session_clear_behavior(provider);
     if let (ManagedSessionClearBehavior::ResetManagedProcess, Some(name)) = (managed, tmux) {
         use crate::services::tui_prompt_dedupe::clear_relaunch;
-        let captured = if matches!(provider, ProviderKind::Codex)
-            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
-        {
+        let captured = if matches!(provider, ProviderKind::Codex) && !herdr {
             match clear_relaunch::capture(name) {
                 Ok(captured) => captured,
                 Err(error) => {
@@ -103,10 +103,10 @@ pub(super) async fn end_session(
         };
         #[cfg(unix)]
         let clear_end =
-            clear_end_record::capture_for(provider, channel_id.get(), name, &transition);
+            clear_end_record::capture_for(provider, (channel_id.get(), herdr), name, &transition);
         #[cfg(unix)]
         let codex_end =
-            codex_end_record::capture_for(provider, channel_id.get(), name, &transition);
+            codex_end_record::capture_for(provider, (channel_id.get(), herdr), name, &transition);
         let ended = super::managed_reset::end_managed_process_session(name);
         if ended.tmux_unconfirmed {
             tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
