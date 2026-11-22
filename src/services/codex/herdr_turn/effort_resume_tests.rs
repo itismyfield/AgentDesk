@@ -1,7 +1,7 @@
 //! The launch an effort restart owes resumes exactly the thread it ended, once.
-use super::super::restart_intent::EffortResume;
 use super::greeting::{ended_source, launch_owing, retired};
 use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
+use crate::services::codex::herdr_turn::restart_intent::EffortResume;
 
 fn owed(native: &str, retired_nonce: &str, required: bool) -> Option<EffortResume> {
     Some(EffortResume {
@@ -98,7 +98,7 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused@127.0.0.1/unused")
         .unwrap();
-    let turn = |effort| super::super::CodexHerdrTurn {
+    let turn = |effort| crate::services::codex::herdr_turn::CodexHerdrTurn {
         pool: &pool,
         owner: super::greeting::owner(),
         channel_id: 8_128_002,
@@ -121,7 +121,7 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
         cancel: None,
         bootstrap: false,
     };
-    let chosen = super::super::launch_options(&turn(Some("ultra")));
+    let chosen = crate::services::codex::herdr_turn::launch_options(&turn(Some("ultra")));
     assert_eq!(chosen.reasoning_effort.as_deref(), Some("ultra"));
     let args = codex_tui_option_args(&chosen);
     assert!(
@@ -129,15 +129,15 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
             .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=\"ultra\""),
         "the pane argv carries the saved level: {args:?}"
     );
-    let unset = super::super::launch_options(&turn(None));
+    let unset = crate::services::codex::herdr_turn::launch_options(&turn(None));
     assert_eq!(
         unset.reasoning_effort.as_deref(),
         Some("low"),
         "no saved level keeps the default"
     );
     assert_ne!(
-        super::super::kept_options("n", &chosen),
-        super::super::kept_options("n", &unset),
+        crate::services::codex::herdr_turn::kept_options("n", &chosen),
+        crate::services::codex::herdr_turn::kept_options("n", &unset),
         "a changed level is a changed launch, so the old pane never takes the new options"
     );
 }
@@ -187,7 +187,7 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         .connect_lazy("postgres://unused@127.0.0.1/unused")
         .unwrap();
     let working = root.path().display().to_string();
-    let turn = super::super::CodexHerdrTurn {
+    let turn = crate::services::codex::herdr_turn::CodexHerdrTurn {
         pool: &pool,
         owner,
         channel_id: 8_128_002,
@@ -210,8 +210,12 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         cancel: None,
         bootstrap: false,
     };
-    super::super::pane_command(&turn, &prepared, (&launchable, &overlay, root.path()))
-        .expect("an effort resume passes the exact resume validator");
+    crate::services::codex::herdr_turn::pane_command(
+        &turn,
+        &prepared,
+        (&launchable, &overlay, root.path()),
+    )
+    .expect("an effort resume passes the exact resume validator");
     let script = crate::services::tmux_common::session_temp_path(&logical, "sh");
     let rendered = std::fs::read_to_string(script).unwrap();
     let exec = rendered.lines().find(|l| l.starts_with("exec ")).unwrap();
@@ -232,6 +236,6 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         !exec.contains("--last") && !exec.contains("fork"),
         "no other thread is picked: {exec}"
     );
-    super::super::options_kept(&turn, &prepared.context.execution_nonce)
+    crate::services::codex::herdr_turn::options_kept(&turn, &prepared.context.execution_nonce)
         .expect("later prompts of the resumed execution keep its launch options");
 }

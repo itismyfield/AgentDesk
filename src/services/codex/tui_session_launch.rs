@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 pub(crate) mod first_input;
-pub(super) mod launch_policy;
+pub(crate) mod launch_policy;
 mod project_trust;
 #[cfg(unix)]
 pub(crate) use launch_policy::prepare_codex_herdr_launch;
@@ -254,7 +254,7 @@ pub(crate) struct CodexHerdrLaunchable {
 #[cfg(all(test, unix))]
 impl CodexHerdrLaunchable {
     /// A verified launchable that runs `bin`, for tests that render a pane command.
-    pub(super) fn for_tests(bin: &str) -> Self {
+    pub(crate) fn for_tests(bin: &str) -> Self {
         Self {
             codex_bin: bin.into(),
             resolution: crate::services::platform::BinaryResolution {

@@ -36,12 +36,12 @@ After의 PrepareInput은 최신 Pending row·nonce·spawn marker를 검증하고
 | create 결과에서 location 기록 | herdr_launch.rs:517–566 | Pending(location 있음, expected 없음) = placed |
 | provider evidence 기록 | herdr_launch.rs:594–615 → hosted_execution.rs:433 | Pending(expected 있음) = evidenced |
 | 재시작 후 Pending boot pass | recovery_engine/herdr_reader.rs:456–465 | durable row 유지, 메모리 등록부 0, Startup 기록 없음 |
-| Pending 공통 선택 | codex/herdr_turn.rs:166–172 | held/options 관문 뒤 pending_launch, first_prompt 합류 |
-| unplaced Pending 복구 | codex/herdr_turn.rs:284–287 → herdr_launch/unplaced.rs:228–312,445–466 | exact receipt/pane/evidence를 CAS 기록한 뒤 같은 nonce 재사용; retired면 fresh launch |
-| evidence 없는 Pending 재조회 | codex/herdr_turn.rs:296–298 → herdr_launch.rs:608–630 | 새 pane 생성 없이 기존 pane evidence 재조회 후 같은 nonce |
-| evidence 있는 Pending 재사용 | codex/herdr_turn.rs:306 | nonce 그대로 first_prompt 합류 |
-| legacy 첫 입력 | codex/herdr_turn.rs:492 → first_input.rs:9–21 | current_record 재조회, gate, write |
-| owner 첫 입력 | codex/herdr_turn.rs:488–482 → first_input.rs:26–67 | 읽은 record로 owner callback/physical write |
+| Pending 공통 선택 | codex/herdr_turn.rs:164–170 | held/options 관문 뒤 pending_launch, first_prompt 합류 |
+| unplaced Pending 복구 | codex/herdr_turn.rs:282–285 → herdr_launch/unplaced.rs:228–312,445–466 | exact receipt/pane/evidence를 CAS 기록한 뒤 같은 nonce 재사용; retired면 fresh launch |
+| evidence 없는 Pending 재조회 | codex/herdr_turn.rs:294–296 → herdr_launch.rs:608–630 | 새 pane 생성 없이 기존 pane evidence 재조회 후 같은 nonce |
+| evidence 있는 Pending 재사용 | codex/herdr_turn.rs:304 | nonce 그대로 first_prompt 합류 |
+| legacy 첫 입력 | codex/herdr_turn.rs:490 → first_input.rs:9–21 | current_record 재조회, gate, write |
+| owner 첫 입력 | codex/herdr_turn.rs:486–480 → first_input.rs:26–67 | 읽은 record로 owner callback/physical write |
 | 물리 입력 합류 | first_input.rs:70–104 | target/composer 판정 뒤 alias·placeholder·hold 설치, 한 번의 input plan |
 | native Startup 관찰 | runtime_binding/codex_hook.rs:324–342 | registry가 정확히 1일 때만 Source 기록, 0/2는 기존 Proceed |
 | Bound·hold 해제 | first_input.rs:141–172 → herdr_turn.rs:279–297 | 자신의 Startup을 읽어 attach, Bound, hold 종료 |

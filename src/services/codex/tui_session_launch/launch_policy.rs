@@ -146,9 +146,7 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
 }
 
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.
-pub(in crate::services::codex) fn codex_tui_option_args(
-    options: &CodexLaunchOptions,
-) -> Vec<String> {
+pub(crate) fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());

@@ -187,7 +187,7 @@ pub(crate) fn execute(
     result
 }
 
-fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+pub(crate) fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     let tools = Some(turn.allowed_tools);
     let instructions = super::compose_codex_developer_instructions(turn.system_prompt, tools);
     CodexLaunchOptions::new("")
@@ -261,7 +261,7 @@ fn fresh_launch(
 
 /// The pane command of `prepared`: a resume names the exact thread its incarnation expects, a
 /// fresh launch names none. Its options are kept before the Pending row, for each later prompt.
-fn pane_command(
+pub(crate) fn pane_command(
     turn: &CodexHerdrTurn<'_>,
     prepared: &PreparedIncarnation,
     (launchable, overlay, home): (
@@ -432,12 +432,12 @@ fn owned_composer(
 }
 
 /// What execution `nonce` keeps of the options it was launched with.
-fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
+pub(crate) fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
     format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
 }
 
 /// Refuses a prompt whose launch options are not the ones execution `nonce` was launched with.
-fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+pub(crate) fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
     let logical = turn.owner.logical_key.as_str();
     let expected = kept_options(nonce, &launch_options(turn));
     match read_codex_tui_launch_options_fingerprint(logical) {
