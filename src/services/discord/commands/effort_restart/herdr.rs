@@ -131,6 +131,8 @@ async fn postlude(held: &RetiredExclusion, pool: sqlx::PgPool, save: Save) -> Sa
     } = save;
     let update = super::super::config::update_channel_effort;
     let saved = update(&shared, &token, channel, &provider, level).await;
+    // The next launch reads every saved option; the resets they owed are spent with this end.
+    super::super::control::consume_reflected(&shared, &provider, channel).await;
     Saved(saved.map(drop).map_err(|error| error.to_string()))
 }
 
@@ -175,8 +177,9 @@ async fn restart(
     {
         return kept("앞선 재기동의 자동 이어하기가 아직 시작되지 않았습니다".into());
     }
-    if turn.is_some() && !tmux::owner_takes(shared, provider, channel).await {
-        return kept("이 채널의 입력 경로는 진행 중 턴의 즉시 재기동을 지원하지 않습니다".into());
+    // The owner is adopted first: an idle restart's intent is stored there too.
+    if !tmux::owner_takes(shared, provider, channel).await {
+        return kept("이 채널의 입력 경로는 즉시 재기동을 지원하지 않습니다".into());
     }
     let episode = match &turn {
         Some(turn) => match turn.nonce() {

@@ -141,3 +141,97 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
         "a changed level is a changed launch, so the old pane never takes the new options"
     );
 }
+
+/// The pane command `fresh_launch` prepares for a resume incarnation: the rendered argv resumes
+/// the exact thread with the saved level, and the new execution's later prompts keep its options.
+#[tokio::test]
+async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level() {
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        self, PreparedIncarnation, ResumeStart,
+    };
+    use std::os::unix::fs::MetadataExt;
+    const SESSION: &str = "019e660d-4859-7522-9cee-8ba7c4e7c745";
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
+    let _tmux = binding_context::tests::fake_tmux(root.path());
+    let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".into(),
+    );
+    let owner = super::greeting::owner();
+    let logical = owner.logical_key.clone();
+    let channel = Some(8_128_002);
+    let sessions = Some(root.path().join("sessions"));
+    let mut prepared =
+        PreparedIncarnation::prepare_at("codex", &logical, channel, Some(SESSION), true, sessions)
+            .unwrap();
+    let source = root.path().join("rollout.jsonl");
+    std::fs::write(&source, b"{}\n").unwrap();
+    let meta = std::fs::metadata(&source).unwrap();
+    prepared.context.resume_start = Some(ResumeStart {
+        operation: "effort-operation".into(),
+        path: source,
+        dev: meta.dev(),
+        ino: meta.ino(),
+        offset: meta.len(),
+    });
+    let launchable = crate::services::codex::tui_session_launch::CodexHerdrLaunchable::for_tests(
+        "/usr/bin/true",
+    );
+    let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+        crate::services::provider::ProviderKind::Codex,
+    );
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let working = root.path().display().to_string();
+    let turn = super::super::CodexHerdrTurn {
+        pool: &pool,
+        owner,
+        channel_id: 8_128_002,
+        endpoint: crate::services::herdr_launch::HerdrLaunchEndpoint {
+            execution_node: "test".into(),
+            config_key: "test".into(),
+            socket_addr: "/test/herdr.sock".into(),
+            herdr_session: "test".into(),
+        },
+        row: None,
+        prompt: "continue",
+        working_dir: &working,
+        system_prompt: None,
+        allowed_tools: &[],
+        model: None,
+        effort: Some("ultra"),
+        fast_mode: None,
+        goals: None,
+        compact_token_limit: None,
+        cancel: None,
+        bootstrap: false,
+    };
+    super::super::pane_command(&turn, &prepared, (&launchable, &overlay, root.path()))
+        .expect("an effort resume passes the exact resume validator");
+    let script = crate::services::tmux_common::session_temp_path(&logical, "sh");
+    let rendered = std::fs::read_to_string(script).unwrap();
+    let exec = rendered.lines().find(|l| l.starts_with("exec ")).unwrap();
+    let resume = exec.find("resume").expect("the pane resumes");
+    let selector = exec
+        .rfind(SESSION)
+        .expect("the pane names the ended thread");
+    assert!(resume < selector, "resume <thread>: {exec}");
+    assert!(
+        exec.contains("model_reasoning_effort"),
+        "the saved level is launched: {exec}"
+    );
+    assert!(
+        exec.contains("ultra"),
+        "the saved level is launched: {exec}"
+    );
+    assert!(
+        !exec.contains("--last") && !exec.contains("fork"),
+        "no other thread is picked: {exec}"
+    );
+    super::super::options_kept(&turn, &prepared.context.execution_nonce)
+        .expect("later prompts of the resumed execution keep its launch options");
+}

@@ -249,6 +249,26 @@ pub(super) struct CodexHerdrLaunchable {
     policy: &'static str,
 }
 
+#[cfg(all(test, unix))]
+impl CodexHerdrLaunchable {
+    /// A verified launchable that runs `bin`, for tests that render a pane command.
+    pub(super) fn for_tests(bin: &str) -> Self {
+        Self {
+            codex_bin: bin.into(),
+            resolution: crate::services::platform::BinaryResolution {
+                resolved_path: Some(bin.into()),
+                requested_binary: "codex".into(),
+                canonical_path: None,
+                source: None,
+                attempts: vec![],
+                failure_kind: None,
+                exec_path: None,
+            },
+            policy: "verified",
+        }
+    }
+}
+
 /// Both hooks and daemon isolation are required, read from the binary's `--version` and
 /// `resume --help` before anything is written.
 #[cfg(unix)]

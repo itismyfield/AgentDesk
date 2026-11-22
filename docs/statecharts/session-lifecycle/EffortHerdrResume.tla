@@ -19,7 +19,8 @@ CONSTANTS
     StartRow,   \* "bound" | "pending" | "retired": the row /effort finds (H:91-99)
     TurnRuns,   \* BOOLEAN: a turn A runs on the old pane when /effort arrives
     Cursor,     \* "T" | "other": the live O cursor's thread at launch (RI:80-92)
-    Mut         \* "none" | "save_first" | "any_thread" | "recover_ungated" | "clear_keeps" | "claude_restart"
+    Mut,        \* "none" | "save_first" | "any_thread" | "recover_ungated" | "clear_keeps" | "claude_restart"
+    Code        \* "s5n1": the reviewed head, whose resume pane named no thread | "fix1": the repair
 
 VARIABLES
     cmd,       \* "idle" | "gated" | "prepared" | "done" | "refused"
@@ -119,7 +120,9 @@ Followup ==
 
 ResumeOwed == intent \in {"idle", "withC"}
 
-\* HT:212,260 -> RI:61-75: a launch from the retired row resumes the ended thread; a cursor naming
+\* HT:212,260 -> RI:61-75, the pane built by HT:262-279 with the incarnation's thread as its
+\* selector (s5n1 left it unset, so launch_policy.rs:188-192 refused every resume pane).
+\* A launch from the retired row resumes the ended thread; a cursor naming
 \* another thread is refused, never replaced by a fresh launch while the resume is owed.
 Launch ==
     /\ row = "retired_old" /\ ~gate /\ ~stuck
@@ -128,7 +131,7 @@ Launch ==
        IF ~ResumeOwed
        THEN /\ launched' = "fresh" /\ row' = "bound_new" /\ newLevel' = saved
             /\ UNCHANGED stuck
-       ELSE IF cur = "T" \/ (Mut = "any_thread" /\ cur = "other")
+       ELSE IF Code = "fix1" /\ (cur = "T" \/ (Mut = "any_thread" /\ cur = "other"))
        THEN /\ launched' = cur /\ row' = "bound_new" /\ newLevel' = saved
             /\ UNCHANGED stuck
        ELSE /\ stuck' = TRUE /\ UNCHANGED <<launched, row, newLevel>>
@@ -144,11 +147,14 @@ Recover ==
     /\ intent' = "cancelled" /\ c' = "none"
     /\ UNCHANGED <<cmd, row, gate, saved, paneLevel, turn, launched, newLevel, rejected, stuck, cleared, users>>
 
-\* CL:221: an owner clear closes an idle resume; its thread's cursor is retired by the clear.
+\* CL:221: an owner clear closes a resume no unsubmitted continuation holds; a Retired Herdr row's
+\* /clear reaches the same commit (herdr_recovery.rs:76 -> closed_verdict.rs:77 -> clear_channel.rs:152).
 Clear ==
     /\ ~cleared /\ ~gate /\ cmd # "idle" /\ c \notin {"pending", "admitted"}
     /\ cleared' = TRUE
-    /\ intent' = IF intent = "idle" /\ Mut # "clear_keeps" THEN "cancelled" ELSE intent
+    /\ intent' = IF Mut = "clear_keeps" THEN intent
+                 ELSE IF intent = "idle" \/ (Code = "fix1" /\ intent = "withC" /\ c = "submitted")
+                 THEN "cancelled" ELSE intent
     /\ UNCHANGED <<cmd, row, gate, saved, paneLevel, c, turn, launched, newLevel, rejected, stuck, users>>
 
 \* Nothing left to do once the request settled and no input waits: a quiet end, not a deadlock.

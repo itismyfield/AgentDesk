@@ -575,3 +575,79 @@ async fn clear_closes_an_idle_effort_resume_so_the_next_launch_starts_fresh() {
         "a clear leaves no resume of the old thread"
     );
 }
+
+/// The `/clear` of a Retired Herdr row discards through `discard_waiting_or_refused`
+/// (`herdr_recovery.rs`), not the full clear: that call too closes the idle resume.
+#[tokio::test]
+async fn herdr_recovery_clear_closes_an_idle_effort_resume() {
+    use super::super::super::{ChannelMailboxRegistry, QueuePersistenceContext};
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 821_732;
+    let ctx = || QueuePersistenceContext::new(&ProviderKind::Claude, "v2-unit", None);
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(ChannelId::new(channel));
+    handle.v2_adopt(path(channel), "unit".into()).await.unwrap();
+    handle
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().unwrap();
+            owner
+                .prepare_effort(Some(idle_effort("idle-recovery")), channel, 5)
+                .map(drop)
+        })
+        .await
+        .unwrap();
+    handle.discard_waiting_or_refused(ctx()).await.unwrap();
+    let cancelled = handle
+        .v2_request(|slot| {
+            let intent = slot.as_ref().unwrap().snapshot.effort_restart.clone();
+            Ok(intent.map(|intent| intent.cancelled))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        cancelled,
+        Some(true),
+        "a Retired-row clear leaves no resume"
+    );
+}
+
+/// A continuation already submitted owes nothing more; a clear still closes its intent's resume.
+#[tokio::test]
+async fn clear_closes_an_effort_resume_whose_continuation_was_submitted() {
+    use super::super::super::{ChannelMailboxRegistry, QueuePersistenceContext};
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 821_733;
+    let ctx = || QueuePersistenceContext::new(&ProviderKind::Claude, "v2-unit", None);
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(ChannelId::new(channel));
+    handle.v2_adopt(path(channel), "unit".into()).await.unwrap();
+    handle
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().unwrap();
+            let request = serde_json::from_value(json!({"operation":"cut-op",
+                "native_session":"native-cut","interrupted_episode":"episode-cut",
+                "desired_revision":1,"ready":true,
+                "cut":{"tmux":"herdr-logical","herdr":"retired-nonce"}}))
+            .unwrap();
+            owner.prepare_effort(Some(request), channel, 5)?;
+            let mut next = owner.snapshot.clone();
+            let intent = next.effort_restart.as_mut().unwrap();
+            intent.continuation.as_mut().unwrap().submitted = true;
+            owner.commit(next)
+        })
+        .await
+        .unwrap();
+    handle.discard_waiting_or_refused(ctx()).await.unwrap();
+    let cancelled = handle
+        .v2_request(|slot| {
+            let intent = slot.as_ref().unwrap().snapshot.effort_restart.clone();
+            Ok(intent.map(|intent| intent.cancelled))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        cancelled,
+        Some(true),
+        "a clear leaves no resume of the old thread"
+    );
+}

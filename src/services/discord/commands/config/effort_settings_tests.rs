@@ -549,3 +549,41 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
         "the Codex Herdr switch gates it"
     );
 }
+
+/// An effort restart's end spends the Codex goals reset it reflects, as it spends `/fast` and `/model`.
+#[tokio::test]
+async fn an_effort_restart_spends_the_codex_goals_reset() {
+    let shared = make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(821_742);
+    shared
+        .overrides
+        .codex_goals_session_reset_pending
+        .insert(channel);
+    shared
+        .settings
+        .write()
+        .await
+        .channel_codex_goals_reset_pending
+        .insert(channel.get().to_string());
+    sync_session_reset_pending(&shared, channel);
+    assert!(shared.overrides.session_reset_pending.contains(&channel));
+    super::super::control::consume_reflected(&shared, &ProviderKind::Codex, channel).await;
+    assert!(
+        !shared
+            .overrides
+            .codex_goals_session_reset_pending
+            .contains(&channel)
+    );
+    assert!(
+        !shared
+            .settings
+            .read()
+            .await
+            .channel_codex_goals_reset_pending
+            .contains(&channel.get().to_string())
+    );
+    assert!(
+        !shared.overrides.session_reset_pending.contains(&channel),
+        "no later turn repeats the Herdr reset refusal"
+    );
+}

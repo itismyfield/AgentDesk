@@ -254,3 +254,11 @@ fn a_refused_effort_continuation_loses_every_body_copy_across_restart_pg() {
     rig.delivered();
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
 }
+
+#[test]
+fn an_effort_continuation_waits_on_the_channel_execution_like_a_person() {
+    use super::super::start_wait::keyed_to_channel;
+    assert_eq!(keyed_to_channel(InputOrigin::EffortContinue), Some(true));
+    assert_eq!(keyed_to_channel(InputOrigin::HttpStart), Some(true));
+    assert_eq!(keyed_to_channel(InputOrigin::Routine), None);
+}

@@ -20,7 +20,8 @@ use tokio::runtime::Handle;
 
 use super::CodexLaunchOptions;
 use super::tui_session_launch::{
-    codex_herdr_home, codex_herdr_launch_admissible, prepare_codex_herdr_launch,
+    CodexHerdrLaunchable, codex_herdr_home, codex_herdr_launch_admissible,
+    prepare_codex_herdr_launch,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedOwner, HostedRecord, HostedState,
@@ -244,21 +245,39 @@ fn fresh_launch(
         logical,
     )?;
     let home = codex_herdr_home(&overlay).ok_or("codex herdr launch: no Codex home")?;
-    let options = launch_options(turn);
     let prepare = |prepared: &PreparedIncarnation| {
         if turn.bootstrap {
             crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap::vacant_recheck(
                 logical,
             )?;
         }
-        let command = prepare_codex_herdr_launch(prepared, &launchable, &options, &overlay, &home)?;
-        // Kept for this execution before its Pending row, so each later prompt compares with it.
-        let nonce = &prepared.context.execution_nonce;
-        write_codex_tui_launch_options_fingerprint(logical, &kept_options(nonce, &options))?;
-        Ok(command)
+        pane_command(turn, prepared, (&launchable, &overlay, &home))
     };
     let launch = launch_of(turn, Some(&home), ports)?;
     launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
+}
+
+/// The pane command of `prepared`: a resume names the exact thread its incarnation expects, a
+/// fresh launch names none. Its options are kept before the Pending row, for each later prompt.
+fn pane_command(
+    turn: &CodexHerdrTurn<'_>,
+    prepared: &PreparedIncarnation,
+    (launchable, overlay, home): (
+        &CodexHerdrLaunchable,
+        &crate::services::provider_auth_profile::ProviderAuthOverlay,
+        &Path,
+    ),
+) -> Result<HerdrLaunchCommand, String> {
+    let context = &prepared.context;
+    let resume = context
+        .resume_start
+        .as_ref()
+        .and(context.expected_native_session_id.as_deref());
+    let options = launch_options(turn).with_resume_session_id(resume);
+    let command = prepare_codex_herdr_launch(prepared, launchable, &options, overlay, home)?;
+    let kept = kept_options(&context.execution_nonce, &options);
+    write_codex_tui_launch_options_fingerprint(&turn.owner.logical_key, &kept)?;
+    Ok(command)
 }
 
 /// A Pending execution whose first prompt never reached its composer: no hook of it is logged and
