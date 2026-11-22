@@ -505,6 +505,8 @@ src/
 │   ├── session_identity/
 │   │   ├── managed.rs
 │   │   └── naming.rs
+│   ├── tool_summary/
+│   │   └── code_mode.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs
@@ -529,6 +531,7 @@ src/
 │   ├── provider_auth_profile.rs
 │   ├── replay_evidence.rs
 │   ├── session_identity.rs
+│   ├── tool_summary.rs
 │   └── tool_text.rs
 ├── engine/
 │   ├── ops/
@@ -2183,8 +2186,6 @@ src/
 │   │   │   ├── status_panel/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
-│   │   │   ├── tool_summary/
-│   │   │   │   └── code_mode.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs

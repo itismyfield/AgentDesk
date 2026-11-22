@@ -8,10 +8,10 @@ from pathlib import Path
 CALL = re.compile(r"\bappend_delivery_journal_batch\s*\(")
 BASELINE = 1
 ALLOWLIST = Counter({"src/services/discord/session_relay_sink/journal.rs": 1})
-EXACT_METADATA_FACADES = {"src/services/tui_o/exact_pg.rs": 1}
+EXACT_METADATA_FACADES = {"src/services/discord/session_relay_sink/journal.rs": 1}
 def exact_facade_error(root: Path) -> str:
     registry = EXACT_METADATA_FACADES
-    expected = {"src/services/tui_o/exact_pg.rs": 1}
+    expected = {"src/services/discord/session_relay_sink/journal.rs": 1}
     if registry != expected:
         return "strict metadata facade registry drift"
     actual = {}
