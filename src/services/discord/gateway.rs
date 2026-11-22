@@ -842,7 +842,7 @@ impl TurnGateway for DiscordGateway {
                 }
             };
 
-            let late_settlement = router::checkpoint_waits_for_admission(channel_id);
+            let late_settlement = (self.shared.router_ports.checkpoint_waits)(channel_id);
             if !late_settlement {
                 let source_message_generations = intervention.source_message_queued_generations();
                 queue_marker::drain_dispatched_queue_markers(

@@ -377,7 +377,7 @@ pub(super) fn schedule_writer_ready_queue_kick(
         #[cfg(unix)]
         match input_ingress::installed(&shared.mailbox(channel_id)).await {
             Ok(true) => {
-                super::router::message_handler::owner_wake(&shared, channel_id);
+                (shared.router_ports.owner_wake)(&shared, channel_id);
                 return;
             }
             Err(error) => {

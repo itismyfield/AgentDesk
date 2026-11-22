@@ -1114,6 +1114,7 @@ pub(crate) struct SharedData {
         tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
+    pub(in crate::services::discord) router_ports: shared_state::RouterPorts,
 }
 
 pub(crate) use session_transition::{
@@ -1432,6 +1433,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         turn_completion_events: turn_completion_events::turn_completion_event_bus(),
         turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
         readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
+        router_ports: router::ROUTER_PORTS,
     })
 }
 

@@ -377,7 +377,7 @@ impl ChannelMailboxHandle {
             return;
         };
         #[cfg(unix)]
-        crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+        (shared.router_ports.owner_wake)(&shared, channel);
         #[cfg(not(unix))]
         let _ = (shared, channel);
     }

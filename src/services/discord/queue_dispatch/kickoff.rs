@@ -122,7 +122,7 @@ async fn kickoff_queue_channel_inner(
     // An owner's queue is driven by its owner after a completion, never dequeued here.
     #[cfg(unix)]
     if queue_io::input_ingress::installed(&shared.mailbox(channel_id)).await == Ok(true) {
-        router::message_handler::owner_wake(shared, channel_id);
+        (shared.router_ports.owner_wake)(shared, channel_id);
         return IdleQueueKickoffChannelOutcome::default();
     }
     let settings_snapshot = shared.settings.read().await.clone();
@@ -186,7 +186,7 @@ async fn kickoff_queue_channel_inner(
     // zero churn. No-start here is fail-open: callers arm the slow (60s)
     // backstop on a no-start with backlog, and the watcher-idle re-drain
     // delivers the fast edge once the TUI reaches Idle.
-    if router::hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
+    if (shared.router_ports.promote_readiness_blocked)(shared, provider, channel_id).await {
         return IdleQueueKickoffChannelOutcome::default();
     }
 
@@ -246,7 +246,7 @@ async fn kickoff_queue_channel_inner(
         }
     };
 
-    let late_settlement = router::checkpoint_waits_for_admission(channel_id);
+    let late_settlement = (shared.router_ports.checkpoint_waits)(channel_id);
     if !late_settlement {
         let source_message_generations = intervention.source_message_queued_generations();
         queue_marker::start_and_drain_kickoff_markers(

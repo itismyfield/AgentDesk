@@ -471,7 +471,7 @@ fn schedule(shared: Shared, channel: Channel, id: String, failures: u32) {
             Ok(Some(at)) if at > now_ms() => schedule(shared, channel, id, failures),
             Ok(Some(_)) => {
                 recover(shared.clone(), channel);
-                crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+                (shared.router_ports.owner_wake)(&shared, channel);
             }
             Err(_) => schedule(shared, channel, id, failures.saturating_add(1)),
             Ok(None) => (),

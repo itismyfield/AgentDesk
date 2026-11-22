@@ -467,7 +467,7 @@ async fn admit_raw(
     #[cfg(unix)]
     if intake == Intake::Accepted {
         crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Owner);
-        crate::services::discord::router::message_handler::owner_wake(shared, channel);
+        (shared.router_ports.owner_wake)(shared, channel);
     }
     Some(intake)
 }
