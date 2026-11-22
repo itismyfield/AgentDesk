@@ -4,8 +4,7 @@ use super::{
     Arc, ChannelId, HashMap, Instant, Intervention, InterventionMode, MessageId, ProviderKind,
     QueueExitEvent, QueueExitKind, QueuedCardDisposition, QueuedCardTeardown, SharedData, UserId,
     mailbox_enqueue_intervention, queue_dispatch, queue_marker, queue_overflow_dlq,
-    queued_card_gate, queued_placeholders_store, runtime_bootstrap,
-    schedule_deferred_idle_queue_kickoff, serenity,
+    queued_card_gate, queued_placeholders_store, schedule_deferred_idle_queue_kickoff, serenity,
 };
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
@@ -207,7 +206,7 @@ pub(super) struct QueueExitPendingPlaceholderDeleter {
     pub(super) http: Arc<serenity::Http>,
 }
 
-impl runtime_bootstrap::StalePlaceholderDeleter for QueueExitPendingPlaceholderDeleter {
+impl queued_card_gate::StalePlaceholderDeleter for QueueExitPendingPlaceholderDeleter {
     fn delete<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -238,7 +237,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
 
 pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears_with(
     shared: &SharedData,
-    deleter: &dyn runtime_bootstrap::StalePlaceholderDeleter,
+    deleter: &dyn queued_card_gate::StalePlaceholderDeleter,
 ) -> (usize, usize) {
     let pending = shared.pending_queue_exit_placeholder_clears();
     if pending.is_empty() {
