@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compiler-driven visibility widening for one crate cut, in shadow mode (#7353 VT1).
+"""Compiler-driven visibility widening for one crate cut, in shadow or real mode (#7353 VT1, VT2).
 
 The partition (`partition.json`) lists, per future crate, the module groups it owns. For a target crate X,
 X and every crate before it in `order` are "below"; every crate after X is "above". Before any real cut the
@@ -17,6 +17,9 @@ uncut hard edge, test-only items, foreign impls and macro paths are classified a
 
 stdout line 1 is `VISTOOL_OK ...` or `VISTOOL_FAIL <reason> ...` (exit 2). `--apply` writes the patch into the
 worktree only on success; the manifest and the (partial) patch go to `--out-dir` and are never committed.
+`--out-dir` also gets `vistool-<X>-test-cfg.json` (vistool_testcfg.py): every upper test use of a lower
+`#[cfg(test)]` item. `--real <workspace> --lower <member>` runs the same rounds on an existing member crate
+(vistool_real.py) and fails unless no residue is left.
 """
 
 import argparse
@@ -32,7 +35,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "vt1-1"
+VERSION = "vt2-1"
 VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
@@ -56,6 +59,7 @@ QUALS = r"(?:(?:async|const|unsafe|default|safe|extern(?:\s+\"[^\"]*\")?)\s+)*"
 ITEM = re.compile(r"^(?P<indent>\s*)(?:(?P<vis>" + VIS + r")\s+)?(?P<quals>" + QUALS + r")(?P<kw>" + ITEM_KW + r")"
                   r"(?:\s+|$)(?P<rest>.*)$")
 MOD_DECL = r"^(?P<indent>\s*)(?:(?P<vis>" + VIS + r")\s+)?mod\s+{name}\s*(?P<end>[;{{])"
+ALREADY_PUB = "is already pub"
 NAME_IN_MSG = re.compile(r"`([^`]+)`")
 SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "I", "macro_path": "macro",
          "glob_hidden": "glob", "unclassified": "?"}
@@ -63,6 +67,9 @@ SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "
 TOOL_REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOL_REPO / "scripts" / "ci"))
 import rust_test_sources as rts  # noqa: E402
+
+# Children (vistool_real, vistool_testcfg) import this module; as a script it must be the same object.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 class VisFail(Exception):
@@ -278,7 +285,8 @@ def upper_manifest(text):
         sections.append(("[dependencies]", ["[dependencies]"]))
     for header, lines in sections:
         if header == "[workspace]":
-            lines = [re.sub(r"^(\s*members\s*=\s*)\[.*\]", r"\1[]", l) for l in lines]
+            # `members = [...]` may wrap over several lines (VT1 review P2-4).
+            lines = re.sub(r"(?ms)^(\s*members\s*=\s*)\[[^\]]*\]", r"\1[]", "\n".join(lines)).split("\n")
         if "dependencies" in header:
             # Share lower's workspace path crates so upper and lower agree on one copy of their types.
             lines = [re.sub(r'(\bpath\s*=\s*")(?!\.\./|/)([^"]+)"', r'\1../lower/\2"', l) for l in lines]
@@ -355,8 +363,9 @@ def transform_upper(root, layout):
 
 # ---------------------------------------------------------------------------------------------- cargo
 
-def run_check(cargo, cwd, args, target_dir, own_root):
-    """Deduplicated compiler messages of the package rooted at own_root."""
+def run_check(cargo, cwd, args, target_dir, own_root, manifest=None):
+    """Deduplicated compiler messages of the package rooted at own_root (and, in a workspace whose root
+    package contains the members, owning `manifest`)."""
     env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
     started = time.monotonic()
     proc = subprocess.run([cargo, "check", *args, "--message-format=json"], cwd=cwd, env=env,
@@ -373,6 +382,8 @@ def run_check(cargo, cwd, args, target_dir, own_root):
             continue
         src = str(Path(msg.get("target", {}).get("src_path", "")).resolve())
         if not src.startswith(prefix):
+            continue
+        if manifest is not None and Path(msg.get("manifest_path", "")).resolve() != Path(manifest).resolve():
             continue
         diag = msg["message"]
         diag["_test"] = bool(msg.get("target", {}).get("test")) or msg.get("profile", {}).get("test", False)
@@ -743,34 +754,53 @@ class Widener:
         - In the target module, a direct declaration or explicit binding of `name` wins; only when there is
           none are its visible `pub(..) use x::*;` globs searched, and a glob is widened only if `name` is
           found behind it. Private `use x::*;` and fn-local `use`s are never touched."""
+        # Every entry (the diagnostic's own line, a hop, a module re-export) obeys the boundary: a `use` the
+        # target crate does not own is never widened, and the chain is that residue.
+        if self._place(rel, index + 1):
+            return {}, self._place(rel, index + 1)
         lines = self.lines(rel)
         text = use_text(lines, index)
         base = self.layout.module_at(rel, index + 1)
         own = {(rel, index): ("item",)} if widen_line(lines[index]) else {}
-        m = re.search(r"((?:[A-Za-z_]\w*::)+)" + re.escape(name) + r"\b", text) or \
-            re.search(r"((?:[A-Za-z_]\w*::)+)\{[^}]*\b" + re.escape(name) + r"\b", text)
-        prefixes = [m.group(1)] if m else [g.group(1) for g in re.finditer(r"((?:[A-Za-z_]\w*::)+)\*", text)]
+        # The flattened tree names the original item behind an alias and the full nested path (P2-2).
+        entries = use_entries(text)
+        # E0364/E0365 on an aliased re-export name the original item, other diagnostics the bound name.
+        named = [(path, orig) for path, orig, bound in entries if bound == name and orig != "*"] or \
+            [(path, orig) for path, orig, bound in entries if orig == name]
+        targets = named or [(path, name) for path, orig, _ in entries if orig == "*"]
         edits, reached, outcome = {}, False, ("unresolved", f"no path to `{name}` at {rel}:{index + 1}")
-        for prefix in prefixes:
-            segs = [x for x in re.sub(r"^.*\buse\s+", "", prefix).split("::") if x]
-            module = () if segs and segs[0] == "crate" else base
-            for seg in segs[1:] if segs and segs[0] == "crate" else segs:
-                module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
+        for segs, orig in targets:
+            segs = list(segs)
+            module = module_path(segs, base)
             found = self.layout.locate(module)
             if found is None:
-                if m and segs and segs[0] not in ("crate", "self", "super") and \
+                if named and segs and segs[0] not in ("crate", "self", "super") and \
                         self.layout.locate(base + (segs[0],)) is None:
                     reached = True  # another crate's (public) item: only this line may need `pub`
-                continue
+                    continue
+                # A module named only through a re-export (`pub(crate) use inner::moved;`, an extracted member's
+                # `use adk_base::domain::x;`): follow it, widening the re-export chain with the item.
+                real, via, out = self._resolve_module(module, hops) if hops else (None, {}, outcome)
+                if out != "edit":
+                    if out[0] != "unresolved":
+                        return {}, out
+                    continue
+                if real is None:
+                    reached = True  # the module lives in another crate: its items are already public
+                    edits.update(via)
+                    continue
+                module, found = real, self.layout.locate(real)
+            else:
+                via = {}
             target, first, last = found
             if self._place(target, first):
                 return {}, self._place(target, first)
             tl, levels = self.lines(target), self._levels(target)
             cand = [j for j in range(max(first - 1, 0), min(last, len(tl)))
-                    if j in levels and find_item_line(tl, j, j, name, "item") == j
+                    if j in levels and find_item_line(tl, j, j, orig, "item") == j
                     and self.layout.module_at(target, j + 1) == module and (target, j) != (rel, index)]
             is_use = lambda j: ITEM.match(tl[j]).group("kw") == "use"
-            direct = [j for j in cand if not is_use(j) or name in use_leaf_names(use_text(tl, j))]
+            direct = [j for j in cand if not is_use(j) or orig in use_leaf_names(use_text(tl, j))]
             globs = [j for j in cand if j not in direct and ITEM.match(tl[j]).group("vis")]
             for j in direct or globs:
                 if self._place(target, j + 1):
@@ -780,18 +810,59 @@ class Widener:
                     if widen_line(tl[j]):
                         edits[(target, j)] = ("item",)
                     continue
-                sub, out = self._through_use(target, j, name, hops - 1) if hops else ({}, outcome)
+                sub, out = self._through_use(target, j, orig, hops - 1) if hops else ({}, outcome)
                 if out == "edit":
                     reached = True
                     edits.update(sub)
+                elif ALREADY_PUB in out[1]:
+                    reached = True  # the rest of the chain is public: only the restricted lines in front widen
                 elif out[0] != "unresolved":
                     return {}, out
+            if reached:
+                edits.update(via)
         if not reached:
             return {}, outcome
         edits.update(own)
         if not edits:
-            return {}, ("unresolved", f"`{name}` behind {rel}:{index + 1} is already pub")
+            return {}, ("unresolved", f"`{name}` behind {rel}:{index + 1} {ALREADY_PUB}")
         return edits, "edit"
+
+    def _resolve_module(self, module, hops):
+        """(module that locates, or None when it lives in another crate; ops widening the `use` lines that
+        re-export it; 'edit' or a failure outcome) for a module path no file or inline block declares."""
+        miss = ("unresolved", f"no module {'::'.join(module)}")
+        for cut in range(len(module) - 1, -1, -1):
+            found = self.layout.locate(module[:cut])
+            if found is None:
+                continue
+            rel, first, last = found
+            tl, levels = self.lines(rel), self._levels(rel)
+            is_use = lambda line: (lambda m: bool(m) and m.group("kw") == "use")(ITEM.match(line))
+            uses = [j for j in range(max(first - 1, 0), min(last, len(tl)))
+                    if j in levels and is_use(tl[j]) and self.layout.module_at(rel, j + 1) == module[:cut]]
+            # An explicit binding of the module name first; else a visible glob over a module declaring it.
+            picks = [(j, [(p, o) for p, o, b in use_entries(use_text(tl, j)) if b == module[cut] and o != "*"])
+                     for j in uses]
+            picks = [(j, hit) for j, hit in picks if hit] or [
+                (j, [(p, module[cut])]) for j in uses if ITEM.match(tl[j]).group("vis")
+                for p, o, _ in use_entries(use_text(tl, j))
+                if o == "*" and self.layout.locate(module_path(list(p), module[:cut]) + (module[cut],))]
+            for j, hit in picks[:1]:
+                sub, out = self._through_use(rel, j, module[cut], hops - 1)
+                if out != "edit" and ALREADY_PUB not in out[1]:
+                    return None, {}, out
+                segs = list(hit[0][0]) + [hit[0][1]]
+                if segs[0] not in ("crate", "self", "super") and self.layout.locate(module[:cut] + (segs[0],)) is None:
+                    return None, sub, "edit"
+                target = module_path(segs, module[:cut]) + module[cut + 1:]
+                if self.layout.locate(target) is None:
+                    real, more, out = self._resolve_module(target, hops - 1) if hops > 1 else (None, {}, miss)
+                    if out != "edit":
+                        return None, {}, out
+                    return real, {**sub, **more}, "edit"
+                return target, sub, "edit"
+            return None, {}, miss
+        return None, {}, miss
 
     def _field(self, rel, sline, field, owner):
         lines = self.lines(rel)
@@ -818,6 +889,14 @@ class Widener:
             for root in (self.lower, self.upper):
                 write_lines(root / rel, self.lines(rel))
         return out
+
+
+def module_path(segs, base):
+    """Module a `use` path prefix names from module `base` (`crate::`, `self::`, `super::`, child)."""
+    module = () if segs and segs[0] == "crate" else base
+    for seg in segs[1:] if segs and segs[0] == "crate" else segs:
+        module = module[:-1] if seg == "super" else module if seg == "self" else module + (seg,)
+    return module
 
 
 def restricted_defs(layout, read):
@@ -896,19 +975,53 @@ def vis_scope(vis, module):
     return None  # pub(crate): (c) already crate-wide, nothing new for a glob
 
 
-def use_leaf_names(text):
-    """Names a `use` item binds (alias wins), ignoring globs and `self`."""
+USE_TOKEN = re.compile(r"(?:r#)?\w+|::|[{},*]")
+
+
+def use_entries(text):
+    """[(path segments, original name, bound name)] of one `use` statement, its brace tree flattened.
+    A glob is (path, '*', '*'); `a::{self}` binds `a`; `x as y` binds `y`."""
     body = re.sub(r"^\s*(?:(?:" + VIS + r")\s+)?use\s+", "", text).split(";")[0]
-    names = []
-    for part in re.split(r"[{},]", body):
-        part = part.strip()
-        if not part or part.endswith("*"):
-            continue
-        alias = re.search(r"\bas\s+(\w+)$", part)
-        leaf = alias.group(1) if alias else part.split("::")[-1].strip()
-        if leaf and leaf != "self" and re.fullmatch(r"\w+", leaf):
-            names.append(leaf)
-    return names
+    toks = [t.removeprefix("r#") for t in USE_TOKEN.findall(body)]
+    out = []
+
+    def tree(i, prefix):
+        path = list(prefix)
+        while i < len(toks):
+            t = toks[i]
+            if t == "::":
+                i += 1
+            elif t == "{":
+                i += 1
+                while i < len(toks) and toks[i] != "}":
+                    i = i + 1 if toks[i] == "," else max(tree(i, path), i + 1)
+                return i + 1
+            elif t == "*":
+                out.append((tuple(path), "*", "*"))
+                return i + 1
+            elif t in ",}":
+                return i
+            else:
+                path.append(t)
+                i += 1
+                if i < len(toks) and toks[i] == "::":
+                    continue
+                bound = None
+                if i + 1 < len(toks) and toks[i] == "as":
+                    bound, i = toks[i + 1], i + 2
+                if path[-1] == "self" and len(path) > 1:
+                    path = path[:-1]
+                out.append((tuple(path[:-1]), path[-1], bound or path[-1]))
+                return i
+        return i
+
+    tree(0, ())
+    return out
+
+
+def use_leaf_names(text):
+    """Names a `use` item binds (alias wins), ignoring globs and `_`."""
+    return [bound for _, orig, bound in use_entries(text) if orig != "*" and bound != "_"]
 
 
 def edit_bindings(before, lines, index):
@@ -931,7 +1044,7 @@ def edit_bindings(before, lines, index):
 
 
 def glob_imports(layout, read):
-    """[(importer module, importer rel, line, target module)] for every `path::*` inside a `use`."""
+    """[(importer module, importer rel, line, target module)] for every glob of a `use` tree (braces too)."""
     modules = set(layout.file_of)
     out = []
     for rel in sorted(layout.module_of):
@@ -940,10 +1053,13 @@ def glob_imports(layout, read):
         except OSError:
             continue
         for i, line in enumerate(lines):
-            if not re.search(r"\buse\b", line) and "::*" not in line:
+            m = ITEM.match(line)
+            if not m or m.group("kw") != "use":
                 continue
-            for m in re.finditer(r"((?:[A-Za-z_]\w*::)+)\*", line):
-                segs = [s for s in m.group(1).split("::") if s]
+            for path, orig, _ in use_entries(use_text(lines, i)):
+                segs = list(path)
+                if orig != "*" or not segs:
+                    continue
                 importer = cur = layout.module_at(rel, i + 1)
                 if segs[0] == "crate":
                     cur, segs = (), segs[1:]
@@ -951,8 +1067,8 @@ def glob_imports(layout, read):
                     pass
                 elif importer + (segs[0],) not in modules and layout.locate(importer + (segs[0],)) is None:
                     continue
-                for s in segs:
-                    cur = cur[:-1] if s == "super" else cur if s == "self" else cur + (s,)
+                for seg in segs:
+                    cur = cur[:-1] if seg == "super" else cur if seg == "self" else cur + (seg,)
                 out.append((importer, rel, i + 1, cur))
     return out
 
@@ -986,15 +1102,35 @@ def glob_check(edits, layout, read):
     return risks
 
 
-def equiv_verdict(repo, base):
-    """Visibility-only verdict from KR-C1's equiv_check.py; this tool never re-implements it."""
+def equiv_verdict(repo, head, patch, out_dir):
+    """KR-C1's equiv_check.py class for the patch itself; this tool never re-implements it.
+
+    The patch goes into a throwaway commit on top of HEAD (own index file, nothing checked out), which is
+    compared statically (`--skip-cargo`): a converged run must be `class=vis` (VT1 review P2-3)."""
     script = TOOL_REPO / "scripts" / "crate_split" / "equiv_check.py"
     if not script.is_file():
         return "판정 보류 (equiv_check.py 없음)"
-    proc = subprocess.run([sys.executable, str(script), "--base", base, "--head", "HEAD"], cwd=repo,
-                          capture_output=True, text=True)
-    first = (proc.stdout.strip().splitlines() or [""])[0]
-    return f"exit={proc.returncode} {first}"
+    if not patch:
+        return "skip (no edits)"
+    index = Path(out_dir).resolve() / "equiv.index"
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    git = lambda *a, **k: subprocess.run(["git", "-C", str(repo), *a], env=env, capture_output=True, text=True, **k)
+    try:
+        steps = [git("read-tree", head), git("apply", "--cached", "-", input=patch)]
+        tree = git("write-tree")
+        steps.append(tree)
+        commit = git("-c", "user.name=vistool", "-c", "user.email=vistool@example.invalid", "commit-tree",
+                     tree.stdout.strip(), "-p", head, "-m", "vistool patch (equiv probe)")
+        steps.append(commit)
+    finally:
+        index.unlink(missing_ok=True)
+    broken = next((p for p in steps if p.returncode), None)
+    if broken is not None:
+        return f"git_failed {broken.stderr.strip()[-300:]}"
+    proc = subprocess.run([sys.executable, str(script), "--repo", str(repo), "--base", head,
+                           "--head", commit.stdout.strip(), "--skip-cargo"], capture_output=True, text=True)
+    row = re.search(r"^\| b class \| ([^|]+?) \|", proc.stdout, re.M)
+    return f"class={row.group(1)}" if row else f"exit={proc.returncode} {(proc.stdout.splitlines() or [''])[0]}"
 
 
 # ---------------------------------------------------------------------------------------------- run
@@ -1020,57 +1156,97 @@ def changed_pairs(original, final):
     return pairs
 
 
+class ShadowProbe:
+    """Two throwaway copies of HEAD (lower, upper) under <repo>/target/crate_split_probe/<X>/."""
+    mode = "shadow"
+
+    def __init__(self, repo, partition_path, crate):
+        self.repo, self.crate, self.label = repo, crate, crate
+        self.partition = load_partition(partition_path)
+        self.probe_root = repo / "target" / "crate_split_probe"
+        self.probe, self.target_dir = self.probe_root / crate, self.probe_root / "target"
+        self.lower, self.upper = self.probe / "lower", self.probe / "upper"
+
+    def prepare(self, manifest):
+        manifest["partition_base"] = self.partition["base"]
+        layout = Layout(self.repo, self.partition, self.crate)
+        manifest["x_files"] = len(layout.x_files)
+        if self.probe.exists():
+            shutil.rmtree(self.probe)
+        extract_head(self.repo, self.lower)
+        extract_head(self.repo, self.upper)
+        lib_rel = transform_lower(self.lower, layout)
+        manifest["upper_rewired"] = transform_upper(self.upper, layout)
+        return layout, Resolver(self.lower, self.upper, lib_rel, layout.root_file)
+
+    def check_lower(self, cargo):
+        return run_check(cargo, self.lower, ["--lib"], self.target_dir, self.lower)
+
+    def check_upper(self, cargo):
+        return run_check(cargo, self.upper, ["--lib", "--tests"], self.target_dir, self.upper)
+
+    def accept(self, manifest):
+        """Last word on a converged run; shadow leaves residue to the slices that own it."""
+
+    def cleanup(self):
+        if self.probe.exists():
+            shutil.rmtree(self.probe)
+
+    def ok_line(self, head, iters, manifest, edits, risks, count):
+        return (f"VISTOOL_OK crate={self.crate} base={head} iters={iters} files={manifest['files']} edits={edits} "
+                f"cut_residue={count('cut_residue')} test_cfg={count('test_cfg')} "
+                f"impl_residue={count('impl_residue')} glob_risk={len(risks)}")
+
+    def fail_line(self, reason, iters):
+        return f"VISTOOL_FAIL {reason} crate={self.crate} iters={iters}"
+
+
 def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, keep_probe=False,
             cargo="cargo", log=print):
     repo = Path(repo).resolve()
+    return run_probe(ShadowProbe(repo, partition_path, crate), repo, out_dir=out_dir, max_iters=max_iters,
+                     apply=apply, keep_probe=keep_probe, cargo=cargo, log=log)
+
+
+def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=False, cargo="cargo", log=print):
+    """The widening rounds shared by shadow and real mode; `probe` owns the copies and the cargo calls."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    partition = load_partition(partition_path)
     head = git_head(repo)
-    manifest = {"tool": VERSION, "crate": crate, "head": head, "partition_base": partition["base"],
+    label = probe.label
+    manifest = {"tool": VERSION, "mode": probe.mode, "crate": probe.crate, "head": head,
                 "rounds": [], "edits": [], "unresolved": [], "residue": {}, "glob_risk": []}
-    probe_root = repo / "target" / "crate_split_probe"
-    probe, target_dir = probe_root / crate, probe_root / "target"
-    lower, upper = probe / "lower", probe / "upper"
-    status, reason, widener, iters = "fail", None, None, 0
+    status, reason, widener, iters, layout, resolver, test_cfg = "fail", None, None, 0, None, None, []
     try:
-        layout = Layout(repo, partition, crate)
-        manifest["x_files"] = len(layout.x_files)
-        if probe.exists():
-            shutil.rmtree(probe)
-        extract_head(repo, lower)
-        extract_head(repo, upper)
-        lib_rel = transform_lower(lower, layout)
-        manifest["upper_rewired"] = transform_upper(upper, layout)
-        resolver = Resolver(lower, upper, lib_rel, layout.root_file)
-        widener = Widener(layout, lower, upper)
+        layout, resolver = probe.prepare(manifest)
+        widener = Widener(layout, probe.lower, probe.upper)
         restricted = restricted_defs(layout, widener.lines)
         while True:
             iters += 1
-            low, low_s = run_check(cargo, lower, ["--lib"], target_dir, lower)
+            low, low_s = probe.check_lower(cargo)
             up, up_s, ran_upper = [], 0.0, False
             if not any(d.get("level") == "error" for d in low):
                 # Upper cannot build on a broken lower; its round waits for lower's re-export fixes.
-                up, up_s = run_check(cargo, upper, ["--lib", "--tests"], target_dir, upper)
+                up, up_s = probe.check_upper(cargo)
                 ran_upper = True
-            (out_dir / f"vistool-{crate}-diags-{iters}.json").write_text(
+            (out_dir / f"vistool-{label}-diags-{iters}.json").write_text(
                 json.dumps({"lower": low, "upper": up}, indent=0, ensure_ascii=False), "utf-8")
             vis, residue, low_err = [], defaultdict(list), []
             for d in low:
                 code = code_of(d)
                 if is_vis(d) or (code in VIS_LINTS and d.get("level") == "warning"):
-                    vis.append((d, lower))
+                    vis.append((d, probe.lower, True))
                 elif d.get("level") == "error":
                     low_err.append(d)
             for d in up:
                 if d.get("level") != "error":
                     continue
                 if is_vis(d):
-                    vis.append((d, upper))
+                    vis.append((d, probe.upper, False))
                 else:
                     residue[classify_residue(d, restricted)].append(d)
             edits, unresolved, outside = {}, [], []
-            for d, run_root in vis:
+            for d, run_root, from_lower in vis:
                 new, outcome = widener.resolve(d, resolver, run_root)
                 if outcome == "edit":
                     for key, op in new.items():
@@ -1080,7 +1256,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                         entry[2].add(where(d, resolver))
                     continue
                 kind, why = outcome
-                if run_root == lower and d.get("level") == "error":
+                if from_lower and d.get("level") == "error":
                     # A lower error nothing here repairs keeps upper from running: never a success (P1-2).
                     low_err.append(d)
                 elif kind in ("cut_residue", "macro_path", "impl_residue"):
@@ -1089,7 +1265,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                     outside.append(f"{code_of(d)} {why} <- {where(d, resolver)}")
                 else:
                     unresolved.append(f"{code_of(d)} {d.get('message')} :: {why} <- {where(d, resolver)}")
-            vis_count = sum(1 for d, _ in vis)
+            vis_count = len(vis)
             # rustc skips its field-privacy pass (E0451) while any other error stands: say so, never hide it.
             manifest["privacy_pass_masked"] = any(d.get("level") == "error" for d in up) or not ran_upper
             manifest["rounds"].append({"iter": iters, "lower_errors": len(low_err), "vis": vis_count,
@@ -1106,6 +1282,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                 manifest["residue"] = {k: {"count": len(residue.get(k, [])), "scope": SCOPE[k],
                                            "first": [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
                                                      for d in residue.get(k, [])[:20]]} for k in RESIDUES}
+                test_cfg = list(residue.get("test_cfg", []))
             if low_err:
                 manifest["lower_errors"] = [f"{code_of(d)} {where(d, resolver)} {d.get('message')}"
                                             for d in low_err[:20]]
@@ -1118,6 +1295,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                 # Every visibility diagnostic left is residue a later slice owns (cut, impl, macro).
                 if residue.get("unclassified"):
                     raise VisFail("unclassified_residue", manifest["residue"]["unclassified"]["first"][0])
+                probe.accept(manifest)
                 break
             if not edits:
                 raise VisFail("no_progress", (unresolved or ["upper did not run and nothing is left to edit"])[0])
@@ -1138,13 +1316,18 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
     finally:
         final = dict(widener.text) if widener else {}
         original = dict(widener.original) if widener else {}
-        if not keep_probe and probe_root.exists():
-            if probe.exists():
-                shutil.rmtree(probe)
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            if not any(probe_root.iterdir()):
-                probe_root.rmdir()
+        if not keep_probe and probe.probe_root.exists():
+            probe.cleanup()
+            if probe.target_dir.exists():
+                shutil.rmtree(probe.target_dir)
+            if not any(probe.probe_root.iterdir()):
+                probe.probe_root.rmdir()
+    read_original = lambda rel: original[rel] if rel in original else read_lines(repo / rel)
+    if layout is not None and resolver is not None:
+        import vistool_testcfg
+        manifest["test_cfg_list"] = vistool_testcfg.write_list(
+            out_dir / f"vistool-{label}-test-cfg.json", test_cfg, resolver, layout, read_original,
+            {"tool": VERSION, "mode": probe.mode, "crate": probe.crate, "head": head})
     pairs = changed_pairs(original, final)
     patch = unified_patch(original, final)
     bad = self_classify(pairs)
@@ -1157,7 +1340,7 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
     if status == "ok" and bad:
         status, reason = "fail", VisFail("non_vis_edit", f"{bad[0][0]}:{bad[0][1]}")
     if status == "ok":
-        risks = glob_check(edits_final, layout, lambda rel: original[rel] if rel in original else read_lines(repo / rel))
+        risks = glob_check(edits_final, layout, read_original)
         manifest["glob_risk"] = risks
         if any(r["fail"] for r in risks):
             r = next(r for r in risks if r["fail"])
@@ -1165,9 +1348,14 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                                              "glob_prelude_collision", f"{r['name']} ({r['kind']}) <- {r['importer']}")
     manifest["final_edits"] = [{k: v for k, v in e.items() if k != "bindings"} for e in edits_final]
     manifest["files"] = len({p[0] for p in pairs})
-    manifest["equiv"] = equiv_verdict(repo, head) if status == "ok" else "판정 보류 (실패)"
     if status == "ok":
-        (out_dir / f"vistool-{crate}.patch").write_text(patch, "utf-8")
+        manifest["equiv"] = equiv_verdict(repo, head, patch, out_dir)
+        if not manifest["equiv"].startswith(("class=vis", "판정 보류", "skip")):
+            status, reason = "fail", VisFail("equiv_not_vis", manifest["equiv"])
+    else:
+        manifest["equiv"] = "판정 보류 (실패)"
+    if status == "ok":
+        (out_dir / f"vistool-{label}.patch").write_text(patch, "utf-8")
         if apply:
             for rel in sorted(final):
                 if read_lines(repo / rel) != original[rel]:
@@ -1180,44 +1368,62 @@ def vistool(repo, partition_path, crate, *, out_dir, max_iters=10, apply=False, 
                 manifest["applied"] = True
     if status != "ok":
         manifest.setdefault("fail", {"reason": reason.reason, "detail": reason.detail})
-        (out_dir / f"vistool-{crate}-partial.patch").write_text(patch, "utf-8")
-    (out_dir / f"vistool-{crate}-manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False), "utf-8")
+        (out_dir / f"vistool-{label}-partial.patch").write_text(patch, "utf-8")
+    (out_dir / f"vistool-{label}-manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False), "utf-8")
     res = manifest["residue"]
     count = lambda k: res.get(k, {}).get("count", 0)
     if status == "ok":
-        line = (f"VISTOOL_OK crate={crate} base={head} iters={iters} files={manifest['files']} edits={len(pairs)} "
-                f"cut_residue={count('cut_residue')} test_cfg={count('test_cfg')} "
-                f"impl_residue={count('impl_residue')} glob_risk={len(risks)}")
+        line = probe.ok_line(head, iters, manifest, len(pairs), risks, count)
     else:
-        line = f"VISTOOL_FAIL {reason.reason} crate={crate} iters={iters}"
+        line = probe.fail_line(reason.reason, iters)
     return status == "ok", line, manifest
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--crate", required=True)
+    ap.add_argument("--crate", help="shadow mode: partition crate to cut out (KRX, KE, DL)")
     ap.add_argument("--partition", default=str(TOOL_REPO / "scripts" / "crate_split" / "partition.json"))
     ap.add_argument("--repo", default=".")
+    ap.add_argument("--real", metavar="WORKSPACE", help="real mode: workspace root whose --lower member exists")
+    ap.add_argument("--lower", help="real mode: lower member dir (crates/<x>)")
+    ap.add_argument("--upper", default=".", help="real mode: upper member dir (default: the root package)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--max-iters", type=int, default=10)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--keep-probe", action="store_true")
     ap.add_argument("--cargo", default="cargo")
     args = ap.parse_args(argv)
-    try:
-        ok, line, manifest = vistool(args.repo, args.partition, args.crate, out_dir=args.out_dir,
-                                     max_iters=args.max_iters, apply=args.apply, keep_probe=args.keep_probe,
-                                     cargo=args.cargo)
-    except VisFail as exc:
-        print(f"VISTOOL_FAIL {exc.reason} crate={args.crate} iters=0")
-        print(exc.detail, file=sys.stderr)
-        return 2
-    print(line)
+    common = dict(out_dir=args.out_dir, max_iters=args.max_iters, apply=args.apply, keep_probe=args.keep_probe,
+                  cargo=args.cargo)
+    if args.real is not None:
+        import vistool_real
+        if not args.lower:
+            print(f"VISTOOL_FAIL no_member mode=real crate=? iters=0")
+            print("--real needs --lower <member dir>", file=sys.stderr)
+            return 2
+        ok, line, manifest = vistool_real.real(args.real, args.lower, args.upper, **common)
+        print(line)
+        if not ok and manifest.get("residue"):
+            print("\n".join(vistool_real.residue_table(manifest)))
+    else:
+        if not args.crate:
+            ap.error("--crate is required (or --real WORKSPACE --lower DIR)")
+        try:
+            ok, line, manifest = vistool(args.repo, args.partition, args.crate, **common)
+        except VisFail as exc:
+            print(f"VISTOOL_FAIL {exc.reason} crate={args.crate} iters=0")
+            print(exc.detail, file=sys.stderr)
+            return 2
+        print(line)
     print(f"EQUIV {manifest['equiv']}")
+    if manifest.get("test_cfg_list"):
+        t = manifest["test_cfg_list"]
+        print(f"TEST_CFG count={t['count']} resolved={t['resolved']} file={t['file']}")
     if not ok:
         print(manifest.get("fail", {}).get("detail", ""), file=sys.stderr)
     return 0 if ok else 2
 
 
 if __name__ == "__main__":
+    sys.modules.setdefault("vistool", sys.modules[__name__])
     sys.exit(main())
