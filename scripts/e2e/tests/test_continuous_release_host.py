@@ -232,8 +232,7 @@ class Driver(Fixture):
                     row["marker_counts"][marker] = 1
                     kind = dict(enumerate(answers)).get(index)
                     lines(session[-1], asked(marker), *([] if kind == "silent" else [
-                        claude(f"{args.run_id}-{index}", output_tokens=500 if kind == "huge" else 2,
-                               cache_read_input_tokens=500 if kind == "cached" else 3)]))
+                        claude(f"{args.run_id}-{index}", output_tokens=500 if kind == "huge" else 2, cache_read_input_tokens=500 if kind == "cached" else 3)]))
                     if stray and index == 0:
                         client.send("20", stray)
                 except turn_gate.Stop as stop:
@@ -344,8 +343,7 @@ class Driver(Fixture):
         report, prompts, _ = self.drive(answers=["huge"])
         self.assertEqual((len(prompts), report["status"], report["reason"]), (1, "UNEVALUABLE", "TURN_OVER_BUDGET"))
         self.assertEqual((report["native_turns"], report["tokens"], report["budget_checked"]), (1, 505, 1))
-        # Cache reads stay in usage but are not charged, so a cache-heavy turn is under its limit.
-        report, prompts, _ = self.drive(answers=["cached"] * 3)
+        report, prompts, _ = self.drive(answers=["cached"] * 3)  # Cache reads stay in usage but are not charged.
         self.assertEqual((len(prompts), report["status"], report["tokens"], report["usage"]["cache_read_tokens"]), (3, "PASS", 21, 1500))
         # The last turn is settled after the scenario passed; its unknown or over-limit usage still holds the result.
         report, prompts, _ = self.drive(answers=[None, None, "silent"])
