@@ -288,7 +288,7 @@ pub(crate) enum TickOutcome {
 ///
 /// This is the unit a poll loop schedules — extracted so tests can
 /// drive single-tick scenarios without spawning a long-running task.
-pub(crate) async fn run_intake_worker_tick_with(
+pub(crate) async fn run_intake_worker_tick(
     pool: &PgPool,
     shared: &Arc<SharedData>,
     target_instance_id: &str,
@@ -556,29 +556,6 @@ pub(crate) async fn run_intake_worker_tick_with(
     outcome
 }
 
-/// Test ticks run the stand-in executor behind the router's real admission check.
-#[cfg(test)]
-pub(crate) async fn run_intake_worker_tick(
-    pool: &PgPool,
-    shared: &Arc<SharedData>,
-    target_instance_id: &str,
-    provider: &str,
-    claim_owner: &str,
-    cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<TickOutcome, sqlx::Error> {
-    let port = test_executor::PORT;
-    run_intake_worker_tick_with(
-        pool,
-        shared,
-        target_instance_id,
-        provider,
-        claim_owner,
-        cancelled,
-        port,
-    )
-    .await
-}
-
 async fn release_cancelled_claim(
     pool: &PgPool,
     row: &IntakeOutboxRow,
@@ -646,7 +623,7 @@ pub(crate) async fn run_intake_worker_loop(
             return;
         }
 
-        let tick = run_intake_worker_tick_with(
+        let tick = run_intake_worker_tick(
             &pool,
             &shared,
             &target_instance_id,

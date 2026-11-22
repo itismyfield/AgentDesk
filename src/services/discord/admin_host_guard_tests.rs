@@ -903,12 +903,28 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
         crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(channel, "mac-mini")]);
 
     let not_cancelled = || false;
-    let tick = run_intake_worker_tick(&pool, &owner, "worker-1", "claude", "o", &not_cancelled);
+    let tick = run_intake_worker_tick(
+        &pool,
+        &owner,
+        "worker-1",
+        "claude",
+        "o",
+        &not_cancelled,
+        crate::services::cluster::intake_worker::test_executor::PORT,
+    );
     assert_eq!(tick.await.unwrap(), TickOutcome::Processed);
     assert_eq!(
-        run_intake_worker_tick(&pool, &owner, "worker-1", "claude", "o", &not_cancelled)
-            .await
-            .unwrap(),
+        run_intake_worker_tick(
+            &pool,
+            &owner,
+            "worker-1",
+            "claude",
+            "o",
+            &not_cancelled,
+            crate::services::cluster::intake_worker::test_executor::PORT
+        )
+        .await
+        .unwrap(),
         TickOutcome::QueueEmpty,
         "the failed refusal is not left pending for another worker tick"
     );
