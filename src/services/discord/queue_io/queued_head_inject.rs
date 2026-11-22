@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use super::super::{health, mailbox_snapshot, router, session_runtime};
+use super::super::{health, mailbox_snapshot, session_runtime};
+use super::transport::IntakeDeps;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::busy_followup_retry_store::input_class;
 use crate::services::provider::ProviderKind;
@@ -79,7 +80,7 @@ impl AttemptRow {
 /// Offers the first ready input, behind nothing but parked ones, to the busy pane. `true` ends the
 /// caller's kickoff: something was reserved or the head is held, so no idle start may follow.
 pub(in crate::services::discord) async fn try_busy(
-    deps: &router::IntakeDeps<'_>,
+    deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     channel: ChannelId,
     known_parent: Option<Option<ChannelId>>,

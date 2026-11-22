@@ -221,7 +221,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E28 | 기존 src/services/discord/router/herdr_consent.rs:128 | ACK/글 바인딩 검사 형태 재사용. 원래 target live 검사는 선택 INSERT 조건에서 제외 |
 | E29 | 기존 src/services/manual_steer/action_handle.rs:24 | one-time 128-bit handle 생성/코덱. PG 소비 여부는 별도로 필요 |
 | E30 | 기존 src/services/discord/router/herdr_consent/transport.rs:49, src/services/discord/http.rs:306 | Render·버튼 비활성화. send helper는 일반 메시지용, 최초 forum post는 별도 어댑터 필요 |
-| E31 | 기존 src/services/discord/runtime_bootstrap/gateway_runtime.rs:112, src/services/discord/runtime_bootstrap/orphan_recovery.rs:63 | gateway 이벤트 수신. utility bot은 agent runtime launch 제외 가능 |
+| E31 | 기존 src/services/discord/runtime_bootstrap/gateway_runtime.rs:113, src/services/discord/runtime_bootstrap/orphan_recovery.rs:63 | gateway 이벤트 수신. utility bot은 agent runtime launch 제외 가능 |
 | E32 | 기존 src/services/discord/health/runtime_resolve.rs:233 | 요청 채널을 소유하는 provider bot 선택. 포럼 ID로 runtime을 고르면 안 됨 |
 | E33 | 기존 src/services/discord/discord_io.rs:64, src/services/discord/settings/read.rs:311 | actor=current owner 검사와 설정 투영. allow_all_users/일반 allowed_user는 결정 권한 아님 |
 | E34 | 기존 src/services/discord/commands/control.rs:717, src/services/turn_orchestrator/queued_head/v2/control.rs:191 | CancelClear: 정확한 미시도 decision 원본만 종결. 선택 기록·다른 입력 불변 |
@@ -231,11 +231,11 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E38 | 기존 src/services/tui_input/target_epoch.rs:51, src/services/turn_host.rs:182 | 현재 물리 실행기 fence만 유지. 요청 시점 session fence 제거. Herdr start는 #8125 |
 | E39 | 기존 src/services/discord/router/message_handler/intake_turn/adk_thread.rs:82 | thread의 현재 부모/category·정확한 thread 세션 시작은 #8125 계약 소비 |
 | E40 | 기존 src/config.rs:195, src/db/postgres.rs:25 | 새 설정 타입 연결·migration 부팅. 운영 설정 파일을 읽거나 바꾸지 않음 |
-| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:113, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
+| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:115, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
 | E42 | 기존 src/services/discord/router/intake_dispatch/queued.rs:85, :291 | 원본 origin으로 PG 선택/논리 route 복원. queued_submission의 metadata 소실을 source=queued로 우회하지 않음 |
 | E43 | 기존 src/services/discord/router/intake_dispatch/queued.rs:337, :46; src/services/discord/router/intake_dispatch/queued/race_loss.rs:17 | finish/restore/race loss 경로. 정상 busy만 원본 복귀, 확정 실패는 Finalize |
-| E44 | 기존 src/services/discord/queue_io/queued_head_inject.rs:121 | 현재 source=queued/metadata=None. decision origin 감지 후 검증 context 복원과 closed 검사 |
-| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:376, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
+| E44 | 기존 src/services/discord/queue_io/queued_head_inject.rs:122 | 현재 source=queued/metadata=None. decision origin 감지 후 검증 context 복원과 closed 검사 |
+| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:378, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
 | E46 | 기존 src/server/routes/agents.rs:1077, :1120 | handoff HTTP source 전달. decision source 명시 거절 |
 | E47 | 기존 src/services/discord/agent_handoff.rs:529, :564, src/services/discord/health/headless_turn.rs:100 | handoff 내부 source ingress→공통 headless. HTTP 우회 호출도 앞에서 decision 거절; HandoffDecision 대조 |
 | E48 | 기존 src/services/discord/router/thread_binding.rs:80, :89, :95; src/services/discord/http.rs:306 | 기존 helper는 locked 거부/unarchive만, edit helper는 message PATCH만. 새 transport가 Unlock→Unarchive→Render 수행 |
@@ -260,7 +260,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | N19 | 신규 src/services/discord/queue_io/decision_drain.rs:NEW reject_handoff_source; 기존 agent_handoff.rs에 호출 연결 | source=decision handoff는 backend 호출 전에 거절; 모델 HandoffDecision은 금지 우회 대조 |
 | N20 | 신규 src/services/discord/decisions/transport.rs:NEW make_editable | 모더레이터 announce로 동일 thread의 필요한 flags만 변경, provider로 본문 편집; 닫힘 desired flags 재적용 |
 | E49 | 기존 src/services/discord/router/intake_gate.rs:165, :179, :227 | MessageCreate의 60초 메모리 dedup/일반 thread 승격 전에 decision ingress로 분기·소비 |
-| E50 | 기존 src/services/discord/runtime_bootstrap.rs:103, src/services/discord/runtime_bootstrap/gateway_runtime.rs:80 | GUILD_MESSAGES/MESSAGE_CONTENT 코드 경로. 앱의 실제 승인 상태는 별도이며 REST도 우회 아님 |
+| E50 | 기존 src/services/discord/runtime_bootstrap.rs:103, src/services/discord/runtime_bootstrap/gateway_runtime.rs:81 | GUILD_MESSAGES/MESSAGE_CONTENT 코드 경로. 앱의 실제 승인 상태는 별도이며 REST도 우회 아님 |
 | E51 | 기존 src/services/discord/catch_up/phase1_sweep.rs:302, :315, :398 | after/before 페이지 조회 재사용 형태. decision은 별도 PG cursor로 전체 구간 증거를 보존 |
 | E52 | 기존 src/services/discord/catch_up/phase2.rs:134, :171 | 기존 checkpoint/봉인 개념 대조. gateway high ID만으로 decision scan cursor를 올리지 않음 |
 | E53 | 기존 src/server/routes/auth.rs:213, :260 | HumanInputCaller는 host/server 인증이며 requester ownership 증거는 아님 |

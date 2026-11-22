@@ -78,7 +78,7 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(shared: &Arc<SharedData>, provid
 /// The router's admission check and executor, handed to the worker this runtime starts.
 const INTAKE_TURN_PORT: crate::services::cluster::intake_worker::IntakeTurnPort =
     crate::services::cluster::intake_worker::IntakeTurnPort {
-        checkpoint_waits: crate::services::discord::checkpoint_waits_for_admission,
+        checkpoint_waits: crate::services::discord::router::checkpoint_waits_for_admission,
         execute: execute_intake_turn,
     };
 
@@ -89,7 +89,7 @@ fn execute_intake_turn<'a>(
     request: crate::services::cluster::intake_turn::IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> crate::services::cluster::intake_worker::IntakeTurnFuture<'a> {
-    Box::pin(crate::services::discord::execute_intake_turn_core(
+    Box::pin(crate::services::discord::router::execute_intake_turn_core(
         http, shared, token, request, uploads,
     ))
 }

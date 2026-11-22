@@ -944,7 +944,7 @@ host_parity:
     herdr: 공통 DM 게이트. host와 무관하게 같은 발신/격리 규칙을 사용
     verdict: 같음
     owner: '공통 권한 및 출력 정책. 각 host의 DM/Gateway 실제 실행은 #8120'
-    evidence: '`src/services/discord/outbound/send_gate.rs:107,220,334`, `src/services/discord/queue_io/transport.rs:15,23`,
+    evidence: '`src/services/discord/outbound/send_gate.rs:107,220,334`, `src/services/discord/queue_io/transport.rs:26,34`,
       `src/services/message_outbox/identity_tests.rs:96`, `src/server/routes/domains/runtime.rs:146`'
   - feature_id: routines
     scope: Headless·채널·스레드·예약·retry

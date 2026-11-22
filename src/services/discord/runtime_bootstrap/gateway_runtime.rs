@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::router::handle_event;
 
 mod command_guard;
 

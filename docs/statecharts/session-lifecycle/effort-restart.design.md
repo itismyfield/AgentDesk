@@ -549,7 +549,7 @@ Claude binary: `/Users/itismyfield/.local/share/claude-stable/claude`, SHA256 `a
 | effort read | discord/commands/config/provider_settings.rs:261-281 | Claude만, channel_effort_levels raw channel key, low..max whitelist |
 | effort save | discord/commands/config/provider_settings.rs:285-311 | Claude local tmux만, candidate try_save 후 relaunch pending |
 | fast save | discord/commands/config/provider_settings.rs:314-375 | provider별 pending key, candidate try_save 후 overrides |
-| settings 구조 | discord/mod.rs:911-913,942-943 | channel_relaunch_pending set + channel_effort_levels map |
+| settings 구조 | discord/mod.rs:910-912,942-943 | channel_relaunch_pending set + channel_effort_levels map |
 | effort restore | discord/settings/read.rs:127-138,308-309 | 저장 string을 복원(읽기 시 whitelist와 구분됨) |
 | effort persist | discord/settings/write.rs:461-471 | pending + effort를 같은 저장면에서 직렬화 |
 | boot | discord/runtime_bootstrap.rs:215-216,273 | load_bot_settings→shared bot_settings |
