@@ -810,7 +810,7 @@ impl TurnGateway for DiscordGateway {
             // Queued human input keeps its verified author; other items take the live-turn owner.
             let dispatch_request_owner =
                 queued_intervention_request_owner(intervention, live_turn.request_owner);
-            let deps = router::IntakeDeps {
+            let deps = super::queue_io::transport::IntakeDeps {
                 http: &live_turn.ctx.http,
                 cache: Some(&live_turn.ctx.cache),
                 ctx_for_chained_dispatch: Some(&live_turn.ctx),

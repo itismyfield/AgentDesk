@@ -318,12 +318,12 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .0
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
+pub(crate) use crate::services::cluster::intake_turn::{IntakeExecution, IntakeRequest};
+pub(crate) use crate::services::turn_orchestrator::HeadlessTurnStartError;
 #[cfg(all(test, unix))]
 pub(crate) use router::TurnKind;
-pub(crate) use router::{
-    HeadlessTurnStartError, IntakeExecution, IntakeRequest, checkpoint_waits_for_admission,
-    execute_intake_turn_core,
-};
+#[cfg(test)]
+pub(crate) use router::{checkpoint_waits_for_admission, execute_intake_turn_core};
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 pub(in crate::services::discord) use shared_state::{
@@ -384,7 +384,6 @@ use queue_dispatch::{
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
-use router::handle_event;
 use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
