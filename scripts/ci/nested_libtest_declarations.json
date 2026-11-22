@@ -70,7 +70,7 @@
           "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
           "function": "producer_waits_for_retention_lock_and_preserves_event",
           "stdout": "null",
-          "sha256": "c10a562841b30350643dde9c1e92c107c3fdc011d4ddbb49b4d4e1dd11683721",
+          "sha256": "feff9a22dd30f9fa6d54c0913e7167fd4c7ebd971bfe0968b3e7c10e9c032992",
           "ignored_args": 1
         }
       ]
