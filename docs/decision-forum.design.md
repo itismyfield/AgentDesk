@@ -218,7 +218,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E25 | 기존 src/services/turn_orchestrator/registry_purge.rs:416 | actor 교체가 새 전달권을 만들지 않음. failed tombstone은 PG에 남음 |
 | E26 | 기존 src/services/discord/router/intake_gate.rs:128 | Click 진입: InteractionCreate → message component. 일반 채팅 intake와 분리 |
 | E27 | 기존 src/services/discord/router/intake_gate/component_events.rs:12 | 신규 decision namespace를 기존 component 라우팅에 추가할 지점 |
-| E28 | 기존 src/services/discord/router/herdr_consent.rs:128 | ACK/글 바인딩 검사 형태 재사용. 원래 target live 검사는 선택 INSERT 조건에서 제외 |
+| E28 | 기존 src/services/discord/router/herdr_consent.rs:115 | ACK/글 바인딩 검사 형태 재사용. 원래 target live 검사는 선택 INSERT 조건에서 제외 |
 | E29 | 기존 src/services/manual_steer/action_handle.rs:24 | one-time 128-bit handle 생성/코덱. PG 소비 여부는 별도로 필요 |
 | E30 | 기존 src/services/discord/router/herdr_consent/transport.rs:49, src/services/discord/http.rs:306 | Render·버튼 비활성화. send helper는 일반 메시지용, 최초 forum post는 별도 어댑터 필요 |
 | E31 | 기존 src/services/discord/runtime_bootstrap/gateway_runtime.rs:113, src/services/discord/runtime_bootstrap/orphan_recovery.rs:63 | gateway 이벤트 수신. utility bot은 agent runtime launch 제외 가능 |

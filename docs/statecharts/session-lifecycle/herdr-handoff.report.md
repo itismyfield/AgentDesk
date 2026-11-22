@@ -20,7 +20,7 @@ Counterexamples against code:
 * TargetBefore: observe old identity -> pin -> same-name pane/process replacement -> literal or Enter through unconditional LegacyTmuxGate. Code: `claude_tui/host_input.rs:144`, `codex_tui/host_input.rs:215`. A human draft or busy screen appearing between writes is also unguarded in this r1 contract.
 * HintBefore: runtime hint with Missing tmux -> non-person admission reads Unknown -> Wait::Event forever. Code: `turn_presence/activity/unbound.rs:289-328`, `provider_dispatch/owner_input.rs:859-872`. No cleanup/wake transition exists in this r1 path.
 * QueueBefore: two generic start errors -> retained/manual-retry original -> exact old execution ends -> no original resume. Code: `queued_head/v2/start_failure.rs:81-113`, `input_owner/held_watch.rs:64`. This is a progress failure, not evidence that raw text was deleted.
-* PersonBefore: a Discord original bypasses start_waits, reaches fresh launch, and the exact fresh Herdr host/nonce permits runtime-hint cleanup on tmux Missing (`herdr_launch.rs:492`, `runtime_marker.rs:68-86`). This reconciles the reported adk-dash message with the non-person counterexample; it does not identify an actual previously stalled synthetic front from message IDs alone.
+* PersonBefore: a Discord original bypasses start_waits, reaches fresh launch, and the exact fresh Herdr host/nonce permits runtime-hint cleanup on tmux Missing (`herdr_launch.rs:509`, `runtime_marker.rs:68-86`). This reconciles the reported adk-dash message with the non-person counterexample; it does not identify an actual previously stalled synthetic front from message IDs alone.
 
 Bounds and assumptions:
 

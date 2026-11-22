@@ -2741,7 +2741,6 @@ src/
 │   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── turn_mark_admission_tests.rs
-│   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── response_format/
@@ -3651,6 +3650,7 @@ src/
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
 │   │   │   ├── supervisor_worker_tests.rs
+│   │   │   ├── typing_indicator.rs
 │   │   │   ├── unknown_notice.rs
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs

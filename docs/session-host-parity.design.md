@@ -50,7 +50,7 @@
 | 배포·외부 artifact·자동 롤백 | 기존 writer/ledger/spool 가드 | 동일 | 옛 바이너리는 child init을 등록 오류로 봄 | 동일 전체 boot 중단 위험 | child 첫 init 전 floor, 대상 binary capability가 true일 때만 downgrade/교체 허용 | #8118 O-a 가드/O-b capability·floor 활성 | `src/cli/build_info.rs:7`, `scripts/deploy-release.sh:1016,1050,1067,1240,2771`; floor 뒤 O-a/old target 거절 |
 | CLI guard·auth login·agent 수정·dispatched output | marker/row 가드 후 tmux IO | guard 거절 또는 host_unsupported | key/name 기반 | actual child 증거 의존 | 사용자 행위의 host-neutral operation 또는 기존 거절 보존 | #8128 D/R2·#8118 H3 | #8119 해당 조각 뒤. `src/cli/utils.rs:176`, `R=provider_auth_profiles.rs:511`, `R=agents_crud.rs:1037`, `S=dispatched_sessions/output.rs:171` |
 | 배포 스모크 초기화 | cell reset 실행 | configured Herdr reset skip | 시나리오 범위에 따라 미실행 | 동일 | 같은 전제의 reset과 시나리오 양 host 실행 | #8120 (#8128 추적) | `scripts/deploy-release.sh:4514` headless E-1 N/A도 #8125 후 제거. 이 레그는 실행 안 함 |
-| `!herdr consent retry/return` | 해당 없음 | 사용자 Herdr 서버 동의/복귀 | 정책 부모·실행 child 구별 필요 | 현재 직접 endpoint | 동의 capability는 endpoint 정책에서 읽고 target은 child | #8118 H3, #8128 추적 | 사용자 소유 Herdr 동의는 불가피한 차이 (§5). `D=router/herdr_consent.rs:34`, `herdr_consent/return_input.rs:14` |
+| `!herdr consent retry/return` | 해당 없음 | 사용자 Herdr 서버 동의/복귀 | 정책 부모·실행 child 구별 필요 | 현재 직접 endpoint | 동의 capability는 endpoint 정책에서 읽고 target은 child | #8118 H3, #8128 추적 | 사용자 소유 Herdr 동의는 불가피한 차이 (§5). `D=services/herdr_launch.rs:132`, `herdr_consent/return_input.rs:14` |
 | `/pwd`·`/system-prompt`·`/skill`·`/sidecar`·`/tool-call`·`/usage`·`/node`·`/adk`·`/help`·`/allowall`·`/cancel-queued` | 일반 handler | 직접 host 분기 없음 | 일반 handler | 일반 handler | 동일 계약 실물은 #8120에서 확인 | #8128 추적·#8123 | host 분기가 없다는 조사이지 E2E 통과 아님. `/adk` 진단 backend literal은 위 D에 포함 |
 | 옛 `!shell`·`!start`·`!sessions`·`!machine-flip`·`!down`·`!meeting`·`!metrics`·`!receipt` | 폐지/교체 안내 | 동일 | 동일 | 동일 | **재구현하지 않음: 이미 main 충족** | #8128 전수 완료 항목 | `D=commands/command_policy.rs:80,88,90,91,92,93,96,99`, `text_commands.rs:76` |
 
@@ -136,10 +136,10 @@ GC의 **실제 row delete 성공** 뒤 같은 child/init provenance·row/nonce/g
 | synthetic source·O actor·notice | `discord/tui_prompt_relay.rs:757`, `tui_prompt_relay/synthetic_start/admission_fence.rs:168`, `tui_prompt_dedupe/hosted_source.rs:64`, `tui_o/writer/actor.rs:423`, `tui_o/writer/input_notices/admission.rs:104`, `tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:67` | O 조각은 필요한 output adapter만, 나머지 H2. actual source pin 유지 |
 | API 주입·presence | `discord/health/turn_deliver/inject.rs:312`, `inject/herdr.rs:48`, `turn_presence/activity/unbound.rs:305,525`, `unbound/completed_scheduled.rs:162`, `unbound/herdr_bound.rs:18` | API T1/T2와 H2 |
 | 명령 설정·clear | `discord/commands/config/provider_settings.rs:117,190,326`, `control.rs:466`, `control/clear_teardown.rs:70,81,115`, `clear_end_record.rs:45`, `codex_end_record.rs:15`, `control/herdr_recovery.rs:28`, `fast_mode.rs:108`, `tui_passthrough.rs:128` | H2 판정만, 기능 차이는 #8128 R/M/C/E; #8119 뒤 |
-| consent·exact recovery | `discord/router/herdr_consent.rs:34`, `herdr_consent/return_input.rs:14`, `herdr_terminate/root_replaced.rs:249`, `root_replaced/preclaim.rs:22`, `admin_host_guard.rs:115` | H3; stored exact endpoint와 current policy를 혼동하지 않음 |
+| consent·exact recovery | `src/services/herdr_launch.rs:132`, `herdr_consent/return_input.rs:14`, `herdr_terminate/root_replaced.rs:249`, `root_replaced/preclaim.rs:22`, `admin_host_guard.rs:115` | H3; stored exact endpoint와 current policy를 혼동하지 않음 |
 | admin guard 소비자 | 부록의 `admin_host_guard` 전부: cli·agents API·auth·auto_queue·restart·tmux_recreate·diagnostics·health/recovery·inflight·stale_turn·idle_cleanup·tmux_watcher·dispatched output·provider guard·routines·session_activity/resume | 설정/실행 판정 중복은 H3로, 관리 기능 개방은 R/R2/D. guard 호출 자체가 저수준 endpoint 직접 사용인 것은 아님 |
 | SQL selector 정책 | `config/session_hosts.rs:354`, `src/db/dispatched_sessions.rs:2212,2249` | **H2**: configured 부모+검증된 child 관계를 공통 SQL/bind로 전달. H child selector clear0·unknown no-clear, child predicate 제거 mutant RED |
-| raw boot inventory·consent | `discord/router/herdr_consent.rs:32,395`, `herdr_consent/return_input.rs:171`, `herdr_consent/startup.rs:27`, `src/cli/doctor/orchestrator/managed_herdr_config.rs:19,30`, `src/server/routes/health_api/runtime_profile.rs:20,61` | H3: child 정책은 shared view, 전역 endpoint inventory는 boot owner 안. registry/maintenance/policy diagnostics 내부 원천은 허용 owner(부록 A2) |
+| raw boot inventory·consent | `src/services/herdr_launch.rs:130`, `discord/router/herdr_consent.rs:382`, `herdr_consent/return_input.rs:171`, `herdr_consent/startup.rs:27`, `src/cli/doctor/orchestrator/managed_herdr_config.rs:19,30`, `src/server/routes/health_api/runtime_profile.rs:20,61` | H3: child 정책은 shared view, 전역 endpoint inventory는 boot owner 안. registry/maintenance/policy diagnostics 내부 원천은 허용 owner(부록 A2) |
 | O 직접 membership 5파일 | `tui_o/topology.rs:35`, `discord/runtime_bootstrap/owner_execution.rs:80,157`, `discord/runtime_bootstrap/o_writer_host.rs:447`, `tui_o/cutover/channel_gate.rs:442,449`, `tui_o/cutover.rs:35,59,73,132,136` | O-a shared enumeration 준비/O-b gate 활성. 값 clone의 직접 channels() 대신 shared child view. CENSUS·EXPECTED_GATES site×child fixture |
 | thread GC·store lifecycle | `dispatched_sessions/hosted_cleanup/thread_gc.rs:13,54,63`, `src/db/dispatched_sessions/thread_gc.rs:80`, `tui_o/store/mod.rs:162`, `writer/host.rs:493,499` | H2/H3 host 판정·기존 delete 보호, O-a/O-b 은퇴 계약/실행. directory 삭제0·exact child만 tombstone |
 | legacy 삭제 예정 | `discord/relay_recovery/apply.rs:100`, `tmux_watcher/host_gate.rs:153` 등 부록의 legacy caller | #7651 삭제 쪽에 귀속. 동작 수리 금지; 살아 있는 O 경계가 이 좌표를 우회하는지는 O 시험으로 검증 |
@@ -395,7 +395,7 @@ src/services/discord/queue_dispatch/canary_workspace_tests.rs:63:    let api = c
 src/services/discord/queue_io/input_owner/claude_handoff.rs:219:            || crate::config::session_hosts::herdr_endpoint(channel.get()).is_none())
 src/services/discord/relay_recovery/apply.rs:100:            let refusal = super::super::admin_host_guard::turn_release_refusal;
 src/services/discord/relay_recovery/tests/host_deferred.rs:17:use crate::services::discord::admin_host_guard::tests::{Host, ModeTmux, Tmux};
-src/services/discord/router/herdr_consent.rs:34:        let mapped = boot.herdr_endpoint(channel)?;
+src/services/herdr_launch.rs:132:        let mapped = boot.herdr_endpoint(channel)?;
 src/services/discord/router/herdr_consent/return_input.rs:14:    let Some(mapped) = session_hosts::herdr_endpoint(channel.get()) else {
 src/services/discord/router/intake_dispatch/queued/transition_busy_tests.rs:1104:    if !discord::admin_host_guard::tests::api_child(concat!(
 src/services/discord/router/intake_dispatch/tests/owner_ingress_tests.rs:527:    assert!(crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(channel.get())));
@@ -573,8 +573,7 @@ src/server/routes/health_api/runtime_profile.rs:173:        booted.session_hosts
 src/server/routes/health_api/runtime_profile/managed_herdr_tests.rs:94:    live.session_hosts = with_boot(|boot| boot.unwrap().config().clone());
 src/services/discord/commands/control/codex_clear_relaunch_tests.rs:182:            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
 src/services/discord/commands/control/codex_clear_retirement_tests.rs:372:                crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
-src/services/discord/router/herdr_consent.rs:32:    session_hosts::with_boot(|boot| {
-src/services/discord/router/herdr_consent.rs:395:    let enabled = session_hosts::with_boot(|boot| {
+src/services/discord/router/herdr_consent.rs:382:    let enabled = session_hosts::with_boot(|boot| {
 src/services/discord/router/herdr_consent/admission_tests.rs:1851:    let boot = session_hosts::with_boot(|boot| boot.cloned()).unwrap();
 src/services/discord/router/herdr_consent/return_input.rs:171:        let approved = || session_hosts::with_boot(|boot| binding_digest(boot?.config(), channel));
 src/services/discord/router/herdr_consent/return_input_tests.rs:272:    let hosts = session_hosts::with_boot(|boot| boot.unwrap().clone());
@@ -590,6 +589,7 @@ src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs:117:   
 src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs:54:            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
 src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs:655:                    crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
 src/services/discord/watchers/lifecycle/resume_companion_restore_tests.rs:719:            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+src/services/herdr_launch.rs:130:    crate::config::session_hosts::with_boot(|boot| {
 src/services/session_host/herdr/managed_config/maintenance.rs:279:    if let Some(boot) = with_boot(|boot| boot.cloned()) {
 src/services/session_host/herdr/managed_config/maintenance.rs:286:    let Some(boot) = with_boot(|boot| boot.cloned()) else {
 src/services/session_host/herdr/managed_config_real_tests.rs:157:    crate::config::session_hosts::with_boot(|boot| {

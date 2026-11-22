@@ -11,7 +11,7 @@ A 코드 조사 기준: `2c8873381478c7179f0347d5bfc5b850d5cb90e2`. 기존 B 설
 | 값/단계 | 기준 코드 좌표 | 모델 범위 |
 |---|---|---|
 | 일반 launch `resume=false` | `src/services/codex/herdr_turn.rs:188`, `:193`, `:194` | `AResumeIntent=FALSE`이면 mode는 항상 `fresh`; native session이 있다는 이유로 resume으로 바꾸지 않음 |
-| immutable incarnation | `src/services/herdr_launch.rs:733`, `:744`, `:749`, `:750`, `:758`; `src/services/tui_prompt_dedupe/binding_context.rs:21` | 새 nonce와 explicit `fresh/resume` 모드. A의 reader start offset은 같은 incarnation에 내구 기록하는 추가 포트 |
+| immutable incarnation | `src/services/herdr_launch.rs:750`, `:744`, `:749`, `:750`, `:758`; `src/services/tui_prompt_dedupe/binding_context.rs:21` | 새 nonce와 explicit `fresh/resume` 모드. A의 reader start offset은 같은 incarnation에 내구 기록하는 추가 포트 |
 | 내구 기록·복원 | `src/services/tui_prompt_dedupe/binding_context.rs:366`, `:379`, `:382`, `:389`, `:495`, `:500` | 파일·directory durability 뒤 launch, boot는 같은 nonce의 기록을 읽음. 기준 구조에는 resume offset 필드가 없으므로 A 구현이 필요 |
 | old End 이후 EOF | `src/services/discord/herdr_terminate.rs:590`, `:594`, `:596`, `:603` | `endConfirmed` proof가 있는 뒤에만 resume EOF 캡처. 이 proof 전달은 실제 호출자 검증 대상 |
 | offset `0/1/2` | 기존 first-input `src/services/codex/herdr_turn/first_input.rs:211`, `:216`, `:225`; tail offset 인자 `src/services/codex/herdr_turn.rs:658`, `:676` | 0=fresh 시작, 1=확인된 old End의 nonzero EOF, 2=새 startup metadata가 붙은 EOF. 바이트 길이의 작은 동치류이며 실제 파일 크기 값이 아님 |
@@ -125,7 +125,7 @@ O cursor==EOF 검사는 **old End 직후 capture 시점**이다. boot/첫 입력
 | 모델 값 | 코드의 값·행동과 좌표 | 축약·제외 |
 |---|---|---|
 | `Policy={before,after}` | 현재 refusal `src/services/discord/commands/restart.rs:219`, 보이는 응답 `:287`; 제안 연결은 본 설계 문서 | before는 old permit·queue를 바꾸지 않고 거절 |
-| `StartKind={Bound,Legacy,Unknown}`, `row={Legacy,Unknown,Retired,Pending,Bound}` | `src/db/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228`; successor 거절/허용 `src/services/herdr_launch.rs:433` | Missing/Conflict/Unknown은 코드 조회에서 구분해야 한다. 모델의 Unknown은 명시적 거절 결과만 축약하며 legacy로 복원하지 않는다. placed/unplaced Pending 부팅 복구는 모델 밖. NoActive는 canonical Legacy+live pane 없음만 검사하며 Missing row 생성은 제외 |
+| `StartKind={Bound,Legacy,Unknown}`, `row={Legacy,Unknown,Retired,Pending,Bound}` | `src/db/dispatched_sessions/hosted_execution.rs:27`, `:171`, `:228`; successor 거절/허용 `src/services/herdr_launch.rs:450` | Missing/Conflict/Unknown은 코드 조회에서 구분해야 한다. 모델의 Unknown은 명시적 거절 결과만 축약하며 legacy로 복원하지 않는다. placed/unplaced Pending 부팅 복구는 모델 밖. NoActive는 canonical Legacy+live pane 없음만 검사하며 Missing row 생성은 제외 |
 | `CloseReply={confirmed,Indeterminate}` | `src/services/discord/herdr_terminate.rs:74`, exact-close·absence·retire·settle 순서 `:548`, `:590`, `:594`, `:596`, `:603` | NotSent·Disabled·Refused·provider survival은 successor를 허용하지 않는 실패 분기에 축약 |
 | `CreateReply={Created,NotSent,Indeterminate,CreatedUnconfirmed}` | `src/services/herdr_launch.rs:111`, `:210`; Pending 선행 `:466`, `:480`, `:482` | ACK 불명은 pane이 실제 생긴 최악 경우로 고정. NotSent에서는 새 pane 0으로 보이는 실패 |
 | `Identity={same,server,pane}` | nonce fence `src/services/session_host/herdr_gate.rs:455`, one-witness close `:496`, `:658`; row recheck `src/services/discord/herdr_terminate.rs:548` | 새 서버·pane 번호 재사용은 exact identity 불일치. 숫자만 재연결하는 동작은 mutant에만 존재 |

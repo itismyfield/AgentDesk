@@ -14,10 +14,10 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 4 | `src/db/dispatched_sessions/hosted_execution.rs:449` bind | `row = Bound`; projected `Launch` | Same owner/nonce, complete Pending evidence |
 | 5 | `src/db/dispatched_sessions/hosted_execution.rs:460` retire | `Retire` | Exact owner, nonce and observed row |
 | 6 | `src/db/dispatched_sessions/hosted_execution.rs:573` compare-and-set | `captured`, `nonce`; `Proof` / `Retire` | Raw row and canonical identity predicates; successor cannot be retired |
-| 7 | `src/services/herdr_launch.rs:503` install | `Launch` | Shared launch entry, all input origins |
-| 8 | `src/services/herdr_launch.rs:575` location | Projected `Launch` | Create reply fills only its Pending |
-| 9 | `src/services/herdr_launch.rs:717` evidence | Projected `Launch` | Same incarnation |
-| 10 | `src/services/herdr_launch.rs:649` failed launch retirement | `LaunchFails`; projected `Retire` | Existing own-Pending failure cleanup, unchanged |
+| 7 | `src/services/herdr_launch.rs:520` install | `Launch` | Shared launch entry, all input origins |
+| 8 | `src/services/herdr_launch.rs:592` location | Projected `Launch` | Create reply fills only its Pending |
+| 9 | `src/services/herdr_launch.rs:734` evidence | Projected `Launch` | Same incarnation |
+| 10 | `src/services/herdr_launch.rs:666` failed launch retirement | `LaunchFails`; projected `Retire` | Existing own-Pending failure cleanup, unchanged |
 | 11 | `src/services/herdr_launch/unplaced.rs:457` recovered evidence | Projected `Launch` | Boot/next-input resolution of an unplaced Pending, unchanged |
 | 12 | `src/services/claude/herdr_turn.rs:878` initial attach bind | Projected `Launch`; `row = Bound` | First source of the same launched execution |
 | 13 | `src/services/discord/tui_prompt_relay/herdr_source.rs:197` source bind | `Reconnect`, `row = Bound` | Verified attach of Pending; not a replacement execution |

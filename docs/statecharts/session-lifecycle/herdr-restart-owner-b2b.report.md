@@ -104,7 +104,7 @@ Seeded 요청에 B2a detached worker·결과 cache 메타데이터(`a*`)를 켜�
 | 부팅 큐 복원 | `src/services/discord/runtime_bootstrap/queued_recovery.rs:50` |
 | boot census 필터 | `src/services/turn_orchestrator/pending_queue_persistence/queued_recovery.rs:55` |
 | 부팅 intake gate·wake | `src/services/discord/runtime_bootstrap.rs:41` |
-| Herdr 새 launch | `src/services/herdr_launch.rs:382`, `:29` |
+| Herdr 새 launch | `src/services/herdr_launch.rs:399`, `:29` |
 | Discord 사람·봇 intake | `src/services/discord/router/intake_queue_transaction.rs:43` |
 | HTTP·루틴 시작 ingress | `src/services/discord/queue_io/input_owner/start.rs:59` |
 | 루틴 ingress | `src/services/discord/queue_io/input_owner/routine.rs:70` |

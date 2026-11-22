@@ -32,20 +32,20 @@ After의 PrepareInput은 최신 Pending row·nonce·spawn marker를 검증하고
 
 | 생성·재사용 진입점 | 코드 좌표 | 남는 상태·모델 대응 |
 |---|---|---|
-| fresh Pending 설치 | herdr_launch.rs:471–482 → hosted_execution.rs:411 | durable Pending, nonce 1, memory registry 1, marker 1 |
-| create 결과에서 location 기록 | herdr_launch.rs:515–566 | Pending(location 있음, expected 없음) = placed |
-| provider evidence 기록 | herdr_launch.rs:592–615 → hosted_execution.rs:433 | Pending(expected 있음) = evidenced |
+| fresh Pending 설치 | herdr_launch.rs:488–499 → hosted_execution.rs:411 | durable Pending, nonce 1, memory registry 1, marker 1 |
+| create 결과에서 location 기록 | herdr_launch.rs:532–583 | Pending(location 있음, expected 없음) = placed |
+| provider evidence 기록 | herdr_launch.rs:609–632 → hosted_execution.rs:433 | Pending(expected 있음) = evidenced |
 | 재시작 후 Pending boot pass | recovery_engine/herdr_reader.rs:455–465 | durable row 유지, 메모리 등록부 0, Startup 기록 없음 |
 | Pending 공통 선택 | codex/herdr_turn.rs:156–164 | held/options 관문 뒤 pending_launch, first_prompt 합류 |
 | unplaced Pending 복구 | codex/herdr_turn.rs:240–253 → herdr_launch/unplaced.rs:224–312,445–466 | exact receipt/pane/evidence를 CAS 기록한 뒤 같은 nonce 재사용; retired면 fresh launch |
-| evidence 없는 Pending 재조회 | codex/herdr_turn.rs:255–264 → herdr_launch.rs:606–630 | 새 pane 생성 없이 기존 pane evidence 재조회 후 같은 nonce |
+| evidence 없는 Pending 재조회 | codex/herdr_turn.rs:255–264 → herdr_launch.rs:623–647 | 새 pane 생성 없이 기존 pane evidence 재조회 후 같은 nonce |
 | evidence 있는 Pending 재사용 | codex/herdr_turn.rs:265 | nonce 그대로 first_prompt 합류 |
 | legacy 첫 입력 | codex/herdr_turn.rs:450 → first_input.rs:9–21 | current_record 재조회, gate, write |
 | owner 첫 입력 | codex/herdr_turn.rs:446–448 → first_input.rs:26–67 | 읽은 record로 owner callback/physical write |
 | 물리 입력 합류 | first_input.rs:70–104 | target/composer 판정 뒤 alias·placeholder·hold 설치, 한 번의 input plan |
 | native Startup 관찰 | runtime_binding/codex_hook.rs:324–342 | registry가 정확히 1일 때만 Source 기록, 0/2는 기존 Proceed |
 | Bound·hold 해제 | first_input.rs:141–172 → herdr_turn.rs:279–297 | 자신의 Startup을 읽어 attach, Bound, hold 종료 |
-| 다른 nonce 등록·표식 교체 | runtime_binding/adopt_skip.rs:205–247, herdr_launch.rs:482–489 | registry 2 또는 marker 2; 새 복구가 덮어쓰면 안 됨 |
+| 다른 nonce 등록·표식 교체 | runtime_binding/adopt_skip.rs:205–247, herdr_launch.rs:499–506 | registry 2 또는 marker 2; 새 복구가 덮어쓰면 안 됨 |
 
 1/2는 실제 UUID nonce의 동등/다름만 추상화한다. 0은 메모리에 등록되지 않음을 뜻한다. HerdrSession의 evidenced는 HostedState::Bound가 아니라 expected evidence가 있는 Pending을 뜻한다. 모델의 pending/placed/evidenced는 위 세 Pending 복구 갈래이며, 모두 first_input 앞에 합류한다. Bound 행·다른 marker·다른 등록 nonce는 입력 전에 거절해야 한다.
 
