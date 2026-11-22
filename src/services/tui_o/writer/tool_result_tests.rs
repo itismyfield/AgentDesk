@@ -78,12 +78,33 @@ async fn tool_results_are_excluded_durably_for_strings_arrays_success_and_replay
     assert!(harness.port.posts().is_empty());
 }
 
-#[test]
-fn tool_result_exclusion_keeps_changed_payload_conflicts_visible() {
-    let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
-    deriver.derive(&result("failed", serde_json::json!("error one"), true));
-    let changed = deriver.derive(&result("failed", serde_json::json!("error two"), true));
-    assert!(matches!(changed.as_slice(), [Derived::Blocked { .. }]));
+#[tokio::test]
+async fn interrupt_placeholder_then_real_tool_result_keeps_the_writer_running_across_replay() {
+    let user = |text: &str| {
+        record(serde_json::json!({"type":"user", "message":{"content":[
+        {"type":"tool_result", "tool_use_id":"t", "is_error":true, "content":text}]}}))
+    };
+    let rows = [
+        user("[Tool call interrupted: the session ended before this call's result was recorded]"),
+        user("Exit code 137"),
+    ];
+    let harness = Harness::new();
+    harness.gate.acquired();
+    // A restart re-reads the same lines into a fresh deriver.
+    for _ in 0..2 {
+        let (mut writer, mut deriver) = (
+            harness.writer(),
+            UnitDeriver::new(CHANNEL, ShadowProvider::Claude),
+        );
+        for item in rows.iter().flat_map(|row| deriver.derive(row)) {
+            assert_eq!(writer.deliver(&item).await, Step::Done, "{item:?}");
+        }
+        assert_eq!(
+            writer.store().ledger().excluded(&key("t")),
+            Some("tool_result_internal")
+        );
+    }
+    assert_eq!(harness.alarms.taken(), []);
 }
 
 #[tokio::test]
