@@ -14,18 +14,18 @@ An enqueue receipt never counts as a native user receipt. Census completion prec
 
 | Entry or branch | Code at the stated SHA | Modeled contract |
 |---|---|---|
-| Channel start | `src/server/routes/agents.rs:659`, `:768`, `:801`, `:816` | all backend Ok statuses accept; rejected start has no echo |
-| DM start | `src/server/routes/agents.rs:694`, `:787` | excluded from channel echo; delegated to HTTP tests |
+| Channel start | `src/server/routes/agents.rs:660`, `:769`, `:802`, `:817` | all backend Ok statuses accept; rejected start has no echo |
+| DM start | `src/server/routes/agents.rs:695`, `:788` | excluded from channel echo; delegated to HTTP tests |
 | Start status domain | `src/services/turn_orchestrator/headless_start.rs:37` | accepted, started, consumed are abstracted as Ok |
 | Deliver, origin, obligations ON | `src/server/routes/agents_turn_deliver.rs:212`, `:223` | only winner executes and enqueues; replay has no enqueue |
 | Deliver, origin, obligations OFF | `src/server/routes/agents_turn_deliver.rs:208`; `agents_turn_deliver/legacy_origin.rs:18`, `:23`, `:26`, `:35` | preflight, existing replay, race replay, winner |
 | Deliver, no origin, obligations OFF | `src/server/routes/agents_turn_deliver.rs:227` | accepted request enqueues; per-request identity delegated to tests |
 | Deliver, no origin, obligations ON | `src/server/routes/agents_turn_deliver.rs:148` | existing 400 remains a rejection |
-| Handoff | `src/server/routes/agents.rs:1013`, `:1044`, `:1049` | same accepted-start abstraction; resolved channel delegated to tests |
+| Handoff | `src/server/routes/agents.rs:1014`, `:1045`, `:1050` | same accepted-start abstraction; resolved channel delegated to tests |
 | Scheduled message creation | `src/server/routes/scheduled_messages/create.rs:206`; `src/services/scheduled_messages.rs:435`; `scheduled_messages/owner_input.rs:211` | metadata source becomes scheduled_message execution source; outside echo |
 | Discord send | `src/services/discord/outbound/send_api.rs:57` | outbound producer source, outside native input |
 | Send-to-agent / send-DM | `src/server/routes/domains/ops.rs:43`, `:46` | outbound routes; no native input source contract |
-| Agent message | `src/server/routes/agents.rs:74`, `:965` | no source-bearing input DTO |
+| Agent message | `src/server/routes/agents.rs:74`, `:966` | no source-bearing input DTO |
 | Messages | `src/server/routes/messages.rs:36` | message storage DTO has no source |
 | Stop/cancel/resume/queue | `src/server/routes/domains/runtime.rs:90`, `:122` | no new source-bearing prompt; no new model action |
 

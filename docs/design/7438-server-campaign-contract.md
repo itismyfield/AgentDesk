@@ -276,7 +276,7 @@ F4/F5 활성화 전 다음 실제 소비자까지 배타 소유권을 통합해�
 
 | 진입점 | 현재 좌표 |
 |---|---|
-| 저장/주기/terminal handoff | `src/server/routes/campaigns.rs:159`, `src/server/mod.rs:512`, `src/kanban/hooks.rs:322` |
+| 저장/주기/terminal handoff | `src/server/routes/campaigns.rs:159`, `src/server/mod.rs:513`, `src/kanban/hooks.rs:322` |
 | 후보·enqueue·활성화 | `src/services/auto_queue/campaign_handoff.rs:154,336,381,395`, `src/services/auto_queue/fsm.rs:594,644` |
 | dispatch 생성/dedup | `src/dispatch/dispatch_create.rs:583,653,1193,1269` |
 | terminal·queue·phase sync | `src/dispatch/dispatch_status.rs:717,725,744,767` |
