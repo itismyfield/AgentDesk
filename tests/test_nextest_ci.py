@@ -1824,24 +1824,32 @@ class RustSources(unittest.TestCase):
                           "src/krx.rs": "#[cfg(test)]\n#[cfg(unix)]\nmod t;\n", "src/krx/t.rs": test}.items():
             (base / rel).parent.mkdir(parents=True, exist_ok=True)
             (base / rel).write_text(text)
-        host = '#[cfg(unix)]\n#[cfg(test)]\n#[path = "krx/{}.rs"]\nmod krx_t;\n'
+        host = '#[cfg(unix)]\n#[cfg(test)]\n#[path = "{}.rs"]\nmod krx_t;\n'
+        up, via_parent = host.format("krx/t"), "#[cfg(test)]\n" + host.format("../krx/t")
         # Reordered or repeated cfgs are the same conjunction; any other difference is a loss.
-        cases = {"same": ("#[cfg(test)]\n" + host.format("t"), test, ""), "deleted": ("", "", ""),
-                 "cfg": (host.format("t").replace("#[cfg(unix)]\n", ""), test, ""),
-                 "file": (host.format("t2"), "", test),
-                 "name": (host.format("t"), test.replace("moved", "renamed"), ""),
-                 "ignore": (host.format("t"), test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn"), ""),
-                 "should_panic": (host.format("t"), test.replace("fn", "#[should_panic]\nfn"), "")}
-        for case, (upper, body, other) in cases.items():
+        cases = {"same": ({"src/upper.rs": "#[cfg(test)]\n" + up}, "upper::krx_t::moved"),
+                 "same_via_parent": ({"src/upper.rs": "mod host;\n", "src/upper/host.rs": via_parent},
+                                     "upper::host::krx_t::moved"),
+                 "duplicate": ({"src/upper.rs": up + "mod host;\n", "src/upper/host.rs": via_parent}, None),
+                 "deleted": ({"src/krx/t.rs": ""}, None),
+                 "cfg": ({"src/upper.rs": up.replace("#[cfg(unix)]\n", "")}, None),
+                 "file": ({"src/upper.rs": host.format("krx/t2"), "src/krx/t.rs": "", "src/krx/t2.rs": test}, None),
+                 "name": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("moved", "renamed")}, None),
+                 "ignore": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn")},
+                            None),
+                 "should_panic": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("fn", "#[should_panic]\nfn")},
+                                  None)}
+        for case, (files, new_id) in cases.items():
             with self.subTest(case):
-                self.tree({"src/lib.rs": "mod krx;\nmod upper;\n", "src/krx.rs": "", "src/upper.rs": upper,
-                           "src/krx/t.rs": body, "src/krx/t2.rs": other})
+                self.tree({"src/lib.rs": "mod krx;\nmod upper;\n", "src/krx.rs": "", "src/upper.rs": "",
+                           "src/upper/host.rs": "", "src/krx/t.rs": test, "src/krx/t2.rs": "", **files})
                 self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "r.json")[0], 0)
                 doc = json.loads((self.root / "r.json").read_text())
-                moved = [[["x", "krx::t::moved"], ["x", "upper::krx_t::moved"]]] if case == "same" else []
+                moved = [[["x", "krx::t::moved"], ["x", new_id]]] if new_id else []
                 self.assertEqual((doc["relocated"]["linux"], doc["removed"]["linux"]),
                                  (moved, [] if moved else ["krx::t::moved"]))
-                self.assertEqual([[r["from"], r["to"]] for r in doc["relocation_keys"]], moved)
+                self.assertEqual([[r["from"], r["to"], r["key"][:2]] for r in doc["relocation_keys"]],
+                                 [pair + [["src/krx/t.rs", "moved"]] for pair in moved])
 
     def test_cfg_evaluator_operators(self):
         cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),
