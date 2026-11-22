@@ -27,7 +27,7 @@ projection은 `Reading::publish_if_current`의 기존 fresh snapshot 재검증 �
 
 `start_waits`의 inflight/rest 관문(`owner_input.rs:699`), 대상 pane 선택(`:710`), host/config/root/Source 검증을 모두 남긴다. 기존 activity가 Idle이거나, 새 child가 fresh 내부 snapshot의 **typed `LegacyMarkerOnly` 결과**를 내고 새 proof가 그 **유일한 Legacy 행 차이만** 해소할 때 통과한다. 공개 `Observed.reason`은 `session_identity_unresolved`다(`unbound/live.rs:1048`). `hosted_active_or_unknown`은 그 내부 hold leaf이며 공개 reason 문자열과 비교하지 않는다. `Reading`의 private unbound stamp/snapshot(`activity.rs:175`)를 볼 수 있는 새 live child가 내부 verdict를 sealed enum으로 변환한다. diagnostic용 `NoticeObservation.hold_leaf` 문자열만으로 permit을 만들지도 않는다. 다른 busy/Unknown 원인은 우회하지 않는다. 삭제나 DB mutation은 이 read-only projection에 넣지 않는다.
 
-admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤 동일 front를 grant/claim한다(`queued_head/v2.rs:398,411`). fence guard는 typed 내부 start context로 Codex fresh/Pending CAS·host/spawn 게시까지 전달하고 그 뒤 해제한다. Source Mutex는 await를 가로질러 보유하지 않는다. 일반 프로세스/다른 owner·다른 nonce의 입력 권리를 이 permit으로 만들지 않는다. 기존 `herdr_launch.rs:442`의 Legacy/Retired 분기, `hosted_execution.rs:411`의 CAS, Startup/nonce/rollout/owner 입력 검증은 유지한다. 서버/socket create의 불명확한 결과와 prompt 재전송은 기존 Pending/owned-input 계약에 맡긴다.
+admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤 동일 front를 grant/claim한다(`queued_head/v2.rs:398,411`). fence guard는 typed 내부 start context로 Codex fresh/Pending CAS·host/spawn 게시까지 전달하고 그 뒤 해제한다. Source Mutex는 await를 가로질러 보유하지 않는다. 일반 프로세스/다른 owner·다른 nonce의 입력 권리를 이 permit으로 만들지 않는다. 기존 `herdr_launch.rs:425`의 Legacy/Retired 분기, `hosted_execution.rs:411`의 CAS, Startup/nonce/rollout/owner 입력 검증은 유지한다. 서버/socket create의 불명확한 결과와 prompt 재전송은 기존 Pending/owned-input 계약에 맡긴다.
 
 
 ### A guard의 운반 경로와 history pin
@@ -239,7 +239,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 |---|---|---|
 | `codex/herdr_turn.rs:200,223` fresh | A guard 전달·새 Pending/host stamp까지 fence, 기존 CAS 유지 | AGrant/ACreate |
 | 같은 파일 `:240,255,261` Pending 재사용 | 새 cleanup/새 create 없음. P의 등록부 복구·기존 Startup 검증 유지 | 기존 PendingRegistration 모델, A 범위 밖 |
-| `herdr_launch.rs:473,489,499,509` | fresh Pending CAS·registry·host/spawn 게시/기존 marker cleanup과 같은 fence | ACreate; downstream 별도 |
+| `herdr_launch.rs:456,472,482,492` | fresh Pending CAS·registry·host/spawn 게시/기존 marker cleanup과 같은 fence | ACreate; downstream 별도 |
 | `codex/tui_session_launch/first_input.rs:196,220,221` | owner/runtime publisher 전체 outer fence; Herdr-configured 기존 거절 유지 | AFenceContender/ARecheck |
 | `discord/watchers/codex_tui_restore.rs:253,317` | fence→Source→verified registration·under-authority hint writer. Source 재진입 금지 | AFenceContender/ARecheck |
 | `codex.rs:1425,1520,1546,1588` | wrapper 기존 Herdr 거절 유지. 삭제/owner 게시/생성 경계 fence. A는 LegacyTmuxWrapper hint를 정리하지 않음 | fence; live takeover 범위 밖 |

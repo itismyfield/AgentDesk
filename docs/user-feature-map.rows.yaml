@@ -546,7 +546,7 @@ host_parity:
     herdr: host admission과 O readiness를 거쳐 Herdr에서 provider 세션 시작·재사용 후 응답
     verdict: 같음
     owner: '#8120의 실제 양쪽 실행 수용은 계속 필요'
-    evidence: '`src/services/discord/router/message_handler/intake_turn.rs:161`, `src/services/turn_host.rs:212`, `src/services/herdr_launch.rs:422`.
+    evidence: '`src/services/discord/router/message_handler/intake_turn.rs:161`, `src/services/turn_host.rs:212`, `src/services/herdr_launch.rs:405`.
       Cancel·clear는 아래 행. Claude/Codex의 E-50/E-51은 양쪽 4개 전달 명세'
     coverage_tuples:
     - host: tmux
@@ -838,7 +838,7 @@ host_parity:
     verdict: 다름
     owner: '#8128 W1/W2. 사용자 결정 A는 증명된 빈 창에만 적용. 원자 서버 검증 능력이 W2 선행 조건'
     evidence: '`src/services/herdr_launch/prepared.rs:11`, `src/services/discord/herdr_terminate/root_replaced.rs:69,342`,
-      `src/services/session_host/herdr/pane_probe.rs:205–244`, `src/services/herdr_launch.rs:479–492`. Retired 행이 successor에
+      `src/services/session_host/herdr/pane_probe.rs:205–244`, `src/services/herdr_launch.rs:462–475`. Retired 행이 successor에
       덮여 증거가 사라지면 자격 종료'
   - feature_id: reset-clear
     scope: 5분 주기 정책의 6시간 idle 정리
@@ -984,7 +984,7 @@ host_parity:
     herdr: 정확한 Herdr 재입력·취소 및 owner 승인 상태 정산
     verdict: 같음
     owner: '검증된 channel의 세션 연속 계약, #8077 구현. 양쪽 실제 세대 및 Cancel 입증 #8120'
-    evidence: '`src/services/herdr_launch.rs:61,422`, `src/services/discord/router/herdr_consent.rs:115,193,375`, `src/services/discord/commands/stop.rs:98`.
+    evidence: '`src/services/herdr_launch.rs:61,405`, `src/services/discord/router/herdr_consent.rs:128,206,388`, `src/services/discord/commands/stop.rs:98`.
       E-19/E-30의 기존 identity는 Herdr에 그대로 적용할 수 없음'
   - feature_id: herdr-handoff
     scope: 사용자 소유 Herdr 서버 동의/복귀
@@ -994,7 +994,7 @@ host_parity:
     reason: 사용자 소유 Herdr 서버 접근 동의
     approval: unrecorded
     owner: '#8128의 사용자 소유 서버 동의 경계'
-    evidence: '`src/services/discord/commands/command_policy.rs:110`, `src/services/herdr_launch.rs:129`, `src/services/discord/router/herdr_consent.rs:115,193,375`,
+    evidence: '`src/services/discord/commands/command_policy.rs:110`, `src/services/discord/router/herdr_consent.rs:31,128,206,388`,
       `src/services/discord/router/herdr_consent/return_input.rs:8,47,160`. #8118 child 대상 상속'
   - feature_id: herdr-handoff
     scope: 터미널 UI 배치
@@ -1004,7 +1004,7 @@ host_parity:
     reason: 서로 다른 앱의 native UI 배치
     approval: unrecorded
     owner: '#7583의 workspace UX 제품 결정'
-    evidence: '`src/services/herdr_launch.rs:391`, `src/services/herdr_launch/prepared.rs:11`, [상속 설계 §5](session-host-parity.design.md#5-사용자-결정-필요남길-차이)'
+    evidence: '`src/services/herdr_launch.rs:374`, `src/services/herdr_launch/prepared.rs:11`, [상속 설계 §5](session-host-parity.design.md#5-사용자-결정-필요남길-차이)'
   - feature_id: effort-model
     scope: Claude `/model`
     tmux: 저장 후 필요 시 동일 대화로 TUI 재기동

@@ -24,7 +24,7 @@
 
 정상 Herdr launch는 실행의 `.host_kind=herdr` 표식을 기록한다. retire는 표식을 legacy로 전환하지 않는다. Claude TUI 실행기는 표식이 Herdr이면 tmux 조회·cleanup·launch 전에 거절한다. 따라서 **retire와 매핑 제거만으로 같은 Claude 채널의 legacy 복귀가 완료되지 않는다.** 자세한 제한은 §3을 따른다.
 
-근거: `src/services/turn_host.rs:91`, `:140`; `src/services/session_host/session_record.rs:8`; `src/services/herdr_launch.rs:363`, `:569`; `src/cli/herdr.rs:259`, `:285`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`.
+근거: `src/services/turn_host.rs:91`, `:140`; `src/services/session_host/session_record.rs:8`; `src/services/herdr_launch.rs:346`, `:569`; `src/cli/herdr.rs:259`, `:285`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`.
 
 ### 1.2 설정·스위치·필수 준비
 
@@ -150,7 +150,7 @@ O readiness는 해당 노드에서 출력 소유권이 확인되고, writer가 �
 
 코드는 실행 전에 cwd가 존재하는 절대 디렉터리인지 검사한다. Claude Herdr launch는 해당 노드의 AgentDesk 실행 파일과 Claude 바이너리를 사용하고 기존 TUI launch script를 준비한다. 다른 노드의 파일이나 도구를 복제하는 기능은 아니다.
 
-근거: `src/services/herdr_launch.rs:287`; `src/services/claude/tui_session_launch.rs:169`.
+근거: `src/services/herdr_launch.rs:270`; `src/services/claude/tui_session_launch.rs:169`.
 
 Herdr integration installer를 중복 적용하지 않는 것을 운영 정책으로 한다. 현재 launch는 provider exec 직전에 지정된 Herdr pane 환경변수를 제거한다. Claude는 기존 AgentDesk hook endpoint를 launch 설정에 전달한다. Codex는 위의 cold-launch 조건을 검사하고 `--no-daemon`을 포함하는 실행 명령을 준비한다. Herdr 화면의 agent 감지나 상태 보고를 AgentDesk hook·응답 회수의 대체물로 삼지 않는다.
 
@@ -172,7 +172,7 @@ Herdr integration installer를 중복 적용하지 않는 것을 운영 정책�
 
 이는 resume 실측 이전의 코드상 차단이다. 다른 시험 채널이나 다른 실행 식별의 legacy 성공으로 대상 채널의 복귀를 대신 인정하지 않는다.
 
-근거: `src/services/herdr_launch.rs:363`, `:569`; `src/cli/herdr.rs:259`, `:285`; `src/db/dispatched_sessions/hosted_execution.rs:434`; `src/services/turn_host.rs:98`, `:140`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`; `src/services/session_host/session_record.rs:12`.
+근거: `src/services/herdr_launch.rs:346`, `:569`; `src/cli/herdr.rs:259`, `:285`; `src/db/dispatched_sessions/hosted_execution.rs:434`; `src/services/turn_host.rs:98`, `:140`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`; `src/services/session_host/session_record.rs:12`.
 
 ### 3.1 보존할 대상과 배출 기준
 
@@ -291,7 +291,7 @@ attach가 한 번도 되지 않은 Pending 실행(logged start 없음)은 다음
 
 pane 위치는 있고 launch 증거가 없으면, 거절하기 전에 기존 launch 재탐침이 그 pane을 한 번 더 읽는다. 자기 nonce의 provider가 root shell의 자식으로 증명될 때만 증거를 한 번 기록한다. pane을 만들거나 입력하거나 닫지 않는다. create가 서버에 닿지 않은 launch(marker 실패, 두 번째 E7 거절, create `NotSent`)는 그 자리에서 자기 Pending을 Retired로 만든다. 다음 입력은 새 launch로 간다.
 
-근거: `src/services/claude/herdr_turn/never_attached.rs:12`, `:30`; `src/services/herdr_launch.rs:459`.
+근거: `src/services/claude/herdr_turn/never_attached.rs:12`, `:30`; `src/services/herdr_launch.rs:442`.
 
 **A. 증거 있음 — 꼬리 `end it with ...` 또는 `ending it needs runtime.herdr_terminate_enabled ...`**
 
@@ -348,7 +348,7 @@ create 응답을 잃었거나 위치 기록 전에 실패해 pane이 있을 수�
 
 [O-U-10] 후속 기능을 확보한 뒤 **동일한 Claude 채널·실행 식별**에서 전체 복귀 순서, 첫 legacy 턴, 후속 턴, 관리 명령을 검증한다. 표식 전환을 생략하는 뮤턴트와 다른 채널의 성공을 대상 채널의 성공으로 인정하는 뮤턴트를 실패시켜야 한다. 그 전에는 같은 채널의 안전한 복귀 수용 기준을 미충족으로 유지한다.
 
-현재 차단의 근거: `src/services/herdr_launch.rs:363`, `:569`; `src/cli/herdr.rs:285`; `src/db/dispatched_sessions/hosted_execution.rs:434`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`; `src/services/session_host/session_record.rs:12`.
+현재 차단의 근거: `src/services/herdr_launch.rs:346`, `:569`; `src/cli/herdr.rs:285`; `src/db/dispatched_sessions/hosted_execution.rs:434`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`; `src/services/session_host/session_record.rs:12`.
 
 ## 4. Herdr 서버 업데이트·복구
 
@@ -614,7 +614,7 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 
 | 책임 | 이전 담당 코드 | 생산 진입점 → 소비자 → Herdr API 및 소유자 경계 | 상태·실측 |
 |---|---|---|---|
-| 지속 실행용 workspace·pane 생성 | tmux 생성 `src/services/platform/tmux.rs:153`; provider 호출 예 `src/services/claude.rs:2852`, `src/services/codex.rs:2220` | provider dispatch `provider_dispatch.rs:358`, `:416`, `:435` → provider Herdr 실행기 → `src/services/herdr_launch.rs:314` → `src/services/session_host/herdr/launch_host.rs:122`의 `workspace.create`·`pane.send_input`. Herdr는 pane 실행 기반을 제공하고 AgentDesk는 실행 준비·Pending 선기록·위치·실행 증거를 소유 | **운영 연결됨**, provider 스위치 조건부. [R-U-01], [R-U-02], [R-U-03] |
+| 지속 실행용 workspace·pane 생성 | tmux 생성 `src/services/platform/tmux.rs:153`; provider 호출 예 `src/services/claude.rs:2852`, `src/services/codex.rs:2220` | provider dispatch `provider_dispatch.rs:358`, `:416`, `:435` → provider Herdr 실행기 → `src/services/herdr_launch.rs:297` → `src/services/session_host/herdr/launch_host.rs:122`의 `workspace.create`·`pane.send_input`. Herdr는 pane 실행 기반을 제공하고 AgentDesk는 실행 준비·Pending 선기록·위치·실행 증거를 소유 | **운영 연결됨**, provider 스위치 조건부. [R-U-01], [R-U-02], [R-U-03] |
 | 첫 prompt·후속 입력과 키 전달 | tmux 입력 `src/services/session_host/tmux_host.rs:96`, `:104`; legacy warm 소비자 `src/services/claude_tui/hosting/host_draft.rs:29` | provider dispatch `provider_dispatch.rs:358`, `:416`, `:435` → Claude `src/services/claude/herdr_turn.rs:166`, `:611` 또는 Codex `src/services/codex/herdr_turn.rs:139`, `:362`, `:497` → `HerdrTarget` mutation gate → `pane.send_text`·bracketed paste·`pane.send_keys`·`pane.send_input` (`src/services/session_host/herdr_gate.rs:386`, `:394`, `:404`, `:418`, `:424`). 対象 검증·입력 불명확 시 hold·턴 의미는 AgentDesk 책임 | **운영 연결됨**, admission·gate 조건부. [R-U-02], [R-U-03], [R-U-11], [R-U-13] |
 | 기록된 실행의 pane 존재·root/provider 프로세스 증거 조회 | legacy restart probe `src/services/discord/recovery_engine/tmux_probe.rs:28` | rehydration `src/services/discord/tui_prompt_relay/rehydration.rs:277`, `:457` → restart reader `src/services/discord/recovery_engine/herdr_reader.rs:181`, `:295` → `SocketHerdrReader::of/read_pane` (`:36`, `:51`, `:55`) → registry view `src/services/session_host/herdr_registry.rs:251` → `HerdrPaneView::read_execution` (`src/services/session_host/herdr_gate.rs:554`) → `session.snapshot` (`:565`)·`pane.process_info` (`:481`, `:575`)と OS 시작 식별. 동일 서버와 저장된 실행의 대조는 AgentDesk 책임 | **운영 연결됨**. 공통 liveness·cwd·PID facade 전체의 이전으로 집계하지 않음. [R-U-08], [R-U-09] |
 | 운영 상태·은퇴를 위한 기록된 pane 조회 | legacy 상태·종료 관측 | `<ADK> herdr status`·`retire`의 CLI 경로 (`src/cli/herdr.rs:171`, `:199`, `:299`) → registry view → `HerdrPaneView::read_execution` → `session.snapshot`·`pane.process_info`. 상태 해석·종료 증명·Retired CAS·hold 해제는 AgentDesk 책임 | **운영 연결됨**. 상태 조회와 진행 턴 완료는 구분. [R-U-02], [R-U-03], [R-U-12] |
@@ -648,7 +648,7 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 | 책임 | 현재 경계 | 상태 |
 |---|---|---|
 | interrupt·세션 보존형 stop | raw `HerdrHost.interrupt`는 `ctrl+c`를 구현하지만 registry의 읽기 전용 host는 interrupt를 거절한다. 제품 Escape 전달은 provider-terminal settlement에 묶여 있으며 생산 settlement는 hard-false | **휴면**. [R-U-04]. 근거: `src/services/session_host/herdr_host.rs:250`; `src/services/session_host/herdr_registry.rs:64`, `:89`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598` |
-| 같은 Claude 채널의 Herdr→legacy 전환 | launch의 Herdr 표식, Retired row witness, Claude tmux 시작 전 gate를 일관되게 전환하는 완료 기능이 없음 | **예정**. [R-U-16], 후속 노드 `i5340_legacy_return`(#5340 범위, 맥 소유). 근거: `src/services/herdr_launch.rs:363`, `:569`; `src/cli/herdr.rs:285`; `src/services/session_host/session_record.rs:12`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20` |
+| 같은 Claude 채널의 Herdr→legacy 전환 | launch의 Herdr 표식, Retired row witness, Claude tmux 시작 전 gate를 일관되게 전환하는 완료 기능이 없음 | **예정**. [R-U-16], 후속 노드 `i5340_legacy_return`(#5340 범위, 맥 소유). 근거: `src/services/herdr_launch.rs:346`, `:569`; `src/cli/herdr.rs:285`; `src/services/session_host/session_record.rs:12`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20` |
 
 | AgentDesk에 남는 책임 | 근거 |
 |---|---|
@@ -685,7 +685,7 @@ H3 probe 이전은 이번 축소 실적으로 계산하지 않는다. 해당 변
 | `src/services/session_host/traits.rs:7`; `src/services/session_host/resolve.rs:425`; `src/services/session_host/consumer_guard.rs` | 공통 host 관측·입력 경계, host 선택과 소비자 guard | AgentDesk 공통 경계. 메서드 구현 제공과 생산 소비자 연결을 구분. 생성·종료·배달 판정은 별도 책임 |
 | `src/services/session_host/herdr/model.rs:180`; `src/services/session_host/herdr/wire.rs:99`, `:117`; `src/services/session_host/herdr/contract.rs` | Socket API 요청·응답·framing·결과 변환 | AgentDesk가 wire와 결과 의미를 해석하고 Herdr가 요청을 실행 |
 | `src/services/session_host/herdr/transport.rs:80`, `:105`, `:143`, `:156` | local Unix socket, peer witness, 읽기 retry와 mutation 단발 전송 | AgentDesk 제어 연결. Herdr UI 클라이언트 재연결과 별개 |
-| `src/services/session_host/herdr/launch_host.rs:122`; `src/services/herdr_launch.rs:314`, `:333`, `:346` | workspace/pane 생성·실행 명령, Pending 선기록과 host 표식 | Herdr는 pane 실행 기반, AgentDesk는 실행 식별·명령·준비·기록 책임 |
+| `src/services/session_host/herdr/launch_host.rs:122`; `src/services/herdr_launch.rs:297`, `:333`, `:346` | workspace/pane 생성·실행 명령, Pending 선기록과 host 표식 | Herdr는 pane 실행 기반, AgentDesk는 실행 식별·명령·준비·기록 책임 |
 | `src/services/session_host/herdr_registry.rs:143`, `:176`, `:251`; `src/services/session_host/herdr_gate.rs:189`, `:302`, `:424`, `:554` | local endpoint, mutation target, 기록된 실행의 read-only view | AgentDesk가 실행 증거와 변경 권한을 검증하고 관측 결과를 해석 |
 | `src/db/dispatched_sessions/hosted_execution.rs:88`, `:382`, `:423`, `:434` | hosted record와 Pending/Bound/Retired CAS | AgentDesk 저장·동시성 계약. pane ID가 실행 정체성을 대신하지 않음 |
 | `src/services/claude/herdr_turn.rs:123`, `:439`, `:594`; `src/services/codex/herdr_turn.rs:113`, `:139`, `:403` | provider별 cold start·후속 입력·source 대기·결과 처리 | provider 대화·턴 의미는 AgentDesk adapter 책임 |
@@ -714,7 +714,7 @@ transport의 재접속과 prompt 재전송을 구분한다. 읽기만 retry하�
 
 종료·retire·매핑 제거 후 같은 Claude 채널이 legacy로 복귀한다는 설명도 사용하지 않는다. 표식과 Retired row 증거를 전환하는 기능은 현재 미확보다. [R-U-16]이 해소되기 전 다른 채널의 성공으로 복귀를 완료 처리하지 않는다.
 
-근거: `src/services/herdr_launch.rs:363`, `:569`; `src/services/session_host/session_record.rs:12`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`.
+근거: `src/services/herdr_launch.rs:346`, `:569`; `src/services/session_host/session_record.rs:12`; `src/services/claude.rs:1776`; `src/services/claude/host_gate.rs:20`.
 
 ### 9.6 실기기 검증 항목과 현재 결과
 

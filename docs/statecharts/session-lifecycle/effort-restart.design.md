@@ -608,7 +608,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | wrapper default | codex_tmux_wrapper/input.rs:279-290 | explicit effort 없고 model 지정이면 high, 양쪽 없으면 None |
 | incarnation 새 nonce | tui_prompt_dedupe/binding_context.rs:333-363 | 새 UUID execution_nonce, expected_native_session_id, launch_mode resume/fresh |
 | incarnation durable | tui_prompt_dedupe/binding_context.rs:366-401 | temp write/fsync/hard-link/parent sync 후 immutable publish; verified Codex archive |
-| Herdr incarnation | herdr_launch.rs:480-511,746 | command 생성 전 durable evidence; stamp spawn markers |
+| Herdr incarnation | herdr_launch.rs:463-494,729 | command 생성 전 durable evidence; stamp spawn markers |
 
 ### Codex Herdr resume는 별도 구현 의존
 

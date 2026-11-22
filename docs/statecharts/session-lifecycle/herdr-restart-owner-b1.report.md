@@ -22,8 +22,8 @@ TLA SHA256 `0bfe4d61abc4dc24a9fb99f93377c5efea85bb70a77546b534f3f2f9bf36b3eb`. �
 | 모델 경계 | 실제 코드 좌표 | 확인한 계약 |
 |---|---|---|
 | ClearBegin | src/services/herdr_launch/clear_epoch.rs:43, src/services/discord/commands/control.rs:523 | 같은 mutex에서 즉시 epoch++/clearing 증가. 기존 effects가 있어도 시작 |
-| LaunchBegin/OwnerFree | src/services/herdr_launch/clear_epoch.rs:98, :190; src/services/claude/herdr_turn.rs:241; src/services/codex/herdr_turn.rs:133; src/services/herdr_launch.rs:405 | provider/token/channel scope. clearing 중 새 startup 등록 거절, 완료 뒤 새 입력 허용 |
-| CheckCreateEpoch | src/services/herdr_launch.rs:546 | Pending 이후 scope epoch 관찰. 거절은 retire_unsent |
+| LaunchBegin/OwnerFree | src/services/herdr_launch/clear_epoch.rs:98, :190; src/services/claude/herdr_turn.rs:241; src/services/codex/herdr_turn.rs:133; src/services/herdr_launch.rs:388 | provider/token/channel scope. clearing 중 새 startup 등록 거절, 완료 뒤 새 입력 허용 |
+| CheckCreateEpoch | src/services/herdr_launch.rs:529 | Pending 이후 scope epoch 관찰. 거절은 retire_unsent |
 | BeginCreateEffect/Create | src/services/herdr_launch/clear_epoch.rs:154; src/services/herdr_launch/prepared.rs:46, :71 | worker 안에서 live epoch/clearing 재검사, create_user_default/create 반환까지 EffectPermit 보유 |
 | worker scope 전달 | src/services/herdr_launch/clear_epoch.rs:236; src/services/claude/herdr_turn/first_input.rs:49; src/services/codex/herdr_turn/first_input.rs:54 | CreatedSubmit 별도 thread에 Arc를 전달하고 동기 TLS scope 설치 |
 | BeginSubmitEffect/SubmitEffect | src/services/claude/herdr_turn/first_input.rs:105; src/services/codex/herdr_turn/first_input.rs:172; src/services/codex/herdr_turn.rs:651 | 실제 composer mutation/run_herdr 앞에서 허가, 물리 반환까지 보유 |

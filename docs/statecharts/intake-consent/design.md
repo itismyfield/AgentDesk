@@ -122,7 +122,7 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | E09 | 같은 파일 `:246–315` | ObserveAndMove → locked hold CAS | FS 관측은 S helper로만 이동. A는 opaque proof와 checked values, 기존 CAS/상위 retirement 결합 유지 | DB hold pub(crate), proof 필수 |
 | E10 | 같은 파일 `:107–180`; `services/discord/router/herdr_consent/custody.rs:205–268` | Release / releases<=1 | S exact durable release receipt → A. nonce만으로 row 생성/증식/새 proof 발급 없음 | DB release pub(crate), LiveSink service scope |
 | E11 | `services/session_host/herdr/policy/consent/settlement.rs:62–105,224–288` | unresolved eligibility / release boundary | D predicate, S Applied/preview/settlement guard·ack는 유지. returned/adopted는 unresolved지만 releasable과 다름 | Consent methods/Store pub(crate) |
-| E12 | `services/discord/router/herdr_consent.rs:24–29,66–77,375–394` | FS inventory / release replay | S store factory/load_all/load_each. 재시작에 persisted IntentRef로 proof 복원 0 | store factory pub(in discord), recover pub(super) |
+| E12 | `services/discord/router/herdr_consent.rs:24–29,79–90,388–407` | FS inventory / release replay | S store factory/load_all/load_each. 재시작에 persisted IntentRef로 proof 복원 0 | store factory pub(in discord), recover pub(super) |
 | E13 | `services/discord/router/herdr_consent/startup.rs:52–87,91–150` | Restart; boot recovery OOS | S local node/user/socket/session 필터, BootState claim/complete, Accepted interruption → existing recovery. 새 Issue 없음 | restore pub(in discord), interrupt private |
 | E14 | `services/session_host/herdr/policy/consent/engine.rs:44–75,129–171,272`; `workflow.rs:93,137,158,222` | FS observation / consent revision OOS | S 복구·click·retry의 기존 load 및 stale-decision guard, DB가 callback으로 호출하지 않음 | runtime service methods, proof factory 없음 |
 | E15 | `config/session_hosts/migration/consent_holds.rs:26–30,61,90` | unresolved inventory OOS | S migration blocking/return 판정. legacy 파일 편집 제외, proof 만들지 못함 | migration service scope, authority 없음 |
@@ -149,7 +149,7 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | file:line | 관측 진입 / 모델 | 제안 경계 |
 |---|---|---|
 | [r2 handoff (255–259)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L255-L259) | 정확한 expected snapshot+unresolved intent / ObserveAndMove | 이 1개 load만 새 S worker_handoff로 이동, begin보다 앞 |
-| `services/discord/router/herdr_consent.rs:76,394` | load_all / load_each inventory, OOS | S 유지 |
+| `services/discord/router/herdr_consent.rs:89,407` | load_all / load_each inventory, OOS | S 유지 |
 | `services/discord/router/herdr_consent/startup.rs:61` | boot interrupt inventory / Restart 경계 | S 유지 |
 | `services/session_host/herdr/policy/consent/engine.rs:149,171,272` | card reserve/retry/apply 최신 관측, OOS | S 유지 |
 | `services/session_host/herdr/policy/consent/workflow.rs:93,137,158,222` | decision/retry/boot 최신 관측, OOS | S 유지 |
