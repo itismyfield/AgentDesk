@@ -497,7 +497,12 @@ mod claim {
     }
 
     type HeadChannelGate = fn(ChannelId, Option<ChannelId>) -> bool;
-    type HeadAdmission = (ChannelId, Option<ChannelId>, HeadChannelGate);
+    type HeadAdmission = (
+        ChannelId,
+        Option<ChannelId>,
+        HeadChannelGate,
+        super::mend::GateCheck,
+    );
 
     pub(crate) enum QueuedHeadClaim {
         Reserved(HeadTicket),
@@ -575,13 +580,9 @@ mod claim {
                 reply,
             } => {
                 let enabled = match admission {
-                    Some((channel, parent, gate)) => channel == channel_id
-                        && crate::services::discord::health::InjectOrigin::queued_head_gate_enabled(
-                            &persistence.provider,
-                            channel,
-                            parent,
-                            gate,
-                        ),
+                    Some((channel, parent, gate, check)) => {
+                        channel == channel_id && check(&persistence.provider, channel, parent, gate)
+                    }
                     None => cfg!(test),
                 };
                 if !enabled {
@@ -787,8 +788,10 @@ mod claim {
             channel: ChannelId,
             parent: Option<ChannelId>,
             gate: HeadChannelGate,
+            check: super::mend::GateCheck,
         ) -> QueuedHeadClaim {
-            self.request_head_claim(expected, persistence, Some((channel, parent, gate)))
+            let admission = Some((channel, parent, gate, check));
+            self.request_head_claim(expected, persistence, admission)
                 .await
         }
 

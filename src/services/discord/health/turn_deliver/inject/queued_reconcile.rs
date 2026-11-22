@@ -127,7 +127,12 @@ pub(super) async fn mend(
             )
         })
         .collect();
-    let admission = (channel, parent, gate);
+    let admission = (
+        channel,
+        parent,
+        gate,
+        super::Origin::queued_head_gate_enabled as _,
+    );
     if let Err(error) = mailbox.mend_queued_head(head, persistence, admission).await {
         let channel_id = channel.get();
         tracing::warn!(channel_id, primary, %error, "queued head proof was not applied");

@@ -56,9 +56,11 @@ pub(crate) use stop_judgement::{
     judge_provider_channel_stop, stop_channel_runtime, stop_judged_provider_channel,
     stop_provider_channel_runtime_with_policy,
 };
+#[cfg(test)]
+pub use stop_result::TOKEN_SUPERSEDED_PATH;
 pub use stop_result::{
-    FINISH_UNOBSERVED_PATH, FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult,
-    InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
+    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, InflightDisposition,
+    RuntimeTurnStopResult,
 };
 
 mod carried_turn_close;

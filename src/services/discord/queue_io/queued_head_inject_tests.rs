@@ -1419,6 +1419,7 @@ async fn s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving
                 admitted_channel,
                 None,
                 gate,
+                crate::services::discord::health::InjectOrigin::queued_head_gate_enabled,
             )
             .await;
         assert!(

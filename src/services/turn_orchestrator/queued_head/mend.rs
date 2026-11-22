@@ -72,6 +72,9 @@ pub(crate) struct UnknownHead {
 }
 
 type Gate = fn(ChannelId, Option<ChannelId>) -> bool;
+/// The queued-head gate check the caller's runtime answers for a provider channel: its own
+/// readiness, then `Gate` on the channel and its parent.
+pub(crate) type GateCheck = fn(&ProviderKind, ChannelId, Option<ChannelId>, Gate) -> bool;
 
 pub(crate) enum MendMsg {
     Inspect {
@@ -81,7 +84,7 @@ pub(crate) enum MendMsg {
     Consume {
         head: Box<UnknownHead>,
         persistence: QueuePersistenceContext,
-        admission: (ChannelId, Option<ChannelId>, Gate),
+        admission: (ChannelId, Option<ChannelId>, Gate, GateCheck),
         reply: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -103,16 +106,10 @@ pub(super) fn step(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: 
         MendMsg::Consume {
             head,
             persistence,
-            admission: (channel, parent, gate),
+            admission: (channel, parent, gate, check),
             reply,
         } => {
-            let open = channel == channel_id
-                && crate::services::discord::health::InjectOrigin::queued_head_gate_enabled(
-                    &persistence.provider,
-                    channel,
-                    parent,
-                    gate,
-                );
+            let open = channel == channel_id && check(&persistence.provider, channel, parent, gate);
             if !open {
                 let _ = reply.send(Err("gate_closed".to_string()));
                 return;
@@ -197,7 +194,7 @@ impl ChannelMailboxHandle {
         &self,
         head: UnknownHead,
         persistence: QueuePersistenceContext,
-        admission: (ChannelId, Option<ChannelId>, Gate),
+        admission: (ChannelId, Option<ChannelId>, Gate, GateCheck),
     ) -> Result<(), String> {
         let msg = |reply| MendMsg::Consume {
             head: Box::new(head),
