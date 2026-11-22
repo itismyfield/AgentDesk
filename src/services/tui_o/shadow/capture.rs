@@ -162,7 +162,7 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     file.take(len).read_to_end(&mut bytes)?;
     #[cfg(all(test, unix))]
     self::io_trace::record_source(file, "source_capture", bytes.len() as u64);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self::io_trace::record(offset, bytes.len() as u64, false);
     Ok(bytes)
 }
@@ -207,7 +207,7 @@ fn hash_prefix_into(
     )?;
     #[cfg(all(test, unix))]
     self::io_trace::record_source(file, "source_prefix", copied);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self::io_trace::record(0, copied, true);
     if copied < len {
         return Err(io::ErrorKind::UnexpectedEof.into());
@@ -691,10 +691,10 @@ mod tests {
 
 pub mod observation;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod io_trace {
     use std::cell::RefCell;
-    #[cfg(unix)]
+    #[cfg(all(test, unix))]
     pub(crate) fn record_source(file: &std::fs::File, tag: &'static str, len: u64) {
         crate::services::codex::actual_submit_tests::source_io::read(file, tag, len);
     }

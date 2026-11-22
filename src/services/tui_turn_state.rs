@@ -14,7 +14,7 @@ pub(crate) use claude_meta::{
 };
 #[path = "tui_turn_state/completion_scan.rs"]
 mod completion_scan;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "tui_turn_state/idle_compaction_tests.rs"]
 pub(crate) mod idle_compaction_tests;
 pub(crate) use self::completion_scan::{

@@ -462,7 +462,7 @@ pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
 /// Test-only: reset the entire dedupe state. Crate-visible so sibling modules
 /// (e.g. `tui_prompt_relay` regression tests) can isolate the shared
 /// prompt-anchor slot under `TEST_LOCK`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_state_for_tests() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
@@ -480,7 +480,7 @@ pub(crate) fn runtime_binding_recorded_at_for_tests(tmux_session_name: &str) -> 
 }
 
 /// Records an aged anchor using a forward-moving test clock, preserving other records' ages.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn record_prompt_anchor_aged_for_tests(
     provider: &str,
     tmux_session_name: &str,

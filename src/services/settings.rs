@@ -16,7 +16,7 @@ pub use catalog::{RuntimeConfigResponse, SettingsConfigEntriesResponse, Settings
 mod resolve;
 mod runtime_config_put;
 pub mod startup;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use resolve::clamp_retry_limit;
 pub use resolve::{
     CONTEXT_COMPACT_LOWER_BOUND_TOKENS, CONTEXT_COMPACT_PERCENT, CONTEXT_COMPACT_PERCENT_CLAUDE,

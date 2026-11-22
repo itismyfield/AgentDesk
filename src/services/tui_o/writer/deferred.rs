@@ -249,7 +249,7 @@ pub(super) async fn retry<I: HostIo>(
         .late
         .then(|| super::late_adopt::Wake::new(waiting.log, channel));
     let started = Instant::now();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Err(detail) =
         activation::test_hook::run(channel, activation::test_hook::Step::DeferredStarted)
     {
@@ -264,7 +264,7 @@ pub(super) async fn retry<I: HostIo>(
     // The last look that found the current source delivered to its end, for a later rebase.
     let mut sample: Option<Sample> = None;
     loop {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Err(detail) =
             activation::test_hook::run(channel, activation::test_hook::Step::DeferredTick)
         {
@@ -515,7 +515,7 @@ async fn commit<I: HostIo>(
             "gateway ownership changed before O activation",
         ));
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     activation::test_hook::run(channel, activation::test_hook::Step::BeforeFence)
         .map_err(Refused::retry)?;
     let fence_sends = {
@@ -531,7 +531,7 @@ async fn commit<I: HostIo>(
         .await
         .map_err(Refused::retry)?;
     let activated = (|| {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         activation::test_hook::run(channel, activation::test_hook::Step::AfterFence)
             .map_err(Refused::retry)?;
         if let Some(detail) = facts.final_blocker() {
