@@ -183,12 +183,16 @@ impl NativePrepared {
                 if slot.cancel_token.is_some() {
                     return Err("native control row authority changed".into());
                 }
-                if !super::record_native_terminal(shared, &row, &outcome.disposition).await {
+                if super::record_native_terminal(shared, &row, &outcome.disposition)
+                    .await
+                    .is_none()
+                {
                     return Ok(None);
                 }
                 let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                     &ProviderKind::Claude,
                     &row,
+                    false,
                 );
                 if !matches!(
                     (clear, detail.reason),

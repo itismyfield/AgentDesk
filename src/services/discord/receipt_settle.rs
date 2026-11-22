@@ -55,11 +55,23 @@ pub(in crate::services::discord) async fn record(
     outcome: TerminalOutcome,
     confirmed_at: DateTime<Utc>,
 ) -> bool {
+    commit_terminal(pool, state, outcome, confirmed_at)
+        .await
+        .unwrap_or(true)
+}
+
+/// None when there is nothing to commit, otherwise whether the receipt became durable.
+async fn commit_terminal(
+    pool: Option<&PgPool>,
+    state: &InflightTurnState,
+    outcome: TerminalOutcome,
+    confirmed_at: DateTime<Utc>,
+) -> Option<bool> {
     let (Some(pool), Some(provider)) = (pool, state.provider_kind()) else {
-        return true;
+        return None;
     };
     if state.user_msg_id == 0 {
-        return true;
+        return None;
     }
     let (turn_id, channel) = execution_key(state);
     let receipt = TurnReceipt {
@@ -73,7 +85,7 @@ pub(in crate::services::discord) async fn record(
         outcome,
         confirmed_at,
     };
-    commit(pool, &receipt).await
+    Some(commit(pool, &receipt).await)
 }
 
 fn execution_key(state: &InflightTurnState) -> (String, String) {
@@ -175,14 +187,24 @@ pub(in crate::services::discord) async fn record_or_stamp(
     state: &InflightTurnState,
     outcome: TerminalOutcome,
 ) -> bool {
+    settle_terminal(pool, state, outcome).await.is_some()
+}
+
+/// `record_or_stamp` that also tells whether the receipt is committed in PG: None keeps the row.
+pub(in crate::services::discord) async fn settle_terminal(
+    pool: Option<&PgPool>,
+    state: &InflightTurnState,
+    outcome: TerminalOutcome,
+) -> Option<bool> {
     let stamp = state.terminal_receipt.unwrap_or(TerminalReceiptStamp {
         outcome,
         confirmed_at: Utc::now(),
     });
-    if record(pool, state, stamp.outcome, stamp.confirmed_at).await {
-        return true;
+    match commit_terminal(pool, state, stamp.outcome, stamp.confirmed_at).await {
+        Some(true) => Some(true),
+        None => Some(false),
+        Some(false) => (!keep_marked(state, stamp)).then_some(false),
     }
-    !keep_marked(state, stamp)
 }
 
 /// After a failed commit: marks the row so it stays until its receipt is recorded. True keeps

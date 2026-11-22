@@ -1,6 +1,6 @@
 # Receipt handoff across restart and same-id retry (#8289)
 
-Code base: `e1ef00a08500e1e2b4e6b040bdd0446873e4ff06` (first repair) plus the second repair.
+Code base: `e1ef00a08500e1e2b4e6b040bdd0446873e4ff06` (first repair) plus the second and third repairs.
 
 Two small models cover where an origin-carrying execution's turns receipt meets another owner.
 
@@ -9,11 +9,14 @@ Two small models cover where an origin-carrying execution's turns receipt meets 
 A native completion whose receipt commit failed keeps its row marked (`terminal_receipt`). A
 graceful shutdown then runs `inflight::mark_restart_mode_blocking`, and the next boot runs
 `BootInputs::prepare`, the boot reaper and `BootInputs::restore` before the runtime starts.
+The native result may also land after shutdown already marked the row DrainRestart (`Complete`
+from `Stopped`), committing the receipt or stamping it while PG is down.
 
 | Config | Result |
 |---|---|
 | `NativeReceiptRestartBefore` | RED as expected: `NoBootHeld` (the marked row gets DrainRestart, so the native CAS refuses it after PG returns; a boot while PG is still down fails on the pending receipt) and `ReceiptEventuallySettled` |
-| `NativeReceiptRestartFixed` | GREEN: restart marking skips a row awaiting its receipt (`inflight.rs::set_inflight_restart_mode_under_lock`), and a pending receipt at boot leaves the input unsettled for the writer's retry instead of failing restore (`native_restore.rs::RestoredInput::drive`) |
+| `NativeReceiptRestartFixed` | GREEN: restart marking skips a row awaiting its receipt (`inflight.rs::set_inflight_restart_mode_under_lock`), and a pending receipt at boot leaves the input unsettled for the writer's retry instead of failing restore (`native_restore.rs::RestoredInput::drive`); the native snapshot CAS lets a prior generation's DrainRestart marker pass once the receipt committed (`clear_store/snapshot.rs::for_native_snapshot_with_detail`) |
+| `NativeReceiptRestartMarkerStrict` | RED as expected (second repair's code): `NoBootHeld` (marker first, then the native result commits the receipt; the next boot's CAS still refuses the marked row: "native boot row CAS deferred") and `ReceiptEventuallySettled` |
 
 ## WatcherRetryReceipt
 

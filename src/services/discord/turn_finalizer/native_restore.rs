@@ -168,6 +168,7 @@ impl RestoredInput {
                     let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,
                         &row,
+                        false,
                     );
                     if !matches!(
                         (clear, detail.reason),
@@ -313,20 +314,21 @@ impl RestoredInput {
                     {
                         return Err("native boot row authority changed".into());
                     }
-                    if !super::super::terminal_handler::record_native_terminal(
+                    let Some(committed) = super::super::terminal_handler::record_native_terminal(
                         shared,
                         &row,
                         &outcome.disposition,
                     )
                     .await
-                    {
+                    else {
                         // The row stays marked and unsettled; boot goes on and the writer
                         // retries this debt once the receipt can commit.
                         return Ok(());
-                    }
+                    };
                     let (cleared, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,
                         &row,
+                        committed,
                     );
                     if !matches!(
                         (cleared, detail.reason),

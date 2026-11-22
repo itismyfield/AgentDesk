@@ -555,14 +555,15 @@ pub(in crate::services::discord::turn_finalizer) fn native_terminal_outcome(
     }
 }
 
-/// Commits the row's terminal before a native cleanup removes it; false keeps the row marked.
+/// Commits the row's terminal before a native cleanup removes it: None keeps the row marked,
+/// Some(true) once the receipt is committed in PG.
 #[cfg(unix)]
 pub(in crate::services::discord::turn_finalizer) async fn record_native_terminal(
     shared: &SharedData,
     row: &super::super::inflight::InflightTurnState,
     disposition: &crate::services::tui_input::human_frame::history::v2::native::Disposition,
-) -> bool {
-    crate::services::discord::receipt_settle::record_or_stamp(
+) -> Option<bool> {
+    crate::services::discord::receipt_settle::settle_terminal(
         shared.pg_pool.as_ref(),
         row,
         native_terminal_outcome(disposition),
@@ -776,11 +777,15 @@ impl NativeCleanup {
             let Some(row) = self.row_snapshot(key, true)? else {
                 return Ok(false);
             };
-            if !record_native_terminal(shared, &row, &outcome.disposition).await {
+            let Some(committed) = record_native_terminal(shared, &row, &outcome.disposition).await
+            else {
                 return Ok(false);
-            }
-            let (cleared, detail) =
-                GuardedClearOutcome::for_native_snapshot_with_detail(&ProviderKind::Claude, &row);
+            };
+            let (cleared, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
+                &ProviderKind::Claude,
+                &row,
+                committed,
+            );
             if !matches!(
                 (cleared, detail.reason),
                 (GuardedClearOutcome::Cleared, _) | (GuardedClearOutcome::Missing, "not_found")

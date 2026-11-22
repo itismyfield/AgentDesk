@@ -1125,6 +1125,7 @@ input-single-path/NativePreparationTypedBefore.cfg	NativeInputPreparation	NoUnty
 input-single-path/NativePreparationTypedFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeReceiptRestartBefore.cfg	NativeReceiptRestart	NoBootHeld	ReceiptEventuallySettled
 input-single-path/NativeReceiptRestartFixed.cfg	NativeReceiptRestart	-	-
+input-single-path/NativeReceiptRestartMarkerStrict.cfg	NativeReceiptRestart	NoBootHeld	ReceiptEventuallySettled
 input-single-path/NativeSupplyBootBefore.cfg	NativeInputPreparation	SupplyBootNoRemint	-
 input-single-path/NativeSupplyBootFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeSupplyKeyBefore.cfg	NativeInputPreparation	SupplyTyped	-

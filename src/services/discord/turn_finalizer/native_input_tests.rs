@@ -945,6 +945,7 @@ fn native_8148_b2b2_runtime_witness_rejects_nonce_aba_under_row_lock() {
     let (outcome, detail) = inflight::GuardedClearOutcome::for_native_snapshot_with_detail(
         &ProviderKind::Claude,
         &captured,
+        false,
     );
     assert_eq!(outcome, inflight::GuardedClearOutcome::UserMsgMismatch);
     assert_eq!(detail.reason, "native_runtime_changed");
