@@ -1002,9 +1002,12 @@ async fn start_reserved_headless_turn_admitted(
         register_headless_original(shared, &provider, &inflight_state, &cancel_token)
             .await
             .map_err(|_| HeadlessTurnStartError::original_start_deferred())?;
-    let created =
-        crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state);
-    super::foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)
+    let agy_foreground = replay_request
+        .save_inflight_claim(
+            &mut inflight_state,
+            &cancel_token,
+            early_thread_parent.as_ref().map(|(parent, _)| parent.get()),
+        )
         .await?;
 
     let _ = attach_paused_turn_watcher_for_inflight(
@@ -1131,7 +1134,7 @@ async fn start_reserved_headless_turn_admitted(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
                                 registration_origin: canonical_registration.then_some(false),
-                                agy_foreground: None,
+                                agy_foreground,
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

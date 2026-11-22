@@ -9,11 +9,12 @@ use uuid::Uuid;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::router::TurnKind;
+use crate::services::imsg_reply::agy_input;
 use crate::services::provider::{CancelToken, ProviderKind, StreamJsonDialectId};
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, dialects::agy, execute_streaming,
 };
-use crate::services::tui_o::store::agy_spool::{AgyReservation, AgySpool};
+use crate::services::tui_o::store::agy_spool::{AgyReservation, AgySpool, ImessageSource};
 
 use super::StreamingTurn;
 
@@ -25,6 +26,7 @@ pub(in crate::services::discord::router::message_handler) struct AgyForeground {
     nonce: Uuid,
     session_key: String,
     ready: Option<ReadyWriter>,
+    imessage: Result<Option<ImessageSource>, &'static str>,
 }
 
 #[derive(Clone)]
@@ -36,6 +38,16 @@ struct ReadyWriter {
 }
 
 impl AgyForeground {
+    pub(in crate::services::discord::router::message_handler) fn stamp_http(
+        state: &mut InflightTurnState,
+    ) {
+        if let Some(claim) = agy_input::claimed() {
+            state.agy_imessage_source_sha256 = Some(claim.source.digest().to_string());
+            state.input_origin_ids = vec![claim.guid];
+            state.logical_channel_id = Some(claim.selection.logical_channel);
+        }
+    }
+
     pub(in crate::services::discord::router::message_handler) fn from_claim(
         source: Option<MessageId>,
         kind: TurnKind,
@@ -62,7 +74,55 @@ impl AgyForeground {
             session_key: state.session_key.clone().filter(|key| !key.is_empty())?,
             // Writer selection supplies this permit once the agy reader is wired.
             ready: None,
+            imessage: Ok(None),
         })
+    }
+
+    pub(in crate::services::discord::router::message_handler) fn from_http_claim(
+        inflight_saved: bool,
+        state: &InflightTurnState,
+        cancel: &CancelToken,
+        logical_channel: Option<u64>,
+    ) -> Option<Self> {
+        let claim = agy_input::claimed()?;
+        let ready = claim.selection;
+        let token_nonce = cancel.turn_nonce();
+        let nonce = token_nonce
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .unwrap_or_default();
+        let session_key = state.session_key.clone().unwrap_or_default();
+        let exact = inflight_saved
+            && agy_input::ready(&ProviderKind::Antigravity, state.channel_id).as_ref()
+                == Some(&ready)
+            && state.provider_kind() == Some(ProviderKind::Antigravity)
+            && state.channel_id == ready.destination
+            && logical_channel == Some(ready.logical_channel)
+            && state.user_msg_id == claim.message
+            && state.request_owner_user_id == claim.author
+            && state.agy_imessage_source_sha256.as_deref() == Some(claim.source.digest())
+            && state.turn_nonce.as_deref() == token_nonce
+            && !nonce.is_nil()
+            && !session_key.is_empty();
+        Some(Self {
+            destination: state.channel_id,
+            logical_channel: ready.logical_channel,
+            message: state.user_msg_id,
+            nonce,
+            session_key,
+            ready: Some(ReadyWriter {
+                runtime_root: ready.root,
+                destination: ready.destination,
+                logical_channel: ready.logical_channel,
+                generation: ready.generation,
+            }),
+            imessage: exact
+                .then_some(Some(claim.source))
+                .ok_or("agy iMessage claim is not durable or exact"),
+        })
+    }
+
+    pub(super) fn requires_agy(&self) -> bool {
+        !matches!(self.imessage, Ok(None))
     }
 
     fn reserve(
@@ -70,6 +130,7 @@ impl AgyForeground {
         turn: &StreamingTurn<'_>,
         request: &ProviderTurnRequest,
     ) -> Result<Option<AgySpool>, String> {
+        let imessage = self.imessage.as_ref().map_err(|reason| *reason)?;
         let Some(ready) = &self.ready else {
             return Ok(None);
         };
@@ -82,7 +143,7 @@ impl AgyForeground {
                 .and_then(|nonce| Uuid::parse_str(nonce).ok())
                 != Some(self.nonce)
         {
-            return Err("agy recording permit does not match the Discord claim".into());
+            return Err("agy recording permit does not match the channel claim".into());
         }
         let resume = request
             .session
@@ -91,18 +152,19 @@ impl AgyForeground {
                 Uuid::parse_str(token.as_str()).map_err(|_| "agy recording resume id is not a UUID")
             })
             .transpose()?;
-        AgySpool::reserve(
-            &ready.runtime_root,
-            AgyReservation {
-                destination: self.destination,
-                logical_channel: self.logical_channel,
-                message: self.message,
-                nonce: self.nonce,
-                session_key: &self.session_key,
-                writer_generation: ready.generation,
-                resume,
-            },
-        )
+        let input = AgyReservation {
+            destination: self.destination,
+            logical_channel: self.logical_channel,
+            message: self.message,
+            nonce: self.nonce,
+            session_key: &self.session_key,
+            writer_generation: ready.generation,
+            resume,
+        };
+        match imessage {
+            Some(source) => AgySpool::reserve_imessage(&ready.runtime_root, input, source),
+            None => AgySpool::reserve(&ready.runtime_root, input),
+        }
         .map(Some)
         .map_err(|error| format!("could not reserve the agy recording: {error}"))
     }

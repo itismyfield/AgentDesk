@@ -19,13 +19,14 @@ pub(super) fn validate_edit_input(input: &DefinitionInput) -> Result<(), Rejecti
             code: DefinitionErrorCode::InvalidField,
             target: Some("workflow_options".into()),
             path: Vec::new(),
+            pipeline_errors: Vec::new(),
         }));
     }
     Ok(())
 }
 
 fn context(state: &CampaignState, binding: &ApprovalBinding) -> Result<(), Rejection> {
-    if state.definition_revision != binding.definition_revision {
+    if state.legacy_execution_revision() != binding.definition_revision {
         return Err(Rejection::new(RejectionCode::StaleDefinition));
     }
     let run = state

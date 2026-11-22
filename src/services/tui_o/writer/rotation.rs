@@ -35,6 +35,8 @@ pub const RETIRE_QUIET: Duration = Duration::from_secs(10);
 pub const OLD_GROWTH_ALARM: Duration = Duration::from_secs(600);
 /// A retired source is watched this long; growth un-retires it.
 pub const RETIRED_WATCH: Duration = Duration::from_secs(24 * 60 * 60);
+/// Herdr records no Codex end, so its replaced drained source retires after this shorter silence.
+pub const HERDR_UNPROVEN_SILENCE: Duration = Duration::from_secs(60 * 60);
 pub const MAX_READERS: usize = 3;
 const DORMANT_QUIET: Duration = Duration::from_secs(30);
 const DORMANT_POLL: Duration = Duration::from_secs(60);

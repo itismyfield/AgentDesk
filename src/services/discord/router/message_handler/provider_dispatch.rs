@@ -298,6 +298,16 @@ fn execute_inner(
     sender: Sender<StreamMessage>,
     owner: Option<OwnerTurn>,
 ) -> Result<(), String> {
+    if turn
+        .agy_foreground
+        .as_ref()
+        .is_some_and(AgyForeground::requires_agy)
+        && (*turn.provider != ProviderKind::Antigravity
+            || !matches!(turn.host, TurnHost::Tmux)
+            || owner.is_some())
+    {
+        return Err("agy iMessage turn cannot use another execution path".into());
+    }
     let start = if start.receipt_id().is_some() {
         let scope = replay_scope::selected(turn.provider, turn.channel_id, turn.tmux_session_name);
         start

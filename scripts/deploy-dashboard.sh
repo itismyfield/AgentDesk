@@ -8,6 +8,10 @@ REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_SRC="$REPO/dashboard"
 . "$SCRIPT_DIR/lib/dashboard_build_commit.sh"
 
+# Dependencies: install from package-lock.json only when node_modules no longer matches it (same check as deploy-release.sh).
+node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$DASHBOARD_SRC" \
+    || bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$DASHBOARD_SRC"
+
 # Build
 echo "▸ Building dashboard..."
 cd "$DASHBOARD_SRC"

@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, channel_reset, clear_fresh_session, health_readiness, herdr_stop, http_auth, known_gap, preflight_evidence, restart_guard
+from . import assertions, channel_reset, clear_fresh_session, discord, health_readiness, herdr_stop, http_auth, known_gap, preflight_evidence, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -360,10 +360,11 @@ def run(driver, scenario, args, client, run_id, result):
     # As on tmux, a skip or pass without the observed mode/class fails a required gate.
     if not args.dry_run and result["status"] != "fail":
         gate = {"scenario_id": str(scenario.get("id"))}
-        (driver._apply_observed_required_agent_mode_gate(
+        # Both run in order, like the tmux early skips, so a class violation is still recorded.
+        driver._apply_observed_required_agent_mode_gate(
             result, required=getattr(args, "required_agent_mode", None), declared=result["agent_mode"], **gate)
-         or driver._apply_observed_required_coverage_class_gate(
-            result, required=getattr(args, "required_coverage_class", None), declared=result["coverage_class"], **gate))
+        driver._apply_observed_required_coverage_class_gate(
+            result, required=getattr(args, "required_coverage_class", None), declared=result["coverage_class"], **gate)
     return result
 
 
@@ -502,8 +503,12 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 if raw and (row.get("author") or {}).get("bot"):
                     return row.get("content", "")
                 return assertions.relay_body(row) if author is None else assertions.author_relay_body(row, author)
-            found, rows = client.wait_for_message(
-                args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
+            try:
+                found, rows = client.wait_for_message(
+                    args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
+            except discord.FetchTransportTimeout as error:
+                ingest(error.observed)
+                raise
             ingest(rows)
             if not found:
                 gap_failure = bool(gap_token and gap_token["marker"] == marker and scenario["id"] != "E-18")
@@ -516,6 +521,16 @@ def _run_checked(driver, scenario, args, client, run_id, result):
         def provider_author(step):
             return assertions.provider_bot_id(driver.cell_provider(args.cell)) if (
                 step.get("relay_author") == "provider" or "wait_for_provider_hold_state" in step) else None
+
+        def require_absent(ended):
+            nonlocal phase
+            # Provider content, not relay_body: a streaming footer would hide the marker.
+            ingest(client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
+            provider = assertions.provider_bot_id(driver.cell_provider(args.cell))
+            if any(ended in r.get("content", "") for r in window.raw_messages
+                   if str((r.get("author") or {}).get("id") or "") == provider):
+                phase = "inconclusive"
+                raise assertions.AssertionError(f"inconclusive: {ended} posted before or during the follow-up send")
 
         def open_gap(index, marker=None):
             nonlocal gap_token
@@ -556,11 +571,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     prompt = str(step.get("send_prompt", step.get("send_discord_prompt"))).replace("{run_id}", run_id)
                 if step.get("requires_absent"):
                     # A follow-up after the hold already ended proves nothing about busy input.
-                    ingest(client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
-                    ended = str(step["requires_absent"]).replace("{run_id}", run_id)
-                    if any(ended in (assertions.relay_body(r) or "") for r in window.raw_messages):
-                        phase = "inconclusive"
-                        raise assertions.AssertionError(f"inconclusive: {ended} posted before the follow-up was sent")
+                    require_absent(str(step["requires_absent"]).replace("{run_id}", run_id))
                 gap_token = None
                 is_clear = prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]
                 if is_clear:
@@ -576,11 +587,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     driver._ack_send(entry, sent)
                     result["real_provider_contacted"] = True
                     result["agent_mode_actual"] = "real_live"
-                    driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
                     gap_failure = False
                     raise
+                if step.get("requires_absent"):
+                    # The hold may have ended while the send was in flight.
+                    require_absent(str(step["requires_absent"]).replace("{run_id}", run_id))
+                driver.post_send_sleep(step)
                 if is_clear:
                     # Replies to this clear follow its own message id; without one none can be attributed.
                     raw = (sent.get("message_id") or sent.get("id")) if isinstance(sent, dict) else None
@@ -606,8 +620,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             elif "wait_for_raw_discord_text" in step:
                 marker = step["wait_for_raw_discord_text"]
                 deadline = time.monotonic() + float(step.get("timeout_s", 30))
+                retry = discord.TransportRetry()
                 while True:
-                    rows = client.fetch_messages(args.channel_id, after_id=after_id, limit=100)
+                    rows = retry.fetch(lambda: client.fetch_messages(args.channel_id, after_id=after_id, limit=100))
+                    if rows is None:
+                        if time.monotonic() >= deadline:
+                            retry.raise_if_unobserved([])
+                        time.sleep(1)
+                        continue
                     ingest(rows)
                     refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
                     if refusal:

@@ -1944,6 +1944,8 @@ pub(super) async fn handle_text_message(
             adk_session_key.as_deref(),
         )
         .await;
+        use crate::services::discord::inflight::{StartEntry, stamp_process_driver_start};
+        stamp_process_driver_start(&mut inflight_state, &turn_host, StartEntry::DiscordIntake);
         let submission = crate::services::discord::inflight::install_managed_submission_boundary(
             &mut inflight_state,
             &turn_host,
@@ -1966,6 +1968,7 @@ pub(super) async fn handle_text_message(
                 };
             }
         };
+        super::provider_dispatch::AgyForeground::stamp_http(&mut inflight_state);
         inflight_create_log::record_turn_start_origin(shared, &provider, channel_id, &inflight_state).await;
         let mut inflight_saved = false;
         let create = context::track_inflight_create(&mut inflight_saved, |state| save_intake_inflight(codex_seed.as_ref(), state));
@@ -2074,7 +2077,7 @@ pub(super) async fn handle_text_message(
         let cache_ttl_minutes =
             super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
         let registration_origin = Some(dispatch_id.is_some());
-        let agy_foreground = super::provider_dispatch::AgyForeground::from_claim(discord_message, turn_kind, inflight_saved, &inflight_state, &cancel_token);
+        let agy_foreground = super::provider_dispatch::AgyForeground::from_http_claim(inflight_saved, &inflight_state, &cancel_token, Some(logical_channel_id)).or_else(|| super::provider_dispatch::AgyForeground::from_claim(discord_message, turn_kind, inflight_saved, &inflight_state, &cancel_token));
         let provider_execution_context = super::provider_isolation::execution_context(&provider, role_binding.as_ref(), channel_id.get(), adk_session_key.clone(), tmux_session_name.clone(), channel_name.clone());
         let dispatch_type_for_mcp = dispatch_type_str.clone();
         // Run the provider in a blocking thread

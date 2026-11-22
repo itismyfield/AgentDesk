@@ -17,6 +17,10 @@ pub(crate) struct ThreadTurnRuntime {
 }
 
 impl ThreadTurnRuntime {
+    pub(crate) fn parent_id(&self) -> u64 {
+        self.parent.get()
+    }
+
     pub(crate) async fn read(
         registry: &HealthRegistry,
         parent: ChannelId,

@@ -1,6 +1,8 @@
 use super::*;
 use crate::services::stream_json_cli::codec::AgyCodec;
-use crate::services::tui_o::store::agy_spool::{AgyReservation, AgySpool, CHECKPOINT, SEGMENT};
+use crate::services::tui_o::store::agy_spool::{
+    AgyReservation, AgySpool, CHECKPOINT, ImessageSource, SEGMENT,
+};
 use crate::services::tui_o::store::fault;
 use serde_json::{Value, json};
 use std::fs;
@@ -8,6 +10,47 @@ use std::num::NonZeroU64;
 use uuid::Uuid;
 
 const ID: &str = "c1c2e570-1f0e-466a-aa13-6aa3dbf604cb";
+
+#[test]
+fn same_imessage_origin_cannot_reserve_two_execution_ids() {
+    let root = tempfile::tempdir().unwrap();
+    let source = ImessageSource::from_guid("p:0/Assistant-GUID").unwrap();
+    assert_eq!(
+        source.digest(),
+        "d144ec4da71c5dd246697895b3bfef87c15aefd68de658b59cbcc63900cd0969"
+    );
+    let reserve = |destination, message| {
+        AgySpool::reserve_imessage(
+            root.path(),
+            AgyReservation {
+                destination,
+                logical_channel: 42,
+                message,
+                nonce: Uuid::from_u128(message.into()),
+                session_key: "discord:41",
+                writer_generation: NonZeroU64::new(45).unwrap(),
+                resume: None,
+            },
+            &source,
+        )
+    };
+    assert!(reserve(41, 43).is_ok());
+    assert_eq!(
+        reserve(41, 44)
+            .err()
+            .expect("same source reserved twice")
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(reserve(42, 44).is_ok());
+    let slot = root
+        .path()
+        .join(format!("o_store/41/agy/v1/imsg-{}", source.digest()));
+    let open: Value = serde_json::from_slice(&fs::read(slot.join(SEGMENT)).unwrap()).unwrap();
+    assert_eq!(open["turn_key"]["id"], 43);
+    assert_eq!(open["data"]["ingress"], "imessage_http");
+    assert_eq!(open["data"]["original_input_sha256"], source.digest());
+}
 
 struct Fixture {
     root: tempfile::TempDir,

@@ -10,7 +10,7 @@ CONSTANTS Jobs, Workers, MaxBudget, MaxCrash, MaxStops, MaxEdits, Gates, LateEve
 
 VARIABLES control, mode, fence, savedReview, activeReview, check, edits,
           state, visit, facts, used, eff, grant, entry, appr, late,
-          cmd, mem, crashes, stops, ghost
+          cmd, mem, crashes, stops, ghost, editor
 store == <<control, mode, fence, savedReview, activeReview, check, edits>>
 job == <<state, visit, facts, used, eff, grant, entry, appr, late>>
 vars == <<store, job, cmd, mem, crashes, stops, ghost>>
@@ -47,7 +47,13 @@ Decidable(j) == Live(j) /\ eff[j].st = "done" /\ Choice(j) # "wait"
 NextOf(j) == IF state[j] = "work" /\ activeReview THEN "review" ELSE "done"
 Counted(j) == ~(Bug = "outerUncounted" /\ state[j] = "review")
 
+EditorInitial == [control |-> "prepared", revision |-> 1, valid |-> TRUE,
+              review |-> TRUE, stage |-> "none", validation |-> "none",
+              savedFrom |-> "prepared", cas |-> TRUE,
+              deletedOccupied |-> FALSE, migrated |-> FALSE]
+
 Init ==
+    /\ editor = EditorInitial
     /\ control = "prepared" /\ mode = "none" /\ fence = 0
     /\ savedReview = TRUE /\ activeReview = TRUE /\ check = "none" /\ edits = 0
     /\ state = [j \in Jobs |-> "none"] /\ visit = [j \in Jobs |-> 0]
@@ -250,7 +256,7 @@ Resume(adopt) ==
     /\ UNCHANGED <<savedReview, check, edits, used, grant, late, cmd, mem, crashes, stops>>
 
 Done == UNCHANGED vars
-Next ==
+RunNext ==
     \/ Validate \/ SaveDelete \/ BeginRun \/ Crash \/ Settle \/ Done
     \/ \E m \in {"immediate", "finish"} : RequestStop(m)
     \/ \E a \in BOOLEAN : Resume(a)
@@ -270,7 +276,8 @@ Fair ==
          /\ WF_vars(Observe(j)) /\ WF_vars(TimerFire(j)) /\ WF_vars(\E g \in Gates : Approve(j, g))
          /\ WF_vars(HostLaunch(j)) /\ WF_vars(HostCancel(j)) /\ WF_vars(Receipt(j))
          /\ WF_vars(Interrupt(j)) /\ WF_vars(Finish(j)) /\ WF_vars(Reconcile(j))
-Spec == Init /\ [][Next]_vars /\ Fair
+Next == RunNext /\ UNCHANGED editor
+Spec == Init /\ [][Next]_<<vars, editor>> /\ Fair
 
 \* ---- Rules ----
 OneCommittedExitPerVisit == ~ghost.dup
@@ -290,4 +297,72 @@ AdoptionDoesNotReenter == ~ghost.reentry
 TerminalNeedsEvidence == \A j \in Jobs : state[j] \in Terminal => eff[j].st \notin Busy
 
 InstanceTerminates == \A j \in Jobs : (state[j] # "none") ~> (state[j] \in Terminal)
+
+\* ---- Editor transaction (separate finite configuration) ----
+EditorGuarded == TRUE
+EditorBefore == FALSE
+Editable(c) == c \in {"prepared", "stopped"}
+StageIds == [plan |-> "requirements", design |-> "design",
+             design_review |-> "design_review", work |-> "implementation",
+             review |-> "review", landing |-> "landing",
+             main_check |-> "main_verification", final_check |-> "final_verification",
+             complete |-> "complete"]
+LegacyResult(s) == CASE s = "complete" -> "success"
+                     [] s \in {"design", "design_review"} -> "unavailable"
+                     [] OTHER -> "pending"
+MigratedResult(s) ==
+    LET mapped == IF ~EditorGuarded /\ s = "work" THEN "complete" ELSE StageIds[s]
+    IN CASE mapped = "complete" -> "success"
+         [] mapped \in {"design", "design_review"} -> "unavailable"
+         [] OTHER -> "pending"
+
+EditorValidate(valid, remove) ==
+    editor' = [editor EXCEPT !.validation =
+        CASE ~valid -> "invalid"
+          [] remove /\ editor.stage = "review" -> "in_use"
+          [] OTHER -> "ok"]
+
+EditorAdvance ==
+    \/ /\ editor.control = "prepared"
+       /\ editor' = [editor EXCEPT !.control = "running", !.stage = "review"]
+    \/ /\ editor.control = "running"
+       /\ editor' = [editor EXCEPT !.control = "stopping"]
+    \/ /\ editor.control = "stopping"
+       /\ editor' = [editor EXCEPT !.control = "stopped"]
+    \/ /\ editor.control = "running"
+       /\ editor' = [editor EXCEPT !.control = "succeeded", !.stage = "complete"]
+
+EditorWritable(rev) ==
+    /\ editor.revision < 3
+    /\ ~EditorGuarded \/ (Editable(editor.control) /\ rev = editor.revision)
+
+EditorSaved(rev) ==
+    [editor EXCEPT !.revision = @ + 1, !.savedFrom = editor.control,
+                   !.cas = rev = editor.revision]
+
+EditorSave(rev, valid, remove) ==
+    /\ EditorWritable(rev)
+    /\ ~EditorGuarded \/ (valid /\ (~remove \/ editor.stage # "review"))
+    /\ editor' = [EditorSaved(rev) EXCEPT !.valid = valid, !.review = @ /\ ~remove,
+          !.deletedOccupied = @ \/ (remove /\ editor.stage = "review" /\ editor.review)]
+
+EditorMigrate(rev) ==
+    /\ EditorWritable(rev) /\ editor.review /\ ~editor.migrated
+    /\ editor' = [EditorSaved(rev) EXCEPT !.migrated = TRUE]
+
+EditStep ==
+    \/ EditorAdvance
+    \/ \E v, d \in BOOLEAN : EditorValidate(v, d)
+    \/ \E r \in 1..2 : EditorMigrate(r) \/ \E v, d \in BOOLEAN : EditorSave(r, v, d)
+    \/ UNCHANGED editor
+
+EditorNext == EditStep /\ UNCHANGED vars
+
+ValidatedDefinitionOnly == editor.valid
+RevisionOnlyWhenEditable == Editable(editor.savedFrom)
+RevisionMatchesExpected == editor.cas
+OccupiedStateKept == ~editor.deletedOccupied
+MigrationKeepsResult ==
+    editor.migrated => \A s \in DOMAIN StageIds : MigratedResult(s) = LegacyResult(s)
+
 =============================================================================
