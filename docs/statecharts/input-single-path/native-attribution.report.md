@@ -17,7 +17,7 @@ Code SHA: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`.
 
 | 모델 값 | 해당 전수표 행/코드 | 추상화 |
 |---|---|---|
-| Ids=1,2; lease=0/1/2; rows/pending은 Ids 부분집합 | lease/anchor 표, `turn_orchestrator.rs:1944`, `:1989`, `:2015`, `:2042` | 원본 1과 뒤 head 2, 0은 lease 없음. 실제 message-id 0을 주입하지 않음 |
+| Ids=1,2; lease=0/1/2; rows/pending은 Ids 부분집합 | lease/anchor 표, `turn_orchestrator.rs:1948`, `:1989`, `:2015`, `:2042` | 원본 1과 뒤 head 2, 0은 lease 없음. 실제 message-id 0을 주입하지 않음 |
 | stage Pending/Injected/Waiting/Dequeued/Running/AssistantEnd/Withdrawn | O queued stage와 `queued::classify`; 입력 등록·strict closer 표 | 저장된 원본, 받은 입력, 실행 소속, 본문 종료, 철회를 구별 |
 | native Idle/External/Own, members/ran/closed | `InputFacts::mark`, `TurnTracker::observe` | External도 member로 가입한 ADK 입력을 실행할 수 있음 |
 | nativeQueue = empty/External/1, pc=0..10 | enqueue/dequeue/remove/command 진입점 | 외부 enqueue를 먼저 소비한 뒤 ADK FIFO를 읽는 fixture. 모든 FIFO permutation의 parser 정확성은 구현 시험 |

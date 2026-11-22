@@ -19,6 +19,7 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod headless_start;
 mod herdr_user_stop;
 #[cfg(unix)]
 mod http_terminate;
@@ -76,6 +77,9 @@ use dispatch_reservation::{
 pub(crate) use episode_identity::TokenFinish;
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
+pub(crate) use headless_start::{
+    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus,
+};
 #[cfg(test)]
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;

@@ -78,7 +78,7 @@
 | `turn_view_reconciler` (1137) | `turn_view_reconciler::TurnViewReconciler` | 40/40 | M 유지. reaction/view reconciliation 실행 객체; engine 완료 bus와 구별. |
 | `readopted_mailbox_ledger` (1138) | `readopted_mailbox_ledger::ReadoptedMailboxLedger` | 0/1 | E 저장/M 접근 경계로 잔류. 값 필드는 ProviderKind/u64/String/bool뿐이고 엔진 원장이다. 단 from_state(26행)는 D 범위 InflightTurnState를 읽고 SharedData helper가 private entries를 갱신하므로 이번 P0의 pure state 폐쇄에서 보류; 봇 전용이라고 분류하지 않음. |
 
-분류의 추가 좌표: `src/services/discord/shared_state.rs:26`(ui), `src/services/discord/shared_state.rs:48`(http), `src/services/discord/shared_state.rs:58`(policy), `src/services/discord/shared_state.rs:410`(override UI 혼합), `src/services/discord/shared_state.rs:440`(dispatch), `src/services/discord/shared_state.rs:622`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:14`(lease 포함), `src/services/discord/inflight.rs:947`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
+분류의 추가 좌표: `src/services/discord/shared_state.rs:26`(ui), `src/services/discord/shared_state.rs:48`(http), `src/services/discord/shared_state.rs:58`(policy), `src/services/discord/shared_state.rs:410`(override UI 혼합), `src/services/discord/shared_state.rs:440`(dispatch), `src/services/discord/shared_state.rs:622`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:14`(lease 포함), `src/services/discord/inflight.rs:939`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
 
 ### 1.2 기존 송신 port와 구현
 
@@ -583,7 +583,7 @@ I-set은 A~G 전환 뒤 old 이름의 잔여 재수출/상위 import만 정리�
 
 ## 8. 검증과 완료 판정
 
-main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**의 `src/domain/outbound.rs:1`/`src/domain/outbound/port.rs:88`에 Serenity 없는 송신 값/port가 있고, `src/domain/message_split.rs:5`/`src/domain/message_split.rs:25`에 아래 층 splitter/단위 계산이 있다. `src/domain/outbound/ids.rs:8`의 snowflake serde 계약, `src/services/turn_orchestrator.rs:1141`의 mailbox registry도 재사용한다. 이것은 새 MessengerOutbound/EngineRuntime이 이미 완료됐다는 뜻은 아니다.
+main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**의 `src/domain/outbound.rs:1`/`src/domain/outbound/port.rs:88`에 Serenity 없는 송신 값/port가 있고, `src/domain/message_split.rs:5`/`src/domain/message_split.rs:25`에 아래 층 splitter/단위 계산이 있다. `src/domain/outbound/ids.rs:8`의 snowflake serde 계약, `src/services/turn_orchestrator.rs:1142`의 mailbox registry도 재사용한다. 이것은 새 MessengerOutbound/EngineRuntime이 이미 완료됐다는 뜻은 아니다.
 
 이 문서 레그에서는 cargo 금지에 따라 Rust 대상 시험·뮤턴트·clippy·빌드를 실행하지 않는다. prepush에 내장된 Python 정적 검사/CI wiring unittest는 수행한다. `check_doc_path_refs.py` rc=0, docs-only cap, `prepush_gates.sh --static-only`를 실행한다. `source_scan_readers.py --run`은 변경 문서를 읽는 module이 없는 경우 cargo 없이 반환하는 것을 스크립트에서 먼저 확인한 뒤 실행한다. 선택 0이면 **해당 없음(문서 독자 없음)**이지 시험 PASS가 아니다. Rust 시험 바이너리·PG·cargo profile 증거는 해당 없음으로 보고한다.
 

@@ -10,7 +10,7 @@
 
 | 값 | 코드 좌표 | 모델 행동 |
 |---|---|---|
-| 대기열 원본 1·2, lease 없음/있음, actor token·nonce | `src/services/turn_orchestrator.rs:1944`, `:1989`, `:2015`, `:2028`, `:2042`, `:2061`; `episode_identity.rs:142` | Inject, BootRestore, Settle |
+| 대기열 원본 1·2, lease 없음/있음, actor token·nonce | `src/services/turn_orchestrator.rs:1948`, `:1989`, `:2015`, `:2028`, `:2042`, `:2061`; `episode_identity.rs:142` | Inject, BootRestore, Settle |
 | native Unknown/Open/Idle 및 record range | `src/services/tui_o/writer/input_facts.rs:22`, `:39`, `:552`; `shadow/seal.rs:98` | ExternalStart, OwnStart, Duration, Reconstruct |
 | Waiting/Dequeued/Attached/Running; enqueue/dequeue/remove/absorbed/command | `src/services/tui_o/writer/input_facts/queued.rs:9`, `:60`; `src/services/tui_o/writer/input_facts/native.rs:13`, `:33` (B1에서 기존 classifier만 이동) | Enqueue, Dequeue, Withdraw, MidTurnJoin |
 | assistant end_turn은 strict idle과 다름 | `src/services/tui_o/shadow/identity.rs:70`; `src/services/tui_turn_state.rs:15` | AssistantEnd, Duration |
@@ -107,8 +107,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/router/message_handler/tui_followup.rs:679` | `defer_promoted_dispatch_if_hosted_tui_busy` | BootRestore / Reconstruct |
 | `src/services/discord/router/message_handler/turn_lifecycle.rs:14` | `mailbox_try_start_turn_with_terminal_marker_cleanup` | Inject(배타 lease claim) |
 | `src/services/discord/router/message_handler/turn_lifecycle.rs:31` | `mailbox_try_start_turn_with_terminal_marker_cleanup` | Inject(배타 lease claim) |
-| `src/services/discord/router/turn_start.rs:723` | `release_mailbox_after_placeholder_post_failure` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/router/turn_start.rs:742` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/router/turn_start.rs:635` | `release_mailbox_after_placeholder_post_failure` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/router/turn_start.rs:654` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/tmux.rs:651` | `start_monitor_auto_turn_when_available` | Inject(배타 lease claim) |
 | `src/services/discord/tmux_restart_handoff.rs:463` | `release_relinquished_turn_mailbox` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/tmux_watcher/turn_stream_collector.rs:239` | `collect_turn_stream_body` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
@@ -130,26 +130,26 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_lease.rs:299` | `claim` | OperatorRelease |
 | `src/services/discord/zombie_foreground_release.rs:354` | `release_zombie_foreground_turn_guarded` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/queue/cancel_effects.rs:212` | `purge_on` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:642` | `try_start_turn` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:649` | `try_start_turn` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:662` | `try_start_turn_with_persistence` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:669` | `try_start_turn_with_persistence` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:685` | `try_start_turn_kinded` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:692` | `try_start_turn_kinded` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:704` | `try_start_turn_kinded_with_persistence` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:646` | `try_start_turn` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:653` | `try_start_turn` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:666` | `try_start_turn_with_persistence` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:673` | `try_start_turn_with_persistence` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:689` | `try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:696` | `try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:708` | `try_start_turn_kinded_with_persistence` | Inject(배타 lease claim) |
 | `src/services/turn_orchestrator.rs:713` | `try_start_turn_kinded_with_persistence` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:724` | `try_start_turn_kinded_result` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:749` | `try_start_owner_front` | Inject(배타 lease claim) |
-| `src/services/turn_orchestrator.rs:772` | `restore_active_turn` | BootRestore / Reconstruct |
+| `src/services/turn_orchestrator.rs:728` | `try_start_turn_kinded_result` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:753` | `try_start_owner_front` | Inject(배타 lease claim) |
+| `src/services/turn_orchestrator.rs:776` | `restore_active_turn` | BootRestore / Reconstruct |
 | `src/services/turn_orchestrator.rs:779` | `restore_active_turn` | BootRestore / Reconstruct |
-| `src/services/turn_orchestrator.rs:790` | `restore_active_turn_kinded` | BootRestore / Reconstruct |
-| `src/services/turn_orchestrator.rs:916` | `finish_turn` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:1619` | `finalize_turn_state` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:1625` | `finalize_turn_state` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:2392` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:2434` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:2460` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/turn_orchestrator.rs:2492` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:794` | `restore_active_turn_kinded` | BootRestore / Reconstruct |
+| `src/services/turn_orchestrator.rs:920` | `finish_turn` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:1623` | `finalize_turn_state` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:1629` | `finalize_turn_state` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:2396` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:2430` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:2464` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/turn_orchestrator.rs:2489` | `input_mailbox_step` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator/checked_purge.rs:7` | `purge_queue` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator/checked_purge.rs:32` | `purge_queue` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator/checked_purge.rs:85` | `try_purge_queue` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
@@ -207,7 +207,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/health/recovery/watchdog_pass.rs:119` | `revalidate_and_clear_explicit_background_inflight` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/health/recovery/watchdog_pass.rs:363` | `run_stall_watchdog_pass` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/health/recovery/watchdog_pass.rs:579` | `run_stall_watchdog_pass` | BootRestore / ProjectionSave / ProjectionClear |
-| `src/services/discord/inflight.rs:539` | `remove_inflight_row_for_policy_op` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/engine/ops/exec_ops.rs:18` | `remove_inflight_row_for_policy_op` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/inflight/clear_store/abandon.rs:94` | `request_inflight_abandon_if_matches` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/inflight/clear_store/abandon.rs:103` | `request_inflight_abandon_if_matches` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/inflight/clear_store/abandon.rs:115` | `request_inflight_abandon_if_matches_in_root` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
@@ -440,7 +440,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
-| `src/engine/ops/exec_ops.rs:337` | `register_exec_ops_with_runner` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
+| `src/engine/ops/exec_ops.rs:347` | `register_exec_ops_with_runner` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/clear_store/herdr_row_end.rs:64` | `clear_restarted_herdr_row` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/clear_store/identity.rs:42` | `clear_inflight_state_if_matches_identity_returning_row_in_root` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
 | `src/services/discord/inflight/clear_store/identity.rs:94` | `remove_identity_matched_state` | ProjectionSave / ProjectionClear (공통 lock·identity 구현과 alias) |
@@ -598,8 +598,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/router/message_handler/intake_turn/stale_dispatch_guard.rs:66` | `abort_terminal_dispatch_at_turn_start` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:611` | `wake` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/router/message_handler/tui_followup.rs:701` | `defer_promoted_dispatch_if_hosted_tui_busy` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/router/turn_start.rs:725` | `release_mailbox_after_placeholder_post_failure` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/router/turn_start.rs:751` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/router/turn_start.rs:637` | `release_mailbox_after_placeholder_post_failure` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/router/turn_start.rs:663` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:95` | `run_bot_spawn_recovery_and_flush_restart_reports` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:136` | `run_bot_spawn_recovery_and_flush_restart_reports` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/session_transition.rs:153` | `wake_installed_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -663,12 +663,12 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_presence/supervisor.rs:869` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_presence/supervisor.rs:874` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/zombie_foreground_release.rs:386` | `release_zombie_foreground_turn_guarded` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:138` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:825` | `recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:1153` | `wait` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:1174` | `turn_finished` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:2061` | `input_mailbox_step` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/turn_orchestrator.rs:2072` | `input_mailbox_step` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:142` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:829` | `recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:1157` | `wait` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:1178` | `turn_finished` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:2065` | `input_mailbox_step` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/turn_orchestrator.rs:2076` | `input_mailbox_step` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/recovery_kickoff.rs:39` | `kickoff_refusal` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/recovery_kickoff.rs:48` | `kickoff_refusal` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator/recovery_kickoff.rs:58` | `occupied_kickoff_outcome` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -687,12 +687,12 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
-| `src/services/turn_orchestrator.rs:1997` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator.rs:2001` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
-| `src/services/turn_orchestrator.rs:2036` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
+| `src/services/turn_orchestrator.rs:2005` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator.rs:2040` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
-| `src/services/turn_orchestrator.rs:2069` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
+| `src/services/turn_orchestrator.rs:2044` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator.rs:2073` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
+| `src/services/turn_orchestrator.rs:2077` | `input_mailbox_step` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator/lease_release.rs:43` | `detach_active_turn_anchor` | Inject / BootRestore / Settle(본문 actor 분기) |
 | `src/services/turn_orchestrator/lease_release.rs:50` | `detach_active_turn_anchor` | Inject / BootRestore / Settle(본문 actor 분기) |
 

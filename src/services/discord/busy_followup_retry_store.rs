@@ -8,15 +8,14 @@ use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
-use super::{
-    InflightTurnState, Intervention, MailboxEnqueueOutcome, SharedData,
-    mailbox_requeue_intervention_front,
-};
+use super::{Intervention, MailboxEnqueueOutcome, SharedData, mailbox_requeue_intervention_front};
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
 #[cfg(test)]
 mod hold_release_tests;
+mod inflight_row;
 mod policy;
+pub(crate) use inflight_row::FollowupRetryRow;
 pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};
 pub(in crate::services::discord) use policy::{auto_pick, decode_checked};
@@ -242,7 +241,7 @@ pub(in crate::services::discord) async fn requeue_inflight_for_followup_retry(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
+    inflight_state: &dyn FollowupRetryRow,
 ) -> MailboxEnqueueOutcome {
     // Boxed so the futures of callers that await a retry stay small.
     Box::pin(requeue_inflight(
@@ -258,11 +257,11 @@ async fn requeue_inflight(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
+    inflight_state: &dyn FollowupRetryRow,
 ) -> MailboxEnqueueOutcome {
-    let user_msg_id = inflight_state.user_msg_id;
+    let user_msg_id = inflight_state.user_msg_id();
     let retry_user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id();
-    if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
+    if user_msg_id == 0 || inflight_state.user_text().trim().is_empty() {
         return MailboxEnqueueOutcome::default();
     }
     let message_id = MessageId::new(user_msg_id);
@@ -271,7 +270,7 @@ async fn requeue_inflight(
     // Every merged id rides along so catch-up never recovers one twice. Row order stays because
     // the text fallback maps lines to ids by position; a missing primary or retry goes last.
     let mut source_message_ids: Vec<MessageId> = inflight_state
-        .source_message_ids
+        .source_message_ids()
         .iter()
         .filter(|id| **id != 0)
         .map(|id| MessageId::new(*id))
@@ -282,7 +281,7 @@ async fn requeue_inflight(
     let source_message_queued_generations = source_message_ids
         .iter()
         .map(|&source_id| {
-            if source_id == message_id && inflight_state.followup_preserve_on_cancel {
+            if source_id == message_id && inflight_state.followup_preserve_on_cancel() {
                 SourceMessageQueuedGeneration::user_instruction(source_id, queued_generation)
             } else {
                 SourceMessageQueuedGeneration::new(source_id, queued_generation)
@@ -290,20 +289,20 @@ async fn requeue_inflight(
         })
         .collect();
     let intervention = Intervention {
-        author_id: UserId::new(inflight_state.request_owner_user_id),
+        author_id: UserId::new(inflight_state.request_owner_user_id()),
         author_is_bot: false,
         message_id,
         queued_generation,
         source_message_ids,
         source_message_queued_generations,
         source_text_segments: Vec::new(),
-        text: inflight_state.user_text.clone(),
+        text: inflight_state.user_text().to_owned(),
         mode: crate::services::turn_orchestrator::InterventionMode::Soft,
         created_at: std::time::Instant::now(),
-        reply_context: inflight_state.followup_reply_context.clone(),
-        has_reply_boundary: inflight_state.followup_has_reply_boundary,
-        merge_consecutive: inflight_state.followup_merge_consecutive,
-        pending_uploads: inflight_state.followup_pending_uploads.clone(),
+        reply_context: inflight_state.followup_reply_context().clone(),
+        has_reply_boundary: inflight_state.followup_has_reply_boundary(),
+        merge_consecutive: inflight_state.followup_merge_consecutive(),
+        pending_uploads: inflight_state.followup_pending_uploads().clone(),
     };
     mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
 }
@@ -640,7 +639,7 @@ pub(in crate::services::discord) fn draft_held_inputs(
 pub(in crate::services::discord) fn release_notice(
     provider: &ProviderKind,
     channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
+    inflight_state: &dyn FollowupRetryRow,
 ) {
     let user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id();
     let Some(state) = load(provider, channel_id.get(), user_msg_id) else {
@@ -717,6 +716,7 @@ fn clear_if_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::InflightTurnState;
 
     fn record_busy_retry_at(
         provider: &ProviderKind,

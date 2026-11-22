@@ -328,8 +328,8 @@ pub(crate) use crate::domain::lifecycle::InflightRestartMode;
 #[cfg(all(test, unix))]
 pub(crate) use router::TurnKind;
 pub(crate) use router::{
-    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
-    IntakeRequest, checkpoint_waits_for_admission, execute_intake_turn_core,
+    HeadlessTurnStartError, IntakeExecution, IntakeRequest, checkpoint_waits_for_admission,
+    execute_intake_turn_core,
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;

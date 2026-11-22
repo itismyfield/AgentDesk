@@ -69,16 +69,16 @@ are omitted: `foreign_row.rs:90`, `catch_up.rs:631`, `queue_effects.rs:320` and
 | `discord/mod.rs:1640`, `queue_io/turn_admission.rs:312` | Shared adapters preserving the refusal reason. |
 | `turn_orchestrator/registry_purge.rs:260,270` | Enqueue through resolved actor; retry only a closed actor. |
 | `turn_orchestrator/claim_observation.rs:214` | Send the actor Enqueue command. |
-| `turn_orchestrator.rs:2089,2100`, `claim_observation.rs:176` | Replay guard before hydrate; refuse a reserved primary or absorbed id. |
+| `turn_orchestrator.rs:2093,2100`, `claim_observation.rs:176` | Replay guard before hydrate; refuse a reserved primary or absorbed id. |
 | `turn_orchestrator/queue_enqueue.rs:25` | Existing queued-source duplicate check. |
 | `turn_orchestrator/queued_head/v2/control.rs:69,86` | Separate V2 enqueue; legacy Take is withheld, outside this reservation model. |
-| `turn_orchestrator.rs:2287`, `dispatch_reservation.rs:38,49` | Take: the only production setter of `pending_user_dispatch`. |
-| `turn_orchestrator.rs:2010`, `dispatch_reservation.rs:90,112` | Release by matching claim; absorbed ids become active. Completion follows claim, with no remaining reservation. |
+| `turn_orchestrator.rs:2291`, `dispatch_reservation.rs:38,49` | Take: the only production setter of `pending_user_dispatch`. |
+| `turn_orchestrator.rs:2014`, `dispatch_reservation.rs:90,112` | Release by matching claim; absorbed ids become active. Completion follows claim, with no remaining reservation. |
 | `turn_orchestrator/front_requeue.rs:69,101,106,129,144,152,186` | Authorized return: lease checked, queue persisted, reservation cleared. New return preserves marker; old restore keeps its prior settlement. |
 | `discord/queue_dispatch.rs:487,501` | Existing authorized restore adapter for admission defer, transition busy, promoted busy and dispatch errors. |
-| `turn_orchestrator.rs:2328`, `dispatch_reservation.rs:234,241` | Release by explicit abandon or reservation-only clear. |
+| `turn_orchestrator.rs:2332`, `dispatch_reservation.rs:234,241` | Release by explicit abandon or reservation-only clear. |
 | `turn_orchestrator/dispatch_cleanup.rs:8,17,24,34,41,50` | Abandon APIs choose marker consumption; ordinary abandon has no lease requirement. |
-| `turn_orchestrator.rs:2190`, `dispatch_reservation.rs:256,274` | Release orphan reservation before marker self-heal. |
+| `turn_orchestrator.rs:2194`, `dispatch_reservation.rs:256,274` | Release orphan reservation before marker self-heal. |
 | `turn_orchestrator/inbound_order.rs:105,114,160` | Existing stalled-reservation valves. |
 | `turn_orchestrator/clear_channel.rs:210`, `checked_purge.rs:55` | Explicit clear/purge, excluded from eventual-execution assumptions. |
 

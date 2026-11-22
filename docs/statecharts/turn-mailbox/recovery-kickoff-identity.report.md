@@ -19,10 +19,10 @@
 
 | 전이 | 코드 |
 |---|---|
-| `Start` | `turn_orchestrator.rs:2014`(try_start_turn), TUI 직접 `synthetic_start/claim/admitted.rs:121` |
+| `Start` | `turn_orchestrator.rs:2018`(try_start_turn), TUI 직접 `synthetic_start/claim/admitted.rs:121` |
 | `Restart` | 메일박스 actor 상태는 메모리, inflight 행은 디스크에 남는다 |
-| `Reattach`(창 살아 있음) | `recovery_engine/runtime.rs:193`,`:325` → `turn_orchestrator.rs:2014` |
-| `Kickoff`(창 없음) | `restore_inflight.rs:2245` + `restore_inflight/kickoff_identity.rs:20` → `turn_orchestrator.rs:2086` |
+| `Reattach`(창 살아 있음) | `recovery_engine/runtime.rs:193`,`:325` → `turn_orchestrator.rs:2018` |
+| `Kickoff`(창 없음) | `restore_inflight.rs:2245` + `restore_inflight/kickoff_identity.rs:20` → `turn_orchestrator.rs:2090` |
 | `Finalize` | `turn_bridge/post_loop_finalize.rs:686` → `turn_finalizer/episode.rs:93` → `episode_identity.rs:345`, miss 로그 `turn_finalizer/finalize.rs:254` |
 | `Stale` | 앞 턴의 늦은 terminal, `turn_finalizer/finalize.rs:188` |
 
