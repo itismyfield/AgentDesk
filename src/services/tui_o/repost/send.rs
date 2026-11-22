@@ -94,7 +94,7 @@ impl RepostEnvelope {
             self.silent,
         )
         .content(self.content.clone())
-        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
+        .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions())
         .nonce(nonce)
         .enforce_nonce(true);
         if !self.additional {

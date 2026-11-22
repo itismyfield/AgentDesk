@@ -421,6 +421,8 @@ impl HealthRegistry {
     pub fn new() -> Self {
         // A live registry implies the observer hook, so every registry install path publishes.
         super::tui_prompt_relay::install_observer_publication();
+        // Custody readers below Discord need the same registry-time install.
+        super::terminal_delivery_custody::install_runtime_reads();
         Self {
             channel_home_seed_issues: tokio::sync::Mutex::new(Vec::new()),
             providers: tokio::sync::Mutex::new(Vec::new()),
