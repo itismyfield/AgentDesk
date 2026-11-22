@@ -166,7 +166,7 @@ pub(crate) use test_fixtures::ready_gateway_for_test;
 pub(crate) use test_fixtures::register_resume_watcher_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use test_fixtures::rest_for_test;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use test_fixtures::resume_owner_channel_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use test_fixtures::revoke_notice_author_for_test;
@@ -425,6 +425,7 @@ pub(in crate::services::discord) use synthetic_headless_message_id::{
 };
 mod bot_runtime;
 pub(super) use bot_runtime::Context;
+#[cfg(unix)]
 use bot_runtime::DEAD_SESSION_REAP_INTERVAL;
 use bot_runtime::DEFERRED_RESTART_POLL_INTERVAL;
 pub(super) use bot_runtime::Data;

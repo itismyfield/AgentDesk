@@ -1,6 +1,12 @@
 //! Queue-exit feedback: reactions, queued placeholder cards and internal follow-ups.
 
-use super::*;
+use super::{
+    Arc, ChannelId, HashMap, Instant, Intervention, InterventionMode, MessageId, ProviderKind,
+    QueueExitEvent, QueueExitKind, QueuedCardDisposition, QueuedCardTeardown, SharedData, UserId,
+    mailbox_enqueue_intervention, queue_dispatch, queue_marker, queue_overflow_dlq,
+    queued_card_gate, queued_placeholders_store, runtime_bootstrap,
+    schedule_deferred_idle_queue_kickoff, serenity,
+};
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
     match kind {

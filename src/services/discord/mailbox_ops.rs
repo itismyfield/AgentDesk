@@ -1,6 +1,20 @@
 //! Mailbox and idle-queue operations the Discord runtime runs against a channel's actor.
 
-use super::*;
+#[cfg(unix)]
+use super::tmux;
+use super::{
+    ActiveTurnKind, Arc, AutomaticQueueProgression, CancelToken, ChannelId, ChannelMailboxSnapshot,
+    HasPendingSoftQueueResult, HashMap, HydratePendingQueueResult, Intervention,
+    MailboxEnqueueOutcome, MailboxTakeNextSoftOutcome, MessageId,
+    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, ProviderKind, SharedData, UserId,
+    VALVE_CLEARED_DISPATCH_MARKER_GRACE, apply_queue_exit_feedback, automatic_queue_progression,
+    catch_up_missed_messages_for_retry, inflight, load_channel_pending_dispatch_marker,
+    mailbox_finish, mailbox_has_blocking_active_turn, mailbox_take_next_automatic_intervention,
+    queue_io, queue_persistence_context, schedule_deferred_idle_queue_kickoff,
+    schedule_deferred_idle_queue_kickoff_immediate, should_trigger_catch_up_retry,
+    take_catch_up_retry_checkpoint_after_queue_drain, task_supervisor, tui_direct_pending_start,
+    turn_bridge,
+};
 
 pub(super) async fn mailbox_snapshot(
     shared: &SharedData,

@@ -1,6 +1,6 @@
 //! Bot-level settings persisted to disk and the per-user records kept alongside them.
 
-use super::*;
+use super::{ChannelId, DEFAULT_ALLOWED_TOOLS, Instant, ProviderKind, UserId};
 
 /// Bot-level settings persisted to disk
 #[derive(Clone)]

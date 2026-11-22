@@ -1,6 +1,18 @@
 //! The Discord bot's shared runtime state and its test fixtures.
 
-use super::*;
+use super::{
+    Arc, CHANNEL_ROSTER_MAX_USERS, CatchUpRetryState, ChannelId, ChannelMailboxHandle,
+    DiscordBotSettings, DispatchRoutingState, EngineRuntime, Ordering, PlaceholderState,
+    QueuedPlaceholderState, RestartLifecycle, RuntimeHttpCache, SessionOverrideState,
+    TmuxRelayCoord, TmuxWatcherRegistry, UserId, UserRecord, answer_flush_barrier,
+    delivery_lease_cell, health, inflight, readopted_mailbox_ledger, shared_state,
+    turn_completion_events, turn_finalizer, turn_view_reconciler,
+};
+#[cfg(test)]
+use super::{
+    ChannelMailboxRegistry, CoreState, PolicyRuntime, ProviderKind, placeholder_cleanup,
+    placeholder_controller, placeholder_live_events, router,
+};
 
 /// Shared state for the Discord bot — split into independently-lockable groups.
 ///

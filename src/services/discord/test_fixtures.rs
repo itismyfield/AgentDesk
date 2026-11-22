@@ -1,6 +1,10 @@
 //! Discord runtime test fixtures shared by the crate's tests.
 
-use super::*;
+#[cfg(unix)]
+use super::tmux;
+use super::{Arc, ChannelId, SharedData, TmuxWatcherHandle, tmux_watcher_now_ms};
+#[cfg(unix)]
+use super::{ProviderKind, queue_dispatch, serenity, shared_state, tui_prompt_relay};
 
 #[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
