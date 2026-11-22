@@ -1,20 +1,14 @@
 //! #3479: the TUI-direct prompt anchor COMPLETION lifecycle (`⏳ → ✅`).
 //!
-//! Behavior-preserving extraction of the live-relay anchor-completion cluster
-//! from the `tui_prompt_relay` parent module: the visibility gate, the deferred
-//! `⏳`-completion drain decision, and the reaction-swap completers (shared-slot
-//! and pinned-injected-message paths). These run the production reaction swap
-//! against the real shared dedupe state, so the move MUST stay byte-identical.
+//! Behavior-preserving extraction of the live-relay anchor-completion cluster:
+//! the visibility gate, the deferred `⏳`-completion drain decision, and the
+//! reaction-swap completers (shared-slot and pinned-injected-message paths).
+//! These run the production reaction swap against the real shared dedupe state.
 //!
-//! Every dependency is reached via the `use super::*;` glob, EXCEPT the
-//! `super::formatting` module path (which the glob does not re-export): from
-//! this child the parent's `super::formatting` is `super::super::formatting`.
-//! The externally-called helpers are re-exported by the parent via
-//! `pub(in crate::services::discord) use self::anchor_completion::{...}` so the
-//! `crate::services::discord::tui_prompt_relay::{...}` call sites stay
-//! byte-identical.
+//! `tui_prompt_relay` re-exports the helpers it and its callers name, and the
+//! log lines keep that module's target.
 
-use super::*;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 pub(in crate::services::discord) fn should_complete_tui_direct_anchor_lifecycle(
     terminal_output_committed: bool,
@@ -31,7 +25,7 @@ pub(in crate::services::discord) fn should_complete_tui_direct_anchor_lifecycle(
 
 /// #3174: outcome of the relay's deferred ⏳-completion drain decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DeferredAnchorCompletionDrain {
+pub(in crate::services::discord) enum DeferredAnchorCompletionDrain {
     /// No matching marker for this turn — common path, do nothing.
     NoMarker,
     /// A matching marker was present AND command_http is available: the marker
@@ -57,7 +51,7 @@ pub(super) enum DeferredAnchorCompletionDrain {
 /// This decision runs against the real shared dedupe state, so an
 /// integration-style test that records a matching marker and calls this function
 /// observes the production consume/fail-open behaviour directly.
-pub(super) fn decide_deferred_anchor_completion_drain(
+pub(in crate::services::discord) fn decide_deferred_anchor_completion_drain(
     provider: &str,
     tmux_session_name: &str,
     turn_lease_generation: u64,
@@ -103,6 +97,7 @@ async fn finish_anchor_completion(
     .await
     {
         tracing::warn!(
+            target: "agentdesk::services::discord::tui_prompt_relay::anchor_completion",
             provider = %provider,
             channel_id = anchor.channel_id,
             tmux_session_name = %tmux_session_name,
@@ -118,6 +113,7 @@ async fn finish_anchor_completion(
         anchor,
     );
     tracing::info!(
+        target: "agentdesk::services::discord::tui_prompt_relay::anchor_completion",
         provider = %provider,
         channel_id = anchor.channel_id,
         tmux_session_name = %tmux_session_name,

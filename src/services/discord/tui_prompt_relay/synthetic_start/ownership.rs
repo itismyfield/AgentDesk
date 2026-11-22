@@ -94,17 +94,6 @@ pub(in crate::services::discord::tui_prompt_relay) fn tui_direct_synthetic_infli
     })
 }
 
-fn tui_direct_watcher_synthetic_inflight_shape_matches(
-    state: Option<&InflightTurnState>,
-    tmux_session_name: &str,
-) -> bool {
-    state.is_some_and(|state| {
-        state.turn_source == TurnSource::ExternalInput
-            && state.tmux_session_name.as_deref() == Some(tmux_session_name)
-            && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
-    })
-}
-
 /// A passive synthetic claim has resolved away from the BridgeAdapter once
 /// either the tmux watcher or the session-bound relay owns terminal delivery.
 /// The Codex/Claude idle observers record their provisional BridgeAdapter lease
@@ -124,17 +113,6 @@ pub(in crate::services::discord::tui_prompt_relay) fn tui_direct_synthetic_non_b
                 RelayOwnerKind::SessionBoundRelay => session_bound_relay_has_live_producer,
                 _ => false,
             }
-    })
-}
-
-pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matches(
-    state: Option<&InflightTurnState>,
-    tmux_session_name: &str,
-    current_offset: u64,
-) -> bool {
-    state.is_some_and(|state| {
-        tui_direct_watcher_synthetic_inflight_shape_matches(Some(state), tmux_session_name)
-            && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
     })
 }
 

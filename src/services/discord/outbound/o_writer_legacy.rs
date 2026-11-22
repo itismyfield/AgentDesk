@@ -103,7 +103,7 @@ impl LegacyView for LegacyRelay {
     }
 
     fn tail_running(&self, tmux: &str) -> bool {
-        super::super::tui_prompt_relay::claude_idle_tail_running(tmux)
+        super::super::tmux_watcher_registry::idle_tail_state::claude_idle_tail_running(tmux)
     }
 
     /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.

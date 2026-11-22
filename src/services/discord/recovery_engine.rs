@@ -129,6 +129,9 @@ pub(in crate::services::discord) mod herdr_row_end;
 mod turn_mode_restart_tests;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
+#[path = "recovery_engine/herdr_attach.rs"]
+pub(in crate::services::discord) mod herdr_attach;
+#[cfg(unix)]
 #[path = "recovery_engine/herdr_reader.rs"]
 pub(in crate::services::discord) mod herdr_reader;
 #[cfg(unix)]

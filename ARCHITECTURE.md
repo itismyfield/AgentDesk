@@ -2379,6 +2379,7 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── herdr_admitted_restart.rs
 │   │   │   ├── herdr_admitted_restart_tests.rs
+│   │   │   ├── herdr_attach.rs
 │   │   │   ├── herdr_before_start_restart.rs
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
@@ -3116,6 +3117,7 @@ src/
 │   │   │   ├── owner_observation/
 │   │   │   │   └── tests.rs
 │   │   │   ├── fences.rs
+│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── owner_observation.rs
 │   │   │   └── session_binding.rs
 │   │   ├── tui_direct_abort_marker/
@@ -3252,7 +3254,6 @@ src/
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
-│   │   │   ├── anchor_completion.rs
 │   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
@@ -3271,7 +3272,6 @@ src/
 │   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── hook_observer.rs
 │   │   │   ├── idle_offset_resolution.rs
-│   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── input_notice.rs
@@ -3654,6 +3654,7 @@ src/
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
+│   │   │   ├── anchor_completion.rs
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── injected.rs
