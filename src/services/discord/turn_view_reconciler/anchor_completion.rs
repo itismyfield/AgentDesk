@@ -1,12 +1,7 @@
 //! #3479: the TUI-direct prompt anchor COMPLETION lifecycle (`⏳ → ✅`).
 //!
-//! Behavior-preserving extraction of the live-relay anchor-completion cluster:
-//! the visibility gate, the deferred `⏳`-completion drain decision, and the
-//! reaction-swap completers (shared-slot and pinned-injected-message paths).
-//! These run the production reaction swap against the real shared dedupe state.
-//!
-//! `tui_prompt_relay` re-exports the helpers it and its callers name, and the
-//! log lines keep that module's target.
+//! Visibility gate, deferred `⏳`-completion drain decision and reaction-swap completers; the
+//! relay imports what it calls, and the log lines keep the `tui_prompt_relay` module target.
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 

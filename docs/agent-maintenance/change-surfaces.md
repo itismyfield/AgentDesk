@@ -1235,8 +1235,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     the `DeferredAnchorCompletionDrain` enum + `decide_deferred_anchor_completion_drain`
     drain decision, `complete_tui_direct_prompt_anchor_lifecycle_if_present`,
     `pinned_anchor_cleanup_target`, and `complete_tui_direct_anchor_lifecycle_for_inflight` —
-    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (deps reached via
-    `use super::*;`, only `super::formatting` becomes `super::super::formatting`).
+    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (removed; later moved under turn_view_reconciler).
+    Deps were reached via `use super::*;`, only `super::formatting` became `super::super::formatting`.
     The three helpers reached from sibling discord modules (`tmux_watcher.rs`,
     `recovery_engine.rs`) are re-exported at `pub(in crate::services::discord)`;
     the relay-internal drain decision/enum are re-imported privately, so the call
