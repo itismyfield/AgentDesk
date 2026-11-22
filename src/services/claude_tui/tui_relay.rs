@@ -769,6 +769,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tui_send_holds_composer_lock_across_paste_and_enter() {
+        use crate::test_support::wait::{WAIT_CAP, recv_within};
         use std::sync::mpsc;
         use std::time::Duration;
 
@@ -799,7 +800,10 @@ mod tests {
             }
         }
 
-        let session = format!("adk-tui-send-lock-{}", uuid::Uuid::new_v4());
+        // A Claude-named session resolves its provider from the name: no tmux probe before the paste
+        // stretches past the 50ms window and hides a send that skips the lock.
+        let session = crate::services::provider::ProviderKind::Claude
+            .build_tmux_session_name(&format!("lock-{}", uuid::Uuid::new_v4().simple()));
         let (holding_tx, holding_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (paste_tx, paste_rx) = mpsc::channel();
@@ -815,9 +819,8 @@ mod tests {
                 },
             );
         });
-        holding_rx
-            .recv_timeout(Duration::from_millis(250))
-            .expect("compact must acquire the composer lock first");
+        // Positive waits return on the event; the long cap only absorbs CI scheduling stalls.
+        recv_within(&holding_rx, WAIT_CAP);
 
         // Fire `/tui/send` on another thread; it must block on the composer lock.
         let handler_session = session.clone();
@@ -838,9 +841,7 @@ mod tests {
             "/tui/send paste must wait behind the /compact composer lock"
         );
         release_tx.send(()).expect("release compact");
-        paste_rx
-            .recv_timeout(Duration::from_millis(250))
-            .expect("/tui/send paste proceeds once the composer lock releases");
+        recv_within(&paste_rx, WAIT_CAP);
     }
 
     /// P3 #4616 regression: the async `handle_send` must offload its blocking
