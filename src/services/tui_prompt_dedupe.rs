@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 use std::time::Instant;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_clock::Instant;
 use tokio::sync::broadcast;
 
@@ -402,7 +402,7 @@ mod injected_steer_tests;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_clock {
     use super::*;
     use std::ops::{Add, AddAssign, Sub, SubAssign};

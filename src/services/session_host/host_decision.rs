@@ -291,13 +291,13 @@ async fn observe_thread(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FORCED_PRESENCE: std::sync::Mutex<
     std::collections::BTreeMap<String, (SessionPresence, usize)>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn presence(name: &str) -> SessionPresence {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some((forced, probes)) = FORCED_PRESENCE.lock().unwrap().get_mut(name) {
         *probes += 1;
         return *forced;
@@ -310,7 +310,7 @@ fn presence(name: &str) -> SessionPresence {
 }
 
 /// Answers the tmux probe of `name` with `presence` for this test.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_presence_for_test(name: &str, presence: SessionPresence) {
     FORCED_PRESENCE
         .lock()

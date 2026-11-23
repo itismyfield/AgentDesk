@@ -146,6 +146,7 @@ class GitGateTests(unittest.TestCase):
             "check_comment_only_change.py",
             "generate_inventory_docs.py",
             "rust_lex.py",
+            "rust_cfg.py",
         ):
             (self.root / "scripts" / name).write_bytes(
                 (REPO_ROOT / "scripts" / name).read_bytes()

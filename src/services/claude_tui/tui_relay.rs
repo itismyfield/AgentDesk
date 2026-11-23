@@ -632,10 +632,10 @@ fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
 /// `/tui/send` without touching tmux. Kept next to the trait it implements; the
 /// auth-boundary assertions live under `crate::server` because middleware
 /// composition is a server-layer responsibility (#3311).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct FakeSendBackend;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SendBackend for FakeSendBackend {
     fn has_session(&self, _session_name: &str) -> bool {
         true
@@ -664,7 +664,7 @@ impl SendBackend for FakeSendBackend {
 }
 
 /// An idle Claude pane with an empty composer, as `capture-pane -e` returns it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn empty_composer_for_tests() -> String {
     let border = "\u{2500}".repeat(60);
     let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";

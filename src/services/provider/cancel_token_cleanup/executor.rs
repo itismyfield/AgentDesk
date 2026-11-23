@@ -87,7 +87,7 @@ impl CancelToken {
         request: CleanupRequest,
         expected: Option<ExpectedBinding<'_>>,
     ) -> CleanupOutcome {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         REQUESTED_INTENTS.with(|intents| intents.borrow_mut().push(request.intent));
         self.publish_cancel_if_source_absent(request.cancel_source.clone());
 
@@ -285,7 +285,7 @@ impl CancelToken {
 
     /// With no tmux binding the target is a process-backend wrapper, whose CLI groups go too.
     fn kill_pid_tree_guarded(&self, target: &CapturedProcess, wrapper: bool) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !REAL_PID_KILL.with(std::cell::Cell::get) {
             let _ = wrapper;
             let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
@@ -346,14 +346,14 @@ impl CancelToken {
         cancel_source: &str,
         authorization: KillAuthorizationState,
     ) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             TMUX_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return TMUX_KILL_SUCCEEDS.load(Ordering::Relaxed)
                 && !SUPPRESS_TMUX_AFTER_CLAIM.load(Ordering::Relaxed);
         }
-        #[cfg(all(unix, not(test)))]
+        #[cfg(all(unix, not(any(test, feature = "test-support"))))]
         {
             if self.tmux_cleanup_is_suppressed(name) {
                 tracing::debug!(
@@ -385,7 +385,7 @@ impl CancelToken {
             }
             killed
         }
-        #[cfg(all(not(unix), not(test)))]
+        #[cfg(all(not(unix), not(any(test, feature = "test-support"))))]
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             false
@@ -393,26 +393,28 @@ impl CancelToken {
     }
 }
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::AtomicBool;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(any(test, feature = "test-support"))]
 static PID_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TMUX_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PID_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TMUX_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static REQUESTED_INTENTS: std::cell::RefCell<Vec<TmuxCleanupIntent>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -423,7 +425,7 @@ pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
 }
 
 /// Runs `test` with this thread's PID kills sent for real instead of counted.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
     struct Restore;
     impl Drop for Restore {
@@ -437,17 +439,17 @@ pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
 }
 
 /// The intents this thread has requested since the last call.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
     REQUESTED_INTENTS.with(|intents| std::mem::take(&mut *intents.borrow_mut()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn pid_kill_dispatches_for_test() -> usize {
     PID_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn tmux_kill_dispatches_for_test() -> usize {
     TMUX_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
@@ -457,7 +459,7 @@ pub(crate) fn set_pid_kill_succeeds_for_test(succeeds: bool) {
     PID_KILL_SUCCEEDS.store(succeeds, Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PID_DISPATCH_BARRIERS: std::sync::Mutex<
     Option<(
         std::sync::Arc<std::sync::Barrier>,

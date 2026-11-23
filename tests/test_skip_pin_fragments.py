@@ -196,7 +196,7 @@ class FailClosedTests(TempRoot):
 
     def test_invalid_fragments_fail_the_pin_import_in_a_fresh_process(self) -> None:
         for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "rust_lex.py",
-                     "registration_fragments.py", "generate_inventory_docs.py"):
+                     "registration_fragments.py", "generate_inventory_docs.py", "rust_cfg.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         write(self.root, SPLIT, block(NAMES[1], ["src/helper.rs"]))
         self.fragment("mac-mini-1-base.txt", "basename | src/a_tests.rs")
@@ -219,7 +219,8 @@ class WriterGateVerdictTests(TempRoot):
         write(self.root, "src/main.rs", "mod prod;\n#[cfg(test)]\nmod helper;\nfn main() {}\n")
         for rel in ("src/prod.rs", "src/helper.rs", "src/alpha_tests.rs", "src/beta/tests.rs"):
             write(self.root, rel, "fn fixture() {}\n")
-        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py", "rust_lex.py"):
+        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py", "rust_lex.py",
+                     "rust_cfg.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         self.real = (ROOT / LEGACY).read_text("utf-8")
         self.loads = 0

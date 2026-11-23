@@ -106,10 +106,10 @@ pub(crate) fn confirm_selected(
     confirmed
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct TestConfirmation(u64);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestConfirmation {
     pub(crate) fn new(channel: u64) -> Self {
         assert!(!transcript_turns(channel));
@@ -124,7 +124,7 @@ impl TestConfirmation {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestConfirmation {
     fn drop(&mut self) {
         CONFIRMED

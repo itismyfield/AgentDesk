@@ -13,7 +13,7 @@ use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use memento::with_memento_test_endpoint;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_snapshot,

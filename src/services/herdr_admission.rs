@@ -89,7 +89,7 @@ pub(crate) fn check() -> Result<(), StopCause> {
     }) {
         return Err(StopCause::ApprovalSnapshot);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return forced.check();
     }
@@ -98,22 +98,22 @@ pub(crate) fn check() -> Result<(), StopCause> {
         .check()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED: std::cell::RefCell<Option<std::sync::Arc<Admission>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replaces the process switch on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedAdmission(Option<std::sync::Arc<Admission>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_for_test(admission: Admission) -> ForcedAdmission {
     let forced = Some(std::sync::Arc::new(admission));
     ForcedAdmission(FORCED.with(|cell| cell.replace(forced)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedAdmission {
     fn drop(&mut self) {
         FORCED.with(|cell| *cell.borrow_mut() = self.0.take());

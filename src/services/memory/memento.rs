@@ -57,12 +57,12 @@ struct MementoRuntimeConfig {
     workspace_override: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static TEST_MEMENTO_CONFIG: MementoRuntimeConfig;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn with_memento_test_endpoint<T>(
     endpoint: String,
     run: impl std::future::Future<Output = T>,
@@ -126,7 +126,7 @@ impl MementoBackend {
         if crate::config::test_instance::requested() {
             return Err("Memento is unavailable in a test instance".to_string());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Ok(config) = TEST_MEMENTO_CONFIG.try_with(Clone::clone) {
             return Ok(config);
         }

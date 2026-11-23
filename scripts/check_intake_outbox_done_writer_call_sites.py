@@ -33,7 +33,7 @@ line-break form is rejected by the repository's enforced `cargo fmt --check`.
 It also does not prove a call is reachable, successful, or the right lifecycle
 action. Conversely, a same-spelled free function in a file importing this
 writer could be over-counted. Comments, strings, pinned whole-file test modules,
-and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
+and test-only cfg regions (shared `rust_cfg` classifier) are excluded, but other cfgs are counted without
 target evaluation. Whole-file skips use the basename rule with production
 module mounts rejected, plus the resolver pin in `scripts/test_only_module_skip_pin_paths.py` plus `.d/` fragments.
 Non-`.rs` regular files and `src/` symlinks are rejected before classification;
@@ -66,8 +66,10 @@ from collections import defaultdict
 from pathlib import Path
 
 try:
+    from rust_cfg import find_test_only_cfg_attributes
     from rust_lex import StripState, strip_line
 except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_cfg import find_test_only_cfg_attributes
     from scripts.rust_lex import StripState, strip_line
 
 SCAN_ROOT = Path("src")
@@ -76,9 +78,6 @@ SYMBOL_MODULES = {
     "mark_done": "intake_outbox",
     "mark_done_from_delivery_proof": "intake_outbox_delivery_proof",
 }
-CFG_EXCLUSIVELY_TEST_RE = re.compile(
-    r"#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*(?:,|\)))"
-)
 
 
 def _load_skip_pin_module():
@@ -116,7 +115,8 @@ def strip_source(text: str) -> str:
     lines = text.split('\n')
     result = []
     for i, line in enumerate(lines):
-        stripped = strip_line(line, state)
+        # Pad dropped comments so offsets still match the raw text.
+        stripped = strip_line(line, state).ljust(len(line))
         result.append(stripped)
         # Preserve \n boundaries except after the last line
         if i < len(lines) - 1:
@@ -126,11 +126,12 @@ def strip_source(text: str) -> str:
 
 def production_text(path: Path) -> str:
     """Return stripped source with exclusively-test cfg items blanked."""
-    code = strip_source(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    code = strip_source(text)
     chars = list(code)
-    for match in list(CFG_EXCLUSIVELY_TEST_RE.finditer(code)):
-        start = code.find("{", match.end())
-        semicolon = code.find(";", match.end())
+    for match in list(find_test_only_cfg_attributes(code, text)):
+        start = code.find("{", match.attribute_end())
+        semicolon = code.find(";", match.attribute_end())
         if start == -1 or (semicolon != -1 and semicolon < start):
             continue
         depth = 0
@@ -214,8 +215,8 @@ LIMITS = (
     "renamed re-exports, name-constructing macros, same-file helper/value indirection, trait "
     "dispatch, protected symbols split before `(`, and direct SQL writers are "
     "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
-    "may be over-counted; direct protected-symbol aliases are rejected; only braced cfg(test) "
-    "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
+    "may be over-counted; direct protected-symbol aliases are rejected; only braced items behind "
+    "a test-only cfg (shared rust_cfg classifier) are stripped, while other cfg/cfg_attr forms remain scanned; the "
     "whole-file skips use the basename rule plus resolver pin, reject production basename "
     "module mounts and src symlinks, and check their census; "
     "non-.rs regular files fail closed before classification; symlink rejection is "

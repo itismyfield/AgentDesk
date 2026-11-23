@@ -240,6 +240,29 @@ class ProdTestSplitTest(unittest.TestCase):
         self.assertFalse(GEN.cfg_requires_test('any(test, feature = "x")'))
         self.assertFalse(GEN.cfg_requires_test('feature = "test"'))
 
+    def test_test_support_feature_alias_is_test_only_on_raw_and_blanked_paths(self) -> None:
+        from scripts.rust_cfg import find_test_only_cfg_attributes
+        from scripts.rust_lex import StripState, strip_line
+
+        table = {
+            'any(test, feature = "test-support")': True,
+            'all(any(test, feature = "test-support"), unix)': True,
+            "all(test, unix)": True,
+            'feature = "test-support"': False,
+            "not(test)": False,
+            'not(any(test, feature = "test-support"))': False,
+            "any(test, unix)": False,
+            'any(test, feature = "test-support", unix)': False,
+            'all(not(test), any(test, feature = "test-support"))': False,
+        }
+        for predicate, expected in table.items():
+            raw = f"#[cfg({predicate})]\nmod m {{}}\n"
+            state = StripState()
+            blanked = "\n".join(strip_line(line, state).ljust(len(line)) for line in raw.split("\n"))
+            with self.subTest(predicate):
+                self.assertEqual(GEN.cfg_requires_test(predicate), expected)
+                self.assertEqual(bool(list(find_test_only_cfg_attributes(blanked, raw))), expected)
+
     def test_giant_flag_uses_production_lines(self) -> None:
         # 1200 raw lines, but 400 of them are inside a #[cfg(test)] mod block,
         # leaving 800 production lines -> below the 1000 threshold -> not giant.
