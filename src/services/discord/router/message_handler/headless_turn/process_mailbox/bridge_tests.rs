@@ -396,24 +396,41 @@ async fn a_scheduled_bridge_completion_settles_on_the_next_poll_pg() {
 #[path = "routine_presentation_tests.rs"]
 mod routine_presentation_tests;
 
-/// After two rollover parts, a Done starting with them sends only the rest and ends the turn;
-/// a Done that changed them takes the full replay, never joining its tail to the old parts.
+/// After two agy rollover parts, a Done starting with them (newlines aside) sends only the rest and
+/// ends the turn; one that changed them is replayed whole. Grok's last-message Done keeps the stream.
 #[tokio::test]
 async fn stream_json_long_done_keeps_frozen_parts_only_when_it_starts_with_them() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    for provider in [ProviderKind::Antigravity, ProviderKind::Grok] {
-        for edit in [
-            ("", ""),
-            ("START", "INTRO\nSTART"),
-            ("START-r1", "START-r2"),
-        ] {
-            with_isolated_runtime_root(|| long_done_after_frozen_parts(provider.clone(), edit))
-                .await;
-        }
+    let cases: [(ProviderKind, fn(&str) -> String, bool); 6] = [
+        (ProviderKind::Antigravity, |b| b.to_owned(), false),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("\n01 ", "\n\n01 ", 1),
+            false,
+        ),
+        (ProviderKind::Antigravity, |b| format!("INTRO\n{b}"), true),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("START-r1", "START-r2", 1),
+            true,
+        ),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("\n05 ", "\n    05 ", 1),
+            true,
+        ),
+        (ProviderKind::Grok, |_| "SHORT".into(), false),
+    ];
+    for (provider, done, replay) in cases {
+        with_isolated_runtime_root(|| long_done_after_frozen_parts(provider, done, replay)).await;
     }
 }
 
-async fn long_done_after_frozen_parts(provider: ProviderKind, edit: (&str, &str)) {
+async fn long_done_after_frozen_parts(
+    provider: ProviderKind,
+    done: fn(&str) -> String,
+    replay: bool,
+) {
     const USER_MESSAGE: u64 = 9_100_000_000_000_008_160;
     const PLACEHOLDER: u64 = 9_100_000_000_000_008_161;
     let lines: Vec<String> = std::iter::once("START-r1".to_string())
@@ -422,7 +439,7 @@ async fn long_done_after_frozen_parts(provider: ProviderKind, edit: (&str, &str)
         .collect();
     let body = lines.join("\n");
     let frozen = format!("{}\n", lines[..45].join("\n"));
-    let result = body.replacen(edit.0, edit.1, 1);
+    let result = done(&body);
     // Process-routine capture admits only Claude and Codex, so claim an ordinary episode.
     let mut shared = make_shared_data_for_tests_with_storage(None);
     Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
@@ -501,7 +518,7 @@ async fn long_done_after_frozen_parts(provider: ProviderKind, edit: (&str, &str)
             .collect::<Vec<_>>()
             .join("\n")
     };
-    if result != body {
+    if replay {
         let replayed = [format!("done-body={result:?}/0"), "replay".into()];
         tokio::time::timeout(Duration::from_secs(10), async {
             while !replayed.iter().all(|want| {

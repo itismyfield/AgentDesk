@@ -315,7 +315,7 @@ pub(super) async fn handle_stream_content_message(
                                 response_sent_offset = inflight_state.response_sent_offset;
                             }
                             let posted = full_response.get(..response_sent_offset).map(str::to_owned);
-                            // After a tool call a Claude-style Done carries only the last message, not the whole answer.
+                            // A tool boundary trims trailing spaces from the body, so only text-only turns compare exactly.
                             let replaces_posted = !preserve_progress && !any_tool_used
                                 && done_replaces_posted_parts(&provider, posted.as_deref(), response_sent_offset, &result);
                             if replaces_posted {
