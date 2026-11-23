@@ -444,10 +444,17 @@ async fn identical_admissions(name: &str, deferred: bool) {
     )
     .unwrap();
     rig.paste().await;
+    let untag = |frame: &str| {
+        let (head, rest) = frame.split_once(']').unwrap();
+        let (head, tag) = crate::services::tui_input::human_frame::untagged(head);
+        assert_eq!(tag.len(), 8, "{frame}");
+        format!("{head}]{rest}")
+    };
+    let second_body = fs::read_to_string(rig.intake.renderer.join("body")).unwrap();
     assert_eq!(
-        first_body,
-        fs::read_to_string(rig.intake.renderer.join("body")).unwrap(),
-        "two independent Discord admissions pasted the same exact frame"
+        untag(&first_body),
+        untag(&second_body),
+        "two independent Discord admissions pasted the same frame but their attempt tags"
     );
     let source = fs::read_to_string(&rig.intake.transcript).unwrap();
     let mut offset = 0u64;
@@ -505,9 +512,20 @@ async fn identical_admissions(name: &str, deferred: bool) {
             registered[0].0, registered[1].0,
             "both actual writes preceded the native queue records"
         );
+        // Each native row names its attempt in its tag, so a tie leaves nothing to pair by order.
+        let tagged: Vec<_> = enqueues
+            .iter()
+            .map(|(_, content)| {
+                let (head, _) = content.split_once(']').unwrap();
+                let tag = crate::services::tui_input::human_frame::untagged(head).1;
+                RowOwner::Command(tag.to_owned())
+            })
+            .collect();
+        let mut ids: Vec<_> = registered.iter().map(|(_, id)| id.clone()).collect();
+        ids.retain(|id| tagged.contains(&RowOwner::Command(id.clone())));
+        assert_eq!(ids.len(), 2, "each row's tag is one registered attempt");
         assert_eq!(
-            owners,
-            vec![RowOwner::Unread, RowOwner::Unread],
+            owners, tagged,
             "an offset tie never swaps live/passive attempts"
         );
     } else {
@@ -524,7 +542,7 @@ async fn identical_admissions(name: &str, deferred: bool) {
     rig.command().await;
     assert_eq!(
         rig.escapes(),
-        usize::from(!deferred),
+        1,
         "only unambiguous exact attempts authorize the stop"
     );
     drop(rig);
@@ -537,6 +555,10 @@ async fn identical_frames_keep_two_independent_admissions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn identical_registration_offsets_remain_unread() {
-    identical_admissions("identical_registration_offsets_remain_unread", true).await;
+async fn identical_registration_offsets_keep_each_tagged_attempt() {
+    identical_admissions(
+        "identical_registration_offsets_keep_each_tagged_attempt",
+        true,
+    )
+    .await;
 }
