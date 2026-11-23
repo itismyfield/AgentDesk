@@ -384,6 +384,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "just fmt-check",
                 "npm run test:policies",
@@ -931,6 +932,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 if line.strip()
             ],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "npm run test:policies",
                 "just fmt-check",
@@ -2191,7 +2193,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             )
             (root / "scripts/ci").mkdir()
             for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
-                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name):
+                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name,
+                           "preinstalled_tools_wiring.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
