@@ -93,6 +93,7 @@ pub(crate) fn v2_queue(
 
 /// Whether the queue file at `path` still holds the owner's retained proof that the exact attempt
 /// `key` sent no key; an unreadable file proves nothing.
+#[cfg(unix)]
 pub(crate) fn proves_not_sent(
     path: &std::path::Path,
     namespace: &str,
