@@ -138,4 +138,4 @@ impl AgyLogin {
 
 #[cfg(all(test, unix))]
 #[path = "agy_cell_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

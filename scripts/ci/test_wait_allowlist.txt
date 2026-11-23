@@ -17,7 +17,6 @@ src/server/dashboard_provision.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/imessage_input_notice_tests.rs
 src/server/routes/receipt.rs
-src/services/claude_compact_trigger.rs
 src/services/claude_tui/busy_inject_tests.rs
 src/services/claude_tui/busy_inject/stash_confirm_tests.rs
 src/services/claude_tui/busy_inject/stash_owner_tests.rs

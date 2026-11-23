@@ -17,9 +17,9 @@ pub(in crate::services) use turn_identity::CompactTurnIdentity;
 /// channel and the physical tmux pane so [`clear_for_tmux`] can forget every
 /// channel's flag for a recreated pane name (launch/teardown hygiene).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct CompactPaneKey {
-    channel_id: u64,
-    tmux_session_name: String,
+pub(crate) struct CompactPaneKey {
+    pub(crate) channel_id: u64,
+    pub(crate) tmux_session_name: String,
 }
 
 /// Per-pane once-per-fill-cycle state.
@@ -169,7 +169,7 @@ fn observe_and_decide_with_source(
 ///     (F3 occupancy re-read; a bare `Some(false)` bool cannot express a drop
 ///     into the hysteresis band).
 /// The leaf lock is read and released here; it is NEVER held across the send.
-fn pane_still_disarmed_for_send(
+pub(crate) fn pane_still_disarmed_for_send(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -228,7 +228,7 @@ fn invalidate_after_authority_rejection(
 /// never carries the leaf state lock into `submit`. `None` means the pre-send
 /// recheck bailed (stale/torn-down/below-threshold) and no mutation was
 /// attempted.
-fn submit_under_composer_lock<T>(
+pub(crate) fn submit_under_composer_lock<T>(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -493,7 +493,7 @@ pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
 #[cfg(test)]
-fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -502,11 +502,10 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::services::discord::ManagedCompactTurnIdentity;
 
-    fn observe_and_decide(
+    pub(crate) fn observe_and_decide(
         pane: &CompactPaneKey,
         occupied: u64,
         threshold: CompactThreshold,
@@ -514,7 +513,7 @@ mod tests {
         observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
     }
 
-    fn pane() -> CompactPaneKey {
+    pub(crate) fn pane() -> CompactPaneKey {
         CompactPaneKey {
             channel_id: 42,
             tmux_session_name: "tmux-4591".to_string(),
@@ -523,11 +522,11 @@ mod tests {
 
     // window 1_000_000, percent 50, lower 300_000 → effective 500_000,
     // rearm_floor = 500_000 - 5% * 1_000_000 = 450_000.
-    fn threshold_for(window: u64) -> CompactThreshold {
+    pub(crate) fn threshold_for(window: u64) -> CompactThreshold {
         compact_threshold(window, 50, 300_000).expect("valid threshold fixture")
     }
 
-    fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
+    pub(crate) fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -536,7 +535,7 @@ mod tests {
             .map(|entry| entry.armed)
     }
 
-    fn panes_is_empty() -> bool {
+    pub(crate) fn panes_is_empty() -> bool {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -675,57 +674,6 @@ mod tests {
             new_generation,
             threshold
         ));
-    }
-
-    #[test]
-    fn active_usage_missing_model_or_provenance_does_not_create_pane_state() {
-        let _guard = state_test_guard();
-        assert!(!observe_active_usage(
-            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
-            &ProviderKind::Claude,
-            None,
-            (Some(560_000), Some(0), Some(0)),
-            50,
-            300_000,
-        ));
-        assert!(panes_is_empty());
-        assert!(!observe_active_usage(
-            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
-            &ProviderKind::Claude,
-            Some("routed-sonnet[1m]"),
-            (Some(560_000), Some(0), Some(0)),
-            50,
-            300_000,
-        ));
-        assert!(panes_is_empty());
-    }
-
-    #[test]
-    fn active_usage_rejects_partial_usage_before_creating_pane_state() {
-        let _guard = state_test_guard();
-        assert!(!observe_active_usage(
-            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
-            &ProviderKind::Claude,
-            Some("routed-sonnet[1m]"),
-            (Some(560_000), None, Some(0)),
-            50,
-            300_000,
-        ));
-        assert!(panes_is_empty());
-    }
-
-    #[test]
-    fn active_usage_non_claude_provider_does_not_create_pane_state() {
-        let _guard = state_test_guard();
-        assert!(!observe_active_usage(
-            ManagedCompactTurnIdentity::test_fixture(42, "tmux-4631"),
-            &ProviderKind::Codex,
-            Some("routed-sonnet[1m]"),
-            (Some(560_000), Some(0), Some(0)),
-            50,
-            300_000,
-        ));
-        assert!(panes_is_empty());
     }
 
     /// Mutation guard: the optimistic consume (disarm + fresh generation) in the
@@ -878,99 +826,6 @@ mod tests {
         assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
-    /// The worker is parked behind the physical pane's composer lock. While it is
-    /// parked, the live turn authority changes from the captured Managed identity
-    /// to ExternalInput or ExternalAdopted. The post-lock authority recheck must
-    /// reject the stale worker before the submit closure can mutate the composer.
-    #[cfg(unix)]
-    #[test]
-    fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::{Arc, mpsc};
-        use std::time::Duration;
-
-        #[derive(Debug)]
-        enum AuthorityTransition {
-            ExternalInput,
-            ExternalAdopted,
-        }
-
-        for external_source in [
-            AuthorityTransition::ExternalInput,
-            AuthorityTransition::ExternalAdopted,
-        ] {
-            let _guard = state_test_guard();
-            let pane = pane();
-            let threshold = threshold_for(1_000_000);
-            let generation =
-                observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
-            let expected_turn =
-                ManagedCompactTurnIdentity::test_fixture(42, &pane.tmux_session_name);
-            let authority_is_managed = Arc::new(AtomicBool::new(true));
-            let sends = Arc::new(AtomicUsize::new(0));
-            let (queued_tx, queued_rx) = mpsc::channel();
-            let (outcome_tx, outcome_rx) = mpsc::channel();
-            let worker_pane = pane.clone();
-            let worker_authority = Arc::clone(&authority_is_managed);
-            let worker_sends = Arc::clone(&sends);
-
-            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
-                &pane.tmux_session_name,
-                || {
-                    let worker = std::thread::spawn(move || {
-                        queued_tx.send(()).expect("signal queued compact worker");
-                        let outcome = submit_under_composer_lock(
-                            &worker_pane,
-                            generation,
-                            threshold,
-                            &expected_turn,
-                            false,
-                            |_| Ok(worker_authority.load(Ordering::SeqCst)),
-                            |_permit| {
-                                worker_sends.fetch_add(1, Ordering::SeqCst);
-                                Outcome::Submitted
-                            },
-                        );
-                        outcome_tx.send(outcome).expect("return compact outcome");
-                    });
-                    queued_rx
-                        .recv_timeout(Duration::from_millis(250))
-                        .expect("worker must queue behind the held composer lock");
-                    assert!(outcome_rx.recv_timeout(Duration::from_millis(25)).is_err());
-                    authority_is_managed.store(false, Ordering::SeqCst);
-                    worker
-                },
-            )
-            .join()
-            .expect("compact worker thread");
-
-            assert_eq!(
-                outcome_rx.recv_timeout(Duration::from_millis(250)).unwrap(),
-                None,
-                "{external_source:?} must reject the queued worker"
-            );
-            assert_eq!(
-                sends.load(Ordering::SeqCst),
-                0,
-                "{external_source:?} must cause zero composer mutations"
-            );
-
-            let fresh_generation = observe_and_decide(&pane, 500_000, threshold)
-                .expect("a later Managed observation must start a fresh high-occupancy cycle");
-            assert_ne!(generation, fresh_generation);
-            assert!(
-                observe_and_decide(&pane, 500_000, threshold).is_none(),
-                "the fresh Managed cycle must schedule exactly once"
-            );
-            assert!(pane_still_disarmed_for_send(
-                &pane,
-                fresh_generation,
-                threshold
-            ));
-            clear_for_tmux(&pane.tmux_session_name);
-        }
-    }
-
     #[test]
     fn stale_authority_rejection_cannot_rearm_a_newer_cycle() {
         let _guard = state_test_guard();
@@ -1044,41 +899,5 @@ mod tests {
         assert!(panes_is_empty());
         // A recreated pane starts armed again.
         assert!(observe_and_decide(&first_pane, 600_000, threshold).is_some());
-    }
-
-    /// Degrade-safe no-inject paths never touch the armed flag and never spawn a
-    /// worker (so these are safe to call without a Tokio runtime): a non-Claude
-    /// provider, an unresolvable window, and a zero/disabled percent.
-    #[test]
-    fn maybe_inject_degrades_safely_without_touching_the_flag() {
-        let _guard = state_test_guard();
-        let pane = pane();
-        maybe_inject_compact(
-            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
-            &ProviderKind::Codex,
-            600_000,
-            Some(1_000_000),
-            50,
-            300_000,
-        );
-        assert!(armed_state(&pane).is_none());
-        maybe_inject_compact(
-            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
-            &ProviderKind::Claude,
-            600_000,
-            None,
-            50,
-            300_000,
-        );
-        assert!(armed_state(&pane).is_none());
-        maybe_inject_compact(
-            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
-            &ProviderKind::Claude,
-            600_000,
-            Some(1_000_000),
-            0,
-            300_000,
-        );
-        assert!(armed_state(&pane).is_none());
     }
 }

@@ -26,15 +26,16 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::config::{AgentChannel, AgentChannelConfig, AgentDef, Config, ProviderConfig};
     use crate::services::provider::ProviderKind;
     use crate::services::provider_hosting::{self, ProviderSessionDriver};
 
-    const REMOVED: &str = "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
+    pub(crate) const REMOVED: &str =
+        "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
     const ALIASES: &[&str] = &["claude-e", "claude_e", " ClAuDe-E ", "\tCLAUDE_E\t"];
 
-    struct ResetHosting;
+    pub(crate) struct ResetHosting;
 
     impl Drop for ResetHosting {
         fn drop(&mut self) {
@@ -42,7 +43,7 @@ mod tests {
         }
     }
 
-    fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
+    pub(crate) fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
         let mut config = Config::default();
         if channel {
             let mut agent: AgentDef = serde_yaml::from_str("id: fixture\nname: Fixture\n").unwrap();
@@ -66,7 +67,7 @@ mod tests {
         config
     }
 
-    fn write_config(path: &std::path::Path, config: &Config) {
+    pub(crate) fn write_config(path: &std::path::Path, config: &Config) {
         let mut yaml = serde_yaml::to_value(config).unwrap();
         // The config serializer omits targetless channel maps; validate their raw input too.
         for (index, agent) in config.agents.iter().enumerate() {
@@ -212,52 +213,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn final_boot_boundary_rejects_retired_before_installing_mirrors() {
-        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _lock = provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _reset = ResetHosting;
-        provider_hosting::install_provider_hosting_config(&fixture(Some("pipe"), false, "claude"));
-        let before = provider_hosting::resolve_provider_session_selection(&ProviderKind::Claude);
-        let config = fixture(Some("claude_e"), false, "claude");
-        let error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(crate::bootstrap::prepare_and_install_boot_snapshots(
-                &config, None,
-            ))
-            .unwrap_err();
-        assert!(format!("{error:#}").contains(REMOVED), "{error:#}");
-        assert_eq!(
-            provider_hosting::resolve_provider_session_selection(&ProviderKind::Claude),
-            before
-        );
-    }
-
-    #[test]
-    fn runtime_audit_load_preserves_removed_runtime_cause() {
-        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        for legacy in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = if legacy {
-                crate::runtime_layout::legacy_config_file_path(dir.path())
-            } else {
-                crate::runtime_layout::config_file_path(dir.path())
-            };
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            write_config(&path, &fixture(Some("claude-e"), false, "claude"));
-            let error = match crate::services::discord_config_audit::load_runtime_config(dir.path())
-            {
-                Err(error) => error,
-                Ok(_) => panic!("runtime config load accepted a removed runtime"),
-            };
-            assert!(error.contains(REMOVED), "{error}");
         }
     }
 

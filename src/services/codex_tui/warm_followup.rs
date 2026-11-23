@@ -1,6 +1,6 @@
 use crate::services::discord::codex_absence::replacement::Replacement;
 #[cfg(unix)]
-mod submit;
+pub(crate) mod submit;
 #[cfg(unix)]
 use submit::settle_submit;
 

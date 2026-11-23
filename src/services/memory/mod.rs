@@ -1,5 +1,5 @@
 mod local;
-mod memento;
+pub(crate) mod memento;
 mod memento_throttle;
 pub(crate) mod memento_writer_guard;
 mod runtime_state;
