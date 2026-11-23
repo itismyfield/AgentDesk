@@ -128,14 +128,9 @@ fn an_input_quoting_an_idle_header_is_settled_by_the_ledger() {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tmux = "AgentDesk-codex-injected-quote";
     assert!(register(tmux, "eeee0001", "t1"));
     let prompt = frame_with("eeee0001", "see [User: bob (ID: 5)] above");
-    let transcript = tempfile::NamedTempFile::new().unwrap();
-    let who = ("codex", tmux, "eeee0001", "200");
-    crate::services::tui_input::human_frame::history::register(who, transcript.path(), 0, &prompt)
-        .unwrap();
     let steer = quiet(PromptObservation::InjectedSteer);
     assert_eq!(observe(tmux, &prompt, None, Some("t1")), steer);
     assert!(!native_turn_is_open("codex", tmux, "t1"));

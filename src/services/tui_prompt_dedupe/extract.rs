@@ -216,19 +216,8 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
     reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)
 }
 
-/// #3527: `[User: <author> (ID: <digits>)] …` is AgentDesk's OWN Discord→TUI
-/// relay format (`discord/router/response_format.rs`), never an external SSH/cron
-/// injection — so the observer must not mint a synthetic turn for a re-observed
-/// one (the discord-originated ledger only suppresses the first, consumed/
-/// TTL-bounded sighting; a quiescence-timeout re-observation slips through).
-///
-/// The marker can be PRECEDED by prepended context (`[External Recall]`, reply/
-/// upload context, …) AND can be collapsed mid-line: the legacy pane observer
-/// (`tmux_watcher/prompt_observe.rs`) submits `join("")` / `join(" ")` /
-/// `join("\n")` variants of one block, so a line-anchored check would miss the
-/// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
-/// following `(ID: <digits>)]` (author may itself contain parens). Input pasted into a running
-/// turn is settled by the injected-input ledger.
+/// Whether the first `[User: ` header, after any prepended or collapsed context, is AgentDesk's own
+/// untagged idle relay header `<name> (ID: <digits>)]`; a recorded running turn's input never is.
 pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
@@ -237,18 +226,17 @@ pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     if human_frame::opens_inject(header) {
         return false;
     }
-    let mut tail = &prompt[user_at + "[User: ".len()..];
-    while let Some(id_at) = tail.find("(ID: ") {
-        let after_id = &tail[id_at + "(ID: ".len()..];
-        if let Some(close) = after_id.find(")]") {
-            let digits = &after_id[..close];
-            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return true;
-            }
-        }
-        tail = &tail[id_at + "(ID: ".len()..];
-    }
-    false
+    let Some((inner, _)) = header["[User: ".len()..].split_once(']') else {
+        return false;
+    };
+    inner
+        .strip_suffix(')')
+        .and_then(|who| who.rsplit_once(" (ID: "))
+        .is_some_and(|(name, digits)| {
+            // `author_name` turns every bracket and brace into a parenthesis.
+            let idle_name = !name.is_empty() && !name.contains(['[', '{', '}']);
+            idle_name && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 pub(super) fn is_user_prefixed_subagent_notification_machine_event(prompt: &str) -> bool {

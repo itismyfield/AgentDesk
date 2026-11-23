@@ -552,3 +552,59 @@ fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
         );
     }
 }
+
+/// A V2 attempt input for this head's owner, sourced in `transcript` or not yet.
+fn v2_input(nonce: &str, frame: &str, transcript: Option<&Transcript>) -> Value {
+    let source = transcript.map_or(json!({"kind": "pre_source"}), |t| {
+        json!({"kind": "existing", "session_id": SESSION, "transcript": t.path,
+            "file": t.bound(SESSION).file, "offset": 0})
+    });
+    json!({"identity": {"primary": HEAD, "queued_generation": 7,
+            "sources": [{"message_id": HEAD, "queued_generation": 7}]},
+        "attempt": {"nonce": nonce, "provider": "claude", "source": source,
+            "target": {"owner": "AgentDesk-claude-test", "execution_nonce": "spawn"}},
+        "original": {"author_id": 200}, "payload": {"frame": frame}})
+}
+
+/// A recorded attempt's proof survives its history becoming V2 or V3, live or passive; abandoned
+/// evidence, another body or a second attempt of the same bytes proves nothing.
+#[test]
+fn a_recorded_proof_survives_the_history_moving_to_v2() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let transcript = Transcript::new(&chain(NONCE, AFTER));
+    assert_eq!(transcript.proven().as_deref(), Some(NONCE));
+    let history = human_frame::history::v2::Registry::runtime().unwrap();
+    // Another input's V2 owner moves the V1 registration into passive evidence.
+    history
+        .prepare("reconcile-test", &v2_input("0f0f0f0f", "other input", None))
+        .unwrap();
+    let file = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let v2 = std::fs::read_to_string(&file).unwrap();
+    assert!(v2.starts_with("{\"version\":2,") && v2.contains("\"state\":\"retained\""));
+    let proof = |t: &Transcript, text: &str| {
+        let want = t.want(&[HEAD], text, Some(recorded(t, NONCE, 0)))?;
+        want.search().map(|proof| (proof.nonce, proof.offset))
+    };
+    let proven = Some((NONCE.to_string(), 0));
+    assert_eq!(proof(&transcript, "status?"), proven, "passive evidence");
+    assert_eq!(proof(&transcript, "status!"), None, "another body");
+    std::fs::write(&file, v2.replacen("{\"version\":2,", "{\"version\":3,", 1)).unwrap();
+    assert_eq!(proof(&transcript, "status?"), proven, "V3");
+    let abandoned = v2.replace("\"state\":\"retained\"", "\"state\":\"abandoned\"");
+    std::fs::write(&file, abandoned).unwrap();
+    assert_eq!(proof(&transcript, "status?"), None, "abandoned evidence");
+    std::fs::write(&file, &v2).unwrap();
+    let twin = v2_input("0e0e0e0e", &frame(NONCE), Some(&transcript));
+    history.prepare("reconcile-test", &twin).unwrap();
+    assert_eq!(
+        proof(&transcript, "status?"),
+        None,
+        "a second attempt of the bytes"
+    );
+    let live = Transcript::new(&chain(NONCE, AFTER));
+    let own = v2_input(NONCE, &frame(NONCE), Some(&live));
+    history.prepare("reconcile-test", &own).unwrap();
+    assert_eq!(proof(&live, "status?"), proven, "a live V2 registration");
+}
