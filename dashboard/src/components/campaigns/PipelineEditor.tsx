@@ -11,7 +11,7 @@ import { GATE_LABELS } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import { TONE_COLORS, kindIcon } from "./PipelineCanvas";
 import {
-  addTransition, attached, conditionOf, type DraftChanges, diagnosticPlace, diagnosticText, freshComparison, newRetry, patchState, patchTransition, removeState, removeTransition, setRetryMax,
+  addTransition, conditionOf, removal, type DraftChanges, diagnosticPlace, diagnosticText, freshComparison, newRetry, patchState, patchTransition, removeState, removeTransition, setRetryMax,
 } from "./pipelineEdit";
 import { OPS, comparisons, durationText, gateName, kindName, stateName, type PipelineGraph } from "./pipelineModel";
 import type { Checks } from "./usePipelineEditor";
@@ -125,6 +125,7 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
   const incoming = draft.transitions.filter((value) => value.to === state.id && value.from !== state.id);
   const here = graph.occupancy?.get(state.id);
   const start = state.id === draft.start;
+  const gone = removal(draft, state.id);
   return <>
     <InspSection className="border-t-0">
       <div className="flex min-w-0 items-center gap-2.5">
@@ -165,7 +166,10 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
         : <Desc>{start ? tr("시작 상태예요.", "This is the start state.") : tr("들어오는 전환이 없어요.", "No transitions lead here.")}</Desc>}
     </InspSection>
     <AlertDialog open={confirming} onOpenChange={setConfirming} danger title={tr(`'${name}' 상태를 지울까요?`, `Delete the state '${name}'?`)}
-      description={tr(`이 상태에 딸린 전환 ${attached(draft, state.id).length}개도 함께 지워져요. 저장하기 전까지는 되돌릴 수 있어요.`, `Its ${attached(draft, state.id).length} transitions go too. Nothing is lost until you save.`)}
+      description={<>{tr(`함께 지워져요: 전환 ${gone.transitions.length}개 · 이벤트 ${gone.events}개 · 다른 상태의 시간 초과 ${gone.timeouts.length}개.`,
+        `Going with it: ${gone.transitions.length} transitions, ${gone.events} events, ${gone.timeouts.length} timeouts on other states.`)}
+        {gone.retries > 0 && tr(` 이 상태로 재시도를 넘기는 전환 ${gone.retries}개는 새 대상을 골라야 해요.`, ` ${gone.retries} retries fall back to it and need a new target.`)}
+        {tr(" 저장하기 전까지는 되돌릴 수 있어요.", " Nothing is lost until you save.")}</>}
       confirmLabel={tr("상태 지우기", "Delete state")} cancelLabel={tr("그대로 두기", "Keep it")} onConfirm={() => { update((current) => removeState(current, state.id)); onChoose(null); }} />
   </>;
 }

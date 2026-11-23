@@ -33,9 +33,10 @@ const DIAGNOSTICS: Record<string, Label> = {
   STATE_IN_USE: ["작업이 남아 있는 상태라 지울 수 없어요", "Tasks still sit in this state, so it cannot go"],
 };
 export const diagnosticText = (code: string, tr: Tr) => DIAGNOSTICS[code] ? tr(...DIAGNOSTICS[code]) : code;
-/** The state a diagnostic belongs to: the one its transition leaves, else its own (which the draft may have removed). */
-export const diagnosticState = ({ state_id: state, transition_id: transition }: PipelineDiagnostic, graphs: Draft[]) =>
-  graphs.flatMap((graph) => graph.transitions).find((value) => value.id === transition)?.from ?? state;
+/** The state a diagnostic belongs to: for a transition's field the one the transition leaves, else its own (which the
+ * draft may have removed); a state's timeout names a transition too, but the diagnostic is the state's. */
+export const diagnosticState = ({ path, state_id: state, transition_id: transition }: PipelineDiagnostic, graphs: Draft[]) =>
+  path.startsWith("/transitions/") ? graphs.flatMap((graph) => graph.transitions).find((value) => value.id === transition)?.from ?? state : state;
 /** Where a diagnostic points: that state by name (from the draft, or the saved graph) and the transition's id. */
 export function diagnosticPlace(diagnostic: PipelineDiagnostic, graphs: Draft[], tr: Tr) {
   const state = diagnosticState(diagnostic, graphs);
@@ -80,11 +81,19 @@ export function addState(draft: Draft, kind: string): [Draft, string] {
   const id = fresh(draft.states, kind);
   return [{ ...draft, states: [...draft.states, { id, kind }] }, id];
 }
-/** The transitions from or to a state, which go with it. */
-export const attached = (draft: Draft, id: string) => draft.transitions.filter((value) => value.from === id || value.to === id);
+/** What deleting a state takes with it: the transitions from or to it, its events and other states' timeouts on those
+ * transitions; and the retries elsewhere that fall back to it, which keep pointing there until a new target is chosen. */
+export function removal(draft: Draft, id: string) {
+  const transitions = draft.transitions.filter((value) => value.from === id || value.to === id).map((value) => value.id);
+  return { transitions, events: draft.events.filter((event) => event.state_id === id).length,
+    timeouts: draft.states.filter((state) => state.id !== id && transitions.includes(state.timeout?.transition_id ?? "")).map((state) => state.id),
+    retries: draft.transitions.filter((value) => value.retry?.then_to === id && !transitions.includes(value.id)).length };
+}
 export function removeState(draft: Draft, id: string): Draft {
-  return { ...draft, states: draft.states.filter((state) => state.id !== id), transitions: draft.transitions.filter((value) => value.from !== id && value.to !== id),
-    events: draft.events.filter((event) => event.state_id !== id) };
+  const { transitions, timeouts } = removal(draft, id);
+  const untimed = ({ timeout: _, ...state }: PipelineState) => state;
+  return { ...draft, states: draft.states.filter((state) => state.id !== id).map((state) => timeouts.includes(state.id) ? untimed(state) : state),
+    transitions: draft.transitions.filter((value) => !transitions.includes(value.id)), events: draft.events.filter((event) => event.state_id !== id) };
 }
 
 /** A new way out of `from` on success, to a state still to choose, after its other priorities. */

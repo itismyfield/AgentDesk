@@ -47,7 +47,7 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
     return () => abort.abort();
   }, [serverId, stamp, reads, tr]);
   const detail = loaded?.detail ?? null;
-  const editor = usePipelineEditor({ id: serverId, detail, reload: () => setReads((value) => value + 1), leave, tr });
+  const editor = usePipelineEditor({ id: serverId, stamp, detail, reload: () => setReads((value) => value + 1), leave, tr });
   const { edit, changes, checks, notice } = editor;
   const shown = edit?.draft ?? loaded?.pipeline;
   useEffect(() => { if (!onEditing) return; onEditing(!!edit); return () => onEditing(false); }, [!!edit, onEditing]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -94,13 +94,16 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
     {errors > 0 && <Chip tone="err"><Num>{tr(`검사 오류 ${errors}`, `${errors} check errors`)}</Num></Chip>}
     {editor.dirty && <Chip tone="warn"><Num>{tr(`저장 안 됨 · ${changesText(changes!, tr)}`, `Unsaved · ${changesText(changes!, tr)}`)}</Num></Chip>}
     <Select aria-label={tr("상태 추가", "Add a state")} wrapperClassName="w-36" className="!min-h-8 !py-1 text-[13px]" value="" disabled={editor.saving}
-      onChange={(event) => { if (!event.target.value) return; const [next, id] = addState(edit.draft, event.target.value); editor.update(() => next); setChosen(id); }}>
+      onChange={(event) => { if (!event.target.value) return; const [next, id] = addState(edit.draft, event.target.value); editor.update(() => next); choose(id); }}>
       <option value="">{tr("+ 상태 추가", "+ Add a state")}</option>{PIPELINE_KINDS.map((kind) => <option key={kind} value={kind}>{kindName(kind, tr)}</option>)}
     </Select>
     <Button variant="ghost" size="sm" icon={<Undo2 aria-hidden />} disabled={!editor.dirty || editor.saving} onClick={editor.revert}>{tr("되돌리기", "Revert")}</Button>
     <Button variant="secondary" size="sm" disabled={editor.saving} onClick={editor.close}>{tr("편집 닫기", "Close editor")}</Button>
     <Button variant="primary" size="sm" loading={editor.saving} disabled={blocked} onClick={() => void editor.save()}>{tr("저장", "Save")}</Button>
-  </div> : detail && !phone && (detail.editable ? <Button variant="secondary" size="sm" className="ml-auto" icon={<PencilLine aria-hidden />} onClick={() => editor.begin(detail)}>{tr("편집", "Edit")}</Button>
+  </div> : detail && !phone && (editor.waiting ? <span className="ml-auto flex flex-wrap items-center gap-2">
+    <Button variant="secondary" size="sm" icon={<PencilLine aria-hidden />} onClick={editor.resume}>{tr("이어서 편집", "Continue editing")}</Button>
+    <Button variant="ghost" size="sm" onClick={editor.forget}>{tr("초안 버리기", "Discard the draft")}</Button>
+  </span> : detail.editable ? <Button variant="secondary" size="sm" className="ml-auto" icon={<PencilLine aria-hidden />} onClick={() => editor.begin(detail)}>{tr("편집", "Edit")}</Button>
     : <Cap className="ml-auto">{tr("준비됨이나 중지됨일 때만 고칠 수 있어요.", "Only a prepared or stopped campaign can be edited.")}</Cap>);
   const latest = notice?.kind === "conflict" ? notice.latest : null;
   const status = notice && <div role={notice.kind === "saved" ? "status" : "alert"} className="grid gap-2 border-b border-[var(--line-soft)] px-4 py-2.5 text-[13px] text-[var(--fg)]">
@@ -125,6 +128,9 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
         {!edit && <Cap className="ml-auto max-[899px]:hidden"><Num>{tr(`상태 ${graph.states.size} · 전환 ${transitions}`, `${graph.states.size} states · ${transitions} transitions`)}</Num></Cap>}
         {tools}
         {note && <Desc className="w-full">{note}</Desc>}
+        {editor.waiting && detail && !edit && <Desc role="status" className="w-full">{[tr("저장하지 않은 초안이 있어요.", "An unsaved draft is waiting."),
+          editor.waiting.revision !== detail.definition_revision && tr(`초안 기준 rev ${editor.waiting.revision} · 지금 서버 rev ${detail.definition_revision}. 저장하면 다른 곳에서 바뀐 내용을 먼저 보여 드려요.`,
+            `The draft is on rev ${editor.waiting.revision}; the server is at rev ${detail.definition_revision}. Saving shows what changed elsewhere first.`)].filter(Boolean).join(" ")}</Desc>}
       </header>
       {status}
       {error && <WidgetState kind="stale" title={tr("파이프라인을 갱신하지 못했어요.", "Could not refresh the pipeline.")} description={error} />}
