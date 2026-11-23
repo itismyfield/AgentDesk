@@ -2,9 +2,14 @@
 
 use std::time::Duration;
 
-use super::*;
 use crate::services::discord::health::o_verdict_for_tests;
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::writer::binding::{BindingCause, BindingTarget};
 use crate::services::tui_o::writer::progress;
+use crate::services::tui_o::writer::tests::actor::*;
+use crate::services::tui_o::writer::tests::*;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// What one drain left: the POSTs started, the debt still published, and health's verdict.
 struct Drained {

@@ -1,6 +1,6 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
-pub(super) mod admission;
+pub(crate) mod admission;
 pub(super) mod evidence;
 
 use std::collections::HashMap;

@@ -99,6 +99,8 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
     "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
+    "krx_tui_o_tests.rs": "Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate.",
+    "krx_tui_o_unix_tests.rs": "Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
     "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
     "test_support/": "Test runtime that holds fixture serialization for the whole async body.",

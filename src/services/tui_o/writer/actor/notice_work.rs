@@ -11,7 +11,7 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
 use sha2::Digest;
 
 #[cfg(test)]
-thread_local! { static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
+thread_local! { pub(crate) static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
 
 fn notice(item: &Derived) -> Option<&PieceWork> {
     match item {
@@ -210,7 +210,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         Ok(())
     }
 
-    pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
+    pub(crate) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
         }
@@ -282,7 +282,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         fresh
     }
 
-    pub(super) async fn prepare_notices(&mut self, fresh: &[UnitKey]) {
+    pub(crate) async fn prepare_notices(&mut self, fresh: &[UnitKey]) {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return;
         }
@@ -494,7 +494,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .retain(|key| queued.contains(key));
     }
 
-    fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
+    pub(crate) fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
         if reason != "registration_source_mismatch" {
             let transient = self.writer.notice_owners.transient(&id.0);
             self.writer.notice_cache.retry(&id, transient);
@@ -515,7 +515,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
     }
 
-    pub(super) fn notice_debt_extra(&mut self) -> usize {
+    pub(crate) fn notice_debt_extra(&mut self) -> usize {
         self.notice_debt(true)
     }
 
@@ -550,7 +550,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .count()
     }
 
-    pub(super) fn notice_raw_independent(&mut self) -> bool {
+    pub(crate) fn notice_raw_independent(&mut self) -> bool {
         if !self.deriver.input_notices_enabled() {
             return self.owed.is_empty();
         }
@@ -580,7 +580,3 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         self.owed.iter().all(|item| notice(item).is_some())
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "notice_work_tests.rs"]
-mod tests;

@@ -1,11 +1,13 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::tui_o::exact_episode::*;
+use crate::services::tui_o::exact_pg::*;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn exact_metadata_pg_restore_and_terminal_port_stub() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let records = super::super::exact_episode::tests::fixture();
+    let records = crate::services::tui_o::exact_episode::tests::fixture();
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
         .fetch_one(&pool)
         .await
@@ -155,7 +157,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
             }
             noise.close().await;
         });
-        let records = super::super::exact_episode::tests::fixture();
+        let records = crate::services::tui_o::exact_episode::tests::fixture();
         assert_eq!(
             record_episode_evidence(false, &pool, &records[0])
                 .await
@@ -200,7 +202,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
     command
         .args([
             "--exact",
-            "services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero",
+            "services::discord::krx_tui_o_test_host::exact_pg::exact_off_pg_statement_trace_and_files_zero",
             "--nocapture",
         ])
         .env("C2A_OFF_DATABASE", &db.database_url)
@@ -222,7 +224,7 @@ async fn exact_ack_pg_waits_for_commit_barrier() {
     use crate::services::tui_o::exact_submission::{COMMIT_BARRIER, CommitBarrier};
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let mut record = super::super::exact_episode::tests::fixture().remove(0);
+    let mut record = crate::services::tui_o::exact_episode::tests::fixture().remove(0);
     record.episode = Uuid::new_v4();
     if let EpisodeEvidence::Pin(pin) = &mut record.evidence {
         pin.episode = record.episode;
@@ -286,7 +288,7 @@ async fn exact_pg_process_reader_uses_only_metadata() {
     }
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    for record in super::super::exact_episode::tests::fixture() {
+    for record in crate::services::tui_o::exact_episode::tests::fixture() {
         record_episode_evidence(true, &pool, &record).await.unwrap();
     }
     for id in [701, 702] {
@@ -306,7 +308,7 @@ async fn exact_pg_process_reader_uses_only_metadata() {
     let run = |root: &std::path::Path| {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata",
+                "services::discord::krx_tui_o_test_host::exact_pg::exact_pg_process_reader_uses_only_metadata",
                 "--exact",
                 "--nocapture",
             ])

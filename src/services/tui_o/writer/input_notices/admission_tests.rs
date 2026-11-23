@@ -1,10 +1,12 @@
-use super::super::NoticeOrigin;
-use super::*;
 use crate::services::tmux_common as tc;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
+use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::LedgerEntry;
 use crate::services::tui_o::store::ledger::input_notices::{NoticeEntry, NoticeEvidence};
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig, clear_end};
+use crate::services::tui_o::writer::input_notices::NoticeOrigin;
+use crate::services::tui_o::writer::input_notices::admission::*;
+use crate::services::tui_o::writer::pieces::PieceWork;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 use chrono::Utc;
 use sha2::{Digest, Sha256};

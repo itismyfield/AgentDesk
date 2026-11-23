@@ -1,6 +1,6 @@
-use super::super::super::EVALUATIONS;
 use super::*;
 use crate::services::tui_o::store::ledger::input_notices::NoticeEvidence;
+use crate::services::tui_o::writer::actor::notice_work::EVALUATIONS;
 
 fn retained(c: &Case, actor: &mut Host, id: &str, prompt: &str) {
     let raw = row(id, prompt);

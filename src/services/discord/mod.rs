@@ -186,6 +186,7 @@ mod tmux_watcher_registry_restore_tests;
 mod krx_claude_tests;
 #[cfg(all(test, unix))]
 mod krx_claude_unix_tests;
+pub(crate) mod krx_tui_o_test_host;
 #[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;

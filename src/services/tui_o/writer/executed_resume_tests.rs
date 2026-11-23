@@ -1,13 +1,35 @@
 //! The production cold resume launch owns its executed source before O delivers from it.
 
-use super::*;
+use crate::config::TestEnvVarGuard;
+use crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook;
 use crate::services::claude_tui::hook_server::{
     adoption_retry::DurableKind, observation_ingress::IngressOutcome,
 };
 use crate::services::codex_tui::tail_launch::{BEFORE_RESUME_PROOF, SELECTION_FOR_TESTS};
+use crate::services::provider::CancelToken;
+use crate::services::tmux_common as tc;
+use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
+use crate::services::tui_o::writer::actor;
+use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
+use crate::services::tui_o::writer::owed::tests::owed_writer;
+use crate::services::tui_o::writer::source_read_tests::*;
+use crate::services::tui_o::writer::*;
+use crate::services::tui_prompt_dedupe::binding_context::{
+    BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
+    PreparedIncarnation,
+};
+use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
+use chrono::{Duration, Utc};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::watch;
 
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 
@@ -193,7 +215,7 @@ async fn deliver(
     OStore,
     Arc<owed::tests::Port>,
     watch::Sender<bool>,
-    tokio::task::JoinHandle<Option<super::super::deliver::StopCause>>,
+    tokio::task::JoinHandle<Option<crate::services::tui_o::writer::deliver::StopCause>>,
 ) {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, cold.root.path())
         .unwrap()
@@ -512,7 +534,7 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
     let gate = Arc::new(crate::services::tui_o::ownership::OwnershipGate::default());
     gate.acquired();
     let spawn = |opened, stopped| {
-        let writer = super::super::deliver::ChannelWriter::new(
+        let writer = crate::services::tui_o::writer::deliver::ChannelWriter::new(
             opened,
             Arc::clone(&gate),
             Arc::clone(&port),
@@ -595,7 +617,9 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
     let closes: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.record {
-            super::super::binding::BindingRecord::Rejected { closes, .. } => *closes,
+            crate::services::tui_o::writer::binding::BindingRecord::Rejected { closes, .. } => {
+                *closes
+            }
             _ => None,
         })
         .collect();
