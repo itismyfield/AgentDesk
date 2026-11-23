@@ -1984,6 +1984,9 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   └── root_replaced.rs
+│   │   ├── host_liveness/
+│   │   │   ├── krx_discord_dl_tests.rs
+│   │   │   └── krx_discord_dl_unix_tests.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
 │   │   ├── inflight/
@@ -2126,6 +2129,9 @@ src/
 │   │   │   └── effort.rs
 │   │   ├── org_schema/
 │   │   │   └── auth_selection_tests.rs
+│   │   ├── org_writer/
+│   │   │   ├── krx_discord_root_tests.rs
+│   │   │   └── krx_discord_root_unix_tests.rs
 │   │   ├── outbound/
 │   │   │   ├── completed_turn_ledger/
 │   │   │   │   ├── o_pending.rs
@@ -3851,6 +3857,7 @@ src/
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
 │   │   ├── session_transition.rs
+│   │   ├── session_transition_tests.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
