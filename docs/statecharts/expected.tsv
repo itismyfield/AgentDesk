@@ -11,6 +11,7 @@
 agy-acp/AgyAcpClearKeeps.cfg	AgyAcpSession	NoPromptToClearedSession	-
 agy-acp/AgyAcpDesign.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpDesignLoad.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpForceCancelFirst.cfg	AgyAcpSession	-	ForceEndsChild
 agy-acp/AgyAcpForceFirstOnly.cfg	AgyAcpSession	-	ForceEndsTurn
 agy-acp/AgyAcpForceNoWatchdog.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpLoadLeak.cfg	AgyAcpSession	AtMostOnePost	-
