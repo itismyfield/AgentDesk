@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef, useMemo, type ReactNode } from "react";
-import { Command } from "cmdk";
-import { Folder, Search } from "lucide-react";
+import { type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { Folder } from "lucide-react";
 import type { Agent, Department } from "../types";
-import { SurfaceEmptyState } from "./common/SurfacePrimitives";
+import { CommandMenu, type CommandMenuGroup, type CommandMenuLabels } from "../kit/pro/command-menu";
 import AgentPersona from "./AgentPersona";
 
 function searchTerms(...values: Array<string | null | undefined>): string[] {
@@ -27,6 +26,9 @@ interface CommandPaletteProps {
   departmentRouteId?: string;
 }
 
+// The kit backdrop takes the shell's modal tint.
+const OVERLAY_STYLE = { "--aui-overlay": "var(--th-modal-overlay)" } as CSSProperties;
+
 export default function CommandPalette({
   agents,
   departments,
@@ -37,170 +39,94 @@ export default function CommandPalette({
   routes,
   departmentRouteId = "settings_organization",
 }: CommandPaletteProps) {
-  const [query, setQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
   const tr = (ko: string, en: string) => (isKo ? ko : en);
 
-  type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: ReactNode } | { type: "dept"; dept: Department };
+  // Every row runs through its own onSelect and the palette closes after it. There is no onRun,
+  // so the kit adds no assistant row and never calls onRun for these rows.
+  const pick = (run: () => void) => () => {
+    run();
+    onClose();
+  };
+  const groups: CommandMenuGroup[] = [
+    {
+      id: "navigate",
+      label: tr("이동", "Navigate"),
+      recommended: false,
+      commands: routes.map((route) => ({
+        id: route.id,
+        label: tr(route.labelKo, route.labelEn),
+        icon: route.icon,
+        keywords: [route.id],
+        onSelect: pick(() => onNavigate(route.id)),
+      })),
+    },
+    {
+      id: "agents",
+      label: tr("에이전트", "Agents"),
+      recommended: false,
+      commands: agents.map((agent) => ({
+        id: agent.id,
+        label: agent.alias || agent.name_ko || agent.name,
+        hint: searchTerms(agent.department_name_ko, agent.status).join(" · ") || undefined,
+        icon: <AgentPersona agent={agent} size={24} />,
+        keywords: searchTerms(agent.id, agent.name, agent.name_ko, agent.alias, agent.avatar_emoji, agent.department_name_ko, agent.status),
+        onSelect: pick(() => onSelectAgent(agent)),
+      })),
+    },
+    {
+      id: "departments",
+      label: tr("부서", "Departments"),
+      recommended: false,
+      commands: departments.map((dept) => ({
+        id: dept.id,
+        label: dept.name_ko || dept.name,
+        hint: typeof dept.agent_count === "number" ? tr(`에이전트 ${dept.agent_count}명`, `${dept.agent_count} agents`) : undefined,
+        // The department emoji stays searchable but is not drawn (no decorative emoji).
+        icon: <Folder />,
+        keywords: searchTerms(dept.id, dept.name, dept.name_ko, dept.icon),
+        onSelect: pick(() => onNavigate(departmentRouteId)),
+      })),
+    },
+  ];
 
-  const navItems = useMemo(
-    () =>
-      routes.map((route) => ({
-      id: route.id,
-      label: tr(route.labelKo, route.labelEn),
-      icon: route.icon,
-    })),
-    [isKo, routes],
-  );
+  const labels: Partial<CommandMenuLabels> = {
+    launch: tr("명령 팔레트 열기", "Open command palette"),
+    search: tr("에이전트, 메뉴, 부서 검색", "Search agents, menu and departments"),
+    detailsShow: tr("설명 보기 (F2)", "Show details (F2)"),
+    detailsHide: tr("설명 숨기기 (F2)", "Hide details (F2)"),
+    close: tr("명령 팔레트 닫기", "Close command palette"),
+    details: tr("항목 설명", "Details"),
+    list: tr("검색 결과", "Search results"),
+    empty: tr("보여 줄 항목이 없어요.", "Nothing to show."),
+    noMatch: tr("맞는 항목이 없어요.", "No results."),
+    groupMove: tr("다음 묶음", "Next group"),
+    searchKey: tr("찾기", "Search"),
+  };
 
-  const handleSelect = (item: ResultItem) => {
-    if (item.type === "nav") {
-      onNavigate(item.id);
-    } else if (item.type === "agent") {
-      onSelectAgent(item.agent);
-    } else if (item.type === "dept") {
-      onNavigate(departmentRouteId);
-    }
+  // Esc closes at once, as before; the kit's own Esc would clear the query first.
+  const closeOnEscape = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
     onClose();
   };
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-start justify-center pt-[8dvh]"
-      onClick={onClose}
+      className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[8dvh]"
+      style={OVERLAY_STYLE}
+      onKeyDownCapture={closeOnEscape}
     >
-      <div className="fixed inset-0" style={{ background: "var(--th-modal-overlay)" }} />
-      <Command
-        loop
-        role="dialog"
-        aria-modal="true"
-        aria-label={tr("명령 팔레트", "Command Palette")}
+      <CommandMenu
+        open
+        modal
+        autoFocus
+        groups={groups}
+        onClose={onClose}
         label={tr("명령 팔레트", "Command Palette")}
-        className="relative mx-4 flex max-h-[84dvh] w-full max-w-lg flex-col [&_[cmdk-group-heading]]:px-4 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-th-text-muted overflow-hidden rounded-lg border shadow-lg"
-        style={{
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          background: "var(--th-bg-surface)",
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Search input */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b" style={{ borderColor: "var(--th-border)" }}>
-          <Search size={18} style={{ color: "var(--th-text-muted)" }} />
-          <Command.Input
-            ref={inputRef}
-            value={query}
-            onValueChange={setQuery}
-            placeholder={tr("검색... (에이전트, 메뉴, 부서)", "Search... (agents, menu, departments)")}
-            className="min-h-11 min-w-0 flex-1 bg-transparent text-sm outline-none"
-            style={{ color: "var(--th-text)" }}
-          />
-          <kbd className="text-xs px-1.5 py-0.5 rounded" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
-            ESC
-          </kbd>
-        </div>
-
-        {/* Results */}
-        <Command.List
-          className="min-h-0 flex-1 overflow-y-auto py-2"
-          label={tr("검색 결과", "Search results")}
-        >
-          <Command.Empty>
-            <SurfaceEmptyState className="mx-2 px-4 py-6 text-center text-sm">
-              {tr("결과 없음", "No results")}
-            </SurfaceEmptyState>
-          </Command.Empty>
-
-          <Command.Group heading={tr("이동", "Navigate")}>
-            {navItems.map((item) => (
-              <Command.Item
-                key={item.id}
-                value={`nav:${item.id}:${item.label}`}
-                keywords={[item.id, item.label]}
-                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
-                onSelect={() => handleSelect({ type: "nav", ...item })}
-              >
-                <span className="flex w-6 items-center justify-center text-base text-center">
-                  {item.icon}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate">{item.label}</div>
-                </div>
-                <span className="shrink-0 text-xs text-th-text-muted">
-                  {tr("이동", "Go")}
-                </span>
-              </Command.Item>
-            ))}
-          </Command.Group>
-
-          <Command.Group heading={tr("에이전트", "Agents")}>
-            {agents.map((agent) => (
-              <Command.Item
-                key={agent.id}
-                value={`agent:${agent.id}:${agent.alias ?? ""}:${agent.name_ko}:${agent.name}`}
-                keywords={searchTerms(
-                  agent.name,
-                  agent.name_ko,
-                  agent.alias ?? "",
-                  agent.avatar_emoji,
-                  agent.department_name_ko ?? "",
-                  agent.status,
-                )}
-                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
-                onSelect={() => handleSelect({ type: "agent", agent })}
-              >
-                <span className="flex w-6 items-center justify-center text-base text-center">
-                  <AgentPersona agent={agent} size={22} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate">
-                    {agent.alias || agent.name_ko || agent.name}
-                  </div>
-                  <div className="text-xs text-th-text-muted">
-                    {agent.department_name_ko || ""} · {agent.status}
-                  </div>
-                </div>
-                <span className="shrink-0 text-xs text-th-text-muted">
-                  {tr("에이전트", "Agent")}
-                </span>
-              </Command.Item>
-            ))}
-          </Command.Group>
-
-          <Command.Group heading={tr("부서", "Departments")}>
-            {departments.map((dept) => (
-              <Command.Item
-                key={dept.id}
-                value={`dept:${dept.id}:${dept.name_ko}:${dept.name}`}
-                keywords={searchTerms(dept.name, dept.name_ko, dept.icon)}
-                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
-                onSelect={() => handleSelect({ type: "dept", dept })}
-              >
-                {/* Department emoji stays searchable but is not drawn (no decorative emoji). */}
-                <span className="flex w-6 items-center justify-center text-th-text-muted">
-                  <Folder size={16} aria-hidden />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate">{dept.name_ko || dept.name}</div>
-                </div>
-                <span className="shrink-0 text-xs text-th-text-muted">
-                  {tr("부서", "Dept")}
-                </span>
-              </Command.Item>
-            ))}
-          </Command.Group>
-        </Command.List>
-      </Command>
+        placeholder={tr("검색... (에이전트, 메뉴, 부서)", "Search... (agents, menu, departments)")}
+        labels={labels}
+      />
     </div>
   );
 }

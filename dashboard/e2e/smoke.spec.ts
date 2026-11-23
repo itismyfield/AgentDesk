@@ -1378,7 +1378,25 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.getByLabel(/^찾기$|^Search$/).click();
     await expect(palette).toBeVisible();
+    // Esc closes at once even with a query typed (the kit alone would clear the query first).
+    await search.fill("zz");
     await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+  });
+
+  test("command palette opens and closes on the phone with touch-size controls", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "Phone layout coverage");
+    await page.goto("/home");
+    await page.getByTestId("topbar-search").click();
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    const search = palette.getByPlaceholder(/검색|Search/);
+    await expect(search).toBeFocused();
+    expect(parseFloat(await search.evaluate((input) => getComputedStyle(input).fontSize))).toBeGreaterThanOrEqual(16);
+    const close = palette.getByRole("button", { name: /명령 팔레트 닫기|Close command palette/ });
+    expect((await close.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    expect((await palette.getByRole("option").first().boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    await expectNoHorizontalOverflow(page);
+    await close.click();
     await expect(palette).toHaveCount(0);
   });
 
@@ -2221,13 +2239,15 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toBeVisible();
     await page.keyboard.press("ControlOrMeta+k");
     const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
-    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
-    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)$/ })).toHaveCount(0);
 
     await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
-    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    const department = palette.getByRole("option", { name: /^플랫폼/ });
     await expect(department).toBeVisible();
     await expect(palette).not.toContainText("📁");
+    // Rows run through their own onSelect only, so no assistant row is offered.
+    await expect(palette.getByRole("option")).toHaveCount(1);
     await department.click();
     await expect(page).toHaveURL(/\/agents$/);
   });
