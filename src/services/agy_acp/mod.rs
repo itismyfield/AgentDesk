@@ -1,5 +1,5 @@
 //! Human-authored Antigravity turns through a resident `agy acp` client (ACP v1),
-//! behind `agy_acp.enabled`. Off by default: every turn keeps the `agy --print` path.
+//! behind `agy_acp.enabled`, read once at boot. Off by default: turns keep `agy --print`.
 
 mod actor;
 mod child;
@@ -12,7 +12,7 @@ pub(crate) mod lifecycle_tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
@@ -37,9 +37,11 @@ impl AgyAcpConfig {
     }
 }
 
-/// The only read made before a turn's eligibility is known: the live config snapshot.
-pub(crate) fn enabled() -> bool {
-    crate::config_live_reload::current().is_some_and(|config| config.agy_acp.enabled)
+/// Set once per boot: a config reload never moves running sessions between paths.
+pub(crate) static ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn install(config: &crate::config::Config) {
+    ENABLED.store(config.agy_acp.enabled, Ordering::Relaxed);
 }
 
 /// How a destination's child is started.

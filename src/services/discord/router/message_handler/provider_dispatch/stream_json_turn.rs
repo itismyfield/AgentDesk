@@ -221,9 +221,9 @@ fn execute_request(
     execute_streaming(dialect, request, sender)
 }
 
-/// The switch is read first, so a turn that stays on `-p` locks, reads, and spawns nothing extra.
+/// The boot-time switch is read first, so a turn that stays on `-p` locks or spawns nothing extra.
 fn acp_selected(dialect: StreamJsonDialectId, turn: &StreamingTurn<'_>) -> bool {
-    agy_acp::enabled()
+    agy_acp::ENABLED.load(std::sync::atomic::Ordering::Relaxed)
         && matches!(dialect, StreamJsonDialectId::Agy)
         && *turn.provider == ProviderKind::Antigravity
         && turn.registration_origin == Some(false)

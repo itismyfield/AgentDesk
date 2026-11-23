@@ -61,9 +61,9 @@
 ### 2.3 스위치
 
 - 설정 키는 `agy_acp.enabled`(bool, 기본 false) 하나다. 채널별 목록은 두지 않는다.
-- 판정은 `execute_request` 첫 줄에서 `config_live_reload::current()`만 읽는다. IO, 잠금, 프로세스 준비는 판정 뒤에만 한다.
+- 값은 부팅 때 `bootstrap::install_boot_snapshots`가 한 번 읽어 `agy_acp::ENABLED`에 고정한다(reload 등급 Restart). 판정은 `execute_request` 첫 줄에서 이 값만 읽는다. IO, 잠금, 프로세스 준비는 판정 뒤에만 한다.
 - 꺼져 있으면 지금 코드와 동작이 같다(dormant).
-- 실행 중에 끄면 이미 ACP로 돈 턴은 ACP에서 끝난다. 그 뒤의 새 입력은 지금 경로로 간다. 자식은 유휴 만료로 정리된다.
+- 실행 중 설정 reload는 경로를 바꾸지 않는다. 전환은 운영 절차(세션 종료 → 설정 변경 → dcserver 재시작)로 하고, 새 부팅의 세션부터 새 값을 쓴다.
 
 ## 3. agy 경로 진입점 전수표
 

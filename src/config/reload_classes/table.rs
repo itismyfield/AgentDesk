@@ -184,7 +184,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("tui_o.tool_cards.enabled", Live, "`src/services/tui_o/store/tool_card_switch.rs` global_enabled (current())"),
     row("tui_o.turn", Restart, "`src/services/discord/tui_direct_pending_start/turn_retirement.rs` confirm_at_boot (turn_mode CONFIRMED set)"),
     row("tui_o.alert_channel_id", Restart, "`src/services/tui_o/alarm.rs` AlarmRouter::for_process (runtime_bootstrap/o_writer_host.rs:parts at gateway boot)"),
-    row("agy_acp", Live, "`src/services/agy_acp/mod.rs` enabled (current() per turn)"),
+    row("agy_acp", Restart, "`src/services/agy_acp/mod.rs` install (boot latch; bootstrap::install_boot_snapshots)"),
     row("session_hosts", Restart, "`src/config/session_hosts.rs` install_selected (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
     row("config_hot_reload", Restart, "`src/bootstrap.rs` prepare_dcserver_boot + `src/launch.rs` after_database_ready (watcher guard owned by bot/server lifetime)"),
 ];

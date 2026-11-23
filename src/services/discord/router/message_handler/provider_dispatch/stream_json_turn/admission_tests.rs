@@ -233,14 +233,17 @@ fn only_human_turns_with_the_switch_on_take_the_acp_path() {
     let state = inflight(&cancel);
     let source = Some(MessageId::new(MESSAGE));
     for (case, enabled, human, dispatch, claimed, acp) in [
-        ("off", false, true, false, true, false),
+        ("human", true, true, false, true, true),
         ("bot", true, false, false, true, false),
         ("dispatch", true, true, true, true, false),
         ("claimless", true, true, false, false, false),
-        ("human", true, true, false, true, true),
+        ("off", false, true, false, true, false),
     ] {
+        // Each row is a new boot; the reload after it must not move the running session.
         let mut config = crate::config::Config::default();
         config.agy_acp.enabled = enabled;
+        crate::services::agy_acp::install(&config);
+        config.agy_acp.enabled = !enabled;
         crate::config_live_reload::install(config);
         let dir = root.path().join(case);
         std::fs::create_dir(&dir).unwrap();
