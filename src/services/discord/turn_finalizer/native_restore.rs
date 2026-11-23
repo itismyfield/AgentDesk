@@ -373,8 +373,12 @@ impl BootInputs {
                 continue;
             }
             if owner_proves_not_sent(&record) {
-                history.native_not_sent_blocking(&record.namespace, &record.settlement.ticket)?;
-                continue;
+                // A refused record stays a boot input for this channel; no other channel waits on it.
+                match history.native_not_sent_blocking(&record.namespace, &record.settlement.ticket)
+                {
+                    Ok(()) => continue,
+                    Err(error) => tracing::warn!(%error, "native boot no-key settlement refused"),
+                }
             }
             let id = serde_json::to_string(&(&record.namespace, &record.settlement.ticket.key))
                 .map_err(|e| e.to_string())?;
