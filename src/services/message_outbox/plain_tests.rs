@@ -1,6 +1,6 @@
-use super::super::{OutboxEnqueueError, OutboxMessage, enqueue_outbox_pg_on_tx};
 use crate::dispatch::test_support::DispatchPostgresTestDb;
 use crate::services::discord::outbound::census_scope;
+use crate::services::message_outbox::{OutboxEnqueueError, OutboxMessage, enqueue_outbox_pg_on_tx};
 use crate::test_support::wait::{WAIT_CAP, await_within};
 use serde_json::{Value, json};
 use sqlx::PgPool;

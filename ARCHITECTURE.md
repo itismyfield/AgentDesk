@@ -2917,6 +2917,11 @@ src/
 │   │   │   ├── durable_stores_tests.rs
 │   │   │   ├── record_lock.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── session_canonical_identity/
+│   │   │   ├── krx_services_dl_tests/
+│   │   │   │   ├── intake_worker_executor_tests.rs
+│   │   │   │   └── message_outbox_source_contract_tests.rs
+│   │   │   └── krx_services_dl_tests.rs
 │   │   ├── session_notice/
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── input_notice.rs
@@ -5485,6 +5490,7 @@ src/
 ├── krx_config_unix_tests.rs
 ├── krx_db_b_tests.rs
 ├── krx_db_tests.rs
+├── krx_services_tests.rs
 ├── krx_tui_o_tests.rs
 ├── krx_tui_o_unix_tests.rs
 ├── launch.rs
@@ -5549,6 +5555,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/krx_config_unix_tests.rs` | Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items. |
 | `src/krx_db_b_tests.rs` | Test-only host that declares the second slice of KRX db tests calling root-crate items. |
 | `src/krx_db_tests.rs` | Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_services_tests.rs` | Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate. |
 | `src/krx_tui_o_tests.rs` | Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_tui_o_unix_tests.rs` | Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |

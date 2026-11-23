@@ -842,7 +842,7 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
             "codex",
             "b1b-claim",
             &cancelled,
-            crate::services::cluster::intake_worker::test_executor::PORT,
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
         )
         .await;
         let _ = finished.send(());

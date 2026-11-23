@@ -990,20 +990,9 @@ mod tests {
 mod dispatch_stamp_tests;
 
 #[cfg(test)]
-#[path = "intake_worker/o_route_tests.rs"]
-mod o_route_tests;
-
-#[cfg(test)]
 #[path = "intake_worker/drain_tests.rs"]
 mod drain_tests;
 
 #[cfg(test)]
 #[path = "intake_worker/test_executor.rs"]
 pub(crate) mod test_executor;
-
-#[cfg(test)]
-#[path = "intake_worker/replay_hold_tests.rs"]
-mod replay_hold_tests;
-
-#[cfg(test)]
-mod owner_fence_pg_tests;

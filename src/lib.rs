@@ -303,6 +303,8 @@ mod krx_db_b_tests;
 #[cfg(test)]
 mod krx_db_tests;
 #[cfg(test)]
+mod krx_services_tests;
+#[cfg(test)]
 mod krx_tui_o_tests;
 #[cfg(all(test, unix))]
 mod krx_tui_o_unix_tests;

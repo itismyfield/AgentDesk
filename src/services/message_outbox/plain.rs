@@ -37,7 +37,3 @@ pub(super) async fn insert_on_tx(
     census::store(tx, id, observed.as_ref()).await?;
     Ok(id)
 }
-
-#[cfg(test)]
-#[path = "plain_tests.rs"]
-mod tests;
