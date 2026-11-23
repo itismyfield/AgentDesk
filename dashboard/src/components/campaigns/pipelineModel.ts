@@ -16,7 +16,7 @@ const EVENTS: Record<string, Label> = {
 };
 /** Template states carry no title, so their ids take the stage board's names. */
 const STATE_NAMES: Record<string, Label> = { ...STAGE_LABELS, failed: ["작업 실패", "Task failed"] };
-const OPS: Record<string, string> = { eq: "=", ne: "≠", lt: "<", le: "≤", gt: ">", ge: "≥" };
+export const OPS: Record<string, string> = { eq: "=", ne: "≠", lt: "<", le: "≤", gt: ">", ge: "≥" };
 
 export const stateName = (state: PipelineState | undefined, id: string, tr: Tr) => state?.title || (STATE_NAMES[id] ? tr(...STATE_NAMES[id]) : id);
 /** A kind or gate this build does not know shows by its id. */

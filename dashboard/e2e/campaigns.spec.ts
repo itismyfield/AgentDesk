@@ -896,7 +896,7 @@ test("relations editor: a draft kept while another page shows asks before a relo
 
 /** The live template as a server campaign's saved pipeline, with a run's tasks in three states (one failed, one blocked),
  * landing approval on, a timeout and an event; a ledger campaign reads the template list and that template instead. */
-async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark" | "light" = "dark") {
+async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark" | "light" = "dark", editable = false) {
   await page.clock.install({ time: new Date(NOW) });
   const calls = await mockApi(page, theme);
   const pipeline = structuredClone(pipelineTemplate.pipeline) as Record<string, unknown> & { states: Record<string, unknown>[]; events: unknown[] };
@@ -904,16 +904,18 @@ async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark"
   pipeline.events = [{ id: "review-timer", state_id: "review", type: "timer.expired" }];
   await json(page, /\/api\/server-campaigns\/pipeline\/templates$/, { templates: [pipelineTemplate.template] });
   await json(page, /\/api\/server-campaigns\/pipeline\/templates\/campaign-development-9\/1$/, pipelineTemplate);
+  // Served by reference, so a test can move its revision between reads.
+  const detail = { pipeline, definition_revision: 7, execution_hash: "b".repeat(64), source: "saved", editable, migration_available: false,
+    execution: { mode: "legacy_stage", run_id: "run-1", definition_revision: 7, state_ids: { A: "implementation", B: "requirements", C: "landing" } } };
   if (kind === "server") {
     const release = gatedServerCampaign();
     release.definition.workflow_options = { start: false, implementation: false, review: false, landing: true, merge: false, deploy: false };
     await serveServerCampaign(page, release);
-    await json(page, /\/api\/server-campaigns\/release\/pipeline$/, { pipeline, definition_revision: 7, execution_hash: "b".repeat(64), source: "saved", editable: false, migration_available: false,
-      execution: { mode: "legacy_stage", run_id: "run-1", definition_revision: 7, state_ids: { A: "implementation", B: "requirements", C: "landing" } } });
+    await json(page, /\/api\/server-campaigns\/release\/pipeline$/, detail);
   }
   await page.goto(kind === "server" ? "/campaigns?mode=server&campaign=release" : "/campaigns?mode=legacy&campaign=open-issues-dag");
   await page.getByRole("tab", { name: "파이프라인" }).click();
-  return { view: page.locator(".campaign-pipeline"), calls };
+  return { view: page.locator(".campaign-pipeline"), calls, detail };
 }
 /** With CAMPAIGNS_SHOTS set, both pipelines in dark and light at the page's size. */
 async function pipelineShots(page: Page) {
@@ -987,12 +989,78 @@ test("pipeline: a ledger campaign says it uses no server pipeline and shows the 
   expect(calls.filter((call) => call.includes("/pipeline"))).toEqual(["GET /api/server-campaigns/pipeline/templates", "GET /api/server-campaigns/pipeline/templates/campaign-development-9/1"]);
 });
 
+test("pipeline edit: a new way out is checked as it changes, a lost save resends its key, and a stale one saves over the newer revision", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "Editing is for wide screens");
+  await page.setViewportSize({ width: 1440, height: 980 });
+  const checked: unknown[] = [], saves: { idempotency_key: string; expected_definition_revision: number; pipeline: typeof pipelineTemplate.pipeline }[] = [];
+  const answers = [{ status: 503, json: { error: "down" } }, { status: 409, json: { error: "rejected", context: { rejection: "state_in_use", definition_error: { pipeline_errors: [{ code: "STATE_IN_USE", path: "/states", state_id: "review", transition_id: null }] } } } },
+    { status: 409, json: { error: "rejected", context: { rejection: "stale_definition" } } }, { json: { result: { definition_revision: 9, run_id: null, control_version: null, event_sequence: 3, control: "prepared" } } }];
+  const { view, calls, detail } = await openPipeline(page, "server", "dark", true);
+  await page.route(/\/api\/server-campaigns\/release\/pipeline\/validate$/, (route) => {
+    const { pipeline } = route.request().postDataJSON();
+    checked.push(pipeline);
+    const open = pipeline.transitions.find((value: { to: string }) => value.to === "");
+    return route.fulfill({ json: { errors: open ? [{ code: "TRANSITION_TARGET_MISSING", path: "/transitions/21/to", state_id: "", transition_id: open.id }] : [], warnings: [] } });
+  });
+  await page.route(/\/api\/server-campaigns\/release\/pipeline$/, (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    saves.push(route.request().postDataJSON());
+    if (saves.length === 3) detail.definition_revision = 8;
+    return route.fulfill(answers[saves.length - 1]);
+  });
+  await view.getByRole("button", { name: "편집" }).click();
+  const tools = view.getByRole("toolbar", { name: "편집 도구" });
+  await view.locator('.react-flow__node[data-id="review"]').click();
+  const panel = view.getByRole("complementary", { name: "파이프라인 편집" });
+  await panel.getByRole("button", { name: "나가는 전환 추가" }).click();
+  const checks = panel.getByRole("region", { name: "저장 전 검사" });
+  await expect(checks.getByRole("list", { name: "검사 결과" })).toContainText("전환에 도착 상태가 없어요리뷰 · review-out-1");
+  await expect(tools).toContainText("검사 오류 1");
+  await expect(tools).toContainText("저장 안 됨 · 전환 +1");
+  await expect(tools.getByRole("button", { name: "저장" })).toBeDisabled();
+  await expect(view.locator('.react-flow__node[data-id="review"]')).toContainText("에이전트 작업 · 바뀜");
+  // The check names the state its transition leaves; pressing it brings that card into view.
+  await checks.getByRole("button", { name: /전환에 도착 상태가 없어요/ }).click();
+  await expect(view.locator('.react-flow__node[data-id="review"]')).toBeInViewport();
+  if (SHOTS) for (const theme of ["dark", "light"]) {
+    await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${SHOTS}/pipeline-edit-error-1440x980-${theme}.png` });
+    await panel.locator(":scope > div").first().evaluate((node) => { node.scrollTop = 0; });
+    await page.screenshot({ path: `${SHOTS}/pipeline-edit-form-1440x980-${theme}.png` });
+    console.log(`edit 1440 ${theme}: under 44px ${(await view.evaluate(small)).length}, sideways ${await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)}`);
+  }
+  // Leaving for another view asks first; staying keeps the draft.
+  await page.getByRole("tab", { name: "현황" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "계속 편집" }).click();
+  await panel.getByRole("listitem", { name: "전환 review-out-1" }).getByRole("combobox").first().selectOption("landing");
+  await expect(checks).toContainText("검사를 모두 통과했어요.");
+  await tools.getByRole("button", { name: "저장" }).click();
+  await expect(view.getByRole("alert")).toContainText("응답을 받지 못했어요.");
+  await tools.getByRole("button", { name: "저장" }).click();
+  await expect(view.getByRole("alert")).toContainText("실행 중인 작업이 아직 이 상태에 있어요: 리뷰");
+  await expect(checks).toContainText("작업이 남아 있는 상태라 지울 수 없어요");
+  await panel.getByRole("textbox", { name: "이름" }).fill("리뷰 2차");
+  await expect(checks).toContainText("검사를 모두 통과했어요.");
+  await tools.getByRole("button", { name: "저장" }).click();
+  await view.getByRole("button", { name: "rev 8 위에 저장" }).click();
+  await expect(view.getByRole("status").filter({ hasText: "저장했어요" })).toHaveText("정의 rev 9에 저장했어요.");
+  expect(saves.map((value) => value.expected_definition_revision)).toEqual([7, 7, 7, 8]);
+  expect([saves[1].idempotency_key === saves[0].idempotency_key, saves[2].idempotency_key !== saves[1].idempotency_key, saves[3].idempotency_key !== saves[2].idempotency_key]).toEqual([true, true, true]);
+  expect(saves[3].pipeline.transitions.find((value) => value.id === "review-out-1")).toMatchObject({ from: "review", to: "landing", priority: 30 });
+  expect(saves[3].pipeline.states.find((value) => value.id === "review")).toMatchObject({ title: "리뷰 2차", kind: "agent_task" });
+  expect(saves[3].pipeline).toMatchObject({ schema_version: 1, vocabulary_version: 1, policy: { design_enabled: false }, start: "requirements" });
+  expect(checked.length).toBeGreaterThan(1);
+  expect(calls.filter((call) => !call.startsWith("GET") && !call.startsWith("POST /api/auth/ws-ticket") && !call.endsWith("/pipeline/validate")).map((call) => call.split(" ")[0])).toEqual(["PUT", "PUT", "PUT", "PUT"]);
+});
+
 test.describe("pipeline at 390px touch", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   test("pipeline: phones list the main flow numbered with task counts, open a state's results, fold the rest, with no sideways scroll and 44px targets", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Phone width");
-    const { view } = await openPipeline(page, "server");
+    const { view } = await openPipeline(page, "server", "dark", true);
     await expect(view.locator(".react-flow")).toHaveCount(0);
+    await expect(view.getByRole("button", { name: "편집" })).toHaveCount(0);
     const flow = view.getByRole("list", { name: "주 흐름" });
     await expect(flow.locator(":scope > li")).toHaveCount(9);
     await expect(flow.locator(":scope > li").nth(0)).toContainText("요구사항시작 · 자동 검사막힘 1");
