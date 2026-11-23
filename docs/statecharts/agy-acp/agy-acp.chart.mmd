@@ -19,29 +19,29 @@ stateDiagram-v2
   s0: No agy child
   s1: Child up, no session
   s2: Session idle
-  s3: Prompt open
-  s4: AgentDesk restarting
-  s5: Prompt open, stop asked
+  s3: Input accepted, prompt not yet written
+  s4: Prompt open
+  s5: AgentDesk restarting
   s6: Old child orphaned, sweep pending
   s7: Turn answered, post pending
   s8: Session loading (replay)
   [*] --> s0
-  s0 --> s0: a person sends a message or writer posts the turn's one terminal message and commits its receipt
+  s0 --> s0: a person sends a message or bridge looks up the receipt, posts the turn's one terminal message and commits
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new or agy refuses the stored id#59; session/new
-  s2 --> s2: person runs /clear
-  s2 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
-  s3 --> s4: AgentDesk restarts
-  s3 --> s5: person runs /clear
-  s4 --> s6: boot settles orphaned prompts
-  s5 --> s4: AgentDesk restarts
-  s3 --> s0: agy exits#59; stdout EOF fails open prompts or deadline passes#59; the child's own process group killed
+  s2 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
+  s3 --> s3: the input's origin is written ahead into the turn's inflight row or person runs /clear
+  s3 --> s4: session/prompt for the saved input (dropped as a failed steer if its turn is stopping)
+  s3 --> s5: AgentDesk restarts
+  s4 --> s5: AgentDesk restarts
+  s5 --> s6: boot settles orphaned prompts
+  s4 --> s0: agy exits#59; stdout EOF fails open prompts or deadline passes#59; the child's own process group killed
   s6 --> s0: boot kills the old child's process group
   s1 --> s7: agy refuses the stored id#59; session/new
-  s7 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
+  s7 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
   s1 --> s8: reattach the stored id (resume, or load)
   s8 --> s8: load replays an old answer
-  s3 --> s7: late response from the killed child
+  s4 --> s7: late response from the killed child
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
@@ -49,12 +49,12 @@ stateDiagram-v2
   class s1 bugPath
   class s2 teal
   class s2 bugPath
-  class s3 blue
-  class s3 mayBreak
+  class s3 teal
   class s3 bugPath
-  class s4 pink
+  class s4 blue
+  class s4 mayBreak
   class s4 bugPath
-  class s5 blue
+  class s5 pink
   class s5 bugPath
   class s6 tan
   class s6 mayBreak

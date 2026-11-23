@@ -10,9 +10,11 @@ const procLabel = (v) => !v.running ? "AgentDesk restarting"
   : v.proc !== "up" ? "No agy child"
   : v.loading ? "Session loading (replay)"
   : v.attached === 0 ? "Child up, no session"
+  : ids(v).some((i) => v.st[i] === "accepted" || v.st[i] === "saved") ? "Input accepted, prompt not yet written"
   : v.open.length > 1 ? "Turn steered: two prompts open"
   : v.open.length === 1 ? (v.cancelSent ? "Prompt open, cancel sent" : v.cancelReq ? "Prompt open, stop asked" : "Prompt open")
   : closing(v) ? "Turn answered, post pending"
+  : v.held !== 0 ? "Row kept for its receipt"
   : "Session idle";
 export const state = (v) => procLabel(v);
 export const group = (v) => !v.running ? "Restart" : v.proc !== "up" ? "Process" : v.open.length > 0 ? "Turn" : "Session";
@@ -25,7 +27,11 @@ const steps = {
   ReattachRefused: "agy refuses the stored id; session/new",
   ReplayOld: "load replays an old answer",
   LoadAnswered: "session/load answers",
-  SendPrompt: "session/prompt for the next input (new turn, or steer while a prompt is open)",
+  Accept: "actor accepts the next input (new turn, or steer while a prompt is open)",
+  Save: "the input's origin is written ahead into the turn's inflight row",
+  Wire: "session/prompt for the saved input (dropped as a failed steer if its turn is stopping)",
+  EarlyLookup: "on !stop the bridge leaves its loop and looks up the receipt",
+  AdmitSettle: "the next admission marks the kept row again and records its receipt",
   SteerErrored: "steer prompt fails (rejected, or outcome unknown); it stays in the turn",
   SweepOrphan: "boot kills the old child's process group",
   AgyResponds: "agy answers the prompt (stopReason)",
@@ -36,7 +42,7 @@ const steps = {
   SendCancel: "session/cancel",
   Clear: "person runs /clear",
   CloseAfterTurn: "turn done; child closed",
-  Settle: "writer posts the turn's one terminal message and commits its receipt",
+  Settle: "bridge looks up the receipt, posts the turn's one terminal message and commits",
   StreamTick: "bridge stream tick reads the steered origin from the inflight row",
   Crash: "AgentDesk restarts",
   Boot: "boot settles orphaned prompts",
