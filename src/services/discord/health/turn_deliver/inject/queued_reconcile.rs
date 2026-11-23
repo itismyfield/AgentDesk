@@ -366,17 +366,22 @@ impl Want {
         })
     }
 
-    /// The nonce of the frame `body` is exactly, bare or in one paste block: the v1 frame this
-    /// head's source and author rebuild under the name it shows, or the frame pasted before v1.
+    /// The nonce of the frame `body` is exactly, bare or in one paste block: the plain or v1 frame
+    /// this head's source and author rebuild under the name it shows, or the frame pasted before v1.
     fn nonce_in(&self, body: &str) -> Option<String> {
         let header = body
             .find("[User: ")
             .and_then(|at| human_frame::parse(&body[at..]));
         if let Some((header, _)) = header.filter(|(header, _)| header.mode == Mode::Inject) {
             let (name, nonce) = (header.name, header.nonce);
-            if nonce.is_empty() {
+            if header.source.is_empty() {
+                // A plain frame carries this attempt's tag, or none when written before tags.
                 let id = self.nonce.as_deref()?;
-                let frame = human_frame::idle(name, &self.author, &self.text);
+                let frame = if nonce.is_empty() {
+                    human_frame::idle(name, &self.author, &self.text)
+                } else {
+                    human_frame::plain_inject(&self.source, &self.author, name, id, &self.text)
+                };
                 if human_frame::history::registered(id, &self.key.0, &frame)
                     && human_frame::history::unique_attempt(id, &self.key.0, &frame)
                     && busy_inject::exact_receipt(body, &frame)

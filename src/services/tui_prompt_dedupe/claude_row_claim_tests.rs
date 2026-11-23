@@ -429,7 +429,8 @@ fn identical_inputs_each_answer_for_their_own_row() {
             writeln!(file, "{record}").unwrap();
         };
         let mut events = subscribe_observed_prompts();
-        let (mut frame, mut owners) = (String::new(), Vec::new());
+        // Attempt n's frame, tagged with its own nonce, is the one row n carries.
+        let (mut frames, mut rows, mut owners) = (Vec::new(), Vec::new(), Vec::new());
         for step in steps {
             match step {
                 Paste | Declare => {
@@ -451,27 +452,31 @@ fn identical_inputs_each_answer_for_their_own_row() {
                         _ => busy_inject::inject_owned(&pane, &request, &TIMING, false),
                     };
                     assert_eq!(report.outcome, busy_inject::Outcome::Injected, "{case}");
-                    let next = busy_inject::frame("discord", "200", "ann", &nonce, request.text);
-                    assert!(frame.is_empty() || frame == next, "{case}: frames differ");
-                    frame = next;
+                    let frame = busy_inject::frame("discord", "200", "ann", &nonce, request.text);
                     // The receipt thread records the enqueue row inside its window.
                     let receipt = (transcript.as_path(), offset, nonce.as_str(), frame.as_str());
                     let deadline = std::time::Instant::now() + TIMING.confirm_window;
                     let seen = busy_inject::await_receipt(receipt, deadline, TIMING.confirm_poll);
                     assert_eq!(seen, Ok(()), "{case}");
+                    frames.push(frame);
                 }
-                Row(uuid, user) => append(match user {
-                    true => serde_json::json!({"type":"user","uuid":uuid,
+                Row(uuid, user) => append({
+                    let frame = frames[rows.len()].clone();
+                    rows.push((*uuid, frame.clone()));
+                    match user {
+                        true => serde_json::json!({"type":"user","uuid":uuid,
                         "message":{"role":"user","content":frame}}),
-                    false => serde_json::json!({"type":"attachment","uuid":uuid,
+                        false => serde_json::json!({"type":"attachment","uuid":uuid,
                         "attachment":{"type":"queued_command","prompt":frame,"commandMode":"prompt"}}),
+                    }
                 }),
                 TurnEnds => append(serde_json::json!({"type":"system","subtype":"turn_duration"})),
                 Observe(uuid) => {
+                    let frame = &rows.iter().find(|(row, _)| row == uuid).unwrap().1;
                     let now = Utc::now();
                     let row = Some(*uuid);
                     observe_prompt_by_tmux_with_row_ids_at(
-                        "claude", &session, &frame, row, None, now,
+                        "claude", &session, frame, row, None, now,
                     );
                     let prompts = [frame.clone()];
                     let owner = crate::services::tui_input::human_frame::history::row_owner(
@@ -483,7 +488,8 @@ fn identical_inputs_each_answer_for_their_own_row() {
         }
         let mut published = 0;
         while let Ok(event) = events.try_recv() {
-            published += usize::from(event.tmux_session_name == session && event.prompt == frame);
+            published +=
+                usize::from(event.tmux_session_name == session && frames.contains(&event.prompt));
         }
         assert_eq!(published, relayed, "{case}: {owners:?}");
         // Each row keeps one owner across readings, and two rows never share one.

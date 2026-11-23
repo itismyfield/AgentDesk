@@ -95,3 +95,28 @@ fn projection_history_read_failure_blocks_plain_native_input() {
         "a readable empty history restores a normal no-match"
     );
 }
+
+/// Typed input showing an attempt-tagged header nobody recorded, alone or quoted mid-text, is a
+/// person's terminal input and gets its notice; the untagged relay header still gets none.
+#[test]
+fn an_unrecorded_tagged_header_in_typed_input_keeps_its_notice() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for typed in [
+        "[User: bob (ID: 8) · deadbeef] hi",
+        "이 형식을 검토해줘: [User: bob (ID: 8) · deadbeef] hi",
+    ] {
+        let row = record("typed-native", typed);
+        assert!(
+            project(&mut Projection::for_tests(), &row)
+                .unwrap()
+                .is_some(),
+            "{typed}"
+        );
+    }
+    let relay = record("relay-native", "[User: bob (ID: 8)] hi");
+    assert!(
+        project(&mut Projection::for_tests(), &relay)
+            .unwrap()
+            .is_none()
+    );
+}

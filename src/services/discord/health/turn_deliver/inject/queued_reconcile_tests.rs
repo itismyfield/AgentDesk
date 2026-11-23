@@ -577,10 +577,15 @@ fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_so
 #[test]
 fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for wrapped in [false, true] {
+    let tagged = human_frame::plain_inject("discord", "200", "ann", NONCE, "status?");
+    let untagged = human_frame::idle("ann", "200", "status?");
+    for (wrapped, frame) in [false, true]
+        .into_iter()
+        .flat_map(|w| [(w, &tagged), (w, &untagged)])
+    {
         let transcript = Transcript::new(&[]);
         let offset = std::fs::metadata(&transcript.path).unwrap().len();
-        let frame = human_frame::idle("ann", "200", "status?");
+        let frame = frame.clone();
         assert!(!frame.contains(&format!("discord:{CHANNEL}:{HEAD}")));
         human_frame::history::register(
             ("claude", "AgentDesk-claude-test", NONCE, "200"),
