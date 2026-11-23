@@ -699,7 +699,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+      - name: Check preinstalled cargo-nextest
+        id: preinstalled_nextest
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/preinstalled-tool.sh cargo-nextest@0.9.149
       - name: Install cargo-nextest
+        if: steps.preinstalled_nextest.outputs.found != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.149
@@ -1133,7 +1141,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 11d342e4500e3d7404ce7d4ec555e998aebda2d4862856899c44ce0f6a4dcc6c
+          pin scripts/check-ci-runner-hardening.sh 4d5cb77a65b70dd01e12ffd44b89317640aad039daeaaa5c0fdc91d12d9fe44c
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1339,7 +1347,15 @@ jobs:
           toolchain: "1.94.1"
           components: clippy, rustfmt
 
+      - name: Check preinstalled just
+        id: preinstalled_just
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/preinstalled-tool.sh just@1.51.0
       - name: Install just
+        if: steps.preinstalled_just.outputs.found != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: just@1.51.0

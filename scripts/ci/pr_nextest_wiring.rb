@@ -6,7 +6,7 @@ module PrNextestWiring
   SWEEP_GATE = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' && (needs.rust_scope.result == 'success' || (needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]')) }}"
   EVIDENCE_GATE = "${{ !github.event.pull_request.draft && !cancelled() }}"
   MAIN_JOB_SHA = {
-    "rust_build" => "02c94892de8fbb5e23f7b955e54319102dd75b44ecbce9c798cf751f52dd3a17",
+    "rust_build" => "729505f57c22012c2be6f263c5e9e460ffcaee2ba112f2008946a0d81e3e594d",
     "rust_tests" => "dd4ddd1b124bfc72c0eeb9fe6738682ec413b4de3dee08a9973f123866fd18a0",
     "test_evidence" => "76e76c159c32a8899fa5b7b11b1396fc609cbfd232a3400e669990f3633660ba",
   }.freeze
@@ -21,10 +21,14 @@ module PrNextestWiring
       "rust_build" => {
         "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
         "needs" => "changes", "if" => BUILD_GATE, "runs_on" => runner,
-        "job_timeout_minutes" => 100, "job_sha256" => "4dea4767fe3b85482e33576d7f84a594d83d598455d9738d00cdc92bf08ad249",
+        "job_timeout_minutes" => 100, "job_sha256" => "4b77585239c50614c555967bb48eebbb8a09d4d2c25006f49c8e2f6549b8d327",
         "cargo_steps" => {
           "Disable remote compiler cache" => {
             "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
+            "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
+          },
+          "Check preinstalled cargo-nextest" => {
+            "commands" => ["bash scripts/ci/preinstalled-tool.sh cargo-nextest@0.9.149"], "timeout_minutes" => nil,
             "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
           },
           "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},

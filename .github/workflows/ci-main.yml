@@ -52,7 +52,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+      - name: Check preinstalled cargo-nextest
+        id: preinstalled_nextest
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/preinstalled-tool.sh cargo-nextest@0.9.149
       - name: Install cargo-nextest
+        if: steps.preinstalled_nextest.outputs.found != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.149
@@ -355,7 +363,15 @@ jobs:
           toolchain: "1.94.1"
           components: clippy, rustfmt
 
+      - name: Check preinstalled just
+        id: preinstalled_just
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/preinstalled-tool.sh just@1.51.0
       - name: Install just
+        if: steps.preinstalled_just.outputs.found != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: just@1.51.0
