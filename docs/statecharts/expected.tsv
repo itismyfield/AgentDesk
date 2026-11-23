@@ -1135,6 +1135,9 @@ input-single-path/NativePreparationStampBefore.cfg	NativeInputPreparation	FreshR
 input-single-path/NativePreparationStampFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationTypedBefore.cfg	NativeInputPreparation	NoUntypedAdmission	-
 input-single-path/NativePreparationTypedFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeReceiptRestartBefore.cfg	NativeReceiptRestart	NoBootHeld	ReceiptEventuallySettled
+input-single-path/NativeReceiptRestartFixed.cfg	NativeReceiptRestart	-	-
+input-single-path/NativeReceiptRestartMarkerStrict.cfg	NativeReceiptRestart	NoBootHeld	ReceiptEventuallySettled
 input-single-path/NativeSupplyBootBefore.cfg	NativeInputPreparation	SupplyBootNoRemint	-
 input-single-path/NativeSupplyBootFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeSupplyKeyBefore.cfg	NativeInputPreparation	SupplyTyped	-
@@ -1234,6 +1237,9 @@ input-single-path/ThreadIngressT2aBoot.cfg	ThreadIngress	-	-
 input-single-path/ThreadIngressT2aCold.cfg	ThreadIngress	-	-
 input-single-path/ThreadIngressT2aLive.cfg	ThreadIngress	-	-
 input-single-path/ThreadIngressT2aRemote.cfg	ThreadIngress	-	-
+input-single-path/WatcherRetryReceiptBefore.cfg	WatcherRetryReceipt	NoFailedAfterRetrySuccess	-
+input-single-path/WatcherRetryReceiptFixed.cfg	WatcherRetryReceipt	-	-
+input-single-path/WatcherRetryReceiptFixedCarryLost.cfg	WatcherRetryReceipt	NoFailedAfterRetrySuccess	-
 intake-consent/IntakeConsentBookkeeping.cfg	IntakeConsent	RollbackExactAndBookkeeping	-
 intake-consent/IntakeConsentCurrent.cfg	IntakeConsent	-	-
 intake-consent/IntakeConsentD1Public.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-

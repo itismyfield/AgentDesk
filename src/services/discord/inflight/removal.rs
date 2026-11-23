@@ -861,9 +861,11 @@ fn load_inflight_probe_with_scope(
 mod boot_custody;
 use boot_custody::inflight_age_secs_for_path;
 pub(in crate::services::discord) use boot_custody::inflight_runtime_root;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use boot_custody::persist_native_boot_record;
 #[cfg(unix)]
 pub(in crate::services::discord) use boot_custody::{
-    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+    native_boot_records, persist_native_boot_record_off_worker, preserve_native_before_discard,
 };
 mod boot_reaper;
 mod custody_notice;
