@@ -56,7 +56,7 @@ Rules:
 
 ## Results
 
-`scripts/ci/statecharts_tlc.py --base ab2d0dcb81 --jobs 4`: PASS 12/12 against `expected.tsv`.
+`scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: PASS 12/12 (9.0s) against `expected.tsv`.
 
 | Config | Writer / Migrate / View / Boot / Locked / Deploy | Expected | Result |
 |---|---|---|---|
