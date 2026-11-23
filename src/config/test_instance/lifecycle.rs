@@ -348,6 +348,24 @@ pub(crate) fn has_admitted_run() -> bool {
     }
 }
 
+/// Bot identity count of the admitted run's profile (three for agy, four for TUI live).
+pub(crate) fn admitted_identity_count() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        if !has_admitted_run() {
+            return None;
+        }
+        super::current()
+            .ok()
+            .flatten()
+            .map(|instance| instance.environment.credentials.len())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 pub(crate) fn bound_listener(address: std::net::SocketAddr) -> Result<(), String> {
     if !requested() {
         return Ok(());
