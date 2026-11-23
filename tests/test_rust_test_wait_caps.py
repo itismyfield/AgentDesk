@@ -149,12 +149,18 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                 self.assertEqual([int(line.split(" ")[2].rsplit(":", 1)[1]) for line in found], list(lines), found)
 
     def test_a_module_mounted_under_the_test_support_gate_is_test_code(self):
-        gate = 'any(test, feature = "test-support")'
-        (self.repo / "src/support.rs").write_text(PROD, encoding="utf-8")
-        for cfg, sites in ((gate, ["src/support.rs:2"]), (f"all({gate}, unix)", ["src/support.rs:2"]), (f"not({gate})", [])):
-            (self.repo / "src/lib.rs").write_text(f"#[cfg({cfg})]\nmod support;\n", encoding="utf-8")
-            found = [line for line in wait_problems(self.repo) if "src/support.rs" in line]
-            self.assertEqual([line.split(" ")[2] for line in found], sites, (cfg, found))
+        gate, join = 'any(test, feature = "test-support")', "fn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }"
+        (self.repo / "src/support.rs").write_text(join, encoding="utf-8")
+        raw = 'any(test, feature = r#"test-support"#)'  # not the feature spelling the gate rule reads
+        for cfg, test_only in ((gate, True), (f"all({gate}, unix)", True), (f"not({gate})", False), (raw, False),
+                               ('all(unix /*, feature = "test-support" */)', False)):
+            for lib, rel in ((f"#[cfg({cfg})]\nmod support;\n", "src/support.rs:1"),
+                             (f"#[cfg({cfg})]\nmod inline {{ {join} }}\n", "src/lib.rs:2")):
+                (self.repo / "src/lib.rs").write_text(lib, encoding="utf-8")
+                found = [line.split(" ")[2] for line in wait_problems(self.repo) if "support.rs" in line or "lib.rs" in line]
+                prod = rts.walk(self.repo / "src/lib.rs", self.repo, production=True)
+                joins = [t for tokens in prod.source_tokens.values() if tokens for t in tokens if t.value == "join"]
+                self.assertEqual((found, len(joins)), (([rel], 0) if test_only else ([], 1)), (cfg, rel))
 
     def test_cfg_attr_test_declares_a_test(self):
         source = "#[cfg_attr(test, test)]\nfn t() {\n    let (_tx, rx) = std::sync::mpsc::channel::<u8>();\n    rx.recv();\n}\n"

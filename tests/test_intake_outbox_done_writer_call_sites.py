@@ -502,6 +502,8 @@ class SharedSkipRuleTests(unittest.TestCase):
             '#[cfg(not(test))] mod hidden_tests;',
             '#[cfg(any(test, feature="x"))] mod hidden_tests;',
             '#[cfg(not(any(test, feature = "test-support")))] mod hidden_tests;',
+            '// #[cfg(any(test, feature = "test-support"))]\n#[cfg(not(any(test, feature = "test-support")))] mod hidden_tests;',
+            '#[cfg(all(unix /*, feature = "test-support", */))] mod hidden_tests;',
         ):
             with self.subTest(declaration=declaration):
                 root = Path(tempfile.mkdtemp())
