@@ -1,9 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Bot, ChartNoAxesCombined, Cpu, SearchX } from "lucide-react";
 import { Badge } from "../../kit/free/badge-clean";
 import { Dialog } from "../../kit/free/dialog-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
-import { CompactBreakdown } from "../../kit/pro/compact-breakdown";
+import { CompactBreakdown, type CompactBreakdownLabels } from "../../kit/pro/compact-breakdown";
 import { CardSkeleton, SectionCard, Well } from "../common/KitPrimitives";
 import type { TFunction } from "../dashboard/model";
 import { cx } from "../dashboard/ui";
@@ -190,6 +190,16 @@ function BreakdownDetail({
   );
 }
 
+/** Kit list texts the tabs can show or speak; the title and total come as props. */
+function breakdownLabels(t: TFunction): Partial<CompactBreakdownLabels> {
+  return {
+    list: t(msg("토큰 순위와 비중", "Token rank and share")),
+    row: (label, value, share) => t(msg(`${label}, ${value}, 전체의 ${share}`, `${label}, ${value}, ${share} of the total`)),
+    summary: (total, amount) => `${total}: ${amount}.`,
+    selectHint: t(msg("누르면 비용과 토큰 구성이 열려요.", "Opens its cost and token mix.")),
+  };
+}
+
 /** "Where tokens went": model/agent tabs over the kit share list, and a row's detail (split on wide screens, drawer
  * below). */
 export function StatsBreakdown({
@@ -230,9 +240,8 @@ export function StatsBreakdown({
   const missing = selection !== null && selectedItem === null && !loading;
   const selectedSkills = selectedItem?.category === "agents" ? skillsForAgent(agentSkillRows, selectedItem.id) : [];
 
-  // The kit rows carry their item id but take no handler, so a click (or Enter) on one opens that item's detail here.
-  const openRow = (event: MouseEvent<HTMLElement>) => {
-    const rowId = (event.target as Element).closest<HTMLElement>(".aui-compact-breakdown-row")?.dataset.itemId;
+  // The kit hands back the row's item id on click, Enter or Space; that item's detail opens here.
+  const openRow = (rowId: string) => {
     const item = list.find((entry) => entry.id === rowId);
     if (!item) return;
     setSelection({ category: item.category, id: item.id });
@@ -251,6 +260,9 @@ export function StatsBreakdown({
           : t(msg("에이전트별 토큰 점유율", "Token share by agent"))}
         format={formatTokens}
         totalLabel={t(msg("이 기간 전체 토큰", "All tokens in this range"))}
+        onSelect={openRow}
+        selectedId={selection?.category === category ? selection.id : null}
+        labels={breakdownLabels(t)}
         footer={
           <span className="min-w-0 [overflow-wrap:anywhere]">
             {category === "agents" ? t(msg(`전체 캐시 히트 ${formatPercent(overallCacheHitRate)} · `, `${formatPercent(overallCacheHitRate)} overall cache hit · `)) : ""}
@@ -320,7 +332,6 @@ export function StatsBreakdown({
           aria-label={categoryLabel}
           data-testid={category === "models" ? "stats-model-share" : "stats-agent-cache"}
           className="min-w-0 [&_.aui-compact-breakdown]:max-w-none!"
-          onClick={openRow}
         >
           {listBody}
         </div>

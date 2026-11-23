@@ -1713,6 +1713,19 @@ test.describe("Dashboard smoke tests", () => {
     await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
   });
 
+  test("home: the limit list marks a row past the auto-run pause once, in the meter", async ({ page }) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "5h", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "7d", limit: 100, used: 83, remaining: 17, reset: 0 }] },
+    ] } }));
+    await page.goto("/home");
+
+    const usage = page.getByTestId("home-usage");
+    await expect(usage.getByRole("meter", { name: "Claude 5시간" })).toHaveAttribute("aria-valuetext", /자동 진행 멈춤 기준 이상/, { timeout: 15000 });
+    await expect(usage.locator(".aui-usage-meter-mini-row").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-state")))).resolves.toEqual(["danger", "warn"]);
+    await expect(usage.locator(".aui-usage-meter-mini-detail")).toHaveCount(0);
+  });
+
   test("home: after empty lists a failed campaign poll reads unknown on both cards until it recovers", async ({ page }) => {
     let down = false;
     await page.clock.install();

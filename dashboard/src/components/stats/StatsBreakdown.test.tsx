@@ -83,7 +83,10 @@ it("opens the selected row's detail with its facts and the agent's top skills", 
   await render();
   const agentsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.includes("에이전트"))!;
   await act(async () => agentsTab.click());
+  // A real button takes Tab, Enter and Space; the kit hands its id over and marks the open row.
+  expect(rows().map((row) => [row.tagName, row.getAttribute("aria-current")])).toEqual([["BUTTON", null], ["BUTTON", null]]);
   await act(async () => rows()[0].click());
+  expect(rows().map((row) => row.getAttribute("aria-current"))).toEqual(["true", null]);
   const detail = document.querySelector<HTMLElement>('[data-testid="stats-detail-body"]')!;
   expect(detail.dataset.item).toBe("pm");
   expect(detail.textContent).toContain("캐시 절감$0.50");

@@ -10,6 +10,7 @@ import {
   buildWindowDelta,
   computeCacheHitRate,
   dailyChartMinWidth,
+  dailySeries,
   dailyColumn,
   dailyIndexAt,
   formatCurrency,
@@ -121,6 +122,13 @@ describe("statsModel", () => {
     });
     // Without a no-cache baseline the saving stays unknown instead of zero.
     expect(items[1]).toMatchObject({ id: "qa", savedCost: null, share: 30, cacheHitRate: 0 });
+  });
+
+  it("colors agents and token kinds with data series, never status tokens", () => {
+    const data = analyticsFixture();
+    data.receipt.agents = ["a", "b", "c", "d", "e"].map((agent, index) => ({ agent, tokens: 10 - index, cost: 0, percentage: 20 }));
+    const colors = [...buildAgentItems(data), ...dailySeries((messages) => messages.en)].map((item) => item.color);
+    expect(colors.filter((color) => /--(?:aui-)?(?:ok|warn|err|info)\b/.test(color))).toEqual([]);
   });
 
   it("leaves agent prompt detail empty when the receipt has no token split", () => {
