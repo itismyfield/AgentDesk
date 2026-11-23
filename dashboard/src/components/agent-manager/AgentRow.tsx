@@ -45,7 +45,7 @@ export function agentSecondaryLine(agent: Agent, locale: string): string | null 
 }
 
 // Home's avatar dots, so a state reads the same on both screens.
-const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle", unknown: "offline" };
+export const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle", unknown: "offline" };
 
 interface AgentRowProps {
   entry: HomeAgent;

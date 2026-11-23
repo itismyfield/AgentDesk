@@ -57,9 +57,10 @@ export interface SkillTrendPoint {
   count: number;
 }
 
-export async function getSkillTrend(days = 30): Promise<SkillTrendPoint[]> {
+export async function getSkillTrend(days = 30, opts?: RequestOptions): Promise<SkillTrendPoint[]> {
   const data = await request<{ trend: SkillTrendPoint[] }>(
     `/api/skills-trend?days=${days}`,
+    opts,
   );
   return data.trend;
 }
