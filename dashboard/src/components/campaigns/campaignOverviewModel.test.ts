@@ -5,11 +5,13 @@ import { serverEntry } from "./campaignOverviewModel";
 
 const tr = (ko: string) => ko;
 
-it("draws the current stage of a stopping, stopped or inspection-needed campaign as waiting, not running", () => {
+it("splits a server campaign's bar by stage, drawing a moving stage of a stopping, stopped or inspection-needed campaign as waiting", () => {
   const doc = serverCampaignFixtures.stoppingUnknown;
-  const head = (display: string) => {
+  const split = (display: string) => {
     const view = { ...doc.view, display, failed_count: 0 } as ServerCampaignSummary["view"];
-    return serverEntry({ definition: doc.definition, view } as ServerCampaignSummary, { ...doc, view } as typeof doc, tr).segments?.find((segment) => segment !== "done" && segment !== "todo");
+    return serverEntry({ definition: doc.definition, view } as ServerCampaignSummary, { ...doc, view } as typeof doc, tr).split;
   };
-  expect(["stopping", "stopped", "needs_inspection", "waiting", "running"].map(head)).toEqual(["wait", "wait", "wait", "wait", "now"]);
+  expect(split("running")?.map(({ key, count, tone }) => `${key} ${count} ${tone}`)).toEqual(["requirements 1 todo", "implementation 1 now", "complete 1 done"]);
+  expect(["stopping", "stopped", "needs_inspection", "waiting"].map((display) => split(display)?.[1].tone)).toEqual(["wait", "wait", "wait", "wait"]);
+  expect(serverEntry({ definition: doc.definition, view: doc.view } as ServerCampaignSummary, null, tr).split).toBeNull();
 });

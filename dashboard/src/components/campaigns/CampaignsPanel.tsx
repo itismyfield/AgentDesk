@@ -19,7 +19,7 @@ import CampaignAutoQueueToggle, { useAutoQueueRequests } from "./CampaignAutoQue
 import CampaignBoard from "./CampaignBoard";
 import { legacyBoard, serverBoard } from "./campaignBoardModel";
 import CampaignDetail from "./CampaignDetail";
-import CampaignList from "./CampaignList";
+import CampaignList, { EntrySplit } from "./CampaignList";
 import { campaignIssueLabel } from "./campaignModel";
 import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
 import CampaignOverview, { type TaskView } from "./CampaignOverview";
@@ -389,6 +389,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
               <Cap className="truncate"><Num>{[selectedEntry && (selectedEntry.kind === "legacy" ? tr("원장", "Ledger") : selectedEntry.repo),
                 selectedEntry?.total != null && tr(`작업 ${selectedEntry.done}/${selectedEntry.total} 완료`, `${selectedEntry.done}/${selectedEntry.total} done`), tr(`캠페인 ${entries.length}개 중`, `of ${entries.length} campaigns`)].filter(Boolean).join(" · ")}</Num></Cap>
+              {!!selectedEntry?.split?.length && <EntrySplit entry={selectedEntry} tr={tr} className="mt-1" />}
             </span>
             <ChevronDown aria-hidden className="size-4 shrink-0 text-[var(--fg-muted)]" />
           </button>

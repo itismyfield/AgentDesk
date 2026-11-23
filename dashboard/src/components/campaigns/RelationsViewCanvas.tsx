@@ -43,9 +43,12 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
     }
     const at = (id: string) => nodes.find((node) => node.id === id)?.position.x ?? 0;
     const within = (part: Set<string>) => (line: ViewLine) => part.has(line.source) && part.has(line.target);
+    // A label only goes on a line whose cards and ties are all on the canvas, so a line that is not drawn never takes it.
+    const shown = new Set([...nodes.map((node) => node.id), ...ties.map((tie) => tieNodeId(tie.id))]);
+    const drawn = (line: ViewLine) => [line.source, ...line.via.map(tieNodeId), line.target].every((id) => shown.has(id));
     const named = new Map<string, string>();
     components.forEach((part, index) => {
-      const path = cycles[index], own = lines.filter(within(part));
+      const path = cycles[index], own = lines.filter((line) => within(part)(line) && drawn(line));
       const steps = new Set(path.slice(1).map((to, step) => JSON.stringify([path[step], to])));
       const back = (pool: ViewLine[]) => pool.find((line) => at(line.target) <= at(line.source)) ?? pool[0];
       const host = back(own.filter((line) => steps.has(JSON.stringify([line.source, line.target])))) ?? back(own);

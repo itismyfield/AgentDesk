@@ -107,18 +107,21 @@ export function ViewTaskNode(props: NodeProps) {
 }
 
 /** `in` tails are dependencies outside the group, at its left; `out` tails depend on it, at its right. `cover` is the
- * task's number, all a tail's short card has room for once zoomed out. */
-export type TailNodeData = { title: string; cover: string; group: string; side: "in" | "out" };
+ * task's number, all a tail's short card has room for once zoomed out; `ends` says whether a line enters and leaves it. */
+export type TailNodeData = { title: string; cover: string; group: string; side: "in" | "out"; ends: { enters: boolean; leaves: boolean } };
 
-/** A task outside the group, faint at the canvas's edge with its group's name; its one pin faces the group. Zoomed out,
- * its dashed edge keeps 1px on screen. Choosing one leaves this view, so it draws no chosen ring. */
+/** A task outside the group, faint at the canvas's edge with its group's name. Both pins are always there, since a task
+ * can come before and after the group at once, and one no line uses is hidden. Zoomed out, its dashed edge keeps 1px on
+ * screen. Choosing one leaves this view, so it draws no chosen ring. */
 export function RelationsTailNode({ data }: NodeProps) {
   const tail = data as TailNodeData;
   const scale = useLegible(), far = scale > FAR;
+  const tailPin = (shown: boolean) => ({ ...pin(false), zIndex: 1, opacity: shown ? 1 : 0 });
   return <div className="relative grid w-60 gap-0.5 rounded-xl border border-dashed border-[var(--line)] px-3 py-2.5 text-left text-xs text-[var(--fg-muted)]"
     style={{ "--legible": scale, ...far ? { borderWidth: scale } : {} } as CSSProperties}>
     <strong className="truncate text-[13px] font-medium text-[var(--fg-dim)]">{tail.title}</strong><span className="truncate">{tail.group}</span>
-    <Handle type={tail.side === "in" ? "source" : "target"} position={tail.side === "in" ? Position.Right : Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+    <Handle type="target" position={Position.Left} isConnectable={false} style={tailPin(tail.ends.enters)} />
+    <Handle type="source" position={Position.Right} isConnectable={false} style={tailPin(tail.ends.leaves)} />
     {far && <FarCover scale={scale} title={tail.cover} line={tail.group} className="bg-[var(--bg)] text-[var(--fg-muted)]" />}
   </div>;
 }

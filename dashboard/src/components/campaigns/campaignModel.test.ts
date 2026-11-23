@@ -95,6 +95,7 @@ describe("first-screen glance", () => {
     const working = Object.fromEntries(nodes.filter((value) => value.id.endsWith("-1")).map((value) => [value.id, live]));
     const tr = (_: string, en: string) => en;
     expect(legacyEntry({ ...makeLargeCampaign(), nodes }, working, tr).attention).toBe("1 failed · 4 blocked");
+    expect(legacyEntry({ ...makeLargeCampaign(), nodes }, working, tr).split?.map(({ key, count, tone }) => `${key} ${count} ${tone}`)).toEqual(["completed 2 done", "running 3 now", "blocked 1 wait", "failed 1 fail", "pending 1 todo"]);
     expect(statusSentence("Running", nodes.map((value) => legacyTask(value, working[value.id])), tr)).toBe("Running · 3 running, 4 blocked, 1 failed");
   });
   it("keeps a gate open from its opening event until the same run, node and gate is approved", () => {
