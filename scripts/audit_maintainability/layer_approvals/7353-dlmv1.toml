@@ -1,0 +1,7 @@
+schema_version = 1
+issue = 7353
+summary = "DL-MV1: discord/mod.rs 본문 항목을 DL child 모듈로 옮겨 turn_lifecycle의 기존 역방향 참조 2건이 가리키는 모듈 경로만 바뀐다"
+move = [
+  { section = "reverse_dependencies", old_id = "02c1eb962996b250aadf4163f7214dfb73dd686c4b9f19759d480a0bc1401dd2", new_id = "f2b92ee179c7afb88a97bc4060ceb9cae105a71f08df8136782b4c3993b2757e", reason = "SharedData 정의가 services::discord에서 services::discord::shared_data로 이동(같은 import 참조)" },
+  { section = "reverse_dependencies", old_id = "45c426f7aa79b004f11fe2c3ac38cdc98b88357dc05782b57974bf78f3b3c1e9", new_id = "3247e49bcd22099810ec2bdf17b6285dae0bcf1ebbecc8523509609be62adfca", reason = "record_turn_stop_tombstone 정의가 services::discord에서 services::discord::mailbox_ops로 이동(같은 path 참조)" },
+]
