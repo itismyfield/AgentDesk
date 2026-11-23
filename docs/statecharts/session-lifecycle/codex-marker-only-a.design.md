@@ -27,7 +27,7 @@ projection은 `Reading::publish_if_current`의 기존 fresh snapshot 재검증 �
 
 `start_waits`의 inflight/rest 관문(`owner_input.rs:699`), 대상 pane 선택(`:710`), host/config/root/Source 검증을 모두 남긴다. 기존 activity가 Idle이거나, 새 child가 fresh 내부 snapshot의 **typed `LegacyMarkerOnly` 결과**를 내고 새 proof가 그 **유일한 Legacy 행 차이만** 해소할 때 통과한다. 공개 `Observed.reason`은 `session_identity_unresolved`다(`unbound/live.rs:1048`). `hosted_active_or_unknown`은 그 내부 hold leaf이며 공개 reason 문자열과 비교하지 않는다. `Reading`의 private unbound stamp/snapshot(`activity.rs:175`)를 볼 수 있는 새 live child가 내부 verdict를 sealed enum으로 변환한다. diagnostic용 `NoticeObservation.hold_leaf` 문자열만으로 permit을 만들지도 않는다. 다른 busy/Unknown 원인은 우회하지 않는다. 삭제나 DB mutation은 이 read-only projection에 넣지 않는다.
 
-admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤 동일 front를 grant/claim한다(`queued_head/v2.rs:398,411`). fence guard는 typed 내부 start context로 Codex fresh/Pending CAS·host/spawn 게시까지 전달하고 그 뒤 해제한다. Source Mutex는 await를 가로질러 보유하지 않는다. 일반 프로세스/다른 owner·다른 nonce의 입력 권리를 이 permit으로 만들지 않는다. 기존 `herdr_launch.rs:425`의 Legacy/Retired 분기, `hosted_execution.rs:411`의 CAS, Startup/nonce/rollout/owner 입력 검증은 유지한다. 서버/socket create의 불명확한 결과와 prompt 재전송은 기존 Pending/owned-input 계약에 맡긴다.
+admission은 물리 fence를 다시 취득하고 fresh proof를 재검증한 뒤 동일 front를 grant/claim한다(`queued_head/v2.rs:398,411`). fence guard는 typed 내부 start context로 Codex fresh/Pending CAS·host/spawn 게시까지 전달하고 그 뒤 해제한다. Source Mutex는 await를 가로질러 보유하지 않는다. 일반 프로세스/다른 owner·다른 nonce의 입력 권리를 이 permit으로 만들지 않는다. 기존 `herdr_launch.rs:431`의 Legacy/Retired 분기, `hosted_execution.rs:411`의 CAS, Startup/nonce/rollout/owner 입력 검증은 유지한다. 서버/socket create의 불명확한 결과와 prompt 재전송은 기존 Pending/owned-input 계약에 맡긴다.
 
 
 ### A guard의 운반 경로와 history pin
@@ -237,9 +237,9 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 
 | 진입점 | A 계약 | 모델 대응 |
 |---|---|---|
-| `codex/herdr_turn.rs:200,223` fresh | A guard 전달·새 Pending/host stamp까지 fence, 기존 CAS 유지 | AGrant/ACreate |
+| `codex/herdr_turn.rs:217,244` fresh | A guard 전달·새 Pending/host stamp까지 fence, 기존 CAS 유지 | AGrant/ACreate |
 | 같은 파일 `:240,255,261` Pending 재사용 | 새 cleanup/새 create 없음. P의 등록부 복구·기존 Startup 검증 유지 | 기존 PendingRegistration 모델, A 범위 밖 |
-| `herdr_launch.rs:456,472,482,492` | fresh Pending CAS·registry·host/spawn 게시/기존 marker cleanup과 같은 fence | ACreate; downstream 별도 |
+| `herdr_launch.rs:462,474,484,494` | fresh Pending CAS·registry·host/spawn 게시/기존 marker cleanup과 같은 fence | ACreate; downstream 별도 |
 | `codex/tui_session_launch/first_input.rs:196,220,221` | owner/runtime publisher 전체 outer fence; Herdr-configured 기존 거절 유지 | AFenceContender/ARecheck |
 | `discord/watchers/codex_tui_restore.rs:253,317` | fence→Source→verified registration·under-authority hint writer. Source 재진입 금지 | AFenceContender/ARecheck |
 | `codex.rs:1425,1520,1546,1588` | wrapper 기존 Herdr 거절 유지. 삭제/owner 게시/생성 경계 fence. A는 LegacyTmuxWrapper hint를 정리하지 않음 | fence; live takeover 범위 밖 |
@@ -252,7 +252,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `provider_dispatch/owner_input.rs:699,704,852,859,875` | A prelude, 나머지 rest/target/claim 관문 유지. global Unknown→Idle 변경 없음 | AAdmission/AGrant |
 | `turn_presence/activity/unbound.rs:199,319`, `live.rs:1084` | 기존 일반 판정 유지, 새 start 전용 projection은 fresh Reading에만 적용 | lookup 분리·AAdmission |
 | `input_owner/drive.rs:88`, `queued_head/v2.rs:398,411` | 중복 wake는 직렬 drive/front claim에 합류 | ARedeliver/ANoDuplicateEffects |
-| `input_owner/ingress.rs:445,458`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
+| `input_owner/ingress.rs:440,453`, `owner_input.rs:250` | 새 원문 Accepted wake·prefer_person 보존. A receipt는 다른 front 권한이 아님 | AChange(front) |
 | `claude/tui_session_launch.rs:34,67`, `claude.rs:2594,2677,2707` | cleanup 앞에서 outer guard, 실제 create/respawn·spawn stamp까지 운반 | AFenceContender의 실제 구현 의무 |
 | `provider_dispatch.rs:52,609`, `owner_input.rs:439,1025`, `headless_turn.rs:1068`, `intake_turn.rs:2179`, `codex/herdr_turn.rs:65` | Clone carrier와 한번 take, 실제 생성 경계 누락 없이 전달 | AGrant/ACreate 연결·구현 시험 |
 | `queued_head/v2/retained.rs:78`, `source_admission.rs:618` | 직접 terminal/bind TTL에서 A debt pin | 모델 범위 밖 실제 TTL 회귀 |
@@ -272,13 +272,13 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `claude/tui_session_launch.rs:37` | prepare_and_create_claude_tui_session | AFenceContender; publisher fence |
 | `codex.rs:68,69,95,647,1546,1588,1612` | (module) / codex_tui_session_turn_lock / execute_streaming_local_tmux / prepare_codex_tui_hook_overrides | AFenceContender; publisher fence |
 | `codex/absence_launch.rs:149` | execute_observed | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
-| `codex/herdr_turn.rs:40,223,261` | (module) / fresh_launch / pending_launch | ACreate / 기존 Pending 별도 |
+| `codex/herdr_turn.rs:39,244,300` | (module) / fresh_launch / pending_launch | ACreate / 기존 Pending 별도 |
 | `codex/herdr_turn/first_input.rs:145` | write | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `codex/process_session_launch.rs:81,88,137,146,170` | execute_streaming_local_process_codex | AObserve registry guard; 기존 process 효과 별도 |
 | `codex/tui_session_launch/first_input.rs:51,79,122,221` | create / publish_codex_tui_launch_script / spawn_owned | AFenceContender; publisher fence |
 | `codex_tui/execution_end/confirm.rs:28` | observe | AObserve registry guard; 기존 process 효과 별도 |
 | `codex_tui/warm_followup.rs:505,1220,1252` | verified_warm / verified_warm_inner / warm_followup_on | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
-| `discord/admin_host_guard.rs:381` | row_is_legacy_tmux | AObserve registry guard; 기존 process 효과 별도 |
+| `discord/admin_host_guard.rs:395` | row_is_legacy_tmux | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/clear_teardown/clear_end_record.rs:135` | vacant | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/clear_teardown/execution_cleanup.rs:161,296,363` | inflight_ready / normal_end / run_with | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/commands/control/managed_reset.rs:92,93` | end_process | AObserve registry guard; 기존 process 효과 별도 |
@@ -303,7 +303,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `discord/turn_presence/activity/unbound/live.rs:32,62` | local_trace | AObserve registry guard; 기존 process 효과 별도 |
 | `discord/watchers/codex_tui_restore.rs:317` | commit_live_direct_resume_fallback | AFenceContender; publisher fence |
 | `discord/watchers/lifecycle/claude_restore.rs:83` | claude_tui_restore_fallback_modified_since | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
-| `discord/zombie_foreground_release.rs:202` | tui_structurally_idle | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
+| `discord/host_liveness.rs:143` | tui_structurally_idle | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `herdr_launch/runtime_marker.rs:34,78` | clear_owned / runtime_paths | AObserve registry guard; 기존 process 효과 별도 |
 | `provider/session_probe.rs:34` | tmux | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `qwen.rs:44,45` | (module) | AObserve registry guard; 기존 process 효과 별도 |
@@ -314,7 +314,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `session_host/process_host.rs:39,95` | execution_pid / presence | AObserve registry guard; 기존 process 효과 별도 |
 | `session_host/resolve.rs:19,21,36,39,127,129,132,147,148,150,389,390,397,408,409,422,423` | (module) / host_votes / kind_hint / legacy_target_host / resolve_host_kind / unread | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `session_resume.rs:632` | clear_resume_runtime_binding | AChange/source evidence; 기존 binding cleanup 별도 |
-| `stale_turn_reconciler.rs:749` | independent_tmux_liveness | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
+| `stale_turn_reconciler.rs:762` | independent_tmux_liveness | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
 | `tmux_common.rs:5,6,1045,1213` | (module) / cleanup_session_temp_files_under_source_authority / tmux_exact_target | AFenceContender; publisher fence |
 | `tmux_common/session_markers.rs:125,129,134,137` | resolve_tmux_runtime_kind_marker / write_tmux_runtime_kind_marker | AFenceContender; publisher fence |
 | `tui_o/cutover/channel_gate.rs:372` | session_kind | AObserve/ARecheck evidence; 기존 reader 권한 유지 |
@@ -341,7 +341,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `qwen/session_lifecycle.rs:111` | execute_streaming_local_tmux | AUnlink 구현의 동일 fence 전제; 기존 삭제 조건 불변 |
 | `tmux_common.rs:1183,1185,1193,1196` | cleanup_cleared_session_temp_files / cleanup_session_temp_files / cleanup_session_temp_files_under_source_authority | AUnlink 구현의 동일 fence 전제; 기존 삭제 조건 불변 |
 | `tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs:220` | commit | AUnlink 구현의 동일 fence 전제; 기존 삭제 조건 불변 |
-| `turn_lifecycle.rs:504` | stop_turn_with_policy | AUnlink 구현의 동일 fence 전제; 기존 삭제 조건 불변 |
+| `turn_lifecycle.rs:505` | stop_turn_with_policy | AUnlink 구현의 동일 fence 전제; 기존 삭제 조건 불변 |
 | `turn_orchestrator/checked_purge.rs:128,582` | queue_file / try_purge_queue | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/dispatch_reservation.rs:459,460` | restart_drain_legacy | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/pending_queue_persistence.rs:8,20,21` | (module) | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |

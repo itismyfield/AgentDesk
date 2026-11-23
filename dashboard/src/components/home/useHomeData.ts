@@ -10,7 +10,7 @@ import {
 } from "../../api/serverCampaigns";
 import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
-import { isOpenServerCampaign, type HomeHealth, type RawUsageProvider } from "./homeModel";
+import { isOpenServerCampaign, type HomeHealth, type HomeTurn, type RawUsageProvider } from "./homeModel";
 
 export interface Loaded<T> {
   data: T | null;
@@ -104,6 +104,12 @@ export async function loadHomeRoutines(): Promise<RoutineRecord[]> {
 export async function loadHomeUsage(): Promise<RawUsageProvider[]> {
   const data = await request<{ providers?: RawUsageProvider[] }>("/api/rate-limits", { suppressErrorToast: true });
   return data.providers ?? [];
+}
+
+/** Live turns of the given agents; an agent whose read fails is left out and keeps its plain cell. */
+export async function loadAgentTurns(ids: string[]): Promise<Map<string, HomeTurn>> {
+  const reads = await Promise.allSettled(ids.map((id) => request<HomeTurn>(`/api/agents/${encodeURIComponent(id)}/turn`, { suppressErrorToast: true })));
+  return new Map(reads.flatMap((read, index) => (read.status === "fulfilled" ? [[ids[index], read.value] as const] : [])));
 }
 
 export function loadRuntimeConfig(): Promise<RuntimeConfigResponse> {

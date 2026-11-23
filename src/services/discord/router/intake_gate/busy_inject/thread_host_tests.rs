@@ -10,12 +10,19 @@ fn a_thread_judged_onto_herdr_shows_no_deferred_tmux_busy_view() {
     let relation = Relation::Child { parent };
     let _child = force_relation_for_test(child, relation);
     let _tmux_child = force_relation_for_test(tmux_child, relation);
-    let _gates = [child, tmux_child, parent].map(test_support::open_gate);
     let view = |channel: u64| {
         defer_owned_busy_view(true, &ProviderKind::Claude, ChannelId::new(channel), None)
     };
     thread_host::record_judged(child, Some(true));
     thread_host::record_judged(tmux_child, Some(false));
+    if cfg!(windows) {
+        let _gate = test_support::open_gate(tmux_child);
+        assert!(
+            !view(tmux_child),
+            "Windows keeps the gate closed without flock"
+        );
+    }
+    let _gates = [child, tmux_child, parent].map(test_support::open_gate_with_flock);
     assert!(!view(parent), "the Herdr channel itself");
     assert!(!view(child), "a thread whose execution runs on Herdr");
     assert!(view(tmux_child), "a live tmux thread under the same parent");

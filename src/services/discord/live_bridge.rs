@@ -320,7 +320,7 @@ pub(super) async fn defer_unstarted_turn(
         accepted = queued.enqueued,
         "{reason}"
     );
-    let accepted = if super::router::checkpoint_waits_for_admission(channel) {
+    let accepted = if (shared.router_ports.checkpoint_waits)(channel) {
         queued.persistence_error.is_none() && queued.enqueued
     } else {
         queued.enqueued

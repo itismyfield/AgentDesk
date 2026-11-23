@@ -29,7 +29,7 @@ SessionInit ==
     /\ crashes = 0 /\ lost = 0 /\ exits = 0
 
 \* Durable Pending first, by CAS over a Legacy or Retired row only; a Pending, Bound or unreadable
-\* row refuses the launch as Occupied (herdr_launch.rs:374-421, hosted_execution.rs:455-475).
+\* row refuses the launch as Occupied (herdr_launch.rs:379-426, hosted_execution.rs:455-475).
 \* A retired predecessor's pane is no longer named by the row.
 StartLaunch ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
@@ -38,7 +38,7 @@ StartLaunch ==
     /\ landed' = "none"
     /\ UNCHANGED <<srv, fresh, stray, input, closing, crashes, lost, exits>>
 
-\* The create reply names the new pane (herdr_launch.rs:453-456).
+\* The create reply names the new pane (herdr_launch.rs:459-462).
 CreateOk ==
     /\ launch = "creating"
     /\ fresh' = TRUE /\ launch' = "placing"
@@ -46,7 +46,7 @@ CreateOk ==
     /\ UNCHANGED <<srv, rec, pane, stray, input, closing, crashes, lost, exits>>
 
 \* The server may have acted with no usable reply: Pending stays, nothing is resent, adopted or
-\* killed (herdr_launch.rs:187-191, 471-472).
+\* killed (herdr_launch.rs:190-194, 471-472).
 CreateLost ==
     /\ launch = "creating" /\ lost < 1
     /\ stray' \in {stray, stray + 1} /\ launch' = "idle" /\ lost' = lost + 1
@@ -60,7 +60,7 @@ CreateNotSent ==
     /\ landed' = "none"
     /\ UNCHANGED <<srv, pane, fresh, stray, input, closing, crashes, lost, exits>>
 
-\* Re-read the row, then record the pane on this nonce's Pending (herdr_launch.rs:482-494).
+\* Re-read the row, then record the pane on this nonce's Pending (herdr_launch.rs:484-496).
 RecordPane ==
     /\ launch = "placing"
     /\ rec' = "placed" /\ pane' = "agent" /\ fresh' = FALSE /\ launch' = "evidence"
@@ -68,14 +68,14 @@ RecordPane ==
     /\ UNCHANGED <<srv, stray, input, closing, crashes, lost, exits>>
 
 \* The re-read or the CAS fails: the launch ends Indeterminate and the pane is not recorded
-\* (herdr_launch.rs:483-494).
+\* (herdr_launch.rs:485-496).
 RecordPaneFails ==
     /\ launch = "placing" /\ lost < 1
     /\ fresh' = FALSE /\ stray' = stray + 1 /\ launch' = "idle" /\ lost' = lost + 1
     /\ landed' = "none"
     /\ UNCHANGED <<srv, rec, pane, input, closing, crashes, exits>>
 
-\* Probe the pane's root shell and provider and store them as expected (herdr_launch.rs:502-514, 592-610).
+\* Probe the pane's root shell and provider and store them as expected (herdr_launch.rs:504-516, 592-610).
 RecordEvidence ==
     /\ launch = "evidence" /\ pane = "agent"
     /\ rec' = "evidenced" /\ launch' = "idle"
@@ -83,7 +83,7 @@ RecordEvidence ==
     /\ UNCHANGED <<srv, pane, fresh, stray, input, closing, crashes, lost, exits>>
 
 \* The probe finds no provider evidence: the launch still returns Launched with the gap, and the
-\* row keeps its pane without evidence (herdr_launch.rs:509-514, 592-610).
+\* row keeps its pane without evidence (herdr_launch.rs:511-516, 592-610).
 EvidenceGap ==
     /\ launch = "evidence" /\ pane # "agent"
     /\ launch' = "idle"
@@ -91,14 +91,14 @@ EvidenceGap ==
     /\ UNCHANGED <<srv, rec, pane, fresh, stray, input, closing, crashes, lost, exits>>
 
 \* A later launch on a Pending that has a pane but no evidence only probes again; it never
-\* creates a pane (herdr_launch.rs:344-373, claude/herdr_turn/never_attached.rs:11-27).
+\* creates a pane (herdr_launch.rs:349-378, claude/herdr_turn/never_attached.rs:11-27).
 ProbeAgain ==
     /\ srv = "up" /\ launch = "idle" /\ rec = "placed" /\ pane = "agent"
     /\ rec' = "evidenced"
     /\ landed' = "none"
     /\ UNCHANGED <<srv, pane, fresh, stray, launch, input, closing, crashes, lost, exits>>
 
-\* The first attach binds the execution (claude/herdr_turn.rs:783 bind_pg; hosted_execution.rs:429-437).
+\* The first attach binds the execution (claude/herdr_turn.rs:792 bind_pg; hosted_execution.rs:429-437).
 Bind ==
     /\ srv = "up" /\ launch = "idle" /\ rec = "evidenced" /\ pane = "agent"
     /\ rec' = "bound"
@@ -106,7 +106,7 @@ Bind ==
     /\ UNCHANGED <<srv, pane, fresh, stray, launch, input, closing, crashes, lost, exits>>
 
 \* The input gate checks the exact execution: root shell and provider process
-\* (claude/herdr_turn.rs:575-579 gate; session_host/herdr_gate.rs:411-431, 827-837, 901-937).
+\* (claude/herdr_turn.rs:578-582 gate; session_host/herdr_gate.rs:411-431, 827-837, 901-937).
 Pin ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
     /\ rec = "bound" /\ pane = "agent"
@@ -123,7 +123,7 @@ Send ==
     /\ UNCHANGED <<srv, rec, pane, fresh, stray, launch, closing, crashes, lost, exits>>
 
 \* Claude exits; the pane stays open at its root shell (the command was typed into a shell,
-\* herdr_launch.rs:298-311).
+\* herdr_launch.rs:303-316).
 ProviderExits ==
     /\ pane = "agent" /\ exits < 1
     /\ pane' = "shell" /\ exits' = exits + 1
@@ -131,7 +131,7 @@ ProviderExits ==
     /\ UNCHANGED <<srv, rec, fresh, stray, launch, input, closing, crashes, lost>>
 
 \* The row ends once its execution is seen gone (recovery_engine/herdr_row_end.rs:1-3, 393-;
-\* herdr_terminate.rs:184-198 retire_confirmed).
+\* herdr_terminate.rs:183-197 retire_confirmed).
 RowEnd ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
     /\ rec \in {"placed", "evidenced", "bound"} /\ pane \in {"shell", "closed"}
@@ -140,7 +140,7 @@ RowEnd ==
     /\ UNCHANGED <<srv, pane, fresh, stray, launch, input, closing, crashes, lost, exits>>
 
 \* Operator terminate: one fresh judgment and one close; then the row is retired
-\* (termination_audit/host_terminate.rs:116-133, herdr_gate.rs:451-491, herdr_terminate.rs:184-198).
+\* (termination_audit/host_terminate.rs:116-133, herdr_gate.rs:451-491, herdr_terminate.rs:183-197).
 OperatorClose ==
     /\ srv = "up" /\ launch = "idle" /\ input = "idle" /\ ~closing
     /\ rec = "bound" /\ pane \in {"agent", "shell"}

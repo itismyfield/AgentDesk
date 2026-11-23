@@ -22,7 +22,7 @@ and touches neither model's existing variables. A separate module keeps every ex
 ## What the model covers and what it does not
 
 The model checks the admission rules against one front at a time. It splits the launch into the Pending CAS
-with its listing (`herdr_launch.rs:482-492`) and the marker publication (`:493-508`), keeps the listing
+with its listing (`herdr_launch.rs:484-494`) and the marker publication (`:493-508`), keeps the listing
 relative to the row's nonce, and lets a held front move only on a real wake: the writer-ready edge, or the
 bootstrap probe of a held_watch. A green config is a statement about these abstractions, not about the
 implementation; the design's tests T1-T11 and their mutants are still required in full.
@@ -34,7 +34,7 @@ implementation; the design's tests T1-T11 and their mutants are still required i
   (design residual R1).
 - The restart witness is assumed readable (`actor.rs:338-356` Ok); design [U3] measures it.
 - `TmuxAppears` is limited to the bootstrap window (no new incarnation, no marker, writer not ready). With a
-  ready writer the ordinary launch has no vacancy check at all (`herdr_launch.rs:497` stamps before the
+  ready writer the ordinary launch has no vacancy check at all (`herdr_launch.rs:499` stamps before the
   `:502` check), a pre-existing gap outside this design (design F1).
 - `LaunchRefused` abstracts a refusal before the Pending CAS only for safety (no second execution, no
   row change). It does not prove what happens to the front afterwards: whether that front is kept or
@@ -98,9 +98,9 @@ a ready edge (`host.rs:893-907` wakes on `ready && !was_ready`). A V2 owner fron
 
 ## Design1Listing: the retired nonce's listing refuses forever
 
-CAS and `install_herdr_execution` list (n2, false) (`herdr_launch.rs:482-492`); the marker write fails and
+CAS and `install_herdr_execution` list (n2, false) (`herdr_launch.rs:484-494`); the marker write fails and
 removes its torn file (`tmux_session_files.rs:326-355`); `retire_unsent` returns the row to Retired
-(`herdr_launch.rs:506-508,588-630`); nothing removes the listing (`adopt_skip.rs:203-260`). Revision 1's
+(`herdr_launch.rs:508-510,590-632`); nothing removes the listing (`adopt_skip.rs:203-260`). Revision 1's
 condition "listed nonce differs from the row nonce" then refuses every later bootstrap in the process.
 Confirmed.
 

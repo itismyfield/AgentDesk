@@ -255,9 +255,14 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         )
     );
     eprintln!("recovery: repeated ticks verified; checking restart");
-    crate::reconcile::reconcile_boot_db_pg(&pool, "recovery-restart", None)
-        .await
-        .unwrap();
+    crate::reconcile::reconcile_boot_db_pg(
+        &pool,
+        "recovery-restart",
+        None,
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
+    )
+    .await
+    .unwrap();
     let retained: String = sqlx::query_scalar(
         "SELECT status FROM auto_queue_entries WHERE id = 'entry-recover-completed'",
     )
@@ -485,9 +490,14 @@ async fn boot_queue_recovery_preserves_impl_but_resumes_completed_plan_pg() {
         (0, 0, 0),
         "boot evidence must not be masked by PR, successor or session guards"
     );
-    crate::reconcile::reconcile_boot_db_pg(&pool, "recovery-before-first-tick", None)
-        .await
-        .unwrap();
+    crate::reconcile::reconcile_boot_db_pg(
+        &pool,
+        "recovery-before-first-tick",
+        None,
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
+    )
+    .await
+    .unwrap();
     let implementation: (String, Option<String>) =
         sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'boot-impl'")
             .fetch_one(&pool)

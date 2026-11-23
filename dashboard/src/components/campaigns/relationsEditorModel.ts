@@ -98,13 +98,14 @@ export function layoutTasks(nodes: CampaignNode[], ids: string[]): Map<string, {
   return placed;
 }
 
-/** Each dependency cycle once, as ids from a task back to itself in dependency → dependent order; a self-dependency counts. */
-export function findCycles(nodes: CampaignNode[]): string[][] {
+type DependencyGraph = ReadonlyArray<{ id: string; dependencies: readonly string[] }>;
+
+/** Tarjan's strongly connected components that hold a loop (a self-dependency counts), each with the task it closed on. */
+function loopedParts(nodes: DependencyGraph) {
   const next = new Map<string, string[]>(nodes.map((node) => [node.id, []]));
   for (const node of nodes) for (const id of node.dependencies) next.get(id)?.push(node.id);
-  // Tarjan's strongly connected components: one with a loop in it holds at least one cycle.
   let counter = 0;
-  const index = new Map<string, number>(), low = new Map<string, number>(), stack: string[] = [], open = new Set<string>(), cycles: string[][] = [];
+  const index = new Map<string, number>(), low = new Map<string, number>(), stack: string[] = [], open = new Set<string>(), parts: { root: string; members: Set<string> }[] = [];
   const visit = (id: string) => {
     index.set(id, counter); low.set(id, counter++); stack.push(id); open.add(id);
     for (const to of next.get(id)!) {
@@ -114,11 +115,20 @@ export function findCycles(nodes: CampaignNode[]): string[][] {
     if (low.get(id) !== index.get(id)) return;
     const component = new Set<string>();
     for (let top = ""; top !== id;) { top = stack.pop()!; open.delete(top); component.add(top); }
-    if (component.size > 1 || next.get(id)!.includes(id)) cycles.push(shortestLoop(id, component, next));
+    if (component.size > 1 || next.get(id)!.includes(id)) parts.push({ root: id, members: component });
   };
   for (const node of nodes) if (!index.has(node.id)) visit(node.id);
-  return cycles;
+  return { next, parts };
 }
+
+/** Each dependency cycle once, as ids from a task back to itself in dependency → dependent order; a self-dependency counts. */
+export function findCycles(nodes: DependencyGraph): string[][] {
+  const { next, parts } = loopedParts(nodes);
+  return parts.map(({ root, members }) => shortestLoop(root, members, next));
+}
+
+/** The members of each part `findCycles` takes a loop from, in the same order: every line between two of them lies on a cycle. */
+export const cycleComponents = (nodes: DependencyGraph): Set<string>[] => loopedParts(nodes).parts.map((part) => part.members);
 
 function shortestLoop(start: string, component: Set<string>, next: Map<string, string[]>): string[] {
   const parent = new Map<string, string>();

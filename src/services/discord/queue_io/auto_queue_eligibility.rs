@@ -71,7 +71,7 @@ pub(in crate::services::discord) async fn queued_reach(
     let Ok(parent) = session_runtime::checked_thread_parent(http, channel_id).await else {
         return QueuedReach::Wait;
     };
-    let gate = router::queued_head_inject_covers;
+    let gate = shared.router_ports.queued_head_inject_covers;
     if !health::InjectOrigin::queued_head_gate_enabled(provider, channel_id, parent, gate) {
         return QueuedReach::Closed;
     }

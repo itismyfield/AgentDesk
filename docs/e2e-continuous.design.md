@@ -94,10 +94,10 @@ YAML의 timeout 합이나 약 3.3시간이라는 과거 명세 합
 | P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/Herdr/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
 | R1: 기본 relay | E-1, E-2, E-3, E-5, E-15; 지원하는 두 TUI provider, host를 회차별 tmux/Herdr 교대 | n=0, 실제 턴/시간/token unknown |
 | R2: 입력·본문·로컬 제어 | E-16, E-20, E-22, E-23, E-52, E-64; YAML cells와 실제 capability의 교집합 | n=0. E-20은 같은 세션에 입력 동시 도착이며 provider 활성 턴 2개를 요구하는 E-11과 다름 |
-| R3: 직접 TUI·압축·모델 | E-4, E-6, E-7, E-10, E-21, E-37; tmux TUI 및 YAML의 provider만 | n=0; Herdr에 tmux-only 키 검사를 N/A로 바꿔 전체 PASS하지 않음 |
+| R3: 직접 TUI·압축·모델 | E-4, E-6, E-7, E-10, E-21, E-37, E-68; tmux TUI 및 YAML의 provider만 | n=0; Herdr에 tmux-only 키 검사를 N/A로 바꿔 전체 PASS하지 않음 |
 | R4: 복원·중단 | E-8, E-9, E-12, E-14, E-17, E-18, E-19, E-30, E-31, E-54, E-63 | n=0; E-17은 matrix 전용으로 adapter가 필요. 재시작/취소는 #8124 소유 instance만, 기존 release restart 경로 사용 금지 |
 | R5: 출력·장기 작업 | E-35, E-53, E-60, E-61, E-62; O/Legacy 프로필을 분리 | n=0; O인 E-60/61과 Legacy인 E-62를 한 boot의 결과로 합치지 않음 |
-| F: 전체 census | 위 R1–R5 + E-50/51 + 별도 E-11, E-13, E-36 = 기존 live 38개, 여기에 신규 네 시나리오 | n=0. 하루 1회 전체는 **비활성 후보**. full inventory와 full live를 구분. 매일 다 도는 시간/token 예산을 아직 제시할 수 없음 |
+| F: 전체 census | 위 R1–R5 + E-50/51 + 별도 E-11, E-13, E-36 = 기존 live 39개, 여기에 신규 네 시나리오 | n=0. 하루 1회 전체는 **비활성 후보**. full inventory와 full live를 구분. 매일 다 도는 시간/token 예산을 아직 제시할 수 없음 |
 
 순환은 **한 번에 R1–R5 중 한 조각·한 cell**, 다음 회차에 cursor를 전진한다. P는 고정 회귀 조합,
 순환은 그 대응 Codex/thread/tmux/Herdr 통제군을 점차 채운다. 조합별 최근성을 별도 표시한다.
@@ -110,7 +110,7 @@ E-13은 claude-pipe 전용이라 초기 TUI 프로필에서 gap이다. E-35/36�
 fixture E-24/25는 offline 별도 결과, unsupported E-26/27/28과 retired E-32/33/34는 live 성공 수에 넣지 않는다.
 
 기계 판독 정본은 [묶음 manifest](e2e-continuous/bundles.schema1.json)다. 이것은 `NOT_RUN` 계획이며
-YAML hash·38 live 목록·P의 실제 host·controlled ingress provenance·공백·off/null 비용을 함께 고정한다.
+YAML hash·39 live 목록·P의 실제 host·controlled ingress provenance·공백·off/null 비용을 함께 고정한다.
 `python3 -m unittest -v tests.test_e2e_continuous_manifest`는 누락/중복/fixture 혼입·거짓 PASS·
 미실측 비용 0·human 승격·배포 hold 뮤턴트를 거부한다. manifest 자체는 실행/coverage 증거가 아니다.
 
@@ -170,7 +170,7 @@ runtime witness가 있어야 한다. witness가 없으면 `UNEVALUABLE(precondit
 | --- | --- |
 | routing | `cluster.enabled=true`, instance ID는 receipt node; `cluster.intake_routing.enabled=true`, mode=enforce. owner-authority scope를 쓰는 경로는 parent 두 ID만 명시(`src/config/runtime_profile.rs:274`) |
 | agent/node | paired agent의 두 channel binding과 default_execution_node_id=receipt node. 독립 PG의 그 node만 online/ready로 광고; execution_slots unset으로 무슬롯 primary 조합 생성. runner의 활성 턴1 제한은 슬롯 광고와 별개 |
-| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:35` |
+| busy gates | `ADK_BUSY_INJECT_DISCORD_CHANNELS`는 parent 두 ID, `ADK_BUSY_INJECT=all`, queued-head 경로는 `ADK_QUEUED_HEAD_INJECT=1`. process OnceLock 값이므로 boot 때 적용·관측. 적용 근거는 `busy_inject.rs:21`, `health/turn_deliver/inject.rs:122`, `queue_io/queued_head_inject.rs:36` |
 | host/output | tmux 및 Herdr parent-only map을 별도 boot 프로필로 생성(§3.5). O/Legacy도 분리. fresh thread에는 host 예외·미리 만든 session을 넣지 않음 |
 
 위 busy 양성 계약은 우선 Claude 대상이다. queued_head_ready의 Codex 확장은 현재 test cfg에만 있다
@@ -317,7 +317,7 @@ ready primary 무슬롯/ready primary 슬롯 있음/primary offline의 세 통�
 기존 health/status는 channel→endpoint join이 부족하다고 명시한다(`herdr.py:155`). 새 관측 adapter는
 expected와 observed host를 별도 필드로 유지하고 exact nonce로 join한다. config에 Herdr라고 적힌 사실을
 actual host로 복사하면 안 된다. binding DB만 있고 provider child가 없거나 모호하면 평가 불가다.
-수정 전 `herdr_launch.rs:56`→`session_hosts.rs:158`은 exact channel 조회, `tui_o/channel_policy.rs:74`도
+수정 전 `herdr_launch.rs:59`→`session_hosts.rs:158`은 exact channel 조회, `tui_o/channel_policy.rs:74`도
 parent 상속이 없어 새 thread가 tmux/legacy로 가면 **응답 본문이 정상이어도 host/output 단언은 RED**다.
 뮤턴트는 thread의 parent 상속을 각각 host·output 쪽에서 제거한다. tmux 대조군은 계속 GREEN이어야 한다.
 부모 필드의 정본/이름 변경은 #8119 소유다(`docs/session-naming.design.md:81`). 새 이름 문자열에 의존하지 않는다.

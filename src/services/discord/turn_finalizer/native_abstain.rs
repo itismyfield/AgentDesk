@@ -178,7 +178,6 @@ impl Work {
         let (result, detail) = inflight::GuardedClearOutcome::for_native_snapshot_with_detail(
             &ProviderKind::Claude,
             &row,
-            false,
         );
         if !matches!(
             (result, detail.reason),

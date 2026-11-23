@@ -5,15 +5,14 @@ use tokio::sync::OwnedMutexGuard;
 use crate::services::codex_tui::execution_end::{self, capture::CapturedOldExecution};
 use crate::services::provider::ProviderKind;
 
+/// `herdr`: the channel's operation acts on a Herdr execution now.
 pub(super) fn capture_for(
     provider: &ProviderKind,
-    channel: u64,
+    (channel, herdr): (u64, bool),
     pane: &str,
     transition: &Option<OwnedMutexGuard<()>>,
 ) -> Option<CapturedOldExecution> {
-    if !matches!(provider, ProviderKind::Codex)
-        || crate::config::session_hosts::herdr_endpoint(channel).is_some()
-    {
+    if !matches!(provider, ProviderKind::Codex) || herdr {
         return None;
     }
     if transition.is_none() {

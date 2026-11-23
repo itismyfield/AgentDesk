@@ -20,8 +20,7 @@ use super::message::{
 use super::policy::{FallbackPolicy, LengthStrategy};
 use super::result::FallbackUsed;
 
-/// Discord's hard per-message character limit.
-pub(crate) const DISCORD_MESSAGE_HARD_LIMIT_CHARS: usize = 2000;
+pub(crate) use crate::domain::outbound::policy::DISCORD_MESSAGE_HARD_LIMIT_CHARS;
 /// Conservative chunk target used by new outbound policy planning.
 pub(crate) const DISCORD_MESSAGE_SAFE_CHARS: usize = 1900;
 pub(crate) const DEFAULT_TEXT_ATTACHMENT_NAME: &str = "agentdesk-discord-message.txt";

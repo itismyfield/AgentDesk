@@ -109,15 +109,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards(
     delete_stale_queued_placeholder_cards_with(&deleter, shared, stale_cards).await;
 }
 
-pub(in crate::services::discord) trait StalePlaceholderDeleter:
-    Send + Sync
-{
-    fn delete<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        placeholder_msg_id: MessageId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
-}
+pub(in crate::services::discord) use crate::services::discord::placeholder_controller::queued_card_gate::StalePlaceholderDeleter;
 
 pub(in crate::services::discord) struct SerenityStalePlaceholderDeleter {
     pub(in crate::services::discord) http: Arc<serenity::Http>,

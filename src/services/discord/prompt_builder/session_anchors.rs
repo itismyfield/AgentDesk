@@ -189,7 +189,7 @@ mod tests {
                 current_path,
                 channel_id: channel.get(),
                 memory_scope_channel_id: channel.get(),
-                role_binding: None,
+                role_id: None,
                 session_id,
                 fresh,
             })

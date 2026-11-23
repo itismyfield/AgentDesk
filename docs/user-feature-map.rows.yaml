@@ -546,7 +546,7 @@ host_parity:
     herdr: host admission과 O readiness를 거쳐 Herdr에서 provider 세션 시작·재사용 후 응답
     verdict: 같음
     owner: '#8120의 실제 양쪽 실행 수용은 계속 필요'
-    evidence: '`src/services/discord/router/message_handler/intake_turn.rs:161`, `src/services/turn_host.rs:212`, `src/services/herdr_launch.rs:405`.
+    evidence: '`src/services/discord/router/message_handler/intake_turn.rs:161`, `src/services/turn_host.rs:212`, `src/services/herdr_launch.rs:410`.
       Cancel·clear는 아래 행. Claude/Codex의 E-50/E-51은 양쪽 4개 전달 명세'
     coverage_tuples:
     - host: tmux
@@ -716,7 +716,7 @@ host_parity:
     herdr: Herdr holder 응답 뒤 해당 후처리를 건너뜀. 일반 활성 턴 중단과 수동 lease 해제는 기존 경로로 가능
     verdict: 다름
     owner: '#8128 Z. #7583 S07c의 stop 호출부, holder 변경이 필요할 때 S07f와 조율'
-    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/zombie_foreground_release.rs:185–212,355–411,432–442`.
+    evidence: '`src/services/discord/commands/stop.rs:69–75,178–195`, `src/services/discord/host_liveness.rs:126–153`, `src/services/discord/zombie_foreground_release.rs:250–306,327–337`.
       동일 시나리오에서 취소된 exact 토큰과 종료 증거가 있으면 pane·native ID·큐를 보존하면서 다음 입력이 진행한다. 새 토큰·활성 턴·불명확한 증거에서는 lease를 유지한다'
   - feature_id: cancel-stop
     scope: 수동 lease 확인·해제 API 및 CLI
@@ -743,7 +743,7 @@ host_parity:
     verdict: 같음
     owner: '명시 권한·대상이 검증된 경우에 종료한다는 계약. lifecycle trait 수렴은 #7583'
     evidence: '`src/server/routes/domains/runtime.rs:79–84,103`, `src/services/dispatched_sessions/force_kill.rs:43,185`,
-      `src/services/dispatched_sessions/herdr_kill.rs:21`, `src/services/discord/herdr_terminate.rs:412,448,692`'
+      `src/services/dispatched_sessions/herdr_kill.rs:20`, `src/services/discord/herdr_terminate.rs:411,447,691`'
   - feature_id: cancel-stop
     scope: '`/cancel-queued`'
     tmux: 큐에서 exact 입력 ID의 취소 결과
@@ -794,7 +794,7 @@ host_parity:
     herdr: 공유 reset·recreate 경로는 기존 tmux guard에서 거절. 현재 `/goal --fresh`의 별도 fresh 준비 분기가 있음
     verdict: 다름
     owner: '#8128 R2a. reset·relaunch는 #7583 S07b, recreate는 S07c'
-    evidence: '`src/services/discord/admin_host_guard.rs:94,116,186,227`, `src/services/discord/commands/tmux_recreate.rs:9,104`,
+    evidence: '`src/services/discord/admin_host_guard.rs:74,96,166,207`, `src/services/discord/commands/tmux_recreate.rs:9,104`,
       `src/services/discord/commands/control/provider_reset.rs:16`, `src/services/discord/router/message_handler/goal_lifecycle.rs:34–62,77–85`,
       `src/services/discord/router/message_handler/intake_turn.rs:949–966`, `src/services/discord/router/message_handler/headless_turn.rs:533–556`'
   - feature_id: reset-clear
@@ -819,7 +819,7 @@ host_parity:
     herdr: 현행 자동 reset 및 legacy repair의 hosted 보호·거절
     verdict: 다름
     owner: '#8128 R2c는 R2a 결과와 기존 조건부 SQL 및 exact 실행 fence를 소비. 다음 run으로 재할당된 slot은 보존'
-    evidence: '`src/services/auto_queue/runtime.rs:177–193,346,472`, `src/services/discord/admin_host_guard.rs:227–248`,
+    evidence: '`src/services/auto_queue/runtime.rs:177–193,349,475`, `src/services/discord/admin_host_guard.rs:207–228`,
       `src/services/routines/session_control.rs:103–117`, `src/services/discord/health/recovery.rs:242`, `src/server/routes/domains/runtime.rs:42,87,112`,
       `src/server/routes/health_api/session_repair.rs:17,76,111`'
   - feature_id: reset-clear
@@ -838,7 +838,7 @@ host_parity:
     verdict: 다름
     owner: '#8128 W1/W2. 사용자 결정 A는 증명된 빈 창에만 적용. 원자 서버 검증 능력이 W2 선행 조건'
     evidence: '`src/services/herdr_launch/prepared.rs:11`, `src/services/discord/herdr_terminate/root_replaced.rs:69,342`,
-      `src/services/session_host/herdr/pane_probe.rs:205–244`, `src/services/herdr_launch.rs:462–475`. Retired 행이 successor에
+      `src/services/session_host/herdr/pane_probe.rs:205–244`, `src/services/herdr_launch.rs:468–475`. Retired 행이 successor에
       덮여 증거가 사라지면 자격 종료'
   - feature_id: reset-clear
     scope: 5분 주기 정책의 6시간 idle 정리
@@ -944,7 +944,7 @@ host_parity:
     herdr: 공통 DM 게이트. host와 무관하게 같은 발신/격리 규칙을 사용
     verdict: 같음
     owner: '공통 권한 및 출력 정책. 각 host의 DM/Gateway 실제 실행은 #8120'
-    evidence: '`src/services/discord/outbound/send_gate.rs:107,220,334`, `src/services/discord/queue_io/transport.rs:15,23`,
+    evidence: '`src/services/discord/outbound/send_gate.rs:107,220,334`, `src/services/discord/queue_io/transport.rs:26,34`,
       `src/services/message_outbox/identity_tests.rs:96`, `src/server/routes/domains/runtime.rs:146`'
   - feature_id: routines
     scope: Headless·채널·스레드·예약·retry
@@ -961,7 +961,7 @@ host_parity:
     verdict: 다름
     owner: '#8128 R2c는 R2a 효과와 #7583 actual-owner 종료 포트를 소비'
     evidence: '`src/server/routes/domains/ops.rs:188–189`, `src/server/routes/routines/handlers.rs:539–560`, `src/services/routines/session_control.rs:120–132,676–698`,
-      `src/services/turn_lifecycle.rs:158–166,348–360`'
+      `src/services/turn_lifecycle.rs:157–164,345–357`'
   - feature_id: routines
     scope: fresh 실행 완료 후 정리
     tmux: run을 claim했을 때의 routine 소유권과 result로 해당 실행만 종료
@@ -976,7 +976,7 @@ host_parity:
     herdr: 이름이 같아도 다른 host 또는 교체 run은 건드리지 않는 기존 조건이 적용. 실제 Herdr 종료는 legacy 효과에서 빠짐
     verdict: 다름
     owner: '#8128 R2c. R2a 효과 및 #7583 actual-owner 종료 포트'
-    evidence: '`src/server/mod.rs:2696–2703`, `src/services/routines/agent_executor.rs:937–966,995–1006`, `src/services/routines/session_control.rs:236–278,676–698`.
+    evidence: '`src/server/mod.rs:2698–2705`, `src/services/routines/agent_executor.rs:937–966,995–1006`, `src/services/routines/session_control.rs:236–278,676–698`.
       소유 증거 부재 및 교체 실행의 종료 0건 검증'
   - feature_id: herdr-handoff
     scope: tmux→Herdr 넘김
@@ -984,7 +984,7 @@ host_parity:
     herdr: 정확한 Herdr 재입력·취소 및 owner 승인 상태 정산
     verdict: 같음
     owner: '검증된 channel의 세션 연속 계약, #8077 구현. 양쪽 실제 세대 및 Cancel 입증 #8120'
-    evidence: '`src/services/herdr_launch.rs:61,405`, `src/services/discord/router/herdr_consent.rs:128,206,388`, `src/services/discord/commands/stop.rs:98`.
+    evidence: '`src/services/herdr_launch.rs:64,410`, `src/services/discord/router/herdr_consent.rs:128,206,388`, `src/services/discord/commands/stop.rs:98`.
       E-19/E-30의 기존 identity는 Herdr에 그대로 적용할 수 없음'
   - feature_id: herdr-handoff
     scope: 사용자 소유 Herdr 서버 동의/복귀
@@ -1004,7 +1004,7 @@ host_parity:
     reason: 서로 다른 앱의 native UI 배치
     approval: unrecorded
     owner: '#7583의 workspace UX 제품 결정'
-    evidence: '`src/services/herdr_launch.rs:374`, `src/services/herdr_launch/prepared.rs:11`, [상속 설계 §5](session-host-parity.design.md#5-사용자-결정-필요남길-차이)'
+    evidence: '`src/services/herdr_launch.rs:379`, `src/services/herdr_launch/prepared.rs:11`, [상속 설계 §5](session-host-parity.design.md#5-사용자-결정-필요남길-차이)'
   - feature_id: effort-model
     scope: Claude `/model`
     tmux: 저장 후 필요 시 동일 대화로 TUI 재기동
@@ -1081,8 +1081,8 @@ host_parity:
     herdr: tmux probe/화면이 guard로 생략되고 `host_unsupported`·`session_host_not_tmux` 노출
     verdict: 다름
     owner: '#8128 D, #7583 S07a agent 조회, S07e output 관찰 포트'
-    evidence: '`src/server/routes/domains/agents.rs:21,29`, `src/server/routes/domains/runtime.rs:95,99,132,139,144`, `src/server/routes/agents.rs:156,206,641,923,946`,
-      `src/services/agents/turn.rs:256,298,479`, `src/services/dispatched_sessions/output.rs:81,169,210`, `src/cli/client.rs:2070,2077`,
+    evidence: '`src/server/routes/domains/agents.rs:21,29`, `src/server/routes/domains/runtime.rs:95,99,132,139,144`, `src/server/routes/agents.rs:156,206,641,924,947`,
+      `src/services/agents/turn.rs:268,310,494`, `src/services/dispatched_sessions/output.rs:90,179,219`, `src/cli/client.rs:2070,2077`,
       `src/cli/run.rs:311`. watch-agent-turn이 이 API를 소비'
   - feature_id: null
     scope: watch-agent-turn
@@ -1090,7 +1090,7 @@ host_parity:
     herdr: 기존 tmux 출력 API·직접 probe에 의존해 Herdr 화면 누락 가능
     verdict: 다름
     owner: '#8128 D와 외부 호출자 확인'
-    evidence: '`src/services/dispatched_sessions/output.rs:81,169`, 저장소 밖 watch-agent-turn 스킬 문서 60·66·88·94행'
+    evidence: '`src/services/dispatched_sessions/output.rs:90,179`, 저장소 밖 watch-agent-turn 스킬 문서 60·66·88·94행'
   - feature_id: null
     scope: CLI `reset-tmux`·API `kill-tmux`
     tmux: raw tmux 이름 기반 cleanup. 다른 host 소유 marker는 보존

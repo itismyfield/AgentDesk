@@ -1,7 +1,7 @@
 //! A Codex turn's planned pane replacement is not its terminal pane death.
 
-use super::super::inflight::{InflightTurnIdentity, load_inflight_state_read_only_result};
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
+use super::row::{TurnIdentity, load_read_only};
+use crate::services::provider::{CancelToken, cancel_requested};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
@@ -19,7 +19,7 @@ struct Phase {
 }
 
 struct Turn {
-    identity: InflightTurnIdentity,
+    identity: TurnIdentity,
     owner: u64,
     nonce: String,
     token: Weak<CancelToken>,
@@ -30,14 +30,11 @@ impl Turn {
         self.token.upgrade().is_some_and(|token| {
             !cancel_requested(Some(&token))
                 && token.turn_nonce() == Some(self.nonce.as_str())
-                && load_inflight_state_read_only_result(&ProviderKind::Codex, key.0)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|row| {
-                        self.identity.matches_state(&row)
-                            && row.request_owner_user_id == self.owner
-                            && row.turn_nonce.as_deref() == Some(self.nonce.as_str())
-                    })
+                && load_read_only(key.0).ok().flatten().is_some_and(|row| {
+                    self.identity == row.identity
+                        && row.request_owner_user_id == self.owner
+                        && row.turn_nonce.as_deref() == Some(self.nonce.as_str())
+                })
         })
     }
 }
@@ -76,23 +73,22 @@ impl Replacement {
                 "Codex pane replacement conflicts with an existing lifecycle action".into(),
             );
         }
-        let row = load_inflight_state_read_only_result(&ProviderKind::Codex, channel)?
-            .ok_or("Codex pane replacement lost its turn row")?;
+        let row = load_read_only(channel)?.ok_or("Codex pane replacement lost its turn row")?;
         let nonce = token
             .turn_nonce()
             .ok_or("Codex pane replacement has no turn nonce")?;
         if cancel_requested(Some(token))
             || row.provider != "codex"
             || row.channel_id != channel
-            || row.tmux_session_name.as_deref() != Some(tmux)
-            || row.user_msg_id == 0
+            || row.identity.tmux_session_name.as_deref() != Some(tmux)
+            || row.identity.user_msg_id == 0
             || row.request_owner_user_id == 0
             || row.turn_nonce.as_deref() != Some(nonce)
         {
             return Err("Codex pane replacement no longer owns its turn".into());
         }
         phase.turn = Some(Turn {
-            identity: InflightTurnIdentity::from_state(&row),
+            identity: row.identity,
             owner: row.request_owner_user_id,
             nonce: nonce.to_owned(),
             token: Arc::downgrade(token),

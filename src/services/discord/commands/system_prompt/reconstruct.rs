@@ -75,7 +75,7 @@ pub(super) async fn build(
         current_path: &path,
         channel_id: channel.get(),
         memory_scope_channel_id: role_channel.get(),
-        role_binding: role.as_ref(),
+        role_id: role.as_ref().map(|binding| binding.role_id.as_str()),
         session_id: Some(session_id),
         fresh: false,
     })

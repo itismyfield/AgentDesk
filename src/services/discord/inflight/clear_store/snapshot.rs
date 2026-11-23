@@ -10,13 +10,10 @@ pub(in crate::services::discord) struct SnapshotClearDetail {
 }
 
 impl GuardedClearOutcome {
-    /// `receipt_committed` lets a prior generation's DrainRestart marker pass: the drained
-    /// execution already ended and its receipt is in PG, so there is nothing left to resume.
     #[cfg(unix)]
     pub(in crate::services::discord) fn for_native_snapshot_with_detail(
         provider: &ProviderKind,
         snapshot: &InflightTurnState,
-        receipt_committed: bool,
     ) -> (Self, SnapshotClearDetail) {
         let Some(root) = inflight_runtime_root() else {
             return (Self::Missing, detail("no_runtime_root", None));
@@ -31,13 +28,13 @@ impl GuardedClearOutcome {
                 snapshot.effective_finalizer_turn_id(),
                 Some(&super::super::InflightEpisodePin::from_state(snapshot)),
             ),
-            (receipt_committed, |current: &InflightTurnState| {
+            |current| {
                 snapshot
                     .hosted_execution_nonce
                     .as_ref()
                     .is_some_and(|nonce| !nonce.is_empty())
                     && current.hosted_execution_nonce == snapshot.hosted_execution_nonce
-            }),
+            },
         )
     }
 
@@ -59,14 +56,6 @@ impl GuardedClearOutcome {
             Some(&super::super::InflightEpisodePin::from_state(snapshot)),
         )
     }
-}
-
-fn prior_drain_restart(state: &InflightTurnState) -> bool {
-    state.restart_mode == Some(InflightRestartMode::DrainRestart)
-        && state.restart_generation.is_some_and(|generation| {
-            generation != 0
-                && generation < crate::services::discord::runtime_store::process_generation()
-        })
 }
 
 fn detail(reason: &'static str, observed_save_generation: Option<u64>) -> SnapshotClearDetail {
@@ -135,7 +124,7 @@ pub(super) fn clear_if_matches_generation_and_episode_in_root(
         expected,
         expected_generation,
         (expected_finalizer_turn_id, expected_episode),
-        (false, |_: &InflightTurnState| true),
+        |_| true,
     )
 }
 
@@ -146,9 +135,8 @@ fn clear_snapshot_checked(
     expected: &InflightTurnIdentity,
     expected_generation: (&str, u64),
     expected_pin: (u64, Option<&super::super::InflightEpisodePin>),
-    runtime: (bool, impl FnOnce(&InflightTurnState) -> bool),
+    runtime_matches: impl FnOnce(&InflightTurnState) -> bool,
 ) -> (GuardedClearOutcome, SnapshotClearDetail) {
-    let (receipt_committed, runtime_matches) = runtime;
     let (expected_updated_at, expected_save_generation) = expected_generation;
     let (expected_finalizer_turn_id, expected_episode) = expected_pin;
     let path = inflight_state_path(root, provider, channel_id);
@@ -167,7 +155,7 @@ fn clear_snapshot_checked(
         Err(reason) => return (GuardedClearOutcome::Missing, detail(reason, None)),
     };
     let observed = Some(state.save_generation);
-    if state.restart_mode.is_some() && !(receipt_committed && prior_drain_restart(&state)) {
+    if state.restart_mode.is_some() {
         return (
             GuardedClearOutcome::PlannedRestartSkipped,
             detail("planned_restart", observed),

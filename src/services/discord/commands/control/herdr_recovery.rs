@@ -25,7 +25,9 @@ pub(super) async fn clear(
     guard: Option<&OwnedMutexGuard<()>>,
     report: &mut ClearReport,
 ) -> bool {
-    if crate::config::session_hosts::herdr_endpoint(channel.get()).is_none() {
+    // A thread's execution runs on its parent's endpoint.
+    use crate::services::session_host::thread_host::{PolicyHost, parent_policy};
+    if !matches!(parent_policy(channel.get()), PolicyHost::Herdr { .. }) {
         return false;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {

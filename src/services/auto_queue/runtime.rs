@@ -7,9 +7,9 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::discord::admin_host_guard::{ManagedResetVerdict, managed_reset_verdict};
-use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::host_teardown_gate::row_host_refusal;
+use crate::services::engine_runtime::health_port::{
+    AppHealthRegistry, ManagedResetPort, SlotResetPort,
+};
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
 
@@ -202,8 +202,22 @@ async fn clear_slot_sessions_with_owner_pg(
     .map_err(|error| format!("clear postgres slot sessions for {thread_count} thread(s): {error}"))
 }
 
+/// The managed-reset verdict of the registry the application carries.
+type ManagedResetVerdict = <AppHealthRegistry as SlotResetPort>::Verdict;
+
+/// The one runtime capability a slot clear takes from the health registry: a reset verdict.
+pub(crate) type SlotRuntimeHealth = Arc<dyn ManagedResetPort<ManagedResetVerdict>>;
+
+/// The registry as the slot-clear port, so callers in KE never name the registry type.
+pub(crate) fn slot_runtime_health<R>(registry: Option<Arc<R>>) -> Option<SlotRuntimeHealth>
+where
+    R: ManagedResetPort<ManagedResetVerdict> + 'static,
+{
+    registry.map(|registry| registry as SlotRuntimeHealth)
+}
+
 pub async fn clear_slot_threads_for_slot_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -212,7 +226,7 @@ pub async fn clear_slot_threads_for_slot_pg(
 }
 
 pub(super) async fn clear_slot_threads_for_runs_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -222,7 +236,7 @@ pub(super) async fn clear_slot_threads_for_runs_pg(
 }
 
 async fn clear_slot_threads_pg(
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -469,7 +483,7 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
 /// check only reads and finishes before the caller's first write.
 async fn filter_safe_slot_thread_reset_targets(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<&dyn ManagedResetPort<ManagedResetVerdict>>,
     target: &SlotClearTarget,
 ) -> Result<(Vec<u64>, Vec<ManagedResetVerdict>), String> {
     let (mut safe_to_reset, mut verdicts) = (Vec::new(), Vec::new());
@@ -479,9 +493,10 @@ async fn filter_safe_slot_thread_reset_targets(
             .selected_rows
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
-        // A Herdr-configured thread is kept whatever its rows say, with or without a registry.
-        let configured = crate::services::session_host::operation_policy::configured_refusal;
-        let host = match configured(*thread_channel_id) {
+        // A Herdr host's thread, or one whose host is not decided, is kept whatever its rows say.
+        // Every row of the thread decides it; no row at all goes on to the row checks below.
+        let host_of = crate::services::session_host::host_decision::host_decision_for_rows;
+        let host = match host_of(pool, *thread_channel_id).await.tmux_refusal() {
             Some(reason) => Some(reason),
             None => slot_thread_host_refusal(pool, &thread_id, selected).await,
         };
@@ -497,17 +512,24 @@ async fn filter_safe_slot_thread_reset_targets(
             (Some(registry), Some(runtime)) => {
                 let channel = poise::serenity_prelude::ChannelId::new(*thread_channel_id);
                 let key = runtime.session_key.as_deref();
-                managed_reset_verdict(registry, &runtime.provider_name, channel, key).await
+                registry
+                    .managed_reset_verdict(&runtime.provider_name, channel, key)
+                    .await
             }
             _ => None,
         };
-        if let Some(reason) = verdict.as_ref().and_then(ManagedResetVerdict::refusal) {
+        let refusal = <AppHealthRegistry as SlotResetPort>::verdict_refusal;
+        if let Some(reason) = verdict.as_ref().and_then(refusal) {
             tracing::warn!(
                 "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
             );
             continue;
         }
-        match crate::services::discord::should_defer_thread_archive_pg(Some(pool), &thread_id).await
+        match crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg(
+            Some(pool),
+            &thread_id,
+        )
+        .await
         {
             Ok(true) => {
                 tracing::warn!(
@@ -564,6 +586,7 @@ async fn slot_thread_host_refusal(
             return Some(format!("`{key}` names no tmux session"));
         };
         let (provider, caller) = (provider.as_deref(), "auto_queue_slot_reset");
+        let row_host_refusal = <AppHealthRegistry as SlotResetPort>::row_host_refusal;
         let refused = row_host_refusal(pool, provider, Some(thread_id), &key, &name, caller).await;
         if refused.is_some() {
             return refused;

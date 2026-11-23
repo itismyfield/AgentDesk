@@ -472,7 +472,7 @@ async fn post_dispatch_completion_summary(
         DeliveryResult, DiscordOutboundPolicy, OutboundChannelId, OutboundDelivery, OutboundIntent,
         OutboundTargetKey,
     };
-    use crate::services::discord::outbound::HttpOutboundClient;
+    use crate::services::dispatches::http_outbound::HttpOutbound;
 
     let Some(token) = config.notify_bot_token.as_deref() else {
         return Err("no notify bot token".to_string());
@@ -486,7 +486,7 @@ async fn post_dispatch_completion_summary(
         .map(OutboundChannelId::new)
         .map_err(|error| format!("invalid dispatch summary thread id {thread_id}: {error}"))?;
     let outbound_client =
-        HttpOutboundClient::new(client, token.to_string(), config.discord_api_base.clone());
+        HttpOutbound::new(client, token.to_string(), config.discord_api_base.clone());
     let outbound_msg = OutboundIntent::new(
         format!("dispatch:{dispatch_id}"),
         format!("dispatch:{dispatch_id}:completion-summary"),
@@ -686,7 +686,10 @@ async fn should_defer_done_card_thread_archive(
     thread_id: &str,
     _dispatch_id: &str,
 ) -> Result<bool, String> {
-    crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await
+    crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg(
+        pg_pool, thread_id,
+    )
+    .await
 }
 
 async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> Result<(), String> {
@@ -701,7 +704,7 @@ async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> 
 
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID.
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
-    crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
+    crate::config::resolve_channel_alias(alias)
 }
 
 pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {

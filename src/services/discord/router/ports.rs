@@ -1,0 +1,121 @@
+//! The router functions every `SharedData` carries as its `RouterPorts`.
+
+use std::sync::Arc;
+
+use poise::serenity_prelude::ChannelId;
+
+use crate::services::discord::SharedData;
+use crate::services::discord::queue_io::transport::IntakeDeps;
+use crate::services::discord::shared_state::{
+    PortFuture, PromoteBlockedFuture, QueuedAdmission, QueuedRun, RouterPorts,
+};
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::{DispatchLease, Intervention};
+
+pub(in crate::services::discord) const ROUTER_PORTS: RouterPorts = RouterPorts {
+    #[cfg(unix)]
+    owner_wake: super::message_handler::owner_wake,
+    checkpoint_waits: super::checkpoint_waits_for_admission,
+    promote_readiness_blocked,
+    admit_and_finish_queued,
+    start_exact_retry,
+    defer_promoted_dispatch,
+    queued_head_inject_covers: super::queued_head_inject_covers,
+    owned_original: super::input_payload::owned_original,
+    #[cfg(unix)]
+    owner_start_session_key,
+};
+
+fn promote_readiness_blocked<'a>(
+    shared: &'a Arc<SharedData>,
+    provider: &'a ProviderKind,
+    channel: ChannelId,
+) -> PromoteBlockedFuture<'a> {
+    Box::pin(super::hosted_tui_promote_readiness_blocked(
+        shared, provider, channel,
+    ))
+}
+
+/// The queued admission both queue runners share: admit, run the caller's step, finish.
+fn admit_and_finish_queued<'a>(
+    deps: &'a IntakeDeps<'a>,
+    admission: QueuedAdmission<'a>,
+    after_admission: PortFuture<'a, bool>,
+) -> PortFuture<'a, QueuedRun> {
+    use super::QueuedAdmissionDisposition as Disposition;
+    Box::pin(async move {
+        let QueuedAdmission {
+            provider,
+            channel_id,
+            intervention,
+            request_owner,
+            request_owner_name,
+            defer_watcher_resume,
+            wait_for_completion,
+            backstop_reason,
+            dispatch_lease,
+        } = admission;
+        let admitted = match super::admit_queued_intake(
+            deps,
+            provider,
+            channel_id,
+            intervention,
+            request_owner,
+            request_owner_name,
+            defer_watcher_resume,
+            wait_for_completion,
+            backstop_reason,
+            dispatch_lease,
+        )
+        .await
+        {
+            Disposition::Admitted(admitted) => admitted,
+            Disposition::Deferred
+            | Disposition::RejectedNonPortableAttachment
+            | Disposition::ConsumedToHold => return QueuedRun::NotAdmitted,
+            Disposition::RejectedRestore => return QueuedRun::RejectedRestore,
+        };
+        let after_admission = after_admission.await;
+        let result = super::finish_admitted_queued_intake(deps, admitted).await;
+        QueuedRun::Finished {
+            after_admission,
+            result,
+        }
+    })
+}
+
+fn start_exact_retry<'a>(
+    http: &'a Arc<poise::serenity_prelude::http::Http>,
+    shared: &'a Arc<SharedData>,
+    channel_id: ChannelId,
+    retry: crate::services::discord::replay_policy::ExactRetry,
+) -> PortFuture<'a, crate::services::discord::replay_policy::ExactHandoff> {
+    Box::pin(super::start_exact_retry(http, shared, channel_id, retry))
+}
+
+fn defer_promoted_dispatch<'a>(
+    shared: &'a Arc<SharedData>,
+    provider: &'a ProviderKind,
+    channel_id: ChannelId,
+    intervention: &'a Intervention,
+    dispatch_lease: Arc<DispatchLease>,
+) -> PortFuture<'a, bool> {
+    Box::pin(super::defer_promoted_dispatch_if_hosted_tui_busy(
+        shared,
+        provider,
+        channel_id,
+        intervention,
+        dispatch_lease,
+    ))
+}
+
+#[cfg(unix)]
+fn owner_start_session_key<'a>(
+    shared: &'a Arc<SharedData>,
+    channel: ChannelId,
+    context: &'a serde_json::Value,
+) -> PortFuture<'a, Option<String>> {
+    Box::pin(super::message_handler::owner_start_session_key(
+        shared, channel, context,
+    ))
+}

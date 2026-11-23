@@ -2,17 +2,20 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::SharedData;
-use crate::services::discord::health::{
-    FINISH_UNOBSERVED_PATH, HealthRegistry, TOKEN_SUPERSEDED_PATH,
-};
-use crate::services::discord::host_teardown_gate::{
-    ChannelTeardown, backfill_inflight_after_guard, guard_tmux_name, nameless_runtime_teardown,
-    row_gate, runtime_target_holds, runtime_teardown,
+use crate::services::engine_runtime::health_port::{
+    FINISH_UNOBSERVED_PATH, PendingQueueView, TOKEN_SUPERSEDED_PATH, TurnStopJudgement,
+    TurnStopPort,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::ChannelTeardown;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
+
+/// A registry this lifecycle stops turns through, for a caller that does not name the runtime.
+pub(crate) trait LifecycleStopPort: TurnStopPort<SharedData> {}
+impl<T: TurnStopPort<SharedData>> LifecycleStopPort for T {}
 
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
 const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
@@ -93,24 +96,24 @@ pub(crate) struct TurnLifecycleStopResult {
 
 mod stop_result;
 
-pub(crate) async fn stop_turn_preserving_queue(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn stop_turn_preserving_queue<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     reason: &str,
 ) -> TurnLifecycleStopResult {
     stop_turn_preserving_queue_with_cancel_event(health_registry, target, reason, true).await
 }
 
-pub(crate) async fn stop_turn_preserving_queue_without_cancel_event(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn stop_turn_preserving_queue_without_cancel_event<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     reason: &str,
 ) -> TurnLifecycleStopResult {
     stop_turn_preserving_queue_with_cancel_event(health_registry, target, reason, false).await
 }
 
-async fn stop_turn_preserving_queue_with_cancel_event(
-    health_registry: Option<&HealthRegistry>,
+async fn stop_turn_preserving_queue_with_cancel_event<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     reason: &str,
     emit_cancel_observability: bool,
@@ -120,7 +123,7 @@ async fn stop_turn_preserving_queue_with_cancel_event(
         target,
         None,
         reason,
-        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+        TmuxCleanupPolicy::PreserveSessionAndInflight {
             restart_mode: crate::domain::lifecycle::InflightRestartMode::HotSwapHandoff,
         },
         emit_cancel_observability,
@@ -128,8 +131,8 @@ async fn stop_turn_preserving_queue_with_cancel_event(
     .await
 }
 
-pub(crate) async fn force_kill_turn(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_turn<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     reason: &str,
     termination_reason_code: &'static str,
@@ -155,8 +158,8 @@ pub(crate) struct ForceKillRow<'a> {
 
 /// [`force_kill_turn`] for a caller holding its target's row: with no runtime to key the
 /// session, that row alone decides whether the host guard admits the kill.
-pub(crate) async fn force_kill_turn_for_row(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_turn_for_row<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     row: ForceKillRow<'_>,
     reason: &str,
@@ -166,8 +169,8 @@ pub(crate) async fn force_kill_turn_for_row(
     force_kill_turn_with_cancel_event(health_registry, target, Some(row), reason, code, true).await
 }
 
-pub(crate) async fn force_kill_turn_without_cancel_event(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_turn_without_cancel_event<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     row: Option<ForceKillRow<'_>>,
     reason: &str,
@@ -184,8 +187,8 @@ pub(crate) async fn force_kill_turn_without_cancel_event(
     .await
 }
 
-async fn force_kill_turn_with_cancel_event(
-    health_registry: Option<&HealthRegistry>,
+async fn force_kill_turn_with_cancel_event<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     row: Option<ForceKillRow<'_>>,
     reason: &str,
@@ -216,8 +219,8 @@ impl ForceKillVerdict {
 }
 
 /// The host verdict a force-kill of `target` gets, read without writing anything.
-pub(crate) async fn force_kill_verdict(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_verdict<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     row: Option<ForceKillRow<'_>>,
 ) -> ForceKillVerdict {
@@ -251,8 +254,8 @@ pub(crate) async fn force_kill_verdict(
 }
 
 /// [`force_kill_verdict`] for a sessions row read as stored: its raw provider and thread.
-pub(crate) async fn force_kill_row_verdict(
-    registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_row_verdict<R: TurnStopPort<SharedData>>(
+    registry: Option<&R>,
     pool: &sqlx::PgPool,
     stored_provider: Option<&str>,
     channel_id: Option<&str>,
@@ -274,8 +277,8 @@ pub(crate) async fn force_kill_row_verdict(
 }
 
 /// [`force_kill_turn`] of the target `verdict` judged, run on that verdict.
-pub(crate) async fn force_kill_turn_with_verdict(
-    health_registry: Option<&HealthRegistry>,
+pub(crate) async fn force_kill_turn_with_verdict<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     verdict: ForceKillVerdict,
     reason: &str,
     termination_reason_code: &'static str,
@@ -284,15 +287,15 @@ pub(crate) async fn force_kill_turn_with_verdict(
     force_kill_on_verdict(health_registry, verdict, reason, code, true).await
 }
 
-async fn force_kill_on_verdict(
-    health_registry: Option<&HealthRegistry>,
+async fn force_kill_on_verdict<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     verdict: ForceKillVerdict,
     reason: &str,
     termination_reason_code: &'static str,
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
     let target = verdict.target.clone();
-    let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+    let policy = TmuxCleanupPolicy::CleanupSession {
         termination_reason_code: Some(termination_reason_code),
     };
     let emit = emit_cancel_observability;
@@ -307,12 +310,12 @@ async fn force_kill_on_verdict(
     .await
 }
 
-async fn stop_turn_with_policy(
-    health_registry: Option<&HealthRegistry>,
+async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
     verdict: Option<ForceKillVerdict>,
     reason: &str,
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    cleanup_policy: TmuxCleanupPolicy,
     emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
     // #1672: capture the *observed* tmux session name and the disk/memory
@@ -328,8 +331,8 @@ async fn stop_turn_with_policy(
         keys,
     ) {
         (true, (Some(registry), Some(provider), Some(channel))) => {
-            let judge = crate::services::discord::health::judge_provider_channel_stop;
-            Some(judge(registry, provider.as_str(), channel).await)
+            let judged = registry.judge_provider_channel_stop(provider.as_str(), channel);
+            Some(judged.await)
         }
         _ => None,
     };
@@ -365,7 +368,12 @@ async fn stop_turn_with_policy(
         (cleanup_policy.should_cleanup_tmux(), keys.0, keys.1, keys.2)
     {
         let holds = match approved {
-            Some((shared, name)) => runtime_target_holds(shared, provider, channel, name).await,
+            Some((shared, name)) => {
+                <R as TurnStopPort<SharedData>>::runtime_target_holds(
+                    shared, provider, channel, name,
+                )
+                .await
+            }
             None => false,
         };
         if !holds {
@@ -377,7 +385,7 @@ async fn stop_turn_with_policy(
         }
     }
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
-        backfill_inflight_after_guard(provider, channel);
+        <R as TurnStopPort<SharedData>>::backfill_inflight_after_guard(provider, channel);
     }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
@@ -390,39 +398,42 @@ async fn stop_turn_with_policy(
         && crate::services::platform::tmux::has_session(&probe_session_owned);
     let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
 
-    if let (Some(_), Some(provider), Some(channel_id)) =
+    if let (Some(registry), Some(provider), Some(channel_id)) =
         (health_registry, target.provider.as_ref(), target.channel_id)
     {
         let runtime = if cleanup_tmux {
             let termination_reason_code = match cleanup_policy {
-                crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                TmuxCleanupPolicy::CleanupSession {
                     termination_reason_code,
                 } => termination_reason_code.unwrap_or("force_kill"),
-                crate::services::discord::TmuxCleanupPolicy::PreserveSession
-                | crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
-                    ..
-                } => "force_kill",
+                TmuxCleanupPolicy::PreserveSession
+                | TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => "force_kill",
             };
-            let policy = crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+            let policy = TmuxCleanupPolicy::CleanupSession {
                 termination_reason_code: Some(termination_reason_code),
             };
-            let stop = crate::services::discord::health::stop_channel_runtime;
             match approved {
                 Some((shared, name)) => {
-                    Some(stop(shared, provider, channel_id, reason, policy, Some(name)).await)
+                    let approved = Some(name);
+                    let stop = registry.stop_channel_runtime(
+                        shared, provider, channel_id, reason, policy, approved,
+                    );
+                    Some(stop.await)
                 }
                 None => None,
             }
         } else if let Some(judged) = judged {
-            let stop = crate::services::discord::health::stop_judged_provider_channel;
-            stop(judged, reason, cleanup_policy).await
+            let stop = registry.stop_judged_provider_channel(judged, reason, cleanup_policy);
+            stop.await
         } else {
             None
         };
         if let Some(runtime) = runtime {
-            use crate::services::discord::health::InflightDisposition;
+            use crate::services::engine_runtime::health_port::InflightDisposition;
             if runtime.inflight == InflightDisposition::PreservedByNativeStop {
-                return stop_result::native_preserved(runtime, tmux_session_observed);
+                let (path, free) = (runtime.lifecycle_path, runtime.mailbox_foreground_free);
+                let observed = tmux_session_observed;
+                return stop_result::native_preserved(path, runtime.queue_depth, free, observed);
             }
             // A stop that was not a legacy one leaves the turn's row and session to its owner.
             if runtime.inflight == InflightDisposition::PreservedByHostGuard {
@@ -442,16 +453,16 @@ async fn stop_turn_with_policy(
         && !cleanup_tmux
         && let Some(registry) = health_registry
     {
-        let hard_stop = crate::services::discord::health::stop_runtime_turn_preserving_watcher(
-            Some(registry),
-            target.provider.as_ref().map(|provider| provider.as_str()),
-            target.channel_id.map(|channel_id| channel_id.get()),
-            Some(&target.tmux_name),
-            "turn_lifecycle_preserve_direct_fallback",
-        )
-        .await;
-        if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
-            lifecycle_path = hard_stop.cleanup_path;
+        let cleanup_path = registry
+            .stop_runtime_turn_preserving_watcher(
+                target.provider.as_ref().map(|provider| provider.as_str()),
+                target.channel_id.map(|channel_id| channel_id.get()),
+                Some(&target.tmux_name),
+                "turn_lifecycle_preserve_direct_fallback",
+            )
+            .await;
+        if cleanup_path != "runtime_unavailable_fallback" {
+            lifecycle_path = cleanup_path;
         }
     }
     // A turn whose finish went unobserved is kept; a force-kill never kills a superseded turn's host.
@@ -550,10 +561,10 @@ async fn stop_turn_with_policy(
         queue_preserved,
         termination_recorded,
         tmux_session_observed,
-        queue_depth_before: pre_snapshot.as_ref().map(|s| s.queue_depth),
-        queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth),
-        queue_disk_present_before: pre_snapshot.as_ref().and_then(|s| s.disk_present),
-        queue_disk_present_after: post_snapshot.as_ref().and_then(|s| s.disk_present),
+        queue_depth_before: pre_snapshot.as_ref().map(|s| s.queue_depth()),
+        queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth()),
+        queue_disk_present_before: pre_snapshot.as_ref().and_then(|s| s.disk_present()),
+        queue_disk_present_after: post_snapshot.as_ref().and_then(|s| s.disk_present()),
         mailbox_foreground_free,
         queue_dropped_message_ids,
     };
@@ -617,14 +628,12 @@ async fn stop_turn_with_policy(
 }
 
 pub(crate) fn cleanup_policy_observability_surface(
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    cleanup_policy: TmuxCleanupPolicy,
 ) -> &'static str {
     match cleanup_policy {
-        crate::services::discord::TmuxCleanupPolicy::PreserveSession => "preserve_session_cancel",
-        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
-            "queue_cancel_preserve"
-        }
-        crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. } => "force_kill_cancel",
+        TmuxCleanupPolicy::PreserveSession => "preserve_session_cancel",
+        TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => "queue_cancel_preserve",
+        TmuxCleanupPolicy::CleanupSession { .. } => "force_kill_cancel",
     }
 }
 
@@ -682,9 +691,13 @@ pub(crate) mod policy_observability_tests {
                 std::process::id()
             ),
         };
-        let result =
-            super::stop_turn_preserving_queue(None, &target, "queue-api cancel_turn (preserve)")
-                .await;
+        let registry = None::<&crate::services::discord::health::HealthRegistry>;
+        let result = super::stop_turn_preserving_queue(
+            registry,
+            &target,
+            "queue-api cancel_turn (preserve)",
+        )
+        .await;
         assert_eq!(result.lifecycle_path, super::DIRECT_FALLBACK_PATH);
         assert!(!result.tmux_killed);
         assert!(!result.inflight_cleared);
@@ -715,7 +728,7 @@ pub(crate) mod policy_observability_tests {
         let temp = tempfile::tempdir().unwrap();
         let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let registry = HealthRegistry::new();
+        let registry = crate::services::discord::health::HealthRegistry::new();
         registry.register("claude".into(), shared.clone()).await;
         let (mailboxes, token) = shared.queue_fixture_parts();
         for (i, drop_reply) in [false, true].into_iter().enumerate() {
@@ -765,7 +778,7 @@ pub(crate) mod policy_observability_tests {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         // An embedded NUL makes metadata lookup fail on every platform.
         Arc::get_mut(&mut shared).unwrap().token_hash = "invalid\0path".to_string();
-        let registry = HealthRegistry::new();
+        let registry = crate::services::discord::health::HealthRegistry::new();
         registry.register("claude".into(), shared.clone()).await;
         let (mailboxes, token) = shared.queue_fixture_parts();
         let channel = ChannelId::new(6038742);
@@ -886,7 +899,7 @@ pub(crate) mod policy_observability_tests {
 
         // An unobservable side is not evidence of a drop.
         assert!(super::dropped_queue_message_ids(Some(&snapshot(vec![9_001])), None).is_empty());
-        assert!(super::dropped_queue_message_ids(None, None).is_empty());
+        assert!(super::dropped_queue_message_ids::<PendingQueueSnapshot>(None, None).is_empty());
     }
 }
 
@@ -914,8 +927,8 @@ impl ForceKillHost {
 
 /// The host guard for a force-kill: on a channel's runtime, that runtime's targets with the
 /// caller's row, the runtime's key and the channel's row; else the caller's own row alone.
-async fn force_kill_host_gate(
-    registry: Option<&HealthRegistry>,
+async fn force_kill_host_gate<R: TurnStopPort<SharedData>>(
+    registry: Option<&R>,
     target: &TurnLifecycleTarget,
     row: Option<ForceKillRow<'_>>,
     tmux_name: &str,
@@ -923,14 +936,15 @@ async fn force_kill_host_gate(
     let caller = "turn_lifecycle_force_kill";
     match (registry, target.provider.as_ref(), target.channel_id) {
         (Some(registry), Some(provider), Some(channel)) if tmux_name.is_empty() => {
-            match nameless_runtime_teardown(registry, provider, channel, caller).await {
+            let nameless = registry.nameless_runtime_teardown(provider, channel, caller);
+            match nameless.await {
                 Some(shared) => ForceKillHost::Nameless(shared),
                 None => ForceKillHost::Gate(ChannelTeardown::Kept, None),
             }
         }
         (Some(registry), Some(provider), Some(channel)) => {
             let key = row.map(|row| row.session_key);
-            let gate = runtime_teardown(registry, provider, channel, tmux_name, key, caller);
+            let gate = registry.runtime_teardown(provider, channel, tmux_name, key, caller);
             let (gate, runtime) = gate.await;
             ForceKillHost::Gate(gate, runtime)
         }
@@ -938,7 +952,8 @@ async fn force_kill_host_gate(
             Some(row) => {
                 let (provider, key) = (row.stored_provider, row.session_key);
                 let channel = target.channel_id.map_or(0, ChannelId::get);
-                let gate = row_gate(row.pool, provider, channel, key, tmux_name, caller);
+                let gate = <R as TurnStopPort<SharedData>>::row_gate;
+                let gate = gate(row.pool, provider, channel, key, tmux_name, caller);
                 ForceKillHost::Gate(gate.await.0, None)
             }
             None => {
@@ -983,8 +998,8 @@ fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> 
 /// stopped.
 /// [`resolve_tmux_session_observed`] for a force-kill, read only; the flag asks for the
 /// inflight backfill the normal lookup writes once the guard admits.
-async fn guard_observed(
-    registry: Option<&HealthRegistry>,
+async fn guard_observed<R: TurnStopPort<SharedData>>(
+    registry: Option<&R>,
     target: &TurnLifecycleTarget,
 ) -> Result<(Option<String>, bool), String> {
     if !target.tmux_name.is_empty() {
@@ -994,11 +1009,11 @@ async fn guard_observed(
     let (Some(registry), Some(provider), Some(channel)) = keys else {
         return Ok((None, false));
     };
-    guard_tmux_name(registry, provider, channel).await
+    registry.guard_tmux_name(provider, channel).await
 }
 
-async fn resolve_tmux_session_observed(
-    health_registry: Option<&HealthRegistry>,
+async fn resolve_tmux_session_observed<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
 ) -> Option<String> {
     if !target.tmux_name.is_empty() {
@@ -1007,33 +1022,25 @@ async fn resolve_tmux_session_observed(
     let registry = health_registry?;
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
-    crate::services::discord::health::resolve_tmux_session_for_cancel(
-        registry,
-        provider.as_str(),
-        channel_id,
-    )
-    .await
+    let resolved = registry.resolve_tmux_session_for_cancel(provider.as_str(), channel_id);
+    resolved.await
 }
 
-async fn pending_queue_pre_snapshot(
-    health_registry: Option<&HealthRegistry>,
+async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
-) -> Option<crate::services::discord::health::PendingQueueSnapshot> {
+) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
     let registry = health_registry?;
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
-    crate::services::discord::health::snapshot_pending_queue_state(
-        registry,
-        provider.as_str(),
-        channel_id,
-    )
-    .await
+    let snapshot = registry.snapshot_pending_queue_state(provider.as_str(), channel_id);
+    snapshot.await
 }
 
-async fn pending_queue_post_snapshot(
-    health_registry: Option<&HealthRegistry>,
+async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
+    health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
-) -> Option<crate::services::discord::health::PendingQueueSnapshot> {
+) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
     pending_queue_pre_snapshot(health_registry, target).await
 }
 
@@ -1050,30 +1057,27 @@ async fn pending_queue_post_snapshot(
 ///
 /// Returns empty when either side is unobservable — an unknown queue is not
 /// evidence of a drop.
-fn dropped_queue_message_ids(
-    pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-    post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-) -> Vec<u64> {
+fn dropped_queue_message_ids<Q: PendingQueueView>(pre: Option<&Q>, post: Option<&Q>) -> Vec<u64> {
     let (Some(pre), Some(post)) = (pre, post) else {
         return Vec::new();
     };
-    pre.message_ids
+    pre.message_ids()
         .iter()
         .copied()
-        .filter(|message_id| !post.message_ids.contains(message_id))
+        .filter(|message_id| !post.message_ids().contains(message_id))
         .collect()
 }
 
 /// Preservation requires measured memory and disk state on both sides of the cancel.
-fn compute_queue_preserved(
-    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
-    pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-    post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
+fn compute_queue_preserved<Q: PendingQueueView>(
+    cleanup_policy: TmuxCleanupPolicy,
+    pre: Option<&Q>,
+    post: Option<&Q>,
 ) -> Option<bool> {
     let _ = cleanup_policy;
     let (pre, post) = (pre?, post?);
-    let (before, after) = (pre.disk_present?, post.disk_present?);
-    Some((!before || after) && post.queue_depth >= pre.queue_depth)
+    let (before, after) = (pre.disk_present()?, post.disk_present()?);
+    Some((!before || after) && post.queue_depth() >= pre.queue_depth())
 }
 
 #[cfg(all(test, unix))]

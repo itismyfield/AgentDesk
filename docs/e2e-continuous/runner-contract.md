@@ -12,7 +12,7 @@ provider 자동 실행에는 `usage:<provider>`·`turn_budget:<provider>` capabi
 
 driver는 `--budget <JSON>`의 남은 turns·tokens·time_s·부모의 절대 monotonic deadline을 받는다. `budget.TurnGuard.start(max_tokens)`를 매 native turn 직전에 호출하고 False면 입력을 보내지 않는다. `finish(actual_tokens)`로 정산하기 전 다음 turn은 허용되지 않는다. unknown 정산은 후속 입력을 막는다. capability 선언은 이 프로토콜을 실제 호출하는 driver adapter에만 부여한다.
 
-driver report는 `native_turns`, 정규화된 총 `tokens`, `budget_checked` 및 usage의 native_turns/input_tokens/output_tokens/cache_read_tokens/cache_write_tokens를 보고한다. tokens는 네 token 항목 합계이며 native_turns·budget_checked도 일치해야 한다. 구성요소 누락·불일치는 unknown이다. 원래 FAIL은 예산 witness 부족 때문에 낮추지 않는다. unknown이 생기면 해당 provider의 남은 occurrence와 이후 자동 실행을 보류하며 예약을 유지한다. `budget/paused.json`의 해제는 실측을 복원한 운영자의 명시적 복구 몫이며 자동 clear는 없다.
+driver report는 `native_turns`, 정규화된 총 `tokens`, `budget_checked` 및 usage의 native_turns/input_tokens/output_tokens/cache_read_tokens/cache_write_tokens를 보고한다. tokens는 예산 토큰 input_tokens+output_tokens+cache_write_tokens의 합계이며(cache_read_tokens는 usage에만 남고 예산에서 빠진다. ledger의 `tokens_basis`가 이 식을 적는다) native_turns·budget_checked도 일치해야 한다. 구성요소 누락·불일치는 unknown이다. 원래 FAIL은 예산 witness 부족 때문에 낮추지 않는다. unknown이 생기면 해당 provider의 남은 occurrence와 이후 자동 실행을 보류하며 예약을 유지한다. `budget/paused.json`의 해제는 실측을 복원한 운영자의 명시적 복구 몫이며 자동 clear는 없다.
 
 예약 전 crash는 실행 0이므로 요청을 보존한다. 예약 후 미완료 crash는 ABANDONED와 provider pause로 남긴다. 새로운 kill/reset/reap 권한은 없다. 시간 초과여도 살아 있는 driver가 lease를 보유하며, 이미 시작한 native turn의 종료와 실제 idle 검증은 driver/#8124 수명 계약이다.
 

@@ -244,6 +244,7 @@ async fn legacy_force_kill(
         session_key,
         active_dispatch_id.as_deref(),
         retry,
+        crate::dispatch::set_dispatch_status_on_pg_boxed,
     )
     .await
     {
@@ -343,6 +344,7 @@ pub(super) async fn fail_or_retry(
                 pool,
                 &origin_dispatch_id,
                 Some(session_key),
+                crate::dispatch::set_dispatch_status_on_pg_boxed,
             )
             .await
             {
@@ -388,6 +390,7 @@ pub(super) async fn fail_or_retry(
                             pool,
                             &meta.origin_dispatch_id,
                             Some(session_key),
+                            crate::dispatch::set_dispatch_status_on_pg_boxed,
                         )
                         .await
                     {

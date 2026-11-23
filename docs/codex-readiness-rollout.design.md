@@ -55,7 +55,7 @@ A1에서 더한 것(0.169.0 fixture):
 
 | 반례 | 모델 cfg | 코드 대조 | 설계 반영 |
 |---|---|---|---|
-| herdr: 화면이 안 읽히면 유휴 Codex에 영영 입력하지 못한다 | `CodexReadyBeforeNarrow` | [C] herdr `composer_ready` 시간 초과(`codex/herdr_turn.rs:316`~`:336`), owner 경로도 같다 | 2절 준비 판정 |
+| herdr: 화면이 안 읽히면 유휴 Codex에 영영 입력하지 못한다 | `CodexReadyBeforeNarrow` | [C] herdr `composer_ready` 시간 초과(`codex/herdr_turn.rs:356`~`:368`), owner 경로도 같다 | 2절 준비 판정 |
 | tmux: 화면이 안 읽히면 45초 뒤 pane을 교체해 전달한다. 영구 보류는 아니고 비용은 재기동이다 | `CodexReadyBeforeTmuxNarrow` (GREEN) | [C] `warm_followup.rs:542`~`:557` → `absence_launch.rs:248`~`:286` | 0절 표의 tmux "수정 전" |
 | tmux: 대기 중 사람이 TUI에서 연 턴이 45초 뒤 교체로 죽는다 | `CodexReadyBeforeTmuxPerson` | [C] `Replacement::begin`은 turn row와 nonce만 본다(`discord/codex_absence/replacement.rs:63`~`:103`) | 1.7, 2절 |
 | tmux: 종료 기록이 유실되거나 모르는 종료로 끝나면 느슨한 판독이 계속 busy라 후속 입력이 큐에 남는다 | `CodexReadyBeforeTmuxLostRecord`·`…LostBoth`·`…Unnamed` | [C] 사전 확인 `intake_turn.rs:1549`~`:1575`, 느슨한 판독 `tui_turn_state.rs:343`, `:731`~`:735` | 2절 대체 단계 2·3 |
@@ -88,7 +88,7 @@ d2의 P2-B 경로(사람 턴 + 이름 없는 종료 + Stop 훅 없음)는 `Codex
 
 | 조사 | 판독 함수 | 판정 | 호출자 (생산 코드) |
 |---|---|---|---|
-| 26 | `pane_looks_ready_for_codex_prompt` `codex_tui/input.rs:1246` | 준비 | `input.rs:1302`(ANSI 변형), `codex/herdr_turn.rs:319`, `discord/recovery_engine/herdr_row_end.rs:591`, `provider.rs:644` |
+| 26 | `pane_looks_ready_for_codex_prompt` `codex_tui/input.rs:1246` | 준비 | `input.rs:1302`(ANSI 변형), `codex/herdr_turn.rs:359`, `discord/recovery_engine/herdr_row_end.rs:591`, `provider.rs:644` |
 | 26 | `pane_looks_ready_for_codex_prompt_with_ansi` `input.rs:1290` | 준비 | `input.rs:432` |
 | 26 | `prompt_readiness_from_ansi_pane` `input.rs:430` | 준비+초안 | `input/submission.rs:131` → `prompt_readiness_snapshot_with_pane` `:119` |
 | 30 | `prompt_readiness_snapshot_with_pane` `input/submission.rs:119` | **Enter 뒤 확인·재전송·취소 정리** | `input.rs:427`(`prompt_readiness_snapshot`), `submission.rs:149`(`submission_readiness_from_ansi_pane` 안), `input.rs:1188`·`:1197`(Enter 뒤 두 번) → `classify_prompt_submit_confirmation` `:980`(호출 `:1204`) → `warm_followup/submit.rs:6` `settle_submit`(`RetrySafeDraft` `:48`, `Unconfirmed` `:93`), 취소 정리 `input.rs:943`~`:971`. 전수는 1.6 |
@@ -100,8 +100,8 @@ d2의 P2-B 경로(사람 턴 + 이름 없는 종료 + Stop 훅 없음)는 `Codex
 | 28 | `decide_warm_input` `warm_followup.rs:363`, `snapshot_has_stranded_draft` `:375` | **준비 대기 시간 초과 → pane 교체** | `warm_followup.rs:533`(대기 전), `:551`(시간 초과 사유), `:562`(대기 뒤) → `Fallback` → `codex/absence_launch.rs:248`~`:261` → `Replacement::begin` `:274` → `cleanup_existing_codex_tui_session` `:280`(`codex.rs:1213`) → argv 재기동 |
 | 30 | `submission_readiness_from_ansi_pane` `input/submission.rs:169`, `submission_busy_in_pane` `:248` | 제출 직전 준비·작업 중 | `input/submission.rs:151`(`admit_codex_prompt_under_lock` `input.rs:1082`), `tui_input/actor/gate.rs:85`·`:109`·`:199`(`judge_codex`·`own_draft`·`submission_busy`), `busy_inject/screen.rs:108` |
 | 30 | `prompt_submission_fits_pane` `input/submission.rs:83` | pane 크기 | `host_input.rs:534` (tmux `pane_size`, 유지) |
-| 30 | `active_composer_content_in_pane` `input/composer_content.rs:45` | 초안 | `codex/herdr_turn.rs:341`, `herdr_row_end.rs:594`, `busy_inject/screen.rs:112` |
-| 32 | `composer_ready` `codex/herdr_turn.rs:316`, `empty_composer` `:339`, `owned_composer` `:354` | herdr 준비·초안·모달 | `herdr_turn.rs:536`·`:574`, `herdr_turn/first_input.rs:135`·`:137` |
+| 30 | `active_composer_content_in_pane` `input/composer_content.rs:45` | 초안 | `codex/herdr_turn.rs:381`, `herdr_row_end.rs:594`, `busy_inject/screen.rs:112` |
+| 32 | `composer_ready` `codex/herdr_turn.rs:356`, `empty_composer` `:371`, `owned_composer` `:386` | herdr 준비·초안·모달 | `herdr_turn.rs:536`·`:574`, `herdr_turn/first_input.rs:135`·`:137` |
 | 32 | `composer` `codex/herdr_turn/busy.rs:46` | herdr busy 입력의 초안·모달 | `busy.rs:69`·`:106` (바꾸지 않음) |
 | 33 | `herdr_turn_in_progress` `input/herdr_cancel.rs:12` | herdr /stop | `discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:773` |
 | 29 | `pane_shows_codex_interactive_modal` `input.rs:1041`, `submission_modal_in_pane` `submission.rs:207`, `inline_banner.rs:8`·`:12`·`:44` | 모달·배너 | `herdr_turn.rs:322`, `busy_inject/screen.rs:59`·`:78`·`:79`, `tui_input/actor/gate.rs:87`, `input.rs:1085`~`:1091` |
@@ -141,7 +141,7 @@ d2의 P2-B 경로(사람 턴 + 이름 없는 종료 + Stop 훅 없음)는 `Codex
 |---|---|---|
 | dcserver 재시작 | 래치 `input.rs:303`(메모리), 훅 버퍼 `claude_tui/hook_registry.rs:52`(TTL 30초, 메모리) | 래치·훅 증거 소실. rollout·binding log·spawn nonce marker는 남는다 |
 | 새 Codex 실행(tmux) | `codex/tui_session_launch/first_input.rs:225`~`:340`, `launch_policy.rs:147` | 새 execution nonce, 새 rollout 또는 resume. SessionStart 훅과 rollout 헤더는 첫 프롬프트 때 온다 [F] |
-| 새 Codex 실행(herdr) | `codex/herdr_turn.rs:200` `fresh_launch`, `:228` `pending_launch`, `:268` `hook_logged`, `:279` `logged_source` | 실행 nonce 자신의 Startup binding event가 source |
+| 새 Codex 실행(herdr) | `codex/herdr_turn.rs:217` `fresh_launch`, `:242` `pending_launch`, `:300` `hook_logged`, `:311` `logged_source` | 실행 nonce 자신의 Startup binding event가 source |
 | 프로세스 종료 | tmux `platform/tmux.rs:1005` `pane_liveness`, herdr `session_host/herdr_gate.rs:758` `read_execution` → `PaneProvider::Exited` `:78` | 턴은 끊기고 rollout에는 종료 기록이 없다 |
 
 ### 1.5 입력 출처 분류표
@@ -205,7 +205,7 @@ Enter 뒤 확인을 rollout 영수증(`busy_inject/rollout.rs:419` `submitted`)�
 
 **거부했을 때의 반환 계약**: `CodexWarmFollowupOutcome`(`warm_followup.rs:58`)에 `Deferred(CodexWarmFallbackReason)`를 더한다. `absence_launch`는 이를 준비 시간 초과 오류(`input.rs`의 `is_prompt_ready_timeout_error`가 참인 형식)로 올리고, pane·세션 파일·binding은 건드리지 않는다. turn 층은 Claude가 같은 상황에서 쓰는 길로 입력을 다시 큐에 넣는다: Enter 전 시간 초과를 재시도 가능한 오류로 올리고(`claude_tui/hosting/warm_followup.rs:334`~`:341`), turn bridge가 다시 넣는다(`discord/turn_bridge/followup_requeue.rs:98` `requeue_if_needed` → `:120`). [C] 이 재큐는 지금 Claude 전용이다. 후보 분류가 provider `Claude`와 runtime `ClaudeTui`를 요구한다(`discord/turn_bridge/streaming_edit_text.rs:185`~`:198`). Codex의 준비 시간 초과 오류(`input.rs:165` 접두어, `:411` `is_prompt_ready_timeout_error`)는 지금 turn 실패로 끝난다. 그래서 조각 C가 이 분류와 재큐에 Codex 분기를 더한다. [U] 재시도 상한에 닿았을 때의 끝은 조각 C의 첫 작업에서 좌표로 고정한다.
 
-**`Deferred`가 거절로 굳지 않게 하는 조건**: busy 재시도 상한은 6회다(`discord/busy_followup_retry_store.rs:24` `MAX_BUSY_RETRY_COUNT`). 45초 대기를 여섯 번 돌아도 270초라, `Unknown`의 단계 4(600초)가 열리기 전에 상한에 닿을 수 있다. 그래서 `Deferred`는 사유를 싣고, turn 층은 이렇게 다룬다. `Busy`로 미룬 입력은 지금의 busy 큐처럼 턴이 끝날 때 다시 시도한다. `Unknown`으로 미룬 입력은 재시도 횟수를 쓰지 않고, 단계 4가 열리는 시각(마지막 rollout 변화 + 600초)에 맞춰 한 번 예약한다(`followup_requeue.rs:79` `schedule_deferred_idle_queue_kickoff`와 같은 예약). 이 조건이 없으면 d3의 확인이 새 거절 경로가 된다.
+**`Deferred`가 거절로 굳지 않게 하는 조건**: busy 재시도 상한은 6회다(`discord/busy_followup_retry_store.rs:23` `MAX_BUSY_RETRY_COUNT`). 45초 대기를 여섯 번 돌아도 270초라, `Unknown`의 단계 4(600초)가 열리기 전에 상한에 닿을 수 있다. 그래서 `Deferred`는 사유를 싣고, turn 층은 이렇게 다룬다. `Busy`로 미룬 입력은 지금의 busy 큐처럼 턴이 끝날 때 다시 시도한다. `Unknown`으로 미룬 입력은 재시도 횟수를 쓰지 않고, 단계 4가 열리는 시각(마지막 rollout 변화 + 600초)에 맞춰 한 번 예약한다(`followup_requeue.rs:79` `schedule_deferred_idle_queue_kickoff`와 같은 예약). 이 조건이 없으면 d3의 확인이 새 거절 경로가 된다.
 
 **Discord 사전 확인과의 관계**: Discord 메시지는 turn을 시작하기 전에 사전 확인을 거친다(`intake_turn.rs:1549`). 조각 A가 이것을 2절 판정으로 바꾸므로, 판정이 `Busy`인 동안에는 입력이 turn을 시작하지 않고 큐에 남는다. 그래서 "확인하지 않는다" 사유가 실행 중인 턴을 만나는 경우는 사전 확인과 교체 사이에 턴이 시작된 때와 사전 확인을 거치지 않는 호출자뿐이다. 지금도 같고, 8절 R5로 적는다.
 
@@ -293,7 +293,7 @@ d2는 2번으로만 풀었다. 그러면 사람 턴이 이름 없는 종료로 �
 
 **herdr의 단계 4**: herdr에는 살아 있는 pane을 끝내고 새 실행으로 바꾸는 경로가 아직 없다.
 
-- #8128 착지 전: 단계 4 조건이 되면 `followup`(`codex/herdr_turn.rs:515`)이 형식 있는 거절로 끝낸다. `PromptRefused`(`:108`)에 새 사유 `SourceUnprovable`을 더한다. 키는 쓰지 않는다. 이 동안 그 채널 입력은 전달되지 않는다(`CodexReadyAfterCompressedHerdr`·`CodexReadyAfterUnnamedHerdr` RED, 8절 R2).
+- #8128 착지 전: 단계 4 조건이 되면 `followup`(`codex/herdr_turn.rs:555`)이 형식 있는 거절로 끝낸다. `PromptRefused`(`:109`)에 새 사유 `SourceUnprovable`을 더한다. 키는 쓰지 않는다. 이 동안 그 채널 입력은 전달되지 않는다(`CodexReadyAfterCompressedHerdr`·`CodexReadyAfterUnnamedHerdr` RED, 8절 R2).
 - #8128 착지 뒤: B2a의 "기존 detached pane exact 종료"와 B2b의 "새 incarnation launch → successor Ready"를 단계 4의 교체로 부른다(`CodexReadyAfterCompressedHerdr8128`·`CodexReadyAfterUnnamedHerdr8128` GREEN). 설계 정본은 #8128의 `docs/herdr-parity-restart.design.md`이고 이 base에는 없다. 조각 B는 거절까지만 넣고, 교체 연결은 #8128 착지 뒤의 작은 후속 조각으로 둔다.
 - 자식 관측: B1의 `claude_tui/activity/processes.rs:19` `observe`는 `tmux::pane_pid`로 루트를 잡아(`:31`) herdr pane에서는 항상 `Unknown`이다. herdr는 `read_execution`(`session_host/herdr_gate.rs:758`)이 주는 실행 `ProcessStamp{pid, start}`(`db/dispatched_sessions/hosted_execution.rs:58`)의 pid를 루트로 삼아 같은 `ancestry(root, text)`(`processes.rs:53`)를 부르는 어댑터를 `codex_tui/readiness.rs` 쪽에 둔다. B1 파일에서 바뀌는 것은 `ancestry`의 가시성 한 줄이다.
 
@@ -371,10 +371,10 @@ marker 정의를 바꿀 때 영향을 받는 소비자(1.6의 전수에서 "판�
 | 유휴 Codex pane은 자식 프로세스가 0개다 | `claude_tui/activity/processes.rs:19` `observe`, `:53` `ancestry` | [U] 리뷰가 이 호스트의 e2e pane 두 개에서 읽기만으로 확인했다(0.169.0 launcher가 `process.execve`로 native codex가 된다). `execve`가 없는 Node에서는 node가 부모로 남아 항상 `Present`가 되고 단계 4가 열리지 않는다(죽이지는 않는다). 확인: 조각 C의 probe 시험 |
 | rollout 기록 이름 | `rollout.rs:339`(`task_started`+`root_turn_id`), `:389`(`task_complete`·`turn_aborted`) | [C] 모르는 이름·이름 없는 종료는 `Unknown`으로 떨어져 대체 단계로 간다 |
 | rollout 경로 | `rollout_tail/discovery.rs:16`·`:22`(CODEX_HOME), `tui_prompt_dedupe/runtime_binding/binding_access.rs:150` | [C] 판정은 binding이 가리키는 파일만 읽는다. cwd 최신 파일을 고르지 않는다 |
-| 훅 설치 | `hook_bundle.rs:31`~`:40`(8종), `codex.rs:411` 스위치, `tui_session_launch.rs:289`(`--dangerously-bypass-hook-trust` 광고 필요), herdr는 override 없으면 launch 거절(`launch_policy.rs:204`~`:207`) | [C] tmux는 훅 없이도 뜰 수 있다. 그때 단계 2가 없고 3·4만 남는다 |
+| 훅 설치 | `hook_bundle.rs:31`~`:40`(8종), `codex.rs:411` 스위치, `tui_session_launch.rs:289`(`--dangerously-bypass-hook-trust` 광고 필요), herdr는 override 없으면 launch 거절(`launch_policy.rs:202`~`:205`) | [C] tmux는 훅 없이도 뜰 수 있다. 그때 단계 2가 없고 3·4만 남는다 |
 | 훅 수신 | `hook_server.rs:297` persist-before-ACK, `:321` `activity_accepted` | [C] binding 관측이 내구화된 훅만 증거로 쓴다 |
 | herdr server | `herdr_gate.rs:758` `read_execution`, `session_host/herdr/contract.rs:179`·`:361` | [C] `Unreadable`은 `Unknown`이지 `Gone`이 아니다 |
-| launch 인자 | `codex.rs:448`~`:454`(`--dangerously-bypass-approvals-and-sandbox`, readonly면 `--sandbox read-only`), `launch_policy.rs:155`~`:158`(`check_for_update_on_startup=false`), `:203`(`--no-daemon`) | [C] 일반 실행은 승인 모달이 없다. readonly 실행과 trust 창은 모달 veto가 맡는다 |
+| launch 인자 | `codex.rs:448`~`:454`(`--dangerously-bypass-approvals-and-sandbox`, readonly면 `--sandbox read-only`), `launch_policy.rs:153`~`:156`(`check_for_update_on_startup=false`), `:201`(`--no-daemon`) | [C] 일반 실행은 승인 모달이 없다. readonly 실행과 trust 창은 모달 veto가 맡는다 |
 | 준비 대기 예산 | `input.rs:153`~`:163`, `config` `followup_prompt_ready_timeout_secs` `:188` | [C] 그대로. PostTurnHandoff 200ms 안에 파일 판독이 끝나야 한다(리뷰 항목) |
 
 ## 5. 구현 계획

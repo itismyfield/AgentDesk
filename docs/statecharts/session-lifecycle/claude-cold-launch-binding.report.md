@@ -28,7 +28,7 @@ The Before chart's shortest path for `FirstTurnQueueEligible` has six steps.
 5. `first_input::observe` sees the file. Its early registration records Resolved by Stat, and `bind_once_logged` binds the row. The source remains unverified.
 6. A busy queue attempt sees the Bound row. `Context::current_source` requires the current pin and holds the attempt.
 
-The fresh launch path waits for SessionStart before attach in `herdr_turn/handoff.rs:138-152`. The two registration mutants break `FirstTurnBound` at step 5 and `FirstTurnQueueEligible` at step 6. Their `LaunchSettles` counterexample adds an early read exit before handoff at step 7.
+The fresh launch path waits for SessionStart before attach in `herdr_turn/handoff.rs:138-157`. The two registration mutants break `FirstTurnBound` at step 5 and `FirstTurnQueueEligible` at step 6. Their `LaunchSettles` counterexample adds an early read exit before handoff at step 7.
 
 | Model boundary | Code |
 |---|---|

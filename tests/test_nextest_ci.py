@@ -1027,6 +1027,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.sp = subprocess
         self.repo = self.dir / "repo"
         for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
+                    "scripts/ci/pr_nextest.py",
                     "scripts/ci/nextest-base-diff.sh", ".config/nextest.toml",
                     "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1816,6 +1817,39 @@ class RustSources(unittest.TestCase):
             self.assertEqual(doc["removed"][platform], ["db::repository::disable"])
             self.assertEqual(doc["by_binary"]["removed"][platform],
                              [["x", "db::repository::disable"], ["x", "db::repository::keep"]])
+
+    def test_same_binary_move_counts_only_when_file_name_cfg_and_test_attributes_match(self):
+        base, test = self.root / "base", "#[test]\nfn moved() {}\n"
+        for rel, text in {"Cargo.toml": '[package]\nname = "x"\n', "src/lib.rs": "mod krx;\nmod upper;\n",
+                          "src/krx.rs": "#[cfg(test)]\n#[cfg(unix)]\nmod t;\n", "src/krx/t.rs": test}.items():
+            (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (base / rel).write_text(text)
+        host = '#[cfg(unix)]\n#[cfg(test)]\n#[path = "{}.rs"]\nmod krx_t;\n'
+        up, via_parent = host.format("krx/t"), "#[cfg(test)]\n" + host.format("../krx/t")
+        # Reordered or repeated cfgs are the same conjunction; any other difference is a loss.
+        cases = {"same": ({"src/upper.rs": "#[cfg(test)]\n" + up}, "upper::krx_t::moved"),
+                 "same_via_parent": ({"src/upper.rs": "mod host;\n", "src/upper/host.rs": via_parent},
+                                     "upper::host::krx_t::moved"),
+                 "duplicate": ({"src/upper.rs": up + "mod host;\n", "src/upper/host.rs": via_parent}, None),
+                 "deleted": ({"src/krx/t.rs": ""}, None),
+                 "cfg": ({"src/upper.rs": up.replace("#[cfg(unix)]\n", "")}, None),
+                 "file": ({"src/upper.rs": host.format("krx/t2"), "src/krx/t.rs": "", "src/krx/t2.rs": test}, None),
+                 "name": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("moved", "renamed")}, None),
+                 "ignore": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("fn", "#[cfg_attr(windows, ignore)]\nfn")},
+                            None),
+                 "should_panic": ({"src/upper.rs": up, "src/krx/t.rs": test.replace("fn", "#[should_panic]\nfn")},
+                                  None)}
+        for case, (files, new_id) in cases.items():
+            with self.subTest(case):
+                self.tree({"src/lib.rs": "mod krx;\nmod upper;\n", "src/krx.rs": "", "src/upper.rs": "",
+                           "src/upper/host.rs": "", "src/krx/t.rs": test, "src/krx/t2.rs": "", **files})
+                self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "r.json")[0], 0)
+                doc = json.loads((self.root / "r.json").read_text())
+                moved = [[["x", "krx::t::moved"], ["x", new_id]]] if new_id else []
+                self.assertEqual((doc["relocated"]["linux"], doc["removed"]["linux"]),
+                                 (moved, [] if moved else ["krx::t::moved"]))
+                self.assertEqual([[r["from"], r["to"], r["key"][:2]] for r in doc["relocation_keys"]],
+                                 [pair + [["src/krx/t.rs", "moved"]] for pair in moved])
 
     def test_cfg_evaluator_operators(self):
         cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),

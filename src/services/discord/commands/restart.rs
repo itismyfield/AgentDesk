@@ -4,6 +4,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::host_decision::{HostDecision, host_decision};
 
 use super::super::{
     Context, Data, Error, SharedData, check_auth, mailbox_cancel_active_turn,
@@ -11,7 +12,7 @@ use super::super::{
 };
 
 #[cfg(unix)]
-mod herdr;
+pub(super) mod herdr;
 
 #[cfg(unix)]
 pub(in crate::services::discord) use herdr::seed_permit as herdr_seed_permit;
@@ -285,22 +286,38 @@ where
     log_command_received!(channel_id.get(), user_name, command_name);
     say("♻ 세션 재시작 중...".into()).await?;
 
-    #[cfg(unix)]
-    if super::super::admin_host_guard::configured_refusal(channel_id.get()).is_some() {
-        return herdr::run(
-            data.shared.clone(),
-            data.provider.clone(),
-            channel_id,
-            (&operation_id.to_string(), command_name, user_name),
-            || async {
-                if mailbox_has_active_turn(&data.shared, channel_id).await {
-                    say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into()).await?;
-                }
-                Ok(())
-            },
-            &say,
-        )
-        .await;
+    let pool = data.shared.pg_pool.as_ref();
+    let token = Some(data.shared.token_hash.as_str());
+    let decided = host_decision(pool, token, Some(&data.provider), channel_id.get()).await;
+    match decided {
+        // No host is restarted while the execution's host is not known.
+        HostDecision::Hold(reason) => {
+            say(format!(
+                "♻ 실행 호스트를 확인하지 못해 재시작하지 않았어요({reason})"
+            ))
+            .await?;
+            return Ok(());
+        }
+        #[cfg(unix)]
+        HostDecision::Herdr { .. } => {
+            return herdr::run(
+                data.shared.clone(),
+                data.provider.clone(),
+                channel_id,
+                (&operation_id.to_string(), command_name, user_name),
+                || async {
+                    if mailbox_has_active_turn(&data.shared, channel_id).await {
+                        say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into()).await?;
+                    }
+                    Ok(())
+                },
+                &say,
+            )
+            .await;
+        }
+        #[cfg(not(unix))]
+        HostDecision::Herdr { .. } => {}
+        HostDecision::Tmux => {}
     }
     let action = resolve_restart_action(&data.shared, channel_id).await;
     let (shared, provider) = (&data.shared, &data.provider);
@@ -497,6 +514,10 @@ mod host_guard_tests {
 
 #[cfg(test)]
 mod seed_tests;
+
+#[cfg(all(test, unix))]
+#[path = "restart/host_hold_tests.rs"]
+mod host_hold_tests;
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use herdr::{

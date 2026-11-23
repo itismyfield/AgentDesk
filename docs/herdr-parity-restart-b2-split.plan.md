@@ -89,14 +89,14 @@ A·B1·B2a·B2b는 각각 리뷰하고 **함께 착지한다**. B2a만 배포하
 
 | 책임 | 현재 코드 좌표 | 연결 경계 |
 |---|---|---|
-| 기존 detached 종료 | `src/services/discord/herdr_terminate/http_force.rs:30` | SharedData health registry와 Expected·postlude·Released 재사용 |
-| captured dispatch 고정 | `src/services/discord/herdr_terminate.rs:499` | typed 조건만. row 기대와 captured 결합의 차이를 명시 |
-| 이미 끝난 실행 관측·retire | `src/services/discord/herdr_terminate.rs:217`, `:224` | 작은 recovery child. giant에 새 복구 본문을 넣지 않음 |
-| selector 보존 disconnect | `src/services/discord/herdr_terminate/retired_exclusion.rs:100` | exclusion 아래 기존 CAS, dispatch 불일치는 false 유지 |
+| 기존 detached 종료 | `src/services/discord/herdr_terminate/http_force.rs:15` | SharedData health registry와 Expected·postlude·Released 재사용 |
+| captured dispatch 고정 | `src/services/discord/herdr_terminate.rs:498` | typed 조건만. row 기대와 captured 결합의 차이를 명시 |
+| 이미 끝난 실행 관측·retire | `src/services/discord/herdr_terminate.rs:216`, `:224` | 작은 recovery child. giant에 새 복구 본문을 넣지 않음 |
+| selector 보존 disconnect | `src/services/turn_orchestrator/retired_exclusion.rs:102` | exclusion 아래 기존 CAS, dispatch 불일치는 false 유지 |
 | owner의 기존 wake | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:602` | gate Drop 뒤 typed 연결 |
 | prefix와 admission bind | `src/services/turn_orchestrator/queued_head/v2.rs:398`, `v2/source_admission.rs:627` | B1 고정 followers와 기존 atomic commit 재사용 |
 | headless 제한 | `src/services/discord/router/message_handler/headless_turn.rs:159` | typed permit만 선택. 일반 시작 거절 유지 |
-| Codex A 포트 | `src/services/codex/herdr_turn.rs:192`, `src/services/herdr_launch/codex_resume.rs:13` | seed-only typed 요청, 기존 source/O EOF 검증 유지 |
+| Codex A 포트 | `src/services/codex/herdr_turn.rs:200`, `src/services/herdr_launch/codex_resume.rs:13` | seed-only typed 요청, 기존 source/O EOF 검증 유지 |
 | dispatch 재발견 | `src/services/dispatches/thread_reuse.rs:247` | seed만 차단, backlog는 기존 tmux 정책 |
 
 `headless_turn.rs`·`owner_input.rs`·`herdr_terminate.rs`와 source-admission 부모에는

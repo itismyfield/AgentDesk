@@ -285,10 +285,11 @@ pub(super) async fn effort(
     .await
 }
 
+/// Applies on `channel`'s pane and saves under `store`, the channel its fast setting is kept in.
 pub(in crate::services::discord::commands) async fn fast(
     shared: &Arc<SharedData>,
     token: &str,
-    channel: ChannelId,
+    (channel, store): (ChannelId, ChannelId),
     desired: Option<bool>,
 ) -> Result<(bool, bool), String> {
     use crate::services::provider_hosting::{
@@ -356,11 +357,11 @@ pub(in crate::services::discord::commands) async fn fast(
     with_ready_pane(shared, (token, channel), apply, |&(next, _), settings| {
         settings
             .channel_fast_modes
-            .insert(channel.get().to_string(), next);
+            .insert(store.get().to_string(), next);
         if next {
-            mirror.insert(channel);
+            mirror.insert(store);
         } else {
-            mirror.remove(&channel);
+            mirror.remove(&store);
         }
     })
     .await

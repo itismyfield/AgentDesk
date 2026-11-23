@@ -3,14 +3,21 @@ use sqlx::PgPool;
 
 use crate::domain::lifecycle::STALE_TURN_GRACE;
 use crate::domain::session_identity::SessionIdentity;
-use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::relay_recovery::AxisBSite;
+use crate::services::engine_runtime::health_port::StaleSweepPort;
 use crate::services::provider::ProviderKind;
 
+/// The registry an automatic sweep asks for its destructive warrant, as a caller passes it in.
+pub(crate) type SweepWarrantPort<'a> = &'a dyn StaleSweepPort<AxisBSite>;
+
+mod inflight_episode;
 #[cfg(test)]
 pub(crate) mod owner_boundary_tests;
 mod policy_maintenance;
 mod test_barriers;
+pub(crate) use inflight_episode::{
+    InflightEpisodeIdentity, InflightEpisodeLookup, InflightEpisodeProbe,
+};
 pub(crate) use policy_maintenance::{PolicyMaintenanceIo, maintain_policy_sessions};
 #[cfg(test)]
 use test_barriers::await_stale_sweep_apply_barrier;
@@ -83,14 +90,15 @@ enum IndependentLiveness {
 /// guarded update. A live or ambiguous pane fails closed and remains busy.
 pub(crate) async fn reconcile_stale_turns_pg(
     pool: &PgPool,
-    registry: Option<&HealthRegistry>,
+    registry: Option<SweepWarrantPort<'_>>,
     site: AxisBSite,
+    inflight_lookup: InflightEpisodeProbe,
 ) -> Result<usize> {
     Ok(reconcile_stale_turns_matching_with_warrant_pg(
         pool,
         None,
         independent_tmux_liveness,
-        channel_inflight_observation,
+        channel_inflight_probe(inflight_lookup),
         Some((registry, site)),
     )
     .await?
@@ -102,12 +110,13 @@ pub(crate) async fn reconcile_stale_turns_pg(
 pub(crate) async fn reconcile_stale_turn_by_key_pg(
     pool: &PgPool,
     session_key: &str,
+    inflight_lookup: InflightEpisodeProbe,
 ) -> Result<SessionReconcileOutcome> {
     reconcile_stale_turn_by_key_with_probes_pg(
         pool,
         session_key,
         independent_tmux_liveness,
-        channel_inflight_observation,
+        channel_inflight_probe(inflight_lookup),
     )
     .await
 }
@@ -240,7 +249,7 @@ async fn load_precondition_diagnostic_pg(
 /// permanently unreconcilable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InflightObservation {
-    Present(crate::services::discord::zombie_foreground_release::InflightEpisodeIdentity),
+    Present(InflightEpisodeIdentity),
     Absent,
     Unknown,
 }
@@ -298,7 +307,18 @@ fn differs_when_both_present<T: PartialEq>(before: &Option<T>, after: &Option<T>
     matches!((before, after), (Some(before), Some(after)) if before != after)
 }
 
-fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightObservation {
+/// The session-key inflight probe over the owner runtime's inflight `lookup`.
+fn channel_inflight_probe(
+    lookup: InflightEpisodeProbe,
+) -> impl Fn(&str, &str) -> InflightObservation + Clone + Send + 'static {
+    move |session_key, provider| channel_inflight_observation(session_key, provider, lookup)
+}
+
+fn channel_inflight_observation(
+    session_key: &str,
+    provider: &str,
+    lookup: InflightEpisodeProbe,
+) -> InflightObservation {
     let Some(identity) = SessionIdentity::parse(session_key) else {
         return InflightObservation::Unknown;
     };
@@ -311,11 +331,7 @@ fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightOb
     if !identity.records_provider(&db_provider) {
         return InflightObservation::Unknown;
     }
-    use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
-    match crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name(
-        &db_provider,
-        &identity.tmux_name,
-    ) {
+    match lookup(&db_provider, &identity.tmux_name) {
         InflightEpisodeLookup::Claimed(episode) => InflightObservation::Present(episode),
         InflightEpisodeLookup::Unclaimed => InflightObservation::Absent,
         // A store that could not be read, and a tmux session two rows both
@@ -555,7 +571,7 @@ where
         pool,
         session_key,
         probe,
-        channel_inflight_observation,
+        channel_inflight_probe(crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name),
         None,
     )
     .await?
@@ -567,18 +583,27 @@ fn structural_candidate_apply(eligible: bool) -> bool {
 }
 
 async fn destructive_warrant_bind(
-    registry: Option<&HealthRegistry>,
+    registry: Option<SweepWarrantPort<'_>>,
     session_key: &str,
     provider: &str,
     site: AxisBSite,
 ) -> bool {
-    crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
-        registry,
-        session_key,
-        provider,
-        site,
-    )
-    .await
+    match registry {
+        Some(registry) => {
+            registry
+                .automatic_stale_sweep_warrants(session_key, provider, site)
+                .await
+        }
+        None => {
+            crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
+                None,
+                session_key,
+                provider,
+                site,
+            )
+            .await
+        }
+    }
 }
 
 async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
@@ -586,7 +611,7 @@ async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
     session_key: Option<&str>,
     liveness_probe: L,
     inflight_probe: I,
-    automatic_warrant: Option<(Option<&HealthRegistry>, AxisBSite)>,
+    automatic_warrant: Option<(Option<SweepWarrantPort<'_>>, AxisBSite)>,
 ) -> Result<ApplySummary>
 where
     L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
@@ -882,7 +907,10 @@ mod tests {
 
         let liveness_probe = |_: &str, _: &str| IndependentLiveness::NoPane;
         let inflight_probe = |_: &str, _: &str| InflightObservation::Unknown;
-        let automatic_warrant = Some((Some(fixture.registry()), AxisBSite::BootReconcileSweep));
+        let automatic_warrant = Some((
+            Some(fixture.registry() as &dyn StaleSweepPort<AxisBSite>),
+            AxisBSite::BootReconcileSweep,
+        ));
         let vetoed = reconcile_stale_turns_matching_with_warrant_pg(
             &pool,
             Some(key),
@@ -1113,7 +1141,7 @@ mod tests {
             crate::services::platform::hostname_short()
         );
         assert_eq!(
-            channel_inflight_observation(&session_key, "claude"),
+            channel_inflight_observation(&session_key, "claude", crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name),
             InflightObservation::Unknown,
             "the production session-key mapping must retain Unprobeable as Unknown"
         );
@@ -1126,7 +1154,7 @@ mod tests {
                 &pool,
                 &session_key,
                 |_, _| IndependentLiveness::ReadyForInput,
-                channel_inflight_observation,
+                channel_inflight_probe(crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name),
             )
             .await
             .unwrap(),
@@ -1338,7 +1366,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            reconcile_stale_turn_by_key_pg(&pool, "remote-host:live-turn")
+            reconcile_stale_turn_by_key_pg(&pool, "remote-host:live-turn", crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
                 .await
                 .unwrap(),
             SessionReconcileOutcome::Unchanged
@@ -1348,7 +1376,7 @@ mod tests {
             ("turn_active".to_string(), Some("original".to_string()))
         );
         assert_eq!(
-            reconcile_stale_turn_by_key_pg(&pool, "missing")
+            reconcile_stale_turn_by_key_pg(&pool, "missing", crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
                 .await
                 .unwrap(),
             SessionReconcileOutcome::NotFound

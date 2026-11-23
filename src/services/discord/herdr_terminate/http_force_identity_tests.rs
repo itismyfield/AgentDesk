@@ -396,6 +396,7 @@ async fn launch_fresh(
         resume: false,
         provider_root: None,
         resume_start: None,
+        takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
     };
     let outcome = launch_herdr_session(pool, launch, prepare, host).await;
     let Ok(HerdrLaunchOutcome::Launched {

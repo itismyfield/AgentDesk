@@ -92,6 +92,8 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(Dashboard, "dashboard", DASHBOARD),
 ];
 
+pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
+
 pub(crate) fn is_static_notice_kind(source: &str) -> bool {
     let Some(policy) = POLICIES
         .iter()
@@ -142,7 +144,7 @@ pub(crate) fn is_static_loopback_source(source: &str) -> bool {
     is_allowed_static_source(source, LOOPBACK)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn static_source_count(caller_mask: u8) -> usize {
     POLICIES
         .iter()

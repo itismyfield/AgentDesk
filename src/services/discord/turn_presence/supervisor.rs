@@ -62,6 +62,13 @@ static PROCESS_STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
 mod notice_store;
 #[path = "unknown_notice.rs"]
 mod notices;
+#[cfg(unix)]
+pub(crate) use notices::operator::observe_boxed as observe_operator_notice;
+#[cfg(all(test, unix))]
+pub(crate) use notices::operator::{
+    restart_for_test as restart_operator_notice_for_test,
+    send_on_this_thread as send_operator_notices_on_this_thread,
+};
 
 pub(crate) struct UnknownSnapshot {
     pub channel_id: u64,
@@ -866,10 +873,7 @@ impl Effects for LiveEffects {
     fn wake_owner(&self, channel: u64) {
         tracing::info!(channel, "[turn_presence] owner wake channel={channel}");
         #[cfg(unix)]
-        crate::services::discord::router::message_handler::owner_wake(
-            &self.shared,
-            ChannelId::new(channel),
-        );
+        (self.shared.router_ports.owner_wake)(&self.shared, ChannelId::new(channel));
         #[cfg(not(unix))]
         self.kickoff(channel);
     }
@@ -881,7 +885,7 @@ impl Effects for LiveEffects {
     }
 
     async fn legacy_gate_blocked(&self, channel: u64) -> bool {
-        let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+        let blocked = self.shared.router_ports.promote_readiness_blocked;
         blocked(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 

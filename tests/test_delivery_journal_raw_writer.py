@@ -26,7 +26,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-        write(root, "src/services/tui_o/exact_pg.rs", "fn evidence() { discord::append_exact_metadata(); }\n")
+        write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\nfn install() { discord::append_exact_metadata(); }\n")
         return root
 
     def test_exact_metadata_facade_registration_is_required(self):
@@ -40,7 +40,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
 
     def test_exact_allowlist_passes(self):
         root = self.fixture()
-        write(root, "src/services/tui_o/exact_pg.rs", "fn evidence() { discord::append_exact_metadata(); }\n")
+        write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\nfn install() { discord::append_exact_metadata(); }\n")
         ok, message = guard.check(root)
         self.assertTrue(ok, message)
 

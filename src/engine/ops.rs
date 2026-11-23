@@ -45,6 +45,7 @@ mod unsent_notify_ops;
 mod unsent_notify_tests;
 
 pub(crate) use db_ops::execute_policy_sql;
+pub(crate) use exec_ops::{PolicyOpRemoveOutcome, install_policy_op_remove};
 pub(crate) use review_ops::{ADVANCE_REVIEW_ROUND_HINT_KEY, ensure_js_error_json};
 
 use crate::supervisor::BridgeHandle;

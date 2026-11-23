@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::pieces::{Derived, PieceWork, TOOL_CALL_CARD, TOOL_CALL_PANEL};
-use crate::services::discord::formatting::{safe_tool_summary, tool_class};
+use crate::domain::tool_summary::{class as tool_class, safe_tool_summary};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 
 pub struct ToolCardInputs {

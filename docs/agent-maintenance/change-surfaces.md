@@ -189,12 +189,13 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   | `relay_authority_mutations` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
   | `required_contexts` | `changes`, `rust_build`, `base_compare`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_census`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ always() }}` |
   | `rust_build` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
-  | `rust_tests` | `changes`, `rust_build` | `${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}` |
+  | `rust_scope` | `changes`, `rust_build` | `${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' && needs.rust_build.outputs.scope_workers != '[]' }}` |
+  | `rust_tests` | `changes`, `rust_build`, `rust_scope` | `${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' && (needs.rust_scope.result == 'success' || (needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]')) }}` |
   | `scripts` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() }}` |
   | `scripts_census` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() }}` |
   | `scripts_contracts` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() }}` |
   | `scripts_guards` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() }}` |
-  | `test_evidence` | `changes`, `rust_build`, `rust_tests` | `${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}` |
+  | `test_evidence` | `changes`, `rust_build`, `rust_scope`, `rust_tests` | `${{ !github.event.pull_request.draft && !cancelled() }}` |
   <!-- /required-gate-wiring -->
 
 - aggregate execution: the calculator records shell/working-directory
@@ -1201,8 +1202,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     `format_slash_command_control_note` / `format_system_continuation_note`
     formatters + their `extract_loop_body` /
     `sanitize_inline_code` / `should_suppress_local_only_kind_note_after_continuation`
-    helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs`
-    sibling (318 prod LoC, below the giant threshold); names are re-imported via
+    helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs` (removed)
+    sibling, later moved under session_notice (318 prod LoC, below the giant threshold); names are re-imported via
     `use self::injected_prompt_policy::{…}` so call sites stay byte-identical and
     the stateful dedupe/bridge helpers (`slash_command_control_turn_is_first_sighting`,
     `record_system_continuation_note_rendered`,
@@ -1234,8 +1235,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     the `DeferredAnchorCompletionDrain` enum + `decide_deferred_anchor_completion_drain`
     drain decision, `complete_tui_direct_prompt_anchor_lifecycle_if_present`,
     `pinned_anchor_cleanup_target`, and `complete_tui_direct_anchor_lifecycle_for_inflight` —
-    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (deps reached via
-    `use super::*;`, only `super::formatting` becomes `super::super::formatting`).
+    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (removed; later moved under turn_view_reconciler).
+    Deps were reached via `use super::*;`, only `super::formatting` became `super::super::formatting`.
     The three helpers reached from sibling discord modules (`tmux_watcher.rs`,
     `recovery_engine.rs`) are re-exported at `pub(in crate::services::discord)`;
     the relay-internal drain decision/enum are re-imported privately, so the call
@@ -1270,15 +1271,15 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     the pure placeholder-suppression decision core, `evidence.rs` owns frontier /
     proof / EOF helpers, and `ops.rs` owns Discord edit/delete cleanup operations.
     All three files are below the giant-file threshold).
-  - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
+  - `src/services/discord/session_notice/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
-    coupling, all items `pub(super)` and re-imported by the parent; below the
+    coupling, re-imported by `tui_prompt_relay`; below the
     giant-file threshold).
   - `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` (278 prod
     lines; #3479 rank-10: pure Claude/Codex transcript+rollout prompt scanners
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
-    coupling, all items `pub(super)` and re-imported by the parent; below the
+    coupling, re-imported by `tui_prompt_relay`; below the
     giant-file threshold).
   - `src/services/discord/tui_prompt_relay/rehydration.rs` (sub-1000 production module; #3479
     rank-10: the Discord-IO/`SharedData`-coupled Claude TUI binding rehydration +
@@ -1288,15 +1289,15 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     cwd-based fallback only when exactly one live markerless Codex TUI session
     owns that cwd. This file is still below the giant-file threshold, but split
     before adding another provider/recovery policy cluster).
-  - `src/services/discord/tui_prompt_relay/anchor_completion.rs` (213 prod lines;
-    #3479 item-2: the live-relay TUI-direct prompt anchor COMPLETION lifecycle
-    (`⏳ → ✅`) — the visibility gate, the deferred `⏳`-completion drain decision,
-    and the reaction-swap completers (shared-slot + pinned-injected-message paths)
-    — extracted verbatim from `tui_prompt_relay.rs`. Deps reached via
-    `use super::*;` (only `super::formatting` becomes `super::super::formatting`);
-    the three externally-called helpers are `pub(in crate::services::discord)` and
-    re-exported by the parent, the relay-internal drain decision/enum stay
-    `pub(super)`; below the giant-file threshold).
+  - `src/services/discord/turn_view_reconciler/anchor_completion.rs` (#3479 item-2:
+    the live-relay TUI-direct prompt anchor COMPLETION lifecycle (`⏳ → ✅`) — the
+    visibility gate, the deferred `⏳`-completion drain decision, and the
+    reaction-swap completers (shared-slot + pinned-injected-message paths) —
+    extracted verbatim from `tui_prompt_relay.rs`, later moved under
+    `turn_view_reconciler` so the watcher and recovery callers do not name the relay.
+    The relay imports the drain decision/enum and its shared-slot completer from
+    there; the log lines keep the `tui_prompt_relay::anchor_completion` target;
+    below the giant-file threshold).
   - `src/services/discord/tui_prompt_relay/launch_script.rs` (107 prod lines;
     #3479 launch-script: the Claude TUI launch-*script* parsing helpers — the
     parsed `ClaudeTuiLaunchInfo` record, `parse_claude_tui_launch_script` +

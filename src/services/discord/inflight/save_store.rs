@@ -1098,7 +1098,7 @@ pub(in crate::services::discord) fn is_synthetic_create_state(state: &InflightTu
         && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher;
     let tui_direct = state.turn_source == TurnSource::ExternalInput
         && state.request_owner_user_id
-            == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+            == crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
     rebind || watcher || tui_direct
 }
 

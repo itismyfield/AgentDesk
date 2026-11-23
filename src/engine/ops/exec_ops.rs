@@ -13,6 +13,33 @@ use std::time::Duration;
 
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
+/// The JS `agentdesk.inflight.remove` result; only `Removed` means the row was unlinked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyOpRemoveOutcome {
+    Removed,
+    Missing,
+    ProtectedReceipt,
+    Busy,
+    Io(String),
+}
+
+/// The inflight store's guarded row unlink for this op, installed before any command runs.
+static POLICY_OP_REMOVE: std::sync::OnceLock<fn(&std::path::Path) -> PolicyOpRemoveOutcome> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn install_policy_op_remove(remove: fn(&std::path::Path) -> PolicyOpRemoveOutcome) {
+    let _ = POLICY_OP_REMOVE.set(remove);
+}
+
+fn policy_op_remove_row(path: &std::path::Path) -> PolicyOpRemoveOutcome {
+    #[cfg(test)]
+    crate::services::discord::install_engine_probes();
+    match POLICY_OP_REMOVE.get() {
+        Some(remove) => remove(path),
+        None => PolicyOpRemoveOutcome::Io("inflight store not installed".to_string()),
+    }
+}
+
 #[cfg(test)]
 #[path = "exec_ops/circuit_evidence_tests.rs"]
 mod circuit_evidence_tests;
@@ -320,7 +347,7 @@ fn register_exec_ops_with_runner<'js>(
                         .join(&provider)
                         .join(format!("{channel_id}.json"));
                     if path.exists() {
-                        use crate::services::discord::policy_op::RemoveOutcome as Outcome;
+                        use self::PolicyOpRemoveOutcome as Outcome;
                         let refused = |error: &str, reason: &str| {
                             serde_json::json!({"ok": false, "error": error, "reason": reason})
                                 .to_string()
@@ -334,7 +361,7 @@ fn register_exec_ops_with_runner<'js>(
                         if !valid_target {
                             return refused("invalid inflight target", "Io");
                         }
-                        match crate::services::discord::policy_op::remove_row(&path) {
+                        match policy_op_remove_row(&path) {
                             Outcome::Removed => {
                                 // Same removal log shape as the store's clears; the policy layer has no
                                 // user_msg_id, so it logs 0.

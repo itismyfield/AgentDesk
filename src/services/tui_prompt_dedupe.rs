@@ -343,11 +343,14 @@ mod extract;
 mod handoff;
 mod injected_steer;
 mod observation;
+#[cfg(unix)]
+pub(crate) mod observer_publication;
 mod prompt_identity;
 mod runtime_binding;
 mod session_rotation;
 mod shadow_peek;
 mod state;
+pub(crate) mod terminal_custody;
 
 pub(crate) use session_rotation::*;
 #[cfg(test)]

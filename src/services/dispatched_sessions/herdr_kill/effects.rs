@@ -9,14 +9,14 @@ use super::super::force_kill::{activates_auto_queue, fail_or_retry};
 use super::super::spawn_auto_queue_activate_for_agent;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::prepare_force_kill_retry_pg;
-use crate::services::discord::TmuxCleanupPolicy;
-use crate::services::discord::herdr_terminate::RetiredExclusion;
-use crate::services::discord::herdr_terminate::http_force::Released;
+use crate::dispatch::set_dispatch_status_on_pg_boxed;
+use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::queue::schedule_post_cancel_queue_drain;
 use crate::services::turn_cancel_finalizer::{
     FinalizeTurnCancelRequest, TurnCancelCorrelation, finalize_turn_cancel,
 };
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, cleanup_policy_observability_surface};
+use crate::services::turn_orchestrator::{Released, RetiredExclusion};
 
 pub(super) const HERDR_TERMINATE: &str = "herdr-terminate";
 
@@ -134,7 +134,14 @@ async fn kill_steps(
         Err(error) => return Err(error),
     }
     let dispatch = exclusion.dispatch();
-    let meta = prepare_force_kill_retry_pg(pool, session_key, dispatch, retry).await?;
+    let meta = prepare_force_kill_retry_pg(
+        pool,
+        session_key,
+        dispatch,
+        retry,
+        set_dispatch_status_on_pg_boxed,
+    )
+    .await?;
     fail_or_retry(pool, session_key, meta).await
 }
 

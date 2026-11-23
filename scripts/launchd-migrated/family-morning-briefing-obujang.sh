@@ -11,6 +11,8 @@ TODAY_FROM="$(TZ=Asia/Seoul date '+%Y-%m-%d')T00:00:00+09:00"
 TOMORROW_FROM="$(TZ=Asia/Seoul date -v+1d '+%Y-%m-%d')T00:00:00+09:00"
 
 SCRIPTS_DIR="$AGENTDESK_OBSIDIAN_SKILL_ROOT/family-morning-briefing/scripts"
+# 구글 캘린더는 공식 API 모듈(google-api 스킬)로 읽는다
+GAPI=("$HOME/.local/share/google-api/venv/bin/python" "$AGENTDESK_OBSIDIAN_SKILL_ROOT/google-api/scripts/gapi.py")
 DATA_DIR="$(mktemp -d)"
 PROMPT_FILE="$(mktemp)"
 trap 'rm -rf "$DATA_DIR" "$PROMPT_FILE"' EXIT
@@ -23,17 +25,17 @@ python3 "$SCRIPTS_DIR/daily_ai_briefing_data.py" \
   > "$DATA_DIR/weather.json" 2>/dev/null || echo '{"error":"weather fetch failed"}' > "$DATA_DIR/weather.json"
 
 # 2. Calendar (본인 / 배우자 / 가족)
-gog cal events primary --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+"${GAPI[@]}" calendar-events primary --from "$TODAY_FROM" --to "$TOMORROW_FROM" --plain \
   > "$DATA_DIR/cal_self.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_self.txt"
 
-gog cal events janelley94@gmail.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+"${GAPI[@]}" calendar-events janelley94@gmail.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --plain \
   > "$DATA_DIR/cal_spouse.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_spouse.txt"
 
-gog cal events family03910667166220074979@group.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+"${GAPI[@]}" calendar-events family03910667166220074979@group.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --plain \
   > "$DATA_DIR/cal_family.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_family.txt"
 
 # 3. Company calendar (obujang only)
-gog cal events mcuitl647488f9gilmcc4jbgi7tm7ag6@import.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+"${GAPI[@]}" calendar-events mcuitl647488f9gilmcc4jbgi7tm7ag6@import.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --plain \
   > "$DATA_DIR/cal_company.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_company.txt"
 
 # 4. Family reminders

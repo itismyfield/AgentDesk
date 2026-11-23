@@ -8,7 +8,7 @@ extra == <<registry, marker, phase, sends, startupSeen, held, otherInstalled,
            restores, restoredPending>>
 reuseVars == <<vars, extra>>
 
-\* evidenced is still HostedState::Pending with expected evidence (herdr_launch.rs:502-514).
+\* evidenced is still HostedState::Pending with expected evidence (herdr_launch.rs:504-516).
 SessionReuseInit ==
     /\ srv = "up" /\ rec = InitialRecord /\ pane = IF rec = "pending" THEN "none" ELSE "agent"
     /\ fresh = FALSE /\ stray = 0 /\ launch = "idle" /\ input = "idle"

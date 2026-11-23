@@ -130,7 +130,7 @@ impl Drop for Gate {
             );
         }
         CHANGED.notify_waiters();
-        crate::services::discord::router::message_handler::owner_wake(&self.shared, self.channel);
+        (self.shared.router_ports.owner_wake)(&self.shared, self.channel);
     }
 }
 

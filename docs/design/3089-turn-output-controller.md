@@ -18,7 +18,7 @@ Agent **turn output** (live streaming, terminal/final delivery, recovery/standby
 |---|---|---|---|
 | `turn_bridge/mod.rs` (+ terminal_delivery.rs, headless_delivery.rs, status_panel.rs, single_message_footer.rs) | #3016 | send-ordered terminal, replace-with-outcome ×3 (cancel / prompt-too-long / normal), streaming rollover, headless enqueue+direct fallback | **yes** (Bridge, `terminal_delivery.rs:517/563`) |
 | `tmux_watcher.rs` | #3016 | ordered terminal fallback, replace-with-outcome, send-with-reference, streaming rollover, placeholder delete/orphan | **yes** (Watcher, `tmux_watcher.rs`) |
-| `session_relay_sink.rs` | #3036 | send-long-rollback (long), replace-with-outcome (short), send-with-reference (new) | **yes** (Sink, `session_relay_sink.rs:332/766`) |
+| `session_relay_sink.rs` | #3036 | send-long-rollback (long), replace-with-outcome (short), send-with-reference (new) | **yes** (Sink, `session_relay_sink.rs:330/766`) |
 | `standby_relay.rs` | — | send-long-rollback (long), replace-with-outcome (short), send (new) | no |
 | `recovery_engine.rs` | — | replace-long-raw (anchored), send-long-raw (TUI-direct), panel completion | no |
 | `placeholder_sweeper.rs` | — | edit (abandoned badge), delete (orphan panel) | no |
@@ -37,7 +37,7 @@ Turn-output `send_long_message_raw*` + `replace_long_message_raw*` compress to *
 
 ### 1.3 Live motivating defect (#3416)
 
-On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monotonic guard (#3154, `inflight.rs:1003-1048`, gated by same `user_msg_id`+`turn_start_offset`) fires when a TUI-direct synthetic inflight creation + a turn_start watcher-at-offset-0 replacement writes `last_offset`/`response_sent_offset` **backward within the same turn**. Observe-only means the backward write persists. 29 occurrences over 3 days, across binaries (incl. #3358-deployed). This is precisely the *multiple writers updating one turn's offset without a single authority* problem; #3089's single offset authority (Phase B) closes the class structurally and lets the guard be promoted from observe to enforce.
+On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monotonic guard (#3154, `inflight.rs:995-1040`, gated by same `user_msg_id`+`turn_start_offset`) fires when a TUI-direct synthetic inflight creation + a turn_start watcher-at-offset-0 replacement writes `last_offset`/`response_sent_offset` **backward within the same turn**. Observe-only means the backward write persists. 29 occurrences over 3 days, across binaries (incl. #3358-deployed). This is precisely the *multiple writers updating one turn's offset without a single authority* problem; #3089's single offset authority (Phase B) closes the class structurally and lets the guard be promoted from observe to enforce.
 
 ---
 
@@ -147,10 +147,10 @@ struct DeliveredCommit {           // the durable mirror of confirmed_end_offset
 
 ### 4.4 Mixed-binary safety (review fix H3 — this is a hard blocker for Phase B)
 
-Old binaries deserialize into their older `InflightTurnState` and reserialize with `serde_json::to_string_pretty` (`inflight.rs:1181`, `:2214`), **dropping unknown fields**. Standby rewrites the same `{channel_id}.json` on its heartbeat (`standby_relay.rs:434`). So a `#[serde(default)]` field added on the new primary is silently erased by an old standby, and a B2 reader that has flipped to record-authority then sees a missing record and falls back to legacy markers (which lack durable END) → duplicate or lost range. `#[serde(default)]` + tolerant deserialize is **not** sufficient.
+Old binaries deserialize into their older `InflightTurnState` and reserialize with `serde_json::to_string_pretty` (`inflight.rs:1173`, `:2214`), **dropping unknown fields**. Standby rewrites the same `{channel_id}.json` on its heartbeat (`standby_relay.rs:434`). So a `#[serde(default)]` field added on the new primary is silently erased by an old standby, and a B2 reader that has flipped to record-authority then sees a missing record and falls back to legacy markers (which lack durable END) → duplicate or lost range. `#[serde(default)]` + tolerant deserialize is **not** sufficient.
 
 Resolution (pick one, decided at B-start):
-- **(a) sidecar delivery record — default.** A separate store old binaries never read **or scan**. Critical (review r2 H): it must live **outside the inflight provider directory's `*.json` scan path** — old binaries enumerate every `*.json` there and *delete malformed* entries (`inflight.rs:2577`), so a sibling `{channel_id}.delivery.json` would be reaped. Use a dedicated `delivery_records/` subtree **or** a non-`.json` extension the old scan ignores. With the sidecar, the inline `inflight.rs` `delivery_lease`/`delivered_frontier` fields are NOT added (no inflight LoC pressure, no old-writer erasure).
+- **(a) sidecar delivery record — default.** A separate store old binaries never read **or scan**. Critical (review r2 H): it must live **outside the inflight provider directory's `*.json` scan path** — old binaries enumerate every `*.json` there and *delete malformed* entries (`inflight.rs:2569`), so a sibling `{channel_id}.delivery.json` would be reaped. Use a dedicated `delivery_records/` subtree **or** a non-`.json` extension the old scan ignores. With the sidecar, the inline `inflight.rs` `delivery_lease`/`delivered_frontier` fields are NOT added (no inflight LoC pressure, no old-writer erasure).
 - **(b) rollout gate** that guarantees no old writer is live before B2 flips authority (cluster-version fence). Only this option uses the inline `inflight.rs` nested fields; it needs fleet-wide version coordination, so it is the fallback.
 
 Either way, B2 must not flip read-authority until the chosen isolation holds.
@@ -168,7 +168,7 @@ are retired; existing responsibilities may grow for fixes and clarification.
 ### Phase A — Gateway / surface unification (AC 1–5)
 - **A0 characterization** — pin all ~15 send/replace sites: ordering, edit-fail preserve vs delete (#2757 both arms), the five failure signals, streaming rollover. Tests go in **whole `#[cfg(test)] mod tests` blocks** (M5) → prod-LoC-neutral → ratchet green. Must pass before any cutover.
 - **A1 controller skeleton** — new `outbound/turn_output_controller.rs`: `deliver_turn_output` (commit+advance internal, I1) + `OutputPlan::from_length_decision` + `DeliveryOutcome`/`EditFailPlaceholderPolicy`. Wires `PlaceholderController.transition` + `outbound::deliver_outbound`. Blocking fake-gateway test for I1 (advance-before-post-send-await). No owner connected (pure add, no cap).
-- **A2 cut over `session_relay_sink` first** (review M6) — the lease-using surface (`session_relay_sink.rs:766`), behind a flag, to validate lease/outcome semantics end-to-end (not standby, which doesn't lease). Frozen #3036, so cutover shrinks it → baseline lowers → green.
+- **A2 cut over `session_relay_sink` first** (review M6) — the lease-using surface (`session_relay_sink.rs:764`), behind a flag, to validate lease/outcome semantics end-to-end (not standby, which doesn't lease). Frozen #3036, so cutover shrinks it → baseline lowers → green.
 - **A3 standby_relay** — transport-only validation (no lease); not frozen, lowest LoC risk.
 - **A4 watcher (#3016), A5 turn_bridge (#3038), A6a recovery_engine** — one PR per owner, verbatim `git mv` of the send body into the controller + a call site; each owner shrinks; `relay-e2e` per PR. `EditFailPlaceholderPolicy` injected explicitly per owner (no default) so watcher's conditional-delete never reaches sink/standby (#2757 fence).
 - **A6b `tui_prompt_relay` external-input tail** (review M7) — route external-input delivery (`tui_prompt_relay.rs:282`) through the controller. This is what actually makes #3088 mechanical; without it #3088 stays open.
@@ -208,7 +208,7 @@ Fold delivery into the finalizer ledger only if A+B leave a measured exactly-onc
 1. **#2757 flattening** → `EditFailPlaceholderPolicy` injected explicitly per owner, no default; A0 pins both arms; cutover blocked until A0 green.
 2. **#3143 duplicate re-open** → I1 promoted to a tested invariant; commit+advance owned inside the controller before any post-send await (H2); blocking fake-gateway test; never wake dormant ledger-routed commit.
 3. **Leased-but-not-Committed lost on restart** (H1 / r2-H) → persist `delivery_lease` and `delivered_frontier` as **separate** fields; release clears only the lease; only `Delivered` writes the frontier; reclaim local-instance leases on restart (process-monotonic deadline dead), judge remote holders by `deadline_epoch_ms`.
-4. **Mixed-binary authority split** (H3 / r2-H) → B0 sidecar **outside the `*.json` scan path** (`inflight.rs:2577` reaps malformed siblings) or a rollout gate, before any authority flip; conservative I3 fallback (missing record ≠ delivered).
+4. **Mixed-binary authority split** (H3 / r2-H) → B0 sidecar **outside the `*.json` scan path** (`inflight.rs:2569` reaps malformed siblings) or a rollout gate, before any authority flip; conservative I3 fallback (missing record ≠ delivered).
 5. **#1270 rotation-vs-respawn watermark** → write `generation_mtime_ns` in the same atomic transition as `range`; characterization test for both #1270 scenarios across restart.
 6. **size review** (M5) → Whole `#[cfg(test)] mod` blocks remain test-only for classification; raw growth warns. Review a split when adding an independent responsibility.
 7. **recon count drift** → replace is 6 not 4; `OutputPlan::Replace` carries `PlaceholderLifecycle` to keep the cancel/prompt-too-long/normal variants distinct.

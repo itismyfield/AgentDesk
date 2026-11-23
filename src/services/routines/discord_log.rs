@@ -9,8 +9,9 @@ use crate::domain::outbound::{
     DeliveryResult, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent, OutboundMessageId,
     OutboundOperationKey, OutboundTargetKey, first_raw_message_id,
 };
-use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
-use crate::services::discord::outbound::HttpOutboundClient;
+use crate::services::discord::health::resolve_bot_http;
+use crate::services::dispatches::http_outbound::HttpOutbound;
+use crate::services::engine_runtime::health_port::AppHealthRegistry;
 
 use super::provider_choice::AgentProviderChannels;
 use super::run_diagnostics::formatting::*;
@@ -27,7 +28,7 @@ const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "
 #[derive(Clone)]
 pub struct RoutineDiscordLogger {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<Arc<AppHealthRegistry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -42,7 +43,7 @@ pub struct RoutineDiscordLogStatus {
 impl RoutineDiscordLogger {
     pub fn new_with_health_registry(
         pool: Arc<PgPool>,
-        health_registry: Option<Arc<HealthRegistry>>,
+        health_registry: Option<Arc<AppHealthRegistry>>,
     ) -> Self {
         Self {
             pool,
@@ -423,7 +424,7 @@ impl RoutineDiscordLogger {
                     target.bot
                 )
             })?;
-        let client = HttpOutboundClient::new(
+        let client = HttpOutbound::new(
             reqwest::Client::new(),
             token,
             crate::services::dispatches::discord_delivery::discord_api_base_url(),
@@ -515,7 +516,7 @@ impl RoutineDiscordLogger {
     async fn resolve_or_create_log_thread(
         &self,
         store: &RoutineStore,
-        registry: &HealthRegistry,
+        registry: &AppHealthRegistry,
         routine_id: &str,
         routine_name: &str,
         agent_id: &str,
@@ -719,7 +720,7 @@ fn parse_message_id(value: &str) -> Option<poise::serenity_prelude::MessageId> {
 }
 
 async fn validate_routine_thread(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     pool: &PgPool,
     agent_id: &str,
     thread_id: poise::serenity_prelude::ChannelId,
@@ -754,7 +755,7 @@ async fn validate_routine_thread(
 }
 
 async fn create_routine_thread(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider_name: &str,
     agent_id: &str,
     parent_channel_id: poise::serenity_prelude::ChannelId,
@@ -779,7 +780,7 @@ async fn create_routine_thread(
 }
 
 async fn resolve_routine_thread_http(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider_name: &str,
     agent_id: &str,
 ) -> Result<RoutineThreadHttp> {
@@ -924,7 +925,7 @@ async fn resolve_agent_provider_bot(pool: &PgPool, agent_id: &str) -> Result<Str
 
 async fn resolve_agent_log_bot(
     pool: &PgPool,
-    health_registry: Option<&HealthRegistry>,
+    health_registry: Option<&AppHealthRegistry>,
     agent_id: &str,
 ) -> Result<String, String> {
     let provider_bot = match resolve_agent_provider_bot(pool, agent_id).await {
@@ -941,7 +942,7 @@ async fn resolve_agent_log_bot(
 }
 
 async fn resolve_available_log_bot(
-    health_registry: Option<&HealthRegistry>,
+    health_registry: Option<&AppHealthRegistry>,
     candidates: &[String],
 ) -> Result<String, String> {
     let Some(health_registry) = health_registry else {

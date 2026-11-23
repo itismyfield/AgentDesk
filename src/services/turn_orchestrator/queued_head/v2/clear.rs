@@ -216,6 +216,12 @@ impl Owner {
         next.prune_readiness_holds();
         next.unfinished_handoff = None;
         effort_continue::close_dropped(&mut next, effort_continue::Dropped::All);
+        // A clear starts the next session fresh; an unsubmitted continuation is `close_dropped`'s.
+        if let Some(intent) = next.effort_restart.as_mut()
+            && intent.pending().is_none()
+        {
+            intent.cancelled = true;
+        }
         next.admission_binds.retain(|bind| match &bind.at {
             BindAt::Settled { .. } => true,
             BindAt::Queued { .. } => active == ActivePolicy::Release,

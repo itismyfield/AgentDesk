@@ -65,3 +65,25 @@ pub use dispatch_status::{
     set_dispatch_status_on_pg_async, set_dispatch_status_with_backends,
 };
 pub use types::DispatchCreateOptions;
+
+/// `set_dispatch_status_on_pg_async` as the `SetDispatchStatus` port that the force-kill
+/// session writes in `db::dispatched_sessions` take.
+pub(crate) fn set_dispatch_status_on_pg_boxed<'a>(
+    pool: &'a sqlx::PgPool,
+    dispatch_id: &'a str,
+    to_status: &'a str,
+    result: Option<&'a serde_json::Value>,
+    transition_source: &'a str,
+    allowed_from: Option<&'a [&'a str]>,
+    touch_completed_at: bool,
+) -> futures::future::BoxFuture<'a, anyhow::Result<usize>> {
+    Box::pin(set_dispatch_status_on_pg_async(
+        pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+    ))
+}

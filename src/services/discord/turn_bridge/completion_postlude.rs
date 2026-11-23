@@ -400,7 +400,11 @@ pub(super) async fn run_completion_postlude(
     )
     .await;
 
-    let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
+    let memory_role_id = resolve_memory_role_id(
+        role_binding
+            .as_ref()
+            .map(|binding| binding.role_id.as_str()),
+    );
     let mut recall_feedback_analysis =
         if should_analyze_recall_feedback || memento_tool_call_observed {
             Some(analyze_recall_feedback_turn(&transcript_events))

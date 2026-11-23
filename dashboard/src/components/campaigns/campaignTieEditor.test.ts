@@ -1,7 +1,6 @@
 import { expect, it } from "vitest";
 import { NO_TIES, type GraphViewSettings, type RawEdgeKey } from "./campaignGraphRouting";
 import { applyTieCommand, pruneTies } from "./campaignTieEditor";
-import { tieSlots } from "./campaignTieGeometry";
 
 const ac: RawEdgeKey = ["a", "c"];
 const bd: RawEdgeKey = ["b", "d"];
@@ -42,12 +41,6 @@ it("drops only members that left the definition and ties left empty", () => {
     routes: [{ edge: ac, via: ["t1"] }, { edge: bd, via: ["t1"] }],
     showOriginal: true,
   });
-});
-
-it("orders strands through a tie by the stored strand order, not by where their lines are drawn", () => {
-  const tie = { id: "t1", position: { x: 0, y: 0 }, strandOrder: [bd, ac] };
-  const line = (id: string, edge: RawEdgeKey, y: number) => ({ id, source: `s${y}`, target: `t${y}`, via: ["t1"], edges: [edge] });
-  expect(tieSlots([tie], [line("upper", ac, 0), line("lower", bd, 400)]).get("t1")).toEqual(["lower", "upper"]);
 });
 
 it("never reuses a removed tie's id, so a stale move cannot land on another tab's new tie", () => {

@@ -8,8 +8,10 @@ use crate::services::claude_compact_context::{
     CLAUDE_AUTO_COMPACT_MAX_TOKENS, CompactThreshold, compact_threshold,
 };
 use crate::services::claude_tui::readiness::compact::{self, Outcome};
-use crate::services::discord::{ManagedCompactTurnIdentity, pending_managed_turn_matches};
 use crate::services::provider::ProviderKind;
+
+mod turn_identity;
+pub(in crate::services) use turn_identity::CompactTurnIdentity;
 
 /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
 /// channel and the physical tmux pane so [`clear_for_tmux`] can forget every
@@ -226,13 +228,13 @@ fn invalidate_after_authority_rejection(
 /// never carries the leaf state lock into `submit`. `None` means the pre-send
 /// recheck bailed (stale/torn-down/below-threshold) and no mutation was
 /// attempted.
-fn submit_under_composer_lock(
+fn submit_under_composer_lock<T>(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
-    expected_turn: &ManagedCompactTurnIdentity,
+    expected_turn: &T,
     completing: bool,
-    live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> Result<bool, String>,
+    live_turn_matches: impl FnOnce(&T) -> Result<bool, String>,
     submit: impl for<'a> FnOnce(
         crate::services::claude_tui::composer_lock::ComposerPermit<'a>,
     ) -> Outcome,
@@ -281,8 +283,8 @@ fn trigger_window_for_resolution(resolution: Option<u64>) -> Option<(u64, Compac
 
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
-pub(in crate::services) fn observe_active_usage(
-    turn_identity: ManagedCompactTurnIdentity,
+pub(in crate::services) fn observe_active_usage<T: CompactTurnIdentity>(
+    turn_identity: T,
     provider: &ProviderKind,
     model: Option<&str>,
     usage: (Option<u64>, Option<u64>, Option<u64>),
@@ -352,8 +354,8 @@ pub(in crate::services) fn observe_active_usage(
 /// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
 /// post-compact re-arm signal handled inside [`observe_and_decide_with_source`].
-pub(in crate::services) fn maybe_inject_compact(
-    turn_identity: ManagedCompactTurnIdentity,
+pub(in crate::services) fn maybe_inject_compact<T: CompactTurnIdentity>(
+    turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,
     actual_window_tokens: Option<u64>,
@@ -371,8 +373,8 @@ pub(in crate::services) fn maybe_inject_compact(
     );
 }
 
-pub(in crate::services) fn maybe_inject_compact_with_source(
-    turn_identity: ManagedCompactTurnIdentity,
+pub(in crate::services) fn maybe_inject_compact_with_source<T: CompactTurnIdentity>(
+    turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,
     actual_window_tokens: Option<u64>,
@@ -418,7 +420,7 @@ pub(in crate::services) fn maybe_inject_compact_with_source(
             threshold,
             &turn_identity,
             pending.completing(),
-            pending_managed_turn_matches,
+            |turn: &T| turn.pending_turn_matches(),
             |permit| {
                 pending.poll(permit, |publish| {
                     // No file or source-authority reads while holding the generation leaf lock.
@@ -502,6 +504,7 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::ManagedCompactTurnIdentity;
 
     fn observe_and_decide(
         pane: &CompactPaneKey,

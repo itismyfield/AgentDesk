@@ -119,12 +119,40 @@ async fn launch_model(
     (model, cwd)
 }
 
-fn local_tui(provider: &ProviderKind, channel: serenity::ChannelId) -> bool {
+/// `herdr`: the channel's operation acts on a Herdr execution now.
+fn local_tui(provider: &ProviderKind, channel: serenity::ChannelId, herdr: bool) -> bool {
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && !crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && !herdr
+        && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
+            .driver
+            == ProviderSessionDriver::TuiHosting
+}
+
+/// Whether `channel`'s operation acts on a Herdr execution now.
+pub(in crate::services::discord) async fn herdr_now(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> bool {
+    super::super::super::admin_host_guard::host_decision_of(shared, provider, channel.get())
+        .await
+        .is_herdr()
+}
+
+/// A Herdr Codex TUI channel: `/effort` ends its exact execution and resumes the thread.
+pub(in crate::services::discord) fn herdr_codex(
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> bool {
+    use crate::services::provider_hosting::{
+        ProviderSessionDriver, resolve_provider_session_selection_with_channel,
+    };
+    matches!(provider, ProviderKind::Codex)
+        && crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && crate::services::turn_host::herdr_turn_switched_on_for(provider)
         && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
             .driver
             == ProviderSessionDriver::TuiHosting
@@ -153,11 +181,11 @@ async fn read_entry_capability<T: Send + 'static>(
         return Ok(read(&refused(error.to_string())));
     }
     let (model, cwd) = launch_model(shared, provider, channel).await;
+    let herdr = herdr_now(shared, provider, channel).await;
     let provider = provider.clone();
     tokio::task::spawn_blocking(move || {
         let known = matches!(provider, ProviderKind::Claude | ProviderKind::Codex);
-        let capability = if known && crate::config::session_hosts::has_herdr_endpoint(channel.get())
-        {
+        let capability = if known && herdr {
             let driver = resolve_provider_session_selection_with_channel(
                 &provider,
                 true,
@@ -168,10 +196,12 @@ async fn read_entry_capability<T: Send + 'static>(
                 && driver == ProviderSessionDriver::TuiHosting
             {
                 herdr_claude()
+            } else if herdr_codex(&provider, channel) {
+                for_model(&provider, model.as_deref(), channel, cwd.as_deref())
             } else {
                 refused("Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into())
             }
-        } else if known && !local_tui(&provider, channel) {
+        } else if known && !local_tui(&provider, channel, herdr) {
             refused(not_local(&provider))
         } else {
             for_model(&provider, model.as_deref(), channel, cwd.as_deref())
@@ -224,7 +254,12 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel).await?;
-    if !local_tui(provider, channel) {
+    let local = local_tui(
+        provider,
+        channel,
+        herdr_now(shared, provider, channel).await,
+    );
+    if !local && !herdr_codex(provider, channel) {
         return Err(io::Error::other(not_local(provider)));
     }
     if !EFFORT_LEVELS.contains(&level) {
@@ -263,7 +298,10 @@ pub(in crate::services::discord) async fn update_channel_effort(
     candidate
         .channel_effort_levels
         .insert(key.clone(), level.to_string());
-    candidate.channel_relaunch_pending.insert(key);
+    // A Herdr pane is ended by the command itself; only a local TUI relaunches on the next turn.
+    if local {
+        candidate.channel_relaunch_pending.insert(key);
+    }
     candidate.try_save_bot_settings(token)?;
     super::super::control::forget_relaunch_failures(channel);
     *settings = candidate;

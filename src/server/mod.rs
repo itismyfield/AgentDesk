@@ -42,6 +42,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::stale_sweep_port;
 
 const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
@@ -334,7 +335,8 @@ pub(crate) async fn run(
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
         &cluster_instance_id,
-        health_registry.as_deref(),
+        stale_sweep_port(health_registry.as_deref()),
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
     )
     .await?;
     drop(boot_reconcile_engine);
@@ -526,8 +528,9 @@ async fn policy_tick_loop(
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
                 match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
                     pool,
-                    health_registry.as_deref(),
+                    stale_sweep_port(health_registry.as_deref()),
                     crate::services::discord::relay_recovery::AxisBSite::PolicyTickStaleSweep,
+                    crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
                 )
                 .await
                 {
@@ -548,7 +551,7 @@ async fn policy_tick_loop(
                 // Resume post-commit cleanup a previous process left owed; this is how a
                 // restarted process converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
-                    health_registry.clone(),
+                    crate::services::auto_queue::runtime::slot_runtime_health(health_registry.clone()),
                     pool,
                 )
                 .await
@@ -2409,7 +2412,7 @@ async fn routine_runtime_loop(
     let agent_executor =
         RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
             .with_headless_fresh_agents(routines_config.headless_fresh_agents);
-    match store.recover_stale_running_runs().await {
+    match agent_executor.recover_stale_running_runs(&store).await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
                 // Reap owned orphaned fresh sessions before they look like abrupt exits.
@@ -2435,7 +2438,7 @@ async fn routine_runtime_loop(
         let routines_config = crate::config_live_reload::current()
             .map(|cfg| cfg.routines.clone())
             .unwrap_or_else(|| routines_config.clone());
-        match store.recover_stale_running_runs().await {
+        match agent_executor.recover_stale_running_runs(&store).await {
             Ok(recovered) if !recovered.is_empty() => {
                 for run in &recovered {
                     // No fresh-session reap here: a concurrent re-claim can reuse the same tmux

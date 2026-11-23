@@ -2,7 +2,7 @@
 use super::*;
 
 pub(crate) struct Submitted {
-    start_offset: u64,
+    pub(crate) start_offset: u64,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
 }
@@ -60,7 +60,7 @@ pub(crate) fn submit_created(
 
 /// The created execution's first prompt through the owner waiting for it: the owner reserves its
 /// frame on the target read from the created pane, and the observer keeps the submit's ticket.
-pub(super) fn submit_owned(
+pub(crate) fn submit_owned(
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
@@ -99,7 +99,7 @@ pub(super) fn submit_owned(
     })
 }
 
-fn submit_using(
+pub(crate) fn submit_using(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     mut ready: impl FnMut() -> Result<(), SubmissionError>,
@@ -157,7 +157,7 @@ fn submit_using(
     Err(exhausted(None).into())
 }
 
-fn exhausted(detail: Option<&str>) -> String {
+pub(crate) fn exhausted(detail: Option<&str>) -> String {
     match detail {
         Some(error) => format!(
             "{error}; fresh prompt readiness attempts exhausted ({} attempts)",
@@ -197,6 +197,3 @@ pub(super) fn observe(
     .map(|(result, harvest)| (result, harvest, start_offset))
     .map_err(SubmissionError::from)
 }
-
-#[cfg(test)]
-mod tests;

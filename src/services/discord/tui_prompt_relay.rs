@@ -1,3 +1,5 @@
+// Only the unix-only rehydration and idle-rollout children use it, via `use super::*`.
+#[cfg(unix)]
 use std::collections::HashSet;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -22,7 +24,6 @@ use crate::services::tui_prompt_dedupe::{
 };
 use tracing::Instrument;
 
-mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
     format_ssh_direct_prompt_notification, format_system_continuation_note,
@@ -32,6 +33,7 @@ use self::injected_prompt_policy::{
 use self::injected_prompt_policy::{
     format_subagent_notification_card, is_start_anchored_task_notification,
 };
+use super::session_notice::injected_prompt_policy;
 mod hook_observer;
 mod task_notification_prompt;
 use self::hook_observer::spawn_tui_prompt_relay_observer;
@@ -40,44 +42,24 @@ use self::hook_observer::{
     HookObserverProbe, hook_observation_target, spawn_tui_prompt_relay_observer_inner,
 };
 
-mod input_notice_memo;
-mod observed_prompt_decision;
 mod scheduled_prompt;
 mod slash_command_output;
-pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
 use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
+use super::session_notice::observed_prompt_decision;
 
-/// Shares the live human-only policy and renderer with transcript projections.
-pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
-    input_notice_memo::content(prompt, |prompt| {
-        let decision = relay_observed_prompt_injected_prompt_decision(prompt);
-        (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
-            .then(|| input_notice_line(prompt))
-    })
-}
-#[cfg(test)]
-pub(crate) use input_notice_memo::RUNS as INPUT_NOTICE_RUNS;
-
-/// The same notice for a scheduled-task fire the writer read off its own row.
-pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {
-    input_notice_content(prompt).map(|_| {
-        injected_prompt_policy::format_direct_prompt_notification(
-            InjectedPromptClass::ScheduledPrompt,
-            "claude",
-            "",
-            prompt,
-        )
-    })
+/// Routes dedupe's binding publications to the observer wake; `HealthRegistry::new` installs it.
+pub(super) fn install_observer_publication() {
+    #[cfg(unix)]
+    crate::services::tui_prompt_dedupe::observer_publication::install(
+        rehydration::observer_binding_published,
+    );
 }
 
-pub(crate) fn input_notice_line(text: &str) -> String {
-    format_ssh_direct_prompt_notification("claude", "", text)
-}
-
-mod idle_tail_state;
-pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
+use super::tmux_watcher_registry::idle_tail_state::CLAUDE_IDLE_RESPONSE_TAILS;
+#[cfg(all(test, unix))]
+use super::tmux_watcher_registry::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,
@@ -104,19 +86,14 @@ pub(in crate::services::discord) use rehydration::claude_pass_tests::rehydrate_o
 #[cfg(all(unix, test))]
 pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
-mod anchor_completion;
 mod bridge_completion;
 pub(in crate::services::discord) mod bridge_gateway;
-use self::anchor_completion::{
-    DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
-};
-pub(in crate::services::discord) use self::anchor_completion::{
-    complete_tui_direct_anchor_lifecycle_for_inflight,
-    complete_tui_direct_prompt_anchor_lifecycle_if_present,
-    should_complete_tui_direct_anchor_lifecycle,
-};
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
+use super::turn_view_reconciler::anchor_completion::{
+    DeferredAnchorCompletionDrain, complete_tui_direct_prompt_anchor_lifecycle_if_present,
+    decide_deferred_anchor_completion_drain,
+};
 #[cfg(unix)]
 pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]
@@ -165,7 +142,6 @@ mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-not
 use self::synthetic_start::build_tui_direct_synthetic_inflight_state;
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
-pub(in crate::services::discord) use self::synthetic_start::tui_direct_watcher_synthetic_inflight_matches;
 #[cfg(unix)]
 #[allow(unused_imports)]
 use self::synthetic_start::{
@@ -183,9 +159,11 @@ use self::synthetic_start::{
 use self::synthetic_start::{
     restore_pending_starts, tui_direct_synthetic_inflight_active_for_prompt,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use super::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches;
 
 #[cfg(unix)]
-pub(in crate::services::discord) mod background_child_completion;
+pub(in crate::services::discord) use super::task_notification_delivery::background_child_completion;
 #[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]
@@ -254,11 +232,9 @@ const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
-pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
+pub(in crate::services::discord) use super::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
 static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
-static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// #3178: dedupe window for the machine slash-command control turn. The #3153
 /// `/loop` double-post arrives as TWO independent observed prompts — the raw
@@ -874,6 +850,15 @@ fn slash_command_control_turn_is_duplicate_external_replay(
         .as_deref()
         .expect("external slash command control decisions carry a kind");
     !slash_command_control_turn_is_first_sighting(tmux_session_name, kind)
+}
+
+impl hosted_source::AdoptionRuntime for SharedData {
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        self.pg_pool.as_ref()
+    }
+    fn token_hash(&self) -> &str {
+        &self.token_hash
+    }
 }
 
 #[cfg(all(test, unix))]

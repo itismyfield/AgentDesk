@@ -29,10 +29,17 @@ async fn transfer_at(point: Checkpoint, fail: bool, channel: u64) {
     if fail {
         test_executor::fail_execution();
     }
-    let outcome =
-        run_intake_worker_tick(&pool, &shared, "fence-worker", "claude", "token", &|| false)
-            .await
-            .unwrap();
+    let outcome = run_intake_worker_tick(
+        &pool,
+        &shared,
+        "fence-worker",
+        "claude",
+        "token",
+        &|| false,
+        super::test_executor::PORT,
+    )
+    .await
+    .unwrap();
     let (before, successor) = at_boundary
         .lock()
         .unwrap()
@@ -96,12 +103,17 @@ async fn owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg() {
             if mode == 1 {
                 test_executor::fail_execution();
             }
-            let result =
-                run_intake_worker_tick(&pool, &shared, "fence-worker", "claude", "token", &|| {
-                    cancelled.load(Ordering::SeqCst)
-                })
-                .await
-                .unwrap();
+            let result = run_intake_worker_tick(
+                &pool,
+                &shared,
+                "fence-worker",
+                "claude",
+                "token",
+                &|| cancelled.load(Ordering::SeqCst),
+                super::test_executor::PORT,
+            )
+            .await
+            .unwrap();
             let row = snapshot(&pool, id).await;
             let (expected, count) = match mode {
                 0 => ("done", 1),

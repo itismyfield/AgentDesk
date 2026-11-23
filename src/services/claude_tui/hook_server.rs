@@ -1405,6 +1405,3 @@ pub(crate) mod tests {
         assert_eq!(current_hook_endpoint(), None);
     }
 }
-
-#[cfg(all(test, unix))]
-mod codex_ingress_tests;

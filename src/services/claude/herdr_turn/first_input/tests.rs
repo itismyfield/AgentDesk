@@ -1,18 +1,24 @@
-use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedOwner, HostedState, SourceRef,
 };
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::claude::herdr_turn::first_input::*;
+use crate::services::claude::herdr_turn::{Attached, HerdrTurn, not_held};
+use crate::services::claude_tui::guarded_outcome::SubmissionError;
+use crate::services::herdr_launch::HerdrLaunchEndpoint;
+use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::herdr_endpoints;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
+use std::sync::Arc;
 
-pub(super) const NONCE: &str = "00112233445566778899aabbccddee01";
+pub(crate) const NONCE: &str = "00112233445566778899aabbccddee01";
 fn pane(above: &str, input: &str) -> String {
     format!(
         "{above}\n\n────────────────────────────────────────────────────\n❯ {input}\n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
     )
 }
 
-pub(super) fn bound_target(
+pub(crate) fn bound_target(
     rig: &HerdrRig,
     logical: &str,
     channel: u64,

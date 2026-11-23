@@ -108,7 +108,7 @@ TurnDiesMidway ==
     /\ UNCHANGED <<srv, sess, exitKind, msg, delivered, restored, crashes, deaths, probeFails>>
 
 \* Force stop: kill the session first, then clear the channel's own row
-\* (turn_lifecycle.rs:471-494, then 519-).
+\* (turn_lifecycle.rs:472-495, then 519-).
 StopKill ==
     /\ UNCHANGED effort
     /\ srv = "up" /\ turn = "running"

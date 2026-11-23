@@ -161,6 +161,9 @@ struct Ports<'a> {
 }
 
 impl HerdrTurnPorts for Ports<'_> {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn earlier_tmux<'a>(&self, _logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
         self.old_tmux.view()
     }

@@ -310,6 +310,9 @@ async fn shown() -> Result<ReplaceLongMessageOutcome, String> {
 
 pub(in crate::services::discord::turn_bridge) struct NoLaunch;
 impl crate::services::claude::herdr_turn::HerdrTurnPorts for NoLaunch {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
         None
     }
@@ -334,6 +337,9 @@ impl crate::services::claude::herdr_turn::HerdrTurnPorts for NoLaunch {
     }
 }
 impl crate::services::codex::herdr_turn::CodexHerdrPorts for NoLaunch {
+    fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
+        crate::services::discord::HERDR_OWNER_PORT
+    }
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
         None
     }
@@ -412,6 +418,7 @@ pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
                     working_dir: ".",
                     system_prompt: None,
                     model: None,
+                    effort: None,
                     allowed_tools: &[],
                     fast_mode: None,
                     goals: None,

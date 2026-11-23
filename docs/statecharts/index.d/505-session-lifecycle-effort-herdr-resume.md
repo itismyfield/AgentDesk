@@ -1,0 +1,2 @@
+key: 505-session-lifecycle-effort-herdr-resume
+| `session-lifecycle` effort Herdr Codex resume (#8109 S5) | `d6f5aa7b7a` | Save-before-retire, any-thread resume, ungated recovery, clear keeping the idle resume and a Claude restart each keep expected RED | Codex: exact retire + save in the held postlude, next launch resumes the same thread or is refused; Claude: pane applied in place, no restart. 6 GREEN + 5 expected RED. O cursor naming the thread is an explicit port assumption. [report](session-lifecycle/effort-herdr-resume.report.md) |

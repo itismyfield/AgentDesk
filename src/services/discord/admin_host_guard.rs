@@ -3,13 +3,15 @@
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::SharedData;
 use crate::services::provider::ProviderKind;
-pub(crate) use crate::services::session_host::operation_policy::configured_refusal;
+
+pub(crate) use super::host_defer_gate::{configured_refusal, host_decision_of};
 
 /// Why a channel's session may not be changed or observed by its tmux name. A found legacy
 /// row, or no row yet with no marker or inflight trace of another host, keeps main's path.
@@ -102,7 +104,10 @@ pub(super) async fn managed_reset_refusal(
     let kills = reset_provider_state && provider.uses_managed_tmux_backend();
     if !(kills || recreate_tmux) {
         // A Herdr-configured channel keeps its provider state whatever the runtime's backend.
-        return reset_provider_state.then(|| configured_refusal(channel_id.get()))?;
+        if !reset_provider_state {
+            return None;
+        }
+        return configured_refusal(shared, provider, channel_id.get()).await;
     }
     let name = session_channel_name(shared, channel_id).await;
     let reason = reset_refusal(shared, provider, channel_id, explicit_session_key, name).await?;
@@ -132,7 +137,7 @@ async fn reset_refusal(
     {
         return Some(reason.to_owned());
     }
-    if let Some(reason) = configured_refusal(channel_id.get()) {
+    if let Some(reason) = configured_refusal(shared, provider, channel_id.get()).await {
         return Some(reason);
     }
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
@@ -335,9 +340,38 @@ pub(crate) async fn session_key_refusal(
     refusal(pool, provider, channel, session_key, tmux_name).await
 }
 
-/// The marker-only check retained for cancel-token cleanup's separate teardown path.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    crate::services::session_host::operation_policy::marker_refusal(tmux_name)
+/// [`session_key_refusal`] as the boxed port the session output route hands to KE.
+pub(crate) fn session_key_refusal_port<'a>(
+    pool: &'a PgPool,
+    provider: Option<&'a ProviderKind>,
+    channel_id: Option<u64>,
+    session_key: &'a str,
+    tmux_name: &'a str,
+) -> BoxFuture<'a, Option<String>> {
+    Box::pin(session_key_refusal(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+    ))
+}
+
+/// [`row_refusal`] as the boxed port the agent turn routes hand to KE.
+pub(crate) fn row_refusal_port<'a>(
+    pool: &'a PgPool,
+    provider: Option<&'a str>,
+    channel_id: Option<&'a str>,
+    session_key: &'a str,
+    tmux_name: &'a str,
+) -> BoxFuture<'a, Option<String>> {
+    Box::pin(row_refusal(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+    ))
 }
 
 /// [`session_key_refusal`] on a stored row's provider and channel columns.

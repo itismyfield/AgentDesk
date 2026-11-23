@@ -172,6 +172,15 @@ mod codex_absence {
 }
 pub(crate) use codex_absence::codex_absent_launch_clear;
 
+/// Lets runtime callers below Discord read this store; `HealthRegistry::new` installs it.
+pub(crate) fn install_runtime_reads() {
+    use crate::services::tui_prompt_dedupe::terminal_custody::{TerminalCustody, install};
+    install(TerminalCustody {
+        retains_channel,
+        codex_absent_launch_clear,
+    });
+}
+
 #[derive(Serialize, Deserialize)]
 struct Record {
     version: u8,

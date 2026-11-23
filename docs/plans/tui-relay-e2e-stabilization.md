@@ -25,13 +25,13 @@
 |---|---|---|
 | Claude input | `src/services/claude_tui/input.rs:88-100` | `plan_prompt_submit`, paste 1800자, control char **reject** |
 | Codex input | `src/services/codex_tui/input.rs:1-100` | rounded-box composer, fresh=120s/followup=45s |
-| Notification strip | `format_ssh_direct_prompt_notification` @ `tui_prompt_relay/injected_prompt_policy.rs`, `strip_terminal_controls` @ `tui_task_card.rs` | 표시용 control char strip — #2699 |
+| Notification strip | `format_ssh_direct_prompt_notification` @ `session_notice/injected_prompt_policy.rs`, `strip_terminal_controls` @ `tui_task_card.rs` | 표시용 control char strip — #2699 |
 | Claude tail | `src/services/claude_tui/transcript_tail.rs` + `tui_prompt_relay.rs:247,373,584,631` | offset JSON, rehydrate grace |
 | Codex tail | `src/services/codex_tui/rollout_tail.rs` | composer_ready, tool deadline 5m |
 | Turn state | `src/services/tui_turn_state.rs:64-120` | envelope classifier + partial parser(Claude only) |
 | Hook (Claude) | `src/services/claude_tui/hook_server.rs:1-80`, `hook_relay.rs:23-80` | Stop/SubagentStop → PROMPT_READY_NOTIFY |
 | Dedupe | `src/services/tui_prompt_dedupe.rs:9-12` | TTL 10s/24h/30m, channel anchor |
-| Explicit turn-finished (#2625) | `TurnFinishedSignal`, `mark_turn_finished_signal_done`, `ChannelMailboxRegistry::turn_finished` @ `turn_orchestrator.rs:1413,1473,1548`; 이벤트명 `turn_finished` @ `observability/emit.rs:91` | inflight cleanup |
+| Explicit turn-finished (#2625) | `TurnFinishedSignal`, `mark_turn_finished_signal_done`, `ChannelMailboxRegistry::turn_finished` @ `turn_orchestrator.rs:1419,1481,1556`; 이벤트명 `turn_finished` @ `observability/emit.rs:91` | inflight cleanup |
 | Stale resume / draft (#2635) | `src/services/discord/turn_bridge/stale_resume.rs:21-62` | unknown transcript recovery |
 | tmux watcher | `src/services/discord/tmux_watcher.rs:11-42` | dead marker, ready sentinel |
 | Discord I/O | API release 8791 | `POST /api/discord/send`, `GET .../messages` |

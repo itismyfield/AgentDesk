@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use poise::serenity_prelude::ChannelId;
 
 use super::runtime_store::org_schema_path;
-use super::settings::{RegisteredChannelBinding, RoleBinding};
 use crate::domain::provider_auth_profile::FallbackPolicy;
 use crate::services::agent_identity::{self, identity_from_parts, identity_label};
+use crate::services::channel_roles::{RegisteredChannelBinding, RoleProjection};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth_profile::ProviderAuthProfileDef;
 #[cfg(test)]
@@ -439,9 +439,8 @@ pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
-) -> Option<RoleBinding> {
+) -> Option<RoleProjection> {
     crate::services::channel_roles::config_projection::org_role_binding(channel_id, channel_name)
-        .map(|projection| projection.into())
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {

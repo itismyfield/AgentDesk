@@ -32,7 +32,7 @@ class ParseOnlyReader:
 # Whole-source pins make an added raw-text assertion revoke the exception.
 PARSE_ONLY_READERS = {
     SCENARIO_READER: ParseOnlyReader(
-        "49e0de9d6c45e17e02984d0bfce1d178801fec258df08f16008d95e4c608629f",
+        "ae27cdd2543670e64b7b26c74eb1dd6db22e7f7617a3ef50ddf98e5a364ad952",
         "tests/e2e/tui_relay/scenarios",
         87,
         90,

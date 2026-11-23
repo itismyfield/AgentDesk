@@ -27,7 +27,7 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
     [agents, sessions, sessionsFailed],
   );
   const todo = useMemo(
-    () => buildTodoItems({ cards: kanbanCards, campaigns: campaigns.data?.summaries ?? null, tr, isKo }),
+    () => buildTodoItems({ cards: kanbanCards, campaigns: campaigns.data?.summaries ?? null, documents: campaigns.data?.documents, tr, isKo }),
     [kanbanCards, campaigns.data, tr, isKo],
   );
   // Each to-do source keeps its own read state, so a slow or failed one never reads as nothing to do.
@@ -50,6 +50,7 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
             agents={agents}
             cards={cardsSource}
             campaigns={campaignsSource}
+            isMobile={isMobileViewport}
             tr={tr}
             className="flex-[2_1_32.5rem]"
           />

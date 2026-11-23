@@ -445,7 +445,7 @@ async fn image_stale_registry_does_not_block_create_patch_fire_pg() {
         for fire in fires {
             crate::services::scheduled_messages::fire_claimed(
                 &pool,
-                None,
+                None::<&crate::services::discord::health::HealthRegistry>,
                 fire,
                 chrono::Utc::now(),
             )

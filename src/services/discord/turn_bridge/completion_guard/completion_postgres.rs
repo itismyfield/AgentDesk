@@ -307,7 +307,7 @@ async fn record_runtime_dispatch_failure_entries_on_pg_tx(
     let mut results = Vec::with_capacity(entry_ids.len());
     for entry_id in entry_ids {
         results.push(
-            crate::services::auto_queue::transactions::EntryDispatchFailureResult::record_on_pg_tx(
+            crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg_tx(
                 tx,
                 &entry_id,
                 retry_limit,

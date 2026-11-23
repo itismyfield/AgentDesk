@@ -69,7 +69,7 @@ impl Ticket {
         format!("tk:{}:", self.0)
     }
 
-    fn receipt(&self, original: &PendingQueueItem) -> String {
+    pub(super) fn receipt(&self, original: &PendingQueueItem) -> String {
         self.receipt_for(&canonical(original))
     }
 
@@ -559,7 +559,11 @@ impl SnapshotV2 {
             .map(|b| &b.receipt)
             .collect();
         let mut free: Vec<String> = (self.admission_receipts.iter())
-            .filter(|r| r.starts_with("tk:") && !bound.contains(r))
+            .filter(|r| {
+                r.starts_with("tk:")
+                    && !bound.contains(r)
+                    && !self.routine_withdrawals.contains_key(*r)
+            })
             .cloned()
             .collect();
         for index in 0..self.items.len() {
@@ -700,6 +704,7 @@ impl Owner {
                         confirmation_deadline_ms: None,
                         resolved_source: None,
                         payload_window: None,
+                        routine_delivery: None,
                         resolved_target: None,
                         preparation_hold: None,
                         legacy_attempt: None,
@@ -904,7 +909,7 @@ impl super::super::super::ChannelMailboxHandle {
 }
 
 impl Owner {
-    fn context_in<'a>(
+    pub(super) fn context_in<'a>(
         snapshot: &'a SnapshotV2,
         receipt: &str,
     ) -> Option<&'a super::super::v2_types::AdmissionContext> {

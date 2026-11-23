@@ -157,7 +157,7 @@ async fn rewatch(
 async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_block_forever() {
     use crate::services::claude_tui::busy_inject::StashChannelGuard;
     use crate::services::claude_tui::input::submission::tests::{events, renderer, view};
-    use crate::services::discord::turn_bridge::followup_requeue::draft_release::idle_release_pending;
+    use crate::services::discord::busy_followup_retry_store::draft_release_watch::idle_release_pending;
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();

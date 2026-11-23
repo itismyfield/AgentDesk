@@ -115,7 +115,7 @@ Added: Policy `U`; scenarios `own_moved`, `own_screen`, `own_restart`, `own_stop
 | `OwnTurnEnd` wake (turn boundary, held watch) | `queue_io/input_owner/drive.rs:113`, `held_watch.rs:65`; probe `first_input.rs:232-260` |
 | `StopCommand` | `discord/commands/stop.rs:191` (pending queue drain) |
 | `Restart` | durable owner queue; boot recovery `queue_io/input_owner/recovery.rs:8` |
-| `ClearCommand` | `discord/commands/control.rs:542` |
+| `ClearCommand` | `discord/commands/control.rs:546` |
 
 | cfg | Before | U | meaning |
 |---|---|---|---|

@@ -744,7 +744,7 @@ fn clear_completion_resumes_the_busy_owner_once() {
 }
 
 fn finish_command_transition(
-    _completion: crate::services::discord::session_transition::SessionTransitionCompletion<'_>,
+    _completion: crate::services::discord::router::SessionTransitionCompletion<'_>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
     failed: bool,
 ) -> Result<(), &'static str> {
@@ -934,11 +934,9 @@ fn busy_hold_case(
     }
     let mut completion = match resume {
         Some("resume") => Some(shared.session_transition_completion(id)),
-        Some("clear") => Some(
-            crate::services::discord::session_transition::SessionTransitionCompletion::new(
-                &shared, id,
-            ),
-        ),
+        Some("clear") => {
+            Some(crate::services::discord::router::SessionTransitionCompletion::new(&shared, id))
+        }
         _ => None,
     };
     let mut intake_transition = (resume == Some("short_intake")).then(|| {

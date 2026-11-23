@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+mod recovery;
+use recovery::ClosingRun;
 mod session_interrupt;
 mod thread_choices;
 #[macro_use]
@@ -1129,6 +1131,7 @@ impl RoutineStore {
             JOIN routines r ON r.id = rr.routine_id
             WHERE rr.status = 'running'
               AND rr.action = 'agent'
+              AND rr.result_json->>'owner_recovering' IS DISTINCT FROM 'true'
               AND (
                     rr.turn_id IS NOT NULL
                     OR (rr.next_retry_at IS NOT NULL AND rr.next_retry_at <= NOW())
@@ -1151,6 +1154,7 @@ impl RoutineStore {
                 updated_at = NOW()
             WHERE status = 'running'
               AND action = 'agent'
+              AND result_json->>'owner_recovering' IS DISTINCT FROM 'true'
               AND (turn_id IS NOT NULL OR next_retry_at IS NOT NULL)
             "#,
         )
@@ -3092,6 +3096,9 @@ impl RoutineStore {
                 WHERE status = 'running'
                   AND lease_expires_at IS NOT NULL
                   AND lease_expires_at < NOW()
+                  AND (run_spec->>'retry_after_start' IS DISTINCT FROM 'false'
+                       OR action IS DISTINCT FROM 'agent' OR turn_id IS NULL
+                       OR jsonb_typeof(result_json->'owner_input') IS DISTINCT FROM 'object')
                 FOR UPDATE SKIP LOCKED
             ),
             closed AS (
@@ -3253,8 +3260,16 @@ impl RoutineStore {
         })
     }
 
-    #[allow(clippy::type_complexity)]
     async fn close_run(&self, run_id: &str, close: CloseRun<'_>) -> Result<bool> {
+        self.close_run_guarded(run_id, close, None).await
+    }
+
+    async fn close_run_guarded(
+        &self,
+        run_id: &str,
+        close: CloseRun<'_>,
+        owner: Option<(&str, &Value)>,
+    ) -> Result<bool> {
         let checkpoint_size_error = match close.checkpoint.as_ref() {
             Some(checkpoint) => checkpoint_size_error(checkpoint, self.max_checkpoint_bytes)?,
             None => None,
@@ -3280,29 +3295,32 @@ impl RoutineStore {
 
         let mut tx = self.pool.begin().await?;
 
-        let target: Option<(
-            String,
-            Option<String>,
-            Option<DateTime<Utc>>,
-            DateTime<Utc>,
-            Option<Value>,
-        )> = sqlx::query_as(
+        let target: Option<ClosingRun> = sqlx::query_as(
             r#"
-            SELECT r.id, r.schedule, r.next_due_at, rr.started_at, rr.result_json
+            SELECT r.id AS routine_id, r.schedule, r.next_due_at, rr.started_at, rr.result_json
             FROM routine_runs rr
             JOIN routines r ON r.id = rr.routine_id
             WHERE rr.id = $1
               AND rr.status = 'running'
+              AND rr.result_json->>'owner_recovering' IS DISTINCT FROM 'true'
+              AND ($2::text IS NULL OR (rr.turn_id = $2 AND rr.result_json->'owner_input' = $3))
             FOR UPDATE OF rr, r
             "#,
         )
         .bind(run_id)
+        .bind(owner.map(|(turn, _)| turn))
+        .bind(owner.map(|(_, intent)| intent))
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| anyhow!("close run {run_id}: lock running run: {e}"))?;
 
-        let Some((routine_id, schedule, current_next_due_at, started_at, current_result_json)) =
-            target
+        let Some(ClosingRun {
+            routine_id,
+            schedule,
+            next_due_at: current_next_due_at,
+            started_at,
+            result_json: current_result_json,
+        }) = target
         else {
             tx.commit().await?;
             return Ok(false);

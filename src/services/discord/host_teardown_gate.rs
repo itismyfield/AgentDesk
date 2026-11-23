@@ -14,17 +14,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::{ClearedHostSession, HostLiveness};
-
-/// The keyed gate's verdict for a caller outside the discord module.
-pub(crate) enum ChannelTeardown {
-    /// A found legacy row with no host trace.
-    Cleared(ClearedHostSession),
-    /// No sessions row and no marker or inflight trace of another host.
-    RowMissing,
-    /// Herdr, unknown, conflicting or unreadable evidence, or no runtime to key it.
-    Kept,
-}
+pub(crate) use crate::services::session_host::ChannelTeardown;
+use crate::services::session_host::HostLiveness;
 
 /// The gate for `tmux_name` under `provider`'s runtime on `channel_id`, read as stored.
 pub(crate) async fn channel_teardown(

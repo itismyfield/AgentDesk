@@ -17,8 +17,9 @@ mod capacity;
 mod model;
 const RESTART_REPORT_VERSION: u32 = 2;
 const AWAITING_REPORT_MAX_AGE: chrono::Duration = chrono::Duration::minutes(5);
-pub(crate) const RESTART_REPORT_CHANNEL_ENV: &str = "AGENTDESK_REPORT_CHANNEL_ID";
-pub(crate) const RESTART_REPORT_PROVIDER_ENV: &str = "AGENTDESK_REPORT_PROVIDER";
+pub(crate) use crate::services::provider::restart_report_env::{
+    RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
+};
 #[derive(Debug, Clone)]
 pub(crate) struct RestartReportContext {
     pub provider: ProviderKind,

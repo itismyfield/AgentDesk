@@ -108,7 +108,7 @@ impl Drop for RuntimeBindingPublication<'_, '_> {
         std::mem::swap(self.target, &mut self.staged);
         #[cfg(unix)]
         if let Some(binding) = attached {
-            crate::services::discord::observer_binding_published(session.to_string(), binding);
+            super::observer_publication::binding_published(session.to_string(), binding);
         }
     }
 }

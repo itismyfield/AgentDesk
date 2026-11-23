@@ -5,6 +5,11 @@
 
 #[path = "gateway_lease_diagnostics.rs"]
 pub(in crate::services::discord) mod gateway_lease_diagnostics;
+#[path = "router_ports.rs"]
+mod router_ports;
+pub(in crate::services::discord) use router_ports::{
+    PortFuture, PromoteBlockedFuture, QueuedAdmission, QueuedRun, RouterPorts,
+};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

@@ -104,10 +104,13 @@ pub(super) async fn fast_save_notice(
     shared
         .check_settings_owner(effective_provider, channel_id)
         .await?;
-    if matches!(effective_provider, ProviderKind::Claude)
-        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
-    {
-        return super::tui_passthrough::herdr_settings::fast(shared, token, channel_id, None)
+    let host = super::super::admin_host_guard::host_decision_of;
+    let host = host(shared, effective_provider, channel_id.get()).await;
+    if matches!(effective_provider, ProviderKind::Claude) && host.is_herdr() {
+        // A thread's pane takes the value its settings channel keeps, as its tmux path does.
+        let store = herdr_store_channel(channel_id, settings_channel).await;
+        let fast = super::tui_passthrough::herdr_settings::fast;
+        return fast(shared, token, (channel_id, store), None)
             .await
             .map(|(enabled, _)| format!("fast mode를 `{enabled}`로 적용했습니다."))
             .map_err(std::io::Error::other);
@@ -128,7 +131,7 @@ pub(super) async fn fast_save_notice(
     )
     .await?;
 
-    if claude_local_tui_relaunch_applies(effective_provider, runtime_channel_id) {
+    if claude_local_tui_relaunch_applies(effective_provider, runtime_channel_id, &host) {
         let shared_with_parent = runtime_channel_id != channel_id;
         return Ok(build_fast_relaunch_notice(next_enabled, shared_with_parent));
     }
@@ -140,4 +143,17 @@ pub(super) async fn fast_save_notice(
     };
     let scope = feature_scope_notice(runtime_channel_id != channel_id);
     Ok(format!("{notice}{scope}"))
+}
+
+/// The channel a Herdr pane's fast setting is kept in: a thread's settings channel, else the
+/// channel itself, whose settings channel is itself.
+pub(super) async fn herdr_store_channel(
+    channel: poise::serenity_prelude::ChannelId,
+    settings_channel: impl std::future::Future<Output = poise::serenity_prelude::ChannelId>,
+) -> poise::serenity_prelude::ChannelId {
+    use crate::services::session_host::surface_policy::{Relation, relation};
+    match relation(channel.get()) {
+        Relation::Child { .. } => settings_channel.await,
+        Relation::NotChild | Relation::Unresolved => channel,
+    }
 }

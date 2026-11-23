@@ -128,7 +128,7 @@ pub(super) fn session_bound_relay_should_own_terminal_delivery(
         && session_bound_discord_delivery_enabled
         && session_bound_relay_turn_fully_mirrored
         && relay_producer_session_name == Some(tmux_session_name)
-        && crate::services::discord::session_relay_sink::session_bound_discord_relay_can_own_terminal_delivery(
+        && crate::services::discord::relay_coord::session_bound_discord_relay_can_own_terminal_delivery(
             inflight,
             tmux_session_name,
         )

@@ -48,6 +48,8 @@ pub(in crate::services::discord) use native_stop_pin::{
     native_pin_observation_count, wait_native_pin_observations,
 };
 pub(crate) mod read_only_owner_snapshot;
+mod runtime_view;
+pub(crate) use runtime_view::{install_codex_absence_reader, install_engine_probes};
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
 pub(in crate::services::discord) use terminal_receipt_stamp::stamp_terminal_receipt_if_matches_identity;
@@ -533,15 +535,7 @@ pub(in crate::services::discord) fn delete_inflight_state_file_checked(
     result.into_inner()
 }
 
-/// The JS `agentdesk.inflight.remove` result; only `Removed` means the row was unlinked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PolicyOpRemoveOutcome {
-    Removed,
-    Missing,
-    ProtectedReceipt,
-    Busy,
-    Io(String),
-}
+pub(crate) use crate::engine::ops::PolicyOpRemoveOutcome;
 /// Unlinks one row for the JS policy op: under the row lock a fresh read refuses a receipt row.
 pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOutcome {
     use PolicyOpRemoveOutcome as Outcome;
@@ -601,11 +595,11 @@ pub(crate) mod policy_op_unlink_hook {
 }
 /// The one path the JS policy op names from outside this store.
 pub(crate) mod policy_op {
+    #[cfg(all(test, unix))]
+    pub(crate) use super::PolicyOpRemoveOutcome as RemoveOutcome;
     #[cfg(test)]
     pub(crate) use super::policy_op_unlink_hook as unlink_hook;
-    pub(crate) use super::{
-        PolicyOpRemoveOutcome as RemoveOutcome, remove_inflight_row_for_policy_op as remove_row,
-    };
+    pub(crate) use super::remove_inflight_row_for_policy_op as remove_row;
 }
 
 fn bump_save_generation_for_write(
@@ -774,7 +768,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
 /// draining watcher advanced between the unlocked enumeration and this write is
 /// preserved) and persists it with only `restart_mode` / `restart_generation`
 /// changed, under the same lock-then-read pattern as the other row clears.
-/// A row holding a policy or terminal receipt is left byte-identical. Deliberately does NOT route through
+/// A row holding a policy receipt is left byte-identical. Deliberately does NOT route through
 /// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
 /// whole point is to keep the on-disk frontier rather than carry a stale one.
 fn set_inflight_restart_mode_under_lock(
@@ -795,10 +789,6 @@ fn set_inflight_restart_mode_under_lock(
     let Some(mut state) = read_inflight_state_content(path) else {
         return Failed;
     };
-    // An execution whose terminal awaits its receipt has nothing to resume after the restart.
-    if state.terminal_receipt.is_some() {
-        return SkippedPolicyReceipt;
-    }
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
@@ -851,7 +841,7 @@ pub(in crate::services::discord) fn consume_stale_restart_marker_if_identity_unc
         || state.user_msg_id == 0
         || state.request_owner_user_id == 0
         || state.request_owner_user_id
-            == super::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+            == super::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
         || state.rebind_origin
         || expected.rebind_origin
         || state.readopted_from_inflight

@@ -1,7 +1,7 @@
 //! Transient agent-start failures (provider runtime not registered yet, busy mailbox) park the
 //! run as `deferred` on a short cadence instead of failing it, until a bounded window closes.
 use super::*;
-use crate::services::discord::HeadlessTurnStartError;
+use crate::services::turn_orchestrator::HeadlessTurnStartError;
 
 /// Delay between deferred start attempts.
 pub(super) const START_DEFER_RETRY_SECS: i64 = 60;
@@ -59,7 +59,7 @@ impl std::error::Error for ThreadSetupError {}
 /// Checked before any thread, reservation or run-row side effect, so a runtime that has not
 /// registered yet (right after a restart) defers the run instead of failing it.
 pub(super) async fn ensure_provider_registered(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider: &ProviderKind,
 ) -> Result<()> {
     if !registry.registered_token_hashes(provider).await.is_empty() {

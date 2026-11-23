@@ -1,6 +1,9 @@
 import { Lock } from "lucide-react";
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Handle, NodeToolbar, Position, type NodeProps } from "@xyflow/react";
+import { MeterBar } from "../common/KitPrimitives";
+import { GROUP_PIN_Y } from "./campaignGroupLayout";
+import { FAR, useLegible } from "./RelationsCanvasChrome";
 import { StatusMarker, type MarkerTone } from "./StatusMarker";
 
 export type TaskNodeData = {
@@ -12,25 +15,111 @@ export type TaskNodeData = {
 
 /** Inline because React Flow's unlayered stylesheet outranks Tailwind's layered utilities. */
 const pin = (locked: boolean) => ({ width: 10, height: 10, background: "var(--th-card-bg)", border: `1.5px solid ${locked ? "var(--fg-faint)" : "var(--fg-muted)"}` });
+/** The card, head, pin row and foot band shared by task and group nodes, so both canvases draw one shape. */
+const CARD = "relative grid w-60 rounded-xl border bg-[var(--th-card-bg)] text-left text-xs text-[var(--fg-muted)]";
+const CHOSEN = "outline-2 outline-offset-2 outline-[var(--info)]";
+const PINS = "relative flex items-center justify-between border-t border-[var(--line)] px-3 py-1.5";
+const FOOT = "m-0 flex items-center gap-1.5 border-t border-[var(--line)] px-3 py-1.5";
+
+function NodeHead({ tone, ratio, title, meta }: { tone: MarkerTone; ratio: number; title: string; meta: string }) {
+  return <div className="flex min-w-0 items-start gap-2 px-3 pt-3 pb-2">
+    <StatusMarker tone={tone} ratio={ratio} className="mt-0.5" />
+    <span className="grid min-w-0"><strong title={title} className="truncate text-sm font-semibold text-[var(--fg)]">{title}</strong><span className="truncate tabular-nums">{meta}</span></span>
+  </div>;
+}
 
 /** One task on the relations canvas: the 선행 pin takes dependencies, the 다음 pin hands this task on. */
 export function RelationsTaskNode({ data, selected }: NodeProps) {
   const task = data as TaskNodeData;
   const ring = task.error ? "border-[var(--err)]" : task.picked ? "border-[var(--info)]" : "border-[var(--line)]";
-  return <div className={`grid w-60 rounded-xl border bg-[var(--th-card-bg)] text-left text-xs text-[var(--fg-muted)] ${ring} ${selected ? "outline-2 outline-offset-2 outline-[var(--info)]" : ""}`}>
-    <div className="flex min-w-0 items-start gap-2 px-3 pt-3 pb-2">
-      <StatusMarker tone={task.tone} ratio={task.ratio} className="mt-0.5" />
-      <span className="grid min-w-0"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{task.title}</strong><span className="truncate tabular-nums">{task.meta}</span></span>
-    </div>
-    <div className="relative flex items-center justify-between border-t border-[var(--line)] px-3 py-1.5">
+  return <div className={`${CARD} ${ring} ${selected ? CHOSEN : ""}`}>
+    <NodeHead {...task} />
+    <div className={PINS}>
       <Handle type="target" position={Position.Left} isConnectable={!task.locked} style={pin(task.locked)} />
       <span>{task.pins[0]}</span><span>{task.pins[1]}</span>
       <Handle type="source" position={Position.Right} style={pin(false)} />
     </div>
     <p className="m-0 px-3 pb-2 tabular-nums">{task.summary}</p>
-    {task.note && <p className={`m-0 flex items-center gap-1.5 border-t border-[var(--line)] px-3 py-1.5 ${task.note.tone === "err" ? "text-[var(--err)]" : ""}`}>
+    {task.note && <p className={`${FOOT} ${task.note.tone === "err" ? "text-[var(--err)]" : ""}`}>
       {task.note.tone === "lock" && <Lock aria-hidden className="size-3" />}{task.note.text}
     </p>}
+  </div>;
+}
+
+/** `far` is the short state line shown once zoomed out; `blocked` is the foot band's text, or null. */
+export type GroupNodeData = {
+  title: string; meta: string; tone: MarkerTone; ratio: number; pins: [needs: string, next: string];
+  summary: string; blocked: string | null; far: string;
+};
+
+/** Zoomed out, a card's name, its 선행/다음 words and one state line cover it at a legible size; the words and the state
+ * line go first once the card is too short on screen for them, and a meter or the ring still shows the state. */
+function FarCover({ scale, title, line, ratio, error, pins, className }: {
+  scale: number; title: string; line: string; ratio?: number; error?: boolean; pins?: [string, string]; className: string;
+}) {
+  const roomy = scale < 1.9;
+  return <div data-far aria-hidden className={`absolute inset-0 grid content-center gap-[0.35em] overflow-hidden rounded-[inherit] px-[0.6em] ${className}`} style={{ fontSize: 12 * scale }}>
+    <strong className="line-clamp-2 text-[1.05em] leading-tight font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:anywhere]">{title}</strong>
+    {roomy && pins && <span className="flex justify-between text-[0.85em] text-[var(--fg-muted)]"><span>{pins[0]}</span><span>{pins[1]}</span></span>}
+    {ratio !== undefined && <MeterBar ratio={ratio} tone="ok" className="h-[0.3em]" />}
+    {roomy && <span className={`truncate tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
+  </div>;
+}
+/** The 선행 and 다음 pins at their own size on screen over the shrunken handles, so a far card still reads as a node. */
+function FarPins({ scale }: { scale: number }) {
+  const dot = (side: "left" | "right") => <i aria-hidden className="absolute z-[1] rounded-full border-solid border-[var(--fg-muted)] bg-[var(--th-card-bg)]"
+    style={{ [side]: 0, top: GROUP_PIN_Y, width: 10 * scale, height: 10 * scale, borderWidth: 1.5 * scale, transform: `translate(${side === "left" ? "-50%" : "50%"}, -50%)` }} />;
+  return <>{dot("left")}{dot("right")}</>;
+}
+/** Zoomed out, a card keeps a 1px edge on screen (red when it fails); the chosen one adds a blue band outside it. */
+const farRing = (scale: number, selected: boolean, error: boolean) =>
+  ({ boxShadow: [`0 0 0 ${scale}px ${error ? "var(--err)" : "var(--line)"}`, selected && `0 0 0 ${3 * scale}px var(--info)`].filter(Boolean).join(", ") });
+
+/** One group on the relations view, built like a task node. `--legible` lets a keyboard focus ring keep 2px on screen. */
+export function RelationsGroupNode({ data, selected }: NodeProps) {
+  const group = data as GroupNodeData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className={`${CARD} ${group.blocked ? "border-[var(--err)]" : "border-[var(--line)]"} ${selected && !far ? CHOSEN : ""}`}
+    style={{ "--legible": scale, ...far ? farRing(scale, selected, !!group.blocked) : {} } as CSSProperties}>
+    <NodeHead {...group} />
+    <div className={PINS}>
+      <Handle type="target" position={Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+      <span>{group.pins[0]}</span><span>{group.pins[1]}</span>
+      <Handle type="source" position={Position.Right} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+    </div>
+    <div className="grid gap-1.5 px-3 pt-2 pb-2.5"><MeterBar ratio={group.ratio} tone="ok" /><span className="truncate tabular-nums">{group.summary}</span></div>
+    {group.blocked && <p className={`${FOOT} text-[var(--err)]`}>{group.blocked}</p>}
+    {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} pins={group.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
+  </div>;
+}
+
+/** Zoomed out, `cover` (number and title) heads the card and `far` is its state line. */
+export type ViewTaskData = TaskNodeData & { cover: string; far: string };
+
+/** A task on the read-only view: the editor's card, covered by its title, pins and state once zoomed out. */
+export function ViewTaskNode(props: NodeProps) {
+  const task = props.data as ViewTaskData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative rounded-xl" style={{ "--legible": scale, ...far ? farRing(scale, props.selected, task.error) : {} } as CSSProperties}>
+    <RelationsTaskNode {...props} selected={props.selected && !far} />
+    {far && <><FarCover scale={scale} title={task.cover} line={task.far} error={task.error} pins={task.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
+  </div>;
+}
+
+/** `in` tails are dependencies outside the group, at its left; `out` tails depend on it, at its right. `cover` is the
+ * task's number, all a tail's short card has room for once zoomed out. */
+export type TailNodeData = { title: string; cover: string; group: string; side: "in" | "out" };
+
+/** A task outside the group, faint at the canvas's edge with its group's name; its one pin faces the group. Zoomed out,
+ * its dashed edge keeps 1px on screen. Choosing one leaves this view, so it draws no chosen ring. */
+export function RelationsTailNode({ data }: NodeProps) {
+  const tail = data as TailNodeData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative grid w-60 gap-0.5 rounded-xl border border-dashed border-[var(--line)] px-3 py-2.5 text-left text-xs text-[var(--fg-muted)]"
+    style={{ "--legible": scale, ...far ? { borderWidth: scale } : {} } as CSSProperties}>
+    <strong className="truncate text-[13px] font-medium text-[var(--fg-dim)]">{tail.title}</strong><span className="truncate">{tail.group}</span>
+    <Handle type={tail.side === "in" ? "source" : "target"} position={tail.side === "in" ? Position.Right : Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+    {far && <FarCover scale={scale} title={tail.cover} line={tail.group} className="bg-[var(--bg)] text-[var(--fg-muted)]" />}
   </div>;
 }
 
@@ -40,7 +129,8 @@ export type TieMenu = {
   strands: { key: string; label: string }[]; previewing: boolean;
   act: { remove: () => void; detach: (key: string) => void; preview: () => void };
 };
-export type TieNodeData = { count: number; menu: TieMenu | null };
+/** `fixed` ties are only drawn: no grab cursor. */
+export type TieNodeData = { count: number; menu: TieMenu | null; fixed?: boolean };
 
 /** Every line through a tie enters and leaves at its centre, so they gather at the dot and fan out again. */
 const centre = { left: "50%", top: "50%", width: 1, height: 1, minWidth: 0, minHeight: 0, border: 0, background: "transparent" };
@@ -49,9 +139,9 @@ const KEY = "rounded border border-[var(--line)] px-1.5 font-mono text-[11px] te
 
 /** A cable tie: a dot the lines pass through, with the number of lines it holds. Chosen, its menu opens above it. */
 export function RelationsTieNode({ data, selected }: NodeProps) {
-  const { count, menu } = data as TieNodeData;
+  const { count, menu, fixed } = data as TieNodeData;
   const [detaching, setDetaching] = useState(false);
-  return <div className="grid size-11 cursor-grab place-items-center">
+  return <div className={`grid size-11 place-items-center ${fixed ? "" : "cursor-grab"}`}>
     <Handle type="target" position={Position.Left} isConnectable={false} style={centre} />
     <span className={`relative size-5 rounded-full border-2 bg-[var(--th-card-bg)] ${selected ? "border-[var(--info)] ring-4 ring-[color-mix(in_oklch,var(--info)_25%,transparent)]" : "border-[var(--fg-muted)]"}`}>
       <span className="absolute -top-4 -right-4 min-w-5 rounded-full border border-[var(--line)] bg-[var(--th-card-bg)] px-1 text-center text-[11px] leading-4 text-[var(--fg)] tabular-nums">{count}</span>

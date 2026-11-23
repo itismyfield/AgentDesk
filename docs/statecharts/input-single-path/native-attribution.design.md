@@ -104,8 +104,8 @@ WARN은 `(ticket, episode, source incarnation)`에 대해 native idle 관측이 
 
 | 경로·코드 좌표 | 모델 행동·새 계약 |
 |---|---|
-| `src/services/turn_orchestrator.rs:1936`, `:2015`, `:2042` TryStart/Restore/RecoveryKickoff | Inject/BootRestore. old 결과가 있으면 새 턴으로 remint하지 않음 |
-| `src/services/turn_orchestrator.rs:2381`, `:2400`, `:2408`, `:2435` Finish/IfToken/IfMatches/HardStop | Settle/AdjacentEnd. Complete는 O 증거 필요; Cancel은 별도 결과 |
+| `src/services/turn_orchestrator.rs:1948`, `:2015`, `:2042` TryStart/Restore/RecoveryKickoff | Inject/BootRestore. old 결과가 있으면 새 턴으로 remint하지 않음 |
+| `src/services/turn_orchestrator.rs:2393`, `:2400`, `:2408`, `:2435` Finish/IfToken/IfMatches/HardStop | Settle/AdjacentEnd. Complete는 O 증거 필요; Cancel은 별도 결과 |
 | `src/services/turn_orchestrator/clear_channel.rs:161`, `checked_purge.rs:32`, `queued_head/v2/control.rs:111`, `policy_close.rs:348` | 명시적 clear/취소·정책 결과를 기존 원본에 기록. drop/clear를 native 성공으로 바꾸지 않음 |
 | `src/services/discord/turn_lease.rs:298` 운영자 release | OperatorRelease. 먼저 이긴 결과 유지; 늦은 O Complete는 결과 덮기/재완료 0 |
 | `src/services/discord/turn_finalizer/episode.rs:89`, `:136` | Settle/ProjectionClear. actor CAS와 row CAS 사이 crash/debt 보존 |

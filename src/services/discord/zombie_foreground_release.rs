@@ -31,13 +31,22 @@
 //! fails (3). Every hold path is reported with the specific evidence that held
 //! it, so an operator never has to guess which gate refused.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::provider::{CancelToken, ProviderKind};
+pub(crate) use crate::services::stale_turn_reconciler::{
+    InflightEpisodeIdentity, InflightEpisodeLookup,
+};
+#[cfg(test)]
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
+
+#[cfg(test)]
+use super::host_liveness::readiness_is_structurally_idle;
+pub(in crate::services::discord) use super::host_liveness::{
+    terminal_evidence_allows_mailbox_release, tui_structurally_idle,
+};
 
 use super::SharedData;
 #[cfg(unix)]
@@ -134,26 +143,6 @@ pub(in crate::services::discord) fn classify_zombie_foreground(
     ZombieForegroundVerdict::HoldTuiNotIdle
 }
 
-/// Shared #5176 terminal-evidence conjunction.
-///
-/// Cancel surfaces pass `release_authorized = token.cancelled`.  The #5068
-/// finalizer reconciler passes an exact episode-nonce match between the
-/// terminal submission and the residual mailbox token.  Both callers must
-/// independently prove that no inflight bridge owns the turn and that the TUI
-/// is structurally terminal. Keeping the conjunction here prevents the two
-/// recovery surfaces from drifting toward different definitions of a zombie.
-pub(in crate::services::discord) const fn terminal_evidence_allows_mailbox_release(
-    mailbox_holds_active_turn: bool,
-    release_authorized: bool,
-    inflight_state_present: bool,
-    tui_structurally_idle: Option<bool>,
-) -> bool {
-    mailbox_holds_active_turn
-        && release_authorized
-        && !inflight_state_present
-        && matches!(tui_structurally_idle, Some(true))
-}
-
 /// What a cancel surface actually accomplished at the mailbox.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ZombieForegroundReleaseOutcome {
@@ -173,100 +162,6 @@ impl ZombieForegroundReleaseOutcome {
         self.verdict
             .map_or("not_probed", ZombieForegroundVerdict::as_str)
     }
-}
-
-/// `Missing` is terminal evidence, not an error: a foreground turn whose tmux
-/// session no longer exists cannot be running.
-fn readiness_is_structurally_idle(readiness: IndependentTmuxReadiness) -> bool {
-    matches!(
-        readiness,
-        IndependentTmuxReadiness::Missing | IndependentTmuxReadiness::ReadyForInput
-    )
-}
-
-/// Probe through the shared readiness authority. An absent or blank binding is
-/// unmeasured, so it cannot authorize releasing foreground ownership.
-pub(in crate::services::discord) fn tui_structurally_idle(
-    provider: &ProviderKind,
-    token: &Arc<CancelToken>,
-) -> Option<bool> {
-    let Some(tmux_session) = token
-        .tmux_session_name()
-        .filter(|session| !session.trim().is_empty())
-    else {
-        return None;
-    };
-    // Another host's session is never read as idle from a tmux probe.
-    if !super::host_liveness::local_tmux(&tmux_session, None) {
-        return None;
-    }
-    let runtime_kind =
-        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session);
-    let output_path =
-        crate::services::tmux_common::resolve_session_temp_path(&tmux_session, "jsonl");
-    Some(readiness_is_structurally_idle(
-        crate::services::tmux_turn_liveness::independent_tmux_readiness(
-            &tmux_session,
-            provider,
-            runtime_kind,
-            output_path.as_deref().map(Path::new),
-            None,
-        ),
-    ))
-}
-
-/// Stable identity of one persisted inflight episode.
-///
-/// Progress fields are deliberately excluded. `current_msg_id`, `last_offset`,
-/// and the state file's mtime/size all move while the same turn stays
-/// authoritative, so an identity built from them would report a transition on
-/// every tick of a live turn and starve recovery.
-///
-/// `started_at` and `user_msg_id` have no production in-episode assignment site
-/// and are the required axes. `turn_nonce` and `turn_start_offset` are
-/// auxiliary — each fires only when BOTH observations carry a value — because
-/// each has production writers that fill it in or restamp it on a row that is
-/// already on disk: `turn_nonce` at synthetic episode start, and
-/// `turn_start_offset` at `tui_prompt_relay/synthetic_start.rs` and
-/// `tui_prompt_relay/codex_idle_rollout.rs`, both of which restamp the offset
-/// when a runtime (re)binds to the episode. Firing there is correct rather than
-/// spurious — a runtime just claimed the row — and one held tick is not a
-/// denial, because the next tick re-baselines on the restamped value.
-///
-/// `turn_start_offset` is carried because the canonical
-/// `inflight::InflightTurnIdentity` already carries it for a collision this
-/// repository has proven: two consecutive `user_msg_id == 0` TUI-direct turns
-/// collide on `started_at`'s one-second resolution, and a legacy row may have
-/// no `turn_nonce` to break the tie.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InflightEpisodeIdentity {
-    pub(crate) started_at: String,
-    pub(crate) user_msg_id: u64,
-    pub(crate) turn_nonce: Option<String>,
-    pub(crate) turn_start_offset: Option<u64>,
-}
-
-/// What the persisted inflight records say about one tmux session.
-///
-/// The three failure shapes are kept apart from `Unclaimed` on purpose: a read
-/// that could not happen, and a claim that is not attributable to one episode,
-/// are both "we do not know", and neither is evidence that no turn is running.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InflightEpisodeLookup {
-    /// Exactly one non-`rebind_origin` row claims this tmux session.
-    Claimed(InflightEpisodeIdentity),
-    /// The store was readable and no row claims this tmux session.
-    Unclaimed,
-    /// The runtime root could not be resolved, or provider enumeration / a
-    /// candidate row could not be read or revalidated under its lock.
-    Unprobeable,
-    /// More than one row claims this tmux session, so the loader's
-    /// `inflight_tmux_one_to_one` invariant is broken. No single row is
-    /// authoritative, and which one a directory scan yields first is not
-    /// stable, so picking one would make the observation nondeterministic in
-    /// both directions: it could mask a live claim behind a stale one, or
-    /// invent a transition between two rows that both stayed put.
-    Ambiguous,
 }
 
 /// #5176 — which persistent inflight-turn record, if any, still claims this

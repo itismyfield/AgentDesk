@@ -1,3 +1,5 @@
+pub(in crate::services::discord) mod queue_status_presentation;
+
 pub(in crate::services::discord) const QUEUE_STANDALONE_PENDING_REACTION: char = '📬';
 pub(in crate::services::discord) const QUEUE_MERGED_PENDING_REACTION: char = '📬';
 pub(in crate::services::discord) const QUEUE_RECONCILE_PENDING_REACTION: char = '🔄';

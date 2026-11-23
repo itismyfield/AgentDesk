@@ -182,7 +182,9 @@ pub(super) async fn channel_key(
     };
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && crate::services::session_host::operation_policy::configured_refusal(channel).is_none()
+        && super::host_defer_gate::configured_refusal(shared, provider, channel)
+            .await
+            .is_none()
         && unix::observe_old(id, &primary, channel)
     {
         return Some(preferred);

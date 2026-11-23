@@ -40,7 +40,7 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | busy 주입 등록·영수증 collector | `src/services/claude_tui/busy_inject.rs:596`, `:644`; `src/services/tui_input/human_frame/history/v2.rs:566` | enqueue 영수증과 native user/command UUID 영수증은 구별됨 |
 | durable 등록 생성/PreSource 해소/수동 이관 | `src/services/tui_input/human_frame/history/v2.rs:354`, `:395`, `:434` | namespace+전체 key, source target/provider/session/path/dev/ino/offset; live/planned/passive, abandoned 제외 |
 | 예약 입력 | `src/services/scheduled_messages/owner_input.rs:196`, `:206`, `:211`, `:297` | owner original과 `origin=scheduled`, source metadata; metadata만으로 native row 소유권을 추정하지 않음 |
-| slash/기계 입력 정책 | `src/services/discord/tui_prompt_relay.rs:50`; `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs:89`, `:141` | human-active/local-only 판정; bare slash 문자열과 machine envelope를 구분 |
+| slash/기계 입력 정책 | `src/services/discord/tui_prompt_relay.rs:50`; `src/services/discord/session_notice/injected_prompt_policy.rs:89`, `:141` | human-active/local-only 판정; bare slash 문자열과 machine envelope를 구분 |
 | capture/replay의 projection 연결 | `src/services/tui_o/writer/rotation/owe.rs:103`, `:116`; `src/services/tui_o/writer/pieces.rs:109`, `:115` | complete CapturedRecord start/end/line → project_record; notice feature는 Claude+transcript turn 채널만 |
 | origin 생성 | `src/services/tui_o/writer/rotation/owe.rs:125`, `:145` | source의 최초 정확한 attachment 또는 rotation link; logical_session/binding_seq/nonce. 현재 실행 nonce와 같다는 보장 없음 |
 | 새 record 분류·identity seal | `src/services/tui_o/writer/input_notices.rs:61`, `:73`, `:112`, `:145`, `:165` | Discord/비인간은 None; Known은 None, Pending/원본 부족은 Err; UnitKey=(channel,Claude,UUID,InputNotice) |

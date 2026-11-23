@@ -541,7 +541,7 @@ pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
     if !dispatch_id_present
         && fresh_assistant_text_seen
         && !full_response.trim().is_empty()
-        && crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
+        && crate::services::discord::watcher_lifecycle_decision::tui_direct_watcher_synthetic_inflight_matches(
             stall_inflight_snapshot,
             tmux_session_name,
             current_offset,
@@ -603,7 +603,7 @@ pub(super) fn local_cmd_no_output(
         && !fresh_assistant_text_seen
         && !tool_state.any_tool_used
         && first_user_prompt_text(unprocessed_tail).is_some_and(|prompt| {
-        !crate::services::discord::tui_prompt_relay::observed_prompt_starts_external_turn_lifecycle(
+        !crate::services::discord::session_notice::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle(
             &prompt,
         )
     })

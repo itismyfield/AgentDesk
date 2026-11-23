@@ -1,14 +1,20 @@
 //! A first input whose quiet idle source proves no boundary ends retained with a resend ask; one
 //! that saw the session's own turn waits for its end, as a running turn does.
-use super::tests::{NONCE, bound_target};
-use super::*;
+use crate::services::claude::herdr_turn::first_input::*;
+use crate::services::claude::herdr_turn::{Attached, composer};
+use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::discord::{
     owner_effect_for_test as effect, owner_held_watch_for_test as held_watch,
 };
+use crate::services::krx_claude_tests::claude_herdr_first_input::{NONCE, bound_target};
+use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding, binding_context};
 use serde_json::{Value, json};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {

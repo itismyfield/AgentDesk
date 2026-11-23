@@ -1,6 +1,8 @@
 import { ChevronRight } from "lucide-react";
-import { useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
+import { AgentMonitor } from "../../kit/pro/agent-monitor";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import {
@@ -8,10 +10,10 @@ import {
 } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, systemNeedsAttention, todoStatus,
-  type HomeAgent, type HomeAgentState, type HomeTone, type SourceState, type TodoItem, type Tr,
+  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, monitorView, systemNeedsAttention, todoStatus,
+  type HomeAgent, type HomeAgentState, type HomeTone, type MonitorView, type SourceState, type TodoItem, type Tr,
 } from "./homeModel";
-import { loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
+import { loadAgentTurns, loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's first three sections: what needs a person, how the system is, and who is working.
 
@@ -22,15 +24,45 @@ const FULL_TOUCH_BUTTON_STYLE = {
   width: "100%",
 } as CSSProperties;
 
-/** What only a person can move, at the top of home. Each row opens the screen where it is handled. */
-export function HomeTodoCard({ items, agents, cards, campaigns, tr, className }: {
+const BUTTON_STYLE = { "--aui-button-clean-muted": "var(--fg-dim)" } as CSSProperties;
+
+/** Desktop row button: approval stays disabled with its reason until the server takes dashboard approvals;
+ * decisions and deploys open the screen where they are handled. */
+function TodoAction({ item, tr, onOpen }: { item: TodoItem; tr: Tr; onOpen: () => void }) {
+  const reasonId = useId();
+  if (item.kind === "other") return null;
+  if (item.kind === "approve") {
+    return (
+      <span className="flex shrink-0 flex-col items-end gap-1 py-2 pr-4">
+        <Button size="lg" disabled aria-describedby={reasonId}>{tr("승인", "Approve")}</Button>
+        <Cap id={reasonId}>{approvalNote(tr)}</Cap>
+      </span>
+    );
+  }
+  return (
+    <span className="shrink-0 pr-4">
+      <Button size="lg" variant="secondary" onClick={onOpen} style={BUTTON_STYLE}>
+        {item.kind === "decide" ? tr("판단하기", "Decide") : tr("배포 보기", "See deploy")}
+      </Button>
+    </span>
+  );
+}
+
+// Dashboard approval needs the coordinator's forum evidence (docs/dashboard-campaign-decisions-api.md).
+const approvalNote = (tr: Tr) => tr("결정 포럼에서 승인해요", "Approve in the Decision forum");
+
+/** What only a person can move, at the top of home. Each row opens the screen where it is handled; desktop rows
+ * add the approval, decision or deploy button. */
+export function HomeTodoCard({ items, agents, cards, campaigns, isMobile, tr, className }: {
   items: TodoItem[];
   agents: Agent[];
   cards: SourceState;
   campaigns: SourceState;
+  isMobile: boolean;
   tr: Tr;
   className?: string;
 }) {
+  const navigate = useNavigate();
   const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const total = items.length;
   const hidden = total - TODO_ROWS;
@@ -53,21 +85,24 @@ export function HomeTodoCard({ items, agents, cards, campaigns, tr, className }:
             <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
               {items.slice(0, TODO_ROWS).map((item) => {
                 const assignee = item.agentId ? agentById.get(item.agentId) : undefined;
+                const action = !isMobile && item.kind !== "other";
                 return (
-                  <li key={item.key} className="border-t border-[var(--line-soft)] first:border-t-0">
-                    <RowLink to={item.to} className="min-h-16">
+                  <li key={item.key} className="flex min-w-0 items-center border-t border-[var(--line-soft)] first:border-t-0">
+                    <RowLink to={item.to} className="min-h-16 flex-1">
                       <Chip tone={item.tone} className="justify-center sm:min-w-[4.5rem]">{item.chip}</Chip>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm leading-5 font-medium" title={item.title}>{item.title}</span>
                         <Cap className="mt-0.5 block truncate">{item.detail}</Cap>
+                        {isMobile && item.kind === "approve" ? <Cap className="mt-0.5 block truncate">{approvalNote(tr)}</Cap> : null}
                       </span>
                       {assignee ? (
                         <span aria-hidden className="hidden sm:inline-flex">
                           <AgentPersona agent={assignee} size={24} />
                         </span>
                       ) : null}
-                      <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />
+                      {action ? null : <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />}
                     </RowLink>
+                    {action ? <TodoAction item={item} tr={tr} onOpen={() => navigate(item.to)} /> : null}
                   </li>
                 );
               })}
@@ -166,9 +201,37 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
   );
 }
 
-/** Everyone with a state dot and one line of what they do. Busy agents lead; desktop folds the rest into one cell,
- * phones list only busy agents. */
-export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
+/** Working agents with a live turn as kit monitors: what runs now and for how long. The host clock ticks once a
+ * second instead of the monitor's own 100ms clock; the log button opens the agent detail with its activity log. */
+function AgentMonitors({ items, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; isKo: boolean; onOpen: (agent: Agent) => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return (
+    <ul className="m-0 grid list-none gap-2 border-t border-[var(--line-soft)] p-3 sm:grid-cols-2 sm:gap-3 sm:px-4">
+      {items.map(({ entry, view }) => (
+        <li key={entry.agent.id} className="min-w-0" data-testid={`home-agent-monitor-${entry.agent.id}`}>
+          <AgentMonitor
+            status="running"
+            agent={{ name: agentName(entry.agent, isKo), role: view.role ?? undefined, mark: <AgentPersona agent={entry.agent} state="working" size={28} /> }}
+            current={{ label: view.label, kind: view.kind }}
+            started={view.started ?? undefined}
+            now={now}
+            onOpenLog={() => onOpen(entry.agent)}
+            style={{ width: "100%" }}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Everyone with a state dot and one line of what they do. On desktop working agents with a live turn get a kit
+ * monitor and the rest follow, busy first, folded into one cell; phones list only busy agents as one-line rows, since
+ * the monitor wraps to about five rows' height there. */
+export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAgent }: {
   entries: HomeAgent[];
   isMobile: boolean;
   tr: Tr;
@@ -176,8 +239,17 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
   onOpenAgent: (agent: Agent) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, entries.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
-  const busy = counts.working + counts.background;
+  const workingIds = isMobile ? "" : everyone.filter((entry) => entry.state === "working").map((entry) => entry.agent.id).join("|");
+  const loadTurns = useCallback(() => loadAgentTurns(workingIds ? workingIds.split("|") : []), [workingIds]);
+  const turns = usePolled(loadTurns, 30_000);
+  const monitors = everyone.flatMap((entry) => {
+    const view = monitorView(turns.data?.get(entry.agent.id), entry, tr);
+    return view ? [{ entry, view }] : [];
+  });
+  const monitored = new Set(monitors.map(({ entry }) => entry.agent.id));
+  const entries = everyone.filter((entry) => !monitored.has(entry.agent.id));
+  const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, everyone.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
+  const busy = entries.filter((entry) => entry.state === "working" || entry.state === "background").length;
   const legendStates = AGENT_STATES.filter((state) => counts[state] > 0 || (!isMobile && state !== "unknown"));
   const legend = isMobile ? (
     <Cap className="font-display tabular-nums">
@@ -203,12 +275,13 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
     : isMobile ? tr(`${rest}명 더 보기`, `Show ${rest} more`) : tr(`나머지 ${rest}명`, `${rest} more`);
 
   return (
-    <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : entries.length} aside={legend} testId="home-agents">
-      {entries.length === 0 ? (
+    <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : everyone.length} aside={legend} testId="home-agents">
+      {monitors.length > 0 ? <AgentMonitors items={monitors} isKo={isKo} onOpen={onOpenAgent} /> : null}
+      {everyone.length === 0 ? (
         <CardNote>{tr("등록된 에이전트가 없어요.", "No agents yet.")}</CardNote>
-      ) : isMobile ? (
+      ) : entries.length === 0 ? null : isMobile ? (
         <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
-          {shown.length === 0 ? (
+          {shown.length === 0 && monitors.length === 0 ? (
             <li className="px-3 py-4 text-sm text-[var(--fg-muted)]">
               {counts.unknown > 0 ? tr("세션을 읽지 못해 상태는 확인 불가예요.", "Sessions did not load, so states are unknown.") : tr("모두 쉬는 중이에요.", "Everyone is resting.")}
             </li>

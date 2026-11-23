@@ -5,42 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+pub(crate) use crate::runtime_layout::boot_id::current_boot_id_at;
+
 pub(crate) const LATEST_STARTUP_DOCTOR_ENDPOINT: &str = "/api/doctor/startup/latest";
 
 pub(crate) fn startup_artifact_root() -> Option<PathBuf> {
     crate::config::runtime_root().map(|root| root.join("runtime").join("doctor").join("startup"))
 }
 
-fn boot_id_from_pid_file(pid_file: &std::path::Path) -> Result<String, String> {
-    let pid = fs::read_to_string(pid_file)
-        .map_err(|error| format!("read dcserver pid file {}: {error}", pid_file.display()))?
-        .trim()
-        .to_string();
-    if pid.is_empty() {
-        return Err(format!("dcserver pid file {} is empty", pid_file.display()));
-    }
-    let mtime = fs::metadata(pid_file)
-        .and_then(|meta| meta.modified())
-        .map_err(|error| {
-            format!(
-                "read dcserver pid file metadata {}: {error}",
-                pid_file.display()
-            )
-        })?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("dcserver pid file mtime before epoch: {error}"))?
-        .as_secs();
-    Ok(format!("{pid}-{mtime}"))
-}
-
 pub(crate) fn current_boot_id() -> Result<String, String> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| "AGENTDESK runtime root is not resolvable".to_string())?;
     current_boot_id_at(&root)
-}
-
-pub(crate) fn current_boot_id_at(root: &std::path::Path) -> Result<String, String> {
-    boot_id_from_pid_file(&root.join("runtime").join("dcserver.pid"))
 }
 
 pub(crate) fn latest_startup_artifact_path() -> Option<PathBuf> {

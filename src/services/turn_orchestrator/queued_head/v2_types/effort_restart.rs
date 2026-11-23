@@ -24,6 +24,10 @@ pub(crate) struct Cut {
     pub(crate) tmux: String,
     #[serde(default)]
     pub(crate) bind_nonce: Option<String>,
+    /// The Herdr execution ended in place of a tmux pane; its retired row is the one the next
+    /// launch resumes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) herdr: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

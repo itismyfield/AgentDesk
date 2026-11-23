@@ -649,7 +649,12 @@ fn an_actorless_force_purge_keeps_held_or_unreadable_snapshots() {
             channel_id: Some(channel),
             tmux_name: String::new(),
         };
-        let purged = crate::services::queue::force_purge_channel_mailbox(None, &target, None).await;
+        let purged = crate::services::queue::force_purge_channel_mailbox(
+            None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
+            &target,
+            None,
+        )
+        .await;
         assert_eq!(purged.map(|counts| counts.disk_files_removed), Some(1));
         let kept = ["unknown", "terminal", "legacy", "torn"].map(|token| file(token).exists());
         assert_eq!(kept, [true, true, false, true]);

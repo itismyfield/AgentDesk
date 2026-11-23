@@ -10,6 +10,9 @@ use super::*;
 use crate::config::session_hosts::{
     BootSessionHosts, EndpointConfig, EndpointMode, SessionHostsConfig,
 };
+use crate::services::discord::health::{
+    observe_operator_notice, restart_operator_notice_for_test, send_operator_notices_on_this_thread,
+};
 use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
 use crate::services::session_host::herdr_socket_rig_tests::{
     NativeHerdrRig, native_registry_on_this_thread, native_server_child,
@@ -493,7 +496,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
     let home = f.home("episode", Some(CANONICAL_CONFIG));
     let boot = notified_boot("episode-node", "episode", &home, &[7_189_042, 7_189_041]);
     let sent: std::sync::Arc<std::sync::Mutex<Vec<u64>>> = Default::default();
-    let _send = OperatorNotice::send_on_this_thread({
+    let _send = send_operator_notices_on_this_thread({
         let sent = sent.clone();
         move |channel, _| {
             sent.lock().unwrap().push(channel);
@@ -517,7 +520,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
             for notice in faults.iter_mut().filter_map(|fault| fault.notice.as_mut()) {
                 notice.root = Some(receipts.clone());
             }
-            notify(faults)
+            notify(faults, observe_operator_notice)
         };
         tick(&restart).await;
         assert_eq!(record("episode").cause, Some(RESTART));
@@ -554,7 +557,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
             root: Some(receipts.clone()),
             ..OperatorNotice::herdr_home("episode-node", &home, 7_189_041)
         };
-        assert!(posted.restart_for_test());
+        assert!(restart_operator_notice_for_test(&posted));
         tick(&unverified).await;
         assert_eq!(record("episode").cause, None);
         for _ in 0..2 {
@@ -581,7 +584,7 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
     let home = f.home("unmapped", Some(CANONICAL_CONFIG));
     let boot = boot("unmapped-node", &[("unmapped", &home)]);
     let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let _send = OperatorNotice::send_on_this_thread({
+    let _send = send_operator_notices_on_this_thread({
         let posted = posted.clone();
         move |_, _| {
             posted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -591,7 +594,11 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
     let restart = RestoreResume::Unverified(RestoreUnverified::ConfigChangedSinceStart);
     paused().block_on(async {
         for _ in 0..3 {
-            notify(pass_with(&boot, &f.personal, &|_| Some(restart.clone()))).await;
+            notify(
+                pass_with(&boot, &f.personal, &|_| Some(restart.clone())),
+                observe_operator_notice,
+            )
+            .await;
             tokio::time::advance(Duration::from_secs(61)).await;
         }
     });
@@ -639,8 +646,14 @@ fn the_process_starts_one_upkeep_task() {
     runtime.block_on(async {
         let selection = crate::bootstrap::prepare_session_hosts_boot(candidate, None).await;
         crate::config::session_hosts::install_selected(selection);
-        assert!(spawn(), "the first start runs the task");
-        assert!(!spawn(), "a second start adds no task");
+        assert!(
+            spawn(observe_operator_notice),
+            "the first start runs the task"
+        );
+        assert!(
+            !spawn(observe_operator_notice),
+            "a second start adds no task"
+        );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while !records().contains_key("task") {
             assert!(

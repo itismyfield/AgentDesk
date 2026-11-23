@@ -157,14 +157,10 @@ impl RoutineAgentExecutor {
         let Some(turn_id) = result.get("turn_id").and_then(Value::as_str) else {
             return;
         };
-        crate::services::discord::health::cancel_routine_process_turn(
-            registry,
-            &provider,
-            poise::serenity_prelude::ChannelId::new(channel),
-            turn_id,
-            reason,
-        )
-        .await;
+        let channel = poise::serenity_prelude::ChannelId::new(channel);
+        registry
+            .cancel_routine_process_turn(&provider, channel, turn_id, reason)
+            .await;
     }
 }
 
@@ -288,6 +284,7 @@ mod tests {
 mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::health::HealthRegistry;
     use crate::services::routines::store::NewRoutine;
 
     #[tokio::test(flavor = "current_thread")]

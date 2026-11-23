@@ -8,6 +8,7 @@ use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
 mod run_policy;
+mod settlement;
 pub(crate) mod start_deferral;
 mod surface;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
@@ -16,10 +17,9 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::domain::bot_role::UtilityBotRole;
-use crate::services::discord::health::{
-    HealthRegistry, reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm,
-    resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
-    start_reserved_headless_agent_turn_with_owner_channel,
+use crate::services::discord::health::resolve_bot_http;
+use crate::services::engine_runtime::health_port::{
+    AppHealthRegistry, HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnStart, RoutineProcessPort,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
@@ -35,7 +35,7 @@ use super::store::{
 #[derive(Clone)]
 pub struct RoutineAgentExecutor {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<Arc<AppHealthRegistry>>,
     default_completion_timeout_secs: u64,
     headless_fresh_agents: bool,
 }
@@ -92,7 +92,7 @@ pub(crate) struct AgentTurnCompletion {
 impl RoutineAgentExecutor {
     pub fn new(
         pool: Arc<PgPool>,
-        health_registry: Option<Arc<HealthRegistry>>,
+        health_registry: Option<Arc<AppHealthRegistry>>,
         default_completion_timeout_secs: u64,
     ) -> Self {
         Self {
@@ -364,6 +364,16 @@ impl RoutineAgentExecutor {
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
+            match settlement::delivery_deadline(self, store, &run, pause_on_terminal_failure)
+                .await?
+            {
+                settlement::Deadline::Proceed => {}
+                settlement::Deadline::Hold => continue,
+                settlement::Deadline::Closed(outcome) => {
+                    outcomes.push(outcome);
+                    continue;
+                }
+            }
             let Some(run) = owner_input::reconcile_run(self, store, run).await? else {
                 continue;
             };
@@ -1042,7 +1052,7 @@ impl RoutineAgentExecutor {
     async fn resolve_or_create_routine_thread(
         &self,
         store: &RoutineStore,
-        registry: &HealthRegistry,
+        registry: &AppHealthRegistry,
         claimed: &ClaimedRoutineRun,
         agent_id: &str,
         provider_name: &str,
@@ -1144,7 +1154,7 @@ fn parse_channel_id(value: &str) -> Option<poise::serenity_prelude::ChannelId> {
 }
 
 async fn validate_routine_thread(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider_name: &str,
     agent_id: &str,
     thread_id: poise::serenity_prelude::ChannelId,
@@ -1177,7 +1187,7 @@ async fn validate_routine_thread(
 }
 
 async fn create_routine_thread(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider_name: &str,
     agent_id: &str,
     parent_channel_id: poise::serenity_prelude::ChannelId,
@@ -1203,7 +1213,7 @@ async fn create_routine_thread(
 }
 
 async fn resolve_routine_thread_http(
-    registry: &HealthRegistry,
+    registry: &AppHealthRegistry,
     provider_name: &str,
     agent_id: &str,
 ) -> Result<RoutineThreadHttp> {

@@ -1,9 +1,6 @@
 use super::outbound::notification_policy::scoped_flags;
 use poise::serenity_prelude as serenity;
-use serenity::{
-    ChannelId, CreateActionRow, CreateAllowedMentions, CreateMessage, EditMessage, Message,
-    MessageId,
-};
+use serenity::{ChannelId, CreateActionRow, CreateMessage, EditMessage, Message, MessageId};
 
 const DISCORD_EMPTY_MESSAGE_SENTINEL: &str = "\u{200b}";
 const DISCORD_CONTENT_HARD_CAP_UNITS: usize = super::DISCORD_MSG_LIMIT;
@@ -111,19 +108,9 @@ fn channel_message_builder(
 /// (`<@requester>` — prompt-too-long, escalation) keep working. Tightening the
 /// residual agent-echoed user-ping case is deferred to the relay-content path
 /// in the delivery-lease consolidation (it must not break directed pings).
-pub(crate) fn relay_allowed_mentions() -> CreateAllowedMentions {
-    CreateAllowedMentions::new()
-        .all_users(true)
-        .everyone(false)
-        .all_roles(false)
-}
+pub(crate) use crate::services::message_outbox::mentions::relay_allowed_mentions;
 
-pub(crate) fn relay_message_payload(content: &str) -> serde_json::Value {
-    serde_json::json!({
-        "content": content,
-        "allowed_mentions": relay_allowed_mentions(),
-    })
-}
+pub(crate) use crate::services::message_outbox::mentions::relay_message_payload;
 
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,

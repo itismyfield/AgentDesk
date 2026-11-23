@@ -10,10 +10,10 @@
 | --- | --- |
 | `RequestClear`, 기존 Bound/Pending/Retired/Unknown | `src/services/discord/commands/control/clear_teardown.rs:73–77,161–221`의 채널 clear, `src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:92–136`의 owner clear, `src/services/discord/commands/control.rs:582–594`의 restored/retired 선행 경로. Unknown/Conflict는 새 종료 권한을 얻지 않는다. |
 | `LoseSource`, `RecordAfterEnd` | tmux는 `src/services/discord/commands/control/clear_teardown.rs:104–122`에서 선택적 증거를 모은 뒤 그 결과와 무관하게 종료를 요청한다. 기존 provider 캡처와 종료 확인의 경계는 같은 디렉터리의 `clear_end_record.rs:37–59,73–99,166–191` 및 `codex_end_record.rs:8–35`다. Herdr도 증거를 기존 nonce에서 선택적으로 붙인다. |
-| `CloseExactOrObserveEnded → RetireExact → ReportClear` | `src/services/discord/herdr_terminate.rs:517–624`의 fence·exact row·종료 확인·Retired CAS, `src/services/discord/commands/control/clear_teardown.rs:197–221`의 postlude. `InterruptPostlude`는 이전 실행을 종료한 뒤 프로세스가 중단된 구간을 나타낸다. 새 저널을 두지 않으므로 해당 구간의 기록 재생은 보장하지 않는다. |
+| `CloseExactOrObserveEnded → RetireExact → ReportClear` | `src/services/discord/herdr_terminate.rs:516–624`의 fence·exact row·종료 확인·Retired CAS, `src/services/discord/commands/control/clear_teardown.rs:197–221`의 postlude. `InterruptPostlude`는 이전 실행을 종료한 뒤 프로세스가 중단된 구간을 나타낸다. 새 저널을 두지 않으므로 해당 구간의 기록 재생은 보장하지 않는다. |
 | `RestartServer`, 현재 증거와 낡은 관측 | `src/services/discord/recovery_engine/herdr_server_replaced.rs:143–210`, `src/services/discord/recovery_engine/herdr_reader.rs:235–351`, `src/services/session_host/herdr_gate/root_replaced.rs:20–90`이 서버 교체와 이전 실행 종료를 관측한다. 두 번째 서버 세대는 첫 관측이 낡을 수 있다는 유한 추상화다. 같은 불변 복원 계보의 활동 상태는 두 번째 재시작에도 유지된다. |
 | `UseRestoredShell → ReturnToShell`, `LoseNoWorkProof` | 현재 `LoneShell`의 foreground 관측은 `src/services/session_host/herdr/pane_probe.rs:206,221–244`다. 현재 셸 화면이 과거 활동 없음과 백그라운드 작업 없음을 보장하지 않는다. 서버 측 활동 증거는 미사용·사용·불명, 작업 증거는 없음·있음·불명으로 분리했다. |
-| `LoseLineageEvidence`, `SurveyEmpty → CompareAndClose` | `src/services/herdr_launch.rs:462–475`의 successor 저장이 이전 row를 덮을 수 있다. 독립 계보 증거가 남지 않으면 당시 후보의 자격을 종료한다. 현 관측/닫기 API는 `src/services/session_host/herdr/model.rs:204–258,269–294`의 별도 동작이다. 결정 A의 세 조건을 서버가 닫기와 함께 원자적으로 확인하는 능력은 W2 선행 의존이다. |
+| `LoseLineageEvidence`, `SurveyEmpty → CompareAndClose` | `src/services/herdr_launch.rs:468–475`의 successor 저장이 이전 row를 덮을 수 있다. 독립 계보 증거가 남지 않으면 당시 후보의 자격을 종료한다. 현 관측/닫기 API는 `src/services/session_host/herdr/model.rs:204–258,269–294`의 별도 동작이다. 결정 A의 세 조건을 서버가 닫기와 함께 원자적으로 확인하는 능력은 W2 선행 의존이다. |
 
 ## 검증 규칙과 설정
 

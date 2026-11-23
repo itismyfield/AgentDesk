@@ -8,6 +8,7 @@ use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 // migrated from `crate::services::discord_delivery` (the flat path is kept
 // as a re-export in `services/mod.rs` for compatibility).
 pub(crate) mod discord_delivery;
+pub(crate) mod http_outbound;
 pub(crate) mod notify_recovery;
 pub(crate) mod thread_reuse;
 
@@ -22,6 +23,7 @@ pub(crate) mod outbox_queue;
 pub(crate) mod outbox_route;
 pub(crate) mod result_header;
 pub(crate) mod routing_constraint;
+pub(crate) mod thread_archive_defer;
 pub(crate) mod wait_queue;
 
 // #3037: dispatch loopback request DTO (`UpdateDispatchBody`) relocated here

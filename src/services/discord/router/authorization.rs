@@ -1,26 +1,4 @@
-/// Classifies how a turn was triggered. Drives the race-handler delete-on-loss
-/// behavior — background-trigger turns must never have their placeholder
-/// deleted, because the placeholder may already carry information the user
-/// needs (e.g. "🟢 main CI 통과!" relayed from a `Bash run_in_background`
-/// completion). See #796.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnKind {
-    /// Triggered by a human user message. Race-handler may delete the
-    /// placeholder when this turn loses to another active turn — the user
-    /// still sees their own message and can be told "queued for later".
-    Foreground,
-    /// Triggered by a background-task notification (notify bot post or other
-    /// agent self-emitted info-only delivery). The placeholder content is the
-    /// only visible record of the notification and MUST be preserved when
-    /// this turn loses a race.
-    BackgroundTrigger,
-}
-
-impl TurnKind {
-    pub(in crate::services::discord) fn is_background_trigger(self) -> bool {
-        matches!(self, TurnKind::BackgroundTrigger)
-    }
-}
+pub(crate) use crate::services::cluster::intake_turn::TurnKind;
 
 /// Returns `true` when a Discord message arriving on a channel was authored
 /// by the dedicated notify bot (or the agent's own background-task self-emit

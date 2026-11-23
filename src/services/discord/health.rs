@@ -20,9 +20,11 @@ use crate::services::provider::ProviderKind;
 //   * `headless_turn` — headless agent-turn reserve/start API
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
+mod consumer_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
+mod managed_reset_port;
 pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
@@ -102,11 +104,17 @@ pub(crate) use super::turn_presence::activity::tests::{
     BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
 };
 mod presence_unknown;
+#[cfg(unix)]
+pub(crate) use super::turn_presence::supervisor::observe_operator_notice;
 pub(crate) use super::turn_presence::supervisor::status as turn_presence_status;
 #[cfg(all(test, unix))]
 pub(crate) use super::turn_presence::supervisor::tests::seed_long_unknown_for_tests;
 #[cfg(test)]
 pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use super::turn_presence::supervisor::{
+    restart_operator_notice_for_test, send_operator_notices_on_this_thread,
+};
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{
@@ -150,18 +158,18 @@ pub(crate) use turn_deliver::{
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.
+#[cfg(all(test, unix))]
+pub(crate) use recovery::InflightDisposition;
 #[cfg(test)]
 pub(crate) use recovery::STALL_WATCHDOG_INTERVAL_SECS;
 #[cfg(all(test, unix))]
 pub(crate) use recovery::StaleSweepWarrantFixture;
+#[cfg(test)]
+pub(crate) use recovery::TOKEN_SUPERSEDED_PATH;
 #[allow(unused_imports)]
 pub(crate) use recovery::self_watchdog;
 #[cfg(test)]
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
-pub(crate) use recovery::{
-    FINISH_UNOBSERVED_PATH, InflightDisposition, TOKEN_SUPERSEDED_PATH,
-    judge_provider_channel_stop, stop_judged_provider_channel,
-};
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
@@ -179,6 +187,7 @@ pub(crate) use recovery::{
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown, stop_channel_runtime,
 };
+pub(crate) use recovery::{judge_provider_channel_stop, stop_judged_provider_channel};
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
 pub use runtime_resolve::resolve_bot_http;
@@ -419,6 +428,12 @@ impl HealthRegistry {
         self.started_at_unix = chrono::Utc::now().timestamp() - seconds;
     }
     pub fn new() -> Self {
+        // A live registry implies the observer hook, so every registry install path publishes.
+        super::tui_prompt_relay::install_observer_publication();
+        // Runtime readers below Discord reach custody and the strict journal through these hooks.
+        super::terminal_delivery_custody::install_runtime_reads();
+        #[cfg(unix)]
+        super::session_relay_sink::journal::install_exact_append();
         Self {
             channel_home_seed_issues: tokio::sync::Mutex::new(Vec::new()),
             providers: tokio::sync::Mutex::new(Vec::new()),

@@ -6,9 +6,10 @@ use std::sync::Arc;
 use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 
-use super::super::admin_host_guard::ManagedReset;
+use super::super::admin_host_guard::{ManagedReset, host_decision_of};
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::queue_io::{mailbox_cancel_all_waiting, mailbox_cancel_queued_primary_message};
+use super::config::claude_local_tui_relaunch_applies as relaunch_applies;
 use cancel_queued::autocomplete_cancel_queued;
 mod cancel_queued;
 use super::super::settings::save_bot_settings;
@@ -240,8 +241,10 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         .contains(&channel_id);
     let mut relaunch_pending =
         matches!(provider, ProviderKind::Claude) && relaunch_pending_for(shared, channel_id).await;
-    let applies = super::config::claude_local_tui_relaunch_applies(provider, channel_id);
-    if relaunch_pending && !applies && herdr_channel(channel_id) {
+    let pending = fast_mode_reset_pending || relaunch_pending;
+    let (applies, herdr) =
+        super::config::pending_relaunch(shared, provider, channel_id, pending).await;
+    if relaunch_pending && !applies && herdr {
         // A channel moved to Herdr is not restarted; its next launch takes the saved setting.
         release_relaunch_pending(shared, channel_id).await;
         relaunch::say(http, channel_id, relaunch::HERDR_NOTICE.to_string()).await;
@@ -390,7 +393,8 @@ async fn relaunch_on_fast_drift(
     channel_id: serenity::ChannelId,
     fast_mode_channel_id: serenity::ChannelId,
 ) -> Option<ManagedReset> {
-    if !super::config::claude_local_tui_relaunch_applies(provider, channel_id) {
+    let host = host_decision_of(shared, provider, channel_id.get()).await;
+    if !relaunch_applies(provider, channel_id, &host) {
         return None;
     }
     let desired = super::config::channel_fast_mode_setting(shared, fast_mode_channel_id).await;
@@ -473,7 +477,11 @@ pub(super) async fn consume_reflected(
         .overrides
         .model_session_reset_pending
         .remove(&channel_id);
-    if fast || model.is_some() || removed {
+    // Codex goals are a launch option too: the ended TUI's next launch reads them as well.
+    let goals = *provider == ProviderKind::Codex
+        && clear_codex_goals_reset_pending_for_channel(shared, channel_id);
+    removed |= goals && settings.channel_codex_goals_reset_pending.remove(&key);
+    if fast || goals || model.is_some() || removed {
         sync_session_reset_pending(shared, channel_id);
         sync_session_reset_pending(shared, fast_channel);
     }
@@ -494,10 +502,6 @@ pub(super) async fn release_relaunch_pending(
     if let Some(token) = shared.http.cached_bot_token.get().filter(|_| removed) {
         save_bot_settings(token, &settings);
     }
-}
-
-fn herdr_channel(channel_id: serenity::ChannelId) -> bool {
-    crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
 }
 
 /// Lets a newly saved setting of `channel`, or of a channel sharing it, retry a relaunch whose
@@ -552,8 +556,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     let mut report = ClearReport::default();
     let first_pause = crate::services::tui_o::cutover::pause_codex_first(channel_id.get());
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
-    let _completion =
-        super::super::session_transition::SessionTransitionCompletion::new(shared, channel_id);
+    let _completion = super::super::router::SessionTransitionCompletion::new(shared, channel_id);
     // Clear registration must reopen before completion wakes the next owner input.
     let clear_epoch = crate::services::herdr_launch::clear_epoch::begin_clear(
         provider.as_str(),

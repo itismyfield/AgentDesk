@@ -121,6 +121,19 @@ async function serveServerCampaign(page: Page, release = gatedServerCampaign()) 
   return release;
 }
 
+/** Enabled controls under 44px on either side, and fields typed in under 16px, inside `root`. */
+const small = (root: HTMLElement | SVGElement) => {
+  const selector = "button, a[href], input, select, textarea, summary, [role='switch'], [role='radio'], [role='combobox'], [tabindex='0']";
+  return Array.from(root.querySelectorAll<HTMLElement>(selector))
+    .filter((node) => !(node as HTMLButtonElement).disabled && node.getClientRects().length && getComputedStyle(node).visibility !== "hidden")
+    .map((node) => ({ node, box: node.getBoundingClientRect() }))
+    .filter(({ box }) => box.width > 0 && Math.min(box.width, box.height) < 44)
+    .map(({ node, box }) => `${node.tagName}.${node.className.toString().slice(0, 40)} ${Math.round(box.width)}x${Math.round(box.height)} ${node.textContent?.trim().slice(0, 20)}`);
+};
+const tiny = (root: HTMLElement | SVGElement) => Array.from(root.querySelectorAll<HTMLElement>("input:not([type='checkbox']):not([type='radio']), select, textarea"))
+  .filter((node) => node.getClientRects().length && parseFloat(getComputedStyle(node).fontSize) < 16)
+  .map((node) => node.outerHTML.slice(0, 80));
+
 async function expectNoHorizontalOverflow(page: Page) {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
 }
@@ -247,10 +260,16 @@ test("campaign tab: closing a task returns focus to the card, list row or connec
   await escape();
   await expect(row).toBeFocused();
   await panel.getByRole("tab", { name: "관계도" }).click();
-  await panel.locator(".react-flow__node").filter({ hasText: "Relay" }).first().click();
-  const relayRow = panel.locator('.campaign-relations [data-task-id="i7340"]');
+  const desktop = testInfo.project.name === "desktop";
+  if (desktop) {
+    await panel.locator(".react-flow__node").filter({ hasText: "Relay" }).first().click();
+    await panel.getByRole("button", { name: "그룹 열기" }).click();
+  } else await panel.locator('[data-group="Relay"]').click();
+  // Wide screens open the task from its card in the group's graph, phones from its row in the group's list.
+  const relayRow = panel.locator(desktop ? '.react-flow__node[data-task-id="i7340"]' : '.campaign-relations .campaign-task-row[data-task-id="i7340"]');
   for (const close of [() => closeButton.click(), escape]) {
     await relayRow.click();
+    if (desktop) await panel.getByRole("button", { name: "작업 상세 열기" }).click();
     await expect(page.locator(".campaign-node-detail")).toBeVisible();
     await close();
     await expect(relayRow).toBeFocused();
@@ -323,17 +342,6 @@ test.describe("touch at 390px", () => {
       expect(box.y + box.height, target).toBeLessThanOrEqual(844 - 64);
     }
     await expectNoHorizontalOverflow(page);
-    const small = (root: HTMLElement | SVGElement) => {
-      const selector = "button, a[href], input, select, textarea, summary, [role='switch'], [role='radio'], [role='combobox'], [tabindex='0']";
-      return Array.from(root.querySelectorAll<HTMLElement>(selector))
-        .filter((node) => !(node as HTMLButtonElement).disabled && node.getClientRects().length && getComputedStyle(node).visibility !== "hidden")
-        .map((node) => ({ node, box: node.getBoundingClientRect() }))
-        .filter(({ box }) => box.width > 0 && Math.min(box.width, box.height) < 44)
-        .map(({ node, box }) => `${node.tagName}.${node.className.toString().slice(0, 40)} ${Math.round(box.width)}x${Math.round(box.height)} ${node.textContent?.trim().slice(0, 20)}`);
-    };
-    const tiny = (root: HTMLElement | SVGElement) => Array.from(root.querySelectorAll<HTMLElement>("input:not([type='checkbox']):not([type='radio']), select, textarea"))
-      .filter((node) => node.getClientRects().length && parseFloat(getComputedStyle(node).fontSize) < 16)
-      .map((node) => node.outerHTML.slice(0, 80));
     await page.locator(".campaign-find").click(); // the search field it opens follows the same rule
     await expect(page.getByRole("searchbox", { name: "작업 찾기" })).toBeVisible();
     const tab = page.locator("#campaign-panel-campaigns");
@@ -533,6 +541,129 @@ test.describe("board at 390px touch", () => {
     expect(await board.evaluate(sideways)).toBe(0);
     await board.locator('[data-board-card="A"]').getByRole("button", { name: "다시 시도 준비" }).click();
     expect(await page.getByRole("alertdialog").evaluate(small)).toBe(0);
+  });
+});
+
+/** A ledger whose Relay and Cluster groups loop, with a tie saved on the group graph over both lines into Release. */
+async function openRelations(page: Page, theme: "dark" | "light" = "dark") {
+  const value = campaign("relations-dag", "관계도 시험", [
+    node("g1", "#7401 게이트웨이 재연결", { status: "completed" }), node("g2", "#7402 헬스 체크 간격", { status: "running", dependencies: ["g1"] }),
+    node("r1", "#7340 재전송 큐 지표", { group: "Relay", dependencies: ["g1"] }), node("r2", "#7403 세션 매핑 유지", { group: "Relay", status: "blocked", dependencies: ["r1"], blocker: "릴리스 승인을 기다려요" }),
+    node("c1", "#7336 채널 이어받기", { group: "Cluster", dependencies: ["r1"] }), node("r3", "#7404 로그 압축", { group: "Relay", dependencies: ["c1"] }),
+    node("rel1", "#7500 릴리스 노트", { group: "Release", dependencies: ["r2", "c1"] }), node("i1", "#7510 배포 경로", { group: "Infra", dependencies: ["g2"] }),
+    node("d1", "#7520 문서 정리", { group: "Docs", status: "completed" }), node("a1", "#7530 감사 후속", { group: "Audit", status: "completed" }), node("q1", "#7540 대기열 표시", { group: "Queue" }),
+  ]);
+  const scope = { mode: "legacy", campaignId: value.id, projection: "groups", taskScope: "all" }, edges = [["r2", "rel1"], ["c1", "rel1"]];
+  const tie = { schemaVersion: 1, scope, ties: [{ id: "t1", position: { x: 0, y: 0 }, strandOrder: edges }], routes: edges.map((edge) => ({ edge, via: ["t1"] })), showOriginal: false, revision: 7 };
+  const calls = await mockApi(page, theme);
+  await json(page, /\/api\/campaigns\?.*$/, { campaigns: [value], live: {}, limit: 100, offset: 0 });
+  await json(page, /\/api\/campaigns\/relations-dag$/, { campaign: value, live: {} });
+  await page.addInitScript(([key, stored]) => window.localStorage.setItem(key, stored), [`agentdesk.campaign-graph-view.v1:${JSON.stringify(["legacy", value.id, "groups", "all"])}`, JSON.stringify(tie)]);
+  await page.goto(`/campaigns?mode=legacy&campaign=${value.id}`);
+  await page.getByRole("tab", { name: "관계도" }).click();
+  return { view: page.locator(".campaign-relations"), calls };
+}
+/** With CAMPAIGNS_SHOTS set, the relations tab in dark and light at the page's size. */
+async function relationsShots(page: Page, name: string) {
+  for (const theme of SHOTS ? ["dark", "light"] as const : []) {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await openRelations(page, theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${SHOTS}/relations-${name}-${theme}.png` });
+    const zoom = page.getByRole("button", { name: "확대" });
+    if (await zoom.isVisible()) {
+      await zoom.click(); await zoom.click(); await page.waitForTimeout(400); await page.screenshot({ path: `${SHOTS}/relations-${name}-${theme}-zoomed.png` });
+      await page.getByRole("button", { name: "화면 맞춤" }).click();
+      await page.locator('.react-flow__node[data-id="campaign-group:Relay"]').dblclick();
+      await page.locator('.react-flow__node[data-id="r2"]').click();
+    } else { await page.locator('[data-group="Relay"]').click(); await page.locator("[data-relations-list]").evaluate((list) => list.scrollIntoView()); }
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${SHOTS}/relations-${name}-${theme}-group.png` });
+  }
+}
+
+test("relations view: group cards by dependency depth, a dashed loop, the saved tie, an inspector a group is chosen into with the keyboard, and zoom tools", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The canvas is for wide screens");
+  await page.clock.install({ time: new Date(NOW) });
+  await page.setViewportSize({ width: 1440, height: 980 });
+  const { view, calls } = await openRelations(page);
+  const card = (key: string) => view.locator(`.react-flow__node[data-id="campaign-group:${key}"]`);
+  await expect(view.locator('.react-flow__node[data-id^="campaign-group:"]')).toHaveCount(8);
+  await expect(view.locator('.react-flow__node[data-id^="campaign-tie:"]')).toHaveCount(1);
+  await expect(view.locator("[data-relations-canvas]").getByText("순환 · Cluster → Relay → Cluster")).toBeVisible();
+  const left = async (key: string) => (await card(key).boundingBox())!.x;
+  expect([await left("Gateway") < await left("Relay"), await left("Relay") < await left("Release")]).toEqual([true, true]);
+  await expect(view.getByRole("complementary", { name: "캠페인 요약" })).toContainText("그룹 8개 · 작업 11개");
+  // Fitted past 75% the cards wear covers; zooming in drops them, and Tab walks the drawn columns then the shelf, outlined near and far.
+  const covers = view.locator("[data-far]"), tools = view.getByRole("toolbar", { name: "보기 도구" });
+  const walk = async (count = 8) => {
+    await view.locator(".react-flow__node").first().focus();
+    await page.keyboard.press("Shift+Tab");
+    const seen = [];
+    for (let step = 0; step < count; step += 1) { await page.keyboard.press("Tab"); seen.push(await page.evaluate(() => [document.activeElement?.getAttribute("data-id"), getComputedStyle(document.activeElement!.firstElementChild!).outlineStyle])); }
+    return seen;
+  };
+  await expect(covers).toHaveCount(8);
+  for (const zoom of ["확대", "확대"]) await tools.getByRole("button", { name: zoom }).click();
+  await expect(covers).toHaveCount(0);
+  expect(await walk()).toEqual(["Cluster", "Gateway", "Relay", "Infra", "Release", "Audit", "Docs", "Queue"].map((key) => [`campaign-group:${key}`, "solid"]));
+  for (const zoom of ["축소", "축소", "축소"]) await tools.getByRole("button", { name: zoom }).click();
+  await expect(covers).toHaveCount(8);
+  expect((await walk()).map(([, outline]) => outline)).toEqual(Array(8).fill("solid"));
+  // A double-click on a card not yet chosen opens it, and back returns the focus to that card.
+  await card("Gateway").dblclick();
+  await expect(view.getByRole("navigation", { name: "이동 줄" })).toHaveText("전체 그룹›Gateway");
+  await view.locator("[data-relations-back]").click();
+  await expect(card("Gateway")).toBeFocused();
+  await card("Relay").focus();
+  await page.keyboard.press("Enter");
+  const aside = view.getByRole("complementary", { name: "선택 그룹" });
+  await expect(aside.getByRole("list", { name: "막힌 작업" })).toContainText("#7403 세션 매핑 유지");
+  await expect(aside.getByRole("list", { name: "다음 그룹" })).toContainText("Release의존성 1");
+  await expect(view.getByRole("toolbar", { name: "보기 도구" }).getByRole("button")).toHaveCount(3);
+  // The opened group's tasks take the canvas, with faint tails for the work outside it on either side.
+  await aside.getByRole("button", { name: "그룹 열기" }).click();
+  await expect(view.getByRole("navigation", { name: "이동 줄" })).toHaveText("전체 그룹›Relay");
+  await expect(view.locator("[data-relations-back]")).toBeFocused();
+  const task = (id: string) => view.locator(`.react-flow__node[data-id="${id}"]`);
+  await expect(view.locator(".react-flow__node[data-task-id]")).toHaveCount(3);
+  expect(await view.locator('.react-flow__node[data-id^="tail:"]').evaluateAll((tails) => tails.map((tail) => tail.getAttribute("data-id")).sort())).toEqual(["tail:c1", "tail:g1", "tail:rel1"]);
+  expect([(await task("tail:g1").boundingBox())!.x < (await task("r1").boundingBox())!.x, (await task("tail:rel1").boundingBox())!.x > (await task("r2").boundingBox())!.x]).toEqual([true, true]);
+  expect(await walk(6)).toEqual(["tail:g1", "tail:c1", "r1", "r2", "r3", "tail:rel1"].map((id) => [id, "solid"]));
+  await task("r2").focus();
+  await page.keyboard.press("Enter");
+  const picked = view.getByRole("complementary", { name: "선택 작업" });
+  await expect(picked).toContainText("막힘 사유릴리스 승인을 기다려요");
+  await expect(picked.getByRole("list", { name: "후행 작업" })).toContainText("릴리스 노트");
+  await picked.getByRole("button", { name: "작업 상세 열기" }).click();
+  await expect(page.locator(".campaign-node-detail")).toBeVisible();
+  await page.getByRole("button", { name: "상세 닫기" }).click();
+  await expect(task("r2")).toBeFocused();
+  // A tail goes to its own group with that task chosen, and 편집 opens the editor on that group.
+  await task("tail:rel1").click();
+  await expect(view.getByRole("navigation", { name: "이동 줄" })).toHaveText("전체 그룹›Release");
+  await expect(view.getByRole("complementary", { name: "선택 작업" })).toContainText("릴리스 노트");
+  await page.getByRole("button", { name: "편집", exact: true }).click();
+  await expect(page).toHaveURL(/edit=relations&scope=group%3ARelease/);
+  expect(calls.filter((call) => !call.startsWith("GET") && !call.startsWith("POST /api/auth/ws-ticket"))).toEqual([]);
+  await relationsShots(page, "1440x980");
+});
+
+test.describe("relations at 390px touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test("relations view: phones list the groups under the loop warning, open a group's tasks, with no sideways scroll and 44px targets", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Phone width");
+    await page.clock.install({ time: new Date(NOW) });
+    const { view } = await openRelations(page);
+    await expect(view.locator(".react-flow")).toHaveCount(0);
+    await expect(view.getByRole("list", { name: "그룹 목록" }).getByRole("button")).toHaveCount(8);
+    await expect(view.getByText("순환 · Cluster → Relay → Cluster")).toBeVisible();
+    await view.locator('[data-group="Relay"]').click();
+    await expect(view.locator('.campaign-task-row[data-task-id="r2"]')).toContainText("선행 1 · 후행 1");
+    await expectNoHorizontalOverflow(page);
+    expect([await view.evaluate(small), await view.evaluate(tiny)]).toEqual([[], []]);
+    await relationsShots(page, "390x844");
   });
 });
 

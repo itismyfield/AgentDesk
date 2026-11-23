@@ -146,9 +146,7 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
 }
 
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.
-pub(in crate::services::codex) fn codex_tui_option_args(
-    options: &CodexLaunchOptions,
-) -> Vec<String> {
+pub(crate) fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());
@@ -243,7 +241,7 @@ fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), Stri
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
-pub(in crate::services::codex) fn prepare_codex_herdr_launch(
+pub(crate) fn prepare_codex_herdr_launch(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,

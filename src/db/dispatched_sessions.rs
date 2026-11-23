@@ -21,7 +21,10 @@ pub(crate) mod rotation_selector;
 pub(crate) use force_kill::{
     ForceKillHosted, load_force_kill_session_hosted_pg, prepare_force_kill_retry_pg,
 };
-pub(crate) use force_kill::{disconnect_session_and_prepare_retry_pg, load_force_kill_session_pg};
+pub(crate) use force_kill::{
+    disconnect_session_and_prepare_retry_pg, fail_force_killed_dispatch_without_retry_pg,
+    load_force_kill_session_pg,
+};
 #[path = "dispatched_sessions/thread_gc.rs"]
 mod thread_gc;
 #[cfg(test)]
@@ -279,30 +282,6 @@ pub(crate) async fn rebind_session_provider_by_id_pg(
     .await
     .map(|result| result.rows_affected())
     .map_err(|error| format!("rebind session #{session_id} provider binding: {error}"))
-}
-
-pub(crate) async fn fail_force_killed_dispatch_without_retry_pg(
-    pool: &PgPool,
-    dispatch_id: &str,
-    session_key: Option<&str>,
-) -> Result<usize, String> {
-    let reason = json!({
-        "reason": "force_kill_session",
-        "session_key": session_key,
-    });
-    crate::dispatch::set_dispatch_status_on_pg_async(
-        pool,
-        dispatch_id,
-        "failed",
-        Some(&reason),
-        "force_kill_session",
-        Some(&["pending", "dispatched"]),
-        true,
-    )
-    .await
-    .map_err(|error| {
-        format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
-    })
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -849,10 +828,15 @@ mod selector_cleanup_tests {
 
             seed_session_with_selectors(&pool, session_key, "idle", Some("dispatch-1841")).await;
 
-            let retry_meta =
-                disconnect_session_and_prepare_retry_pg(&pool, session_key, None, false)
-                    .await
-                    .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+            let retry_meta = disconnect_session_and_prepare_retry_pg(
+                &pool,
+                session_key,
+                None,
+                false,
+                crate::dispatch::set_dispatch_status_on_pg_boxed,
+            )
+            .await
+            .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
             assert!(retry_meta.is_none());
             assert_cleanup_preserved_selectors(&pool, session_key).await;
 
@@ -1393,6 +1377,7 @@ mod selector_cleanup_tests {
                 session_key,
                 Some(dispatch_id),
                 true,
+                crate::dispatch::set_dispatch_status_on_pg_boxed,
             )
             .await
             .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests

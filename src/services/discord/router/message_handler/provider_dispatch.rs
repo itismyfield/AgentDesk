@@ -95,7 +95,15 @@ pub(super) async fn observe_codex_turn(
     if !matches!(provider, ProviderKind::Codex) || !matches!(host, TurnHost::Tmux) {
         return None;
     }
-    crate::services::discord::codex_absence::observe_turn(channel, tmux?, token).await
+    let tmux = tmux?;
+    let episode = async {
+        crate::services::discord::inflight::read_only_owner_snapshot::codex_episode_snapshot(
+            channel, tmux, token,
+        )
+        .await
+        .map(|snapshot| snapshot.episode().clone())
+    };
+    crate::services::discord::codex_absence::observe_turn(channel, tmux, token, episode).await
 }
 
 #[cfg(test)]
@@ -600,7 +608,7 @@ mod herdr {
     use crate::services::discord::tui_prompt_relay::herdr_source::{
         HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
     };
-    use crate::services::herdr_launch::HerdrLaunchHost;
+    use crate::services::herdr_launch::{HerdrLaunchHost, OwnerPort};
     use crate::services::provider::ProviderKind;
     use crate::services::session_host::HerdrTarget;
     use crate::services::tui_prompt_dedupe::binding_events::SourceId;
@@ -635,6 +643,7 @@ mod herdr {
                 system_prompt: turn.system_prompt,
                 allowed_tools: turn.allowed_tools,
                 model: turn.model,
+                effort: turn.effort,
                 fast_mode: turn.native_fast_mode,
                 goals: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
@@ -727,8 +736,20 @@ mod herdr {
             self.confirmed(owner, record, target)
         }
 
+        fn effort_resume(
+            &self,
+        ) -> Option<crate::services::codex::herdr_turn::restart_intent::EffortResume> {
+            let owed = crate::services::discord::commands::effort_restart::herdr_resume;
+            let channel = poise::serenity_prelude::ChannelId::new(self.channel_id);
+            Handle::current().block_on(owed(self.shared?, channel))
+        }
+
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
+        }
+
+        fn owner_port(&self) -> OwnerPort {
+            crate::services::discord::HERDR_OWNER_PORT
         }
     }
 
@@ -769,6 +790,10 @@ mod herdr {
 
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
+        }
+
+        fn owner_port(&self) -> OwnerPort {
+            crate::services::discord::HERDR_OWNER_PORT
         }
 
         fn hold_notice(&self) -> Option<Arc<herdr_turn::HoldNotice>> {

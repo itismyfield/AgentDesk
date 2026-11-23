@@ -43,6 +43,7 @@ mod inflight;
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
+pub(crate) use inflight::{install_codex_absence_reader, install_engine_probes};
 mod inflight_heartbeat_sweeper;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
@@ -84,6 +85,8 @@ mod session_banner;
 mod session_relay_sink;
 #[cfg(unix)]
 pub(crate) use session_relay_sink::journal::append_exact_metadata;
+#[cfg(all(test, unix))]
+pub(crate) use session_relay_sink::journal::install_exact_append;
 #[cfg(all(test, unix))]
 pub(crate) use session_relay_sink::journal::{
     exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
@@ -180,29 +183,36 @@ mod tmux_watcher_registry;
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
 #[cfg(test)]
+mod krx_claude_tests;
+#[cfg(all(test, unix))]
+mod krx_claude_unix_tests;
+#[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
+#[cfg(any(unix, test))]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::note_ended as note_takeover_ended;
+#[cfg(any(unix, test))]
+mod herdr_owner_port;
+#[cfg(any(unix, test))]
+pub(crate) use herdr_owner_port::HERDR_OWNER_PORT;
 #[cfg(test)]
 pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+#[cfg(test)]
+pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
+pub(crate) use session_notice::input_notice::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
-#[cfg(test)]
-pub(crate) use tui_prompt_relay::INPUT_NOTICE_RUNS;
-#[cfg(unix)]
-pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use tui_prompt_relay::{
-    input_notice_content, input_notice_line, scheduled_input_notice_content,
-};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
@@ -319,10 +329,12 @@ pub(crate) fn input_queue_path_for_test(shared: &SharedData, channel: u64) -> st
         .0
 }
 pub(crate) use crate::domain::lifecycle::InflightRestartMode;
-pub(crate) use router::{
-    HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,
-    IntakeRequest, TurnKind, checkpoint_waits_for_admission, execute_intake_turn_core,
-};
+pub(crate) use crate::services::cluster::intake_turn::{IntakeExecution, IntakeRequest};
+pub(crate) use crate::services::turn_orchestrator::HeadlessTurnStartError;
+#[cfg(all(test, unix))]
+pub(crate) use router::TurnKind;
+#[cfg(test)]
+pub(crate) use router::{checkpoint_waits_for_admission, execute_intake_turn_core};
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 pub(in crate::services::discord) use shared_state::{
@@ -358,10 +370,8 @@ use adk_session::{
     build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
     parse_dispatch_id,
 };
+pub(in crate::services) use compact_turn_authority::ManagedCompactTurnIdentity;
 use compact_turn_authority::compact_eligible_turn_source;
-pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, pending_managed_turn_matches,
-};
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
 #[cfg(test)]
@@ -385,7 +395,6 @@ use queue_dispatch::{
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
-use router::handle_event;
 use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
@@ -654,42 +663,8 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     )
 }
 
-async fn has_active_session_for_thread_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    let Some(pool) = pg_pool else {
-        return Ok(false);
-    };
-
-    let row = sqlx::query(
-        "SELECT 1
-         FROM sessions
-         WHERE thread_channel_id = $1
-           AND LOWER(COALESCE(status, '')) IN ('turn_active', 'working')
-           AND COALESCE(last_heartbeat, created_at) > NOW() - INTERVAL '10 minutes'
-         LIMIT 1",
-    )
-    .bind(thread_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load active session for thread {thread_id}: {error}"))?;
-
-    Ok(row.is_some())
-}
-
-pub(crate) async fn should_defer_thread_archive_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    if let Ok(channel_id) = thread_id.parse::<u64>()
-        && has_fresh_inflight_for_channel(channel_id)
-    {
-        return Ok(true);
-    }
-
-    has_active_session_for_thread_pg(pg_pool, thread_id).await
-}
+#[cfg(test)]
+pub(crate) use crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg;
 
 /// Consume a legacy deferred-restart signal.
 ///
@@ -1116,6 +1091,7 @@ pub(crate) struct SharedData {
         tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
+    pub(in crate::services::discord) router_ports: shared_state::RouterPorts,
 }
 
 pub(crate) use session_transition::{
@@ -1434,6 +1410,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         turn_completion_events: turn_completion_events::turn_completion_event_bus(),
         turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
         readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
+        router_ports: router::ROUTER_PORTS,
     })
 }
 
@@ -2081,7 +2058,7 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
     reply_message_id: MessageId,
     text: impl Into<String>,
     reason: &'static str,
-) -> queue_dispatch::MailboxEnqueueOutcome {
+) -> bool {
     let outcome = mailbox_enqueue_intervention(
         shared,
         provider,
@@ -2113,14 +2090,14 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
             error = %error,
             "internal followup enqueue failed durable pending-queue persistence"
         );
-        return outcome;
+        return false;
     }
 
     if outcome.enqueued {
         schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id, reason);
     }
 
-    outcome
+    outcome.enqueued
 }
 
 async fn mailbox_has_pending_soft_queue(

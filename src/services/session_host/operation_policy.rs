@@ -1,39 +1,8 @@
 //! Read-only host policy observations. These values grant no execution or teardown authority.
 
-use crate::services::session_host::HostKind;
+use crate::services::session_host::{HostKind, HostLiveness, HostSessionRef, host_for};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
-
-/// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
-pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;
-    let key = endpoint.key;
-    Some(format!(
-        "Herdr 설정 채널(endpoint `{key}`)이라 tmux 세션을 바꾸지 않아요"
-    ))
-}
-
-/// Whether the marker alone admits a tmux observation; rows can still refuse it.
-pub(crate) fn marker_is_tmux(marker: &HostKindMarker) -> bool {
-    matches!(
-        marker,
-        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
-    )
-}
-
-/// The `.host_kind` marker check alone, for a path holding only a tmux name.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
-    let marker = read_host_kind_marker(tmux_name);
-    let tmux = marker_is_tmux(&marker);
-    if !tmux {
-        tracing::info!(
-            name = tmux_name,
-            ?marker,
-            row_tmux = true,
-            "tmux probe deferred: host is not tmux"
-        );
-    }
-    (!tmux).then(|| format!("the host marker of {tmux_name} is not tmux"))
-}
+pub(crate) use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
 
 /// A provider-auth login target: only the auth namespace with no other host's marker.
 pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
@@ -47,6 +16,16 @@ pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
 pub(crate) fn terminate_enabled() -> bool {
     crate::config_live_reload::current()
         .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
+}
+
+/// Only an explicit local tmux/process marker permits a historical liveness probe.
+pub(crate) fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
+    let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
+        read_host_kind_marker(name)
+    else {
+        return None;
+    };
+    Some(host_for(kind).liveness(HostSessionRef { kind, name }))
 }
 
 #[cfg(test)]
@@ -89,14 +68,20 @@ mod tests {
         assert_eq!(auth_login_refusal(name), refused);
     }
 
-    #[test]
-    fn configured_and_login_refusals_keep_their_exact_text() {
+    #[tokio::test]
+    async fn configured_and_login_refusals_keep_their_exact_text() {
+        use crate::services::session_host::host_decision::host_decision;
         let _hosts = crate::config::session_hosts::force_for_test(Some("node"), &[(17, "node")]);
+        let refusal = async |channel| {
+            host_decision(None, None, None, channel)
+                .await
+                .tmux_refusal()
+        };
         assert_eq!(
-            configured_refusal(17).as_deref(),
+            refusal(17).await.as_deref(),
             Some("Herdr 설정 채널(endpoint `node-endpoint`)이라 tmux 세션을 바꾸지 않아요")
         );
-        assert_eq!(configured_refusal(18), None);
+        assert_eq!(refusal(18).await, None);
         assert_eq!(
             auth_login_refusal("AgentDesk-login-x").as_deref(),
             Some("AgentDesk-login-x is not a provider-auth login session")

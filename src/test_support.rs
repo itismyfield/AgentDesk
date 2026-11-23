@@ -1,15 +1,15 @@
 //! Test-only serialized runtimes, E/P lock holder records, and Rust source scanning for `include_str!` guards.
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
-pub(crate) mod serial_runtime;
-pub(crate) mod wait;
+pub mod serial_runtime;
+pub mod wait;
 
 use std::fmt;
 use std::ops::Range;
 
 /// A comment or literal that never closes; the guard must fail, not match nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnterminatedSource {
+pub struct UnterminatedSource {
     pub(crate) kind: &'static str,
     pub(crate) offset: usize,
 }
@@ -25,18 +25,18 @@ impl fmt::Display for UnterminatedSource {
 }
 
 /// Source with every comment byte blanked to a space; literals, CR and LF stay.
-pub(crate) fn strip_rust_comments(source: &str) -> Result<String, UnterminatedSource> {
+pub fn strip_rust_comments(source: &str) -> Result<String, UnterminatedSource> {
     blank(source, false)
 }
 
 /// Code-only view: comments and string/char literals are blanked to spaces.
-pub(crate) fn rust_code_mask(source: &str) -> Result<String, UnterminatedSource> {
+pub fn rust_code_mask(source: &str) -> Result<String, UnterminatedSource> {
     blank(source, true)
 }
 
 /// Byte range from the first `signature` in a code mask through its matching `}`.
 /// `None` when the signature is absent, ends in `;` first, or never closes.
-pub(crate) fn braced_item_span(code: &str, signature: &str) -> Option<Range<usize>> {
+pub fn braced_item_span(code: &str, signature: &str) -> Option<Range<usize>> {
     let start = code.find(signature)?;
     let open = start + code[start..].find(['{', ';'])?;
     if code.as_bytes()[open] == b';' {
@@ -290,7 +290,7 @@ fn prefixed_literal_end(
     }
 }
 
-pub(crate) mod lock_holder {
+pub mod lock_holder {
     //! Holder record for the process-wide test mutexes: the shared env lock (E) and the PG lifecycle lock (P).
     //! A watchdog thread names the holder whenever one holder has kept a waiter parked past `STALL_REPORT_AFTER`.
 
@@ -305,11 +305,11 @@ pub(crate) mod lock_holder {
     const REPEAT_EVERY: Duration = Duration::from_secs(300);
     const WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
-    pub(crate) static ENV_LOCK: LockSlot = LockSlot::new("config::shared_test_env_lock (E)");
-    pub(crate) static PG_LIFECYCLE_LOCK: LockSlot =
+    pub static ENV_LOCK: LockSlot = LockSlot::new("config::shared_test_env_lock (E)");
+    pub static PG_LIFECYCLE_LOCK: LockSlot =
         LockSlot::new("db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK (P)");
 
-    pub(crate) struct LockSlot {
+    pub struct LockSlot {
         name: &'static str,
         holder: Mutex<Option<Party>>,
     }
@@ -361,7 +361,7 @@ pub(crate) mod lock_holder {
 
         /// Runs the blocking `lock` with this caller registered as a waiter, then records it as holder.
         #[track_caller]
-        pub(crate) fn hold<G>(&'static self, lock: impl FnOnce() -> G) -> G {
+        pub fn hold<G>(&'static self, lock: impl FnOnce() -> G) -> G {
             let at = Location::caller();
             let id = self.enter_wait(at);
             let guard = lock();
@@ -371,7 +371,7 @@ pub(crate) mod lock_holder {
         }
 
         /// Called from the owning guard's `Drop` before its inner `MutexGuard` releases the mutex.
-        pub(crate) fn release(&self) {
+        pub fn release(&self) {
             *self.holder() = None;
         }
 

@@ -2,7 +2,7 @@
 #[cfg(test)]
 use super::admission::Admission;
 use super::admission::AdmissionTicket;
-use crate::services::discord::router::IntakeExecution;
+use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::discord::{Intervention, MailboxEnqueueOutcome, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
@@ -422,12 +422,7 @@ pub(crate) async fn intake(
             .await
             .allowed_bot_ids
             .contains(&request.request_owner.get());
-    let raw = crate::services::discord::router::input_payload::owned_original(
-        request,
-        bot,
-        uploads,
-        durable_context,
-    );
+    let raw = (shared.router_ports.owned_original)(request, bot, uploads, durable_context);
     admit_raw(shared, provider, request.channel_id, &raw, uploads_pending).await
 }
 
@@ -467,7 +462,7 @@ async fn admit_raw(
     #[cfg(unix)]
     if intake == Intake::Accepted {
         crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Owner);
-        crate::services::discord::router::message_handler::owner_wake(shared, channel);
+        (shared.router_ports.owner_wake)(shared, channel);
     }
     Some(intake)
 }

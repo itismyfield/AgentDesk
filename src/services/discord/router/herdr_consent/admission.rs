@@ -33,7 +33,21 @@ pub(in crate::services::discord::router) async fn check(
     provider: &ProviderKind,
     request: &IntakeRequest,
 ) -> Option<Result<Hold, Refusal>> {
-    let configured = endpoint(request.channel_id.get())?;
+    // A thread asks its parent's endpoint, and only for an input that runs on Herdr now; a tmux
+    // thread's input or an undecided one needs no consent (its turn host holds the undecided).
+    use crate::services::session_host::surface_policy::{Relation, relation};
+    let channel = request.channel_id.get();
+    let configured = match relation(channel) {
+        Relation::Child { parent } => {
+            let configured = endpoint(parent)?;
+            let (pool, token) = (deps.shared.pg_pool.as_ref(), &deps.shared.token_hash);
+            let host = crate::services::session_host::host_decision::input_runs_herdr;
+            host(pool, token, provider, channel)
+                .await
+                .then_some(configured)?
+        }
+        Relation::NotChild | Relation::Unresolved => endpoint(channel)?,
+    };
     // Existing routing owns remote custody; only its execution-node worker observes policy.
     if session_hosts::local_node().as_deref() != Some(configured.execution_node.as_str()) {
         return None;

@@ -469,6 +469,18 @@ mod test_override {
 #[cfg(test)]
 pub(crate) mod test_override {
     use crate::services::agent_protocol::RuntimeHandoffKind;
+    use std::path::Path;
+
+    pub(crate) fn assert_first_open_send(report: &str, expected_file: &Path, expected_stage: &str) {
+        let (_, open) = report
+            .split_once("oldest_open=seq=1,origin=")
+            .expect(report);
+        let (location, stage) = open.split_once(",stage=").expect(report);
+        let (stage, _) = stage.split_once(",open_secs=").expect(report);
+        let source = location.rsplitn(3, ':').nth(2).expect(report);
+        assert_eq!(Path::new(source), expected_file, "{report}");
+        assert_eq!(stage, expected_stage, "{report}");
+    }
 
     /// Keeps a tmux runtime binding registered until dropped, so a panicking test cannot leave it behind.
     pub(crate) struct TuiSessionGuard(String);

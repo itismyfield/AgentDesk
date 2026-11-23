@@ -104,7 +104,9 @@ fn mend_consumes_only_the_actors_own_unchanged_unknown_head_behind_an_open_gate(
             let HeadSettle::Committed(Some(ticket)) = settled.await else {
                 panic!("H may have been sent");
             };
-            let admitted = (channel, None, open as Gate);
+            let check: GateCheck =
+                crate::services::discord::health::InjectOrigin::queued_head_gate_enabled;
+            let admitted = (channel, None, open as Gate, check);
 
             // A head its live owner may still settle is not Unknown, whatever proof is found.
             let original = disk(channel)["head_injection"]["original"].clone();
@@ -131,12 +133,12 @@ fn mend_consumes_only_the_actors_own_unchanged_unknown_head_behind_an_open_gate(
                 stale
             );
             let closed = Err("gate_closed".to_string());
-            let shut = (channel, None, shut as Gate);
+            let shut = (channel, None, shut as Gate, check);
             assert_eq!(
                 handle.mend_queued_head(head.clone(), ctx(), shut).await,
                 closed
             );
-            let elsewhere = (ChannelId::new(1), None, open as Gate);
+            let elsewhere = (ChannelId::new(1), None, open as Gate, check);
             assert_eq!(
                 handle
                     .mend_queued_head(head.clone(), ctx(), elsewhere)

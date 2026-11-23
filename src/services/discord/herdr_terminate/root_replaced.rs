@@ -35,12 +35,12 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
+use crate::services::discord::recovery_engine::herdr_attach::HerdrSourceAttach;
 use crate::services::discord::recovery_engine::host_reconcile::HostReconcile;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tmux::execution_identity::herdr_observation::{
     HerdrExecutionMatch, HerdrMismatch,
 };
-use crate::services::discord::tui_prompt_relay::herdr_source::HerdrSourceAttach;
 use crate::services::herdr_launch::retired_hold::{self, RetiredHoldOutcome};
 use crate::services::tui_prompt_dedupe as dedupe;
 use std::collections::BTreeMap;
@@ -245,8 +245,11 @@ fn local(
         .ok_or("channel unavailable")?;
     let node = crate::config::session_hosts::local_node().ok_or("local node unavailable")?;
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
-    let endpoint =
-        crate::config::session_hosts::herdr_endpoint(channel).ok_or("endpoint unavailable")?;
+    // A thread's execution is compared with its parent's endpoint, where it runs.
+    use crate::services::session_host::thread_host::{PolicyHost, parent_policy};
+    let PolicyHost::Herdr { endpoint, .. } = parent_policy(channel) else {
+        return Err("endpoint unavailable".into());
+    };
     if owner.discord_token_hash != shared.token_hash
         || owner.owner_node != node
         || owner.runtime_root != root.display().to_string()

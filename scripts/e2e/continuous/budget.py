@@ -70,7 +70,7 @@ def settle(state_dir, when, run_id, actual):
     if row is None:
         return
     for provider, used in actual.items():
-        for field in FIELDS:
+        for field in (*FIELDS, "tokens_basis"):
             if used.get(field) is not None and provider in row:
                 row[provider][field] = used[field]
         if used.get("over_budget"):

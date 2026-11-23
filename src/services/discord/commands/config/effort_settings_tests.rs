@@ -502,3 +502,89 @@ fn a_launch_drops_a_saved_level_the_current_model_lacks() {
         })
     });
 }
+
+/// `/effort` restarts only a Herdr Codex TUI channel; a Herdr Claude pane takes the level in place.
+#[cfg(unix)]
+#[test]
+fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
+    let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut config = crate::config::Config::default();
+    for provider in ["claude", "codex"] {
+        let hosted = crate::config::ProviderConfig {
+            tui_hosting: Some(true),
+            ..Default::default()
+        };
+        config.providers.insert(provider.into(), hosted);
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let default = crate::config::Config::default();
+            crate::services::provider_hosting::install_provider_hosting_config(&default);
+        }
+    }
+    let _restore = Restore;
+    crate::services::provider_hosting::install_provider_hosting_config(&config);
+    let channel = serenity::ChannelId::new(821_740);
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("node-a"), &[(channel.get(), "node-a")]);
+    let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
+    // The Claude Herdr turn is on too, so only the provider keeps a Claude pane off the restart.
+    let _claude = crate::services::turn_host::force_switch_for_test(Some(true));
+    assert!(herdr_codex(&ProviderKind::Codex, channel));
+    assert!(
+        !herdr_codex(&ProviderKind::Claude, channel),
+        "a Herdr Claude pane is never restarted for effort"
+    );
+    let elsewhere = serenity::ChannelId::new(821_741);
+    assert!(
+        !herdr_codex(&ProviderKind::Codex, elsewhere),
+        "a local TUI keeps the tmux path"
+    );
+    let _off = crate::services::turn_host::force_codex_switch_for_test(Some(false));
+    assert!(
+        !herdr_codex(&ProviderKind::Codex, channel),
+        "the Codex Herdr switch gates it"
+    );
+}
+
+/// An effort restart's end spends the Codex goals reset it reflects, as it spends `/fast` and `/model`.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_effort_restart_spends_the_codex_goals_reset() {
+    let shared = make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(821_742);
+    shared
+        .overrides
+        .codex_goals_session_reset_pending
+        .insert(channel);
+    shared
+        .settings
+        .write()
+        .await
+        .channel_codex_goals_reset_pending
+        .insert(channel.get().to_string());
+    sync_session_reset_pending(&shared, channel);
+    assert!(shared.overrides.session_reset_pending.contains(&channel));
+    super::super::control::consume_reflected(&shared, &ProviderKind::Codex, channel).await;
+    assert!(
+        !shared
+            .overrides
+            .codex_goals_session_reset_pending
+            .contains(&channel)
+    );
+    assert!(
+        !shared
+            .settings
+            .read()
+            .await
+            .channel_codex_goals_reset_pending
+            .contains(&channel.get().to_string())
+    );
+    assert!(
+        !shared.overrides.session_reset_pending.contains(&channel),
+        "no later turn repeats the Herdr reset refusal"
+    );
+}

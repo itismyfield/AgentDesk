@@ -6,16 +6,22 @@ mod intake_dispatch;
 mod intake_gate;
 mod intake_queue_transaction;
 pub(in crate::services::discord) mod message_handler;
+mod ports;
+use crate::services::discord::queue_reactions::queue_status_presentation;
 pub(in crate::services::discord) use message_handler::input_payload;
-mod queue_status_presentation;
 mod response_format;
 mod thread_binding;
+mod transition_wake;
 mod turn_start;
 
 pub(crate) use authorization::TurnKind;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
 pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
+pub(in crate::services::discord) use ports::ROUTER_PORTS;
+pub(in crate::services::discord) use transition_wake::SessionTransitionCompletion;
+#[cfg(unix)]
+pub(in crate::services::discord) use transition_wake::wake_installed_owner;
 pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> bool {
     intake_dispatch::replay_admission::dormant_start(channel).is_some()
 }
@@ -43,13 +49,11 @@ pub(super) use message_handler::{
     start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
-pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
 #[cfg(test)]
 pub(super) use turn_start::claim_reserved_headless_turn;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
-    HeadlessTurnStartStatus,
 };
 #[cfg(test)]
 pub(crate) use turn_start::{

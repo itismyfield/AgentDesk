@@ -23,6 +23,25 @@ pub(crate) struct OwnerInput {
 }
 
 impl OwnerInput {
+    pub(crate) async fn settle_delivery(
+        &self,
+        handle: &ChannelMailboxHandle,
+    ) -> Result<crate::services::turn_orchestrator::RoutineInputSettlement, String> {
+        if self.original["channel_id"].as_u64() != Some(self.channel) {
+            return Err("owner channel mismatch".into());
+        }
+        let original = serde_json::from_value(self.original.clone())
+            .map_err(|error| format!("stored original: {error}"))?;
+        handle
+            .settle_routine_input(
+                (self.namespace.clone(), self.ticket.clone()),
+                original,
+                self.context.clone(),
+                self.admission_committed == Some(true),
+            )
+            .await
+    }
+
     pub(crate) fn new(
         original: &PendingQueueItem,
         namespace: &str,
@@ -377,7 +396,7 @@ impl ChannelMailboxHandle {
             return;
         };
         #[cfg(unix)]
-        crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+        (shared.router_ports.owner_wake)(&shared, channel);
         #[cfg(not(unix))]
         let _ = (shared, channel);
     }

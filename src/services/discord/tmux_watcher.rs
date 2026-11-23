@@ -2097,7 +2097,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
 
         if !anchor_cleanup_is_stale_for_newer_turn
-            && crate::services::discord::tui_prompt_relay::should_complete_tui_direct_anchor_lifecycle(
+            && crate::services::discord::turn_view_reconciler::anchor_completion::should_complete_tui_direct_anchor_lifecycle(
             terminal_output_committed,
             tui_direct_anchor_terminal_body_visible,
             tui_direct_anchor_or_lease_present_for_lifecycle,
@@ -2125,7 +2125,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     anchor.message_id,
                 );
             }
-            let completed = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
+            let completed = crate::services::discord::turn_view_reconciler::anchor_completion::complete_tui_direct_prompt_anchor_lifecycle_if_present(
                 &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,
@@ -2201,7 +2201,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .as_ref()
                 .map(|state| state.born_generation)
                 .unwrap_or(shared.restart.current_generation);
-            let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
+            let _ = crate::services::discord::turn_view_reconciler::anchor_completion::complete_tui_direct_anchor_lifecycle_for_inflight(
                 &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,

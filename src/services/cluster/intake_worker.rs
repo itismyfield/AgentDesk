@@ -4,9 +4,8 @@
 //! Polls `intake_outbox` for rows where `target_instance_id == self`,
 //! atomically claims them, transitions through the 5-state machine
 //! (`pending → claimed → accepted → spawned → done | failed_pre_accept |
-//! failed_post_accept`), and invokes
-//! `services::discord::execute_intake_turn_core` to actually run the
-//! Discord turn.
+//! failed_post_accept`), and runs the Discord turn through the router's
+//! `execute_intake_turn_core`, handed in as `IntakeTurnPort`.
 //!
 //! Runtime bootstrap starts the loop in observe/enforce mode when PostgreSQL is available.
 //!
@@ -17,13 +16,14 @@
 //!     (round-2 P0 #2). Post-accept failures call `mark_failed_post_accept`
 //!     and the operator alert path takes over.
 
+use super::intake_turn::{IntakeExecution, IntakeRequest, TurnKind};
 use crate::db::intake_outbox::{
     IntakeOutboxRow, claim_pending_for_target_except, mark_accepted, mark_done,
     mark_failed_post_accept, mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-use crate::services::discord::{IntakeExecution, IntakeRequest, SharedData, TurnKind};
+use crate::services::discord::SharedData;
 use crate::services::tui_o::cutover::intake_route;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -38,6 +38,32 @@ pub(crate) use crate::intake_consent_authority::BeforeEffects;
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[cfg(unix)]
 pub(crate) use o_input::{scope_key::WorkerScopeKey, take_before_effects};
+
+/// The router's admission check for a channel, consulted before replay sources are trusted.
+pub(crate) type CheckpointWaits = fn(ChannelId) -> bool;
+pub(crate) type IntakeTurnFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>>,
+            > + Send
+            + 'a,
+    >,
+>;
+/// Runs one claimed request as a Discord turn.
+pub(crate) type ExecuteIntakeTurn = for<'a> fn(
+    &'a Arc<serenity::http::Http>,
+    &'a Arc<SharedData>,
+    &'a str,
+    IntakeRequest,
+    super::attachment_transfer::uploads::PendingUploads,
+) -> IntakeTurnFuture<'a>;
+
+/// Router decisions the worker needs; the Discord runtime hands them in when it starts the loop.
+#[derive(Clone, Copy)]
+pub(crate) struct IntakeTurnPort {
+    pub(crate) checkpoint_waits: CheckpointWaits,
+    pub(crate) execute: ExecuteIntakeTurn,
+}
 #[derive(Default)]
 struct MarkDoneMissCounters {
     stamp_handoff_observed: AtomicU64,
@@ -269,6 +295,7 @@ pub(crate) async fn run_intake_worker_tick(
     provider: &str,
     claim_owner: &str,
     cancelled: &(dyn Fn() -> bool + Sync),
+    port: IntakeTurnPort,
 ) -> Result<TickOutcome, sqlx::Error> {
     let Some(_active_tick) = shared.restart.intake_worker_lifecycle.try_begin_tick() else {
         return Ok(TickOutcome::Cancelled);
@@ -315,7 +342,7 @@ pub(crate) async fn run_intake_worker_tick(
 
     // Round-2 P0 #2: pre-accept failure (cwd validation, payload
     // conversion) is retryable; post-accept failure is operator-only.
-    let request = match intake_request_from_row(&row) {
+    let request = match intake_request_from_row(&row, port.checkpoint_waits) {
         Ok(req) => req,
         Err(error) => {
             if error.starts_with("replay source") {
@@ -473,6 +500,7 @@ pub(crate) async fn run_intake_worker_tick(
     test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
         &row,
+        port.execute,
         &runtime.http,
         &runtime.shared,
         &runtime.token,
@@ -574,6 +602,7 @@ pub(crate) async fn run_intake_worker_loop(
     provider: String,
     claim_owner: String,
     config: IntakeWorkerConfig,
+    port: IntakeTurnPort,
 ) {
     // Own the reader for the lifetime of the loop; `cancelled` is the single
     // live probe handed to every checkpoint, so the loop and the tick can never
@@ -601,6 +630,7 @@ pub(crate) async fn run_intake_worker_loop(
             &provider,
             &claim_owner,
             &cancelled,
+            port,
         )
         .await;
 
@@ -645,7 +675,10 @@ pub(crate) async fn run_intake_worker_loop(
 /// than panic. Phase 2-pre.3 codex note follow-up: handles nullable
 /// `request_owner_name` by substituting `request_owner_id` (the only
 /// other identity available) when DB had NULL.
-fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, String> {
+fn intake_request_from_row(
+    row: &IntakeOutboxRow,
+    checkpoint_waits: CheckpointWaits,
+) -> Result<IntakeRequest, String> {
     let channel_id: u64 = row
         .channel_id
         .parse()
@@ -670,7 +703,12 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         intake_outbox_id: Some(row.id),
         channel_id: ChannelId::new(channel_id),
         user_msg_id: MessageId::new(user_msg_id),
-        source_message_ids: replay_sources_from_row(row, channel_id, user_msg_id)?,
+        source_message_ids: replay_sources_from_row(
+            row,
+            channel_id,
+            user_msg_id,
+            checkpoint_waits,
+        )?,
         busy_followup_retry_user_msg_id: MessageId::new(user_msg_id),
         request_owner: UserId::new(request_owner),
         request_owner_name: owner_name,
@@ -696,8 +734,9 @@ fn replay_sources_from_row(
     row: &IntakeOutboxRow,
     channel_id: u64,
     user_msg_id: u64,
+    checkpoint_waits: CheckpointWaits,
 ) -> Result<Vec<MessageId>, String> {
-    if !crate::services::discord::checkpoint_waits_for_admission(ChannelId::new(channel_id)) {
+    if !checkpoint_waits(ChannelId::new(channel_id)) {
         return Ok(Vec::new());
     }
     let Some(stored) = row.replay_source_message_ids.as_ref() else {
@@ -778,7 +817,8 @@ mod tests {
     #[test]
     fn intake_request_from_row_round_trips_basic_fields() {
         let row = fake_row();
-        let req = intake_request_from_row(&row).expect("convert ok");
+        let req =
+            intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS).expect("convert ok");
         assert_eq!(req.intake_outbox_id, Some(42));
         assert_eq!(req.channel_id.get(), 1234567890);
         assert_eq!(req.user_msg_id.get(), 9876543210);
@@ -793,7 +833,8 @@ mod tests {
         for (stored, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
             let mut row = fake_row();
             row.preserve_on_cancel = stored;
-            let request = intake_request_from_row(&row).expect("convert preservation");
+            let request = intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS)
+                .expect("convert preservation");
             assert_eq!(request.preserve_on_cancel, expected);
         }
     }
@@ -802,7 +843,8 @@ mod tests {
     fn intake_request_from_row_handles_null_request_owner_name() {
         let mut row = fake_row();
         row.request_owner_name = None;
-        let req = intake_request_from_row(&row).expect("convert ok");
+        let req =
+            intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS).expect("convert ok");
         // Falls back to request_owner_id so the executor still has a
         // stable string identity to log against.
         assert_eq!(req.request_owner_name, "555");
@@ -812,7 +854,8 @@ mod tests {
     fn intake_request_from_row_rejects_non_numeric_channel_id() {
         let mut row = fake_row();
         row.channel_id = "not-a-number".to_string();
-        let err = intake_request_from_row(&row).expect_err("must reject");
+        let err = intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS)
+            .expect_err("must reject");
         assert!(err.contains("channel_id"), "{err}");
     }
 
@@ -820,7 +863,8 @@ mod tests {
     fn intake_request_from_row_rejects_unknown_turn_kind() {
         let mut row = fake_row();
         row.turn_kind = "ghosting".to_string();
-        let err = intake_request_from_row(&row).expect_err("must reject");
+        let err = intake_request_from_row(&row, test_executor::CHECKPOINT_WAITS)
+            .expect_err("must reject");
         assert!(err.contains("turn_kind"), "{err}");
     }
 

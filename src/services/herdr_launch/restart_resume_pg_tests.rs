@@ -87,6 +87,7 @@ async fn codex_restart_pending_keeps_resume_boundary_before_create_pg() {
         resume: true,
         resume_start: start,
         provider_root: Some(root.clone()),
+        takeover_ended: crate::services::discord::HERDR_OWNER_PORT.takeover_ended,
     };
     let missing = launch_herdr_session(&pool, request(None), command, host.clone()).await;
     assert!(matches!(missing, Err(HerdrLaunchError::Prepare(_))));

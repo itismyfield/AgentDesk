@@ -5,8 +5,10 @@ pub(crate) use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod completed_turn_ledger_model;
 mod durable_ancestors;
 pub(crate) mod durable_publish;
+pub(in crate::services::discord) mod record_lock;
 pub(crate) mod usage_footer;
 pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,

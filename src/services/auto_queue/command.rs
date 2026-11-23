@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn cancel_selected_runs_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &sqlx::PgPool,
     target_run_ids: &[String],
     reason: &str,
@@ -410,7 +410,7 @@ pub(super) async fn soft_pause_with_pg(pool: &sqlx::PgPool) -> Result<serde_json
 }
 
 pub(super) async fn force_pause_with_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
     // #2048 F2: capture the run set AND flip them to `paused` in a single

@@ -6,7 +6,6 @@ use crate::db::dispatched_session_canonical_identity::{
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
-use crate::services::discord::SharedData;
 use crate::services::session_host::herdr_endpoints;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
@@ -312,8 +311,14 @@ pub(crate) fn capture_hook(
 #[path = "hosted_source/source_tests.rs"]
 pub(crate) mod tests;
 
-pub(crate) async fn adoption_channel(
-    shared: &Arc<SharedData>,
+/// Runtime fields the adoption check reads; the Discord runtime implements it.
+pub(crate) trait AdoptionRuntime {
+    fn pg_pool(&self) -> Option<&sqlx::PgPool>;
+    fn token_hash(&self) -> &str;
+}
+
+pub(crate) async fn adoption_channel<S: AdoptionRuntime>(
+    shared: &Arc<S>,
     prompt: &super::ObservedTuiPrompt,
     candidate: Option<ChannelId>,
 ) -> Option<ChannelId> {
@@ -339,8 +344,8 @@ pub(crate) async fn adoption_channel(
 }
 
 // New prompt adoption needs a live execution; admitted readers keep their tail.
-pub(crate) async fn current_execution_for_adoption(
-    shared: &Arc<SharedData>,
+pub(crate) async fn current_execution_for_adoption<S: AdoptionRuntime>(
+    shared: &Arc<S>,
     provider: &str,
     channel: ChannelId,
     logical: &str,
@@ -350,7 +355,7 @@ pub(crate) async fn current_execution_for_adoption(
         Err(_) => return false,
         Ok(true) => {}
     }
-    let Some(pool) = shared.pg_pool.as_ref() else {
+    let Some(pool) = shared.pg_pool() else {
         return false;
     };
     let channel_text = channel.to_string();
@@ -358,7 +363,7 @@ pub(crate) async fn current_execution_for_adoption(
         provider,
         identity: CanonicalSessionIdentity {
             kind: SessionIdentityKind::DiscordChannel,
-            discord_token_hash: &shared.token_hash,
+            discord_token_hash: shared.token_hash(),
             channel_id: &channel_text,
         },
     };

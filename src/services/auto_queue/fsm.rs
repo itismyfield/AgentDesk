@@ -441,7 +441,7 @@ pub(crate) struct AutoQueueActivateDeps {
     pub(super) pg_pool: Option<sqlx::PgPool>,
     pub(super) engine: crate::engine::PolicyEngine,
     pub(super) config: Arc<crate::config::Config>,
-    pub(super) health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pub(super) health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
     pub(super) guild_id: Option<String>,
 }
 
@@ -451,7 +451,9 @@ impl AutoQueueActivateDeps {
             pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
-            health_registry: state.health_registry.clone(),
+            health_registry: crate::services::auto_queue::runtime::slot_runtime_health(
+                state.health_registry.clone(),
+            ),
             guild_id: state
                 .config
                 .onboarding
