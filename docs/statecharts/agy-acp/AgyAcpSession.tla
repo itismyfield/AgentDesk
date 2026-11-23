@@ -471,6 +471,10 @@ NoSteerFailAfterClear ==
 \* Witness: a cancelled turn's receipt names a steered input only through the durable merge.
 NoMergeOnCancel ==
     ~\E i \in Inputs : merged[i] /\ turnOf[i] # None /\ outcome[turnOf[i]] = "cancelled"
+\* Witnesses: a forced stop arrives after session/cancel went out, and an earlier child's exit
+\* report is still due while the next child runs.
+NoPromotion == ~(forceReq /\ cancelSent /\ proc = "up")
+NoLateExit == ~(oldExits > 0 /\ proc = "up" /\ recorded)
 \* Liveness: every accepted input is eventually covered by one terminal post
 \* (answer, failure notice or cancel notice), steered inputs included.
 EveryInputSettles == \A i \in Inputs : (st[i] # "absent") ~> (posts[i] >= 1)
