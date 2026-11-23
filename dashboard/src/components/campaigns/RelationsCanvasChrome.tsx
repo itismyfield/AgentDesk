@@ -33,9 +33,9 @@ export function ZoomTools({ flow, fit = { padding: 0.08, minZoom: 0.1, maxZoom: 
   </div>;
 }
 
-/** `count` rides the line as a small round badge; `cycle` is the loop's label; `error` draws it red and dashed; a
- * line with `loopY` runs backwards, so it turns down to that height, runs back along it and turns up into its target. */
-export type LineData = { count?: number; cycle?: string; error: boolean; loopY?: number };
+/** `count` rides the line as a small round badge; `cycle` is the loop's label; `error` draws it red and dashed; `faint`
+ * dims a line that leaves the scope; a line with `loopY` runs backwards, so it turns down to that height, runs back along it and turns up into its target. */
+export type LineData = { count?: number; cycle?: string; error: boolean; loopY?: number; faint?: boolean };
 const TURN = 40;
 /** Half the gap between two columns of groups. */
 const GAP_HALF = 32;
@@ -51,14 +51,14 @@ function nearTarget(sx: number, sy: number, tx: number, ty: number): [number, nu
 
 /** A view-only curve from a 다음 pin to a 선행 pin; its badge and line keep their size on screen when zoomed out. */
 export function RelationsLine({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
-  const { count, cycle, error, loopY } = data as LineData;
+  const { count, cycle, error, loopY, faint } = data as LineData;
   const scale = useLegible();
   const [curve, midX, midY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const [path, x, y] = loopY === undefined ? [curve, ...targetX - sourceX > 2 * GAP_HALF ? nearTarget(sourceX, sourceY, targetX, targetY) : [midX, midY]]
     : [`M${sourceX},${sourceY} C${sourceX + TURN},${sourceY} ${sourceX + TURN},${loopY} ${sourceX},${loopY} L${targetX},${loopY} C${targetX - TURN},${loopY} ${targetX - TURN},${targetY} ${targetX},${targetY}`, (sourceX + targetX) / 2, loopY];
   const width = 2 * Math.min(scale, 2.5);
   return <>
-    <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke: error ? "var(--err)" : "var(--fg-faint)", strokeWidth: width, strokeLinecap: "round", strokeDasharray: error ? `${3 * width} ${2.5 * width}` : undefined }} />
+    <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke: error ? "var(--err)" : "var(--fg-faint)", strokeWidth: width, strokeLinecap: "round", strokeDasharray: error ? `${3 * width} ${2.5 * width}` : undefined, opacity: faint ? 0.5 : undefined }} />
     {(count !== undefined || cycle) && <EdgeLabelRenderer>
       <div className="pointer-events-none absolute z-[1] grid justify-items-center gap-1" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})` }}>
         {count !== undefined && <span className="h-[18px] min-w-[18px] rounded-full border border-[var(--line)] bg-[var(--bg-3)] px-1.5 text-center text-[11px] leading-4 font-semibold text-[var(--fg-dim)] tabular-nums">{count}</span>}

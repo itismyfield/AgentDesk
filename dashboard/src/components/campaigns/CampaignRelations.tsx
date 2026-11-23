@@ -3,10 +3,12 @@ import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { Badge as KitBadge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
 import { Select } from "../../kit/free/select-clean";
 import { Cap, KitCard, MeterBar, Num, RowButton, Well } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import CampaignGroupOverview, { buildCampaignGroupOverview, groupCycleText } from "./CampaignGroupOverview";
+import CampaignGroupTasks from "./CampaignGroupTasks";
 import { campaignRawEdges, rawEdgeId } from "./campaignGraphRouting";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import { campaignGroup, campaignTaskTitle } from "./campaignModel";
@@ -60,51 +62,75 @@ function GroupList({ campaign, onOpen, tr, children }: { campaign: Campaign; onO
   </div>;
 }
 
-/** 관계도: a head row with the task picker and 편집, over the group graph (a group list on phones) or the open task's
- * direct connections. A chosen group is summed up beside the graph; opening it lists its tasks below, and that list
- * stays while a task is open, so closing the task returns focus to its row. `onEdit` (wide screens only) opens the
- * editor on the open task's neighbors, else the chosen or opened group, else the group of the first task with a dependency. */
+/** 관계도: the task picker and 편집 over the group graph, an opened group's task graph (lists, on phones) or a task's
+ * connections. A task opened from a group keeps the group on screen, so closing it returns focus to its card or row. */
 export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit, tr }: {
   campaign: Campaign; selectedId: string | null; onOpen: (id: string | null) => void; onEdit?: (scope: EditScope) => void; tr: Tr;
 }) {
   const [chosen, setChosen] = useState<string | null>(null);
   const [group, setGroup] = useState<string | null>(null);
+  const [task, setTask] = useState<string | null>(null);
   const listId = useId();
-  const listCard = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
   const selected = campaign.nodes.find((node) => node.id === selectedId);
+  const byId = new Map(campaign.nodes.map((node) => [node.id, node]));
   const all = new Set(campaign.nodes.map((node) => node.id));
   const members = group === null ? [] : campaign.nodes.filter((node) => campaignGroup(node) === group);
   const groups = new Set(campaign.nodes.map(campaignGroup)).size;
   const kept = keptDraft(campaign.id) !== null;
   const phone = useIsMobile();
-  const editScope = (): EditScope => selected ? { kind: "task", id: selected.id, depth: 1 }
+  const inGroup = !phone && group !== null && (!selected || campaignGroup(selected) === group);
+  const editScope = (): EditScope => inGroup ? { kind: "group", key: group } : selected ? { kind: "task", id: selected.id, depth: 1 }
     : { kind: "group", key: chosen ?? group ?? campaignGroup(campaign.nodes.find((node) => node.dependencies.length) ?? campaign.nodes[0]) };
-  /** The opened group's list takes the focus, which also scrolls it into view under the graph. */
-  const openGroup = (key: string) => { setGroup(key); setChosen(key); requestAnimationFrame(() => listCard.current?.querySelector<HTMLElement>("[aria-expanded]")?.focus()); };
-  return <div className="campaign-relations grid min-w-0 gap-3">
+  /** Puts the focus on `selector` inside the view once the screen it belongs to is drawn. */
+  const focus = (selector: string) => requestAnimationFrame(() => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(selector)?.focus()));
+  /** Opening a group draws its tasks in the canvas's place (its list, on phones) and moves the focus there. */
+  const openGroup = (key: string, id: string | null = null) => {
+    setGroup(key); setChosen(key); setTask(id);
+    if (!id) focus(phone ? "[data-relations-list] [aria-expanded]" : "[data-relations-back]");
+  };
+  const goto = (id: string) => { const node = byId.get(id); if (node) openGroup(campaignGroup(node), id); };
+  const back = () => { const left = group; setGroup(null); setTask(null); if (left !== null) focus(`.react-flow__node[data-id="campaign-group:${CSS.escape(encodeURIComponent(left))}"]`); };
+  const pick = (value: string) => { const node = byId.get(value); if (inGroup && node && campaignGroup(node) === group) setTask(value); onOpen(value || null); };
+  const name = (key: string) => key || tr("미분류", "Ungrouped");
+  return <div ref={root} className="campaign-relations grid min-w-0 gap-3">
     <div className="min-w-0 overflow-hidden rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-1)]">
       <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line-soft)] px-4 py-2">
-        {selected ? <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button>
+        {inGroup ? <div className="flex min-w-0 items-center gap-1">
+          <IconButton data-relations-back icon={<ArrowLeft aria-hidden />} label={tr("전체 그룹으로 돌아가기", "Back to all groups")} onClick={back} />
+          <nav aria-label={tr("이동 줄", "Breadcrumb")} className="min-w-0"><ol className="m-0 flex min-w-0 list-none items-center gap-1 p-0 text-[15px]">
+            <li><Button variant="ghost" onClick={back}>{tr("전체 그룹", "All groups")}</Button></li>
+            <li aria-hidden className="text-[var(--fg-muted)]">›</li>
+            <li aria-current="page" className="min-w-0 truncate font-semibold text-[var(--fg)]">{name(group)}</li>
+          </ol></nav>
+          <Cap className="shrink-0 pl-2"><Num>{tr(`작업 ${members.length}개`, `${members.length} tasks`)}</Num></Cap>
+        </div> : selected ? <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => onOpen(null)}>{!phone && group !== null ? tr("그룹 보기로", "Back to the group") : tr("전체 그룹 관계", "All group connections")}</Button>
           : <div className="grid min-w-0 gap-0.5"><strong className="truncate text-[15px] text-[var(--fg)]">{tr("그룹 관계", "Group connections")}</strong>
             <Cap><Num>{tr(`그룹 ${groups}개 · 작업 ${campaign.nodes.length}개`, `${groups} groups · ${campaign.nodes.length} tasks`)}</Num></Cap></div>}
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2 max-sm:w-full">
           {onEdit && kept && <KitBadge size="md" tone="warning">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</KitBadge>}
           <div className="campaign-node-picker min-w-0 flex-1 sm:w-72 sm:flex-none">
             <Select aria-label={tr("연결을 볼 작업", "Task to inspect")} size="lg" placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
-              options={campaign.nodes.map((node) => ({ value: node.id, label: node.title }))} onChange={(value) => onOpen(value || null)} />
+              options={campaign.nodes.map((node) => ({ value: node.id, label: node.title }))} onChange={pick} />
           </div>
           {onEdit && <Button variant="secondary" size="lg" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>}
         </div>
       </header>
-      {selected ? <div className="p-4"><CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} /></div>
+      {selected && !inGroup ? <div className="p-4"><CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} /></div>
         : phone ? <GroupList campaign={campaign} onOpen={openGroup} tr={tr}><TieLines campaign={campaign} tr={tr} /></GroupList>
-        : <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={onOpen} tr={tr} />}
+        : inGroup ? <CampaignGroupTasks key={group} campaign={campaign} group={group} chosen={task} onChoose={setTask} onGoto={goto} onGotoGroup={(key) => openGroup(key)}
+          onOpenTask={(id) => { setTask(id); onOpen(id); }} tr={tr} />
+        : <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={goto} tr={tr} />}
     </div>
-    {group !== null && <div ref={listCard}><KitCard pad="none">
+    {phone && group !== null && <div data-relations-list><KitCard pad="none">
       <div className="grid min-w-0 gap-0.5 p-1.5">
-        <TaskGroupHeading open controls={listId} label={group || tr("미분류", "Ungrouped")} count={members.length} onToggle={() => setGroup(null)} />
-        <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => <RowButton key={node.id} data-node-id={node.id} data-task-id={node.id} selected={node.id === selectedId} onClick={() => onOpen(node.id)}
-          className="campaign-task-row rounded-[var(--r-sm)] py-2 text-[13px]"><span className="min-w-0 truncate">{node.title}</span></RowButton>)}</div>
+        <TaskGroupHeading open controls={listId} label={name(group)} count={members.length} onToggle={() => setGroup(null)} />
+        <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => {
+          const after = campaign.nodes.filter((other) => other.dependencies.includes(node.id)).length, before = node.dependencies.filter((id) => byId.has(id)).length;
+          return <RowButton key={node.id} data-node-id={node.id} data-task-id={node.id} selected={node.id === selectedId} onClick={() => onOpen(node.id)}
+            className="campaign-task-row grid gap-0.5 rounded-[var(--r-sm)] py-2 text-[13px]"><span className="min-w-0 truncate">{node.title}</span>
+            <Cap><Num>{tr(`선행 ${before} · 후행 ${after}`, `${before} before · ${after} after`)}</Num></Cap></RowButton>;
+        })}</div>
       </div>
     </KitCard></div>}
   </div>;

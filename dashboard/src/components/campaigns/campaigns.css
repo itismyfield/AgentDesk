@@ -66,4 +66,4 @@
 }
 }
 /* A relations card the keyboard reached: React Flow clears its node's outline, so the card draws one, 2px on screen at any zoom. */
-@layer components { .campaign-relations .react-flow__node-relationsGroup:focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); } }
+@layer components { .campaign-relations :is(.react-flow__node-relationsGroup, .react-flow__node-relationsTask, .react-flow__node-relationsTail):focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); } }

@@ -7,6 +7,7 @@ import { campaignNodeSchema, setCampaignAutoQueue, updateCampaignNode } from "..
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGroupOverview";
+import { buildGroupTasks } from "./CampaignGroupTasks";
 import type { LineData } from "./RelationsCanvasChrome";
 import { RelationsGroupNode, type GroupNodeData } from "./RelationsTaskNode";
 
@@ -153,4 +154,13 @@ it("splits an aggregate line by its ties without touching the task graph, the ne
     expect(vi.mocked(write)).not.toHaveBeenCalled();
   }
   vi.unstubAllGlobals();
+});
+
+it("lays an opened group's tasks out between the tasks outside it, with each looped part through them in display ids", () => {
+  // r1 → c1 → r3 → r1 loops through Cluster's c1, a tail at the left edge since r3 depends on it.
+  const graph = buildGroupTasks([node("g1", "Gateway"), node("r1", "Relay", ["g1", "r3"]), node("r2", "Relay", ["r1"]), node("c1", "Cluster", ["r1"]), node("r3", "Relay", ["c1"]), node("rel1", "Release", ["r2"])], "Relay");
+  const x = (...ids: string[]) => ids.map((id) => graph.positions.get(id)!.x);
+  expect(graph.tails.map((tail) => `${tail.id}:${tail.side}`).sort()).toEqual(["tail:c1:in", "tail:g1:in", "tail:rel1:out"]);
+  expect([Math.max(...x("tail:g1", "tail:c1")) < Math.min(...x("r1", "r2", "r3")), x("tail:rel1")[0] > Math.max(...x("r1", "r2", "r3"))]).toEqual([true, true]);
+  expect([graph.components.map((part) => [...part].sort()), graph.cycles.map((path) => path.includes("tail:c1"))]).toEqual([[["r1", "r3", "tail:c1"]], [true]]);
 });

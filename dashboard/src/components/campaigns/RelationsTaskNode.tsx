@@ -93,6 +93,36 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
   </div>;
 }
 
+/** Zoomed out, `cover` (number and title) heads the card and `far` is its state line. */
+export type ViewTaskData = TaskNodeData & { cover: string; far: string };
+
+/** A task on the read-only view: the editor's card, covered by its title, pins and state once zoomed out. */
+export function ViewTaskNode(props: NodeProps) {
+  const task = props.data as ViewTaskData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative rounded-xl" style={{ "--legible": scale, ...far ? farRing(scale, props.selected, task.error) : {} } as CSSProperties}>
+    <RelationsTaskNode {...props} selected={props.selected && !far} />
+    {far && <><FarCover scale={scale} title={task.cover} line={task.far} error={task.error} pins={task.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
+  </div>;
+}
+
+/** `in` tails are dependencies outside the group, at its left; `out` tails depend on it, at its right. `cover` is the
+ * task's number, all a tail's short card has room for once zoomed out. */
+export type TailNodeData = { title: string; cover: string; group: string; side: "in" | "out" };
+
+/** A task outside the group, faint at the canvas's edge with its group's name; its one pin faces the group. Zoomed out,
+ * its dashed edge keeps 1px on screen. Choosing one leaves this view, so it draws no chosen ring. */
+export function RelationsTailNode({ data }: NodeProps) {
+  const tail = data as TailNodeData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative grid w-60 gap-0.5 rounded-xl border border-dashed border-[var(--line)] px-3 py-2.5 text-left text-xs text-[var(--fg-muted)]"
+    style={{ "--legible": scale, ...far ? { borderWidth: scale } : {} } as CSSProperties}>
+    <strong className="truncate text-[13px] font-medium text-[var(--fg-dim)]">{tail.title}</strong><span className="truncate">{tail.group}</span>
+    <Handle type={tail.side === "in" ? "source" : "target"} position={tail.side === "in" ? Position.Right : Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+    {far && <FarCover scale={scale} title={tail.cover} line={tail.group} className="bg-[var(--bg)] text-[var(--fg-muted)]" />}
+  </div>;
+}
+
 /** The chosen tie's menu; labels come translated, strands are the tie's lines as `#A → #B`. */
 export type TieMenu = {
   labels: { menu: string; remove: string; detach: string; preview: string };

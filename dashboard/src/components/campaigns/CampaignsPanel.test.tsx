@@ -19,10 +19,10 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@xyflow/react", () => ({
-  ReactFlow: ({ nodes, onNodesChange }: { nodes: Array<{ id: string }>; onNodesChange?: (changes: unknown[]) => void }) => (
+  ReactFlow: ({ nodes, onNodesChange }: { nodes: Array<{ id: string; domAttributes?: object }>; onNodesChange?: (changes: unknown[]) => void }) => (
     <div data-graph-nodes={nodes.length}>
       Task graph
-      {nodes.map((node) => <button key={node.id} data-graph-node={node.id} onClick={() => onNodesChange?.([{ type: "select", id: node.id, selected: true }])} />)}
+      {nodes.map((node) => <button key={node.id} data-graph-node={node.id} {...node.domAttributes} onClick={() => onNodesChange?.([{ type: "select", id: node.id, selected: true }])} />)}
     </div>
   ),
   Background: () => null,
@@ -242,18 +242,19 @@ it("preserves the selection and a task edit draft across polls, task changes and
   expect(page()).toContain("changed elsewhere");
 });
 
-it("lists a group's tasks from the connections graph and opens one", async () => {
+it("opens a group's task graph from the connections graph and a task from it, and closing the task returns to its card", async () => {
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {}, read: 1 });
   await render();
   await act(async () => button("Connections").click());
   expect(container.querySelector("[data-graph-nodes]")?.getAttribute("data-graph-nodes")).toBe("4");
   await act(async () => container.querySelector<HTMLButtonElement>('[data-graph-node="campaign-group:Gateway"]')!.click());
   await act(async () => button("Open group").click());
-  expect(container.querySelectorAll(".campaign-relations .campaign-task-row")).toHaveLength(30);
-  await act(async () => container.querySelector<HTMLButtonElement>('.campaign-relations [data-node-id="task-30"]')!.click());
+  // Gateway's 30 tasks and the task before it and after it in the neighbouring groups.
+  expect(container.querySelector("[data-graph-nodes]")?.getAttribute("data-graph-nodes")).toBe("32");
+  await act(async () => container.querySelector<HTMLButtonElement>('[data-graph-node="task-30"]')!.click());
+  await act(async () => button("Open task details").click());
   expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 30");
-  expect(page()).toContain("Direct connections to the selected task");
-  // The group's rows stay while the task is open, so closing it lands on the row that opened it.
+  // The group's graph stays while the task is open, so closing it lands on the card that opened it.
   await act(async () => button("Close details").click());
   expect(document.activeElement?.getAttribute("data-task-id")).toBe("task-30");
 });
