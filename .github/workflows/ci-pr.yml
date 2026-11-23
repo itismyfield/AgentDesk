@@ -37,11 +37,12 @@ jobs:
       # Verified docs/comment-only changes suppress heavy Rust jobs; the judge
       # reads the same effective outputs so expected skips still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
-      high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
+      high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && (steps.comment_only.outputs.comment_only == 'true' || steps.comment_only.outputs.ci_metadata_only == 'true') && 'false' || steps.filter.outputs.high_risk_recovery }}
       rust_tests_skip: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}
       rust_or_policy: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
-      # Include readers retain the compile and library lanes.
-      rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      # Include readers retain the compile and library lanes. CI metadata keeps the build and plan.
+      rust_build: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      rust_tests: ${{ steps.comment_only.outcome == 'success' && (steps.comment_only.outputs.ci_metadata_only == 'true' || (steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true')) && 'false' || steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
@@ -458,6 +459,7 @@ jobs:
             win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
       - name: Comment-only gate
         id: comment_only
+        if: github.event_name == 'pull_request'
         continue-on-error: true
         shell: bash
         env:
@@ -465,7 +467,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FILTER_OUTPUTS: ${{ toJSON(steps.filter.outputs) }}
-        run: python3 scripts/ci/comment_only_gate.py
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --disable-pip-version-check --break-system-packages pyyaml
+          python3 scripts/ci/comment_only_gate.py
   # The required `Dashboard (Node 22)` context is published by dashboard_required_context.
   dashboard:
     name: Dashboard (Node 22) runner
@@ -672,7 +676,7 @@ jobs:
     outputs:
       scope_workers: ${{ steps.plan.outputs.scope_workers }}
       full_workers: ${{ steps.plan.outputs.full_workers }}
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_build == 'true' }}
     runs-on: >-
       ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch' ||
@@ -811,7 +815,7 @@ jobs:
   base_compare:
     name: Rust tests base comparison
     needs: [changes, rust_build]
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -896,7 +900,7 @@ jobs:
   rust_scope:
     name: Rust tests (worker ${{ matrix.worker }})
     needs: [changes, rust_build]
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' && needs.rust_build.outputs.scope_workers != '[]' }}
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success' && needs.rust_build.outputs.scope_workers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -957,7 +961,7 @@ jobs:
     name: Rust tests (worker ${{ matrix.worker }})
     needs: [changes, rust_build, rust_scope]
     if: >-
-      ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' &&
+      ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success' &&
       (needs.rust_scope.result == 'success' ||
       (needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]')) }}
     runs-on: ubuntu-latest
@@ -1027,7 +1031,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download nextest plan
         id: plan
-        if: needs.rust_build.result == 'success'
+        if: needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: nextest-plan
@@ -1069,10 +1073,10 @@ jobs:
         run: |
           [ ! -f "$RUNNER_TEMP/scope-observation.json" ] || exit 0
           reason=rust-build-unavailable
-          if [ "$BUILD_RESULT" = success ]; then
-            reason=plan-unavailable
-          elif [ "$RUST_TESTS" = false ] && [ "$BUILD_RESULT" = skipped ]; then
+          if [ "$RUST_TESTS" = false ] && { [ "$BUILD_RESULT" = success ] || [ "$BUILD_RESULT" = skipped ]; }; then
             reason=rust-path-filter
+          elif [ "$BUILD_RESULT" = success ]; then
+            reason=plan-unavailable
           fi
           python3 scripts/ci/nextest_ci.py pr-scope-unavailable --reason "$reason" --output "$RUNNER_TEMP/scope-observation.json"
       - name: Upload PR scope observation
@@ -1143,8 +1147,8 @@ jobs:
               exit 1
             fi
           }
-          pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh fc3780abc8a5ff44f79ebfd213b7b0aab33ce55713d2de69cd671ba398ad2a2b
+          pin scripts/ci/nextest_required.py c19a273c124eb7869a0e5dc489b99379974b9632d35224ccb613a6af00f78d6f
+          pin scripts/check-ci-runner-hardening.sh 3e966ee348bb8cb70fa3cbc5a5d0e637c658889de37b4c7a534b1fb4734ef557
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1157,7 +1161,7 @@ jobs:
   pg15_owner_proof:
     name: PostgreSQL 15 owner proof
     needs: [changes, rust_build]
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:

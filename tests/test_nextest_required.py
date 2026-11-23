@@ -16,7 +16,6 @@ from test_nextest_ci import SHA, Fixture, junit, nci  # noqa: E402
 
 nreq = sys.modules["nextest_required"]
 
-N = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # Written from the old *_required_context mirrors and design section 1.5, not from the implementation:
 # context -> (N gate, {own job: gate}). A gate lists changes outputs that make the job expected; "!x" means x false.
 EXPECTED = {
@@ -31,13 +30,15 @@ EXPECTED = {
     "Fast check cross OS required context (ubuntu-latest)": (
         ["rust_tests"], {"check_fast_cross_os": ["cross_os_rust"], "check_fast_cross_os_targets": ["cross_os_rust"]}),
 }
-ON = {"rust_tests": "true", "rust_or_policy": "true", "relay_contract": "true", "high_risk_recovery": "true",
+ON = {"rust_build": "true", "rust_tests": "true", "rust_or_policy": "true", "relay_contract": "true", "high_risk_recovery": "true",
       "dashboard": "true", "cross_os_rust": "true", "rust_tests_skip": "false"}
 
 
 def jobs_of(name):
     n_gate, own = EXPECTED[name]
-    return {**{job: n_gate for job in N}, **own}
+    build_gate = ["rust_build", *[term for term in n_gate if term != "rust_tests"]]
+    return {"rust_build": build_gate, "test_evidence": build_gate,
+            "base_compare": n_gate, "rust_tests": n_gate, **own}
 
 
 def off(outputs, terms):

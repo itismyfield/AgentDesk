@@ -804,7 +804,7 @@ targets = PrNextestWiring.targets(ARGV.fetch(2)).merge({
     "if" => built_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "66beab7ad0dff73e5013b8eed735d453c65152c568c23a09cd60b292dbc2eee7",
+    "job_sha256" => "75b81d85001d7bf186d2b5c7a265e9d65ac1ce96a0e96440eff17847c10987dc",
     "cargo_steps" => {
       "Reuse archived lib test binary" => {
         "commands" => ['python3 scripts/ci/lib-test-artifact.py prepare-nextest --source "$RUNNER_TEMP/nextest" --directory "$RUNNER_TEMP/lib-test-artifact"'],
@@ -987,7 +987,7 @@ nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
 verify_helper_hash scripts/ci/generated_artifact_steps.rb 870d236cd7867ddb578830cb7e60ce864d3c68ec9a4c89d678cf14c0780e98fb || exit 1
 verify_helper_hash scripts/ci/main_script_check_shards.rb 52bd83f0cf608795ab5e9df277dad307dd92e252f83ae26912a1a3c9acdca32b || exit 1
-verify_helper_hash scripts/ci/pr_nextest_wiring.rb eb9578a485036af4bbe95c76ee59c4aab027504de54ac028f7c9e3791fb0c9f0 || exit 1
+verify_helper_hash scripts/ci/pr_nextest_wiring.rb fa1a71c6481545a49693ebaa90ff0efe001aaa156a2473319bf85248b842dfee || exit 1
 verify_helper_hash .github/actions/pr-nextest-setup/action.yml eb2bed4b88d18e067175c1e4055471116da4b9fceb849a16e267dc5fe4686965 || exit 1
 verify_helper_hash scripts/ci/nextest-pr-worker.sh 888892db12a7fa0173b7f211571a255f84c619f6045fd15c8fe841fd2fd3f5a8 || exit 1
 verify_helper_hash scripts/ci/preinstalled_tools_wiring.rb 277aaaa2a32c76dec58a97b9d89f4fa407dce4627d2bb588ed8ca9d01af26538 || exit 1
