@@ -191,11 +191,14 @@ function BreakdownDetail({
 }
 
 /** Kit list texts the tabs can show or speak; the title and total come as props. */
-function breakdownLabels(t: TFunction): Partial<CompactBreakdownLabels> {
+export function breakdownLabels(t: TFunction): Partial<CompactBreakdownLabels> {
   return {
     list: t(msg("토큰 순위와 비중", "Token rank and share")),
     row: (label, value, share) => t(msg(`${label}, ${value}, 전체의 ${share}`, `${label}, ${value}, ${share} of the total`)),
-    summary: (total, amount) => `${total}: ${amount}.`,
+    summary: (total, amount, change) => `${total}: ${amount}.${change ? t(msg(
+      ` 이전 기간보다 ${change.percent} ${change.decrease ? "줄었어요" : "늘었어요"}.`,
+      ` ${change.decrease ? "Down" : "Up"} ${change.percent} from the previous period.`,
+    )) : ""}`,
     selectHint: t(msg("누르면 비용과 토큰 구성이 열려요.", "Opens its cost and token mix.")),
   };
 }

@@ -66,28 +66,32 @@ export function accountLimits(data: ClaudeAccountsResponse | null, t: TFunction,
   });
 }
 
-function limitLabels(t: TFunction): Partial<UsageMeterLabels> {
+/** Kit texts for the account list. The pause line names only its value: the gate reads provider usage, not an account. */
+function limitLabels(t: TFunction, pausePct: number | null): Partial<UsageMeterLabels> {
   return {
     limits: t(msg("계정별 한도", "Limits by account", "アカウント別の上限", "按账号划分的上限")),
     limitReached: t(msg("한도 도달", "Limit reached")),
     nearLimit: t(msg("한도에 가까움", "Close to the limit")),
-    danger: t(msg("자동 진행 멈춤 기준 이상", "At or past the auto-run pause")),
     notMeasured: t(msg("측정 안 됨", "Not measured")),
     unlimited: t(msg("무제한", "Unlimited")),
     announce: (state, title, actual, percent) => state === "limit"
       ? t(msg(`${title}, 한도 도달. ${actual}.`, `${title}, limit reached. ${actual}.`))
       : t(msg(`${title}, ${percent}% 썼어요.`, `${title}, ${percent}% used.`)),
-    announceDanger: (title, _actual, percent) => t(msg(`${title}, 자동 진행 멈춤 기준 이상이에요. ${percent}%.`, `${title}, at or past the auto-run pause. ${percent}%.`)),
+    ...(pausePct === null ? {} : {
+      danger: t(msg(`멈춤 기준 ${pausePct}% 이상`, `At or past the ${pausePct}% pause line`)),
+      announceDanger: (title: string, _actual: string, percent: number) => t(msg(`${title}, 멈춤 기준 ${pausePct}% 이상이에요. ${percent}%.`, `${title}, at or past the ${pausePct}% pause line. ${percent}%.`)),
+    }),
   };
 }
 
-/** Claude account limits from cswap as the kit limit list home uses for provider limits, marked at the auto-run pause
- * like home. Polls every 30 seconds while visible; the button rereads at once. */
+/** Claude account limits from cswap as the kit limit list home uses for provider limits, with home's auto-run pause line.
+ * Polls every 30 seconds while visible; the button rereads at once. */
 export function StatsAccountLimits({ t, locale, className }: { t: TFunction; locale: string; className?: string }) {
   const [load, setLoad] = useState<Load>({ status: "loading", data: null, error: null, hint: null });
   const [busy, setBusy] = useState(true);
   const [nonce, setNonce] = useState(0);
   const pauseScale = pauseMeterScale(autoPauseRule(usePolled(loadRuntimeConfig, 300_000).data));
+  const pausePct = pauseScale.dangerAt === undefined ? null : Math.round(pauseScale.dangerAt * 100);
 
   useEffect(() => {
     let controller: AbortController | null = null;
@@ -180,8 +184,11 @@ export function StatsAccountLimits({ t, locale, className }: { t: TFunction; loc
             locale={locale}
             limits={limits}
             {...pauseScale}
-            labels={limitLabels(t)}
+            labels={limitLabels(t, pausePct)}
           />
+          {pausePct !== null ? (
+            <Cap>{t(msg("자동 진행 멈춤은 공급자 사용량으로 판정해요", "Auto-run pauses are judged by provider usage"))}</Cap>
+          ) : null}
         </InspSection>
       )}
     </SectionCard>

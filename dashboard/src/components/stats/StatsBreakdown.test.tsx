@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { TokenAnalyticsResponse } from "../../types";
-import { StatsBreakdown, shareLabel } from "./StatsBreakdown";
+import { StatsBreakdown, breakdownLabels, shareLabel } from "./StatsBreakdown";
 import { buildAgentItems, buildAgentSkillRows, buildModelItems, dailySeries, msg } from "./statsModel";
 
 let container: HTMLDivElement;
@@ -101,6 +101,11 @@ it("keeps empty, loading and failed lists distinct", async () => {
   expect(container.textContent).toContain("분류를 불러오지 못했어요");
   await render({ models: [], agents: [], loading: false, failed: false });
   expect(container.textContent).toContain("표시할 모델 데이터가 없습니다.");
+});
+
+it("speaks a change in the list summary when the kit has one", () => {
+  const summary = breakdownLabels(t).summary!;
+  expect([summary("토큰", "1", { percent: "5%", decrease: true }), summary("토큰", "1", null)]).toEqual(["토큰: 1. 이전 기간보다 5% 줄었어요.", "토큰: 1."]);
 });
 
 it("rounds list shares and marks tiny ones", () => {

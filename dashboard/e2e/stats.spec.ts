@@ -351,19 +351,22 @@ test.describe("stats page", () => {
     await mockApi(page);
     await page.goto("/stats");
     const limits = page.getByTestId("stats-claude-accounts");
-    await expect(limits.getByRole("meter", { name: "backup@example.com · #2 5시간" })).toHaveAttribute("aria-valuetext", /자동 진행 멈춤 기준 이상/, { timeout: 15_000 });
+    // The gate reads provider usage, so an account row names only the line's value and the card says so.
+    await expect(limits.getByRole("meter", { name: "backup@example.com · #2 5시간" })).toHaveAttribute("aria-valuetext", /멈춤 기준 90% 이상$/, { timeout: 15_000 });
     await expect(limits.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1);
+    await expect(limits).toContainText("자동 진행 멈춤은 공급자 사용량으로 판정해요");
   });
 
-  test("English phone: the kit charts and the share list show and speak no Korean", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "mobile", "The narrow chart shows its reading hint");
+  test("English: the kit charts, share list and account limits show and speak no Korean", async ({ page }, testInfo) => {
     await mockApi(page, { language: "en" });
     await page.goto("/stats");
-    await expect(page.locator(".aui-kpi-chart-reading-hint").first()).toBeVisible({ timeout: 15_000 });
-    const text = await page.locator(".aui-kpi-chart, .aui-compact-breakdown").evaluateAll((nodes) => nodes.flatMap((node) => [
+    // Only the narrow chart shows its reading hint; the pause line marks the 92% account row.
+    if (testInfo.project.name === "mobile") await expect(page.locator(".aui-kpi-chart-reading-hint").first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1, { timeout: 15_000 });
+    const text = await page.locator(".aui-kpi-chart, .aui-compact-breakdown, .aui-usage-meter").evaluateAll((nodes) => nodes.flatMap((node) => [
       (node as HTMLElement).innerText,
-      ...Array.from(node.querySelectorAll(".aui-kpi-chart-sr, .aui-compact-breakdown-sr"), (sr) => sr.textContent ?? ""),
-      ...Array.from(node.querySelectorAll("[aria-label]"), (labelled) => labelled.getAttribute("aria-label") ?? ""),
+      ...Array.from(node.querySelectorAll(".aui-kpi-chart-sr, .aui-compact-breakdown-sr, .aui-usage-meter-sr-only"), (sr) => sr.textContent ?? ""),
+      ...Array.from(node.querySelectorAll("[aria-label], [aria-valuetext], [title]"), (el) => ["aria-label", "aria-valuetext", "title"].map((name) => el.getAttribute(name) ?? "").join(" ")),
     ]).join("\n"));
     expect(text.match(/[가-힣]+/g)).toBeNull();
   });

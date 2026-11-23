@@ -46,14 +46,14 @@ export interface MetricDelta {
   tone: MetricDeltaTone;
 }
 
-/** Data series for agents and token kinds: the dashboard's chart colors from before the kit, as the kit has no series
- * tokens. Status tokens (ok, warn, err, info) stay out so a bar never reads as an alert. */
+/** Data series for agents and token kinds (light, dark). The kit has no series tokens; these keep clear of status and
+ * provider colors, and neighbours differ in hue and lightness in both themes (at least 3:1 on cards). */
 const DATA_SERIES = [
-  "var(--claude)",
-  "var(--codex)",
-  "oklch(0.72 0.14 265)",
-  "oklch(0.78 0.1 235)",
-  "color-mix(in oklch, var(--accent) 70%, white 30%)",
+  "light-dark(oklch(0.5 0.17 294), oklch(0.7 0.15 294))",
+  "light-dark(oklch(0.62 0.07 172), oklch(0.85 0.09 172))",
+  "light-dark(oklch(0.5 0.18 352), oklch(0.66 0.16 352))",
+  "light-dark(oklch(0.6 0.13 118), oklch(0.87 0.14 118))",
+  "light-dark(oklch(0.42 0.08 30), oklch(0.6 0.08 30))",
 ];
 
 export function msg(ko: string, en = ko, ja = ko, zh = ko) {
@@ -434,22 +434,22 @@ export function dailySeries(t: TFunction): DailySeriesDescriptor[] {
     {
       key: "cache_read_tokens",
       label: t(msg("cache R", "cache R")),
-      color: DATA_SERIES[1],
+      color: DATA_SERIES[0],
     },
     {
       key: "cache_creation_tokens",
       label: t(msg("cache W", "cache W")),
-      color: DATA_SERIES[2],
+      color: DATA_SERIES[1],
     },
     {
       key: "input_tokens",
       label: t(msg("input", "input")),
-      color: DATA_SERIES[3],
+      color: DATA_SERIES[2],
     },
     {
       key: "output_tokens",
       label: t(msg("output", "output")),
-      color: DATA_SERIES[0],
+      color: DATA_SERIES[3],
     },
   ];
 }
