@@ -11,9 +11,6 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 pub(crate) mod auto_queue;
 pub(crate) mod intake_timing;
 
-#[cfg(test)]
-mod auto_queue_tests;
-
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 
@@ -36,7 +33,7 @@ pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::ffi::OsString;
     use tracing_subscriber::fmt::writer::MakeWriter;
@@ -94,7 +91,7 @@ mod tests {
         }
     }
 
-    fn capture_logs_with_default_filter<F>(emit: F) -> String
+    pub(crate) fn capture_logs_with_default_filter<F>(emit: F) -> String
     where
         F: FnOnce(),
     {
@@ -185,34 +182,6 @@ mod tests {
             !outside_line.contains("channel_id=Some(\"builder-channel\")"),
             "field must not leak once the span has closed: {outside_line}"
         );
-    }
-
-    #[test]
-    fn default_agentdesk_filter_keeps_observability_targets_and_drops_policy_target() {
-        let logs = capture_logs_with_default_filter(|| {
-            tracing::info!(
-                target: crate::api_caller_observability::LOG_TARGET,
-                "api caller production filter marker"
-            );
-            tracing::info!(
-                target: "policy",
-                "policy production filter marker"
-            );
-        });
-
-        assert!(
-            logs.contains("api caller production filter marker"),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains(crate::api_caller_observability::LOG_TARGET),
-            "logs={logs}"
-        );
-        assert!(
-            !logs.contains("policy production filter marker"),
-            "logs={logs}"
-        );
-        assert!(!logs.contains("policy"), "logs={logs}");
     }
 }
 

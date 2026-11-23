@@ -150,6 +150,40 @@ fn trimmed_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Test helper: run `body` and collect the claimed-header flags this module logs.
+#[cfg(test)]
+pub(crate) fn capture_identity<T>(body: impl FnOnce() -> T) -> (T, Vec<bool>) {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+    struct Capture(Arc<Mutex<Vec<bool>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != LOG_TARGET {
+                return;
+            }
+            struct Visitor<'a>(&'a Mutex<Vec<bool>>);
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+                    if field.name() == "manager_channel_check_relied_on_claimed_header" {
+                        self.0.lock().unwrap().push(value);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            event.record(&mut Visitor(&self.0));
+        }
+    }
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(Capture(values.clone()));
+    let result = tracing::subscriber::with_default(subscriber, body);
+    let collected = values.lock().unwrap().clone();
+    (result, collected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

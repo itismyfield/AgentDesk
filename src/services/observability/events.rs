@@ -15,8 +15,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(test)]
-mod capture_stress_tests;
-#[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
 mod overflow_tests;
@@ -70,7 +68,7 @@ fn now_millis() -> i64 {
 /// Keep history, absolute indices, and overflow state under one mutex so a
 /// snapshot cannot skip a concurrently pushed event.
 #[derive(Debug, Default)]
-struct EventLogInner {
+pub(crate) struct EventLogInner {
     buffer: VecDeque<StructuredEvent>,
     next_logical_idx: u64,
     last_flushed_idx: u64,
@@ -84,7 +82,7 @@ struct EventLogInner {
 #[derive(Debug)]
 pub struct EventLog {
     capacity: usize,
-    inner: Mutex<EventLogInner>,
+    pub(crate) inner: Mutex<EventLogInner>,
 }
 
 impl EventLog {
@@ -196,7 +194,7 @@ impl EventLog {
     }
 }
 
-static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
+pub(crate) static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
 static FLUSHER_STARTED: OnceLock<()> = OnceLock::new();
 
 pub fn global() -> Arc<EventLog> {
