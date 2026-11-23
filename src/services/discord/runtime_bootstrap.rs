@@ -1,7 +1,6 @@
 use super::{health, *};
 use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
-#[cfg(unix)]
 mod boot_sigterm;
 mod deferred_restart;
 mod framework_setup;
@@ -367,7 +366,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     if !gateway_outcome.starts_provider_runtime() {
         // Lease ownership is unknown. No intake worker or restart poller has
         // been spawned, so this health-blind SharedData cannot outlive run_bot.
-        shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+        boot_sigterm::release_boot_slot(&shared, boot_sigterm::seen());
         return;
     }
 

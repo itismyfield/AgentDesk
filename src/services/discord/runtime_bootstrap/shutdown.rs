@@ -19,6 +19,7 @@ pub(super) fn run_bot_spawn_sigterm_handler(
 
             // Set global shutdown flag
             shared_for_signal.restart.legacy_sigterm();
+            super::boot_sigterm::mark();
 
             let (after_initial, before_final) = boundaries;
             persist_sigterm_state_with_boundaries(
@@ -90,9 +91,15 @@ impl SigtermSource {
     async fn wait(self) -> Option<(Boundary, Boundary)> {
         let none = || -> (Boundary, Boundary) { (Box::new(|| {}), Box::new(|| {})) };
         match self {
-            // The latch keeps a signal that arrived before this handler, e.g. during the boot gate.
+            // A peer handler may have taken the signal while this runtime was still booting.
             Self::Os => {
-                super::boot_sigterm::signalled(&mut super::boot_sigterm::subscribe()).await;
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm = signal(SignalKind::terminate()).ok()?;
+                let mut mark = super::boot_sigterm::watch();
+                tokio::select! {
+                    _ = sigterm.recv() => {}
+                    () = super::boot_sigterm::signalled(&mut mark) => {}
+                }
                 Some(none())
             }
             #[cfg(all(test, unix))]

@@ -1,82 +1,106 @@
 ------------------------- MODULE GatewayBootShutdown -------------------------
-\* #8351 round 3: one SIGTERM against a process whose Claude runtime C is still in the
-\* native boot gate (runtime_bootstrap.rs:299-301) while another provider O already
-\* runs its SIGTERM handler (:332/:408/:453). Both share one shutdown barrier of 2 slots
-\* (shared_state.rs:617-621); each runtime has its own shutting_down flag (shared_data.rs:163-180).
-\* Mode = "before":       53de918 - the gate reads only C's own flag, which nothing sets
-\*                        before C installs its handler; that handler opens a fresh stream.
-\* Mode = "after":        the gate waits on the process SIGTERM latch armed before :299; a
-\*                        signal observed by the gate stops C and takes its slot once, and the
-\*                        handler installed after the gate reads the same latch.
-\* Mode = "noreadycheck": mutation - a Ready attempt does not look at the latch.
-\* Mode = "nolast":       mutation - the gate takes the last slot without exiting.
-\* Mode = "freshstream":  mutation - C's handler opens its own stream (no handoff).
-\* Refusable: preparation may refuse; the refused runtime hands its slot to the latch.
+\* #8351 rounds 3-4: one SIGTERM against a process whose Claude runtime C has no SIGTERM
+\* handler yet: it is in the native boot gate (runtime_bootstrap.rs:301-303), in the gateway
+\* lease phase after a Ready gate, or out of run_bot after a failed lease or a refusal.
+\* With Providers = 2 another provider O already runs its handler (shutdown.rs:14-54).
+\* All runtimes share one shutdown barrier (shared_state.rs:617-621); each has its own
+\* shutting_down flag (shared_data.rs:163-180).
+\* While no tokio SIGTERM listener exists, SIGTERM keeps its default action and kills the process.
+\* Mode = "r2":          53de918 - the gate reads only C's own flag, which nothing sets.
+\* Mode = "r3":          2b93d60 - the gate registers a process SIGTERM latch before its first
+\*                       attempt (so the default action is gone); a failed lease still does a
+\*                       raw fetch_sub.
+\* Mode = "b":           round 4 - nothing registers early; O's handler sets a process mark, the
+\*                       gate stops on it, a slot released at boot exits when it was the last
+\*                       after SIGTERM, and a later handler also takes the mark.
+\* Mutations of "b": "b_nomark" (gate ignores the mark), "b_nohandoff" (C's handler hears
+\* only its own stream), "b_rawfail" (failed lease keeps the raw fetch_sub), "b_noexit" (a
+\* boot-time release never exits).
+\* LeaseEnds: preferred-poll eventually ends (acquired, standby or failed). FALSE models a
+\* peer whose handback stays suppressed (gateway_handback_breaker.rs:23-25).
 EXTENDS Naturals
-CONSTANTS Mode, Refusable
-VARIABLES term, busy, c, cHears, cCounted, oCounted, exited, termAtGate
-vars == <<term, busy, c, cHears, cCounted, oCounted, exited, termAtGate>>
+CONSTANTS Mode, Providers, LeaseEnds, Refusable
+VARIABLES term, done, busy, c, cHeard, cCounted, oCounted, mark, termAtGate
+vars == <<term, done, busy, c, cHeard, cCounted, oCounted, mark, termAtGate>>
 
-CStates == {"attempt", "wait", "ready", "started", "stopped", "refused"}
-TypeOK == /\ term \in BOOLEAN /\ busy \in BOOLEAN /\ c \in CStates /\ cHears \in BOOLEAN
-          /\ cCounted \in BOOLEAN /\ oCounted \in BOOLEAN /\ exited \in BOOLEAN
-          /\ termAtGate \in BOOLEAN
+CStates == {"gate", "wait", "ready", "lease", "started", "stopped", "failed", "refused"}
+TypeOK == /\ term \in BOOLEAN /\ done \in {"no", "exit", "killed"} /\ busy \in BOOLEAN
+          /\ c \in CStates /\ cHeard \in BOOLEAN /\ cCounted \in BOOLEAN
+          /\ oCounted \in BOOLEAN /\ mark \in BOOLEAN /\ termAtGate \in BOOLEAN
 
-Init == /\ term = FALSE /\ busy \in BOOLEAN /\ c = "attempt" /\ cHears = FALSE
-        /\ cCounted = FALSE /\ oCounted = FALSE /\ exited = FALSE /\ termAtGate = FALSE
+Init == /\ term = FALSE /\ done = "no" /\ busy \in BOOLEAN /\ c = "gate" /\ cHeard = FALSE
+        /\ cCounted = FALSE /\ oCounted = FALSE /\ mark = FALSE /\ termAtGate = FALSE
 
-GateSees == Mode # "before"
-HandlerSees == IF Mode \in {"before", "freshstream"} THEN cHears ELSE term
-\* shutdown.rs:34-54: the CAS takes a slot once; the holder of the last slot exits.
-Take(lastExits) == /\ cCounted' = TRUE
-                   /\ exited' = (exited \/ (oCounted /\ lastExits))
+B == Mode \in {"b", "b_nomark", "b_nohandoff", "b_rawfail", "b_noexit"}
+\* Some tokio SIGTERM listener exists: a live handler, or the r3 latch from gate entry on.
+Registered == Providers = 2 \/ c = "started" \/ Mode = "r3"
+GateSees == mark /\ Mode \in {"r3", "b", "b_nohandoff", "b_rawfail", "b_noexit"}
+Live == done = "no"
+\* C gives up its slot once; with `exits` it ends the process when that was the last slot.
+Take(exits) == /\ cCounted' = TRUE
+               /\ done' = IF exits /\ (Providers = 1 \/ oCounted) THEN "exit" ELSE done
 
-\* The process gets SIGTERM once. A handler stream that exists at that moment hears it.
-Term == /\ ~term /\ ~exited /\ term' = TRUE /\ cHears' = (c = "started")
-        /\ UNCHANGED <<busy, c, cCounted, oCounted, exited, termAtGate>>
-\* O is past its gate: its handler persists and takes its slot (shutdown.rs:14-54).
-OHandle == /\ term /\ ~oCounted /\ ~exited /\ oCounted' = TRUE /\ exited' = cCounted
-           /\ UNCHANGED <<term, busy, c, cHears, cCounted, termAtGate>>
-\* The history lock holder finishes (environment progress).
+\* One SIGTERM. A listener that exists hears it (and O's handler or the r3 latch sets the mark);
+\* with none, the default action ends the process.
+Term == /\ ~term /\ Live /\ term' = TRUE
+        /\ IF Registered
+           THEN /\ mark' = TRUE /\ cHeard' = (c = "started") /\ UNCHANGED done
+           ELSE /\ done' = "killed" /\ UNCHANGED <<mark, cHeard>>
+        /\ UNCHANGED <<busy, c, cCounted, oCounted, termAtGate>>
+\* O's handler persists and takes its slot; the last slot exits (shutdown.rs:34-54).
+OHandle == /\ Providers = 2 /\ term /\ ~oCounted /\ Live /\ oCounted' = TRUE
+           /\ done' = IF cCounted THEN "exit" ELSE done
+           /\ UNCHANGED <<term, busy, c, cHeard, cCounted, mark, termAtGate>>
 ClearBusy == /\ busy /\ busy' = FALSE
-             /\ UNCHANGED <<term, c, cHears, cCounted, oCounted, exited, termAtGate>>
+             /\ UNCHANGED <<term, done, c, cHeard, cCounted, oCounted, mark, termAtGate>>
 
-\* An attempt runs to completion; only then is the latch looked at (native_input.rs).
+\* An attempt runs to completion, then the gate looks at the mark (native_input.rs:99-104).
 CAttempt ==
-    /\ c = "attempt" /\ ~exited
-    /\ \/ /\ GateSees /\ term /\ Mode # "noreadycheck"
-          /\ c' = "stopped" /\ Take(Mode # "nolast") /\ UNCHANGED termAtGate
-       \/ /\ ~(GateSees /\ term /\ Mode # "noreadycheck")
-          /\ \/ /\ busy /\ c' = "wait" /\ UNCHANGED <<cCounted, exited, termAtGate>>
-             \/ /\ ~busy /\ c' = "ready" /\ termAtGate' = term
-                /\ UNCHANGED <<cCounted, exited>>
-             \/ /\ Refusable /\ c' = "refused" /\ UNCHANGED <<cCounted, exited, termAtGate>>
-    /\ UNCHANGED <<term, busy, cHears, oCounted>>
-\* The 5 s retry sleep, raced against the latch in "after".
-CWaitEnd == /\ c = "wait" /\ ~exited
-            /\ IF GateSees /\ term
-               THEN c' = "stopped" /\ Take(Mode # "nolast")
-               ELSE c' = "attempt" /\ UNCHANGED <<cCounted, exited>>
-            /\ UNCHANGED <<term, busy, cHears, oCounted, termAtGate>>
-\* Ready: lease, intake and the runtime's own SIGTERM handler (runtime_bootstrap.rs:332/:408/:453).
-CStart == /\ c = "ready" /\ ~exited /\ c' = "started"
-          /\ UNCHANGED <<term, busy, cHears, cCounted, oCounted, exited, termAtGate>>
-CHandle == /\ c = "started" /\ HandlerSees /\ ~cCounted /\ ~exited /\ Take(TRUE)
-           /\ UNCHANGED <<term, busy, c, cHears, oCounted, termAtGate>>
-\* A refused runtime returns from run_bot; in "before" its slot is never taken.
-CRefusedSlot == /\ c = "refused" /\ Mode # "before" /\ term /\ ~cCounted /\ ~exited
-                /\ Take(Mode # "nolast")
-                /\ UNCHANGED <<term, busy, c, cHears, oCounted, termAtGate>>
+    /\ c = "gate" /\ Live /\ UNCHANGED <<term, busy, cHeard, oCounted, mark>>
+    /\ IF GateSees
+       THEN c' = "stopped" /\ Take(Mode # "b_noexit") /\ UNCHANGED termAtGate
+       ELSE \/ /\ busy /\ c' = "wait" /\ UNCHANGED <<cCounted, done, termAtGate>>
+            \/ /\ ~busy /\ c' = "ready" /\ termAtGate' = term
+               /\ UNCHANGED <<cCounted, done>>
+            \/ /\ Refusable /\ c' = "refused" /\ UNCHANGED termAtGate
+               /\ IF B THEN Take(Mode # "b_noexit" /\ mark) ELSE UNCHANGED <<cCounted, done>>
+\* The 5 s retry sleep raced against the mark (native_input.rs:137-144).
+CWaitEnd == /\ c = "wait" /\ Live /\ GateSees /\ c' = "stopped" /\ Take(Mode # "b_noexit")
+            /\ UNCHANGED <<term, busy, cHeard, oCounted, mark, termAtGate>>
+CRetry == /\ c = "wait" /\ Live /\ ~GateSees /\ c' = "gate"
+          /\ UNCHANGED <<term, done, busy, cHeard, cCounted, oCounted, mark, termAtGate>>
+\* Ready: run_bot_acquire_gateway_lease (preferred-poll gateway_lease.rs:229-319).
+CReady == /\ c = "ready" /\ Live /\ c' = "lease"
+          /\ UNCHANGED <<term, done, busy, cHeard, cCounted, oCounted, mark, termAtGate>>
+\* Lease acquired or standby: the runtime and its handler start (runtime_bootstrap.rs:334/:410/:455).
+CLeaseStart == /\ c = "lease" /\ Live /\ c' = "started"
+               /\ UNCHANGED <<term, done, busy, cHeard, cCounted, oCounted, mark, termAtGate>>
+\* Lease failed: run_bot gives up the slot and returns (runtime_bootstrap.rs:367-371).
+CLeaseFail == /\ c = "lease" /\ Live /\ c' = "failed"
+              /\ IF Mode \in {"b", "b_nomark", "b_nohandoff"}
+                 THEN Take(mark) ELSE Take(FALSE)
+              /\ UNCHANGED <<term, busy, cHeard, oCounted, mark, termAtGate>>
+CLeaseEnd == CLeaseStart \/ CLeaseFail
+\* C's handler: its own stream, plus the mark when it takes over (shutdown.rs:94-104).
+CHandle == /\ c = "started" /\ Live /\ ~cCounted
+           /\ IF Mode = "r2" \/ Mode = "b_nohandoff" THEN cHeard ELSE mark
+           /\ Take(TRUE)
+           /\ UNCHANGED <<term, busy, c, cHeard, oCounted, mark, termAtGate>>
+\* r3 only: the refused runtime waits on the latch for its slot.
+CRefusedSlot == /\ Mode = "r3" /\ c = "refused" /\ mark /\ ~cCounted /\ Live /\ Take(TRUE)
+                /\ UNCHANGED <<term, busy, c, cHeard, oCounted, mark, termAtGate>>
 
-Next == Term \/ OHandle \/ ClearBusy \/ CAttempt \/ CWaitEnd \/ CStart \/ CHandle \/ CRefusedSlot
+Next == Term \/ OHandle \/ ClearBusy \/ CAttempt \/ CWaitEnd \/ CRetry \/ CReady \/ CLeaseEnd
+        \/ CHandle \/ CRefusedSlot
 
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(OHandle) /\ WF_vars(ClearBusy) /\ WF_vars(CAttempt) /\ WF_vars(CWaitEnd)
-        /\ WF_vars(CStart) /\ WF_vars(CHandle) /\ WF_vars(CRefusedSlot)
+        /\ WF_vars(CRetry) /\ WF_vars(CReady) /\ WF_vars(CHandle) /\ WF_vars(CRefusedSlot)
+        /\ IF LeaseEnds THEN WF_vars(CLeaseEnd) ELSE TRUE
 
 \* ---- rules ----
 \* A gate that decided after the shutdown request starts no runtime.
-NoStartAfterTerm == ~(c \in {"ready", "started"} /\ termAtGate)
-\* The shutdown barrier ends: the last slot holder exits.
-BarrierEnds == term ~> exited
+NoStartAfterTerm == ~(c \in {"ready", "lease", "started"} /\ termAtGate)
+\* The process ends after SIGTERM: the last slot holder exits or the default action kills it.
+BarrierEnds == term ~> (done # "no")
 =============================================================================

@@ -47,36 +47,42 @@ No chart is generated: the `statechart` skill is not installed on the WSL lane.
 Not modeled: the handback breaker (`gateway_handback_breaker.rs`). It suppresses the keepalive yield after dense empty handbacks; on 11-23 no handback happened, so the breaker was not involved.
 The preferred node's restart-pending standby (`gateway_lease.rs:304-311`) is not modeled either. That standby retries without advertising a waiter.
 
-## Boot gate and SIGTERM (#8351 round 3)
+## Boot gate and SIGTERM (#8351 rounds 3-4)
 
-Model: [GatewayBootShutdown.tla](GatewayBootShutdown.tla). One process, one SIGTERM. Claude (C) is still in the native boot gate. Another provider (O) already runs its SIGTERM handler. Both share a shutdown barrier of 2 slots, and each runtime has its own `shutting_down` flag.
+Model: [GatewayBootShutdown.tla](GatewayBootShutdown.tla). One SIGTERM reaches a process whose Claude runtime C has no SIGTERM handler yet. C may be in the native boot gate, in the gateway lease phase after a Ready gate, or out of run_bot after a failed lease or a refusal. With `Providers = 2`, another provider O already runs its handler. While no tokio SIGTERM listener exists, the signal keeps its default action and kills the process.
 
 Rules:
 - `NoStartAfterTerm` (INVARIANT): a gate that decides after the shutdown request starts no runtime.
-- `BarrierEnds` (PROPERTY): `term ~> exited`. The last slot holder ends the process.
+- `BarrierEnds` (PROPERTY): `term ~> (done # "no")`. After SIGTERM, the last slot holder exits or the default action ends the process.
 
-| cfg | Mode | result |
+| cfg | Mode / Providers / LeaseEnds | result |
 |---|---|---|
-| GatewayBootShutdownBefore | `before`: 53de918, the gate reads only C's own flag | RED: `NoStartAfterTerm`, `BarrierEnds` |
-| GatewayBootShutdownAfter | `after`: the gate waits on the process SIGTERM latch, and the later handler reads the same latch | GREEN |
-| GatewayBootShutdownNoReadyCheck | mutation: a Ready attempt ignores the latch | RED: `NoStartAfterTerm` |
-| GatewayBootShutdownNoLast | mutation: the gate takes the last slot without exiting | RED: `BarrierEnds` |
-| GatewayBootShutdownFreshStream | mutation: C's handler opens its own stream (no handoff) | RED: `BarrierEnds` |
+| GatewayBootShutdownSingleBefore | `r3` (2b93d60 latch) / 1 / FALSE | RED: `BarrierEnds`. The latch removes the default action: after a failed lease, or in an endless preferred wait, nothing exits |
+| GatewayBootShutdownSingleAfter | `b` (round 4) / 1 / FALSE | GREEN |
+| GatewayBootShutdownMultiBefore | `r2` (53de918) / 2 / TRUE | RED: `NoStartAfterTerm`, `BarrierEnds` |
+| GatewayBootShutdownMultiR3 | `r3` / 2 / TRUE | RED: `BarrierEnds`. The failed lease keeps the raw `fetch_sub` after O already took its slot |
+| GatewayBootShutdownMultiAfter | `b` / 2 / TRUE | GREEN |
+| GatewayBootShutdownMultiNoMark | mutation: the gate ignores the mark | RED: `NoStartAfterTerm` |
+| GatewayBootShutdownMultiNoHandoff | mutation: C's handler hears only its own stream | RED: `BarrierEnds` |
+| GatewayBootShutdownMultiRawFail | mutation: the failed lease keeps the raw `fetch_sub` | RED: `BarrierEnds` |
+| GatewayBootShutdownMultiNoExit | mutation: a boot-time slot release never exits | RED: `BarrierEnds` |
+| GatewayBootShutdownMultiStuckLease | `b` / 2 / FALSE | RED: `BarrierEnds`. Known gap, present since b012692: with a peer handler, preferred-poll does not read the mark and can wait forever behind a suppressed handback |
 
-`Refusable = TRUE` in every config: a refused runtime hands its slot to the latch (`CRefusedSlot`).
+`Refusable = TRUE` in every config.
 
-Before counterexample: SIGTERM arrives while C sleeps between held restores. O's handler takes its slot, but nothing sets C's flag, because C installs its handler only after the gate. The lock frees, and C goes Ready and starts. C's handler opens a fresh stream after the signal and never hears it. One slot stays, and the process never exits.
+### Entry points that take SIGTERM or a barrier slot (round-4 head)
 
-| Model step | Code (round-3 head) |
-|---|---|
-| per-runtime flag, shared barrier | `runtime_bootstrap/shared_data.rs:163-180` (`shutting_down` per SharedData, `shutdown_remaining` injected); `shared_state.rs:617-621` invariant; flag writers `shared_state.rs:728-774` |
-| gate entry (C's latch armed) | `runtime_bootstrap.rs:301-303` → `runtime_bootstrap/native_input.rs:33` `boot_sigterm::subscribe()` before the first attempt |
-| Term (process latch) | `runtime_bootstrap/boot_sigterm.rs:10-28` (one tokio SIGTERM listener per process, `send_replace(true)`) |
-| CAttempt → stopped | `native_input.rs:99-104` (checked after every attempt, so a Ready result cannot override the request) |
-| CWaitEnd | `native_input.rs:137-144` (`select!` of the 5 s sleep and the latch, then the same check) |
-| Take (slot once, last exits) | `boot_sigterm.rs:39-54` `stop_before_start`, same CAS + `fetch_sub == 1 → exit(0)` contract as `shutdown.rs:34-54` |
-| CRefusedSlot | `native_input.rs:119` → `boot_sigterm.rs:57-62` `release_slot_on_sigterm` |
-| CStart / CHandle | handler install `runtime_bootstrap.rs:334` (worker), `:410` (gateway), `:455` (standby); `shutdown.rs:94-97`: the handler waits on the latch, so a signal that arrived during the gate is not lost |
-| OHandle | `shutdown.rs:14-54` |
-
-Not modeled: the gateway lease wait after a Ready gate (`gateway_lease.rs:229-319`). A SIGTERM there stays in the latch until that runtime installs its handler. The lease wait does not read the latch, so the stop waits for the lease outcome.
+| Entry point | Code | Model |
+|---|---|---|
+| native gate | `runtime_bootstrap.rs:300-302` → `native_input.rs:33` reads the mark (`boot_sigterm::watch`), checked after each attempt `:101-104`, sleep raced `:137-144` | CAttempt / CWaitEnd / CRetry |
+| gate stop | `boot_sigterm.rs:53-56` `stop_before_start` → `release_boot_slot` `:34-50` (CAS once; exit only for the last slot after SIGTERM) | Take |
+| refused runtime | `native_input.rs:119` → `release_boot_slot` | CAttempt refused branch |
+| failed gateway lease | `runtime_bootstrap.rs:367-371` → `release_boot_slot(&shared, seen())` | CLeaseFail |
+| utility bot skip | `runtime_bootstrap.rs:191` raw `fetch_sub` before any SharedData (unchanged) | not modeled |
+| preferred-poll wait | `gateway_lease.rs:229-319` (reads only its own `shutting_down` `:297` and the restart file) | CLeaseStart / CLeaseEnd fairness |
+| SIGTERM handler install | `runtime_bootstrap.rs:333` (worker), `:409` (gateway), `:454` (standby) | CLeaseStart → started |
+| SIGTERM handler | `shutdown.rs:14-54`: `legacy_sigterm` `:21`, mark `:22`, CAS + last `exit(0)` `:37-56`; signal source `:95-104` (own stream raced with the mark) | OHandle / CHandle |
+| process mark | `boot_sigterm.rs:7-22` (static `watch`; registers no signal) | `mark` |
+| deferred restart slot | `deferred_restart.rs:94` CAS, `:121-131` `fetch_sub`, `:195-208` rollback `fetch_add`; final `exit(0)` `spawns.rs:366-395` | not modeled (no SIGTERM) |
+| per-runtime flag / shared barrier | `shared_data.rs:163-180`, `shared_state.rs:617-621`, flag writers `:728-774` | model premise |
+| startup sigaction | `cli/dcserver_decision_boot.rs:68-87` (installed and restored during decision boot, before run_bot) | not modeled |

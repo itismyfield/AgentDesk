@@ -75,9 +75,9 @@ async fn held_restore_is_retried_until_ready_and_health_shows_the_wait() {
 }
 
 #[tokio::test]
-async fn refused_preparation_stops_is_visible_and_answers_sigterm() {
+async fn refused_preparation_stops_is_visible_and_gives_up_its_slot() {
     let claude = barrier(3);
-    let (latch, sigterm) = watch::channel(false);
+    let (_mark, sigterm) = watch::channel(false);
     let mut calls = 0;
     let ready = await_native_boot(&ProviderKind::Claude, &claude, sigterm, TICK, || {
         calls += 1;
@@ -102,15 +102,9 @@ async fn refused_preparation_stops_is_visible_and_answers_sigterm() {
             )),
         "{json}"
     );
-    assert_eq!(remaining(&claude), 3, "the slot waits for SIGTERM");
-    latch.send_replace(true);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !stopped(&claude) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the refused runtime gives up its slot on SIGTERM");
+    // Like a failed lease, the refused runtime leaves run_bot and its slot with it.
+    assert!(claude.restart.shutdown_counted.load(Ordering::Acquire));
+    assert!(!claude.restart.shutting_down.load(Ordering::Acquire));
     assert_eq!(remaining(&claude), 2);
     boot_hold::release("claude");
 }
@@ -171,36 +165,107 @@ async fn a_ready_attempt_after_sigterm_starts_nothing() {
 const CHILD_DIR: &str = "ADK_TEST_NATIVE_BOOT_SIGTERM_DIR";
 const TESTS: &str = "services::discord::runtime_bootstrap::queued_recovery::native_input::tests::";
 
-/// Child process: Claude is held in its gate; with `codex`, Codex is past its gate with its
-/// real SIGTERM handler and holds the other barrier slot.
-fn sigterm_child(dir: std::path::PathBuf, codex: bool) {
+/// A cluster config naming this node the preferred gateway, a migrated database, and a lease
+/// held by another connection: preferred-poll then waits for as long as the holder keeps it.
+async fn preferred_fixture(
+    root: &std::path::Path,
+) -> (
+    Vec<Box<dyn std::any::Any>>,
+    crate::db::auto_queue::test_support::TestPostgresDb,
+    sqlx::PgPool,
+    String,
+    crate::db::postgres::AdvisoryLockLease,
+) {
+    let mut guards: Vec<Box<dyn std::any::Any>> = Vec::new();
+    guards.push(Box::new(crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    )));
+    for (key, path) in [
+        ("AGENTDESK_ROOT_DIR", root.to_path_buf()),
+        ("AGENTDESK_CONFIG", root.join("config.yaml")),
+    ] {
+        guards.push(Box::new(
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(key, &path),
+        ));
+    }
+    let mut config = crate::config::Config::default();
+    config.data.dir = root.join("data");
+    config.cluster.enabled = true;
+    let instance =
+        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    config.cluster.instance_id = Some(instance.clone());
+    config.cluster.gateway_preferred_instance_id = Some(instance.clone());
+    crate::config_live_reload::install(config);
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,updated_at) VALUES ($1,'online',NOW(),NOW())")
+        .bind(&instance)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The non-preferred node holds the lease, as on 11-23.
+    let held = crate::services::discord::runtime_bootstrap::gateway_lease::try_acquire_discord_gateway_lease(
+        &pool,
+        TOKEN,
+        &ProviderKind::Claude,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    (guards, fixture, pool, instance, held)
+}
+
+const TOKEN: &str = "discord_7465737467617465";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Child {
+    /// Codex serves with its real SIGTERM handler; Claude is held in its gate.
+    Pair,
+    /// As `Pair`, but Codex already gave up its slot, so Claude holds the last one.
+    PairClaudeLast,
+    /// Claude alone, held in its gate.
+    AloneWait,
+    /// Claude alone, ready, then out of run_bot through the failed-lease slot release.
+    AloneLeaseFailed,
+    /// Claude alone, ready, then in preferred-poll behind a held lease.
+    AlonePreferred,
+}
+
+/// Child process body; it prints its markers and ends only by exit or by signal.
+fn sigterm_child(dir: std::path::PathBuf, mode: Child) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async move {
-        let slots = Arc::new(AtomicUsize::new(1 + usize::from(codex)));
+        let pair = matches!(mode, Child::Pair | Child::PairClaudeLast);
+        let slots = Arc::new(AtomicUsize::new(if mode == Child::Pair { 2 } else { 1 }));
+        let mut preferred = None;
+        if mode == Child::AlonePreferred {
+            preferred = Some(preferred_fixture(&dir).await);
+        }
+        let pool = preferred.as_ref().map(|(_, _, pool, _, _)| pool.clone());
         let claude =
-            crate::services::discord::make_shared_data_for_tests_with_barrier(None, slots.clone());
-        let _handler = codex.then(|| {
+            crate::services::discord::make_shared_data_for_tests_with_barrier(pool, slots.clone());
+        let _handler = pair.then(|| {
             let codex =
-                crate::services::discord::make_shared_data_for_tests_with_barrier(None, slots);
-            super::super::super::shutdown::run_bot_spawn_sigterm_handler(
-                &codex,
-                ProviderKind::Codex,
-            )
+                crate::services::discord::make_shared_data_for_tests_with_barrier(None, slots.clone());
+            if mode == Child::PairClaudeLast {
+                codex.restart.shutdown_counted.store(true, Ordering::SeqCst);
+            }
+            super::super::super::shutdown::run_bot_spawn_sigterm_handler(&codex, ProviderKind::Codex)
         });
         let release = dir.join("release");
+        let hold = matches!(mode, Child::Pair | Child::PairClaudeLast | Child::AloneWait);
         let mut announced = false;
-        let sigterm = super::super::super::boot_sigterm::subscribe();
         let ready = await_native_boot(
             &ProviderKind::Claude,
             &claude,
-            sigterm,
+            super::super::super::boot_sigterm::watch(),
             Duration::from_millis(20),
             || {
-                let held = !release.exists();
+                let held = hold && !release.exists();
                 if held && !announced {
                     announced = true;
                     println!("HELD");
@@ -215,17 +280,40 @@ fn sigterm_child(dir: std::path::PathBuf, codex: bool) {
             },
         )
         .await;
-        if ready {
-            println!("RUNTIME_START");
+        match mode {
+            Child::AloneLeaseFailed => {
+                super::super::super::boot_sigterm::release_boot_slot(
+                    &claude,
+                    super::super::super::boot_sigterm::seen(),
+                );
+                println!("LEASE_FAILED remaining={}", slots.load(Ordering::SeqCst));
+            }
+            Child::AlonePreferred => {
+                println!("PREFERRED_WAIT");
+                let mut breaker = super::super::super::gateway_handback_breaker::GatewayHandbackBreaker::with_sources(
+                    "claude", TOKEN, None, || 0, Default::default,
+                );
+                let pool = claude.pg_pool.clone().unwrap();
+                let _ = super::super::super::gateway_lease::acquire_as_preferred_gateway(
+                    &pool,
+                    TOKEN,
+                    &ProviderKind::Claude,
+                    &claude,
+                    &mut breaker,
+                )
+                .await;
+                println!("RUNTIME_START");
+            }
+            _ if ready => println!("RUNTIME_START"),
+            _ => {}
         }
-        println!("GATE_RETURNED");
-        // Only the last slot holder's exit(0) ends this process.
+        // Only an exit(0) or the signal's default action ends this process.
         std::future::pending::<()>().await
     });
 }
 
-/// Runs `test` as the child, sends it one real SIGTERM while Claude is held, then frees the lock.
-fn run_sigterm_child(test: &str) -> (Option<std::process::ExitStatus>, Vec<String>) {
+/// Runs `test` as the child, waits for `marker`, sends one real SIGTERM, then frees the lock.
+fn run_sigterm_child(test: &str, marker: &str) -> (Option<std::process::ExitStatus>, Vec<String>) {
     use std::io::BufRead;
     let dir = tempfile::tempdir().unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -251,14 +339,14 @@ fn run_sigterm_child(test: &str) -> (Option<std::process::ExitStatus>, Vec<Strin
         }
     });
     let mut seen: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !seen.iter().any(|line| line.ends_with("HELD")) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while !seen.iter().any(|line| line.contains(marker)) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match received.recv_timeout(left) {
             Ok(line) => seen.push(line),
             Err(_) => {
                 let _ = child.kill();
-                panic!("child never held: {seen:?}");
+                panic!("child never reached {marker}: {seen:?}");
             }
         }
     }
@@ -284,35 +372,96 @@ fn run_sigterm_child(test: &str) -> (Option<std::process::ExitStatus>, Vec<Strin
     (status, seen)
 }
 
-fn assert_stopped_and_exited(test: &str) {
-    let (status, seen) = run_sigterm_child(test);
+/// The child started nothing after SIGTERM and ended: by exit(0) or, with `default`, also by
+/// the signal's default action.
+fn assert_ended(test: &str, marker: &str, default: bool) -> Vec<String> {
+    use std::os::unix::process::ExitStatusExt;
+    let (status, seen) = run_sigterm_child(test, marker);
     assert!(
         !seen.iter().any(|line| line.contains("RUNTIME_START")),
         "Claude started after SIGTERM: {seen:?}"
     );
-    let status = status.unwrap_or_else(|| panic!("the shutdown barrier never ended: {seen:?}"));
-    assert_eq!(status.code(), Some(0), "{seen:?}");
+    let status = status.unwrap_or_else(|| panic!("SIGTERM did not end the process: {seen:?}"));
+    let by_default = default && status.signal() == Some(libc::SIGTERM);
+    assert!(
+        status.code() == Some(0) || by_default,
+        "{status:?} {seen:?}"
+    );
+    seen
 }
 
-/// One real SIGTERM while Claude sleeps between held restores and Codex already serves:
-/// Claude starts nothing, both slots go, and the process exits 0.
+fn child_mode() -> Option<std::path::PathBuf> {
+    std::env::var(CHILD_DIR).ok().map(Into::into)
+}
+
+/// (나) Codex already serves: Claude in its retry wait starts nothing, both slots go, exit 0.
 #[test]
 fn real_sigterm_while_restore_is_held_stops_claude_and_ends_the_barrier() {
-    if let Ok(dir) = std::env::var(CHILD_DIR) {
-        return sigterm_child(dir.into(), true);
+    if let Some(dir) = child_mode() {
+        return sigterm_child(dir, Child::Pair);
     }
-    assert_stopped_and_exited(
+    assert_ended(
         "real_sigterm_while_restore_is_held_stops_claude_and_ends_the_barrier",
+        "HELD",
+        false,
     );
 }
 
-/// Claude holds the last slot, so its gate must end the process itself.
+/// (나) Claude holds the last slot, so its gate ends the process itself.
 #[test]
 fn real_sigterm_with_claude_holding_the_last_slot_exits() {
-    if let Ok(dir) = std::env::var(CHILD_DIR) {
-        return sigterm_child(dir.into(), false);
+    if let Some(dir) = child_mode() {
+        return sigterm_child(dir, Child::PairClaudeLast);
     }
-    assert_stopped_and_exited("real_sigterm_with_claude_holding_the_last_slot_exits");
+    assert_ended(
+        "real_sigterm_with_claude_holding_the_last_slot_exits",
+        "HELD",
+        false,
+    );
+}
+
+/// (가) A lone Claude registers no SIGTERM handler before its own, so the default action ends it.
+#[test]
+fn real_sigterm_in_the_retry_wait_of_a_lone_claude_ends_the_process() {
+    if let Some(dir) = child_mode() {
+        return sigterm_child(dir, Child::AloneWait);
+    }
+    assert_ended(
+        "real_sigterm_in_the_retry_wait_of_a_lone_claude_ends_the_process",
+        "HELD",
+        true,
+    );
+}
+
+/// (가) After the failed-lease return the slot is gone once, and SIGTERM still ends the process.
+#[test]
+fn real_sigterm_after_a_lone_claude_lease_failure_ends_the_process() {
+    if let Some(dir) = child_mode() {
+        return sigterm_child(dir, Child::AloneLeaseFailed);
+    }
+    let seen = assert_ended(
+        "real_sigterm_after_a_lone_claude_lease_failure_ends_the_process",
+        "LEASE_FAILED",
+        true,
+    );
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("LEASE_FAILED remaining=0")),
+        "{seen:?}"
+    );
+}
+
+/// (가) A lone Claude in preferred-poll behind a held lease ends on SIGTERM.
+#[test]
+fn real_sigterm_in_preferred_wait_of_a_lone_claude_ends_the_process_pg() {
+    if let Some(dir) = child_mode() {
+        return sigterm_child(dir, Child::AlonePreferred);
+    }
+    assert_ended(
+        "real_sigterm_in_preferred_wait_of_a_lone_claude_ends_the_process_pg",
+        "PREFERRED_WAIT",
+        true,
+    );
 }
 
 /// The production path after a ready gate: the preferred node reaches preferred-poll
@@ -320,44 +469,10 @@ fn real_sigterm_with_claude_holding_the_last_slot_exits() {
 #[tokio::test]
 async fn held_restore_then_ready_reaches_preferred_waiter_pg() {
     use crate::services::discord::runtime_bootstrap::gateway_handback_breaker::GatewayHandbackBreaker;
-    use crate::services::discord::runtime_bootstrap::gateway_lease::{
-        acquire_as_preferred_gateway, try_acquire_discord_gateway_lease,
-    };
+    use crate::services::discord::runtime_bootstrap::gateway_lease::acquire_as_preferred_gateway;
     let root = tempfile::tempdir().unwrap();
-    let _live = crate::config_live_reload::test_live_guard(
-        crate::config::test_env_lock::acquire_shared_test_env_lock(),
-    );
-    let _paths = [
-        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            root.path(),
-        ),
-        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_CONFIG",
-            &root.path().join("config.yaml"),
-        ),
-    ];
-    let mut config = crate::config::Config::default();
-    config.data.dir = root.path().join("data");
-    config.cluster.enabled = true;
-    let instance =
-        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-    config.cluster.instance_id = Some(instance.clone());
-    config.cluster.gateway_preferred_instance_id = Some(instance.clone());
-    crate::config_live_reload::install(config);
-    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = fixture.connect_and_migrate().await;
-    sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,updated_at) VALUES ($1,'online',NOW(),NOW())")
-        .bind(&instance)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let token = "discord_7465737467617465";
-    // The non-preferred node holds the lease, as on 11-23.
-    let held = try_acquire_discord_gateway_lease(&pool, token, &ProviderKind::Claude)
-        .await
-        .unwrap()
-        .unwrap();
+    let (_guards, fixture, pool, instance, held) = preferred_fixture(root.path()).await;
+    let token = TOKEN;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
 

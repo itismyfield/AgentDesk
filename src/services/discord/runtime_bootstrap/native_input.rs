@@ -29,8 +29,8 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
         && super::super::super::turn_finalizer::native_prepare::enabled()
     {
         use super::super::super::turn_finalizer::native_prepare::BootInputs;
-        // Armed before the first attempt: no runtime handler can hear SIGTERM yet.
-        let sigterm = super::super::boot_sigterm::subscribe();
+        // Set by a peer runtime's SIGTERM handler; this runtime has none yet and registers none.
+        let sigterm = super::super::boot_sigterm::watch();
         let attempt = || async move {
             let prepared = crate::services::discord::runtime_store::runtime_root()
                 .ok_or_else(|| "native boot root unavailable".to_string())
@@ -99,7 +99,7 @@ where
         let outcome = attempt().await;
         // An attempt that finished after the shutdown request starts nothing, even when ready.
         if stop_requested(&sigterm) {
-            boot_sigterm::stop_before_start(shared);
+            boot_sigterm::stop_before_start(shared, *sigterm.borrow());
             return false;
         }
         let error = match outcome {
@@ -116,7 +116,7 @@ where
             }
             NativeBoot::Refused(error) => {
                 boot_hold::hold(provider.as_str(), "native_boot_refused", &error);
-                boot_sigterm::release_slot_on_sigterm(shared.clone(), sigterm);
+                boot_sigterm::release_boot_slot(shared, *sigterm.borrow());
                 return false;
             }
             NativeBoot::RestoreHeld(error) => error,
@@ -139,7 +139,7 @@ where
             () = boot_sigterm::signalled(&mut sigterm) => {}
         }
         if stop_requested(&sigterm) {
-            boot_sigterm::stop_before_start(shared);
+            boot_sigterm::stop_before_start(shared, *sigterm.borrow());
             return false;
         }
     }
