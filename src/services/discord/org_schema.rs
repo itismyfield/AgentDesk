@@ -8,8 +8,6 @@ use crate::services::agent_identity::{self, identity_from_parts, identity_label}
 use crate::services::channel_roles::{RegisteredChannelBinding, RoleProjection};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth_profile::ProviderAuthProfileDef;
-#[cfg(test)]
-use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
 // ─── Compatibility document access ─────────────────────────────────────────
@@ -37,9 +35,6 @@ pub(crate) fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str
     )
 }
 
-#[cfg(test)]
-#[path = "org_schema/auth_selection_tests.rs"]
-mod auth_selection_tests;
 #[cfg(test)]
 fn list_profile_bindings_from_schema(
     schema: OrgSchema,
@@ -124,7 +119,7 @@ pub(crate) fn spawn_auth_overlay(
 
 /// The account a launch for the channel and agent is configured to use: a recovery pin first,
 /// then the channel or agent setting, then the provider primary; `true` when a pin chose it.
-fn configured_launch_profile(
+pub(crate) fn configured_launch_profile(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -215,7 +210,7 @@ type LaunchParts = (
     Option<(u64, FallbackPolicy)>,
 );
 
-fn launch_overlay_parts(
+pub(crate) fn launch_overlay_parts(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,

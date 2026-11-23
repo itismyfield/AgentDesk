@@ -1,5 +1,9 @@
-use super::*;
-use crate::domain::provider_auth_profile::ProfileOverrides;
+use crate::domain::provider_auth_profile::{FallbackPolicy, ProfileOverrides};
+use crate::services::discord::org_schema::*;
+use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::ProviderAuthProfileDef;
+use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
+use std::collections::HashMap;
 
 #[test]
 fn normalized_selection_inputs_preserve_launch_and_fallback_results() {

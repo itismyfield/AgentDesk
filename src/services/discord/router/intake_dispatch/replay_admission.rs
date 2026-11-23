@@ -481,29 +481,10 @@ pub(crate) async fn prepare_effect_start(
     StartPermit::seal(ack, &projection.target).map_err(|_| StartRefusal::PermitMismatch)
 }
 
-/// The activation supplier of tests: producers turn on only for the channels a guard names.
+/// Test activation (supplied by `replay_policy::activation`) and lost acknowledgements.
 #[cfg(test)]
 pub(crate) mod test_activation {
-    static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-    pub(crate) fn active(channel: &str) -> bool {
-        let channels = ACTIVE.lock().unwrap().join(",");
-        crate::services::discord::replay_policy::activation::Settings::parse(true, Some(&channels))
-            .selected(channel)
-    }
-
-    pub(crate) struct Activated(String);
-
-    pub(crate) fn activate(channel: u64) -> Activated {
-        ACTIVE.lock().unwrap().push(channel.to_string());
-        Activated(channel.to_string())
-    }
-
-    impl Drop for Activated {
-        fn drop(&mut self) {
-            ACTIVE.lock().unwrap().retain(|active| active != &self.0);
-        }
-    }
+    pub(crate) use crate::services::discord::replay_policy::activation::test_activation::activate;
 
     static ACK_LOST: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 

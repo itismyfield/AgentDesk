@@ -50,7 +50,3 @@ impl LocalSnapshot {
         ))
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "recovery_tests.rs"]
-mod tests;
