@@ -56,7 +56,7 @@ pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
     if crate::config::test_instance::requested() {
         return Ensured::Refused("test_instance_manual_daemon_required");
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ENSURED.with(|count| count.set(count.get() + 1));
     let socket = PathBuf::from(&launch.socket_addr);
     let context = context_for(&socket);
@@ -367,13 +367,13 @@ async fn ready(socket: &Path, child: Child, wait: Duration, value: &mut Value) -
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ENSURED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How many times this thread entered `ensure`; entry points are tested by this count.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn ensured_on_this_thread() -> usize {
     ENSURED.with(std::cell::Cell::get)
 }

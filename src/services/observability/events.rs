@@ -20,7 +20,7 @@ mod capture_stress_tests;
 mod capture_tests;
 #[cfg(test)]
 mod overflow_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_capture;
 
 use serde::Serialize;
@@ -133,7 +133,7 @@ impl EventLog {
             }
         }
         inner.buffer.push_back(event);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if GLOBAL_EVENT_LOG
             .get()
             .is_some_and(|global| std::ptr::eq(global.as_ref(), self))

@@ -2502,7 +2502,7 @@ mod remote_dispatch_gate_tests {
     //! `execute_command_streaming` refuses every remote profile synchronously, before any SSH
     //! attempt, even with the removed `remote_ssh_enabled: true` key still in the yaml.
 
-    use crate::services::remote::{RemoteAuth, RemoteProfile};
+    use crate::services::remote_stub::{RemoteAuth, RemoteProfile};
     use std::sync::Mutex;
 
     static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());

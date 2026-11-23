@@ -5,7 +5,7 @@ pub mod commit_resolver;
 pub mod remote;
 pub mod repo_resolver;
 pub mod runner;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_origin_fixture;
 pub mod worktree_resolver;
 

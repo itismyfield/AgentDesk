@@ -172,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_machine_history_is_durable_ordered_deduplicated_and_retained() {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "machine_history",
             "machine resource history",
         )

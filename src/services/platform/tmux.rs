@@ -1012,7 +1012,7 @@ impl From<bool> for PaneLiveness {
 
 mod liveness;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use liveness::tests as liveness_tests;
 
 /// Probe a session's pane liveness as a three-state answer (see [`PaneLiveness`]).

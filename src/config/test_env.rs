@@ -1,3 +1,6 @@
+/// Child-process probe proving a test fixture restores the environment on return and unwind.
+#[path = "../test_env_panic_probe.rs"]
+pub(crate) mod panic_probe;
 pub(crate) mod teardown_probe;
 
 pub(crate) struct TestEnvVarGuard {
@@ -142,13 +145,14 @@ pub(crate) fn assert_test_config_write_within_root(root: &std::path::Path, path:
     );
 }
 
+#[cfg(test)]
 fn probe_root_config_isolation(prior_present: bool, owning: bool) {
-    crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+    panic_probe::assert_restores_on_return_and_panic(
         &["AGENTDESK_ROOT_DIR", "AGENTDESK_CONFIG"],
         prior_present,
         || {
             let checkpoint = |path: &std::path::Path| {
-                crate::test_env_panic_probe::checkpoint_values(&[
+                panic_probe::checkpoint_values(&[
                     ("AGENTDESK_ROOT_DIR", Some(path.as_os_str())),
                     ("AGENTDESK_CONFIG", None),
                 ]);

@@ -2915,9 +2915,9 @@ pub(crate) mod test_env_lock {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_env;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.

@@ -11,7 +11,7 @@ pub(crate) fn install_policy_channel(read: fn(u64) -> u64) {
 
 pub(crate) fn policy_channel(channel: u64) -> u64 {
     // A thread forced as a child follows its forced parent, as the boot view's would.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(Relation::Child { parent }) =
         FORCED_RELATIONS.with(|forced| forced.borrow().get(&channel).copied())
     {
@@ -39,7 +39,7 @@ pub(crate) fn install_relation(read: fn(u64) -> Relation) {
 }
 
 pub(crate) fn relation(channel: u64) -> Relation {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_RELATIONS.with(|forced| forced.borrow().get(&channel).copied()) {
         return forced;
     }
@@ -48,23 +48,23 @@ pub(crate) fn relation(channel: u64) -> Relation {
         .map_or(Relation::NotChild, |read| read(channel))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED_RELATIONS: std::cell::RefCell<std::collections::BTreeMap<u64, Relation>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 /// This thread's relation of `channel` until dropped, for a judgement no boot view is built for.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedRelation(u64);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_relation_for_test(channel: u64, relation: Relation) -> ForcedRelation {
     FORCED_RELATIONS.with(|forced| forced.borrow_mut().insert(channel, relation));
     ForcedRelation(channel)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedRelation {
     fn drop(&mut self) {
         FORCED_RELATIONS.with(|forced| forced.borrow_mut().remove(&self.0));
