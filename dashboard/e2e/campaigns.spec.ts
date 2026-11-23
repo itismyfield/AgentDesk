@@ -150,6 +150,8 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
     await expect(panel.locator(".campaign-picker")).toContainText("열린 이슈 DAG");
     await expect(panel.locator(".campaign-picker")).toContainText("작업 1/8 완료 · 캠페인 2개 중");
   }
+  // The campaign's card splits its bar by task status, each part named with its count.
+  await expect(panel.getByRole("img", { name: "상태별 작업: 완료 1, 진행 중 2, 막힘 1, 대기 3, 건너뜀 1" })).toBeVisible();
   await expect(panel.locator(".campaign-detail-status")).toHaveText("진행 중 · 2개 진행, 1개 막힘");
 
   const attention = panel.getByRole("region", { name: "주의" });
@@ -157,6 +159,10 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
   const running = panel.locator('[data-task-id="i7272"]');
   await expect(running).toContainText("리뷰 진행 중");
   await expect(running).toContainText("끝나면: 배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.");
+  // The card reads the step, owner and session; the coordinator's stage note stays in the detail.
+  await expect(running.locator(".campaign-task-progress")).toHaveText("진행 중 · 리뷰");
+  await expect(running.locator(".campaign-task-foot")).toContainText(/세션 작업 중.*담당 아다 대시보드/);
+  await expect(running).not.toContainText("재시작 프로토콜 리뷰 2회차");
   await expect(running.getByRole("img", { name: /아다 대시보드/ })).toBeVisible();
   await expect(panel.getByRole("region", { name: "요약" })).toContainText("PR 연결1 / 2");
   await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");

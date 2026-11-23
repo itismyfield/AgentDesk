@@ -1,6 +1,6 @@
 import type { CampaignNodeLive } from "../../api/campaigns";
 import { COLUMN_DEFS } from "../agent-manager/kanban-utils";
-import { Chip, type ChipTone } from "../common/KitPrimitives";
+import { Chip, DONE_TRACK_COLOR, cn, type ChipTone, type DotTone, type TrackSegment } from "../common/KitPrimitives";
 import { liveIsWorking } from "./campaignModel";
 
 export type Tr = (ko: string, en: string) => string;
@@ -93,13 +93,22 @@ export function dispatchLabel(live: CampaignNodeLive, tr: Tr) {
   if (live.running) return `${type} ${tr("진행 중", "running")}`;
   return live.dispatch_status ? `${type} ${label(DISPATCH_STATUSES, live.dispatch_status, tr)}` : null;
 }
-export function sessionLabel(live: CampaignNodeLive, tr: Tr) {
+/** The session on the card's dispatch: the working one while it runs, else the latest dispatch's. */
+function liveSessionOf(live: CampaignNodeLive) {
   const working = live.running && live.working_dispatch_id !== undefined;
-  const status = working ? live.working_session_status : live.session_status;
-  const seenAt = working ? live.working_session_seen_at : live.session_seen_at;
+  return { status: working ? live.working_session_status : live.session_status, seenAt: working ? live.working_session_seen_at : live.session_seen_at };
+}
+export function sessionLabel(live: CampaignNodeLive, tr: Tr) {
+  const { status, seenAt } = liveSessionOf(live);
   if (!status) return tr("잡은 세션 없음", "No session on it");
   const seen = seenAt ? formatCampaignTime(seenAt, tr) : null;
   return [label(SESSION_STATUSES, status, tr), seen && tr(`마지막 신호 ${seen}`, `last seen ${seen}`)].filter(Boolean).join(" · ");
+}
+const SESSION_TONES: Record<string, DotTone> = { turn_active: "ok", awaiting_bg: "info", awaiting_user: "warn", disconnected: "err", aborted: "err" };
+/** A ledger card's session line, from the linked issue card's session; none when no session has taken it. */
+export function liveSession(live: CampaignNodeLive | undefined, tr: Tr) {
+  const { status, seenAt } = live ? liveSessionOf(live) : { status: null, seenAt: null };
+  return status ? { tone: SESSION_TONES[status] ?? "neutral", text: `${tr("세션", "Session")} ${label(SESSION_STATUSES, status, tr)}`, seenAt: seenAt ?? null } : null;
 }
 export function queueLabel(live: CampaignNodeLive, tr: Tr) {
   return label(QUEUE_STATUSES, live.queue_status, tr);
@@ -122,4 +131,15 @@ export function LiveChip({ live, tr }: { live: CampaignNodeLive | undefined; tr:
         ? queueLabel(live, tr)
         : `${tr("카드", "Card")} ${cardStatusLabel(live.card_status, tr)}`;
   return <Chip className="campaign-live max-w-full" tone={working ? "info" : "neutral"} dot={working} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</Chip>;
+}
+
+const SPLIT_COLORS: Record<TrackSegment | "skip", string> = {
+  done: DONE_TRACK_COLOR, now: "var(--info)", fail: "var(--err)", wait: "var(--warn)", todo: "var(--bg-3)", skip: "color-mix(in srgb, var(--fg-faint) 45%, var(--bg-3))",
+};
+/** A campaign's tasks as one bar split by status or stage, each part as wide as its share; its name reads every part and count. */
+export function SplitBar({ parts, label, tr, className }: { parts: { key: string; label: [string, string]; count: number; tone: TrackSegment | "skip" }[]; label: string; tr: Tr; className?: string }) {
+  const text = parts.map((part) => `${tr(...part.label)} ${part.count}`).join(", ");
+  return <span role="img" aria-label={`${label}: ${text}`} title={text} className={cn("campaign-split flex h-1.5 min-w-0 gap-[3px]", className)}>
+    {parts.map((part) => <i key={part.key} data-part={part.key} className="block h-full min-w-1.5 rounded-full" style={{ flex: `${part.count} 1 0`, background: SPLIT_COLORS[part.tone] }} />)}
+  </span>;
 }

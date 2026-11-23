@@ -3,6 +3,7 @@ import { useId, useState, type CSSProperties, type ReactNode } from "react";
 import type { CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
+import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import AgentPersona from "../AgentPersona";
@@ -11,7 +12,7 @@ import {
 } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { GATE_LABELS, findAgent, findTasks, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
-import { LABELS, LiveChip, type Tr } from "./campaignPresentation";
+import { LABELS, LiveChip, liveSession, type Tr } from "./campaignPresentation";
 import { StatusMarker, nodeMarker } from "./StatusMarker";
 import { TaskRow, moveListFocus } from "./TaskListParts";
 
@@ -125,24 +126,29 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
         {(allRunning ? running : running.slice(0, cardLimit)).map((task) => {
           const agent = findAgent(roster, task.agent);
           const selected = task.id === selectedId;
+          // A ledger's stage is a coordinator's note, kept for the detail; its card reads the status and the step it names.
+          const progress = task.progress ?? (task.step && `${tr(...LABELS[task.status])} · ${tr(...task.step)}`);
+          const session = task.sessionNow ?? liveSession(task.live, tr);
+          const seen = session ? session.seenAt : task.updatedAt;
           return <KitCard key={task.id} as="article" pad="none" selected={selected} style={selected ? SELECTED_CARD_STYLE : undefined}>
             <button type="button" data-glance-id={task.id} data-task-id={task.id} aria-current={selected || undefined} aria-controls={controls} onClick={() => onOpen(task.id)}
               className={cn("campaign-task-card m-0 flex h-full w-full min-w-0 cursor-pointer flex-col gap-2 border-0 bg-transparent px-3.5 py-3 text-left font-inherit text-inherit motion-reduce:transition-none sm:px-4 sm:py-3.5", !selected && ROW_HOVER_CLASS)}>
               <span className="flex min-w-0 items-start gap-2.5">
                 {agent && <AgentPersona agent={agent} size={32} />}
                 <span className="grid min-w-0 flex-1">
-                  <strong className="text-sm font-semibold leading-5 text-[var(--fg)] [overflow-wrap:anywhere] [word-break:keep-all]">{task.title}</strong>
-                  <span className="truncate font-mono text-xs text-[var(--fg-muted)]">{task.number ? `${task.number} · ${task.id}` : task.id}</span>
+                  <strong title={task.title} className="line-clamp-2 text-sm font-semibold leading-5 text-[var(--fg)] [overflow-wrap:anywhere] [word-break:keep-all]">{task.title}</strong>
+                  {(task.number || !phone) && <span className="truncate font-mono text-xs text-[var(--fg-muted)]">{phone ? task.number : task.number ? `${task.number} · ${task.id}` : task.id}</span>}
                 </span>
                 {phone ? <ChevronRight aria-hidden className="mt-0.5 size-4 shrink-0 text-[var(--fg-muted)]" /> : task.step && <Chip tone="info">{tr(...task.step)}</Chip>}
               </span>
-              {task.summary && <span className="text-[13px] leading-[18px] text-[var(--fg)] [overflow-wrap:anywhere]">{task.summary}</span>}
-              <span className="campaign-task-stage line-clamp-2 text-[13px] leading-[18px] font-medium text-[var(--fg)] [overflow-wrap:anywhere]" title={task.stage}>{task.stage}</span>
-              {task.benefit && <Desc className="line-clamp-2">{tr("끝나면", "When done")}: {task.benefit}</Desc>}
-              {task.blocker && <Desc className="campaign-blocker line-clamp-3 text-[var(--warn)] [overflow-wrap:anywhere]">{tr("막힘", "Blocked")}: {task.blocker}</Desc>}
-              {(task.updatedAt || task.session || task.live) && <Cap className="mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-[var(--line-soft)] pt-2">
-                {task.updatedAt && <Num>{tr("갱신", "Updated")} {formatRelativeTime(Date.parse(task.updatedAt), ko)}</Num>}
-                {task.session && <span className="min-w-0 truncate">{task.session.includes(" · ") ? task.session : `${tr("세션", "Session")} ${task.session.slice(0, 8)}`}</span>}
+              {task.summary && <span title={task.summary} className="campaign-task-summary truncate text-[13px] leading-[18px] text-[var(--fg)]">{task.summary}</span>}
+              {progress && <span className="campaign-task-progress truncate text-[13px] leading-[18px] font-medium text-[var(--fg)]">{progress}</span>}
+              {task.benefit && <Desc className="line-clamp-2 max-[899px]:line-clamp-1">{tr("끝나면", "When done")}: {task.benefit}</Desc>}
+              {task.blocker && <Desc className="campaign-blocker line-clamp-2 text-[var(--warn)] [overflow-wrap:anywhere] max-[899px]:line-clamp-1">{tr("막힘", "Blocked")}: {task.blocker}</Desc>}
+              {(session || task.agent || seen || task.live) && <Cap className="campaign-task-foot mt-auto flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-[var(--line-soft)] pt-2">
+                {session && <span className="flex min-w-0 items-center gap-1.5"><StatusDot tone={session.tone} /><span className="truncate">{session.text}</span></span>}
+                {seen && <Num>{session ? formatRelativeTime(Date.parse(seen), ko) : `${tr("갱신", "Updated")} ${formatRelativeTime(Date.parse(seen), ko)}`}</Num>}
+                {task.agent && <span className="min-w-0 truncate">{tr("담당", "Owner")} {agent ? localeName(language, agent) : task.agent}</span>}
                 <LiveChip live={task.live} tr={tr} />
               </Cap>}
             </button>

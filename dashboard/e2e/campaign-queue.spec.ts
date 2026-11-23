@@ -109,7 +109,7 @@ async function shot(page: Page, name: string, projectName: string) {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/${projectName}-${name}.png`, fullPage: true });
 }
 
-test("a running campaign task shows as a card with its assignee and stage, and only the shown campaign is polled", async ({ page }, testInfo) => {
+test("a running campaign task shows as a card with its number and assignee, its stage note left to the detail, and only the shown campaign is polled", async ({ page }, testInfo) => {
   await page.clock.install({ time: new Date(NOW) });
   const calls = await prepare(page, testInfo.project.name);
   await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
@@ -119,7 +119,7 @@ test("a running campaign task shows as a card with its assignee and stage, and o
   await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card.locator("strong")).toHaveText(/^무중단 재시작/);
   await expect(card).toContainText("#7272");
-  await expect(card.locator(".campaign-task-stage")).toHaveText(/^Absorbed into #7272 acceptance/);
+  await expect(card).not.toContainText("Absorbed into");
   await expect(card.getByRole("img", { name: /아다 대시보드/ })).toBeVisible();
   if (testInfo.project.name === "desktop") await expect(panel.getByRole("button", { name: "새 캠페인" })).toBeVisible();
   await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");

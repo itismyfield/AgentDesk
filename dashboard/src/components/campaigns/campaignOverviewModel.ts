@@ -2,9 +2,9 @@ import { z } from "zod";
 import type { Campaign, CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import type { ServerCampaignDocument, ServerCampaignEvent, ServerCampaignSummary } from "../../api/serverCampaigns";
 import type { Agent } from "../../types";
-import type { TrackSegment } from "../common/KitPrimitives";
+import type { DotTone, TrackSegment } from "../common/KitPrimitives";
 import { CAMPAIGN_STAGES, campaignProgress, campaignStageStep, campaignTaskNumber, campaignTaskTitle, liveIsWorking, safeCampaignLink } from "./campaignModel";
-import type { Tr } from "./campaignPresentation";
+import { LABELS, type Tr } from "./campaignPresentation";
 import { DISPLAY_LABELS, DISPOSITION_LABELS, REASON_LABELS, STAGE_LABELS, nodeReasons } from "./serverCampaignModel";
 import { nodeMarker, type MarkerTone } from "./StatusMarker";
 
@@ -22,40 +22,57 @@ export function serverBucket(display: Display): CampaignBucket {
   return display === "succeeded" ? "done" : display === "prepared" || display === "stopped" ? "ready" : "running";
 }
 
-/** One card in the campaign list, for a ledger or a server campaign. */
+/** One part of a campaign's split bar: a ledger status or a server stage, with its task count and colour. */
+export interface SplitPart { key: string; label: Label; count: number; tone: TrackSegment | "skip" }
+
+/** One card in the campaign list, for a ledger or a server campaign. `split` is null until a server campaign's tasks are read. */
 export interface CampaignEntry {
   key: string; kind: "legacy" | "server"; id: string; title: string; description: string; repo: string | null;
   bucket: CampaignBucket; status: string; statusLabel: string; done: number | null; total: number | null; attention: string | null;
-  segments?: TrackSegment[] | null; ratio?: number | null;
+  split: SplitPart[] | null;
 }
 export const entryKey = (kind: CampaignEntry["kind"], id: string) => `${kind}:${id}`;
+
+// A ledger's bar: finished work first, then what is moving, what needs someone and what waits.
+const LEDGER_SPLIT: [CampaignNodeStatus, SplitPart["tone"]][] = [["completed", "done"], ["running", "now"], ["blocked", "wait"], ["failed", "fail"], ["pending", "todo"], ["skipped", "skip"]];
 
 /** Counts with the campaign's live map, the same tasks its overview shows. */
 export function legacyEntry(campaign: Campaign, live: Record<string, CampaignNodeLive> | undefined, tr: Tr): CampaignEntry {
   const { total } = campaignProgress(campaign.nodes);
-  const counts = taskCounts(campaign.nodes.map((node) => legacyTask(node, live?.[node.id])));
+  const tasks = campaign.nodes.map((node) => legacyTask(node, live?.[node.id]));
+  const counts = taskCounts(tasks);
   return {
     key: entryKey("legacy", campaign.id), kind: "legacy", id: campaign.id, title: campaign.title, description: campaign.description, repo: null,
     bucket: LEDGER_BUCKETS[campaign.status], status: campaign.status, statusLabel: tr(...LEDGER_STATUS_LABELS[campaign.status]),
     done: counts.done, total, attention: attentionText(counts.blocked, counts.failed, tr),
-    segments: null, ratio: total > 0 ? counts.done / total : null,
+    split: LEDGER_SPLIT.map(([status, tone]) => ({ key: status, label: LABELS[status], count: tasks.filter((task) => task.status === status).length, tone })).filter((part) => part.count > 0),
   };
 }
 
-const TRACK_STAGES = Object.keys(STAGE_LABELS).filter((stage) => stage !== "complete");
+type Disposition = keyof typeof DISPOSITION_LABELS;
+const PAUSED_DISPLAYS = new Set<Display>(["waiting", "stopping", "stopped", "needs_inspection"]);
+/** A stage's colour is its most pressing task's: failed, held, moving (waiting while the campaign is held), not started. */
+function stageTone(stage: string, dispositions: Disposition[], display: Display): SplitPart["tone"] {
+  if (stage === "complete") return "done";
+  if (dispositions.includes("failed")) return "fail";
+  if (dispositions.some((value) => value === "blocked" || value === "interrupted")) return "wait";
+  if (dispositions.some((value) => value === "assigned" || value === "running" || value === "verifying")) return PAUSED_DISPLAYS.has(display) ? "wait" : "now";
+  return "todo";
+}
 
-/** A summary carries no node list; the full document, once read, adds the task counts and stage track. */
+/** A summary carries no node list; the full document, once read, adds the task counts and the bar split by stage. */
 export function serverEntry(summary: ServerCampaignSummary, doc: ServerCampaignDocument | null, tr: Tr): CampaignEntry {
   const { definition, view } = summary;
   const nodes = doc?.view.nodes ?? [];
   const done = doc ? nodes.filter((node) => node.runtime.disposition === "complete").length : null;
-  const at = nodes.length ? Math.min(...nodes.map(({ runtime }) => runtime.stage === "complete" ? TRACK_STAGES.length : TRACK_STAGES.indexOf(runtime.stage))) : null;
-  const head: TrackSegment = view.display === "unable_to_progress" || view.failed_count > 0 ? "fail" : view.display === "waiting" || view.display === "stopping" || view.display === "stopped" || view.display === "needs_inspection" ? "wait" : view.display === "prepared" ? "todo" : "now";
+  const split = SERVER_STAGES.flatMap((stage): SplitPart[] => {
+    const here = nodes.filter((node) => node.runtime.stage === stage).map((node) => node.runtime.disposition);
+    return here.length ? [{ key: stage, label: STAGE_LABELS[stage as keyof typeof STAGE_LABELS], count: here.length, tone: stageTone(stage, here, view.display) }] : [];
+  });
   return {
     key: entryKey("server", view.campaign_id), kind: "server", id: view.campaign_id, title: definition.title, description: definition.goal,
     repo: definition.repository, bucket: serverBucket(view.display), status: view.display, statusLabel: tr(...DISPLAY_LABELS[view.display]),
-    done, total: doc ? doc.definition.nodes.length : null, attention: attentionText(view.blocked_count, view.failed_count, tr),
-    segments: at === null ? null : TRACK_STAGES.map((_, index) => index < at ? "done" : index === at ? head : "todo"), ratio: null,
+    done, total: doc ? doc.definition.nodes.length : null, attention: attentionText(view.blocked_count, view.failed_count, tr), split: doc ? split : null,
   };
 }
 
@@ -98,12 +115,17 @@ export function cleanBlocker(text: string | null | undefined): string | null {
 // A pending task's blocker is a precondition, not a block; it shows only as the row's reason.
 const needsSomeone = (status: CampaignNodeStatus, blocker: string | null) => status === "blocked" || status === "failed" || (status === "running" && !!blocker);
 
-/** A task as the overview shows it, read from a ledger node or a server node. Only fields the server gave are set. */
+/** A task as the overview shows it, read from a ledger node or a server node. Only fields the server gave are set.
+ * `progress` is a server task's short state line and `sessionNow` its session's; a ledger's stage is a coordinator's note
+ * the detail keeps, and its session comes from the live card read. */
 export interface OverviewTask {
   id: string; title: string; number: string | null; status: CampaignNodeStatus; marker: { tone: MarkerTone; ratio: number };
   stage: string; step: Label | null; summary: string | null; benefit: string | null; blocker: string | null; group: string | null;
   updatedAt: string | null; session: string | null; agent: string | null; prUrl: string | null; attention: boolean; gate: PendingGate | null;
+  progress: string | null; sessionNow: SessionNow | null;
 }
+/** A session as a card's foot shows it: a dot, the state words and when it was last seen. */
+export interface SessionNow { tone: DotTone; text: string; seenAt: string | null }
 
 /** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
@@ -116,7 +138,7 @@ export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): Overvie
     stage: node.stage.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
     summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker, group: node.group,
     updatedAt: node.updated_at, session: node.session_id, agent: node.assignee, prUrl: safeCampaignLink(node.pr_url) ?? null,
-    attention: needsSomeone(status, blocker), gate: null,
+    attention: needsSomeone(status, blocker), gate: null, progress: null, sessionNow: null,
   };
 }
 
@@ -124,6 +146,7 @@ const DISPOSITION_STATUS: Record<keyof typeof DISPOSITION_LABELS, CampaignNodeSt
   pending: "pending", assigned: "running", running: "running", verifying: "running", failed: "failed", blocked: "blocked", interrupted: "pending", complete: "completed",
 };
 const SESSION_STATES: Record<string, Label> = { alive: ["세션 살아 있음", "session alive"], gone: ["세션 끝남", "session gone"], unknown: ["세션 확인 불가", "session unknown"] };
+const SESSION_TONES: Record<string, DotTone> = { alive: "ok", gone: "neutral", unknown: "warn" };
 const SERVER_STAGES = Object.keys(STAGE_LABELS);
 
 export function serverTasks({ definition, view }: ServerCampaignDocument, events: ServerCampaignEvent[], tr: Tr): OverviewTask[] {
@@ -137,14 +160,17 @@ export function serverTasks({ definition, view }: ServerCampaignDocument, events
     const session = runtime?.current_attempt ? view.sessions.find((value) => value.attempt_id === runtime.current_attempt) : undefined;
     const blocker = reasons.length ? reasons.map((code) => tr(...REASON_LABELS[code])).join(" · ") : null;
     const issue = safeCampaignLink(node.issue_url) ? new URL(node.issue_url).pathname.match(/\/issues\/(\d+)\/?$/)?.[1] : undefined;
+    const stage = runtime ? [tr(...DISPOSITION_LABELS[runtime.disposition]), tr(...STAGE_LABELS[runtime.stage]), tr(`계열 ${runtime.series}`, `series ${runtime.series}`)].join(" · ") : tr("서버 상태 없음", "No server state");
+    const sessionText = session ? `${tr(...SESSION_STATES[session.observation.state])} · ${session.identity.gate.host}` : null;
+    const observation = session?.observation;
     return {
       id: node.id, title: node.title, number: issue ? `#${issue}` : null, status,
       marker: !runtime ? { tone: "plan", ratio: 0 } : status === "running" ? { tone: "progress", ratio: (SERVER_STAGES.indexOf(runtime.stage) + 1) / (SERVER_STAGES.length + 1) } : nodeMarker(status),
-      stage: runtime ? [tr(...DISPOSITION_LABELS[runtime.disposition]), tr(...STAGE_LABELS[runtime.stage]), tr(`계열 ${runtime.series}`, `series ${runtime.series}`)].join(" · ") : tr("서버 상태 없음", "No server state"),
-      step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
+      stage, step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
       blocker, group: null,
-      updatedAt: null, session: session ? `${tr(...SESSION_STATES[session.observation.state])} · ${session.identity.gate.host}` : null,
-      agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate: gates.get(node.id) ?? null,
+      updatedAt: null, session: sessionText,
+      agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate: gates.get(node.id) ?? null, progress: runtime ? stage : null,
+      sessionNow: observation && sessionText ? { tone: SESSION_TONES[observation.state], text: sessionText, seenAt: observation.state === "unknown" ? observation.last_observed_at : observation.observed_at } : null,
     };
   });
 }

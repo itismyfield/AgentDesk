@@ -3,9 +3,9 @@ import { useState, type CSSProperties } from "react";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
-import { Cap, Chip, Desc, KitCard, MeterBar, Num, ROW_HOVER_CLASS, StageTrack, cn } from "../common/KitPrimitives";
+import { Cap, Chip, Desc, KitCard, Num, ROW_HOVER_CLASS, cn } from "../common/KitPrimitives";
 import { BUCKET_LABELS, type CampaignBucket, type CampaignEntry } from "./campaignOverviewModel";
-import { Badge, type Tr } from "./campaignPresentation";
+import { Badge, SplitBar, type Tr } from "./campaignPresentation";
 
 const SELECTED_CARD_STYLE = {
   borderColor: "var(--accent)",
@@ -43,7 +43,7 @@ export default function CampaignList({ entries, selectedKey, onSelect, onCreate,
               <Badge status={entry.status} label={entry.statusLabel} tr={tr} />
             </span>
             {entry.description && <Desc className="truncate">{entry.description.split("\n")[0]}</Desc>}
-            {entry.segments ? <StageTrack segments={entry.segments} /> : entry.ratio != null ? <MeterBar ratio={entry.ratio} tone="ok" /> : null}
+            {!!entry.split?.length && <EntrySplit entry={entry} tr={tr} />}
             <Cap className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
               <Chip className="h-[18px] px-1.5 text-[11px]">{entry.kind === "legacy" ? tr("원장", "Ledger") : tr("서버", "Server")}</Chip>
               {entry.repo && <span className="font-mono">{entry.repo}</span>}
@@ -55,4 +55,9 @@ export default function CampaignList({ entries, selectedKey, onSelect, onCreate,
       })}
     </ul>
   </section>;
+}
+
+/** The list card's bar: a ledger's tasks by status, a server campaign's by pipeline stage. */
+export function EntrySplit({ entry, tr, className }: { entry: CampaignEntry; tr: Tr; className?: string }) {
+  return <SplitBar parts={entry.split ?? []} label={entry.kind === "legacy" ? tr("상태별 작업", "Tasks by status") : tr("단계별 작업", "Tasks by stage")} tr={tr} className={className} />;
 }
