@@ -6,6 +6,7 @@ use axum::{
 use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use super::AppState;
 use crate::db::agents::load_all_agent_channel_bindings_pg;
@@ -238,17 +239,44 @@ pub async fn channel_messages(
         "[#2723] channel_messages → upstream"
     );
 
-    let response = match reqwest::Client::new()
-        .get(&url)
+    let messages = fetch_channel_messages(
+        channel_id.get(),
+        &url,
+        &token,
+        &query_params,
+        CHANNEL_MESSAGES_TIMEOUT,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({"messages": messages}))))
+}
+
+/// Upper bound for one upstream message read; a stalled Discord used to hold the caller forever.
+const CHANNEL_MESSAGES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Send the upstream read with a whole-request timeout; split out so a stub upstream can drive it.
+async fn fetch_channel_messages(
+    channel_id: u64,
+    url: &str,
+    token: &str,
+    query_params: &[(&str, String)],
+    timeout: Duration,
+) -> AppResult<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| AppError::internal(format!("discord client build failed: {error}")))?;
+    let response = match client
+        .get(url)
         .header("Authorization", format!("Bot {token}"))
-        .query(&query_params)
+        .query(query_params)
         .send()
         .await
     {
         Ok(resp) => resp,
+        Err(error) if error.is_timeout() => return Err(channel_messages_timed_out(channel_id)),
         Err(error) => {
             tracing::warn!(
-                channel_id = channel_id.get(),
+                channel_id,
                 error = %error,
                 "[#2723] channel_messages discord request failed"
             );
@@ -259,9 +287,16 @@ pub async fn channel_messages(
             ));
         }
     };
+    channel_messages_outcome(channel_id, response).await
+}
 
-    let messages = channel_messages_outcome(channel_id.get(), response).await?;
-    Ok((StatusCode::OK, Json(json!({"messages": messages}))))
+fn channel_messages_timed_out(channel_id: u64) -> AppError {
+    tracing::warn!(channel_id, "channel_messages discord request timed out");
+    AppError::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        ErrorCode::Discord,
+        "discord request timed out",
+    )
 }
 
 /// Decode the upstream response and interpret it (#5702, #5787).
@@ -287,6 +322,7 @@ async fn channel_messages_outcome(
 
     let body = match response.json::<serde_json::Value>().await {
         Ok(data) => Some(data),
+        Err(error) if error.is_timeout() => return Err(channel_messages_timed_out(channel_id)),
         Err(error) => {
             tracing::warn!(
                 channel_id,
@@ -482,7 +518,8 @@ mod tests {
 
     /// Serve one canned HTTP response so a test can drive the real `reqwest`
     /// decode path instead of handing the helper a ready-made `Value`.
-    async fn stub_upstream(raw: &'static [u8]) -> reqwest::Response {
+    /// `hold` keeps the socket open afterwards, like a stalled upstream.
+    async fn serve_stub(raw: &'static [u8], hold: bool) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -493,13 +530,44 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept stub request");
             let _ = socket.read(&mut [0u8; 1024]).await;
             let _ = socket.write_all(raw).await;
+            if hold {
+                std::future::pending::<()>().await;
+            }
         });
+        format!("http://{addr}/messages")
+    }
 
+    async fn stub_upstream(raw: &'static [u8]) -> reqwest::Response {
         reqwest::Client::new()
-            .get(format!("http://{addr}/messages"))
+            .get(serve_stub(raw, false).await)
             .send()
             .await
             .expect("stub upstream response")
+    }
+
+    async fn fetch_with_short_timeout(url: String) -> AppResult<Value> {
+        fetch_channel_messages(7, &url, "token", &[], Duration::from_millis(300)).await
+    }
+
+    #[tokio::test]
+    async fn fetch_channel_messages_answers_504_only_for_a_stalled_upstream() {
+        // Silent before the headers, and silent after a partial body.
+        for stalled in [&b""[..], b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n[{"] {
+            let error = fetch_with_short_timeout(serve_stub(stalled, true).await).await;
+            let error = error.expect_err("a stalled upstream is not a success");
+            assert_eq!(error.status(), StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(error.code(), ErrorCode::Discord);
+        }
+        let prompt: &'static [u8] =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n[{\"id\":\"1\"}]";
+        let ok = fetch_with_short_timeout(serve_stub(prompt, true).await).await;
+        assert_eq!(ok.unwrap(), json!([{"id": "1"}]));
+        // A refused connection stays a plain transport failure.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind closed port");
+        let url = format!("http://{}/messages", closed.local_addr().unwrap());
+        drop(closed);
+        let error = fetch_with_short_timeout(url).await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
