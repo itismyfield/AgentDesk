@@ -1,21 +1,29 @@
 # Shared frame ledger file: V2 owner and out-of-scope writer (#8343 slice 5)
 
-Production base: `6b91594c5c` (slice 4 repair 1: the scope-free proof reads `history::registered`
-`history.rs:335` / `unique_attempt` `:894` through `readable()` → `v2::unscoped_store()` → `owned()`).
-Model: `InputLedgerFormat.tla`, view `ledger-format.view.mjs`. Revision 1 adds the ops procedure (`Deploy`).
+Production base: `6b91594c5c`, which is slice 4 repair 1. The scope-free proof reads `history::registered`
+(`history.rs:335`) and `unique_attempt` (`:894`) through `readable()` → `v2::unscoped_store()` → `owned()`.
+
+Model: `InputLedgerFormat.tla`, view `ledger-format.view.mjs`.
+- Revision 1 added the ops procedure (`Deploy`).
+- Revision 2 added the transcript binding a proof needs (`binding`/`xbind`) and rollback (`Rollback`). It
+  also replaced the V1 archive branches with "hold the deploy".
 
 ## What this model checks, and what it does not
 
-It checks four things:
+It checks only these things:
 - **Format change:** which envelope each writer can open.
-- **Proof visibility:** whether the recorded attempt stays visible to the scope-free proof.
+- **Proof visibility and usability:** the ledger record, and the transcript binding `mend` needs
+  (`queued_reconcile.rs:163-177,246-265,379-383`).
 - **Stale overwrite:** a read-modify-write outside the shared lock.
-- **Ops procedure:** where the final format check sits relative to stopping the producers.
+- **Ops procedure:** intake close, the stop, the final check, session replacement, and a rollback after
+  the new binary has written.
 
-It is **not** a proof of C4/C5 in the slice 5 design, the keyed/keyless reconciliation and native-row
-uniqueness. Those are proven by concurrent-transaction tests in the implementation (see Not modeled).
-`RecordedAtMostOnce` holds because each input registers once by construction, not because a dedupe
-was checked.
+What it leaves out:
+- C4/C5 in the slice 5 design (keyed/keyless reconciliation, native-row uniqueness) are still to be
+  proven by the implementation's concurrent-transaction tests.
+- `RecordedAtMostOnce` holds because each input registers once by construction.
+- `OwnerProgress` means every input settles. It does not mean the deploy finished; `DeployReached`
+  says that.
 
 One file, `runtime/injected_frames.json`, is shared by every channel of the process. Two writers meet in it:
 
@@ -24,100 +32,108 @@ One file, `runtime/injected_frames.json`, is shared by every channel of the proc
 | V2 input owner | `first_input.rs:101 prepare_history` → `v2.rs:334 prepare` → `v2.rs:260 transaction` | V2 transaction. A V1 file is restored to passive (`v2.rs:299 migration::restore`); a missing one starts from `migration::MISSING`. | V2 transaction. A missing file starts from an empty V2 snapshot; a V1 file is refused. |
 | Out-of-scope writer (path A `inject.rs:491`, path B `queued_owner.rs` → `queued_provider.rs:42`) | `history.rs:235 register` → `:264 update` (`:177`) | V1 update, refused on a V2/V3 file (`compat.rs:98`). The input is NotSent(`load_failed`) and handed back (`inject.rs:708-731`). | V2 transaction writing a registration-less passive entry, the shape `migration::restore` makes today |
 
-Both writers take the same `.lock` (`history.rs:181-188`, `v2.rs:270-277`); `native_control.rs:261` try-locks it.
-
 ## Variables and ranges (from the slice 5 entry census)
 
 | Constant | Range | Meaning |
 |---|---|---|
 | `Writer` | `v1`, `v2` | how the out-of-scope writer registers |
 | `Migrate` | BOOLEAN | `migration::restore` of a V1 file exists |
-| `View` | `v1`, `v2` | mend proof read: V1 `read()` (before repair 1) or the `owned()` view |
-| `Boot` | `none`, `v1`, `v2` | ledger file on disk when the (first) binary starts |
+| `View` | `v1`, `v2` | proof read of the binary that is not 5b: V1 `read()` (main before slice 4) or the `owned()` view (slice 4 repair 1) |
+| `Boot` | `none`, `v1`, `v2` | ledger file on disk when the first binary starts |
 | `Locked` | BOOLEAN | the out-of-scope read-modify-write is one step under the shared lock |
-| `Restart` | BOOLEAN | a restart between paste and settle leaves the out-of-scope head Unknown, proven later by `queued_reconcile::mend` (`:81`, `nonce_in :335`) |
-| `Deploy` | `none`, `precheck`, `stopcheck`, `bakunchecked` | with anything but `none`, the old binary (V1 writer, restore, `View`) is checked, stopped and replaced by the 5b binary (V2 writer, no restore, V2 view) |
+| `Restart` | BOOLEAN | a restart between paste and settle leaves the out-of-scope head Unknown |
+| `Deploy` | `none`, `precheck`, `guarded`, `replaceonv2` | see below |
+| `Rollback` | `none`, `binary`, `ledger` | after the 5b binary has written, back to the old binary with the current ledger or with the pre-deploy copy |
 
 `Deploy` values:
-- `precheck` is design revision 0's procedure: the live check plans what to do at the stop.
-- `stopcheck` is revision 1's: a final check after the stop. A V1 file with an open proof obligation
-  goes back to the old binary; otherwise it is archived (`.bak`).
-- `bakunchecked` is a mutant that archives a V1 file without the obligation check.
+- `precheck` is revision 0: a live format check, then stop, replace the sessions and start.
+- `guarded` is revision 2:
+  1. Close intake.
+  2. Settle on the original binding.
+  3. Stop.
+  4. Replace the sessions and start only if the stopped ledger is V2/V3/missing and no Unknown head
+     remains. Otherwise hold: the old binary comes back up on the same sessions.
+- `replaceonv2` is a mutant that replaces the sessions whenever the format is V2.
 
-A 5b binary booted on V1 stops its Claude runtime before intake: `native.rs:199 boot_records` →
-`runtime_bootstrap/native_input.rs:15-20` → `runtime_bootstrap.rs:299-301`.
+A 5b binary booted on V1 stops its Claude runtime before intake: `native.rs:199` →
+`runtime_bootstrap/native_input.rs:15-20` → `runtime_bootstrap.rs:299-301`. An operator's manual settlement
+during a hold is not modeled.
 
 Rules:
-- `RecordedExactlyOnce`: a pasted input has exactly one record, in the ledger or its archive.
-- `RecordedAtMostOnce`.
-- `ProofKept`: an Unknown head keeps its proof in the live ledger.
-- `NewBootSupported`: the 5b binary never boots on V1.
-- `OwnerProgress`: every input is eventually done.
+- `RecordedExactlyOnce` (live ledger)
+- `RecordedAtMostOnce`
+- `ProofKept`
+- `BindingKept`: an Unknown head keeps the transcript binding its proof needs.
+- `NewBootSupported`
+- `OwnerProgress`
+- `DeployReached`: procedure configs only.
 
 ## Results
 
-`scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: PASS 12/12 (9.0s) against `expected.tsv`.
+`scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: see the slice 5 leg report for the run
+(15/15 against `expected.tsv`).
 
-| Config | Writer / Migrate / View / Boot / Locked / Deploy | Expected | Result |
+| Config | View / Boot / Deploy / Rollback | Expected | Broken rules |
 |---|---|---|---|
-| `InputLedgerFormatNow.cfg` | v1 / yes / v2 / none / yes / none | GREEN | GREEN, 14 states |
-| `InputLedgerFormatNowBeforeRepair.cfg` | v1 / yes / **v1** / none / yes / none | RED before repair 1 | OwnerProgress RED: [chart](ledger-format-before-repair.chart.mmd) |
-| `InputLedgerFormatNowOpsV2.cfg` | v1 / yes / v2 / **v2** / yes / none | GREEN (the observed ops file) | GREEN, 15 states: the out-of-scope input is refused and delivered by the owner |
-| `InputLedgerFormatDropMigrationOnly.cfg` | v1 / **no** / v2 / none / yes / none | RED (slice 4 DESIGN_DELTA) | OwnerProgress RED: [chart](ledger-format-drop-migration.chart.mmd) |
-| `InputLedgerFormatAfter.cfg` | v2 / no / v2 / none / yes / none | GREEN | GREEN, 12 states |
-| `InputLedgerFormatAfterBootV2.cfg` | v2 / no / v2 / v2 / yes / none | GREEN | GREEN, 12 states |
-| `InputLedgerFormatAfterBootV1.cfg` | v2 / no / v2 / **v1** / yes / none | RED: the ops procedure must leave no V1 file | OwnerProgress RED: [chart](ledger-format-boot-v1.chart.mmd) |
-| `InputLedgerFormatAfterUnlocked.cfg` | v2 / no / v2 / none / **no** / none | RED mutant | RecordedExactlyOnce RED: [chart](ledger-format-unlocked.chart.mmd) |
-| `InputLedgerFormatDeployPrecheck.cfg` | old→5b / v1 / none / yes / **precheck** | RED (rev 0 procedure) | NewBootSupported, ProofKept, OwnerProgress RED: [chart](ledger-format-deploy-precheck.chart.mmd) |
-| `InputLedgerFormatDeployStopcheck.cfg` | old→5b / v1 / none / yes / stopcheck | GREEN | GREEN, 107 states |
-| `InputLedgerFormatDeployStopcheckBootV1.cfg` | old→5b / v1 / **v1** / yes / stopcheck | GREEN | GREEN, 116 states |
-| `InputLedgerFormatDeployBakUnchecked.cfg` | old→5b / v1 / none / yes / **bakunchecked** | RED mutant | ProofKept, OwnerProgress RED: [chart](ledger-format-deploy-bak-unchecked.chart.mmd) |
+| `Now` | v2 / none / none / none (Writer v1, Migrate) | GREEN | none |
+| `NowBeforeRepair` | **v1** / none / none / none | RED before repair 1 | OwnerProgress: [chart](ledger-format-before-repair.chart.mmd) |
+| `NowOpsV2` | v2 / **v2** / none / none | GREEN (the observed ops files) | none |
+| `DropMigrationOnly` | v2 / none / none / none (Migrate **off**) | RED (slice 4 DESIGN_DELTA) | OwnerProgress: [chart](ledger-format-drop-migration.chart.mmd) |
+| `After` | v2 / none / none / none (Writer v2, no restore) | GREEN | none |
+| `AfterBootV2` | v2 / v2 / none / none (after) | GREEN | none |
+| `AfterBootV1` | v2 / **v1** / none / none (after) | RED: no V1 file may be left at boot | OwnerProgress: [chart](ledger-format-boot-v1.chart.mmd) |
+| `AfterUnlocked` | v2 / none / none / none (after, **unlocked**) | RED mutant | RecordedExactlyOnce: [chart](ledger-format-unlocked.chart.mmd) |
+| `DeployPrecheck` | v2 / none / **precheck** / none | RED (rev 0 procedure) | BindingKept, NewBootSupported, OwnerProgress: [chart](ledger-format-deploy-precheck.chart.mmd) |
+| `DeployGuarded` | v2 / none / guarded / none | GREEN (rev 2 procedure) | none |
+| `DeployGuardedBootV1` | v2 / **v1** / guarded / none | GREEN | none (the old binary's owner restores V1 before the final check) |
+| `DeployGuardedPreRepair` | **v1** / none / guarded / none | RED = the deploy holds | OwnerProgress, DeployReached: [chart](ledger-format-deploy-pre-repair-hold.chart.mmd) |
+| `DeployReplaceOnV2` | v2 / none / **replaceonv2** / none | RED mutant (review P1-1) | BindingKept, OwnerProgress: [chart](ledger-format-deploy-replace-on-v2.chart.mmd) |
+| `DeployRollbackBinary` | v2 / none / guarded / **binary** | GREEN | none |
+| `DeployRollbackLedger` | v2 / none / guarded / **ledger** | RED mutant (review P1-2) | ProofKept, RecordedExactlyOnce, OwnerProgress: [chart](ledger-format-deploy-rollback-ledger.chart.mmd) |
 
-Revision 1 added `ProofKept` and `NewBootSupported` to every config. The first eight configs keep
-`Deploy = "none"`, where both rules hold by construction; their results are unchanged.
+- `DeployGuardedPreRepair` is the compatibility scenario for a start binary without repair 1 (main
+  before slice 4). That binary cannot prove a V2-recorded Unknown head, so the guarded procedure holds:
+  it loops on the old binary without replacing the sessions. This is the documented hold, not a key or
+  a deletion. The design therefore deploys slice 4 before slice 5b.
+- `BindingKept` was added to the first eight configs; their results are unchanged.
 
 ## Counterexamples against the code
 
 ### Before repair 1
-`XRegister` → `OwnerPrepare` → `Settle` → `Crash`, then stuck:
-1. `XRegister`: path B head H registers through `history.rs:264` → `update` with the file missing: V1 `{"entries":[H]}`.
-2. `OwnerPrepare`: any V2 owner input on any channel opens the same file; `v2.rs:299` restores H as passive and publishes V2.
-3. `Crash`: the restart lands between H's paste and its settle, so H stays Unknown.
-4. `mend` → `claude_proof` → `nonce_in` (`queued_reconcile.rs:335`) → `history::registered` read V1 `read()` = `compat::read_legacy` → Err on V2 → false.
-   No proof, so H stays Unknown forever (`queued_owner.rs:25`, then `queued_head.rs:630` BlockedUnknown).
+`XRegister` → `OwnerPrepare` → `Settle` → `Crash`, then stuck.
+1. Path B head H registers V1 on a missing file (`history.rs:264`).
+2. A V2 owner input restores it to passive (`v2.rs:299`).
+3. The restart leaves H Unknown.
+4. `nonce_in`'s `history::registered` read V1 only and fails on V2.
 
-Repair 1 (`history.rs:343` and `:895` now read `readable()`) makes this the GREEN `Now`.
+Repair 1 (`history.rs:343,895`) makes this the GREEN `Now`.
 
 ### Drop migration only
-`XRegister` → `Settle`, then stuck. The out-of-scope writer creates V1 on a missing file. Without
-`migration::restore`, `v2.rs:299` has no V1 branch, every owner transaction errs, and
-`first_input.rs:101` keeps refusing the owner's input.
+The out-of-scope writer creates V1. Without `migration::restore`, every owner transaction errs.
 
 ### After, V1 file at boot
-The out-of-scope transaction refuses V1 and hands the input back; the owner's transaction refuses it
-too. No product fallback is added; the ops procedure guarantees no V1 file at boot.
+Both writers refuse V1. The procedure never starts 5b on V1.
 
 ### Unlocked mutant
-`XRead` → `OwnerPrepare` → `XWrite`: a writer that reads the file, lets the owner publish, and writes back
-its old copy erases the owner's registration. The after design keeps every out-of-scope mutation inside
-one `Registry::transaction`: in-process `cached` mutex, then the `.lock` flock, then read, apply, publish.
+`XRead` → `OwnerPrepare` → `XWrite`: the stale copy erases the owner's registration.
 
 ### Rev 0 procedure (`DeployPrecheck`)
-`PreCheck` finds no file → `XRegister` → `Stop` → `StartAsPlanned` boots the 5b binary on V1:
-1. The node's ledger is missing while the old binary still runs.
-2. A channel's owner adoption is held by a legacy backlog: `v2_ensure` returns `Ok(())` without an owner
-   (`queued_head/v2/actor.rs:28-43`, `v1_holds` at `queued_head.rs:574-576`). Through
-   `ingress.rs:381-394`, the external input then takes path A.
-3. The old `history::update` creates V1 (`history.rs:177-195`).
-4. The new binary's `boot_records` refuses V1, `prepare_native_boot` returns false, and the Claude runtime
-   returns before worker and intake registration.
+A live check finds no file. Then a channel whose owner adoption is held (`queued_head/v2/actor.rs:37`)
+takes path A, and the old `history::update` creates V1 (`history.rs:177-195`). The 5b binary boots on it.
 
-The same procedure also archives a V1 file at the stop while H is Unknown, which loses its proof
-(`ProofKept`).
+### Replace on V2 (`DeployReplaceOnV2`, review P1-1)
+`XRegister` → `Close` → `OwnerPrepare` (restores V1 to V2) → `Stop` (H's paste is not settled, so H is
+Unknown) → `FinalCheck` replaces the sessions because the file is V2. H's record is in the ledger, but
+`Recorded::matches` needs H's transcript (`queued_reconcile.rs:379-383`), so `mend` can never succeed
+(`queued_owner.rs:25-27`, then `queued_head.rs:623-630` BlockedUnknown).
 
-### Archive without the obligation check (`DeployBakUnchecked`)
-The final check moves a V1 file whose Unknown head H still needs `nonce_in`'s ledger proof
-(`queued_reconcile.rs:335-342`). H can never be proven (`ProofKept`, `OwnerProgress`).
+### Ledger rollback (`DeployRollbackLedger`, review P1-2)
+`Close` → `Stop` → `FinalCheck` (start 5b) → `XRegister` under 5b → `RollbackStep` restores the pre-deploy
+copy. The 5b binary's committed registration disappears (`history.rs:335-351`, `:894-905`).
+
+Binary-only rollback (`DeployRollbackBinary`) keeps the current ledger and is GREEN. The old binary reads
+V2/V3: `compat.rs:43-55`, `v2.rs:299`/`migration.rs:30`, and `v2.rs:870-880` for registration-less
+passive entries. All of these are identical on origin/main and the base.
 
 ## Not modeled
 
@@ -127,10 +143,11 @@ The final check moves a V1 file whose Unknown head H still needs `nonce_in`'s le
 - **Register and paste as separate steps.** A crash between them, an unconfirmed publication
   (`v2.rs:325-330`), and a later failure of `mark` or `receipt` are outside the state space.
 - **Keyed/keyless reconciliation (C1) and native-row uniqueness (C5).** The model has no `(id, path)`,
-  provenance, or row/event keys. Implementation tests prove them; candidate names are in design rev 1
-  §8 (`keyless_reconcile_*`, `shared_row_*`).
-- **The owner's own restart recovery and native V3 settlement.** `recovery.rs:34 sync_history` →
-  `project` and native V3 settlement touch registered entries only.
-- **Capacity.** `CAPACITY` is 4096.
-- **Which provider a V1 boot stops.** Only the Claude native boot stop is represented (`NewBootSupported`).
-  Codex shows V1 as owner projection and first-record errors (design rev 1 §5).
+  provenance, or row/event keys. These are still to be proven by implementation tests; candidate names
+  are in slice 5 design §8.
+- **The owner's own restart recovery and native V3 settlement.** A handed-back input the owner takes is
+  bound to the sessions current at that moment.
+- **The operator's manual settlement during a hold.**
+- **Capacity.**
+- **Which provider a V1 boot stops.** Only the Claude native boot stop is represented. Codex shows V1 as
+  owner projection and first-record errors.

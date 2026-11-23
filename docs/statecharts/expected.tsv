@@ -666,10 +666,13 @@ input-single-path/InputLedgerFormatAfter.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatAfterBootV1.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatAfterBootV2.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatAfterUnlocked.cfg	InputLedgerFormat	RecordedExactlyOnce	-
-input-single-path/InputLedgerFormatDeployBakUnchecked.cfg	InputLedgerFormat	ProofKept	OwnerProgress
-input-single-path/InputLedgerFormatDeployPrecheck.cfg	InputLedgerFormat	NewBootSupported,ProofKept	OwnerProgress
-input-single-path/InputLedgerFormatDeployStopcheck.cfg	InputLedgerFormat	-	-
-input-single-path/InputLedgerFormatDeployStopcheckBootV1.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatDeployGuarded.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatDeployGuardedBootV1.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatDeployGuardedPreRepair.cfg	InputLedgerFormat	-	DeployReached,OwnerProgress
+input-single-path/InputLedgerFormatDeployPrecheck.cfg	InputLedgerFormat	BindingKept,NewBootSupported	OwnerProgress
+input-single-path/InputLedgerFormatDeployReplaceOnV2.cfg	InputLedgerFormat	BindingKept	OwnerProgress
+input-single-path/InputLedgerFormatDeployRollbackBinary.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatDeployRollbackLedger.cfg	InputLedgerFormat	ProofKept,RecordedExactlyOnce	OwnerProgress
 input-single-path/InputLedgerFormatDropMigrationOnly.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatNow.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatNowBeforeRepair.cfg	InputLedgerFormat	-	OwnerProgress
