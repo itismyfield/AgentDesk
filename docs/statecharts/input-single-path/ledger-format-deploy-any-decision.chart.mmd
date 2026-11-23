@@ -1,0 +1,52 @@
+---
+title: "Frame ledger file: V2 owner, out-of-scope writer and the 5b ops procedure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDebtAcrossReplace in some cases
+    lg1: Path to the NoDebtAcrossReplace or ObligationsSettled bug
+    lg2: Repeats forever, so ObligationsSettled breaks
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  class lg2 repeats
+  s0: [old] file none #183; owner input owner #183; out-of-scope input queued
+  s1: [old] (keyless handed, no row) file none #183; owner input owner #183; out-of-scope input queued
+  s2: [old] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s3: [closing] (keyless handed, no row) file none #183; owner input owner #183; out-of-scope input queued
+  s4: [closing] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s5: [stopped] (keyless handed, no row) file none #183; owner input owner #183; out-of-scope input queued
+  s6: [closing] file v1 #183; owner input owner #183; out-of-scope input done
+  s7: RED: sessions replaced while a retry debt or keyless obligation still needs them
+  s8: [closing] file v2 #183; owner input pasted #183; out-of-scope input done
+  s9: [closing] (keyless handed) file v2 #183; owner input pasted #183; out-of-scope input done
+  s10: [closing] (keyless handed) file v2 #183; owner input done #183; out-of-scope input done
+  s11: [stopped] (keyless handed) file v2 #183; owner input done #183; out-of-scope input done
+  [*] --> s0
+  s0 --> s1: Appear
+  s0 --> s2: XRegister
+  s1 --> s3: Close
+  s2 --> s4: Close
+  s3 --> s5: Stop
+  s4 --> s6: Settle
+  s5 --> s7: FinalCheck
+  s6 --> s8: OwnerPrepare
+  s8 --> s9: Appear
+  s9 --> s10: Settle
+  s10 --> s11: Stop
+  s11 --> s7: FinalCheck
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 mayBreak
+  class s7 bugPath
+  class s7 repeats
+  class s8 bugPath
+  class s9 bugPath
+  class s10 bugPath
+  class s11 bugPath

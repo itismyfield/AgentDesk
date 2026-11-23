@@ -7,11 +7,11 @@ export const state = (v) => {
     return `RED: a pasted input without exactly one record (file ${v.fmt})`;
   if (st.x === "unknown" && v.xbind !== v.binding)
     return "RED: Unknown head's transcript binding replaced; its proof cannot be used";
-  if (v.binding === "replaced" && (v.retryDebt === true || v.keylessObl === true))
+  if (v.binding === "replaced" && (v.retryDebt === true || (v.kst && v.kst !== "none" && v.kst !== "joined")))
     return "RED: sessions replaced while a retry debt or keyless obligation still needs them";
   if (v.bin === "new" && v.bootfmt === "v1") return "RED: 5b binary booted on a V1 ledger; Claude runtime stops before intake";
   const bin = v.bin && v.bin !== "run" ? `[${v.bin}${v.binding === "replaced" ? ", new sessions" : ""}] ` : "";
-  const debt = [v.retryDebt === true ? "retry debt" : "", v.keylessObl === true ? "keyless debt" : ""].filter(Boolean).join(", ");
+  const debt = [v.retryDebt === true ? "retry debt" : "", v.kst && v.kst !== "none" && v.kst !== "joined" ? `keyless ${v.kst}${v.krow ? "" : ", no row"}` : ""].filter(Boolean).join(", ");
   return `${bin}${debt ? `(${debt}) ` : ""}file ${v.fmt} · owner input ${st.o} · out-of-scope input ${st.x}${v.held === true ? " (read outside the lock)" : ""}`;
 };
 export const step = (action) => action;

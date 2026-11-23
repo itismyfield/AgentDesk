@@ -9,6 +9,12 @@ Model: `InputLedgerFormat.tla`, view `ledger-format.view.mjs`. Revisions:
 - 3 (for slice 5b2) adds the rest of E2 and makes E3 an explicit deploy condition. E2 now also covers
   tui_o retry debt (`retryDebt`) and unsettled keyless attempts (`keylessObl`). A settled historical
   keyless record (`KeylessHist`) is not debt.
+- 4 (for slice 5b2) makes the keyless obligation fail-closed. The single Boolean becomes the persisted
+  Codex admission/decision (`kst`: Reserved, EffectPossible, Uncertain, Admitted, HandedPending,
+  Joined) and whether the native row reached the transcript (`krow`). Only a terminal persisted state
+  (`Joined`) passes. A missing transcript row is no proof that nothing was pasted
+  (`append.rs:483-500 replay_start`; `codex_tui/busy_inject.rs:396-453` marks EffectPossible before the
+  paste and Admitted after Enter).
 
 ## What this model checks, and what it does not
 
@@ -27,8 +33,10 @@ It checks only these things:
 What it leaves out:
 - C4/C5 in the slice 5 design (keyed/keyless reconciliation, native-row uniqueness) are still to be
   proven by implementation tests.
-- `retryDebt` and `keylessObl` are single Booleans standing for the persisted classes in design §7 E2. The
-  ledger structure behind them is not modeled, and both settle only on the original binding (assumed).
+- `retryDebt` (a Boolean) and `kst`/`krow` stand for the persisted classes in design §7 E2. The ledger
+  structure behind them is not modeled, and both settle only on the original binding (assumed). Whether
+  the one-off reader computes them correctly from real records is a fixture question (design §7 O6 table),
+  not a TLC one.
 - `RecordedAtMostOnce` holds by construction.
 - `OwnerProgress` means every input settles. `ObligationsSettled` means every debt settles.
   `DeployReached` means the 5b binary started.
@@ -43,7 +51,7 @@ What it leaves out:
 | `Boot` | `none`, `v1`, `v2` | ledger file on disk when the first binary starts |
 | `Locked` | BOOLEAN | the out-of-scope read-modify-write is one step under the shared lock |
 | `Restart` | BOOLEAN | a restart between paste and settle leaves the out-of-scope head Unknown |
-| `Deploy` | `none`, `precheck`, `guarded`, `replaceonv2`, `skipretry`, `skipkeyless`, `skipe3`, `keylessall` | `guarded` is revision 3; the rest are revision 0 or mutants, each dropping one condition |
+| `Deploy` | `none`, `precheck`, `guarded`, `replaceonv2`, `skipretry`, `skipkeyless`, `skipe3`, `keylessall`, `nonceabsent`, `anydecision` | `guarded` is revision 4; the rest are revision 0 or mutants, each dropping one condition |
 | `Rollback` | `none`, `binary`, `ledger` | after the 5b binary has written |
 
 `guarded`:
@@ -53,24 +61,25 @@ What it leaves out:
 4. Replace the sessions and start only if, from persisted state after the stop, all of these hold:
    - the ledger is V2, V3 or missing;
    - no Unknown head remains;
-   - there is no retry debt and no unsettled keyless attempt;
+   - there is no retry debt, and every keyless attempt is absent or terminal (`Joined`);
    - the start binary has repair 1.
 
    Otherwise hold: the old binary comes back on the same sessions with intake open again, and the
    procedure starts over.
 
-`retryDebt` and `keylessObl` can appear while the old producer still runs, including after the live
+`retryDebt` and a keyless attempt (any non-terminal `kst`, with or without its row) can appear while the
+old producer still runs, including after the live
 check (`Appear`). The model's hold does not include the operator's manual settlement.
 
 Rules:
 - Invariants: `RecordedExactlyOnce`, `RecordedAtMostOnce`, `ProofKept`, `BindingKept`, `NewBootSupported`,
-  `NoDebtAcrossReplace` (no session replacement while a debt remains), `E3Enforced` (5b never starts
+  `NoDebtAcrossReplace` (no session replacement while a retry debt or a non-terminal keyless attempt remains), `E3Enforced` (5b never starts
   without a repair 1 start binary, in every run).
 - Properties: `OwnerProgress`, `ObligationsSettled` (`<>[]` no debt), `DeployReached` (procedure configs).
 
 ## Results
 
-`scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: see the slice 5 leg report (19/19 against
+`scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: see the slice 5 leg report (21/21 against
 `expected.tsv`).
 
 | Config | View / Boot / Deploy / Rollback | Expected | Broken rules |
@@ -83,15 +92,17 @@ Rules:
 | `AfterBootV1` | v2 / **v1** / none / none (after) | RED: E1 | OwnerProgress: [chart](ledger-format-boot-v1.chart.mmd) |
 | `AfterUnlocked` | after, **unlocked** | RED mutant | RecordedExactlyOnce: [chart](ledger-format-unlocked.chart.mmd) |
 | `DeployPrecheck` | v2 / none / **precheck** / none | RED (rev 0) | BindingKept, NewBootSupported, NoDebtAcrossReplace, OwnerProgress, ObligationsSettled: [chart](ledger-format-deploy-precheck.chart.mmd) |
-| `DeployGuarded` | v2 / none / guarded / none | GREEN (rev 3) | none (447 states) |
+| `DeployGuarded` | v2 / none / guarded / none | GREEN (rev 4) | none (1,500 states) |
 | `DeployGuardedBootV1` | v2 / **v1** / guarded / none | GREEN | none |
 | `DeployGuardedPreRepair` | **v1** / none / guarded / none | `E3Enforced` holds in every run; the deploy never starts | OwnerProgress, DeployReached: [chart](ledger-format-deploy-pre-repair-hold.chart.mmd) |
 | `DeployReplaceOnV2` | v2 / none / **replaceonv2** / none | RED mutant (rev 1 review P1-1) | BindingKept, OwnerProgress: [chart](ledger-format-deploy-replace-on-v2.chart.mmd) |
 | `DeploySkipRetry` | v2 / none / **skipretry** / none | RED mutant (rev 2 review P1-1) | NoDebtAcrossReplace, ObligationsSettled: [chart](ledger-format-deploy-skip-retry.chart.mmd) |
 | `DeploySkipKeyless` | v2 / none / **skipkeyless** / none | RED mutant (rev 2 review P1-1) | NoDebtAcrossReplace, ObligationsSettled: [chart](ledger-format-deploy-skip-keyless.chart.mmd) |
 | `DeployKeylessAll` | v2 / none / **keylessall** / none | RED mutant: a settled history record must not hold the deploy | DeployReached: [chart](ledger-format-deploy-keyless-all.chart.mmd) |
+| `DeployNonceAbsent` | v2 / none / **nonceabsent** / none | RED mutant (rev 3 review P1-1, case A) | NoDebtAcrossReplace, ObligationsSettled: [chart](ledger-format-deploy-nonce-absent.chart.mmd) |
+| `DeployAnyDecision` | v2 / none / **anydecision** / none | RED mutant (rev 3 review P1-1, case B: HandedPending) | NoDebtAcrossReplace, ObligationsSettled: [chart](ledger-format-deploy-any-decision.chart.mmd) |
 | `DeploySkipE3` | **v1** / none / **skipe3** / none | RED mutant (rev 2 review P2-2) | E3Enforced, OwnerProgress, DeployReached: [chart](ledger-format-deploy-skip-e3.chart.mmd) |
-| `DeployRollbackBinary` | v2 / none / guarded / **binary** | GREEN | none (523 states) |
+| `DeployRollbackBinary` | v2 / none / guarded / **binary** | GREEN | none (1,576 states) |
 | `DeployRollbackLedger` | v2 / none / guarded / **ledger** | RED mutant (rev 1 review P1-2) | ProofKept, RecordedExactlyOnce, OwnerProgress: [chart](ledger-format-deploy-rollback-ledger.chart.mmd) |
 
 - `DeployGuardedPreRepair` and `DeploySkipE3` differ only in whether the final check requires E3. With the
@@ -135,6 +146,15 @@ the live check and the stop. The code points are:
 - `local_retry/notice_selection.rs:12-46` for InputNotice;
 - `actor/transition_snapshot.rs:275-289` for obligations;
 - `history.rs:505-546` for keyless Pending.
+
+### Nonce absent / any decision
+`Appear` (a keyless attempt that is non-terminal, with no native row yet, or HandedPending) → `Close` →
+`Stop` → `FinalCheck` replaces the sessions:
+- `nonceabsent` treats "no row in the transcript" as "never pasted". Codex marks EffectPossible before the
+  paste and Admitted after Enter, and the native row is written later (`codex_tui/busy_inject.rs:396-453`,
+  `rollout.rs:578-620`).
+- `anydecision` treats HandedPending as settled. `injected_steer.rs:143-156` defers it, and
+  `append::replay_start` (`append.rs:494`) keeps it a recovery target.
 
 ### Keyless all
 Counting the settled history record as debt holds every deploy (`DeployReached`). Rev 3 §7 E2 classifies

@@ -34,6 +34,7 @@
 \*                                    against the session's current transcript binding
 \*                                    (`queued_reconcile.rs:166-183,242-249,382-386`)
 \*   Deploy   none | precheck | guarded | replaceonv2 | skipretry | skipkeyless | skipe3 | keylessall
+\*            | nonceabsent | anydecision
 \*            none: one binary, Writer/Migrate/View as given.
 \*            Otherwise the old binary (V1 writer, restore, View) runs and is replaced by the 5b
 \*            binary (V2 writer, no restore, V2 view):
@@ -46,9 +47,15 @@
 \*            skipkeyless  mutant: the final check ignores an unsettled keyless attempt
 \*            skipe3       mutant: the final check does not require a start binary with repair 1
 \*            keylessall   mutant: every keyless record, settled history included, counts as debt
+\*            nonceabsent  mutant: a keyless attempt whose native row is not in the transcript passes
+\*            anydecision  mutant: any non-null append decision (HandedPending included) passes
+\*            Rev 4 O6 is fail-closed: a keyless attempt passes only with a terminal state in the
+\*            persisted record (Codex `decision == Joined`, `append.rs:494`); Reserved, EffectPossible,
+\*            Uncertain, Admitted without a result and HandedPending stay obligations, whether or not
+\*            the native row reached the transcript (`kst`, `krow`).
 \*            The guarded check reads only persisted state after the stop (rev 3 E2): Unknown heads,
 \*            retry debt (Body and InputNotice), unsettled keyless attempts, and E3 (View = "v2").
-\*            retryDebt and keylessObl can appear while the old producer still runs, also after the
+\*            retryDebt and a keyless attempt can appear while the old producer still runs, also after the
 \*            live pre-check; they settle only on the original binding. A settled historical keyless
 \*            record (KeylessHist) exists in every procedure config and is not debt.
 \*   Rollback none | binary | ledger  after the 5b binary has written: back to the old binary with
@@ -62,10 +69,16 @@ CONSTANTS Writer, Migrate, View, Boot, Locked, Restart, Deploy, Rollback
 Inputs == {"o", "x"}
 
 VARIABLES fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap,
-          retryDebt, keylessObl, made
+          retryDebt, kst, krow, made
 
-Obl == <<retryDebt, keylessObl, made>>
-vars == <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap, retryDebt, keylessObl, made>>
+Obl == <<retryDebt, kst, krow, made>>
+vars == <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap, retryDebt, kst, krow, made>>
+
+\* A Codex keyless attempt's persisted admission/decision (`append.rs:6-19`): none, or one of
+\* Reserved, EffectPossible, Uncertain, Admitted, HandedPending, Joined; krow: its native row is in
+\* the transcript.
+KStates == {"none", "reserved", "effect", "uncertain", "admitted", "handed", "joined"}
+KeylessObl == kst \notin {"none", "joined"}
 
 States == {"queued", "owner", "pasted", "unknown", "done"}
 Bins == {"run", "old", "checked", "closing", "stopped", "new", "rolled"}
@@ -84,7 +97,8 @@ TypeOK ==
     /\ xbind \in {"original", "replaced"}
     /\ snap \in [f : Formats, r : [Inputs -> 0..3]]
     /\ retryDebt \in BOOLEAN
-    /\ keylessObl \in BOOLEAN
+    /\ kst \in KStates
+    /\ krow \in BOOLEAN
     /\ made \subseteq {"retry", "keyless"}
 
 Init ==
@@ -100,7 +114,8 @@ Init ==
     /\ xbind = "original"
     /\ snap = [f |-> Boot, r |-> [i \in Inputs |-> 0]]
     /\ retryDebt = FALSE
-    /\ keylessObl = FALSE
+    /\ kst = "none"
+    /\ krow = FALSE
     /\ made = {}
 
 New == bin = "new"
@@ -221,7 +236,8 @@ PreCheck ==
     /\ UNCHANGED <<fmt, rec, st, held, copy, bootfmt, binding, xbind, snap>>
     /\ UNCHANGED Obl
 
-Guards == {"guarded", "replaceonv2", "skipretry", "skipkeyless", "skipe3", "keylessall"}
+Guards == {"guarded", "replaceonv2", "skipretry", "skipkeyless", "skipe3", "keylessall",
+           "nonceabsent", "anydecision"}
 
 \* While the old producer runs (also after the live check), tui_o can record a retry debt and a
 \* keyless paste can still await its receipt; each settles only on the original binding.
@@ -230,15 +246,17 @@ Appear(k) ==
     /\ bin \in {"old", "checked", "closing"}
     /\ k \notin made
     /\ made' = made \cup {k}
-    /\ IF k = "retry" THEN retryDebt' = TRUE /\ UNCHANGED keylessObl
-                       ELSE keylessObl' = TRUE /\ UNCHANGED retryDebt
+    /\ IF k = "retry" THEN retryDebt' = TRUE /\ UNCHANGED <<kst, krow>>
+                       ELSE /\ kst' \in KStates \ {"none", "joined"}
+                            /\ krow' \in BOOLEAN
+                            /\ UNCHANGED retryDebt
     /\ UNCHANGED <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap>>
 
 SettleObl(k) ==
     /\ Running
     /\ binding = "original"
-    /\ IF k = "retry" THEN retryDebt /\ retryDebt' = FALSE /\ UNCHANGED keylessObl
-                       ELSE keylessObl /\ keylessObl' = FALSE /\ UNCHANGED retryDebt
+    /\ IF k = "retry" THEN retryDebt /\ retryDebt' = FALSE /\ UNCHANGED <<kst, krow>>
+                       ELSE KeylessObl /\ kst' = "joined" /\ krow' = TRUE /\ UNCHANGED retryDebt
     /\ UNCHANGED <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap, made>>
 
 \* Rev 2 step 1: close new intake; queued inputs keep settling on the original binding.
@@ -276,7 +294,9 @@ Ready ==
     /\ fmt # "v1"
     /\ (Deploy = "replaceonv2" \/ st["x"] # "unknown")
     /\ (Deploy = "skipretry" \/ ~retryDebt)
-    /\ (Deploy = "skipkeyless" \/ ~keylessObl)
+    /\ (Deploy = "skipkeyless" \/ ~KeylessObl
+        \/ (Deploy = "nonceabsent" /\ ~krow)
+        \/ (Deploy = "anydecision" /\ kst = "handed"))
     /\ (Deploy = "skipe3" \/ View = "v2")
     /\ (Deploy # "keylessall" \/ ~KeylessHist)
 
@@ -341,13 +361,13 @@ BindingKept == st["x"] = "unknown" => xbind = binding
 NewBootSupported == New => bootfmt # "v1"
 
 \* INVARIANT: the sessions are never replaced while a debt that needs them remains (E2).
-NoDebtAcrossReplace == binding = "replaced" => ~retryDebt /\ ~keylessObl
+NoDebtAcrossReplace == binding = "replaced" => ~retryDebt /\ ~KeylessObl
 
 \* INVARIANT: the 5b binary starts only after a start binary with repair 1 (E3), in every run.
 E3Enforced == bin \in {"new", "rolled"} => View = "v2"
 
 \* PROPERTY (liveness): every retry debt and keyless obligation eventually settles.
-ObligationsSettled == <>[](~retryDebt /\ ~keylessObl)
+ObligationsSettled == <>[](~retryDebt /\ ~KeylessObl)
 
 \* PROPERTY (liveness): every input is eventually done.
 OwnerProgress == <>(\A i \in Inputs : st[i] = "done")

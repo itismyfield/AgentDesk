@@ -18,23 +18,23 @@ stateDiagram-v2
   s3: [checked] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
   s4: [checked] file v1 #183; owner input owner #183; out-of-scope input pasted
   s5: [stopped] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
-  s6: [checked] (retry debt) file v1 #183; owner input owner #183; out-of-scope input pasted
-  s7: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s6: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s7: [checked] (keyless uncertain) file v1 #183; owner input owner #183; out-of-scope input pasted
   s8: RED: sessions replaced while a retry debt or keyless obligation still needs them
-  s9: [stopped] (retry debt) file v1 #183; owner input owner #183; out-of-scope input unknown
-  s10: RED: Unknown head's transcript binding replaced#59; its proof cannot be used
+  s9: RED: Unknown head's transcript binding replaced#59; its proof cannot be used
+  s10: [stopped] (keyless uncertain) file v1 #183; owner input owner #183; out-of-scope input unknown
   [*] --> s0
   s0 --> s1: Appear
   s0 --> s2: PreCheck
   s1 --> s3: PreCheck
   s2 --> s4: XRegister
   s3 --> s5: Stop
-  s3 --> s6: XRegister
-  s4 --> s7: Stop
+  s4 --> s6: Stop
+  s4 --> s7: Appear
   s5 --> s8: StartAsPlanned
-  s6 --> s9: Stop
-  s7 --> s10: StartAsPlanned
-  s9 --> s10: StartAsPlanned
+  s6 --> s9: StartAsPlanned
+  s7 --> s10: Stop
+  s10 --> s9: StartAsPlanned
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 bugPath
@@ -47,7 +47,7 @@ stateDiagram-v2
   class s7 bugPath
   class s8 breaks
   class s8 bugPath
+  class s9 mayBreak
   class s9 bugPath
-  class s10 mayBreak
+  class s9 repeats
   class s10 bugPath
-  class s10 repeats

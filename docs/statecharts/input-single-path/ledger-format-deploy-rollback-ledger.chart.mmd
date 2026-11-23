@@ -12,33 +12,35 @@ stateDiagram-v2
   class lg2 repeats
   s0: [old] file none #183; owner input owner #183; out-of-scope input queued
   s1: [closing] file none #183; owner input owner #183; out-of-scope input queued
-  s2: [stopped] file none #183; owner input owner #183; out-of-scope input queued
-  s3: [closing] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s4: [new, new sessions] file none #183; owner input owner #183; out-of-scope input queued
-  s5: [stopped] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s6: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s7: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input pasted
-  s8: RED: a pasted input without exactly one record (file none)
-  s9: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input queued
-  s10: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input unknown
-  s11: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input pasted
-  s12: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input unknown
-  s13: RED: a pasted input without exactly one record (file v2)
+  s2: [old] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s3: [stopped] file none #183; owner input owner #183; out-of-scope input queued
+  s4: [closing] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s5: [new, new sessions] file none #183; owner input owner #183; out-of-scope input queued
+  s6: [closing] file v2 #183; owner input done #183; out-of-scope input queued
+  s7: [stopped] file v2 #183; owner input done #183; out-of-scope input queued
+  s8: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input pasted
+  s9: RED: a pasted input without exactly one record (file none)
+  s10: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input queued
+  s11: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input unknown
+  s12: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input pasted
+  s13: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input unknown
+  s14: RED: a pasted input without exactly one record (file v2)
   [*] --> s0
   s0 --> s1: Close
-  s1 --> s2: Stop
-  s1 --> s3: OwnerPrepare
-  s2 --> s4: FinalCheck
-  s3 --> s5: Stop
-  s4 --> s7: XRegister
-  s5 --> s6: FinalCheck
-  s6 --> s9: Settle
-  s7 --> s8: RollbackStep
-  s7 --> s10: Crash
-  s9 --> s11: XRegister
-  s10 --> s8: RollbackStep
-  s11 --> s12: Crash
-  s12 --> s13: RollbackStep
+  s0 --> s2: OwnerPrepare
+  s1 --> s3: Stop
+  s2 --> s4: Close
+  s3 --> s5: FinalCheck
+  s4 --> s6: Settle
+  s5 --> s8: XRegister
+  s6 --> s7: Stop
+  s7 --> s10: FinalCheck
+  s8 --> s9: RollbackStep
+  s8 --> s11: Crash
+  s10 --> s12: XRegister
+  s11 --> s9: RollbackStep
+  s12 --> s13: Crash
+  s13 --> s14: RollbackStep
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 bugPath
   class s1 bugPath
@@ -48,10 +50,11 @@ stateDiagram-v2
   class s5 bugPath
   class s6 bugPath
   class s7 bugPath
-  class s8 mayBreak
   class s8 bugPath
+  class s9 mayBreak
   class s9 bugPath
   class s10 bugPath
   class s11 bugPath
   class s12 bugPath
-  class s13 repeats
+  class s13 bugPath
+  class s14 repeats
