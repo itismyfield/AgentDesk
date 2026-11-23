@@ -618,7 +618,7 @@ fn boot_sweep_clears_only_the_recorded_group_and_holds_on_probe_errors() {
     join_within(reaper, WAIT_CAP).unwrap();
 
     // Same PID but another start time: someone else's process; untouched, record dropped.
-    let (pid, identity, mut other) = Orphan::start("sleep 1000");
+    let (pid, identity, other) = Orphan::start("sleep 1000");
     let wrong = identity.persisted_starttime().map(|t| t + 1);
     let lstart = identity.persisted_macos_lstart_hash().map(|t| t + 1);
     let record = write_record(dir, pid, wrong, lstart);
