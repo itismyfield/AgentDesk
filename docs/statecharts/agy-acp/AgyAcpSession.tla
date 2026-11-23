@@ -28,8 +28,8 @@ CONSTANTS Lifetime,    \* "resident" | "per_turn"
           ClearMode,   \* "detach" | "keep"
           Fence,       \* TRUE: responses carry the child incarnation
           ReceiptMode, \* "merge": the receipt merges the durable origins | "memory"
-          ForceMode,   \* "promote": a forced stop follows a sent cancel | "first_only"
-          RecordMode   \* "owner": an exit removes only its own record | "waiter": any record
+          ForceMode,   \* "promote": a forced stop follows a sent cancel | "first_only" | "off"
+          RecordMode   \* "owner": an exit removes only its own record | "waiter" | "off"
 
 Inputs == 1..2
 NoGen == 0
@@ -63,15 +63,15 @@ VARIABLES running,     \* AgentDesk process is up
           receiptHas,  \* per input: the committed receipt names its origin
           merged,      \* per input: only the durable merge put it in the receipt
           forceReq,    \* a forced stop of the open turn is pending
-          inc,         \* incarnation of the latest spawned child
-          record,      \* incarnation whose child record is on disk (0 = none)
-          exits,       \* incarnations whose exit report has not reached AgentDesk yet
+          recorded,    \* the latest spawned child's record is on disk
+          curExit,     \* the latest child ended and its exit report has not arrived yet
+          oldExits,    \* exit reports of earlier children that have not arrived yet
           crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft, forceLeft
 
 vars == <<running, proc, attached, stored, nextGen, clearedGen, loading, st, sentCount, turnOf,
           open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone,
           badSend, served, steerFailed, noticed, orphan, clearedSent, settlerView, receiptHas,
-          merged, forceReq, inc, record, exits, crashLeft, dieLeft, stopLeft, clearLeft,
+          merged, forceReq, recorded, curExit, oldExits, crashLeft, dieLeft, stopLeft, clearLeft,
           refuseLeft, steerFailLeft, forceLeft>>
 
 Queued == {i \in Inputs : st[i] = "queued"}
@@ -87,7 +87,7 @@ OpenTurns(o, t) == {t[i] : i \in o}
 sessionVars == <<attached, stored, nextGen, clearedGen, loading>>
 budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft, forceLeft>>
 receiptVars == <<settlerView, receiptHas, merged>>
-childVars == <<forceReq, inc, record, exits>>
+childVars == <<forceReq, recorded, curExit, oldExits>>
 extraVars == <<steerFailed, noticed, orphan, clearedSent, receiptVars, childVars>>
 
 Init ==
@@ -105,7 +105,7 @@ Init ==
     /\ orphan = FALSE /\ clearedSent = [i \in Inputs |-> FALSE]
     /\ settlerView = [i \in Inputs |-> FALSE] /\ receiptHas = [i \in Inputs |-> FALSE]
     /\ merged = [i \in Inputs |-> FALSE]
-    /\ forceReq = FALSE /\ inc = 0 /\ record = 0 /\ exits = {} /\ forceLeft = 1
+    /\ forceReq = FALSE /\ recorded = FALSE /\ curExit = FALSE /\ oldExits = 0 /\ forceLeft = 1
 
 \* A person posts in Discord (or an authenticated iMessage arrives); the mailbox keeps it.
 Arrive(i) ==
@@ -117,11 +117,10 @@ Arrive(i) ==
 Spawn ==
     /\ running /\ proc # "up" /\ Queued # {} /\ ~orphan
     /\ proc' = "up" /\ served' = FALSE /\ attached' = NoGen /\ loading' = FALSE
-    /\ inc' = inc + 1 /\ record' = inc + 1
+    /\ recorded' = TRUE /\ curExit' = FALSE /\ oldExits' = oldExits + (IF curExit THEN 1 ELSE 0)
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, open, done,
                    outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend,
-                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq,
-                   exits>>
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq>>
 
 NewSession ==
     /\ running /\ proc = "up" /\ attached = NoGen /\ stored = NoGen /\ nextGen <= 3
@@ -219,7 +218,7 @@ AgyResponds ==
           /\ forceReq' = EndForce(rest)
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, posts, refusedIn, zombie,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, inc, record, exits>>
+                   clearedSent, receiptVars, recorded, curExit, oldExits>>
 
 \* The steer prompt fails: rejected before execution, or an unknown outcome (internal error,
 \* request aborted, any other code, deadline or lost pipe after the write). Either way the
@@ -244,7 +243,7 @@ SteerErrored ==
     /\ steerFailLeft' = steerFailLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, posts, zombie, wrongDone, badSend,
                    served, noticed, orphan, clearedSent, receiptVars, crashLeft, dieLeft, stopLeft,
-                   clearLeft, refuseLeft, forceLeft, inc, record, exits>>
+                   clearLeft, refuseLeft, forceLeft, recorded, curExit, oldExits>>
 
 \* Close every turn that still has an open prompt with the given outcome.
 FailOpenTurns(kind) ==
@@ -259,11 +258,11 @@ AgyDies ==
     /\ proc' = "dead" /\ attached' = NoGen /\ loading' = FALSE /\ dieLeft' = dieLeft - 1
     /\ FailOpenTurns(IF cancelSent THEN "cancelled" ELSE "failure") /\ open' = {}
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE /\ forceReq' = FALSE
-    /\ exits' = exits \cup {inc}
+    /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    zombie, wrongDone, badSend, served, crashLeft, stopLeft, clearLeft, refuseLeft,
                    steerFailLeft, forceLeft, steerFailed, noticed, orphan, clearedSent,
-                   receiptVars, inc, record>>
+                   receiptVars, recorded, oldExits>>
 
 \* No update within the inactivity budget, or no cancelled answer within the cancel budget:
 \* kill the child's own process group and close the open turns.
@@ -272,10 +271,10 @@ WatchdogKill ==
     /\ proc' = "dead" /\ attached' = NoGen /\ loading' = FALSE /\ zombie' = TRUE
     /\ FailOpenTurns(IF cancelSent THEN "cancelled" ELSE "failure") /\ open' = {}
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE /\ forceReq' = FALSE
-    /\ exits' = exits \cup {inc}
+    /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, inc, record>>
+                   clearedSent, receiptVars, recorded, oldExits>>
 
 \* The killed child's buffered response is read after a new prompt is open.
 ZombieResponse ==
@@ -299,12 +298,12 @@ UserStop ==
 
 \* A force-kill or session cleanup of the channel's turn; it may follow a person's stop.
 ForceStop ==
-    /\ running /\ open # {} /\ forceLeft > 0 /\ ~forceReq
+    /\ ForceMode # "off" /\ running /\ open # {} /\ forceLeft > 0 /\ ~forceReq
     /\ forceReq' = TRUE /\ cancelReq' = TRUE /\ forceLeft' = forceLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft, dieLeft,
                    stopLeft, clearLeft, refuseLeft, steerFailLeft, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, inc, record, exits>>
+                   clearedSent, receiptVars, recorded, curExit, oldExits>>
 
 \* The turn sends Terminate: the child's own group is killed and its open turns end cancelled.
 \* The mutant sends it only when no session/cancel went out first.
@@ -314,20 +313,20 @@ SendTerminate ==
     /\ proc' = "dead" /\ attached' = NoGen /\ loading' = FALSE /\ zombie' = TRUE
     /\ FailOpenTurns("cancelled") /\ open' = {}
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE /\ forceReq' = FALSE
-    /\ exits' = exits \cup {inc}
+    /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, inc, record>>
+                   clearedSent, receiptVars, recorded, oldExits>>
 
 \* A stopped child's exit report: the record goes only if it is that child's (the mutant removes
-\* whatever record is on disk).
-ExitReported(n) ==
-    /\ running /\ n \in exits /\ exits' = exits \ {n}
-    /\ record' = IF RecordMode = "waiter" \/ record = n THEN 0 ELSE record
+\* whatever record is on disk). A report from an earlier child arrives after the next spawn.
+ExitReported(latest) ==
+    /\ running /\ IF latest THEN curExit ELSE oldExits > 0
+    /\ curExit' = (curExit /\ ~latest) /\ oldExits' = IF latest THEN oldExits ELSE oldExits - 1
+    /\ recorded' = (recorded /\ ~latest /\ RecordMode = "owner")
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq,
-                   inc>>
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq>>
 
 SendCancel ==
     /\ running /\ proc = "up" /\ cancelReq /\ ~cancelSent /\ open # {}
@@ -353,11 +352,11 @@ Clear ==
 \* One-turn lifetime: the child is closed after its last prompt settles.
 CloseAfterTurn ==
     /\ Lifetime = "per_turn" /\ running /\ proc = "up" /\ open = {} /\ attached # NoGen /\ served
-    /\ proc' = "none" /\ attached' = NoGen /\ exits' = exits \cup {inc}
+    /\ proc' = "none" /\ attached' = NoGen /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, loading, st, sentCount, turnOf, open, done,
                    outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend,
                    served, budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars,
-                   forceReq, inc, record>>
+                   forceReq, recorded, oldExits>>
 
 \* The writer posts the turn's recorded disposition once; that post covers every member, and
 \* carries one notice line for each member whose steer failed (the mutant leaves it out). The
@@ -387,20 +386,21 @@ Crash ==
     /\ running' = FALSE /\ crashLeft' = crashLeft - 1
     /\ proc' = IF proc = "up" THEN "dead" ELSE proc
     /\ attached' = NoGen /\ loading' = FALSE /\ open' = {} /\ zombie' = FALSE
-    /\ cancelReq' = FALSE /\ cancelSent' = FALSE /\ forceReq' = FALSE /\ exits' = {}
+    /\ cancelReq' = FALSE /\ cancelSent' = FALSE /\ forceReq' = FALSE
+    /\ curExit' = FALSE /\ oldExits' = 0
     /\ orphan' = (proc = "up") /\ settlerView' = [i \in Inputs |-> FALSE]
     /\ UNCHANGED <<stored, nextGen, clearedGen, st, sentCount, turnOf, done, outcome, posts,
                    refusedIn, wrongDone, badSend, served, dieLeft, stopLeft, clearLeft, refuseLeft,
                    steerFailLeft, forceLeft, steerFailed, noticed, clearedSent, receiptHas, merged,
-                   inc, record>>
+                   recorded>>
 
 \* Boot sweeps the recorded child group of the previous AgentDesk before any new spawn.
 SweepOrphan ==
-    /\ running /\ orphan /\ orphan' = FALSE /\ record' = 0
+    /\ running /\ orphan /\ orphan' = FALSE /\ recorded' = FALSE
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   steerFailed, noticed, clearedSent, receiptVars, budgetVars, forceReq, inc,
-                   exits>>
+                   steerFailed, noticed, clearedSent, receiptVars, budgetVars, forceReq, curExit,
+                   oldExits>>
 
 \* Boot: a turn with written prompts and no terminal record is failed with a notice (the mutant
 \* re-queues its inputs and writes them again). Boot settles from the durable row, so its view
@@ -427,7 +427,7 @@ Next ==
     \/ Spawn \/ NewSession \/ Reattach \/ ReattachRefused \/ LoadAnswered
     \/ SendPrompt \/ AgyResponds \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
     \/ UserStop \/ SendCancel \/ Clear \/ CloseAfterTurn \/ Crash \/ SweepOrphan \/ Boot \/ Rest
-    \/ ForceStop \/ SendTerminate \/ \E n \in exits : ExitReported(n)
+    \/ ForceStop \/ SendTerminate \/ \E latest \in BOOLEAN : ExitReported(latest)
 
 \* agy itself is not assumed to answer (no fairness on AgyResponds or SteerErrored): only
 \* AgentDesk's own steps, the watchdog included, are fair.
@@ -458,7 +458,7 @@ NoReviveAfterClear == \A i \in Inputs : clearedSent[i] => st[i] # "queued"
 \* Every input a post covered, steered ones included, is named by that turn's receipt.
 NoMissingOrigin == \A i \in Inputs : posts[i] >= 1 => receiptHas[i]
 \* A running child, or one a restart left running, always has its own record for the sweep.
-ChildRecorded == (proc = "up" \/ orphan) => record = inc
+ChildRecorded == (proc = "up" \/ orphan) => recorded
 \* Reachability witnesses (expected to break when checked alone): a steered input answered by
 \* its turn, a failed steer covered by its turn's post, a steer that fails after /clear, and a
 \* cancelled receipt that needed the durable merge.
