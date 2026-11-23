@@ -4,11 +4,13 @@ import type { KanbanCard } from "../../types";
 import {
   buildGitHubIssueUrl,
   coalesceGitHubCommentTimeline,
+  coerceTimestampMs,
   getCardDwellBadge,
   getCardStateEnteredAt,
   normalizeGitHubIssueUrl,
   normalizeGitHubRepo,
   parseGitHubCommentTimeline,
+  toIsoTimestamp,
 } from "./kanban-utils";
 
 function makeComment(
@@ -449,5 +451,15 @@ describe("getCardDwellBadge", () => {
       tone: "stale",
       detail: "2시간",
     });
+  });
+});
+
+describe("coerceTimestampMs", () => {
+  // Node parses the Postgres text form as is; Safari does not, so the rewrite itself is asserted.
+  it("rewrites Postgres timestamptz text into strict ISO and leaves other strings alone", () => {
+    expect(toIsoTimestamp("2026-11-23 10:00:00.123456+00")).toBe("2026-11-23T10:00:00.123+00:00");
+    expect(toIsoTimestamp("2026-05-24 11:43:59.5-0730")).toBe("2026-05-24T11:43:59.500-07:30");
+    expect(toIsoTimestamp("2026-11-23")).toBe("2026-11-23");
+    expect(coerceTimestampMs("2026-11-23 10:00:00.123456+00")).toBe(Date.UTC(2026, 10, 23, 10, 0, 0, 123));
   });
 });

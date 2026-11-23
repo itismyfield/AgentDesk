@@ -1,7 +1,8 @@
-import { useEffect, useId, useMemo, useState } from "react";
-import { Grid2X2, List, Pencil, Plus, Search, UsersRound, X } from "lucide-react";
-import { getSkillRanking } from "../../api";
-import type { Agent, Department } from "../../types";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Pencil, Plus, Search, UsersRound, X } from "lucide-react";
+import { formatElapsedCompact } from "../../agent-insights";
+import { getDiscordBindings } from "../../api";
+import type { Agent, Department, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { isTestAgent } from "../../lib/agentHelpers";
 import { Button } from "../../kit/free/button-clean";
@@ -13,31 +14,42 @@ import { Select } from "../../kit/free/select-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { ActionMenu } from "../common/ActionMenu";
+import { Cap, SectionCard, StatusDot, type DotTone } from "../common/KitPrimitives";
+import { AGENT_STATES, agentLine, agentStateLabel, monitorView, type HomeAgent, type HomeAgentState } from "../home/homeModel";
+import { useAgentTurns } from "../home/useHomeData";
 import AgentInfoCard from "./AgentInfoCard";
 import { AgentInfoCardContent } from "./AgentInfoCardContent";
-import { filterAgents } from "./agent-list-controls";
+import AgentRow from "./AgentRow";
+import { AgentsAttentionCard, useAgentsAttention } from "./AgentsAttentionCard";
+import { AgentsSummaryPane } from "./AgentsSummaryPane";
+import { NO_DEPARTMENT, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
-import { AgentsGridView } from "./AgentsGridView";
 import { AgentManagerStyles } from "./AgentManagerStyles";
 
 interface AgentsTabProps {
   tr: Translator;
   locale: string;
   isKo: boolean;
-  agents: Agent[];
+  /** Every agent with its home state, plus home's department-only session stand-ins (counted, never listed). */
+  entries: HomeAgent[];
+  /** The entries the filters keep, in list order. */
+  sortedEntries: HomeAgent[];
   departments: Department[];
   deptTab: string;
   setDeptTab: (deptId: string) => void;
   search: string;
   setSearch: (next: string) => void;
-  statusFilter: string;
-  setStatusFilter: (next: string) => void;
+  statusFilter: AgentStatusFilter;
+  setStatusFilter: (next: AgentStatusFilter) => void;
   sortMode: AgentSortMode;
   setSortMode: (next: AgentSortMode) => void;
-  sortedAgents: Agent[];
   includeTests: boolean;
   setIncludeTests: (next: boolean) => void;
+  selectedAgentId: string | null;
+  onSelectAgent: (agentId: string | null) => void;
+  unlinkedSessions?: DispatchedSession[];
+  onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   onCreateAgent: () => void;
   onEditAgent: (agent: Agent) => void;
   onDuplicateAgent: (agent: Agent) => void;
@@ -47,27 +59,29 @@ interface AgentsTabProps {
   saving: boolean;
 }
 
-type AgentViewMode = "grid" | "list";
-const STATUS_KEYS = ["all", "working", "idle", "break", "offline"] as const;
+const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
 
-function buildTopSkillMap(rows: Awaited<ReturnType<typeof getSkillRanking>>["byAgent"]) {
-  const byAgent = new Map<string, string[]>();
-  for (const row of rows) {
-    const key = row.agent_role_id;
-    const existing = byAgent.get(key) ?? [];
-    if (!existing.includes(row.skill_desc_ko)) {
-      existing.push(row.skill_desc_ko);
-      byAgent.set(key, existing.slice(0, 3));
-    }
-  }
-  return byAgent;
+/** Agents with a Discord route, read once for the settings dot; null until read (and after a failed read). */
+function useBoundAgentIds(): Set<string> | null {
+  const [bound, setBound] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    let active = true;
+    getDiscordBindings({ suppressErrorToast: true })
+      .then((bindings) => { if (active) setBound(new Set(bindings.map((binding) => binding.agentId))); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+  return bound;
 }
 
+/** The agents tab: what needs a look, then every agent with home's states, and on desktop the detail (or a summary
+ * while none is picked) beside the list. Phones open the detail full screen. */
 export default function AgentsTab({
   tr,
   locale,
   isKo,
-  agents,
+  entries,
+  sortedEntries,
   departments,
   deptTab,
   setDeptTab,
@@ -77,9 +91,12 @@ export default function AgentsTab({
   setStatusFilter,
   sortMode,
   setSortMode,
-  sortedAgents,
   includeTests,
   setIncludeTests,
+  selectedAgentId,
+  onSelectAgent,
+  unlinkedSessions = [],
+  onAssign,
   onCreateAgent,
   onEditAgent,
   onDuplicateAgent,
@@ -88,62 +105,57 @@ export default function AgentsTab({
   onAgentUpdated,
   saving,
 }: AgentsTabProps) {
-  const [preferredViewMode, setViewMode] = useState<AgentViewMode>("grid");
-  // Phones always get the dense list; the detail opens as a full-screen page there.
   const isMobile = useIsMobile();
-  const viewMode: AgentViewMode = isMobile ? "list" : preferredViewMode;
-  const testAgentCount = agents.filter(isTestAgent).length;
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [topSkillsByAgent, setTopSkillsByAgent] = useState<Map<string, string[]>>(() => new Map());
   const panelId = useId();
+  const listRef = useRef<HTMLUListElement>(null);
+  // Home's counted set; the rows and everything about real agents leave the stand-ins out.
+  const counted = useMemo(() => entries.filter((entry) => isListedAgent(entry.agent, includeTests)), [entries, includeTests]);
+  const listed = useMemo(() => counted.filter((entry) => !isStandIn(entry.agent)), [counted]);
+  const standIns = counted.length - listed.length;
+  const listedAgents = useMemo(() => listed.map((entry) => entry.agent), [listed]);
+  const testAgentCount = entries.filter((entry) => isTestAgent(entry.agent)).length;
+  const attention = useAgentsAttention(listedAgents, tr, isKo);
+  const bound = useBoundAgentIds();
+  // Phones show no tool line, so they read no turns either (as home).
+  const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
+  const departmentById = useMemo(() => new Map(departments.map((department) => [department.id, department])), [departments]);
+  const known = useMemo(() => new Set(departmentById.keys()), [departmentById]);
 
-  useEffect(() => {
-    let cancelled = false;
-    getSkillRanking("30d", 120)
-      .then((ranking) => {
-        if (!cancelled) setTopSkillsByAgent(buildTopSkillMap(ranking.byAgent));
-      })
-      .catch(() => {
-        if (!cancelled) setTopSkillsByAgent(new Map());
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const countedAgents = includeTests ? agents : agents.filter((candidate) => !isTestAgent(candidate));
-  const deptCounts = new Map<string, number>();
-  for (const agent of countedAgents) {
-    const key = agent.department_id || "__none";
-    deptCounts.set(key, (deptCounts.get(key) ?? 0) + 1);
-  }
   // Tab counts follow the other filters, so each number is what that tab would show.
   const statusCounts = useMemo(() => {
-    const base = filterAgents(agents, { deptTab, statusFilter: "all", search, includeTests });
+    const base = filterAgents(entries, { deptTab, statusFilter: "all", search, includeTests, departments: known });
     const counts: Record<string, number> = { all: base.length };
-    for (const agent of base) counts[agent.status] = (counts[agent.status] ?? 0) + 1;
+    for (const { state } of base) counts[state] = (counts[state] ?? 0) + 1;
     return counts;
-  }, [agents, deptTab, includeTests, search]);
+  }, [entries, deptTab, includeTests, search, known]);
+  const legend = AGENT_STATES.filter((state) => state !== "unknown" || statusCounts.unknown);
+  // A picked tab stays while its count drops to zero, so the filter never hides behind a vanished tab.
+  const statusKeys: AgentStatusFilter[] = ["all", ...AGENT_STATES.filter((state) => legend.includes(state) || state === statusFilter)];
 
-  useEffect(() => {
-    if (selectedAgentId && !sortedAgents.some((agent) => agent.id === selectedAgentId)) {
-      setSelectedAgentId(null);
-    }
-  }, [selectedAgentId, sortedAgents]);
-
-  const selectedAgent = useMemo(
-    () => sortedAgents.find((agent) => agent.id === selectedAgentId) ?? null,
-    [selectedAgentId, sortedAgents],
-  );
-  const selectedDept = deptTab !== "all" ? departments.find((department) => department.id === deptTab) : undefined;
+  const selectedEntry = entries.find((entry) => entry.agent.id === selectedAgentId);
+  const selected = selectedEntry?.agent ?? null;
+  const selectedDept = deptTab !== "all" ? departmentById.get(deptTab) : undefined;
   const filtersActive = search.trim() !== "" || statusFilter !== "all" || deptTab !== "all";
+  const unassigned = listed.filter((entry) => !hasDepartment(entry.agent, known)).length;
 
-  const statusLabels: Record<(typeof STATUS_KEYS)[number], string> = {
-    all: tr("전체", "All"),
-    working: tr("작업 중", "Working"),
-    idle: tr("대기", "Idle"),
-    break: tr("휴식", "Break"),
-    offline: tr("오프라인", "Offline"),
+  const lineOf = (entry: HomeAgent) => {
+    const view = monitorView(turns.get(entry.agent.id), entry, tr);
+    if (!view) return agentLine(entry, tr, isKo);
+    // The clock goes first, so a long tool line truncates instead of it.
+    const elapsed = view.started === null ? "" : ` ${formatElapsedCompact(Date.now() - view.started, isKo)}`;
+    return `${agentStateLabel(entry.state, tr)}${elapsed} · ${view.label}`;
+  };
+  const needsCheck = (agent: Agent) => !hasDepartment(agent, known) || (bound !== null && !bound.has(agent.id));
+  const anyCheck = sortedEntries.some((entry) => needsCheck(entry.agent));
+
+  const onRowKey = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const step = { ArrowDown: 1, ArrowUp: -1, Home: -Infinity, End: Infinity }[event.key];
+    if (step === undefined || event.altKey || event.metaKey || event.ctrlKey) return;
+    event.preventDefault();
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-agent-item]") ?? []);
+    const index = Math.max(0, Math.min(rows.length - 1, rows.indexOf(event.currentTarget) + step));
+    rows[index]?.focus();
+    rows[index]?.scrollIntoView?.({ block: "nearest" });
   };
 
   const detailActions = (agent: Agent, closable: boolean) => {
@@ -173,14 +185,14 @@ export default function AgentsTab({
           ]}
         />
         {closable ? (
-          <IconButton icon={<X size={15} />} label={tr("상세 닫기", "Close details")} onClick={() => setSelectedAgentId(null)} />
+          <IconButton icon={<X size={15} />} label={tr("상세 닫기", "Close details")} onClick={() => onSelectAgent(null)} />
         ) : null}
       </>
     );
   };
 
   const list =
-    countedAgents.length === 0 ? (
+    listed.length === 0 ? (
       <EmptyState
         icon={<UsersRound size={18} />}
         title={tr("아직 에이전트가 없어요", "No agents yet")}
@@ -191,7 +203,7 @@ export default function AgentsTab({
           </Button>
         }
       />
-    ) : sortedAgents.length === 0 ? (
+    ) : sortedEntries.length === 0 ? (
       <EmptyState
         icon={<Search size={18} />}
         title={tr("검색 결과 없음", "No agents found")}
@@ -213,162 +225,191 @@ export default function AgentsTab({
         }
       />
     ) : (
-      <AgentsGridView
-        agents={sortedAgents}
-        locale={locale}
-        tr={tr}
-        viewMode={viewMode}
-        selectedAgentId={selectedAgentId}
-        onSelectAgent={(agent) => setSelectedAgentId(agent.id)}
-        topSkillsByAgent={topSkillsByAgent}
-      />
+      <ul ref={listRef} data-testid="agents-list" className="@container m-0 min-w-0 list-none p-0">
+        {sortedEntries.map((entry) => (
+          <li key={entry.agent.id} className="border-t border-(--line-soft) first:border-t-0">
+            <AgentRow
+              entry={entry}
+              line={lineOf(entry)}
+              department={entry.agent.department_id ? departmentById.get(entry.agent.department_id) : undefined}
+              warn={needsCheck(entry.agent)}
+              locale={locale}
+              tr={tr}
+              selected={entry.agent.id === selectedAgentId}
+              onSelect={() => onSelectAgent(entry.agent.id)}
+              onKeyDown={onRowKey}
+            />
+          </li>
+        ))}
+      </ul>
     );
 
   return (
     <div data-testid="agents-tab" className="agent-kit-scope min-w-0">
       <AgentManagerStyles />
       <div className="grid min-w-0 items-start gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(18rem,38%)] xl:gap-5">
-        <div className="@container flex min-w-0 flex-col gap-3">
-          <div className="grid min-w-0 grid-cols-2 gap-2 @xl:grid-cols-[minmax(0,1fr)_9rem_12rem]">
-            <TextField
-              type="search"
-              aria-label={tr("에이전트 검색", "Search agents")}
-              placeholder={tr("이름·역할 검색", "Search name or role")}
-              prefix={<Search size={14} aria-hidden />}
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              clearable
-              onClear={() => setSearch("")}
-              className="col-span-2 min-w-0 @xl:col-span-1"
-            />
-            <Select
-              aria-label={tr("에이전트 정렬", "Sort agents")}
-              value={sortMode}
-              onChange={(value) => setSortMode(value as AgentSortMode)}
-              className="min-w-0"
-              options={[
-                { value: "status", label: tr("상태순", "By status") },
-                { value: "department", label: tr("부서순", "By department") },
-                { value: "name", label: tr("이름순", "By name") },
-                { value: "activity", label: tr("활동량순", "By activity") },
-                { value: "created", label: tr("생성일순", "By created date") },
-              ]}
-            />
-            <Select
-              aria-label={tr("소속 부서", "Department")}
-              value={deptTab}
-              onChange={setDeptTab}
-              className="min-w-0"
-              options={[
-                { value: "all", label: tr(`전체 부서 · ${countedAgents.length}명`, `All departments · ${countedAgents.length} agents`) },
-                ...departments.map((department) => ({
-                  value: department.id,
-                  label: `${localeName(locale, department)} · ${deptCounts.get(department.id) ?? 0}`,
-                })),
-              ]}
-            />
-          </div>
-
-          <div className="flex min-w-0 items-center gap-2">
-            <SegmentedControl
-              kind="tabs"
-              aria-label={tr("에이전트 상태", "Agent status")}
-              value={statusFilter}
-              onChange={setStatusFilter}
-              className="min-w-0 flex-1"
-              options={STATUS_KEYS.map((key) => ({
-                value: key,
-                label: statusLabels[key],
-                count: statusCounts[key] ?? 0,
-                controls: panelId,
-              }))}
-            />
-            {/* The kit control sizes itself to its slot (inline-size containment), so the slot gets a width. */}
-            <div data-testid="agents-view-mode" className="hidden w-[4.5rem] shrink-0 sm:block pointer-coarse:w-[6.25rem]">
-              <SegmentedControl
-                aria-label={tr("보기 방식", "View mode")}
-                value={viewMode}
-                onChange={(value) => setViewMode(value as AgentViewMode)}
-                variant="tray"
-                size="sm"
-                options={[
-                  { value: "grid", icon: <Grid2X2 size={14} aria-hidden />, ariaLabel: tr("그리드", "Grid") },
-                  { value: "list", icon: <List size={14} aria-hidden />, ariaLabel: tr("리스트", "List") },
-                ]}
-              />
-            </div>
-          </div>
-
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <p className="m-0 text-xs text-(--fg-muted)" aria-live="polite">
-                {tr(`${sortedAgents.length}명 표시`, `${sortedAgents.length} agents shown`)}
-              </p>
+        <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
+          <AgentsAttentionCard attention={attention} locale={locale} isMobile={isMobile} tr={tr} onOpenAgent={onSelectAgent} />
+          <SectionCard
+            title={tr("모든 에이전트", "All agents")}
+            count={sortedEntries.length}
+            aside={isMobile ? null : (
+              <Cap className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
+                {legend.map((state) => (
+                  <span key={state} className="flex items-center gap-1.5 font-display tabular-nums">
+                    <StatusDot tone={LEGEND_TONE[state]} />
+                    {agentStateLabel(state, tr)} {statusCounts[state] ?? 0}
+                  </span>
+                ))}
+              </Cap>
+            )}
+            testId="agents-roster"
+          >
+            <div className="@container flex min-w-0 flex-col gap-2 border-t border-(--line-soft) px-3 py-3 sm:px-4">
+              {standIns > 0 ? (
+                <Cap data-testid="agents-stand-ins">
+                  {tr(`수에는 에이전트 없이 부서에만 붙은 세션 ${standIns}개도 들어 있어요(홈과 같은 기준).`, `Counts include ${standIns} sessions attached to a department only, as on home.`)}
+                </Cap>
+              ) : null}
+              {attention.status === "empty" ? (
+                <Cap data-testid="agents-attention-empty">{tr("막히거나 실패한 에이전트가 없어요.", "No agent is stuck or failing.")}</Cap>
+              ) : null}
+              <div className="grid min-w-0 grid-cols-1 items-center gap-2 @xl:grid-cols-[minmax(0,1fr)_10rem_8rem_auto]">
+                <TextField
+                  type="search"
+                  aria-label={tr("에이전트 검색", "Search agents")}
+                  placeholder={tr("이름·역할 검색", "Search name or role")}
+                  prefix={<Search size={14} aria-hidden />}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  clearable
+                  onClear={() => setSearch("")}
+                  className="min-w-0"
+                />
+                <Select
+                  aria-label={tr("소속 부서", "Department")}
+                  value={deptTab}
+                  onChange={setDeptTab}
+                  className="order-last min-w-0 @xl:order-none"
+                  options={[
+                    { value: "all", label: tr(`전체 부서 · ${listed.length}명`, `All departments · ${listed.length}`) },
+                    ...departments.map((department) => ({
+                      value: department.id,
+                      label: `${localeName(locale, department)} · ${listed.filter((entry) => entry.agent.department_id === department.id).length}`,
+                    })),
+                    ...(unassigned ? [{ value: NO_DEPARTMENT, label: tr(`미배정 · ${unassigned}`, `Unassigned · ${unassigned}`) }] : []),
+                  ]}
+                />
+                {isMobile ? null : (
+                  <Select
+                    aria-label={tr("에이전트 정렬", "Sort agents")}
+                    value={sortMode}
+                    onChange={(value) => setSortMode(value as AgentSortMode)}
+                    className="min-w-0"
+                    options={[
+                      { value: "status", label: tr("상태순", "By status") },
+                      { value: "department", label: tr("부서순", "By department") },
+                      { value: "name", label: tr("이름순", "By name") },
+                      { value: "activity", label: tr("활동량순", "By activity") },
+                      { value: "created", label: tr("생성일순", "By created date") },
+                    ]}
+                  />
+                )}
+                {testAgentCount > 0 ? (
+                  <Checkbox
+                    data-testid="agents-include-tests"
+                    checked={includeTests}
+                    onChange={(event) => setIncludeTests(event.target.checked)}
+                    label={tr(`테스트 포함 (${testAgentCount})`, `Tests (${testAgentCount})`)}
+                    className="order-last"
+                  />
+                ) : null}
+                {/* The kit control is an inline-size container, so its grid slot carries the placement. */}
+                <div className="min-w-0 @xl:order-last @xl:col-span-4">
+                  <SegmentedControl
+                    kind="tabs"
+                    variant="tray"
+                    aria-label={tr("에이전트 상태", "Agent status")}
+                    value={statusFilter}
+                    onChange={(value) => setStatusFilter(value as AgentStatusFilter)}
+                    options={statusKeys.map((key) => ({
+                      value: key,
+                      label: key === "all" ? tr("전체", "All") : agentStateLabel(key, tr),
+                      count: statusCounts[key] ?? 0,
+                      controls: panelId,
+                    }))}
+                  />
+                </div>
+              </div>
               {selectedDept ? (
-                <Button variant="ghost" size="sm" onClick={() => onEditDepartment(selectedDept)}>
+                <Button variant="ghost" size="sm" className="self-start" onClick={() => onEditDepartment(selectedDept)}>
                   {tr("부서 편집", "Edit department")}
                 </Button>
               ) : null}
             </div>
-            {testAgentCount > 0 ? (
-              <Checkbox
-                data-testid="agents-include-tests"
-                checked={includeTests}
-                onChange={(event) => setIncludeTests(event.target.checked)}
-                label={tr(`테스트 에이전트 포함 (${testAgentCount})`, `Include test agents (${testAgentCount})`)}
-              />
+            <div id={panelId} role="tabpanel" aria-label={statusFilter === "all" ? tr("전체", "All") : agentStateLabel(statusFilter, tr)} className="min-w-0 border-t border-(--line-soft)">
+              {list}
+            </div>
+            {anyCheck && !isMobile ? (
+              <Cap className="block border-t border-(--line-soft) px-4 py-2.5 text-right">
+                {tr("주황 점은 설정 확인이 필요하다는 뜻이에요(부서나 Discord 경로 없음).", "An orange dot marks settings to check (no department or Discord route).")}
+              </Cap>
             ) : null}
-          </div>
-
-          <div id={panelId} role="tabpanel" aria-label={statusLabels[(statusFilter as (typeof STATUS_KEYS)[number])] ?? statusLabels.all} className="min-w-0">
-            {list}
-          </div>
+          </SectionCard>
         </div>
 
         {!isMobile ? (
           <section
             data-testid="agents-detail-pane"
             aria-label={
-              selectedAgent
-                ? `${localeName(locale, selectedAgent)} — ${tr("에이전트 상세", "Agent details")}`
-                : tr("에이전트 상세", "Agent details")
+              selected
+                ? `${localeName(locale, selected)} — ${tr("에이전트 상세", "Agent details")}`
+                : tr("에이전트 요약", "Agents summary")
             }
-            className="sticky top-0 max-h-[calc(100dvh-8rem)] min-w-0 overflow-y-auto overscroll-contain rounded-(--r-xl) bg-(--bg-1) p-4 shadow-[inset_0_0_0_1px_var(--line-soft)] xl:p-5"
+            className="sticky top-0 max-h-[calc(100dvh-9.5rem)] min-w-0 overflow-y-auto overscroll-contain rounded-(--r-xl) bg-(--bg-1) p-4 shadow-[inset_0_0_0_1px_var(--line-soft)] xl:p-5"
           >
-            {selectedAgent ? (
+            {selected ? (
               <AgentInfoCardContent
-                key={selectedAgent.id}
-                agent={selectedAgent}
+                key={selected.id}
+                agent={selected}
+                state={selectedEntry?.state}
                 isKo={isKo}
                 locale={locale}
                 tr={tr}
                 departments={departments}
                 onAgentUpdated={onAgentUpdated}
-                actions={detailActions(selectedAgent, true)}
+                actions={detailActions(selected, true)}
               />
             ) : (
-              <EmptyState
-                bare
-                icon={<UsersRound size={18} />}
-                title={tr("선택한 에이전트가 없어요", "No agent selected")}
-                text={tr("에이전트를 고르면 상세 정보와 편집 메뉴가 보여요.", "Select an agent to see details and actions.")}
+              <AgentsSummaryPane
+                counted={counted}
+                entries={listed}
+                agents={listedAgents}
+                departments={departments}
+                locale={locale}
+                tr={tr}
+                deptTab={deptTab}
+                onSelectDept={setDeptTab}
+                unlinkedSessions={unlinkedSessions}
+                onAssign={onAssign}
               />
             )}
           </section>
         ) : null}
       </div>
 
-      {isMobile && selectedAgent ? (
+      {isMobile && selected ? (
         <AgentInfoCard
-          agent={selectedAgent}
+          agent={selected}
+          state={selectedEntry?.state}
           isKo={isKo}
           locale={locale}
           tr={tr}
           departments={departments}
-          onClose={() => setSelectedAgentId(null)}
+          onClose={() => onSelectAgent(null)}
           onAgentUpdated={onAgentUpdated}
           backLabel={tr("목록으로", "Back to list")}
-          actions={detailActions(selectedAgent, false)}
+          actions={detailActions(selected, false)}
         />
       ) : null}
     </div>

@@ -5,12 +5,14 @@ import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
+import type { HomeAgentState } from "../home/homeModel";
 import type { Translator } from "./types";
 import { AgentOverlay } from "./AgentOverlay";
 import { AgentInfoCardContent } from "./AgentInfoCardContent";
 
 interface AgentInfoCardProps {
   agent: Agent;
+  state?: HomeAgentState;
   isKo: boolean;
   locale: string;
   tr: Translator;
@@ -25,6 +27,7 @@ interface AgentInfoCardProps {
 /** Agent detail as an overlay: a centred card from 900px, a full-screen page with a back button below it. */
 export default function AgentInfoCard({
   agent,
+  state,
   isKo,
   locale,
   tr,
@@ -64,6 +67,7 @@ export default function AgentInfoCard({
     >
       <AgentInfoCardContent
         agent={agent}
+        state={state}
         isKo={isKo}
         locale={locale}
         tr={tr}

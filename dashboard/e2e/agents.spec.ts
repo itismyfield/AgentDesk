@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 
-// Agents tab: list, detail open/close, create and edit windows at 1440x900 (desktop) and 390x844 (mobile).
+// Agents tab: what needs a look, the roster, detail open/close (URL `?agent=`), create and edit windows at 1440x900
+// (desktop) and 390x844 (mobile).
 // Set AGENTS_SHOT_DIR to also capture 390/820/1440 x light/dark screenshots outside the test output folder.
 
 const NOW = 1760918400000;
@@ -171,7 +172,7 @@ async function openAgents(page: Page, theme: "dark" | "light" = "dark") {
   await mockShell(page, theme);
   await page.goto("/agents");
   await expect(page.getByTestId("agents-tab")).toBeVisible({ timeout: 15000 });
-  await expect(page.getByTestId("agents-card-agent-ada").or(page.getByTestId("agents-grid-card-agent-ada"))).toBeVisible();
+  await expect(page.getByTestId("agents-row-agent-ada")).toBeVisible();
 }
 
 const shotDir = process.env.AGENTS_SHOT_DIR;
@@ -182,46 +183,66 @@ async function shot(page: Page, testInfo: TestInfo, name: string) {
 }
 
 test.describe("Agents tab", () => {
-  test("lists agents with status tabs, search and an empty state", async ({ page }, testInfo) => {
+  test("lists agents with home's states, search and an empty state", async ({ page }) => {
     await openAgents(page);
-    const isMobile = testInfo.project.name === "mobile";
-    await expect(page.getByTestId(isMobile ? "agents-view-list" : "agents-view-grid")).toBeVisible();
     // Test agents stay hidden until asked for.
-    await expect(page.getByText("5명 표시")).toBeVisible();
-    await expect(page.getByTestId("agents-card-e2e-agent-fixture").or(page.getByTestId("agents-grid-card-e2e-agent-fixture"))).toHaveCount(0);
+    const rows = page.getByTestId("agents-list").locator("[data-agent-item]");
+    await expect(rows).toHaveCount(5);
+    await expect(page.getByTestId("agents-row-e2e-agent-fixture")).toHaveCount(0);
     await page.getByTestId("agents-include-tests").check();
-    await expect(page.getByText("6명 표시")).toBeVisible();
+    await expect(rows).toHaveCount(6);
     await page.getByTestId("agents-include-tests").uncheck();
+    await expect(page.getByTestId("agents-attention-empty")).toBeVisible();
 
     const tabs = page.getByRole("tablist", { name: "에이전트 상태" });
     await expect(tabs.getByRole("tab", { name: /전체/ })).toHaveAttribute("aria-selected", "true");
-    await tabs.getByRole("tab", { name: /휴식/ }).click();
-    await expect(page.getByText("1명 표시")).toBeVisible();
-    await expect(page.getByLabel(/노바 감시/).first()).toBeVisible();
+    await expect(tabs.getByRole("tab", { name: /휴식|오프라인/ })).toHaveCount(0);
+    await tabs.getByRole("tab", { name: /작업 중/ }).click();
+    await expect(rows).toHaveCount(1);
+    await expect(page.getByLabel(/^아다 대시보드|^ada/).first()).toBeVisible();
     await tabs.getByRole("tab", { name: /전체/ }).click();
 
     await page.getByRole("searchbox", { name: "에이전트 검색" }).fill("없는 이름");
     await expect(page.getByText("검색 결과 없음")).toBeVisible();
     await page.getByRole("button", { name: "조건 지우기" }).click();
-    await expect(page.getByText("5명 표시")).toBeVisible();
-
-    if (!isMobile) {
-      await page.getByRole("radio", { name: "리스트" }).click();
-      await expect(page.getByTestId("agents-view-list")).toBeVisible();
-      await page.getByRole("radio", { name: "그리드" }).click();
-      await expect(page.getByTestId("agents-view-grid")).toBeVisible();
-    }
+    await expect(rows).toHaveCount(5);
     await expectNoHorizontalOverflow(page);
   });
 
-  test("opens and closes the agent detail", async ({ page }, testInfo) => {
+  test("puts stuck and failing agents in a card above the roster", async ({ page }, testInfo) => {
+    await mockShell(page);
+    await page.route(/\/api\/agents(?:\?.*)?$/, (route) => route.fulfill({
+      json: { agents: AGENTS.map((item) => (item.id === "agent-nova" ? { ...item, visual_status_code: "stuck-suspect" } : item)) },
+    }));
+    await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [{
+      id: "card-9", title: "릴레이 재시도", status: "failed", assignee_agent_id: "agent-luna", github_issue_number: 9012,
+      github_repo: "acme/agentdesk", latest_dispatch_result_summary: "테스트 실패", created_at: NOW, updated_at: NOW,
+    }] } }));
+    await page.goto("/agents");
+    const card = page.getByTestId("agents-attention");
+    await expect(card).toContainText("살펴볼 것");
+    await expect(card).toContainText("막힘 의심");
+    await expect(card).toContainText("#9012 릴레이 재시도");
+    await expect(page.getByTestId("agents-attention-empty")).toHaveCount(0);
+    if (testInfo.project.name === "desktop") {
+      await card.getByRole("button", { name: "상세" }).click();
+      await expect(page.getByRole("region", { name: /노바 감시 — 에이전트 상세/ })).toBeVisible();
+    } else {
+      await card.getByRole("button", { name: /노바 감시/ }).click();
+      await expect(page.getByRole("dialog", { name: /노바 감시 — 에이전트 상세/ })).toBeVisible();
+    }
+    await expect(page).toHaveURL(/\?agent=agent-nova$/);
+  });
+
+  test("opens and closes the agent detail, with the agent in the URL", async ({ page }, testInfo) => {
     await openAgents(page);
     const isMobile = testInfo.project.name === "mobile";
-    const card = page.getByTestId(isMobile ? "agents-card-agent-ada" : "agents-grid-card-agent-ada");
+    const card = page.getByTestId("agents-row-agent-ada");
     if (!isMobile) {
       const pane = page.getByTestId("agents-detail-pane");
-      await expect(pane).toContainText("선택한 에이전트가 없어요");
+      await expect(pane.getByTestId("agents-summary")).toContainText("부서별 인원");
       await card.click();
+      await expect(page).toHaveURL(/\/agents\?agent=agent-ada$/);
       const detail = page.getByRole("region", { name: /ada — 에이전트 상세/ });
       await expect(detail).toBeVisible();
       await expect(card).toHaveAttribute("aria-current", "true");
@@ -233,10 +254,18 @@ test.describe("Agents tab", () => {
       await expect(detail.getByRole("button", { name: "접기" })).toHaveAttribute("aria-expanded", "true");
       // Arrow keys walk the list without opening anything.
       await card.focus();
-      await page.keyboard.press("ArrowRight");
-      await expect(page.getByTestId("agents-grid-card-agent-luna")).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await expect(page.getByTestId("agents-list").locator("[data-agent-item]").nth(1)).toBeFocused();
       await page.getByRole("button", { name: "상세 닫기" }).click();
-      await expect(pane).toContainText("선택한 에이전트가 없어요");
+      await expect(page).toHaveURL(/\/agents$/);
+      await expect(pane.getByTestId("agents-summary")).toBeVisible();
+      // Switching tabs with a detail open and going back lands on the tab the address names.
+      await card.click();
+      await page.getByRole("tab", { name: /^부서/ }).click();
+      await expect(page).toHaveURL(/agent=agent-ada&tab=departments$/);
+      await page.goBack();
+      await expect(page).toHaveURL(/\/agents$/);
+      await expect(page.getByRole("tab", { name: /^에이전트/ })).toHaveAttribute("aria-selected", "true");
     } else {
       await card.click();
       const drawer = page.getByRole("dialog", { name: /ada — 에이전트 상세/ });
@@ -248,10 +277,27 @@ test.describe("Agents tab", () => {
       await back.click();
       await expect(drawer).toHaveCount(0);
       await expect(card).toBeFocused();
+      // The browser back button closes the detail too, and a link opens it directly.
       await card.click();
+      await expect(drawer).toBeVisible();
+      await page.goBack();
+      await expect(drawer).toHaveCount(0);
+      await expect(page).toHaveURL(/\/agents$/);
+      await page.goto("/agents?agent=agent-ada");
       await expect(drawer).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(drawer).toHaveCount(0);
+      await expect(page).toHaveURL(/\/agents$/);
+      // Two closes in one frame step back once: the list stays, not the page before it.
+      await page.goto("/home");
+      await page.goto("/agents");
+      await card.click();
+      await drawer.evaluate((node) => {
+        for (let i = 0; i < 2; i += 1) node.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await expect(drawer).toHaveCount(0);
+      await expect(page).toHaveURL(/\/agents$/);
+      await expect(card).toBeVisible();
     }
     await expectNoHorizontalOverflow(page);
   });
@@ -278,7 +324,7 @@ test.describe("Agents tab", () => {
     await page.keyboard.press("Escape");
     await expect(wizard).toHaveCount(0);
 
-    await page.getByTestId(isMobile ? "agents-card-agent-luna" : "agents-grid-card-agent-luna").click();
+    await page.getByTestId("agents-row-agent-luna").click();
     const detail = isMobile
       ? page.getByRole("dialog", { name: /루나 옵스 — 에이전트 상세/ })
       : page.getByRole("region", { name: /루나 옵스 — 에이전트 상세/ });
@@ -329,7 +375,7 @@ test.describe("Agents tab on a touch phone", () => {
     expect(await smallTargets(tab)).toEqual([]);
     expect(await smallInputFonts(tab)).toEqual([]);
 
-    await page.getByTestId("agents-card-agent-ada").tap();
+    await page.getByTestId("agents-row-agent-ada").tap();
     const drawer = page.getByRole("dialog", { name: /에이전트 상세/ });
     await expect(drawer).toBeVisible();
     await expectNoHorizontalOverflow(page);
@@ -365,11 +411,10 @@ test.describe("Agents tab screenshots", () => {
         const prefix = `agents-${size.w}-${theme}`;
         await shot(page, testInfo, `${prefix}-list`);
         const phoneLayout = size.w < 900;
-        await page.getByTestId(phoneLayout ? "agents-card-agent-ada" : "agents-grid-card-agent-ada").click();
+        await page.getByTestId("agents-row-agent-ada").click();
         await shot(page, testInfo, `${prefix}-detail`);
         if (!phoneLayout) {
-          await page.getByRole("radio", { name: "리스트" }).click();
-          await page.getByTestId("agents-card-agent-long").click();
+          await page.getByTestId("agents-row-agent-long").click();
           await shot(page, testInfo, `${prefix}-rows-long`);
         }
         await page.getByRole("button", { name: "편집" }).click();

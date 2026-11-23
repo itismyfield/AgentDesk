@@ -1,22 +1,25 @@
-import { lazy, Suspense, useEffect } from "react";
-import { useSearchParams } from "react-router";
+import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
+import { Plus } from "lucide-react";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import type { Agent, Department, DispatchedSession } from "../types";
 import type { UiLanguage } from "../i18n";
+import { PageFrame } from "../app/PageFrame";
+import { useWorkspace } from "../contexts/WorkspaceContext";
+import { Button } from "../kit/free/button-clean";
+import { IconButton } from "../kit/free/icon-button-clean";
+import { SegmentedControl } from "../kit/free/segmented-control-clean";
+import { useIsMobile } from "./common/overlay/useBreakpoint";
 import AgentsTab from "./agent-manager/AgentsTab";
 import DepartmentsTab from "./agent-manager/DepartmentsTab";
 import AgentFormModal from "./agent-manager/AgentFormModal";
 import AgentSetupWizard from "./agent-manager/AgentSetupWizard";
 import DepartmentFormModal from "./agent-manager/DepartmentFormModal";
+import { isListedAgent } from "./agent-manager/agent-list-controls";
 import {
   type AgentManagerTab,
   useAgentManagerController,
 } from "./agent-manager/useAgentManagerController";
-import { SessionPanel } from "./session-panel/SessionPanel";
-import {
-  SurfaceActionButton,
-  SurfaceSection,
-  SurfaceSegmentButton,
-} from "./common/SurfacePrimitives";
+import { SurfaceActionButton } from "./common/SurfacePrimitives";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 const TAB_KEYS: AgentManagerTab[] = ["agents", "departments", "skills"];
@@ -27,19 +30,18 @@ interface AgentManagerViewProps {
   language: UiLanguage;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
+  /** Sessions not linked to an agent, offered for attaching. */
   sessions?: DispatchedSession[];
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  /** The shell's last tab; the page follows `?tab=` instead, so links and the back button agree with the screen. */
   activeTab?: AgentManagerTab;
   onTabChange?: (tab: AgentManagerTab) => void;
-  showHeader?: boolean;
-  showTabBar?: boolean;
-  title?: string;
-  subtitle?: string;
-  scrollable?: boolean;
   autoOpenCreate?: boolean;
   onAutoOpenConsumed?: () => void;
 }
 
+/** `/agents`: agents, departments and skills under one frame. The tab (`?tab=`) and the open agent (`?agent=`) live in
+ * the URL, so links land on them and the back button closes a detail opened here. */
 export default function AgentManagerView({
   agents,
   departments,
@@ -48,18 +50,12 @@ export default function AgentManagerView({
   onDepartmentsChange,
   sessions,
   onAssign,
-  activeTab,
   onTabChange,
-  showHeader = true,
-  showTabBar = true,
-  title,
-  subtitle,
-  scrollable = true,
   autoOpenCreate = false,
   onAutoOpenConsumed,
 }: AgentManagerViewProps) {
+  const { sessions: workspaceSessions, sessionsFailed } = useWorkspace();
   const {
-    canShowDispatch,
     deptModal,
     deptOrder,
     deptOrderDirty,
@@ -67,7 +63,7 @@ export default function AgentManagerView({
     draggingDeptId,
     dragOverDeptId,
     dragOverPosition,
-    dispatchOpen,
+    entries,
     form,
     agentModal,
     handleCancelOrder,
@@ -89,13 +85,11 @@ export default function AgentManagerView({
     openEditAgent,
     openEditDept,
     reorderSaving,
-    resolvedTab,
     saving,
     search,
     setAgentModal,
     setDeptModal,
     setDeptTab,
-    setDispatchOpen,
     setIncludeTests,
     setSearch,
     setSortMode,
@@ -103,7 +97,7 @@ export default function AgentManagerView({
     setupWizard,
     setSetupWizard,
     sortMode,
-    sortedAgents,
+    sortedEntries,
     statusFilter,
     tr,
   } = useAgentManagerController({
@@ -112,22 +106,45 @@ export default function AgentManagerView({
     language,
     onAgentsChange,
     onDepartmentsChange,
-    sessions,
-    onAssign,
-    activeTab,
+    sessions: workspaceSessions,
+    sessionsFailed,
     onTabChange,
   });
+  const isMobile = useIsMobile();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
-
-  // `/agents?tab=skills` deep links (old /meetings URL) pick the tab once, then drop the param.
+  // The URL alone picks the tab here, so going back never lands on a tab the address does not name.
+  const urlTab = searchParams.get("tab") as AgentManagerTab | null;
+  const tab = urlTab && TAB_KEYS.includes(urlTab) ? urlTab : "agents";
+  const selectedAgentId = searchParams.get("agent");
+  const openedHere = (location.state as { agentOpened?: boolean } | null)?.agentOpened === true;
+  // One step back per close: a second close before the location changes is dropped.
+  const closing = useRef(false);
   useEffect(() => {
-    const requested = searchParams.get("tab") as AgentManagerTab | null;
-    if (!requested || !TAB_KEYS.includes(requested)) return;
-    handleTabChange(requested);
-    const next = new URLSearchParams(searchParams);
-    next.delete("tab");
-    setSearchParams(next, { replace: true });
-  }, [handleTabChange, searchParams, setSearchParams]);
+    closing.current = false;
+  }, [location.key]);
+
+  const changeTab = (next: AgentManagerTab) => {
+    handleTabChange(next);
+    const params = new URLSearchParams(searchParams);
+    if (next === "agents") params.delete("tab");
+    else params.set("tab", next);
+    setSearchParams(params, { replace: true, state: location.state });
+  };
+
+  // The first open adds a history entry, so back (or closing) returns to the list; switching agents replaces it.
+  const selectAgent = useCallback((agentId: string | null) => {
+    if (!agentId && openedHere) {
+      if (!closing.current) navigate(-1);
+      closing.current = true;
+      return;
+    }
+    const params = new URLSearchParams(searchParams);
+    if (agentId) params.set("agent", agentId);
+    else params.delete("agent");
+    setSearchParams(params, agentId && !selectedAgentId ? { state: { agentOpened: true } } : { replace: true, state: location.state });
+  }, [location.state, navigate, openedHere, searchParams, selectedAgentId, setSearchParams]);
 
   // Auto-open the setup wizard when rendered via the /agents/new route.
   useEffect(() => {
@@ -139,102 +156,53 @@ export default function AgentManagerView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoOpenCreate]);
 
-  const resolvedTitle = title ?? tr("에이전트", "Agents");
-  const resolvedSubtitle = subtitle ?? tr(
-    "에이전트와 부서, 쓸 수 있는 스킬을 관리해요.",
-    "Manage agents, departments and available skills.",
-  );
-  const tabItems: Array<{ key: AgentManagerTab; panelId: string; label: string }> = [
-    { key: "agents", panelId: "agents-tab-panel", label: tr(`에이전트 ${sortedAgents.length}`, `Agents ${sortedAgents.length}`) },
-    { key: "departments", panelId: "agents-departments-tab-panel", label: tr(`부서 ${departments.length}`, `Departments ${departments.length}`) },
-    { key: "skills", panelId: "agents-skills-tab-panel", label: tr("스킬", "Skills") },
-  ];
+  const listedCount = entries.filter((entry) => isListedAgent(entry.agent, includeTests)).length;
   // Aborted sessions are finished work, not something to attach to an agent.
-  const liveSessions = sessions?.filter((session) => session.status !== "aborted");
-  // Header actions stay the same on every tab so the header never shifts.
-  const headerActions = (
-    <div className="flex shrink-0 flex-wrap items-center gap-2">
-      {canShowDispatch && (
-        <SurfaceActionButton tone="neutral" compact onClick={() => setDispatchOpen((prev) => !prev)} aria-expanded={dispatchOpen}>
-          {dispatchOpen ? tr("실행 중 세션 닫기", "Hide live sessions") : tr(`실행 중 세션 ${liveSessions?.length ?? 0}`, `Live sessions ${liveSessions?.length ?? 0}`)}
-        </SurfaceActionButton>
+  const unlinkedSessions = sessions?.filter((session) => session.status !== "aborted");
+  const header = (
+    <div data-testid="agents-tab-bar" className="flex min-w-0 items-center gap-2">
+      {/* The kit control is an inline-size container, so its slot needs a definite width. */}
+      <div className="min-w-0 flex-1 sm:w-80 sm:flex-none">
+        <SegmentedControl<AgentManagerTab>
+          kind="tabs"
+          variant="tray"
+          fullWidth
+          aria-label={tr("에이전트 관리 화면", "Agent manager views")}
+          value={tab}
+          onChange={changeTab}
+          options={[
+            { value: "agents", label: tr("에이전트", "Agents"), count: listedCount, controls: "agents-tab-panel" },
+            { value: "departments", label: tr("부서", "Departments"), count: departments.length, controls: "agents-departments-tab-panel" },
+            { value: "skills", label: tr("스킬", "Skills"), controls: "agents-skills-tab-panel" },
+          ]}
+        />
+      </div>
+      {isMobile ? (
+        <IconButton variant="primary" icon={<Plus size={18} />} label={tr("에이전트 추가", "Add agent")} onClick={openCreateAgent} />
+      ) : (
+        <Button size="lg" icon={<Plus size={15} aria-hidden />} onClick={openCreateAgent}>{tr("에이전트 추가", "Add agent")}</Button>
       )}
-      <SurfaceActionButton compact onClick={openCreateAgent}>
-        + {tr("에이전트 추가", "Add agent")}
-      </SurfaceActionButton>
     </div>
   );
-  const tabBar = showTabBar ? (
-    <div
-      data-testid="agents-tab-bar"
-      role="tablist"
-      aria-label={tr("에이전트 관리 섹션", "Agent manager sections")}
-      className="-mx-1 flex gap-1 overflow-x-auto px-1 [scrollbar-width:none]"
-    >
-      {tabItems.map((item) => (
-        <SurfaceSegmentButton
-          key={item.key}
-          id={`agents-tab-button-${item.key}`}
-          data-testid={`agents-tab-button-${item.key}`}
-          role="tab"
-          aria-selected={resolvedTab === item.key}
-          aria-controls={item.panelId}
-          active={resolvedTab === item.key}
-          tone="neutral"
-          onClick={() => handleTabChange(item.key)}
-          className="shrink-0 whitespace-nowrap [word-break:keep-all]"
-        >
-          {item.label}
-        </SurfaceSegmentButton>
-      ))}
-    </div>
-  ) : null;
-  return (
-    <div
-      data-testid="agents-page"
-      className={`mx-auto w-full max-w-[88rem] min-w-0 space-y-5 overflow-x-hidden p-4 pb-8 sm:p-8 ${
-        scrollable ? "h-full overflow-y-auto" : ""
-      }`}
-      style={{
-        paddingBottom: "max(2rem, env(safe-area-inset-bottom))",
-        WebkitOverflowScrolling: scrollable ? "touch" : undefined,
-        touchAction: scrollable ? "pan-y" : undefined,
-      }}
-    >
-      {showHeader ? (
-        <header className="space-y-4 border-b border-th-border-subtle pb-4" data-testid="agents-page-header">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h1 className="text-2xl font-semibold tracking-tight" style={{ color: "var(--th-text-heading)" }}>
-                {resolvedTitle}
-              </h1>
-              <p className="mt-1 max-w-3xl text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {resolvedSubtitle}
-              </p>
-            </div>
-            {headerActions}
-          </div>
-          {tabBar}
-        </header>
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {tabBar}
-          {headerActions}
-        </div>
-      )}
 
-      {/* Tab content */}
-      {resolvedTab === "agents" ? (
-        <div
-          id="agents-tab-panel"
-          role="tabpanel"
-          aria-labelledby="agents-tab-button-agents"
-          className="space-y-4"
-        >
+  return (
+    <PageFrame
+      testId="agents-page"
+      title={tr("에이전트", "Agents")}
+      description={tr(
+        "막히거나 실패한 에이전트가 먼저 보여요. 설정은 오른쪽 상세에서 바꿔요.",
+        "Stuck or failing agents come first. Change settings in the detail on the right.",
+      )}
+      actions={header}
+    >
+      {tab === "agents" ? (
+        <div id="agents-tab-panel" role="tabpanel" aria-label={tr("에이전트", "Agents")}>
           <AgentsTab
             tr={tr}
             locale={locale}
-            agents={agents}
+            isKo={isKo}
+            entries={entries}
+            sortedEntries={sortedEntries}
             departments={departments}
             deptTab={deptTab}
             setDeptTab={setDeptTab}
@@ -244,10 +212,12 @@ export default function AgentManagerView({
             setStatusFilter={setStatusFilter}
             sortMode={sortMode}
             setSortMode={setSortMode}
-            sortedAgents={sortedAgents}
             includeTests={includeTests}
             setIncludeTests={setIncludeTests}
-            isKo={isKo}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={selectAgent}
+            unlinkedSessions={unlinkedSessions}
+            onAssign={onAssign}
             onCreateAgent={openCreateAgent}
             onEditAgent={openEditAgent}
             onDuplicateAgent={openDuplicateAgent}
@@ -257,19 +227,14 @@ export default function AgentManagerView({
             saving={saving}
           />
         </div>
-      ) : resolvedTab === "skills" ? (
-        <div id="agents-skills-tab-panel" role="tabpanel" aria-labelledby="agents-tab-button-skills">
+      ) : tab === "skills" ? (
+        <div id="agents-skills-tab-panel" role="tabpanel" aria-label={tr("스킬", "Skills")}>
           <Suspense fallback={null}>
             <SkillCatalogView embedded />
           </Suspense>
         </div>
       ) : (
-        <div
-          id="agents-departments-tab-panel"
-          role="tabpanel"
-          aria-labelledby="agents-tab-button-departments"
-          className="space-y-3"
-        >
+        <div id="agents-departments-tab-panel" role="tabpanel" aria-label={tr("부서", "Departments")} className="space-y-3">
           <div className="flex justify-end">
             <SurfaceActionButton tone="neutral" compact onClick={openCreateDept}>
               + {tr("부서 추가", "Add department")}
@@ -296,32 +261,6 @@ export default function AgentManagerView({
             onDragEnd={handleDragEnd}
           />
         </div>
-      )}
-
-      {canShowDispatch && dispatchOpen && liveSessions && onAssign && (
-        <SurfaceSection
-          title={tr("실행 중 세션", "Live sessions")}
-          description={tr(
-            "에이전트에 연결되지 않은 세션이에요. 부서나 에이전트에 붙일 수 있어요.",
-            "Sessions not linked to an agent yet. Attach them to a department or agent.",
-          )}
-          badge={`${liveSessions.length}`}
-          className="rounded-[30px] p-4 sm:p-5"
-          actions={(
-            <SurfaceActionButton tone="neutral" compact onClick={() => setDispatchOpen(false)}>
-              {tr("닫기", "Close")}
-            </SurfaceActionButton>
-          )}
-        >
-          <div className="mt-4">
-            <SessionPanel
-              sessions={liveSessions}
-              departments={departments}
-              agents={agents}
-              onAssign={onAssign}
-            />
-          </div>
-        </SurfaceSection>
       )}
 
       {/* Agent create/edit modal */}
@@ -368,6 +307,6 @@ export default function AgentManagerView({
           onClose={() => setDeptModal({ open: false, editDept: null })}
         />
       )}
-    </div>
+    </PageFrame>
   );
 }

@@ -1,149 +1,72 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  filterAgents,
-  filterAndSortAgents,
-  sortAgents,
-} from "./agent-list-controls";
-import type { Agent } from "../../types";
+import { NO_DEPARTMENT, classifyRoster, filterAgents, filterAndSortAgents, isStandIn, sortAgents } from "./agent-list-controls";
+import type { Agent, DispatchedSession } from "../../types";
+import type { HomeAgent } from "../home/homeModel";
 
-function makeAgent(overrides: Partial<Agent>): Agent {
-  return {
-    id: "a1",
-    name: "Alpha",
-    name_ko: "알파",
-    department_id: "dev",
-    avatar_emoji: "🤖",
-    personality: null,
-    status: "idle",
-    stats_tasks_done: 0,
-    stats_xp: 0,
-    stats_tokens: 0,
-    created_at: 0,
-    ...overrides,
-  } as Agent;
-}
+const entry = (state: HomeAgent["state"], overrides: Partial<Agent>): HomeAgent => ({
+  state,
+  info: null,
+  seenAt: null,
+  agent: {
+    id: "a1", name: "Alpha", name_ko: "알파", department_id: "dev", avatar_emoji: "🤖", personality: null,
+    status: "idle", stats_tasks_done: 0, stats_tokens: 0, created_at: 0, ...overrides,
+  } as Agent,
+});
 
-const agents: Agent[] = [
-  makeAgent({
-    id: "a",
-    name: "Alpha",
-    name_ko: "알파",
-    department_id: "dev",
-    department_name_ko: "개발",
-    status: "idle",
-    stats_xp: 1000,
-    agentdesk_working_count: 5,
-    stats_tasks_done: 10,
-    created_at: 1700000000,
-  }),
-  makeAgent({
-    id: "b",
-    name: "Beta",
-    name_ko: "베타",
-    department_id: "design",
-    department_name_ko: "디자인",
-    status: "working",
-    stats_xp: 5000,
-    agentdesk_working_count: 1,
-    stats_tasks_done: 50,
-    created_at: 1700000200,
-  }),
-  makeAgent({
-    id: "c",
-    name: "Charlie",
-    name_ko: "찰리",
-    alias: "CC",
-    department_id: "dev",
-    department_name_ko: "개발",
-    status: "offline",
-    stats_xp: 200,
-  }),
+const entries: HomeAgent[] = [
+  entry("resting", { id: "a", name: "Alpha", name_ko: "알파", department_name_ko: "개발", agentdesk_working_count: 5, stats_tasks_done: 10, created_at: 1700000000 }),
+  entry("working", { id: "b", name: "Beta", name_ko: "베타", department_id: "design", department_name_ko: "디자인", status: "working", stats_tasks_done: 50, created_at: 1700000200 }),
+  entry("noSession", { id: "c", name: "Charlie", name_ko: "찰리", alias: "CC", department_id: null }),
+  entry("background", { id: "d-e2e", name: "Delta", name_ko: "델타" }),
+  entry("working", { id: "f-e2e", name: "Foxtrot", name_ko: "폭스", status: "working" }),
 ];
+const ids = (rows: HomeAgent[]) => rows.map((row) => row.agent.id);
+const all = { deptTab: "all", statusFilter: "all", search: "" } as const;
 
 describe("filterAgents", () => {
-  it("filters by department tab", () => {
-    const result = filterAgents(agents, {
-      deptTab: "design",
-      statusFilter: "all",
-      search: "",
-    });
-    expect(result.map((a) => a.id)).toEqual(["b"]);
+  it("filters by department, including agents without one", () => {
+    expect(ids(filterAgents(entries, { ...all, deptTab: "design" }))).toEqual(["b"]);
+    expect(ids(filterAgents(entries, { ...all, deptTab: NO_DEPARTMENT }))).toEqual(["c"]);
+    // A department id that no longer exists counts as unassigned.
+    expect(ids(filterAgents(entries, { ...all, deptTab: NO_DEPARTMENT, departments: new Set(["design"]) }))).toEqual(["a", "c", "f-e2e"]);
   });
 
-  it("filters by status", () => {
-    const result = filterAgents(agents, {
-      deptTab: "all",
-      statusFilter: "offline",
-      search: "",
-    });
-    expect(result.map((a) => a.id)).toEqual(["c"]);
+  it("filters by home state and hides idle test agents unless asked, as home does", () => {
+    expect(ids(filterAgents(entries, { ...all, statusFilter: "working" }))).toEqual(["b", "f-e2e"]);
+    expect(ids(filterAgents(entries, all))).toEqual(["a", "b", "c", "f-e2e"]);
+    expect(ids(filterAgents(entries, { ...all, includeTests: true }))).toHaveLength(5);
   });
 
-  it("matches search against name, name_ko, alias, and emoji", () => {
-    expect(
-      filterAgents(agents, {
-        deptTab: "all",
-        statusFilter: "all",
-        search: "cc",
-      }).map((a) => a.id),
-    ).toEqual(["c"]);
-    expect(
-      filterAgents(agents, {
-        deptTab: "all",
-        statusFilter: "all",
-        search: "베타",
-      }).map((a) => a.id),
-    ).toEqual(["b"]);
+  it("matches search against name, name_ko and alias", () => {
+    expect(ids(filterAgents(entries, { ...all, search: "cc" }))).toEqual(["c"]);
+    expect(ids(filterAgents(entries, { ...all, search: "베타" }))).toEqual(["b"]);
+  });
+});
+
+describe("classifyRoster", () => {
+  it("counts a department-only session as home does, as a stand-in without a row", () => {
+    const sessions = [{ id: "s9", session_key: "s9", name: "adk-cc", department_id: "dev", linked_agent_id: null, status: "idle" }] as DispatchedSession[];
+    const roster = classifyRoster([entries[2].agent], sessions, false);
+    expect(roster.map(({ agent, state }) => [agent.id, state, isStandIn(agent)])).toEqual([
+      ["dispatched:s9", "resting", true],
+      ["c", "noSession", false],
+    ]);
   });
 });
 
 describe("sortAgents", () => {
-  it("sorts by status with working first and offline last", () => {
-    expect(sortAgents(agents, "status").map((a) => a.id)).toEqual([
-      "b",
-      "a",
-      "c",
-    ]);
+  it("sorts by home state, then the Korean name", () => {
+    expect(ids(sortAgents(entries, "status"))).toEqual(["b", "f-e2e", "d-e2e", "a", "c"]);
   });
 
-  it("sorts by xp descending", () => {
-    expect(sortAgents(agents, "xp").map((a) => a.id)).toEqual(["b", "a", "c"]);
+  it("sorts by activity, department and creation", () => {
+    expect(ids(sortAgents(entries.slice(0, 3), "activity"))).toEqual(["b", "a", "c"]);
+    expect(ids(sortAgents(entries.slice(0, 3), "department"))).toEqual(["c", "a", "b"]);
+    expect(ids(sortAgents(entries.slice(0, 3), "created"))).toEqual(["b", "a", "c"]);
   });
 
-  it("sorts by activity (working_count + tasks_done) descending", () => {
-    expect(sortAgents(agents, "activity").map((a) => a.id)).toEqual([
-      "b",
-      "a",
-      "c",
-    ]);
-  });
-
-  it("sorts by department name then name", () => {
-    expect(sortAgents(agents, "department").map((a) => a.id)).toEqual([
-      "a",
-      "c",
-      "b",
-    ]);
-  });
-
-  it("sorts by created descending", () => {
-    expect(sortAgents(agents, "created").map((a) => a.id)).toEqual([
-      "b",
-      "a",
-      "c",
-    ]);
-  });
-
-});
-
-describe("filterAndSortAgents", () => {
   it("composes filtering and sorting", () => {
-    const result = filterAndSortAgents(
-      agents,
-      { deptTab: "dev", statusFilter: "all", search: "" },
-      "xp",
-    );
-    expect(result.map((a) => a.id)).toEqual(["a", "c"]);
+    expect(ids(filterAndSortAgents(entries, { ...all, deptTab: "dev" }, "name"))).toEqual(["a", "f-e2e"]);
   });
 });
