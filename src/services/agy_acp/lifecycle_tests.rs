@@ -563,7 +563,11 @@ fn an_earlier_child_exit_never_removes_the_next_child_record() {
     assert!(!lost, "the live child keeps its record");
 }
 
-struct Orphan(std::process::Child);
+/// The leader, and a guard that ends its group when the test scope ends, also on a panic.
+struct Orphan {
+    child: std::process::Child,
+    _group: Group,
+}
 
 impl Orphan {
     /// A process group whose leader runs `script`; the leader is reaped on its own thread.
@@ -572,18 +576,26 @@ impl Orphan {
         crate::services::process::configure_child_process_group(&mut command);
         let child = command.args(["-c", script]).spawn().unwrap();
         let pid = child.id();
-        (pid, ProcessIdentity::capture(pid), Self(child))
+        (
+            pid,
+            ProcessIdentity::capture(pid),
+            Self {
+                child,
+                _group: Group(pid),
+            },
+        )
     }
 }
 
-impl Drop for Orphan {
-    /// Ends the whole group, also on a panic: dash's `sh -c` keeps `sleep` as a child holding
-    /// the test's output. A live group's number is never reissued, so it is still this one.
+struct Group(u32);
+
+impl Drop for Group {
+    /// dash's `sh -c` keeps `sleep` as a child holding the test's output. A live group's number
+    /// is never reissued, so it is still this one.
     fn drop(&mut self) {
-        if process_group_probe(self.0.id()) == ProcessGroupProbe::Live {
-            crate::services::process::kill_pid_tree(self.0.id());
+        if process_group_probe(self.0) == ProcessGroupProbe::Live {
+            crate::services::process::kill_pid_tree(self.0);
         }
-        let _ = self.0.wait();
     }
 }
 
@@ -612,13 +624,13 @@ fn boot_sweep_clears_only_the_recorded_group_and_holds_on_probe_errors() {
         identity.persisted_starttime(),
         identity.persisted_macos_lstart_hash(),
     );
-    let reaper = std::thread::spawn(move || leader.0.wait());
+    let reaper = std::thread::spawn(move || leader.child.wait());
     assert_eq!(child::sweep_recorded(&record), Ok(()));
     assert!(group_gone(pid) && !record.exists());
     join_within(reaper, WAIT_CAP).unwrap();
 
     // Same PID but another start time: someone else's process; untouched, record dropped.
-    let (pid, identity, other) = Orphan::start("sleep 1000");
+    let (pid, identity, mut other) = Orphan::start("sleep 1000");
     let wrong = identity.persisted_starttime().map(|t| t + 1);
     let lstart = identity.persisted_macos_lstart_hash().map(|t| t + 1);
     let record = write_record(dir, pid, wrong, lstart);
@@ -641,11 +653,12 @@ fn boot_sweep_clears_only_the_recorded_group_and_holds_on_probe_errors() {
         log(dir, "short").is_empty(),
         "no spawn while the sweep holds"
     );
-    drop(other);
+    other.child.kill().unwrap();
+    other.child.wait().unwrap();
 
     // Leader gone, a grandchild left in its group: the group is stopped, then the child spawns.
     let (pid, identity, mut leader) = Orphan::start("sleep 1000 & exit 0");
-    leader.0.wait().unwrap();
+    leader.child.wait().unwrap();
     write_record(
         dir,
         pid,
