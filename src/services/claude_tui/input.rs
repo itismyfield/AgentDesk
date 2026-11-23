@@ -1,7 +1,7 @@
 use std::process::Output;
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use super::guarded_outcome::{send_fresh_prompt, send_warm_followup};
 use super::{
     guarded_outcome::{self, SubmissionError},

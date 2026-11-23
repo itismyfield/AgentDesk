@@ -147,7 +147,7 @@ pub struct CodexTuiRolloutMarker {
     pub rollout_start_offset: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn write_codex_tui_rollout_marker(
     tmux_session_name: &str,
     rollout_path: &Path,
@@ -290,7 +290,7 @@ fn hook_retired(
     crate::services::tui_prompt_dedupe::codex_tail_source_retired(authority, &claim)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,

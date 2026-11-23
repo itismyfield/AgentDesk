@@ -667,7 +667,7 @@ static POSTGRES_TEST_LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
 static POSTGRES_TEST_DATABASE_OWNERS: std::sync::OnceLock<
     std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>>,
 > = std::sync::OnceLock::new();
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FIXTURE_BASE_OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
         const { std::cell::RefCell::new(None) };
@@ -694,7 +694,7 @@ thread_local! {
 }
 
 /// Whether this thread currently holds `POSTGRES_TEST_LIFECYCLE_LOCK` (P).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_lifecycle_lock_held() -> bool {
     PG_LIFECYCLE_HELD.with(|depth| depth.get() > 0)
 }
@@ -706,7 +706,7 @@ pub(crate) fn test_lifecycle_lock_held() -> bool {
 /// `shared_test_env_lock().lock()` sites. It fires *before* the blocking
 /// `lock()`, which is what converts a silent, unattributable hang into a red
 /// test that names itself.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn assert_test_lifecycle_lock_not_held_before_env_lock() {
     if !test_lifecycle_lock_held() {
         return;

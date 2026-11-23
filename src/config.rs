@@ -2856,14 +2856,14 @@ pub fn load_graceful() -> Config {
 /// `test_env_lock::acquire_shared_test_env_lock` so it also covers the direct
 /// `shared_test_env_lock().lock()` sites, which the re-entry tripwire below
 /// cannot reach.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     crate::db::postgres::assert_test_lifecycle_lock_not_held_before_env_lock();
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_env_lock {
     //! Canonical acquisition path for the shared test-environment mutex.
     //! New test sites must use `acquire_shared_test_env_lock`; directly locking

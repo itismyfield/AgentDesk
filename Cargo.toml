@@ -16,6 +16,9 @@ path = "src/lib.rs"
 name = "agentdesk"
 path = "src/main.rs"
 
+[lints.rust]
+# M-KRX가 feature를 선언하기 전까지 켤 수 없는 값만 등록한다.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("test-support"))'] }
 
 [lints.clippy]
 # #2954 stage-1 hard gates. Full `-D warnings` is tracked separately because
