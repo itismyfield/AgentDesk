@@ -13,7 +13,7 @@ Model: `InputLedgerFormat.tla`, view `ledger-format.view.mjs`.
 It checks only these things:
 - **Format change:** which envelope each writer can open.
 - **Proof visibility and usability:** the ledger record, and the transcript binding `mend` needs
-  (`queued_reconcile.rs:163-177,246-265,379-383`).
+  (`queued_reconcile.rs:166-183,242-249,382-386`).
 - **Stale overwrite:** a read-modify-write outside the shared lock.
 - **Ops procedure:** intake close, the stop, the final check, session replacement, and a rollback after
   the new binary has written.
@@ -124,7 +124,7 @@ takes path A, and the old `history::update` creates V1 (`history.rs:177-195`). T
 ### Replace on V2 (`DeployReplaceOnV2`, review P1-1)
 `XRegister` → `Close` → `OwnerPrepare` (restores V1 to V2) → `Stop` (H's paste is not settled, so H is
 Unknown) → `FinalCheck` replaces the sessions because the file is V2. H's record is in the ledger, but
-`Recorded::matches` needs H's transcript (`queued_reconcile.rs:379-383`), so `mend` can never succeed
+`Recorded::matches` needs H's transcript (`queued_reconcile.rs:382-386`), so `mend` can never succeed
 (`queued_owner.rs:25-27`, then `queued_head.rs:623-630` BlockedUnknown).
 
 ### Ledger rollback (`DeployRollbackLedger`, review P1-2)

@@ -32,7 +32,7 @@
 \*   Restart  BOOLEAN                 a daemon restart between paste and settle leaves "x" Unknown,
 \*                                    proven later by `queued_reconcile::mend` (`:81`, `nonce_in :335`)
 \*                                    against the session's current transcript binding
-\*                                    (`queued_reconcile.rs:163-177,246-265,379-383`)
+\*                                    (`queued_reconcile.rs:166-183,242-249,382-386`)
 \*   Deploy   none | precheck | guarded | replaceonv2
 \*            none: one binary, Writer/Migrate/View as given.
 \*            Otherwise the old binary (V1 writer, restore, View) runs and is replaced by the 5b
@@ -180,7 +180,7 @@ Crash ==
     /\ Frozen
 
 \* The proof finds the recorded attempt through a view that reads the file's format, and only
-\* in the transcript the attempt was bound to (`Recorded::matches`, `queued_reconcile.rs:379-383`).
+\* in the transcript the attempt was bound to (`Recorded::matches`, `queued_reconcile.rs:382-386`).
 Visible(i) == rec[i] >= 1 /\ (EffView = "v2" \/ fmt \in {"none", "v1"})
 
 Mend ==
