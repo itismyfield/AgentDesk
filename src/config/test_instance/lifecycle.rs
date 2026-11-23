@@ -276,14 +276,17 @@ impl RunSnapshot {
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<std::io::Result<std::collections::BTreeSet<_>>>()
             .map_err(|_| rejected())?;
-        let expected: std::collections::BTreeSet<_> = names
-            .iter()
-            .map(|name| std::ffi::OsString::from(*name))
-            .collect();
+        let set = |names: &[&str]| -> std::collections::BTreeSet<_> {
+            names.iter().map(std::ffi::OsString::from).collect()
+        };
+        // Provider keys are optional and carry no identity; only bot tokens are bound below.
+        let optional = instance.environment.provider_credentials;
+        let allowed = set(&[names, optional].concat());
         if !metadata.is_dir()
             || metadata.mode() & 0o7777 != 0o700
             || metadata.uid() != unsafe { libc::geteuid() }
-            || entries != expected
+            || !entries.is_superset(&set(names))
+            || !entries.is_subset(&allowed)
         {
             return Err(rejected());
         }

@@ -155,7 +155,7 @@ class DeployRequests(unittest.TestCase):
             "profile": paths["profile"], "admission": paths["admission"], "resources": paths["resources"],
             "deploy_lock": str(self.root / "deploy.lock"),
             "credentials": {name: f"op://AgentDesk/Test/{name}" for name in
-                            ("antigravity_bot_token", "announce_bot_token", "notify_bot_token")}}))
+                            ("antigravity_bot_token", "announce_bot_token", "notify_bot_token", "gemini_api_key")}}))
 
     def test_switched_off_queues_and_runs_nothing(self):
         self.save(False)
@@ -191,7 +191,7 @@ class DeployRequests(unittest.TestCase):
         self.assertEqual(instance.ensure(config, HEAD, execute=execute, pipe=lambda *a: pipes.append(a)), "u1")
         self.assertEqual([source for source, _, _ in pipes],
                          [["agent-op", "read", f"op://AgentDesk/Test/{name}"]
-                          for name in ("announce_bot_token", "antigravity_bot_token", "notify_bot_token")])
+                          for name in ("announce_bot_token", "antigravity_bot_token", "gemini_api_key", "notify_bot_token")])
         self.assertTrue(all("op://" not in " ".join(call) for call in calls))
         self.assertEqual(pipes[0][2]["PATH"].split(":")[0], str(self.root / "worktree/target/debug"))
         replies["status"] = " M dirty\n"

@@ -48,10 +48,11 @@
 | provider home·바이너리 | 시험 instance는 `claude`·`codex` 홈만 안다(`src/config/test_instance/environment.rs:241–249`). org의 auth profile은 정확히 둘이어야 한다(`:96–121`). PATH는 `<worktree>/target/debug:/usr/bin:/bin`이라 `agy`가 잡히지 않는다(`:168–196`, `src/services/platform/binary_resolver.rs:828–832`). | 새 child `src/config/test_instance/agy_cell.rs`가 프로필별 provider 집합, `antigravity` 홈, `agy_login` 검증을 맡는다. `agy` 경로는 선언한 절대경로를 `AGENTDESK_AGY_PATH`로 준다(기존 override 규칙 `src/services/platform/binary_resolver.rs:1282`, Claude 선례 `environment.rs:80–85`). `environment.rs`(850줄)에는 호출만 둔다. |
 | Memento 차단 | 설정의 `mcp_servers`가 비어 있고 memory backend가 file이어야 선언을 받는다(`src/config/test_instance/environment.rs:27–31`, `:402–415`, `src/config.rs:2496`). 기본 Memento 주입(`src/config.rs:2343`), Memento backend(`src/services/memory/memento.rs:102`), 기동 probe(`src/services/memory/runtime_state.rs:116`), MCP credential 감시(`src/services/discord/mcp_credential_watcher.rs:294`)는 선언이 있으면 모두 꺼진다. | 서버 쪽은 변경 없음. 남는 경로는 agy CLI가 자기 HOME에서 읽는 MCP 설정이다(`src/services/mcp_config/antigravity.rs:42–43`). 아래 「agy 로그인 홈」으로 막는다. `provider_has_memento_mcp`의 Antigravity 분기(`src/services/mcp_config.rs:89–95`)는 instance 안에서 false여야 하며 시험으로 고정한다. |
 
-**agy 로그인 홈.** 릴리스 서버는 운영자의 실제 HOME 아래 `.gemini/config/mcp_config.json`에 운영 MCP 서버를 동기화한다(`src/bootstrap.rs:56`, `src/services/mcp_config/antigravity.rs:22–43`). agy 자식이 실제 HOME을 쓰면 운영 Memento 설정을 읽게 된다. 그래서 agy 자식의 HOME은 실제 HOME도 instance HOME도 아닌 전용 디렉터리 `$HOME/.adk/dev/agy-login`으로 고정한다. instance root는 head마다 새로 생기므로 로그인 상태를 root 안에 두면 배포마다 브라우저 로그인이 필요해진다. `agy_login` 선언은 `{mode, login_home, cli}` 세 키다. 바이너리는 `login_home`이 `<instances의 부모>/agy-login`과 같고, symlink·`.adk/release` 경로가 아니며, `cli`가 실행 가능한 일반 파일인지 본다. Claude 로그인 선언이 실제 HOME을 허용한 것(`src/config/test_instance/environment.rs:437–496`)보다 좁다. `up`은 admission 때 이 홈에서 MCP 서버가 0개임을 확인한다(`mcp_config.json`이 없거나 서버 항목이 비어 있음). 확인 실패나 판독 불가는 `BLOCKED`이고 입력은 0이다. 이 홈에는 AgentDesk가 아무것도 쓰지 않는다.
+**agy 로그인 홈.** 릴리스 서버는 운영자의 실제 HOME 아래 `.gemini/config/mcp_config.json`에 운영 MCP 서버를 동기화한다(`src/bootstrap.rs:56`, `src/services/mcp_config/antigravity.rs:22–43`). agy 자식이 실제 HOME을 쓰면 운영 Memento 설정을 읽게 된다. 그래서 agy 자식의 HOME은 실제 HOME도 instance HOME도 아닌 전용 디렉터리 `$HOME/.adk/dev/agy-login`으로 고정한다. instance root는 head마다 새로 생기므로 로그인 상태를 root 안에 두면 배포마다 브라우저 로그인이 필요해진다. `agy_login` 선언은 `{mode, login_home, cli}` 세 키다. 바이너리는 `login_home`이 `<instances의 부모>/agy-login`과 같고, symlink·`.adk/release` 경로가 아니며, `cli`가 실행 가능한 일반 파일인지 본다. Claude 로그인 선언이 실제 HOME을 허용한 것(`src/config/test_instance/environment.rs:437–496`)보다 좁다. `up`은 admission 때 이 홈에서 MCP 서버가 0개임을 확인한다(`mcp_config.json`이 없거나 0바이트이거나 서버 항목이 비어 있음. 0바이트 파일은 agy가 첫 실행에서 스스로 만든다). 확인 실패나 판독 불가는 `BLOCKED`이고 입력은 0이다. 이 홈에는 AgentDesk가 아무것도 쓰지 않는다.
 
 - [U] agy 인증이 keychain에 있어 새 HOME에서도 그대로 통하는지, 전용 홈에서 한 번 로그인해야 하는지는 이 조사에서 실행해 보지 않았다. 어느 쪽이든 선언은 같다. O4의 확인 명령이 가른다. 인증이 없으면 `BLOCKED_AUTH`이고 skip이나 PASS가 아니다(`docs/test-infra.design.md:59–60`).
 - [U] agy가 `mcp_config.json` 말고 다른 파일로도 MCP 서버를 읽는지는 확인하지 못했다. S1은 `agy mcp list`의 실제 출력으로 admission 판독을 고정하고, 서버가 하나라도 보이면 거절한다.
+- API 키 모드(사용자 결정 agy-verify-1123): 셀은 브라우저 로그인 없이 돈다. 디렉터리 이름 `agy-login`은 그대로 두지만 로그인 상태가 아니라 agy HOME이다. 이 홈에는 `.gemini/antigravity-cli/settings.json`의 `{"modelProvider":"gemini"}`만 둔다. 키는 instance root의 `credential/gemini_api_key`(0600)에 두고, 바이너리가 agy 마커가 붙은 자식을 띄울 때만 읽어 `GEMINI_API_KEY`로 넣는다(dcserver env·overlay·org에는 없다). 모델은 settings.json의 `model` 키를 agy 1.5.14가 따르지 않아 채널 `model: gemini-3.8-flash-low`(`--model`)로 지정한다. effort는 모델 id의 `-low`가 맡는다.
 
 **실패하면 입력 0.** root 선언·identity·credential 집합·env·로그인 홈 검사 중 하나라도 실패하면 `up`이 Gateway에 붙기 전에 끝난다. E-65·E-66·E-67은 Discord 입력과 HTTP 호출을 한 번도 하지 않고 `UNEVALUABLE(precondition)` 또는 `BLOCKED_*`로 남는다. 시험 토큰이 없을 때 릴리스 root나 운영 토큰으로 넘어가는 경로는 없다. 봇 이름으로 읽는 파일은 선언된 root 하나뿐이고(`src/credential.rs:54–57`), 빠진 파일은 기동 승인의 집합 비교에서 걸린다.
 
@@ -163,6 +164,8 @@ agent-op read 'op://AgentDesk/Test-Announce/credential' \
   | scripts/dev-instance.sh credential --instance "$UUID" --name announce_bot_token
 agent-op read 'op://AgentDesk/Test-Notify/credential' \
   | scripts/dev-instance.sh credential --instance "$UUID" --name notify_bot_token
+agent-op read 'op://AgentDesk/Gemini API/credential' \
+  | scripts/dev-instance.sh credential --instance "$UUID" --name gemini_api_key
 scripts/dev-instance.sh validate --instance "$UUID"
 ```
 
