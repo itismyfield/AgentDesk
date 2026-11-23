@@ -305,6 +305,21 @@ pub(super) async fn run_pre_emit_guard(
             "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
             channel_id
         );
+        // The same-id retry below continues this execution: its origins move to the receipt row
+        // before the kill, so the watcher-death cleanup leaves their terminal to the retry.
+        if let Some(row) = crate::services::discord::inflight::load_inflight_state(
+            watcher_provider,
+            channel_id.get(),
+        )
+        .filter(|row| {
+            !row.rebind_origin && row.user_msg_id != 0 && !row.input_origin_ids.is_empty()
+        }) {
+            crate::services::discord::receipt_settle::carry_retry_origins(
+                shared.pg_pool.as_ref(),
+                &row,
+            )
+            .await;
+        }
         // Selectors are cleared and the pane killed only where the host verdict lets it go.
         let admitted = host_gate::admits_automatic_kill(
             shared,
