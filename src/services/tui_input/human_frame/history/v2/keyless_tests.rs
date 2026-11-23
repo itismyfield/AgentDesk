@@ -13,12 +13,11 @@ fn fx() -> Fx {
     let (_root, _dir) = (TestRuntimeRootGuard::new(), tempfile::tempdir().unwrap());
     let t = _dir.path().join("native.jsonl");
     std::fs::write(&t, "").unwrap();
-    let history = Registry::runtime().unwrap();
     Fx {
         _root,
         _dir,
         t,
-        history,
+        history: Registry::runtime().unwrap(),
     }
 }
 fn frame(body: &str) -> String {
