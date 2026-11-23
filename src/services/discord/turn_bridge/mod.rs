@@ -86,8 +86,8 @@ use panel_lifecycle::{
     refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
-    done_result_requires_full_terminal_replay, no_answer, push_transcript_event,
-    response_portion_after_offset, rollover_parts_stay_posted,
+    done_replaces_posted_parts, done_result_requires_full_terminal_replay, no_answer,
+    push_transcript_event, response_portion_after_offset, rollover_parts_stay_posted,
     terminal_delivery_response_after_offset,
 };
 use std::collections::VecDeque;

@@ -113,17 +113,43 @@ pub(super) fn no_answer(full_response: &str, response_sent_offset: usize, delive
             .is_empty()
 }
 
-/// Stream-json CLIs post rollover parts as final text; Done keeps them only when its body starts
-/// with exactly the posted text, otherwise the full terminal replay still runs.
-pub(super) fn rollover_parts_stay_posted(
-    provider: &ProviderKind,
-    posted: Option<&str>,
-    done_body: &str,
-) -> bool {
+fn is_stream_json(provider: &ProviderKind) -> bool {
     matches!(
         provider.execution_adapter(),
         Some(crate::services::provider::ProviderExecutionAdapter::StreamJsonCli(_))
-    ) && posted.is_some_and(|posted| done_body.starts_with(posted))
+    )
+}
+
+/// Whether `done` begins with `posted`, ignoring whitespace the bridge's chunk composition adds or trims.
+fn starts_with_posted(done: &str, posted: &str) -> bool {
+    let mut done = done.chars().filter(|c| !c.is_whitespace());
+    posted
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| done.next() == Some(c))
+}
+
+/// Stream-json CLIs post rollover parts as final text; Done keeps them only when the provider's own
+/// Done body starts with the posted text.
+pub(super) fn rollover_parts_stay_posted(
+    provider: &ProviderKind,
+    posted: Option<&str>,
+    done_result: &str,
+) -> bool {
+    is_stream_json(provider) && posted.is_some_and(|posted| starts_with_posted(done_result, posted))
+}
+
+/// A stream-json Done that does not start with its already posted parts replaces the whole answer.
+pub(super) fn done_replaces_posted_parts(
+    provider: &ProviderKind,
+    posted: Option<&str>,
+    response_sent_offset: usize,
+    done_result: &str,
+) -> bool {
+    is_stream_json(provider)
+        && response_sent_offset > 0
+        && !done_result.trim().is_empty()
+        && !rollover_parts_stay_posted(provider, posted, done_result)
 }
 
 pub(super) fn done_result_requires_full_terminal_replay(

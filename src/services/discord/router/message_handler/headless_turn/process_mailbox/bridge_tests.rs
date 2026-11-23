@@ -402,14 +402,18 @@ mod routine_presentation_tests;
 async fn stream_json_long_done_keeps_frozen_parts_only_when_it_starts_with_them() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for provider in [ProviderKind::Antigravity, ProviderKind::Grok] {
-        for intro in ["", "INTRO\n"] {
-            with_isolated_runtime_root(|| long_done_after_frozen_parts(provider.clone(), intro))
+        for edit in [
+            ("", ""),
+            ("START", "INTRO\nSTART"),
+            ("START-r1", "START-r2"),
+        ] {
+            with_isolated_runtime_root(|| long_done_after_frozen_parts(provider.clone(), edit))
                 .await;
         }
     }
 }
 
-async fn long_done_after_frozen_parts(provider: ProviderKind, intro: &'static str) {
+async fn long_done_after_frozen_parts(provider: ProviderKind, edit: (&str, &str)) {
     const USER_MESSAGE: u64 = 9_100_000_000_000_008_160;
     const PLACEHOLDER: u64 = 9_100_000_000_000_008_161;
     let lines: Vec<String> = std::iter::once("START-r1".to_string())
@@ -418,7 +422,7 @@ async fn long_done_after_frozen_parts(provider: ProviderKind, intro: &'static st
         .collect();
     let body = lines.join("\n");
     let frozen = format!("{}\n", lines[..45].join("\n"));
-    let result = format!("{intro}{body}");
+    let result = body.replacen(edit.0, edit.1, 1);
     // Process-routine capture admits only Claude and Codex, so claim an ordinary episode.
     let mut shared = make_shared_data_for_tests_with_storage(None);
     Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
@@ -497,14 +501,16 @@ async fn long_done_after_frozen_parts(provider: ProviderKind, intro: &'static st
             .collect::<Vec<_>>()
             .join("\n")
     };
-    if !intro.is_empty() {
+    if result != body {
+        let replayed = [format!("done-body={result:?}/0"), "replay".into()];
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !crate::services::discord::turn_bridge::STREAM_TEST_EVENTS
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(ch, event)| *ch == channel.get() && event == "replay")
-            {
+            while !replayed.iter().all(|want| {
+                crate::services::discord::turn_bridge::STREAM_TEST_EVENTS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(ch, event)| *ch == channel.get() && event == want)
+            }) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
