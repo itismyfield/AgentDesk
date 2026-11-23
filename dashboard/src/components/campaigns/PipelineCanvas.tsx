@@ -1,51 +1,61 @@
-import { Bot, CircleX, Flag, Hourglass, Lock, MessageCircleQuestion, Play, RotateCw, ShieldCheck, Zap, type LucideIcon } from "lucide-react";
-import { useMemo, useRef, type CSSProperties, type ReactNode } from "react";
-import { Background, BaseEdge, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
+import { Bot, Box, CircleX, Flag, Hand, Hourglass, Lock, Maximize, MessageCircleQuestion, MousePointer2, Play, RotateCw, ShieldCheck, SquarePlus, Zap, type LucideIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Background, BaseEdge, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type OnConnectEnd, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { PipelineState } from "../../api/serverCampaignPipeline";
+import { IconButton } from "../../kit/free/icon-button-clean";
 import type { Tr } from "./campaignPresentation";
+import { NEW_PIN } from "./pipelineEdit";
 import { PIPE_WIDTH, cardHeight, type Line, type Pin, type PipelineGraph } from "./pipelineModel";
-import { FLOAT, ZoomTools, useLegible } from "./RelationsCanvasChrome";
+import { FLOAT, TOOL, ZoomTools, useLegible } from "./RelationsCanvasChrome";
 
-export const KIND_ICONS: Record<PipelineState["kind"], LucideIcon> = {
+const KIND_ICONS: Record<string, LucideIcon> = {
   agent_task: Bot, auto_check: ShieldCheck, auto_action: Zap, human_decision: MessageCircleQuestion, wait: Hourglass, end_success: Flag, end_failure: CircleX,
 };
+export const kindIcon = (kind: string) => KIND_ICONS[kind] ?? Box;
 export const TONE_COLORS: Record<Line["tone"], string> = { pass: "var(--ok)", fail: "var(--err)", retry: "var(--warn)", other: "var(--fg-muted)", event: "var(--warn)" };
 const CANVAS_HEIGHT = "max(560px, calc(100dvh - 25rem))";
 const FIT = { padding: { x: "32px", top: "72px", bottom: "72px" }, minZoom: 0.1, maxZoom: 1 } as const;
 
 /** Text the parent has already put into words, so the card only lays it out. */
 export type StateNodeData = {
-  kind: PipelineState["kind"]; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: string | null;
-  badges: { text: string; start?: boolean }[]; foot: [string, string] | null;
+  kind: string; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: { text: string; held: boolean }[];
+  badges: { text: string; start?: boolean; off?: boolean }[]; foot: [string, string] | null;
+  /** While editing: a check error on this state, whether the draft added or changed it, and its '+ 전환' pin's label. */
+  flagged?: boolean; mark?: string | null; add?: string | null;
 };
+/** A pin let go over empty canvas: where, and where its pin sits, in pixels from the canvas's top left. */
+export type PinDrop = { x: number; y: number; fx: number; fy: number };
 /** Inline because React Flow's unlayered stylesheet outranks Tailwind's layered utilities. */
 const dot = (color: string): CSSProperties => ({ position: "absolute", width: 10, height: 10, minWidth: 0, minHeight: 0, borderRadius: 999, border: `2px solid ${color}`, background: "var(--th-card-bg)" });
 
 /** One state as a blueprint card: kind icon, name and kind, a 진입 pin at its left (top, off the main flow) and a
  * coloured pin per result at its right; a retry pin carries ↻n. Start and approval gates ride above it. */
-function StateNode({ data, selected }: NodeProps) {
+function StateNode({ data, selected, isConnectable }: NodeProps) {
   const node = data as StateNodeData;
-  const Icon = KIND_ICONS[node.kind];
-  return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${selected ? "border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-soft)]" : "border-[var(--line)]"}`}
+  const Icon = kindIcon(node.kind);
+  // While editing, result pins start a line and the 진입 pin takes one.
+  const entry = { type: "target", isConnectable, isConnectableStart: false } as const, out = { type: "source", isConnectable, isConnectableEnd: false } as const;
+  const rows: (Pin | null)[] = [...node.pins, ...node.add ? [null] : []];
+  return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${node.flagged ? "border-[var(--err)]" : selected ? "border-[var(--accent)]" : "border-[var(--line)]"} ${selected ? "shadow-[0_0_0_3px_var(--accent-soft)]" : node.flagged ? "shadow-[0_0_0_3px_var(--err-soft)]" : ""}`}
     style={{ width: PIPE_WIDTH }}>
     {node.badges.length > 0 && <div className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 gap-1.5">{node.badges.map((badge) => <span key={badge.text}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
+      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : badge.off ? "border-dashed border-[var(--line)] bg-[var(--bg-2)] text-[var(--fg-muted)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
       {badge.start ? <Play aria-hidden className="size-3" /> : <Lock aria-hidden className="size-3" />}{badge.text}</span>)}</div>}
-    {!node.main && <Handle type="target" position={Position.Top} isConnectable={false} style={{ ...dot("var(--fg-dim)"), zIndex: 1 }} />}
+    {!node.main && <Handle {...entry} position={Position.Top} style={{ ...dot("var(--fg-dim)"), zIndex: 1 }} />}
     <div className="flex min-w-0 items-center gap-2 border-b border-[var(--line-soft)] px-3 pt-2.5 pb-2">
       <span className={`grid size-6 shrink-0 place-items-center rounded-[7px] bg-[var(--bg-3)] ${node.kind === "end_success" ? "text-[var(--ok)]" : node.kind === "end_failure" ? "text-[var(--err)]" : ""}`}><Icon aria-hidden className="size-3.5" /></span>
-      <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}</span></span>
-      {node.occupancy && <span className="shrink-0 rounded-full bg-[var(--info-soft)] px-1.5 leading-5 font-medium text-[var(--info)]">{node.occupancy}</span>}
+      <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}{node.mark && <b className="font-semibold text-[var(--warn)]"> · {node.mark}</b>}</span></span>
+      {node.occupancy.map(({ text, held }) => <span key={text} className={`shrink-0 rounded-full px-1.5 leading-5 font-medium ${held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]"}`}>{text}</span>)}
     </div>
-    <div className="grid content-start gap-1.5 px-3 py-2">{Array.from({ length: Math.max(1, node.pins.length) }, (_, row) => {
-      const pin = node.pins[row];
+    <div className="grid content-start gap-1.5 px-3 py-2">{Array.from({ length: Math.max(1, rows.length) }, (_, row) => {
+      const pin = rows[row];
       return <div key={pin?.id ?? row} className="relative -mx-3 flex min-h-[18px] items-center justify-between gap-2 px-3 text-[13px] leading-[18px]">
-        {row === 0 && node.main ? <span><Handle type="target" position={Position.Left} isConnectable={false} style={dot("var(--fg-dim)")} />{node.entry}</span> : <span />}
+        {row === 0 && node.main ? <span><Handle {...entry} position={Position.Left} style={dot("var(--fg-dim)")} />{node.entry}</span> : <span />}
         {pin && <span className="flex min-w-0 items-center gap-1" style={{ color: TONE_COLORS[pin.tone] }}>
           <span className="truncate">{pin.label}{pin.hint && ` → ${pin.hint}`}</span>{pin.tone === "retry" && <><RotateCw aria-hidden className="size-3 shrink-0" /><span className="tabular-nums">{pin.transition.retry!.max}</span></>}
-          <Handle type="source" id={pin.id} position={Position.Right} isConnectable={false} style={dot(TONE_COLORS[pin.tone])} />
+          <Handle {...out} id={pin.id} position={Position.Right} style={dot(TONE_COLORS[pin.tone])} />
         </span>}
+        {pin === null && <span className="text-[var(--fg-muted)]">{node.add}<Handle {...out} id={NEW_PIN} position={Position.Right} style={dot("var(--accent)")} /></span>}
       </div>;
     })}</div>
     {node.foot && <div className="flex min-w-0 justify-between gap-2 border-t border-[var(--line-soft)] px-3 pt-1.5 pb-2 text-xs leading-[14px] text-[var(--fg-muted)]"><span className="truncate">{node.foot[0]}</span><span className="shrink-0">{node.foot[1]}</span></div>}
@@ -88,56 +98,91 @@ const NODE_TYPES = { pipelineState: StateNode, pipelineEvent: EventNode };
 const EDGE_TYPES = { pipelineLine: PipelineLine };
 const swatch = (color: string, dashed = false) => <i aria-hidden className={`w-5 border-t-2 ${dashed ? "border-dashed" : ""}`} style={{ borderColor: color }} />;
 
-/** The read-only pipeline canvas: cards in tab order along the drawn flow, coloured lines, the key, zoom tools and a minimap. */
-export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, inspector, children, tr }: {
+/** The pipeline canvas: cards in tab order along the drawn flow, coloured lines, the key, zoom tools and a minimap. While
+ * editing it fills the window over the checks, and a pin dragged to a state points there, or let go elsewhere asks where. */
+export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, reveal = null, edit, checks, inspector, children, tr }: {
   label: string; graph: PipelineGraph; nodeData: Map<string, StateNodeData & { aria: string }>; eventData: Map<string, { title: string; target: string }>;
   chosen: string | null; onChoose: (id: string | null) => void; inspector: ReactNode; children: ReactNode; tr: Tr;
+  /** A state to bring into view (a check pointed at it). */
+  reveal?: { id: string; n: number } | null;
+  /** `busy` (a save is out) holds the pins and the tools that change the draft. */
+  edit?: { busy: boolean; onLink: (from: string, pin: string, to: string) => void; onDrop: (from: string, pin: string, at: PinDrop) => void; onAdd: (button: HTMLElement) => void };
+  checks?: ReactNode;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
+  // While editing, select connects pins and picks cards; move only pans, cards included.
+  const [tool, setTool] = useState<"select" | "move">("select");
+  useEffect(() => { if (reveal) void flow.current?.fitView({ nodes: [{ id: reveal.id }], minZoom: 0.8, maxZoom: 1, duration: 200 }); }, [reveal]);
   // A card handed over as a new object keeps its last size, or React Flow hides it until it measures it again.
   const sizes = useRef(new Map<string, NonNullable<Node["measured"]>>());
   const nodes = useMemo(() => [...graph.main, ...graph.off].map((id): Node => ({ id, type: "pipelineState", position: graph.positions.get(id)!, data: nodeData.get(id)!,
-    selected: id === chosen, draggable: false, ariaLabel: nodeData.get(id)!.aria, measured: sizes.current.get(id), initialWidth: PIPE_WIDTH, initialHeight: cardHeight(graph.pins.get(id)!.length) }))
+    selected: id === chosen, draggable: false, ariaLabel: nodeData.get(id)!.aria, measured: sizes.current.get(id), initialWidth: PIPE_WIDTH, initialHeight: cardHeight(graph.rows.get(id)!) }))
     .sort((a, b) => Number(graph.off.includes(a.id)) - Number(graph.off.includes(b.id)) || a.position.x - b.position.x || a.position.y - b.position.y)
     .concat(graph.events.map((event) => ({ id: `event:${event.id}`, type: "pipelineEvent", position: graph.positions.get(`event:${event.id}`)!, data: eventData.get(event.id)!,
       draggable: false, selectable: false, focusable: false, initialWidth: PIPE_WIDTH, initialHeight: 56 }))), [graph, nodeData, eventData, chosen]);
   const edges = useMemo(() => graph.lines.map((line): Edge => ({ id: line.id, source: line.source, sourceHandle: line.handle, target: line.target, type: "pipelineLine", selectable: false, focusable: false,
     data: { tone: line.tone, lane: line.lane, drop: line.drop, retry: line.retry, dim: chosen !== null && line.source !== chosen && line.target !== chosen } satisfies LineData })), [graph, chosen]);
   const canvas = useRef<HTMLDivElement>(null);
+  const full = !!edit, moving = full && tool === "move";
+  // The click that ends a pin's drag lands on the pane; it keeps the choice the drag made.
+  const ended = useRef(0);
+  const dropped: OnConnectEnd = (event, state) => {
+    ended.current = Date.now();
+    const from = state.fromNode?.id, pin = state.fromHandle?.id, box = canvas.current?.getBoundingClientRect();
+    if (!edit || !from || !pin || !box || !flow.current || !state.from) return;
+    const point = "changedTouches" in event ? event.changedTouches[0] : event, under = document.elementFromPoint(point.clientX, point.clientY);
+    const to = state.isValid && state.toNode ? state.toNode.id : under?.closest<HTMLElement>(".react-flow__node-pipelineState")?.dataset.id;
+    if (to) return to === from && !state.isValid ? undefined : edit.onLink(from, pin, to);
+    const start = flow.current.flowToScreenPosition(state.from);
+    if (under?.closest(".react-flow__pane")) edit.onDrop(from, pin, { x: point.clientX - box.left, y: point.clientY - box.top, fx: start.x - box.left, fy: start.y - box.top });
+  };
   // The first view fits the graph when that keeps it at 80% or more; past that it opens at 80% on the start, top first.
   const open = (instance: ReactFlowInstance) => {
     const { x0, x1, y0, y1 } = graph.bounds, width = canvas.current?.clientWidth ?? 0, height = canvas.current?.clientHeight ?? 0;
     const fit = Math.min((width - 64) / (x1 - x0), (height - 120) / (y1 - y0)), zoom = Math.min(1, Math.max(0.8, fit));
     void instance.setViewport({ zoom, x: (zoom === fit ? (width - (x1 - x0) * zoom) / 2 : 32) - x0 * zoom, y: 24 + Math.max(0, (height - 120 - (y1 - y0) * zoom) / 2) - y0 * zoom });
   };
+  // The editor opens the view anew at the window's size, and closing it at the page's.
+  useEffect(() => { if (flow.current) open(flow.current); }, [full]); // eslint-disable-line react-hooks/exhaustive-deps
   return <section aria-label={label} style={{ "--pipeline-height": CANVAS_HEIGHT } as CSSProperties}
-    className="grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]">
-    <div ref={canvas} data-pipeline-canvas className="relative h-[var(--pipeline-height)] min-w-0 bg-[var(--bg)] [&_.react-flow\_\_node:focus-visible>div]:outline-2 [&_.react-flow\_\_node:focus-visible>div]:outline-offset-2 [&_.react-flow\_\_node:focus-visible>div]:outline-[var(--accent)]">
-      <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
-        onInit={(instance) => { flow.current = instance; open(instance); }}
-        minZoom={0.1} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} edgesFocusable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false}
-        deleteKeyCode={null} selectionKeyCode={null} multiSelectionKeyCode={null}
-        // A click or Enter on a focused card arrives as a select change; the pane lets it go.
-        onNodesChange={(changes) => {
-          for (const change of changes) if (change.type === "dimensions" && change.dimensions) sizes.current.set(change.id, change.dimensions);
-          const picked = changes.find((change) => change.type === "select" && change.selected);
-          if (picked && "id" in picked) onChoose(picked.id);
-          else if (changes.some((change) => change.type === "select")) onChoose(null);
-        }}
-        onPaneClick={() => onChoose(null)}>
-        <Background gap={20} size={1.6} color="var(--line)" />
-        <MiniMap pannable zoomable ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")} bgColor="var(--th-card-bg)" maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
-          nodeColor={(node) => node.id === chosen ? "var(--accent)" : "var(--fg-faint)"} nodeBorderRadius={6} style={{ marginBottom: 76, width: 168, height: 104, border: "1px solid var(--line-soft)", borderRadius: 12 }} />
-      </ReactFlow>
-      <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
-        <span className="flex items-center gap-1.5">{swatch("var(--ok)")}{tr("통과", "Pass")}</span>
-        <span className="flex items-center gap-1.5">{swatch("var(--err)")}{tr("실패", "Fail")}</span>
-        <span className="flex items-center gap-1.5"><RotateCw aria-hidden className="size-3 text-[var(--warn)]" />{tr("재시도", "Retry")}</span>
-        <span className="flex items-center gap-1.5"><Lock aria-hidden className="size-3 text-[var(--warn)]" />{tr("승인", "Approval")}</span>
-        {graph.events.length > 0 && <span className="flex items-center gap-1.5">{swatch("var(--warn)", true)}{tr("이벤트", "Event")}</span>}
+    className={full ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_18rem] grid-rows-[minmax(0,1fr)] min-[1280px]:grid-cols-[minmax(0,1fr)_21rem]"
+      : "grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]"}>
+    <div className="flex min-h-0 min-w-0 flex-col">
+      <div ref={canvas} data-pipeline-canvas data-full={full || undefined} className="relative h-[var(--pipeline-height)] min-w-0 bg-[var(--bg)] data-full:h-auto data-full:min-h-0 data-full:flex-1 [&_.react-flow\_\_node:focus-visible>div]:outline-2 [&_.react-flow\_\_node:focus-visible>div]:outline-offset-2 [&_.react-flow\_\_node:focus-visible>div]:outline-[var(--accent)]">
+        <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
+          onInit={(instance) => { flow.current = instance; open(instance); }}
+          minZoom={0.1} maxZoom={1.5} nodesDraggable={false} edgesFocusable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false}
+          nodesConnectable={full && !moving && !edit.busy} elementsSelectable={!moving} connectOnClick={false} onConnectEnd={dropped} connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2, strokeDasharray: "6 5" }}
+          deleteKeyCode={null} selectionKeyCode={null} multiSelectionKeyCode={null}
+          // A click or Enter on a focused card arrives as a select change; the pane lets it go.
+          onNodesChange={(changes) => {
+            for (const change of changes) if (change.type === "dimensions" && change.dimensions) sizes.current.set(change.id, change.dimensions);
+            const picked = changes.find((change) => change.type === "select" && change.selected);
+            if (picked && "id" in picked) onChoose(picked.id);
+            else if (changes.some((change) => change.type === "select") && Date.now() - ended.current > 300) onChoose(null);
+          }}
+          onPaneClick={() => Date.now() - ended.current > 300 && onChoose(null)}>
+          <Background gap={20} size={1.6} color="var(--line)" />
+          <MiniMap pannable zoomable ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")} bgColor="var(--th-card-bg)" maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
+            nodeColor={(node) => node.id === chosen ? "var(--accent)" : "var(--fg-faint)"} nodeBorderRadius={6} style={{ marginBottom: 76, width: 168, height: 104, border: "1px solid var(--line-soft)", borderRadius: 12 }} />
+        </ReactFlow>
+        <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
+          <span className="flex items-center gap-1.5">{swatch("var(--ok)")}{tr("통과", "Pass")}</span>
+          <span className="flex items-center gap-1.5">{swatch("var(--err)")}{tr("실패", "Fail")}</span>
+          <span className="flex items-center gap-1.5"><RotateCw aria-hidden className="size-3 text-[var(--warn)]" />{tr("재시도", "Retry")}</span>
+          <span className="flex items-center gap-1.5"><Lock aria-hidden className="size-3 text-[var(--warn)]" />{tr("승인", "Approval")}</span>
+          {graph.events.length > 0 && <span className="flex items-center gap-1.5">{swatch("var(--warn)", true)}{tr("이벤트", "Event")}</span>}
+        </div>
+        <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")} tr={tr} />
+        {edit && <div role="toolbar" aria-orientation="vertical" aria-label={tr("캔버스 도구", "Canvas tools")} className={`${FLOAT} top-1/2 left-4 flex -translate-y-1/2 flex-col gap-0.5 p-1`}>
+          <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택 · 핀을 끌어 이어요", "Select · drag a pin to connect")} pressed={tool === "select"} onClick={() => setTool("select")} />
+          <IconButton icon={<Hand aria-hidden />} className={TOOL} label={tr("이동", "Move")} pressed={tool === "move"} onClick={() => setTool("move")} />
+          <IconButton icon={<SquarePlus aria-hidden />} className={TOOL} label={tr("상태 추가", "Add a state")} disabled={edit.busy} onClick={(event) => edit.onAdd(event.currentTarget)} />
+          <IconButton icon={<Maximize aria-hidden />} className={TOOL} label={tr("맞춤", "Fit")} onClick={() => void flow.current?.fitView(FIT)} />
+        </div>}
+        {children}
       </div>
-      <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")} tr={tr} />
-      {children}
+      {checks}
     </div>
     {inspector}
   </section>;

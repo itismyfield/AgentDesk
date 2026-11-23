@@ -3,6 +3,7 @@ pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_recovery;
 pub mod agents;
+pub(crate) mod agy_acp;
 pub mod analytics;
 pub mod api_friction;
 pub mod auto_queue;

@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import template from "../../../e2e/fixtures/pipeline-template-campaign-development-9-v1.json";
-import type { PipelineDefinition } from "../../api/serverCampaignPipeline";
+import { campaignPipelineSchema, type PipelineDefinition } from "../../api/serverCampaignPipeline";
 import { buildPipelineGraph, pinSummary, retryText } from "./pipelineModel";
 
 const tr = (ko: string) => ko;
@@ -36,9 +36,21 @@ it("loops back under the cards, skips over them, drops to the row below, and dra
   expect([graph.gates.get("landing"), graph.gates.get("implementation"), graph.gates.get("complete")]).toEqual([["landing"], ["implementation"], undefined]);
 });
 
-it("counts a run's tasks in each state from the server's state ids and leaves out ids the graph lacks", () => {
-  const run = buildPipelineGraph(pipeline, tr, { A: "review", B: "review", C: "landing", D: null, E: "gone" });
-  expect(["review", "landing", "design"].map((id) => run.occupancy!.get(id))).toEqual([2, 1, 0]);
+it("counts a run's tasks in each state, a failed one at the failure end and a blocked one apart, leaving out ids the graph lacks", () => {
+  const run = buildPipelineGraph(pipeline, tr, { A: { state: "review" }, B: { state: "review" }, C: { state: "landing" }, D: { state: null }, E: { state: "gone" },
+    F: { state: "implementation", disposition: "failed" }, G: { state: "implementation", disposition: "running" }, H: { state: "landing", disposition: "blocked" } });
+  expect(["review", "landing", "implementation", "failed", "design"].map((id) => run.occupancy!.get(id))).toEqual([
+    { here: 2, held: 0 }, { here: 1, held: 1 }, { here: 1, held: 0 }, { here: 1, held: 0 }, { here: 0, held: 0 }]);
+});
+
+it("numbers the flow as drawn, drops only from the flow, reads an unknown kind and lays out an empty graph", () => {
+  const link = (from: string, to: string, value = "succeeded") => ({ id: `${from}-${to}`, from, to, priority: 10, condition: { field: "state.outcome", op: "eq", value } });
+  const probe = buildPipelineGraph({ ...pipeline, start: "a", events: [], states: [{ id: "z", kind: "end_success" }, { id: "b", kind: "future_kind" }, { id: "a", kind: "agent_task" },
+    { id: "fix", kind: "agent_task" }, { id: "f", kind: "end_failure" }], transitions: [link("a", "b"), link("b", "z"), link("a", "fix", "failed"), link("fix", "f", "failed")] }, tr, null);
+  expect([probe.main, probe.lines.find((value) => value.id === "fix-f")!.drop, probe.lines.find((value) => value.id === "a-fix")!.drop]).toEqual([["a", "b", "z"], undefined, true]);
+  expect(campaignPipelineSchema.safeParse({ pipeline: { start: "b", states: [{ id: "b", kind: "future_kind" }], transitions: [] }, definition_revision: 1, editable: false,
+    execution: { mode: "legacy_stage", run_id: null, state_ids: {} } }).success).toBe(true);
+  expect(Object.values(buildPipelineGraph({ ...pipeline, states: [], transitions: [] }, tr, null).bounds).every(Number.isFinite)).toBe(true);
 });
 
 it("keeps the reachable states as the flow when no path reaches a success end, and puts an event under its state", () => {

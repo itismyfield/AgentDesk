@@ -103,14 +103,15 @@ fn a_previous_frame_containing_the_next_one_is_not_its_receipt() {
     std::fs::write(&path, "").unwrap();
     let session = format!("receipt-prefix-{}", uuid::Uuid::new_v4());
     let body = "첫 줄\n둘째 줄\n셋째 줄";
+    // Frames written before attempt tags; a tag ends each header, so tagged ones never nest.
     let first = frame(
         "discord",
         "720205",
         "ann",
-        "ca720261",
+        "",
         &format!("{body}\n추가 지시"),
     );
-    let second = frame("discord", "720205", "ann", "ca720262", body);
+    let second = frame("discord", "720205", "ann", "", body);
     assert!(first.contains(&second));
     let append = |record: serde_json::Value| {
         let mut file = std::fs::OpenOptions::new()

@@ -1,18 +1,26 @@
-import type { DragEvent } from "react";
-import type { Agent, Department } from "../../types";
+import { useEffect, useRef, useState, type DragEvent } from "react";
+import { ArrowDown, ArrowUp, Building2, ChevronRight, GripVertical, Plus } from "lucide-react";
+import type { Department } from "../../types";
 import { localeName } from "../../i18n";
+import { Button } from "../../kit/free/button-clean";
+import { EmptyState } from "../../kit/free/empty-state-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
 import AgentPersona from "../AgentPersona";
-import { SurfaceActionButton, SurfaceCard, SurfaceEmptyState, SurfaceNotice } from "../common/SurfacePrimitives";
+import { Cap, RowButton, SectionCard } from "../common/KitPrimitives";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
+import type { HomeAgent } from "../home/homeModel";
+import { PERSONA } from "./AgentRow";
 import type { Translator } from "./types";
 
 interface DepartmentsTabProps {
   tr: Translator;
   locale: string;
-  agents: Agent[];
-  departments: Department[];
+  /** The listed agents with home's states, as the agents tab counts them. */
+  members: HomeAgent[];
   deptOrder: Department[];
   deptOrderDirty: boolean;
   reorderSaving: boolean;
+  reorderFailed: boolean;
   draggingDeptId: string | null;
   dragOverDeptId: string | null;
   dragOverPosition: "before" | "after" | null;
@@ -20,19 +28,22 @@ interface DepartmentsTabProps {
   onCancelOrder: () => void;
   onMoveDept: (index: number, direction: -1 | 1) => void;
   onEditDept: (department: Department) => void;
-  onDragStart: (deptId: string, event: DragEvent<HTMLDivElement>) => void;
-  onDragOver: (deptId: string, event: DragEvent<HTMLDivElement>) => void;
-  onDrop: (deptId: string, event: DragEvent<HTMLDivElement>) => void;
+  onCreateDept: () => void;
+  onDragStart: (deptId: string, event: DragEvent<HTMLElement>) => void;
+  onDragOver: (deptId: string, event: DragEvent<HTMLElement>) => void;
+  onDrop: (deptId: string, event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
 }
 
+/** Departments as one list: a row opens the edit window; arrows (and dragging on desktop) change the order until it is saved. */
 export default function DepartmentsTab({
   tr,
   locale,
-  agents,
+  members,
   deptOrder,
   deptOrderDirty,
   reorderSaving,
+  reorderFailed,
   draggingDeptId,
   dragOverDeptId,
   dragOverPosition,
@@ -40,203 +51,145 @@ export default function DepartmentsTab({
   onCancelOrder,
   onMoveDept,
   onEditDept,
+  onCreateDept,
   onDragStart,
   onDragOver,
   onDrop,
   onDragEnd,
 }: DepartmentsTabProps) {
+  const isMobile = useIsMobile();
+  const listRef = useRef<HTMLOListElement>(null);
+  // The moved row's arrow keeps the focus; at either end it passes to the other arrow.
+  const [moved, setMoved] = useState<{ id: string; direction: -1 | 1 } | null>(null);
+  useEffect(() => {
+    if (!moved) return;
+    const arrows = listRef.current?.querySelectorAll<HTMLButtonElement>(`[data-dept-move="${CSS.escape(moved.id)}"]`);
+    const [up, down] = Array.from(arrows ?? []);
+    const wanted = moved.direction < 0 ? up : down;
+    (wanted && !wanted.disabled ? wanted : moved.direction < 0 ? down : up)?.focus();
+    setMoved(null);
+  }, [deptOrder, moved]);
+
+  const addButton = (
+    <Button variant="secondary" size={isMobile ? "lg" : "sm"} icon={<Plus size={14} aria-hidden />} onClick={onCreateDept}>
+      {tr("부서 추가", "Add department")}
+    </Button>
+  );
+
   return (
-    <div data-testid="agents-departments-tab" className="space-y-4">
-      {deptOrderDirty && (
-        <SurfaceNotice
-          tone="info"
-          className="flex flex-col gap-3 sm:flex-row sm:items-center"
-          action={(
-            <div className="flex flex-wrap items-center gap-2">
-              <SurfaceActionButton onClick={onSaveOrder} disabled={reorderSaving}>
-                {reorderSaving ? tr("저장 중...", "Saving...") : tr("순번 저장", "Save Order")}
-              </SurfaceActionButton>
-              <SurfaceActionButton tone="neutral" onClick={onCancelOrder}>
-                {tr("취소", "Cancel")}
-              </SurfaceActionButton>
-            </div>
-          )}
+    <div data-testid="agents-departments-tab" className="flex min-w-0 flex-col gap-3">
+      {deptOrderDirty ? (
+        <div
+          role="status"
+          data-testid="agents-departments-order-bar"
+          className="sticky top-0 z-10 flex min-w-0 flex-wrap items-center gap-2 rounded-(--r-md) border border-(--line) bg-(--bg-2) px-3 py-2 shadow-(--shadow-sm) sm:px-4"
         >
-          <span className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-            {tr("순번이 변경되었습니다.", "Order has been changed.")}
+          <span className="min-w-0 flex-1 text-sm text-(--fg)">
+            {reorderFailed
+              ? tr("순서를 저장하지 못했어요. 다시 저장해 보세요.", "Could not save the order. Try again.")
+              : tr("순서를 바꿨어요. 저장해야 다른 화면에도 반영돼요.", "The order changed. Save it to apply everywhere.")}
           </span>
-        </SurfaceNotice>
-      )}
+          <Button variant="secondary" size={isMobile ? "lg" : "sm"} onClick={onCancelOrder} disabled={reorderSaving}>
+            {tr("되돌리기", "Undo")}
+          </Button>
+          <Button variant="primary" size={isMobile ? "lg" : "sm"} onClick={onSaveOrder} loading={reorderSaving}>
+            {tr("순서 저장", "Save order")}
+          </Button>
+        </div>
+      ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {deptOrder.map((dept, index) => {
-          const members = agents
-            .filter((agent) => agent.department_id === dept.id)
-            .sort((left, right) => {
-              const leftWorking = left.status === "working" ? 0 : 1;
-              const rightWorking = right.status === "working" ? 0 : 1;
-              if (leftWorking !== rightWorking) return leftWorking - rightWorking;
-              return left.name.localeCompare(right.name);
-            });
-          const agentCountForDept = members.length;
-          const isDragging = draggingDeptId === dept.id;
-          const isDragTarget = dragOverDeptId === dept.id && draggingDeptId !== dept.id;
-          const showDropBefore = isDragTarget && dragOverPosition === "before";
-          const showDropAfter = isDragTarget && dragOverPosition === "after";
-          return (
-            <SurfaceCard
-              data-testid={`agents-department-card-${dept.id}`}
-              key={dept.id}
-              className={`group relative flex h-full flex-col px-4 py-4 transition-all hover:bg-surface-subtle ${isDragging ? "opacity-60" : ""}`}
-              onDragStart={(e) => onDragStart(dept.id, e)}
-              onDragOver={(e) => onDragOver(dept.id, e)}
-              onDrop={(e) => onDrop(dept.id, e)}
-              onDragEnd={onDragEnd}
-              style={{
-                cursor: "grab",
-                borderColor: `color-mix(in srgb, ${dept.color} 22%, var(--th-border) 78%)`,
-                background:
-                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-              }}
-              // SurfaceCard renders a div, so drag attributes stay here.
-              // eslint-disable-next-line react/no-unknown-property
-              draggable
-            >
-              {showDropBefore && (
-                <div className="pointer-events-none absolute left-2 right-2 top-0 h-0.5 rounded bg-blue-400" />
-              )}
-              {showDropAfter && (
-                <div className="pointer-events-none absolute left-2 right-2 bottom-0 h-0.5 rounded bg-blue-400" />
-              )}
-
-              <div className="flex h-full flex-col">
-                <div className="flex items-start gap-3">
-                  <div
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl"
-                    style={{ background: `${dept.color}1f`, color: dept.color }}
-                  >
-                    {dept.icon}
-                  </div>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                        {localeName(locale, dept)}
-                      </span>
-                      <span
-                        className="rounded-full px-2 py-0.5 text-[11px] font-medium"
-                        style={{ background: `${dept.color}22`, color: dept.color }}
-                      >
-                        {agentCountForDept} {tr("명", "agents")}
-                      </span>
-                    </div>
-                    <div
-                      className="mt-1 text-[11px]"
-                      style={{ color: "var(--th-text-muted)", fontFamily: "var(--font-mono)" }}
-                    >
-                      id: {dept.id} · {tr("순서", "Order")} {index + 1}
-                    </div>
-                    {dept.description && (
-                      <div className="mt-2 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                        {dept.description}
-                      </div>
-                    )}
-                  </div>
-
-                  <SurfaceActionButton onClick={() => onEditDept(dept)} tone="neutral" compact>
-                    {tr("편집", "Edit")}
-                  </SurfaceActionButton>
-                </div>
-
-                <div className="mt-4 flex-1 space-y-2">
-                  {members.length > 0 ? (
-                    members.slice(0, 4).map((member) => (
-                      <div
-                        key={member.id}
-                        className="flex items-center gap-2 rounded-lg border px-3 py-2"
-                        style={{
-                          borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                          background:
-                            "color-mix(in srgb, var(--th-bg-surface) 82%, var(--th-card-bg) 18%)",
-                        }}
-                      >
-                        <AgentPersona agent={member} size={24} />
-                        <span className="min-w-0 flex-1 truncate text-xs" style={{ color: "var(--th-text-primary)" }}>
-                          {localeName(locale, member)}
-                        </span>
-                        <span
-                          className="rounded-full px-2 py-0.5 text-[10px]"
-                          style={{
-                            background: "color-mix(in srgb, var(--th-bg-surface) 70%, transparent)",
-                            color: "var(--th-text-muted)",
-                          }}
-                        >
-                          {member.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
-                        </span>
-                      </div>
-                    ))
-                  ) : (
-                    <div
-                      className="rounded-lg border border-dashed px-3 py-4 text-center text-xs"
-                      style={{
-                        borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)",
-                        color: "var(--th-text-muted)",
-                      }}
-                    >
-                      {tr("소속 에이전트 없음", "No agents assigned")}
-                    </div>
-                  )}
-
-                  {members.length > 4 ? (
-                    <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                      +{members.length - 4} {tr("명 더 있음", "more members")}
-                    </div>
-                  ) : null}
-                </div>
-
-                <div
-                  className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-3"
-                  style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}
+      <SectionCard title={tr("부서", "Departments")} count={deptOrder.length} aside={<span className="ml-auto">{addButton}</span>} testId="agents-departments">
+        {deptOrder.length === 0 ? (
+          <div className="border-t border-(--line-soft) p-3 sm:p-4">
+            <EmptyState
+              icon={<Building2 size={18} />}
+              title={tr("아직 부서가 없어요", "No departments yet")}
+              text={tr("부서를 만들면 에이전트를 묶어 볼 수 있어요.", "Add a department to group agents.")}
+            />
+          </div>
+        ) : (
+          <ol ref={listRef} className="@container m-0 min-w-0 list-none border-t border-(--line-soft) p-0">
+            {deptOrder.map((dept, index) => {
+              const name = localeName(locale, dept);
+              const people = members.filter((entry) => entry.agent.department_id === dept.id);
+              const target = dragOverDeptId === dept.id && draggingDeptId !== dept.id ? dragOverPosition : null;
+              return (
+                <li
+                  key={dept.id}
+                  data-testid={`agents-department-row-${dept.id}`}
+                  draggable={!isMobile}
+                  onDragStart={(event) => onDragStart(dept.id, event)}
+                  onDragOver={(event) => onDragOver(dept.id, event)}
+                  onDrop={(event) => onDrop(dept.id, event)}
+                  onDragEnd={onDragEnd}
+                  className={`relative flex min-w-0 items-center border-t border-(--line-soft) first:border-t-0 ${draggingDeptId === dept.id ? "opacity-50" : ""}`}
                 >
-                  <div className="flex items-center gap-1.5">
-                    <SurfaceActionButton
-                      onClick={() => onMoveDept(index, -1)}
+                  {target ? (
+                    <span aria-hidden className={`pointer-events-none absolute inset-x-3 h-0.5 rounded-full bg-(--accent) ${target === "before" ? "-top-px" : "-bottom-px"}`} />
+                  ) : null}
+                  {isMobile ? null : <GripVertical aria-hidden size={16} className="ml-3 shrink-0 cursor-grab text-(--fg-faint)" />}
+                  <RowButton
+                    className="min-w-0 flex-1 sm:pl-2"
+                    aria-label={tr(`${name} 편집, ${people.length}명`, `Edit ${name}, ${people.length} agents`)}
+                    onClick={() => onEditDept(dept)}
+                  >
+                    <span aria-hidden className="size-2.5 shrink-0 rounded-full" style={{ background: dept.color || "var(--fg-faint)" }} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm leading-5 font-medium text-(--fg)">{name}</span>
+                      <Cap className="block truncate font-mono">
+                        {dept.id} · {tr(`순서 ${index + 1}`, `order ${index + 1}`)}
+                      </Cap>
+                    </span>
+                    {dept.description ? (
+                      <Cap className="hidden min-w-0 flex-1 truncate @3xl:block">{dept.description}</Cap>
+                    ) : null}
+                    {people.length > 0 ? (
+                      <span aria-hidden className="hidden shrink-0 items-center @md:flex">
+                        {people.slice(0, 4).map((entry) => (
+                          <AgentPersona key={entry.agent.id} agent={entry.agent} state={PERSONA[entry.state]} size={24} className="-ml-1.5 ring-2 ring-(--bg-2) first:ml-0" />
+                        ))}
+                      </span>
+                    ) : null}
+                    <Cap className="shrink-0 text-right font-display tabular-nums whitespace-nowrap">
+                      {people.length > 0 ? tr(`${people.length}명`, `${people.length}`) : tr("소속 없음", "No agents")}
+                    </Cap>
+                    <ChevronRight aria-hidden size={15} className="shrink-0 text-(--fg-faint)" />
+                  </RowButton>
+                  <span className="flex shrink-0 items-center gap-1 pr-3 sm:pr-4">
+                    <IconButton
+                      data-dept-move={dept.id}
+                      icon={<ArrowUp size={15} />}
+                      label={tr(`${name} 위로`, `Move ${name} up`)}
                       disabled={index === 0}
-                      tone="neutral"
-                      compact
-                      className="h-11 min-w-11 px-0 py-0"
-                      aria-label={tr("위로 이동", "Move up")}
-                    >
-                      ▲
-                    </SurfaceActionButton>
-                    <SurfaceActionButton
-                      onClick={() => onMoveDept(index, 1)}
+                      onClick={() => {
+                        onMoveDept(index, -1);
+                        setMoved({ id: dept.id, direction: -1 });
+                      }}
+                    />
+                    <IconButton
+                      data-dept-move={dept.id}
+                      icon={<ArrowDown size={15} />}
+                      label={tr(`${name} 아래로`, `Move ${name} down`)}
                       disabled={index === deptOrder.length - 1}
-                      tone="neutral"
-                      compact
-                      className="h-11 min-w-11 px-0 py-0"
-                      aria-label={tr("아래로 이동", "Move down")}
-                    >
-                      ▼
-                    </SurfaceActionButton>
-                  </div>
-
-                  <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("드래그로 순서 변경", "Drag to reorder")}
+                      onClick={() => {
+                        onMoveDept(index, 1);
+                        setMoved({ id: dept.id, direction: 1 });
+                      }}
+                    />
                   </span>
-                </div>
-              </div>
-            </SurfaceCard>
-          );
-        })}
-      </div>
-
-      {deptOrder.length === 0 && (
-        <SurfaceEmptyState className="py-16 text-center">
-          <div className="text-3xl mb-2">🏢</div>
-          {tr("등록된 부서가 없습니다.", "No departments found.")}
-        </SurfaceEmptyState>
-      )}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+        {deptOrder.length > 1 ? (
+          <Cap className="block border-t border-(--line-soft) px-3 py-2.5 sm:px-4">
+            {isMobile
+              ? tr("줄을 누르면 편집 창이 열려요. 화살표로 순서를 바꾼 뒤 저장해요.", "Tap a row to edit it. Use the arrows to reorder, then save.")
+              : tr("줄을 누르면 편집 창이 열려요. 끌거나 화살표로 순서를 바꾼 뒤 저장해요.", "Click a row to edit it. Drag or use the arrows to reorder, then save.")}
+          </Cap>
+        ) : null}
+      </SectionCard>
     </div>
   );
 }

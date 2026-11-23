@@ -3,7 +3,7 @@ import { useState, type ReactNode } from "react";
 import { Cap, cn } from "../common/KitPrimitives";
 import type { Tr } from "./campaignPresentation";
 import { TONE_COLORS } from "./PipelineCanvas";
-import { KIND_LABELS, durationText, eventName, gateName, pinSummary, retryText, stateName, type Pin, type PipelineGraph } from "./pipelineModel";
+import { durationText, eventName, gateText, kindName, occupancyTexts, pinSummary, retryText, stateName, type Pin, type PipelineGraph } from "./pipelineModel";
 
 /** One result in words: its colour, the result, where it goes, its approval gate and its retry budget. */
 export function PinText({ graph, pin, tr, children }: { graph: PipelineGraph; pin: Pin; tr: Tr; children?: ReactNode }) {
@@ -13,7 +13,7 @@ export function PinText({ graph, pin, tr, children }: { graph: PipelineGraph; pi
     <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] text-[var(--fg-dim)]">
       <i aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: TONE_COLORS[pin.tone] }} />
       <strong className="font-semibold text-[var(--fg)]">{pin.label}</strong><span>→ {to}</span>
-      {transition.gate && !pin.exhausted && <span className="text-[var(--warn)]">· {gateName(transition.gate, tr)}</span>}
+      {transition.gate && !pin.exhausted && <span className="text-[var(--warn)]">· {gateText(graph, transition.gate, tr)}</span>}
     </span>
     {transition.retry && !pin.exhausted && <Cap className="pl-3.5">{retryText(graph, transition, tr)}</Cap>}
     {children}
@@ -27,11 +27,11 @@ export default function PipelineStateList({ graph, chosen, onChoose, open = fals
 }) {
   const [shownOff, setShownOff] = useState(false);
   const row = (id: string, number: number | null) => {
-    const state = graph.states.get(id)!, count = graph.occupancy?.get(id) ?? 0, expanded = open || chosen === id;
+    const state = graph.states.get(id)!, expanded = open || chosen === id;
     const head = <>
       <span className="flex min-w-0 items-baseline gap-2"><strong className="min-w-0 truncate text-sm font-semibold text-[var(--fg)]">{stateName(state, id, tr)}</strong>
-        <Cap className="ml-auto shrink-0">{[id === graph.main[0] && tr("시작", "Start"), tr(...KIND_LABELS[state.kind])].filter(Boolean).join(" · ")}</Cap>
-        {count > 0 && <span className="shrink-0 rounded-full bg-[var(--info-soft)] px-1.5 text-xs leading-5 font-medium text-[var(--info)]">{tr(`작업 ${count}`, `${count} tasks`)}</span>}</span>
+        <Cap className="ml-auto shrink-0">{[id === graph.main[0] && tr("시작", "Start"), kindName(state.kind, tr)].filter(Boolean).join(" · ")}</Cap>
+        {occupancyTexts(graph, id, tr).map(({ text, held }) => <span key={text} className={cn("shrink-0 rounded-full px-1.5 text-xs leading-5 font-medium", held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]")}>{text}</span>)}</span>
       {!expanded && <Cap className="truncate text-[13px] text-[var(--fg-dim)]">{pinSummary(graph, id, tr) || tr("나가는 전환 없음", "No way out")}</Cap>}
     </>;
     return <li key={id} className={number === null ? "grid" : "grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-2.5"}>

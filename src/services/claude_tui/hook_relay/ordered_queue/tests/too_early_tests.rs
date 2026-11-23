@@ -132,7 +132,7 @@ fn serve(listener: std::net::TcpListener, rule: Rule, sends: Sends, stop: Arc<At
             encoded.extend_from_slice(&buffer[..read]);
             match http_body_bounds(&encoded) {
                 Some((start, len)) if encoded.len() >= start + len => break true,
-                _ if read == 0 => break false,
+                _ if read == 0 || not_a_relay(&encoded) => break false,
                 _ => {}
             }
         };

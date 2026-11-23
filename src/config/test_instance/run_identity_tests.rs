@@ -266,8 +266,14 @@ fn run_health_rejects_credential_inode_content_and_symlink_drift() {
                 std::fs::remove_file(&path).unwrap();
                 std::os::unix::fs::symlink(root.join("foreign-sentinel"), &path).unwrap();
             }
-            "late-extra" => {
-                let extra = root.join("credential/driver_bot_token");
+            // The agy-only provider key is an unknown entry for every other profile.
+            "late-extra" | "late-gemini" => {
+                let leaf = if mode == "late-extra" {
+                    "driver_bot_token"
+                } else {
+                    "gemini_api_key"
+                };
+                let extra = root.join("credential").join(leaf);
                 std::fs::write(&extra, b"synthetic-legacy-extra").unwrap();
                 std::fs::set_permissions(&extra, std::fs::Permissions::from_mode(0o600)).unwrap();
             }
@@ -293,6 +299,7 @@ fn run_health_rejects_credential_inode_content_and_symlink_drift() {
         "content",
         "symlink",
         "late-extra",
+        "late-gemini",
         "directory-mode",
     ] {
         let fixture = RunFixture::new(false);

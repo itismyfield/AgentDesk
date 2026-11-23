@@ -127,6 +127,11 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::services::agy_acp::AgyAcpConfig::is_default"
+    )]
+    pub agy_acp: crate::services::agy_acp::AgyAcpConfig,
     /// Validated file edits update the snapshot when true (default); false keeps the boot value.
     /// Failed edits/watchers retain the last value; `reload_classes::FIELDS` lists when fields act.
     #[serde(default = "default_true")]
@@ -2449,6 +2454,7 @@ impl Default for Config {
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
             tui_o: None,
             session_hosts: SessionHostsConfig::default(),
+            agy_acp: Default::default(),
             config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()

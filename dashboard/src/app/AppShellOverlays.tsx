@@ -1,6 +1,8 @@
 import { createElement, lazy, Suspense } from "react";
 
 import { ToastOverlay } from "../components/NotificationCenter";
+import { classifyAgents } from "../components/home/homeModel";
+import { useWorkspace } from "../contexts/WorkspaceContext";
 import { AppShortcutHelpModal } from "./AppShortcutHelpModal";
 import { AppTweaksPanel } from "./AppTweaksPanel";
 import { PRIMARY_ROUTES } from "./routes";
@@ -42,13 +44,18 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
     themePreference,
     tr,
   } = ctx;
+  const { sessions, sessionsFailed } = useWorkspace();
+  // The live agent in home's session-based words, as home and the agents tab show it.
+  const infoAgent = agentInfoAgent ? agents.find((agent: { id: string }) => agent.id === agentInfoAgent.id) ?? agentInfoAgent : null;
+  const infoState = infoAgent ? classifyAgents([infoAgent], sessions, sessionsFailed)[0]?.state : undefined;
 
   return (
     <>
       <Suspense fallback={null}>
-        {agentInfoAgent && (
+        {infoAgent && (
           <AgentInfoCard
-            agent={agentInfoAgent}
+            agent={infoAgent}
+            state={infoState}
             isKo={isKo}
             locale={locale}
             tr={tr}

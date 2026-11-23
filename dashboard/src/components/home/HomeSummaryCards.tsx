@@ -205,7 +205,7 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
 }
 
 /** Monitor texts home can show or speak: a running monitor without steps, with fold and log buttons. */
-const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
+export const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
   agent: tr("에이전트", "Agent"),
   statusRunning: tr("실행 중", "Running"),
   log: tr("로그", "Log"),

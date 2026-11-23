@@ -192,9 +192,10 @@ async fn s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_
             until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
             assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
             let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+            let nonce = fixture.pane.nonce().unwrap();
             assert_eq!(
                 buffer,
-                format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B")
+                format!("[User: {AUTHOR_NAME} (ID: 200) · {nonce}] distinct tail B")
             );
             fixture.assert_still_busy().await;
         } else {

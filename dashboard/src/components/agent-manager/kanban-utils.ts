@@ -232,6 +232,17 @@ export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en:
   }
 }
 
+const PG_TIMESTAMP = /^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)(?:(\.\d{1,3})\d*)?([+-]\d\d)(?::?(\d\d))?$/;
+
+/** Postgres `timestamptz::text` ("2026-11-23 10:00:00.123456+00") in the ISO form every engine parses: Safari
+ * rejects the space, the bare-hour offset and more than three fraction digits. Other strings pass unchanged. */
+export function toIsoTimestamp(value: string): string {
+  const match = PG_TIMESTAMP.exec(value);
+  if (!match) return value;
+  const [, date, time, fraction = "", hours, minutes = "00"] = match;
+  return `${date}T${time}${fraction && fraction.padEnd(4, "0")}${hours}:${minutes}`;
+}
+
 export function coerceTimestampMs(value: string | number | null | undefined): number | null {
   if (value == null || value === "") return null;
   if (typeof value === "number") {
@@ -241,7 +252,7 @@ export function coerceTimestampMs(value: string | number | null | undefined): nu
   if (Number.isFinite(numeric)) {
     return numeric < 1e12 ? numeric * 1000 : numeric;
   }
-  const parsed = new Date(value).getTime();
+  const parsed = new Date(toIsoTimestamp(value)).getTime();
   return Number.isNaN(parsed) ? null : parsed;
 }
 

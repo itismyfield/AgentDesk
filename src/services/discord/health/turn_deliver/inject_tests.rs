@@ -557,7 +557,11 @@ async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
     let records = pane.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0], pane.read("buffer").unwrap());
-    assert_eq!(records[0], "[User: Ann (ops) (ID: 200)] discord status?");
+    let nonce = pane.nonce().unwrap();
+    assert_eq!(
+        records[0],
+        format!("[User: Ann (ops) (ID: 200) · {nonce}] discord status?")
+    );
     assert!(queue_texts(&shared, ch).await.is_empty());
     assert!(claim_source(&provider, message, std::time::Instant::now()).is_none());
     assert_eq!(pane.records(), records);

@@ -9,6 +9,11 @@ use crate::services::claude_tui::readiness::compact::Outcome;
 use crate::services::discord::ManagedCompactTurnIdentity;
 use crate::services::provider::ProviderKind;
 
+/// How long a wait for something that must happen polls before failing: a hang detector, not a
+/// bound of the contract, so a slow runner only makes a broken build fail later.
+#[cfg(unix)]
+const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[test]
 fn active_usage_missing_model_or_provenance_does_not_create_pane_state() {
     let _guard = state_test_guard();
@@ -114,7 +119,7 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
                     outcome_tx.send(outcome).expect("return compact outcome");
                 });
                 queued_rx
-                    .recv_timeout(Duration::from_millis(250))
+                    .recv_timeout(LIVENESS)
                     .expect("worker must queue behind the held composer lock");
                 assert!(outcome_rx.recv_timeout(Duration::from_millis(25)).is_err());
                 authority_is_managed.store(false, Ordering::SeqCst);
@@ -124,7 +129,7 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
         crate::test_support::wait::join_within(worker, crate::test_support::wait::WAIT_CAP);
 
         assert_eq!(
-            outcome_rx.recv_timeout(Duration::from_millis(250)).unwrap(),
+            outcome_rx.recv_timeout(LIVENESS).unwrap(),
             None,
             "{external_source:?} must reject the queued worker"
         );

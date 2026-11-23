@@ -12,6 +12,7 @@ export {
   getDepartments,
   createDepartment,
   updateDepartment,
+  reorderDepartments,
   deleteDepartment,
   getSettings,
   saveSettings,

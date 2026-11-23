@@ -485,7 +485,7 @@ fn observed_at(
                     .trim()
                     .strip_prefix("[User: ")
                     .and_then(|rest| rest.split_once(']'))
-                    .and_then(|(head, _)| head.strip_suffix(')'))
+                    .and_then(|(head, _)| super::untagged(head).0.strip_suffix(')'))
                     .and_then(|head| head.rsplit_once(" (ID: "))
                     .is_some_and(|(name, author)| {
                         !name.is_empty()

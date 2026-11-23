@@ -174,8 +174,9 @@ fn a_same_frame_row_reaches_the_receipt_attempt_only_with_evidence() {
         std::fs::write(&path, "").unwrap();
         let session = format!("receipt-same-{}", uuid::Uuid::new_v4());
         let (na, nb) = ("ca7272a2", "ca7272b2");
-        let f = frame("discord", "720205", "ann", na, "same body");
-        assert_eq!(f, frame("discord", "720205", "ann", nb, "same body"));
+        // A frame written before attempt tags is the same for both attempts.
+        let f = frame("discord", "720205", "ann", "", "same body");
+        assert_ne!(f, frame("discord", "720205", "ann", na, "same body"));
         let history = Registry::runtime().unwrap();
         let ia = input(3, na, &session, &path, &f);
         history.prepare(NS, &ia).unwrap();

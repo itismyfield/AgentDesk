@@ -727,9 +727,10 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
     let (header, text) = crate::services::tui_input::human_frame::parse(&buffer).unwrap();
     assert_eq!(text, " status?", "the owner must paste the original H body");
+    let nonce = fixture.pane.nonce().expect("hidden attempt id");
     assert_eq!(
         (header.name, header.source, header.nonce),
-        (AUTHOR_NAME, "", "")
+        (AUTHOR_NAME, "", nonce.as_str())
     );
     assert_eq!(
         header.author, "200",
@@ -831,7 +832,8 @@ async fn s2b_a_received_queued_head_lets_the_same_body_be_injected_again_pg() {
     }
     assert_eq!(fixture.pane.keys().len(), 6, "{:?}", fixture.pane.keys());
     let again = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    assert_eq!(again, first);
+    let retag = format!(" · {}]", fixture.pane.nonce().unwrap());
+    assert_eq!(again, first.replacen(&format!(" · {nonce}]"), &retag, 1));
     assert!(fixture.queue().await.is_empty());
     fixture.assert_holder_kept().await;
 }
@@ -865,7 +867,11 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
     assert_eq!(
         buffer,
-        format!("[User: {AUTHOR_NAME} (ID: 200)] {}", before[0].text)
+        format!(
+            "[User: {AUTHOR_NAME} (ID: 200) · {}] {}",
+            fixture.pane.nonce().unwrap(),
+            before[0].text
+        )
     );
     assert!(!buffer.contains("distinct tail B"));
     let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
@@ -980,7 +986,11 @@ async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_blo
     fixture.kick().await;
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    assert_eq!(buffer, format!("[User: {AUTHOR_NAME} (ID: 200)] status?"));
+    let nonce = fixture.pane.nonce().unwrap();
+    assert_eq!(
+        buffer,
+        format!("[User: {AUTHOR_NAME} (ID: 200) · {nonce}] status?")
+    );
     let disk = fixture.disk();
     assert!(disk["head_injection"].is_null(), "{disk}");
     let after = fixture.queue().await;
@@ -995,9 +1005,10 @@ async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_blo
         ["paste-buffer", "send-keys", "paste-buffer", "send-keys"]
     );
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    let nonce = fixture.pane.nonce().unwrap();
     assert_eq!(
         buffer,
-        format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B")
+        format!("[User: {AUTHOR_NAME} (ID: 200) · {nonce}] distinct tail B")
     );
     assert!(fixture.queue().await.is_empty());
     let disk = fixture.disk();
@@ -1052,9 +1063,10 @@ async fn s2b_actual_router_kickoff_settles_the_head_at_enter_whatever_receipt_fo
         std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
         fixture.kick().await;
         let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+        let nonce = fixture.pane.nonce().unwrap();
         assert_eq!(
             buffer,
-            format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B"),
+            format!("[User: {AUTHOR_NAME} (ID: 200) · {nonce}] distinct tail B"),
             "{case}: the settled head is never typed again"
         );
         assert!(fixture.queue().await.is_empty(), "{case}");
@@ -1501,7 +1513,11 @@ async fn a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg() {
         assert_eq!(body["delivery"], "injected", "{body}");
         assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
         let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-        assert_eq!(buffer, "[User: imessage:200 (ID: 200)] C after parked");
+        let nonce = fixture.pane.nonce().unwrap();
+        assert_eq!(
+            buffer,
+            format!("[User: imessage:200 (ID: 200) · {nonce}] C after parked")
+        );
         let after: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
         assert_eq!(after, queued);
         assert_eq!(

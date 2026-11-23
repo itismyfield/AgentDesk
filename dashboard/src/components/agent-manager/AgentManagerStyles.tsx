@@ -5,7 +5,6 @@ const css =
   "@keyframes agent-fade-in{from{opacity:0}}" +
   "@keyframes agent-sheet-in{from{transform:translateY(100%)}}" +
   "@keyframes agent-card-in{from{opacity:0;transform:translateY(8px) scale(.98)}}" +
-  "@keyframes agent-rise{from{opacity:0;transform:translateY(6px)}}" +
   ".agent-kit-scope :is(.aui-text-field-clean__box,.aui-text-area-clean__box) :is(input,textarea):focus-visible{outline:none}" +
   ".agent-kit-scope :is(.aui-text-field-clean__box,.aui-text-area-clean__box):has(:focus-visible){outline:2px solid var(--th-focus-ring,var(--accent));outline-offset:2px}";
 
