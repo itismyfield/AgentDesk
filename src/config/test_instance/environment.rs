@@ -8,7 +8,7 @@ use super::agy_cell::{self, AgyLogin};
 use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
-pub(super) struct Environment {
+pub(crate) struct Environment {
     api: String,
     claude_login: Option<ClaudeLogin>,
     agy_login: Option<AgyLogin>,
@@ -19,7 +19,7 @@ pub(super) struct Environment {
 }
 
 impl Environment {
-    pub(super) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
+    pub(crate) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
         let id = manifest["instance_id"].as_str().ok_or_else(rejected)?;
         let port = manifest["api"]["port"].as_u64().ok_or_else(rejected)?;
         let api = format!("http://127.0.0.1:{port}");
@@ -905,5 +905,5 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
 
 #[cfg(all(test, unix))]
 pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
-    super::environment_tests::review_fixture()
+    super::login_test_support::review_fixture()
 }

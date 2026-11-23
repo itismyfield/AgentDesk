@@ -106,7 +106,7 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_content;
 mod composer_lock;
-mod submission;
+pub(crate) mod submission;
 pub use submission::owned_preserved_plan;
 pub(crate) use submission::{
     notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,

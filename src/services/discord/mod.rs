@@ -188,6 +188,8 @@ mod krx_claude_tests;
 mod krx_claude_unix_tests;
 pub(crate) mod krx_tui_o_test_host;
 #[cfg(test)]
+mod krx_config_tests;
+#[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;

@@ -166,6 +166,7 @@ src/
 │   │   ├── host_scope_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
+│   │   ├── login_test_support.rs
 │   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
@@ -620,6 +621,10 @@ src/
 │   └── transition_core.rs
 ├── krx_claude_tests/
 │   └── tui_session_launch_tests.rs
+├── krx_config_tests/
+│   ├── runtime_validation_tests.rs
+│   ├── settings_cli_tests.rs
+│   └── skill_sync_shipped_tree_tests.rs
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
@@ -2120,6 +2125,12 @@ src/
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
+│   │   ├── krx_config_tests/
+│   │   │   ├── codex_submission_tests.rs
+│   │   │   ├── codex_warm_followup_tests.rs
+│   │   │   ├── compact_trigger_tests.rs
+│   │   │   ├── observability_cancel_tests.rs
+│   │   │   └── provider_cli_session_guard_tests.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests.rs
 │   │   │   └── log_flood_tests.rs
@@ -3788,6 +3799,7 @@ src/
 │   │   ├── jsonl_watcher.rs
 │   │   ├── krx_claude_tests.rs
 │   │   ├── krx_claude_unix_tests.rs
+│   │   ├── krx_config_tests.rs
 │   │   ├── krx_tui_o_test_host.rs
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
@@ -4038,6 +4050,9 @@ src/
 │   │   └── transport_tests.rs
 │   ├── kanban_cards/
 │   │   └── entry_transactions.rs
+│   ├── krx_config_tests/
+│   │   ├── logging_filter_tests.rs
+│   │   └── tmux_readiness_tests.rs
 │   ├── krx_db_b_tests/
 │   │   ├── auto_queue_dispatch_failure_tests.rs
 │   │   ├── auto_queue_entries_tests.rs
@@ -5319,6 +5334,7 @@ src/
 │   ├── kanban_cards.rs
 │   ├── kanban_cards_snapshot_tests.rs
 │   ├── krx_claude_tests.rs
+│   ├── krx_config_tests.rs
 │   ├── krx_db_b_tests.rs
 │   ├── krx_db_tests.rs
 │   ├── krx_tui_o_tests.rs
@@ -5446,6 +5462,8 @@ src/
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
 ├── krx_claude_tests.rs
+├── krx_config_tests.rs
+├── krx_config_unix_tests.rs
 ├── krx_db_b_tests.rs
 ├── krx_db_tests.rs
 ├── krx_tui_o_tests.rs
@@ -5486,6 +5504,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
+| `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
@@ -5507,6 +5526,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_config_unix_tests.rs` | Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items. |
 | `src/krx_db_b_tests.rs` | Test-only host that declares the second slice of KRX db tests calling root-crate items. |
 | `src/krx_db_tests.rs` | Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_tui_o_tests.rs` | Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate. |

@@ -24,7 +24,7 @@ const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 #[path = "memento_anchor.rs"]
 mod anchor;
 #[cfg(test)]
-use anchor::load_session_anchor_prompt;
+pub(crate) use anchor::load_session_anchor_prompt;
 pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
@@ -33,9 +33,6 @@ mod endpoint;
 pub(super) mod instance_tests;
 #[path = "memento_scope.rs"]
 mod scope;
-#[cfg(test)]
-#[path = "memento_scope_tests.rs"]
-mod scope_tests;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
@@ -51,10 +48,10 @@ struct CachedMcpSession {
 }
 
 #[derive(Clone)]
-struct MementoRuntimeConfig {
-    endpoint: String,
-    access_key: String,
-    workspace_override: Option<String>,
+pub(crate) struct MementoRuntimeConfig {
+    pub(crate) endpoint: String,
+    pub(crate) access_key: String,
+    pub(crate) workspace_override: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -167,7 +164,7 @@ impl MementoBackend {
             .header("Content-Type", "application/json")
     }
 
-    fn resolve_workspace(
+    pub(crate) fn resolve_workspace(
         &self,
         role_id: &str,
         channel_id: u64,
@@ -560,7 +557,7 @@ mod backend_tests {
     #[tokio::test]
     async fn automatic_turn_capture_and_transcript_reflect_never_reach_memento_writers() {
         let backend = MementoBackend::new(ResolvedMemorySettings {
-            backend: crate::services::discord::settings::MemoryBackendKind::Memento,
+            backend: crate::domain::memory::MemoryBackendKind::Memento,
             ..ResolvedMemorySettings::default()
         });
 

@@ -1,11 +1,11 @@
-use super::{
-    EventLog, GLOBAL_EVENT_LOG, MAX_EVENTS, StructuredEvent, global, record, record_simple,
-    test_capture::*,
-};
 use crate::services::observability::emit::tests::{
     ROOT_CAUSE_ACTIONS, every_emit_surface_records_one_recent_event_scenario as surfaces,
     invariant_severity_routes_to_exact_log_level_and_suffix_4422 as foreign_invariants,
     relay_root_cause_metric_wrappers_record_persistent_events_scenario as root_metrics,
+};
+use crate::services::observability::events::{
+    EventLog, GLOBAL_EVENT_LOG, MAX_EVENTS, StructuredEvent, global, record, record_simple,
+    test_capture::*,
 };
 use crate::services::turn_lifecycle::policy_observability_tests::{
     assert_noop_cancel_event,
@@ -192,7 +192,7 @@ fn isolated_capture_interference_and_append_equivalence() {
         "empty", "seeded", "foreign", "clear", "flood", "poison", "negative",
     ] {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["services::observability::events::capture_stress_tests::isolated_capture_interference_and_append_equivalence", "--exact", "--nocapture"])
+            .args(["services::krx_config_tests::capture_stress_tests::isolated_capture_interference_and_append_equivalence", "--exact", "--nocapture"])
             .env(CASE, case).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while child.try_wait().unwrap().is_none() {
