@@ -894,8 +894,8 @@ test("relations editor: a draft kept while another page shows asks before a relo
   expect(asked).toEqual(["beforeunload", "beforeunload"]);
 });
 
-/** The live template as a server campaign's saved pipeline, with a run's tasks in three states, a timeout and an event;
- * a ledger campaign reads the template list and that template instead. */
+/** The live template as a server campaign's saved pipeline, with a run's tasks in three states (one failed, one blocked),
+ * landing approval on, a timeout and an event; a ledger campaign reads the template list and that template instead. */
 async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark" | "light" = "dark") {
   await page.clock.install({ time: new Date(NOW) });
   const calls = await mockApi(page, theme);
@@ -905,7 +905,9 @@ async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark"
   await json(page, /\/api\/server-campaigns\/pipeline\/templates$/, { templates: [pipelineTemplate.template] });
   await json(page, /\/api\/server-campaigns\/pipeline\/templates\/campaign-development-9\/1$/, pipelineTemplate);
   if (kind === "server") {
-    await serveServerCampaign(page);
+    const release = gatedServerCampaign();
+    release.definition.workflow_options = { start: false, implementation: false, review: false, landing: true, merge: false, deploy: false };
+    await serveServerCampaign(page, release);
     await json(page, /\/api\/server-campaigns\/release\/pipeline$/, { pipeline, definition_revision: 7, execution_hash: "b".repeat(64), source: "saved", editable: false, migration_available: false,
       execution: { mode: "legacy_stage", run_id: "run-1", definition_revision: 7, state_ids: { A: "implementation", B: "requirements", C: "landing" } } });
   }
@@ -942,13 +944,18 @@ test("pipeline: a server campaign's states left to right with result lines, task
   const left = async (id: string) => (await card(id).boundingBox())!.x;
   expect([await left("requirements") < await left("design"), await left("review") < await left("landing"), await left("final_verification") < await left("complete")]).toEqual([true, true, true]);
   expect((await card("failed").boundingBox())!.y).toBeGreaterThan((await card("review").boundingBox())!.y + 100);
-  await expect(card("implementation")).toContainText("작업 1");
-  await expect(card("review")).not.toContainText(/작업 \d/);
+  // A failed (in implementation) counts at the failure end, B blocked counts apart, C runs in landing.
+  await expect(card("failed")).toContainText("작업 1");
+  await expect(card("requirements")).toContainText("막힘 1");
+  await expect(card("landing")).toContainText("작업 1");
+  await expect(card("implementation")).not.toContainText(/작업 \d/);
   await expect(card("requirements")).toContainText("시작");
   await expect(card("landing")).toContainText("착지 승인");
+  await expect(card("landing")).not.toContainText("정의상");
+  await expect(card("implementation")).toContainText("정의상 구현 승인");
   await expect(card("review")).toContainText("1시간");
   await expect(view.getByRole("complementary", { name: "파이프라인 요약" })).toContainText("정의 rev 7 · 실행 run-1");
-  await expect(view.locator(".react-flow__minimap")).toBeVisible();
+  await expect(view.locator(".react-flow__minimap-node")).toHaveCount(11);
   await expect(view.getByRole("toolbar", { name: "보기 도구" }).getByRole("button")).toHaveCount(3);
   await expect(view.getByRole("list", { name: "주 흐름" }).locator(":scope > li")).toHaveCount(9);
   // Tab walks the main flow left to right, then the row below, each card outlined; Enter opens it in the inspector.
@@ -988,7 +995,7 @@ test.describe("pipeline at 390px touch", () => {
     await expect(view.locator(".react-flow")).toHaveCount(0);
     const flow = view.getByRole("list", { name: "주 흐름" });
     await expect(flow.locator(":scope > li")).toHaveCount(9);
-    await expect(flow.locator(":scope > li").nth(3)).toContainText("구현에이전트 작업작업 1");
+    await expect(flow.locator(":scope > li").nth(0)).toContainText("요구사항시작 · 자동 검사막힘 1");
     await expect(flow.locator(":scope > li").nth(4)).toContainText("성공 → 착지 · 품질 실패 ↻3 → 구현");
     await flow.getByRole("button", { name: /^리뷰/ }).click();
     await expect(flow.getByRole("list", { name: "나가는 전환" })).toContainText("3회까지, 그다음 작업 실패");

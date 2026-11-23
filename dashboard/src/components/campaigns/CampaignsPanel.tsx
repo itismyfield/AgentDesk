@@ -1,7 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
-  isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
+  DEFAULT_WORKFLOW_OPTIONS, isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { PageFrame } from "../../app/PageFrame";
@@ -350,7 +350,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
         selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
       board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
-      pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of }} tr={tr} />}
+      pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of }} dispositions={Object.fromEntries(view.nodes.map((value) => [value.id, value.runtime.disposition]))}
+        approvals={definition.workflow_options ?? DEFAULT_WORKFLOW_OPTIONS} tr={tr} />}
       task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
         gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
       onCloseTask={() => setNode(null)} />;

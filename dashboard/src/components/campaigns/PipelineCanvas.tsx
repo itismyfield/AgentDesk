@@ -1,23 +1,23 @@
-import { Bot, CircleX, Flag, Hourglass, Lock, MessageCircleQuestion, Play, RotateCw, ShieldCheck, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Box, CircleX, Flag, Hourglass, Lock, MessageCircleQuestion, Play, RotateCw, ShieldCheck, Zap, type LucideIcon } from "lucide-react";
 import { useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { Background, BaseEdge, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { PipelineState } from "../../api/serverCampaignPipeline";
 import type { Tr } from "./campaignPresentation";
 import { PIPE_WIDTH, cardHeight, type Line, type Pin, type PipelineGraph } from "./pipelineModel";
 import { FLOAT, ZoomTools, useLegible } from "./RelationsCanvasChrome";
 
-export const KIND_ICONS: Record<PipelineState["kind"], LucideIcon> = {
+const KIND_ICONS: Record<string, LucideIcon> = {
   agent_task: Bot, auto_check: ShieldCheck, auto_action: Zap, human_decision: MessageCircleQuestion, wait: Hourglass, end_success: Flag, end_failure: CircleX,
 };
+export const kindIcon = (kind: string) => KIND_ICONS[kind] ?? Box;
 export const TONE_COLORS: Record<Line["tone"], string> = { pass: "var(--ok)", fail: "var(--err)", retry: "var(--warn)", other: "var(--fg-muted)", event: "var(--warn)" };
 const CANVAS_HEIGHT = "max(560px, calc(100dvh - 25rem))";
 const FIT = { padding: { x: "32px", top: "72px", bottom: "72px" }, minZoom: 0.1, maxZoom: 1 } as const;
 
 /** Text the parent has already put into words, so the card only lays it out. */
 export type StateNodeData = {
-  kind: PipelineState["kind"]; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: string | null;
-  badges: { text: string; start?: boolean }[]; foot: [string, string] | null;
+  kind: string; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: { text: string; held: boolean }[];
+  badges: { text: string; start?: boolean; off?: boolean }[]; foot: [string, string] | null;
 };
 /** Inline because React Flow's unlayered stylesheet outranks Tailwind's layered utilities. */
 const dot = (color: string): CSSProperties => ({ position: "absolute", width: 10, height: 10, minWidth: 0, minHeight: 0, borderRadius: 999, border: `2px solid ${color}`, background: "var(--th-card-bg)" });
@@ -26,17 +26,17 @@ const dot = (color: string): CSSProperties => ({ position: "absolute", width: 10
  * coloured pin per result at its right; a retry pin carries ↻n. Start and approval gates ride above it. */
 function StateNode({ data, selected }: NodeProps) {
   const node = data as StateNodeData;
-  const Icon = KIND_ICONS[node.kind];
+  const Icon = kindIcon(node.kind);
   return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${selected ? "border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-soft)]" : "border-[var(--line)]"}`}
     style={{ width: PIPE_WIDTH }}>
     {node.badges.length > 0 && <div className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 gap-1.5">{node.badges.map((badge) => <span key={badge.text}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
+      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : badge.off ? "border-dashed border-[var(--line)] bg-[var(--bg-2)] text-[var(--fg-muted)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
       {badge.start ? <Play aria-hidden className="size-3" /> : <Lock aria-hidden className="size-3" />}{badge.text}</span>)}</div>}
     {!node.main && <Handle type="target" position={Position.Top} isConnectable={false} style={{ ...dot("var(--fg-dim)"), zIndex: 1 }} />}
     <div className="flex min-w-0 items-center gap-2 border-b border-[var(--line-soft)] px-3 pt-2.5 pb-2">
       <span className={`grid size-6 shrink-0 place-items-center rounded-[7px] bg-[var(--bg-3)] ${node.kind === "end_success" ? "text-[var(--ok)]" : node.kind === "end_failure" ? "text-[var(--err)]" : ""}`}><Icon aria-hidden className="size-3.5" /></span>
       <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}</span></span>
-      {node.occupancy && <span className="shrink-0 rounded-full bg-[var(--info-soft)] px-1.5 leading-5 font-medium text-[var(--info)]">{node.occupancy}</span>}
+      {node.occupancy.map(({ text, held }) => <span key={text} className={`shrink-0 rounded-full px-1.5 leading-5 font-medium ${held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]"}`}>{text}</span>)}
     </div>
     <div className="grid content-start gap-1.5 px-3 py-2">{Array.from({ length: Math.max(1, node.pins.length) }, (_, row) => {
       const pin = node.pins[row];

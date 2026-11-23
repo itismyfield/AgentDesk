@@ -8,7 +8,7 @@ import type { Tr } from "./campaignPresentation";
 import PipelineCanvas, { type StateNodeData } from "./PipelineCanvas";
 import PipelineInspector from "./PipelineInspector";
 import PipelineStateList from "./PipelineStateList";
-import { KIND_LABELS, buildPipelineGraph, durationText, eventName, gateName, pinSummary, stateName } from "./pipelineModel";
+import { buildPipelineGraph, durationText, eventName, gateText, kindName, occupancyTexts, pinSummary, stateName } from "./pipelineModel";
 
 /** A server campaign reads its own pipeline again whenever `stamp` (its view's as_of) moves; a ledger campaign has none. */
 export type PipelineSource = { kind: "server"; id: string; stamp: string } | { kind: "legacy" };
@@ -16,7 +16,11 @@ type Loaded = { pipeline: PipelineDefinition; detail: Detail | null; template: {
 
 /** 파이프라인: the campaign's state graph, read only. Server campaigns show their own (with the tasks in each state);
  * ledger campaigns show the built-in template and say so. Phones get the numbered list instead of the canvas. */
-export default function CampaignPipeline({ source, tr }: { source: PipelineSource; tr: Tr }) {
+export default function CampaignPipeline({ source, dispositions, approvals = null, tr }: {
+  source: PipelineSource; tr: Tr;
+  /** A server campaign's task dispositions by node, and its workflow options' approvals by gate. */
+  dispositions?: Record<string, string>; approvals?: Record<string, boolean> | null;
+}) {
   const phone = useIsMobile();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,20 +35,24 @@ export default function CampaignPipeline({ source, tr }: { source: PipelineSourc
     return () => abort.abort();
   }, [serverId, stamp, tr]);
   const detail = loaded?.detail ?? null;
-  const graph = useMemo(() => loaded && buildPipelineGraph(loaded.pipeline, tr, detail?.execution.state_ids ?? null), [loaded, detail, tr]);
+  // The parent hands over fresh copies on every poll; equal ones keep the drawn graph.
+  const same = JSON.stringify([dispositions, approvals]);
+  const tasks = useMemo(() => detail && Object.fromEntries(Object.entries(detail.execution.state_ids).map(([node, state]) => [node, { state, disposition: dispositions?.[node] }])), [detail, same]); // eslint-disable-line react-hooks/exhaustive-deps
+  const graph = useMemo(() => loaded && buildPipelineGraph(loaded.pipeline, tr, tasks, approvals), [loaded, tasks, same, tr]); // eslint-disable-line react-hooks/exhaustive-deps
   const nodeData = useMemo(() => new Map(graph ? [...graph.states.values()].map((state) => {
-    const pins = graph.pins.get(state.id)!, count = graph.occupancy?.get(state.id) ?? 0, title = stateName(state, state.id, tr);
+    const pins = graph.pins.get(state.id)!, occupancy = occupancyTexts(graph, state.id, tr), title = stateName(state, state.id, tr);
     const timeout = state.timeout ? durationText(state.timeout.after_seconds, tr) : "";
     const data: StateNodeData & { aria: string } = {
-      kind: state.kind, title, kindLabel: tr(...KIND_LABELS[state.kind]), pins, entry: tr("진입", "In"), main: !graph.off.includes(state.id),
-      occupancy: count > 0 ? tr(`작업 ${count}`, `${count} tasks`) : null, foot: state.owner || timeout ? [state.owner ?? "", timeout] : null,
-      badges: [...state.id === graph.main[0] ? [{ text: tr("시작", "Start"), start: true }] : [], ...(graph.gates.get(state.id) ?? []).map((gate) => ({ text: gateName(gate, tr) }))],
-      aria: [title, tr(...KIND_LABELS[state.kind]), count > 0 && tr(`작업 ${count}`, `${count} tasks`), pinSummary(graph, state.id, tr)].filter(Boolean).join(", "),
+      kind: state.kind, title, kindLabel: kindName(state.kind, tr), pins, entry: tr("진입", "In"), main: !graph.off.includes(state.id),
+      occupancy, foot: state.owner || timeout ? [state.owner ?? "", timeout] : null,
+      badges: [...state.id === graph.main[0] ? [{ text: tr("시작", "Start"), start: true }] : [], ...(graph.gates.get(state.id) ?? []).map((gate) => ({ text: gateText(graph, gate, tr), off: !!graph.approvals && !graph.approvals[gate] }))],
+      aria: [title, kindName(state.kind, tr), ...occupancy.map(({ text }) => text), pinSummary(graph, state.id, tr)].filter(Boolean).join(", "),
     };
     return [state.id, data];
   }) : []), [graph, tr]);
   const eventData = useMemo(() => new Map(graph?.events.map((event) => [event.id, { title: eventName(event.type, tr), target: `→ ${stateName(graph.states.get(event.state_id), event.state_id, tr)}` }]) ?? []), [graph, tr]);
 
+  if (graph?.states.size === 0) return <WidgetState kind="empty" title={tr("이 파이프라인에는 상태가 없어요.", "This pipeline has no states.")} />;
   if (!graph) return error ? <WidgetState kind="error" title={tr("파이프라인을 불러오지 못했어요.", "Could not load the pipeline.")} description={error} />
     : <WidgetState kind="loading" title={tr("파이프라인을 불러오고 있어요.", "Loading the pipeline.")} />;
   const template = loaded!.template ?? (loaded!.pipeline.template_id ? { id: loaded!.pipeline.template_id, version: loaded!.pipeline.template_version ?? 0 } : null);
