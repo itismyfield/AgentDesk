@@ -1,0 +1,2 @@
+key: turn-presence-typing
+| `turn-presence` / Discord typing ownership (#8081) | `406cdfc2a3` | After TUI closure, native refresh can outlive both intake and restart reattachment. Mailbox token deferral can interrupt Busy refresh after the native loop is removed. | [Typing ownership model](turn-presence/TurnPresenceTyping.tla) checks closed silence and Busy refresh. [Report](turn-presence/turn-presence.report.md#discord-typing-ownership) records before, fixed, and token deferral mutant results. |

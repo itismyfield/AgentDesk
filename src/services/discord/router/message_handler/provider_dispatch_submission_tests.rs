@@ -273,7 +273,19 @@ async fn creator_cells(creator: Creator, guarded: bool) {
             shared: &shared,
             workspace: workspace.path(),
         };
+        use crate::services::discord::turn_presence::{
+            supervisor::tests::RegisteredForTyping, typing_indicator::tests::SpawnProbe,
+        };
+        let supervised = creator == Creator::Intake && cell.refuse;
+        let _registration =
+            supervised.then(|| RegisteredForTyping::new(&ProviderKind::Claude, channel.get()));
+        let typing = SpawnProbe::new(channel);
         let outcome = run_turn(creator, &fixture, channel, cell).await;
+        assert_eq!(
+            typing.count(),
+            usize::from(creator == Creator::Intake && !supervised),
+            "{case}: supervised TUI intake leaves typing to presence; legacy intake spawns it"
+        );
         let at = &outcome.at_provider;
         assert_eq!(
             at.phase_at_entry,

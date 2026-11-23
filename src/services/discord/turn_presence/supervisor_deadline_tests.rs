@@ -120,37 +120,32 @@ async fn three_second_http_delay_keeps_same_busy_generation_success_gaps_within_
 }
 
 #[tokio::test(start_paused = true)]
-async fn idle_fences_a_due_mailbox_wait_and_old_generation_cannot_restart_typing() {
+async fn idle_fences_a_due_send_and_old_generation_cannot_restart_typing() {
     let channel = 6_200_021;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], BUSY);
     let mut supervisor = Supervisor::new(fake.clone());
     let presence = supervisor.presence(channel);
-    let supervisor = Arc::new(supervisor);
     supervisor.tick(Instant::now()).await;
     wait(TYPING_EVERY.as_secs()).await;
-    lock(&fake.mailbox_delay).insert(channel, Duration::from_secs(5));
-    let due = tokio::spawn({
-        let supervisor = supervisor.clone();
-        async move { supervisor.send_due(Instant::now()).await }
-    });
-    tokio::task::yield_now().await;
-    assert!(!lock(&fake.mailbox_delay).contains_key(&channel));
+    let old_generation = lock(&presence).generation;
     fake.set(channel, IDLE);
     supervisor.tick(Instant::now()).await;
     assert_eq!(status(channel).unwrap()["activity"], "idle");
+    supervisor.start_typing(channel, &presence, old_generation, Instant::now());
     assert_eq!(successes(&fake, channel), [Duration::ZERO]);
     fake.set(channel, BUSY);
     supervisor.tick(Instant::now()).await;
     wait(5).await;
-    due.await.unwrap();
+    supervisor.start_typing(channel, &presence, old_generation, Instant::now());
+    tokio::task::yield_now().await;
     assert_eq!(successes(&fake, channel), [Duration::ZERO, TYPING_EVERY]);
     assert_eq!(
         lock(&presence).next_typing_at,
         Some(fake.start + TYPING_EVERY * 2)
     );
     wait(TYPING_EVERY.as_secs() - 5).await;
-    supervisor.send_due(Instant::now()).await;
+    supervisor.send_due(Instant::now());
     wait(1).await;
     assert_eq!(
         successes(&fake, channel),

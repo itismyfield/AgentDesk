@@ -2083,6 +2083,12 @@ turn-presence/TurnPresenceRetiredRestartBeforeLiveness.cfg	TurnPresence	-	NewInp
 turn-presence/TurnPresenceRetiredRestartFixed.cfg	TurnPresence	-	-
 turn-presence/TurnPresenceRetiredSweep.cfg	TurnPresence	RetiredOnlyQuietNotUnknown	NewInputEventuallyStarts
 turn-presence/TurnPresenceRetiredUnsafe.cfg	TurnPresence	NoForeignMarkerRemoval,NoLiveMarkerRemoval	-
+turn-presence/TurnPresenceTypingHeadlessFixed.cfg	TurnPresenceTyping	-	-
+turn-presence/TurnPresenceTypingIntakeBefore.cfg	TurnPresenceTyping	NoTypingWhileClosed	-
+turn-presence/TurnPresenceTypingIntakeFixed.cfg	TurnPresenceTyping	-	-
+turn-presence/TurnPresenceTypingRestoreBefore.cfg	TurnPresenceTyping	NoTypingWhileClosed	-
+turn-presence/TurnPresenceTypingRestoreFixed.cfg	TurnPresenceTyping	-	-
+turn-presence/TurnPresenceTypingTokenMutant.cfg	TurnPresenceTyping	BusyRefreshWithinDeadline	-
 turn-view/BusyActiveBefore.cfg	TurnView	OneBusyResult	-
 turn-view/BusyActiveFixed.cfg	TurnView	-	-
 turn-view/BusyActiveNoFallback.cfg	TurnView	OneBusyResult,NoInvisibleSettled	AcceptedEventuallyVisible

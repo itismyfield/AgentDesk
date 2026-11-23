@@ -2105,6 +2105,7 @@ pub(super) async fn handle_text_message(
         let first_admission = matches!(turn_host, crate::services::turn_host::TurnHost::Tmux).then(|| {
             crate::services::tui_o::cutover::admit_codex_first(channel_id.get(), &provider, session_id.as_deref(), &context_prompt, &cancel_token, tmux_session_name.as_deref())
         }).flatten();
+        let typing_scope = super::typing_indicator::TypingScope::for_start(&turn_host, false);
         tokio::task::spawn_blocking(move || {
             let mut first_admission = first_admission;
             let _original_registration = producer_registration;
@@ -2171,8 +2172,9 @@ pub(super) async fn handle_text_message(
         super::typing_indicator::spawn_native_typing_indicator(
             shared,
             http.clone(),
-            channel_id,
-            inflight_state.effective_finalizer_turn_id(),
+            &provider,
+            &inflight_state,
+            typing_scope,
         );
         spawn_turn_bridge(
             shared.clone(),

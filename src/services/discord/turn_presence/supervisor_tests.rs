@@ -4,6 +4,23 @@ use super::*;
 use crate::services::discord::turn_presence::activity::Observed;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 
+#[cfg(unix)]
+pub(in crate::services::discord) struct RegisteredForTyping {
+    _confirmed: TestConfirmation,
+    _started: Started,
+}
+
+#[cfg(unix)]
+impl RegisteredForTyping {
+    pub(in crate::services::discord) fn new(provider: &ProviderKind, channel: u64) -> Self {
+        let _confirmed = TestConfirmation::new(channel);
+        register(provider, &[channel]);
+        Self {
+            _confirmed,
+            _started: Started::new(provider),
+        }
+    }
+}
 const BUSY: Observed = Observed {
     activity: Activity::Busy,
     reason: "open",
@@ -105,7 +122,6 @@ struct Fake {
     token: AtomicBool,
     head: Mutex<Option<u64>>,
     read_delay: Mutex<HashMap<u64, Duration>>,
-    mailbox_delay: Mutex<HashMap<u64, Duration>>,
     typing_delay: Mutex<HashMap<u64, Duration>>,
     typing_errors: Mutex<HashMap<u64, String>>,
     typed: Mutex<Vec<(u64, Duration)>>,
@@ -133,7 +149,6 @@ impl Fake {
             token: AtomicBool::new(false),
             head: Mutex::new(None),
             read_delay: Mutex::new(HashMap::new()),
-            mailbox_delay: Mutex::new(HashMap::new()),
             typing_delay: Mutex::new(HashMap::new()),
             typing_errors: Mutex::new(HashMap::new()),
             typed: Mutex::new(Vec::new()),
@@ -215,10 +230,6 @@ impl Effects for Fake {
     }
 
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>, bool) {
-        let delay = lock(&self.mailbox_delay).remove(&channel);
-        if let Some(delay) = delay {
-            tokio::time::sleep(delay).await;
-        }
         let live = lock(&self.live_mailbox).clone();
         if let Some(shared) = live {
             return waiting_input(&shared, &ProviderKind::Claude, ChannelId::new(channel)).await;
@@ -416,20 +427,23 @@ async fn a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing() {
     );
 }
 
-/// A mailbox token's own turn types for itself, so a busy channel holding one gets no presence send.
+/// A persistent mailbox token cannot interrupt Busy refresh or keep typing alive after Idle.
 #[tokio::test(start_paused = true)]
-async fn a_mailbox_token_keeps_presence_from_typing() {
+async fn busy_typing_survives_a_mailbox_token_and_stops_at_idle() {
     let channel = 6_200_003;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], BUSY);
     fake.token.store(true, Ordering::SeqCst);
     let run = supervise(&fake);
-    wait(TYPING_EVERY.as_secs() * 5 + 1).await;
-    assert!(fake.typed_secs(channel).is_empty());
-    fake.token.store(false, Ordering::SeqCst);
-    wait(TYPING_EVERY.as_secs()).await;
+    wait(TYPING_EVERY.as_secs() * 4 + 1).await;
+    let expected = [0, 6, 12, 18, 24];
+    assert_eq!(fake.typed_secs(channel), expected);
+    fake.set(channel, IDLE);
+    wait(TYPING_EVERY.as_secs() * 3).await;
     run.abort();
-    assert_eq!(fake.typed_secs(channel), [TYPING_EVERY.as_secs() * 6]);
+    assert_eq!(status(channel).unwrap()["activity"], "idle");
+    assert_eq!(fake.typed_secs(channel), expected);
+    assert_eq!(typing_counts(channel), (5, 0));
 }
 
 /// Waiting input sees one notice after a minute; recovery starts a fresh grace and a

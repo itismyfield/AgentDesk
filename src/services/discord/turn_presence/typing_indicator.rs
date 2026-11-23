@@ -7,23 +7,38 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, MissedTickBehavior};
 
 use super::super::SharedData;
-use super::super::inflight::InflightSignal;
+use super::super::inflight::{InflightSignal, InflightTurnState};
+use super::super::scheduled_turn::ScheduledTurnMark;
 use super::super::turn_completion_events::TurnCompletionEvent;
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_host::TurnHost;
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 const TYPING_MAX_LIFETIME: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[async_trait]
 trait TypingTransport: Send + Sync {
+    fn supervisor_owns_typing(&self, _channel_id: ChannelId) -> bool {
+        false
+    }
+
     async fn broadcast_typing(&self, channel_id: ChannelId) -> Result<(), String>;
 }
 
 struct SerenityTypingTransport {
     http: Arc<serenity::Http>,
+    presence_provider: Option<ProviderKind>,
 }
 
 #[async_trait]
 impl TypingTransport for SerenityTypingTransport {
+    fn supervisor_owns_typing(&self, channel_id: ChannelId) -> bool {
+        self.presence_provider
+            .as_ref()
+            .is_some_and(|provider| super::supervisor::observes(provider, channel_id.get()))
+    }
+
     async fn broadcast_typing(&self, channel_id: ChannelId) -> Result<(), String> {
         channel_id
             .broadcast_typing(&self.http)
@@ -32,19 +47,71 @@ impl TypingTransport for SerenityTypingTransport {
     }
 }
 
+pub(in crate::services::discord) enum TypingScope {
+    Channel,
+    HerdrChannel,
+    Standalone,
+}
+
+impl TypingScope {
+    pub(in crate::services::discord) fn for_start(host: &TurnHost, standalone: bool) -> Self {
+        match (host, standalone) {
+            (_, true) => Self::Standalone,
+            (TurnHost::Herdr(_), false) => Self::HerdrChannel,
+            (_, false) => Self::Channel,
+        }
+    }
+
+    fn presence_provider(
+        self,
+        provider: &ProviderKind,
+        state: &InflightTurnState,
+    ) -> Option<ProviderKind> {
+        if state.routine_presentation.isolated_run()
+            || matches!(
+                state.scheduled,
+                ScheduledTurnMark::Scheduled { isolated: true, .. }
+            )
+        {
+            return None;
+        }
+        let tui = match self {
+            Self::Standalone => false,
+            Self::HerdrChannel => matches!(provider, ProviderKind::Claude | ProviderKind::Codex),
+            Self::Channel => matches!(
+                (provider, state.runtime_kind_for_recovery()),
+                (ProviderKind::Claude, RuntimeHandoffKind::ClaudeTui)
+                    | (ProviderKind::Codex, RuntimeHandoffKind::CodexTui)
+            ),
+        };
+        tui.then(|| provider.clone())
+    }
+}
+
 pub(in crate::services::discord) fn spawn_native_typing_indicator(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
-    channel_id: ChannelId,
-    turn_id: u64,
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    scope: TypingScope,
 ) {
+    let channel_id = ChannelId::new(state.channel_id);
+    let transport = SerenityTypingTransport {
+        http,
+        presence_provider: scope.presence_provider(provider, state),
+    };
+    if transport.supervisor_owns_typing(channel_id) {
+        return;
+    }
+    #[cfg(all(test, unix))]
+    tests::record_spawn(channel_id);
     let finalize_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(shared);
     let producer_rx = shared.inflight_signals.subscribe();
     spawn_typing_indicator_task(
-        SerenityTypingTransport { http },
+        transport,
         channel_id,
-        turn_id,
+        state.effective_finalizer_turn_id(),
         TYPING_MAX_LIFETIME,
         finalize_rx,
         producer_rx,
@@ -109,6 +176,10 @@ async fn run_native_typing_indicator<T: TypingTransport>(
                     | broadcast::error::RecvError::Closed) => break,
             },
             _ = refresh.tick() => {
+                // Turn mode can be confirmed after this loop was started.
+                if transport.supervisor_owns_typing(channel_id) {
+                    break;
+                }
                 if let Err(error) = transport.broadcast_typing(channel_id).await {
                     tracing::warn!(
                         target: "agentdesk::services::discord::router::message_handler::typing_indicator",
@@ -124,10 +195,56 @@ async fn run_native_typing_indicator<T: TypingTransport>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::services::discord) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[cfg(unix)]
+    static SPAWNS: std::sync::Mutex<Vec<(ChannelId, usize)>> = std::sync::Mutex::new(Vec::new());
+
+    #[cfg(unix)]
+    pub(in crate::services::discord) struct SpawnProbe(ChannelId);
+
+    #[cfg(unix)]
+    impl SpawnProbe {
+        pub(in crate::services::discord) fn new(channel: ChannelId) -> Self {
+            SPAWNS.lock().unwrap().push((channel, 0));
+            Self(channel)
+        }
+
+        pub(in crate::services::discord) fn count(&self) -> usize {
+            SPAWNS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(channel, _)| *channel == self.0)
+                .unwrap()
+                .1
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SpawnProbe {
+        fn drop(&mut self) {
+            SPAWNS
+                .lock()
+                .unwrap()
+                .retain(|(channel, _)| *channel != self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn record_spawn(channel: ChannelId) {
+        if let Some((_, count)) = SPAWNS
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|(id, _)| *id == channel)
+        {
+            *count += 1;
+        }
+    }
 
     struct CountingTransport {
         calls: Arc<AtomicUsize>,
@@ -159,6 +276,98 @@ mod tests {
         let (finalize_tx, finalize_rx) = broadcast::channel(8);
         let (producer_tx, producer_rx) = broadcast::channel(8);
         (finalize_tx, finalize_rx, producer_tx, producer_rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_typing_keeps_process_and_standalone_work() {
+        use super::super::supervisor::tests::RegisteredForTyping;
+        use crate::services::discord::{
+            admin_host_guard::tests::Recorder, make_shared_data_for_tests,
+        };
+
+        let shared = make_shared_data_for_tests();
+        let api = Recorder::start().await;
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(6_201_081);
+        let _registration = RegisteredForTyping::new(&provider, channel.get());
+        let typing = SpawnProbe::new(channel);
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            2,
+            3,
+            "typing fixture".into(),
+            None,
+            Some("fixture-pane".into()),
+            Some("fixture-transcript".into()),
+            None,
+            0,
+        );
+        let spawn = |state: &InflightTurnState, scope| {
+            spawn_native_typing_indicator(&shared, api.http.clone(), &provider, state, scope);
+        };
+        // A pre-runtime-kind Claude row with a transcript and no FIFO is a TUI restore.
+        assert_eq!(state.runtime_kind, None);
+        spawn(&state, TypingScope::Channel);
+        assert_eq!(typing.count(), 0);
+        spawn(&state, TypingScope::Standalone);
+        assert_eq!(typing.count(), 1);
+        state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+        spawn(&state, TypingScope::for_start(&TurnHost::Tmux, false));
+        assert_eq!(typing.count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn native_refresh_ends_when_a_running_tui_becomes_supervised() {
+        use super::super::supervisor::tests::RegisteredForTyping;
+
+        struct LateConfirmation {
+            eligibility: SerenityTypingTransport,
+            counter: CountingTransport,
+        }
+
+        #[async_trait]
+        impl TypingTransport for LateConfirmation {
+            fn supervisor_owns_typing(&self, channel: ChannelId) -> bool {
+                self.eligibility.supervisor_owns_typing(channel)
+            }
+
+            async fn broadcast_typing(&self, channel: ChannelId) -> Result<(), String> {
+                self.counter.broadcast_typing(channel).await
+            }
+        }
+
+        let channel = ChannelId::new(6_201_082);
+        let provider = ProviderKind::Codex;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_finalize_tx, finalize_rx, _producer_tx, producer_rx) = test_receivers();
+        let task = spawn_typing_indicator_task(
+            LateConfirmation {
+                eligibility: SerenityTypingTransport {
+                    http: Arc::new(serenity::Http::new("test-token")),
+                    presence_provider: Some(provider.clone()),
+                },
+                counter: CountingTransport {
+                    calls: calls.clone(),
+                },
+            },
+            channel,
+            21,
+            TYPING_MAX_LIFETIME,
+            finalize_rx,
+            producer_rx,
+        );
+        yield_until(|| calls.load(Ordering::SeqCst) == 1).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let _registration = RegisteredForTyping::new(&provider, channel.get());
+        tokio::time::advance(TYPING_REFRESH_INTERVAL).await;
+        yield_until(|| task.is_finished()).await;
+        assert!(task.is_finished());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

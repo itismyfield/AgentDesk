@@ -389,7 +389,7 @@ impl<E: Effects> Supervisor<E> {
                     notice.heartbeat(Instant::now());
                 }
             }
-            self.send_due(Instant::now()).await;
+            self.send_due(Instant::now());
             let now = Instant::now();
             let next_poll = now + TICK;
             let deadline = self
@@ -463,38 +463,19 @@ impl<E: Effects> Supervisor<E> {
         }
     }
 
-    /// Re-sends typing at each due deadline; a mailbox token's own turn types for itself.
-    async fn send_due(&self, now: Instant) {
-        let channels: Vec<_> = self.channels.iter().map(|(c, p)| (*c, p.clone())).collect();
-        for (channel, presence) in channels {
+    /// Refreshes from the published Busy generation even while its mailbox token is held.
+    fn send_due(&self, now: Instant) {
+        for (&channel, presence) in &self.channels {
             let generation = {
-                let presence = lock(&presence);
+                let presence = lock(presence);
                 (presence.activity == Activity::Busy
                     && presence.sending.is_none()
                     && presence.next_typing_at.is_some_and(|at| at <= now))
                 .then_some(presence.generation)
             };
-            let Some(generation) = generation else {
-                continue;
-            };
-            let (token, ..) = self.effects.mailbox(channel).await;
-            let now = Instant::now();
-            {
-                let mut guard = lock(&presence);
-                // The observation loop can publish Idle or replace the generation during I/O.
-                if guard.activity != Activity::Busy
-                    || guard.generation != generation
-                    || guard.sending.is_some()
-                    || guard.next_typing_at.is_none_or(|at| at > now)
-                {
-                    continue;
-                }
-                if token {
-                    guard.next_typing_at = Some(now + TYPING_EVERY);
-                    continue;
-                }
+            if let Some(generation) = generation {
+                self.start_typing(channel, presence, generation, now);
             }
-            self.start_typing(channel, &presence, generation, now);
         }
     }
 
@@ -646,7 +627,6 @@ fn apply(
         presence.queue_held = None;
         presence.held_noticed = false;
         match observed.activity {
-            Activity::Busy if token => presence.next_typing_at = Some(now + TYPING_EVERY),
             Activity::Busy => actions.push(Action::Typing(presence.generation)),
             Activity::Idle | Activity::Unknown => {}
         }

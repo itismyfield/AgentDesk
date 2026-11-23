@@ -1108,6 +1108,10 @@ async fn start_reserved_headless_turn_admitted(
     let execution_pool = shared.pg_pool.clone();
     let turn_shared = shared.clone();
     let producer_registration = original_registration.clone();
+    let typing_scope = super::typing_indicator::TypingScope::for_start(
+        &turn_host,
+        turn_local_session || tmux_session_label.is_some(),
+    );
     let producer = {
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
@@ -1192,8 +1196,9 @@ async fn start_reserved_headless_turn_admitted(
         super::typing_indicator::spawn_native_typing_indicator(
             shared,
             ctx.http.clone(),
-            channel_id,
-            inflight_state.effective_finalizer_turn_id(),
+            &provider,
+            &inflight_state,
+            typing_scope,
         );
     }
     let completion_tx = process_mailbox.map(|mailbox| mailbox.watch(producer));

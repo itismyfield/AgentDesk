@@ -367,7 +367,25 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
             .count()
     };
 
+    use crate::services::discord::turn_presence::{
+        supervisor::tests::RegisteredForTyping, typing_indicator::tests::SpawnProbe,
+    };
+    let supervised = cases[0].1;
+    let _registration = RegisteredForTyping::new(&provider, supervised.get());
+    let typing: Vec<_> = cases
+        .iter()
+        .map(|(_, channel, ..)| SpawnProbe::new(*channel))
+        .collect();
     restore_inflight_turns(&discord.http, &shared, &provider).await;
+    assert_eq!(
+        typing[0].count(),
+        0,
+        "supervised TUI restore must leave typing to presence"
+    );
+    assert!(
+        typing[1..].iter().all(|probe| probe.count() == 1),
+        "unobserved TUI restore must still spawn native typing"
+    );
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watched: Vec<_> = cases

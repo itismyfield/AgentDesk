@@ -2378,11 +2378,15 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 .await
                 .compact_pct_for(&provider);
         if !state.silent_turn {
-            super::super::turn_presence::typing_indicator::spawn_native_typing_indicator(
+            use super::super::turn_presence::typing_indicator::{
+                TypingScope, spawn_native_typing_indicator,
+            };
+            spawn_native_typing_indicator(
                 shared,
                 http.clone(),
-                channel_id,
-                state.effective_finalizer_turn_id(),
+                provider,
+                &state,
+                TypingScope::Channel,
             );
         }
         spawn_turn_bridge(

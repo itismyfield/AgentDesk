@@ -24,3 +24,17 @@ FinalCheckAndPublish checks a publication event against its sampled inputs, incl
 - Current Main configuration: reproduces the strict admission/final-files comparison defects, but shares S1 recollection and the projected publication-pair control flow.
 
 In the shared Main/M1 abstraction, repeating the failed two-pair cycle reaches the notice threshold and defeats stable Busy. M2: admit the same execution, read open, pass publication pair, then Progress before FinalCheckAndPublish; the strict final compare at base live.rs:606 can fail every cycle. M3: change a non-session identity between collections or after pinning; name equality accepts a different turn, matching the need for turn_nonce and owner/source axes in both comparison paths.
+
+## Discord typing ownership
+
+The existing model's Busy publication feeds the supervisor. The typing model adds the closed boundary, the initial native task decision at intake or after restart, and the case where a provider starts supervising an already-running channel. A TUI close can leave a mailbox token and a durable inflight row without sending matching native completion. The native loop then has another refresh available even though the supervisor has published Idle.
+
+| Scenario | TLC result |
+|---|---|
+| [Intake before](TurnPresenceTypingIntakeBefore.cfg) | RED, `NoTypingWhileClosed` |
+| [Restore before](TurnPresenceTypingRestoreBefore.cfg) | RED, `NoTypingWhileClosed` |
+| [Intake fixed](TurnPresenceTypingIntakeFixed.cfg) and [restore fixed](TurnPresenceTypingRestoreFixed.cfg) | GREEN, idle silence, exclusive supervisor ownership, and repeated Busy refresh |
+| [Headless fixed](TurnPresenceTypingHeadlessFixed.cfg) | GREEN, native refresh remains available during work |
+| [Mailbox token deferral mutant](TurnPresenceTypingTokenMutant.cfg) | RED, `BusyRefreshWithinDeadline` |
+
+A tick stands for one successful refresh opportunity. HTTP delay and cancellation of a send overtaken by Idle are exercised by the Rust supervisor tests. The model covers the confirmed channel's execution and abstracts the native loop's six-hour timeout so a single post-close refresh can violate the invariant.
