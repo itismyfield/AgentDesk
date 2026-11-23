@@ -51,15 +51,28 @@ export function buildAttention({ agents, todo, failed, cardsRead, tr, isKo, now 
     });
   }
   const cards = new Set<string>();
+  // Cards on the to-do list without an owner go under the agent their latest failed dispatch went to.
+  const unowned = new Map<string, TodoItem>();
+  const fromTodo = (item: TodoItem): AttentionReason => ({ key: item.key, tone: item.tone, chip: item.chip, detail: join(item.title, item.detail), to: item.to });
   for (const item of todo) {
-    if (!item.agentId) continue;
+    if (!item.agentId) {
+      unowned.set(item.key, item);
+      continue;
+    }
     cards.add(item.key);
-    add(item.agentId, { key: item.key, tone: item.tone, chip: item.chip, detail: join(item.title, item.detail), to: item.to });
+    add(item.agentId, fromTodo(item));
   }
   for (const dispatch of failed) {
     const at = coerceTimestampMs((dispatch as TaskDispatch & { updated_at?: string | number | null }).updated_at ?? dispatch.created_at);
     const card = dispatch.kanban_card_id ? `card:${dispatch.kanban_card_id}` : null;
-    if (at === null || now - at > RECENT_FAILURE_MS || (card && (cardsRead || cards.has(card)))) continue;
+    if (at === null || now - at > RECENT_FAILURE_MS) continue;
+    const orphan = card ? unowned.get(card) : undefined;
+    if (orphan) {
+      unowned.delete(orphan.key);
+      add(dispatch.to_agent_id, fromTodo(orphan));
+      continue;
+    }
+    if (card && (cardsRead || cards.has(card))) continue;
     if (card) cards.add(card);
     add(dispatch.to_agent_id, {
       key: `dispatch:${dispatch.id}`,

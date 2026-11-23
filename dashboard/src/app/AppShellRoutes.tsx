@@ -43,7 +43,6 @@ const AuditPageView = lazy(() => import("../components/audit/AuditPageView"));
 export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) {
   const {
     agents,
-    agentsPageTab,
     agentsWithDispatched,
     departments,
     handleSettingsSave,
@@ -74,7 +73,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
         const updated = await api.assignDispatchedSession(id, patch);
         setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
       }}
-      activeTab={agentsPageTab}
       onTabChange={setAgentsPageTab}
       autoOpenCreate={autoOpenCreate}
       onAutoOpenConsumed={autoOpenCreate ? () => navigateToRoute("/agents") : undefined}

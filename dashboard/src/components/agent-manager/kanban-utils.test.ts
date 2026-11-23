@@ -460,6 +460,8 @@ describe("coerceTimestampMs", () => {
     expect(toIsoTimestamp("2026-11-23 10:00:00.123456+00")).toBe("2026-11-23T10:00:00.123+00:00");
     expect(toIsoTimestamp("2026-05-24 11:43:59.5-0730")).toBe("2026-05-24T11:43:59.500-07:30");
     expect(toIsoTimestamp("2026-11-23")).toBe("2026-11-23");
+    // Digits without the dot are not a fraction, so the text is not a Postgres timestamp.
+    expect(toIsoTimestamp("2026-11-23 10:00:00123+00")).toBe("2026-11-23 10:00:00123+00");
     expect(coerceTimestampMs("2026-11-23 10:00:00.123456+00")).toBe(Date.UTC(2026, 10, 23, 10, 0, 0, 123));
   });
 });
