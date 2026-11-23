@@ -49,6 +49,34 @@ pub(in crate::services::discord) fn observe_liveness(
     TmuxHost.liveness(HostSessionRef::tmux(name)).into()
 }
 
+/// A Herdr row's recorded pane on this node: `Missing` once a complete snapshot of its endpoint
+/// lacks it, `Alive` while listed. A row its marker and locator do not both record as Herdr,
+/// another node's row or an unread server is `Unknown`.
+pub(in crate::services::discord) fn observe_herdr_liveness(
+    name: &str,
+    row: &InflightTurnState,
+) -> SessionLiveness {
+    use super::inflight::PersistedHostLocator;
+    use crate::services::session_host::{HostKind, herdr_endpoints};
+    use crate::services::tmux_common::host_marker::HostKindMarker;
+    let Some(PersistedHostLocator::Known(locator)) = &row.host_locator else {
+        return SessionLiveness::Unknown;
+    };
+    let (HostKind::Herdr, Some(node), Some(pane)) =
+        (locator.host_kind, &locator.execution_node, &locator.pane)
+    else {
+        return SessionLiveness::Unknown;
+    };
+    if read_host_kind_marker(name) != HostKindMarker::Known(HostKind::Herdr) {
+        return SessionLiveness::Unknown;
+    }
+    match herdr_endpoints().pane_presence(node, &locator.host_session_id, pane) {
+        HostPresence::Present => SessionLiveness::Alive,
+        HostPresence::Missing => SessionLiveness::Missing,
+        HostPresence::ProbeFailed => SessionLiveness::Unknown,
+    }
+}
+
 /// Session presence of a local tmux session; anything else is `None` with no probe.
 pub(in crate::services::discord) fn observe_presence(
     name: &str,

@@ -413,11 +413,12 @@ pub(super) fn set_test_tmux_alive_override(names: Option<&[&str]>) {
     *guard = names.map(|slice| slice.iter().map(|s| (*s).to_string()).collect());
 }
 
-/// A stale row is kept unless tmux confirms its pane dead; another host keeps it too.
+/// A stale row is kept unless its host confirms the session gone: tmux its pane dead, Herdr
+/// its recorded pane absent; any other host or an unread one keeps it.
 fn tmux_pane_alive_for_stale_check(name: &str, state: &InflightTurnState) -> bool {
     use crate::services::discord::host_liveness;
     if !host_liveness::local_tmux(name, Some(state)) {
-        return true;
+        return host_liveness::not_dead(host_liveness::observe_herdr_liveness(name, state));
     }
     #[cfg(test)]
     {
@@ -466,7 +467,7 @@ pub(super) fn stale_removal_reason(
             if age_secs > max_age {
                 // Defense-in-depth: when DrainRestart inflight ages past the
                 // 30-min retention window, refuse to wipe if the inflight's
-                // tmux pane is still alive. Wiping the row strands the live
+                // tmux or Herdr pane is still alive. Wiping the row strands the live
                 // CLI's eventual response — see the 2026-05-26 incident where
                 // repeated quick-exits left a codex turn pane alive but its
                 // inflight anchor was removed at the 10th boot. Only one

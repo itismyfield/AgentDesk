@@ -307,6 +307,32 @@ impl HerdrRegistry {
         entry.host.current_working_dir(reference).ok().flatten()
     }
 
+    /// `pane` in a complete session snapshot, the read `agentdesk herdr status` starts with, of
+    /// the one endpoint serving `node`'s `session`. No single such endpoint, an incomplete answer
+    /// or a server listing no pane at all (one just restarted) is a failed probe.
+    pub(crate) fn pane_presence(&self, node: &str, session: &str, pane: &str) -> HostPresence {
+        use super::herdr::contract::labeled_snapshot;
+        use super::herdr::model::HerdrRequest;
+        let mut serving = self.endpoints.iter().filter(|registered| {
+            registered.endpoint.execution_node() == node
+                && registered.endpoint.herdr_session() == session
+        });
+        let (Some(only), None) = (serving.next(), serving.next()) else {
+            return HostPresence::ProbeFailed;
+        };
+        let call = HerdrCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            request: HerdrRequest::SessionSnapshot {},
+        };
+        match labeled_snapshot(&call, only.transport.call(&call).0) {
+            Ok(snapshot) if snapshot.panes.iter().any(|listed| listed.pane_id == pane) => {
+                HostPresence::Present
+            }
+            Ok(snapshot) if !snapshot.panes.is_empty() => HostPresence::Missing,
+            _ => HostPresence::ProbeFailed,
+        }
+    }
+
     /// The one local endpoint's read-only host; none, or several, give no host.
     pub(crate) fn sole_host(&self) -> Option<&dyn InteractiveSessionHost> {
         match self.endpoints.as_slice() {
