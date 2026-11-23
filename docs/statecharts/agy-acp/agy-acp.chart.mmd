@@ -7,8 +7,8 @@ stateDiagram-v2
     lg1: Process
     lg2: Turn
     lg3: Session
-    lg4: Breaks AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession in some cases
-    lg5: Path to the AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession bug
+    lg4: Breaks AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession or NoReviveAfterClear in some cases
+    lg5: Path to the AtMostOnePost or NoDuplicateExecution or NoForeignResponse or NoPromptToClearedSession or NoReviveAfterClear bug
   }
   class lg0 pink
   class lg1 tan
@@ -21,24 +21,27 @@ stateDiagram-v2
   s2: Session idle
   s3: Prompt open
   s4: AgentDesk restarting
-  s5: Old child orphaned, sweep pending
-  s6: Turn answered, post pending
-  s7: Session loading (replay)
+  s5: Prompt open, stop asked
+  s6: Old child orphaned, sweep pending
+  s7: Turn answered, post pending
+  s8: Session loading (replay)
   [*] --> s0
-  s0 --> s0: a person sends a message or writer posts the turn's one terminal message (covers steered inputs)
+  s0 --> s0: a person sends a message or writer posts the turn's one terminal message (covers steered inputs, notes failed steers)
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new or agy refuses the stored id#59; session/new
-  s2 --> s2: person runs /clear (a steer being returned is discarded too)
+  s2 --> s2: person runs /clear
   s2 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
   s3 --> s4: AgentDesk restarts
-  s4 --> s5: boot settles orphaned prompts
+  s3 --> s5: person runs /clear
+  s4 --> s6: boot settles orphaned prompts
+  s5 --> s4: AgentDesk restarts
   s3 --> s0: agy exits#59; stdout EOF fails open prompts or deadline passes#59; the child's own process group killed
-  s5 --> s0: boot kills the old child's process group
-  s1 --> s6: agy refuses the stored id#59; session/new
-  s6 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
-  s1 --> s7: reattach the stored id (resume, or load)
-  s7 --> s7: load replays an old answer
-  s3 --> s6: late response from the killed child
+  s6 --> s0: boot kills the old child's process group
+  s1 --> s7: agy refuses the stored id#59; session/new
+  s7 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
+  s1 --> s8: reattach the stored id (resume, or load)
+  s8 --> s8: load replays an old answer
+  s3 --> s7: late response from the killed child
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
@@ -51,11 +54,14 @@ stateDiagram-v2
   class s3 bugPath
   class s4 pink
   class s4 bugPath
-  class s5 tan
+  class s5 blue
   class s5 bugPath
-  class s6 teal
+  class s6 tan
   class s6 mayBreak
   class s6 bugPath
   class s7 teal
   class s7 mayBreak
   class s7 bugPath
+  class s8 teal
+  class s8 mayBreak
+  class s8 bugPath

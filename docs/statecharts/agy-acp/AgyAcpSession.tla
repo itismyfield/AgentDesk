@@ -3,12 +3,11 @@
 \* One channel, two person inputs, one AgentDesk restart, one agy exit, one stop, one clear,
 \* one refused resume and one failed steer prompt. A person input that arrives while a prompt
 \* is open is steered into that turn: it joins the turn, and the turn's one answer covers it.
-\* A steer error is either a certain pre-execution rejection (the input returns to the queue
-\* through a durable Returning record) or an unknown outcome (the input stays in the turn and
-\* is closed by the turn's post with an unknown-outcome notice, never sent again).
+\* A steer error of either kind (rejected before execution, or unknown outcome) never returns
+\* the input to the queue: it stays in the turn, is never sent again, and the turn's one post
+\* covers it with a notice.
 \* The child runs in its own process group, so an AgentDesk restart can leave it orphaned;
-\* boot sweeps that group before a new child is spawned. /clear also ends every Returning
-\* record, so a rejected steer the person cleared never comes back.
+\* boot sweeps that group before a new child is spawned.
 \* The platform kill calls (Unix group signals, Windows taskkill /T and the dcserver job
 \* object) are outside the model: Kill and Crash stand for both, and process tests check them.
 \* Output custody (spool -> writer -> Discord receipt) is abstracted to Settle; its
@@ -17,11 +16,10 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Lifetime,    \* "resident" | "per_turn"
           AttachMode,  \* "resume" | "load_gated" | "load_leak"
-          SteerMode,   \* "steer" | "early_close" | "after_close" | "refuse_drop" | "error_requeue"
-                       \* | "return_volatile"
+          SteerMode,   \* "steer" | "early_close" | "after_close" | "error_requeue" | "error_silent"
           BootMode,    \* "fail" | "rerun_sent"
           Watchdog,    \* TRUE | FALSE
-          ClearMode,   \* "detach" | "keep" | "returns_old"
+          ClearMode,   \* "detach" | "keep"
           Fence        \* TRUE: responses carry the child incarnation
 
 Inputs == 1..2
@@ -42,24 +40,22 @@ VARIABLES running,     \* AgentDesk process is up
           done,        \* per leader: durable terminal record of the turn
           outcome,     \* per leader: "none" | "answer" | "failure" | "cancelled"
           posts,       \* per input: terminal posts that cover it
-          refusedIn,   \* per input: leader of the turn that refused its steer (0 = none)
+          refusedIn,   \* per input: leader of the turn whose steer failed and re-queued it (mutant)
           cancelReq, cancelSent,
           zombie,      \* a killed child's late response is still in the pipe
           wrongDone,   \* a turn was ended by another child's response
           badSend,     \* a prompt went to a session retired by clear
           served,      \* the live child has received a prompt
-          returning,   \* per input: durable Returning record of a rejected steer
-          retMem,      \* per input: in-memory return only (mutant), lost on restart
-          uncertain,   \* per input: steer prompt ended with an unknown-outcome error
+          steerFailed, \* per input: its steer prompt ended with an error (either kind)
+          noticed,     \* per input: the post that covered it carried the steer-error notice
           orphan,      \* a child from before the restart may still run in its own group
-          discarded,   \* per input: /clear discarded it while its steer was being returned
-          clearPosts,  \* per input: /clear replies that cover it (not a turn post)
-          crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerRefuseLeft
+          clearedSent, \* per input: it had been sent when /clear ran
+          crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft
 
 vars == <<running, proc, attached, stored, nextGen, clearedGen, loading, st, sentCount, turnOf,
           open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone,
-          badSend, served, returning, retMem, uncertain, orphan, discarded, clearPosts, crashLeft,
-          dieLeft, stopLeft, clearLeft, refuseLeft, steerRefuseLeft>>
+          badSend, served, steerFailed, noticed, orphan, clearedSent, crashLeft, dieLeft, stopLeft,
+          clearLeft, refuseLeft, steerFailLeft>>
 
 Queued == {i \in Inputs : st[i] = "queued"}
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
@@ -72,8 +68,8 @@ Closing == {L \in Leaders : done[L] /\ posts[L] = 0}
 OpenTurns(o, t) == {t[i] : i \in o}
 
 sessionVars == <<attached, stored, nextGen, clearedGen, loading>>
-budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerRefuseLeft>>
-extraVars == <<returning, retMem, uncertain, orphan, discarded, clearPosts>>
+budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft>>
+extraVars == <<steerFailed, noticed, orphan, clearedSent>>
 
 Init ==
     /\ running = TRUE /\ proc = "none" /\ attached = NoGen /\ stored = NoGen /\ nextGen = 1
@@ -85,10 +81,9 @@ Init ==
     /\ cancelReq = FALSE /\ cancelSent = FALSE /\ zombie = FALSE
     /\ wrongDone = FALSE /\ badSend = FALSE /\ served = FALSE
     /\ crashLeft = 1 /\ dieLeft = 1 /\ stopLeft = 1 /\ clearLeft = 1 /\ refuseLeft = 1
-    /\ steerRefuseLeft = 1
-    /\ returning = [i \in Inputs |-> FALSE] /\ retMem = [i \in Inputs |-> FALSE]
-    /\ uncertain = [i \in Inputs |-> FALSE] /\ orphan = FALSE
-    /\ discarded = [i \in Inputs |-> FALSE] /\ clearPosts = [i \in Inputs |-> 0]
+    /\ steerFailLeft = 1
+    /\ steerFailed = [i \in Inputs |-> FALSE] /\ noticed = [i \in Inputs |-> FALSE]
+    /\ orphan = FALSE /\ clearedSent = [i \in Inputs |-> FALSE]
 
 \* A person posts in Discord (or an authenticated iMessage arrives); the mailbox keeps it.
 Arrive(i) ==
@@ -126,7 +121,7 @@ ReattachRefused ==
     /\ attached' = nextGen /\ stored' = nextGen /\ nextGen' = nextGen + 1
     /\ UNCHANGED <<running, proc, clearedGen, loading, st, sentCount, turnOf, open, done, outcome,
                    posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   crashLeft, dieLeft, stopLeft, clearLeft, steerRefuseLeft, extraVars>>
+                   crashLeft, dieLeft, stopLeft, clearLeft, steerFailLeft, extraVars>>
 
 \* session/load replays an old answer as session/update before it responds.
 ReplayOld(i) ==
@@ -141,9 +136,9 @@ LoadAnswered ==
                    open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie,
                    wrongDone, badSend, served, budgetVars, extraVars>>
 
-\* The next queued input is written as session/prompt after its durable record. While the open
-\* turn still has a prompt pending it steers that turn; otherwise it leads a new turn once no
-\* prompt is open. A steer refused by a turn waits for the next turn instead of retrying it.
+\* The next queued input is written as session/prompt after its durable record (the turn's
+\* origin list). While the open turn still has a prompt pending it steers that turn; otherwise
+\* it leads a new turn once no prompt is open. The mutant's re-queued steer avoids its old turn.
 JoinTarget ==
     IF SteerMode = "after_close" /\ Active = {} THEN Closing ELSE Active
 SendPrompt ==
@@ -187,37 +182,12 @@ AgyResponds ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, posts, refusedIn, zombie,
                    wrongDone, badSend, served, budgetVars, extraVars>>
 
-\* The steer prompt fails before execution for certain (parse/invalid request/method/params,
-\* auth, unknown session, or the line was never written). The input leaves the turn and a
-\* durable Returning record owns it until it is back in the queue (the mutant keeps that
-\* record in memory only; refuse_drop leaves the input in the turn).
-SteerRejected ==
-    /\ running /\ proc = "up" /\ steerRefuseLeft > 0
-    /\ \E i \in open :
-        /\ turnOf[i] # i
-        /\ LET L == turnOf[i]
-               rest == open \ {i}
-               t2 == IF SteerMode = "refuse_drop" THEN turnOf ELSE [turnOf EXCEPT ![i] = None]
-           IN /\ open' = rest
-              /\ turnOf' = t2
-              /\ refusedIn' = [refusedIn EXCEPT ![i] = L]
-              /\ sentCount' = [sentCount EXCEPT ![i] = sentCount[i] - 1]
-              /\ returning' = IF SteerMode \in {"refuse_drop", "return_volatile"}
-                                THEN returning ELSE [returning EXCEPT ![i] = TRUE]
-              /\ retMem' = IF SteerMode = "return_volatile"
-                             THEN [retMem EXCEPT ![i] = TRUE] ELSE retMem
-              /\ Finish(L, L \notin OpenTurns(rest, t2))
-              /\ cancelReq' = EndCancel(rest) /\ cancelSent' = EndCancelSent(rest)
-    /\ steerRefuseLeft' = steerRefuseLeft - 1
-    /\ UNCHANGED <<running, proc, sessionVars, st, posts, zombie, wrongDone, badSend, served,
-                   uncertain, orphan, discarded, clearPosts, crashLeft, dieLeft, stopLeft,
-                   clearLeft, refuseLeft>>
-
-\* The steer prompt fails with an unknown outcome (internal error, request aborted, any other
-\* code, deadline or lost pipe after the write): agy may have run it. The input stays in the
-\* turn and is covered by its post with an unknown-outcome notice (the mutant re-queues it).
+\* The steer prompt fails: rejected before execution, or an unknown outcome (internal error,
+\* request aborted, any other code, deadline or lost pipe after the write). Either way the
+\* input stays in the turn, is never sent again, and the turn's post covers it with a notice
+\* (the mutant re-queues it).
 SteerErrored ==
-    /\ running /\ proc = "up" /\ steerRefuseLeft > 0
+    /\ running /\ proc = "up" /\ steerFailLeft > 0
     /\ \E i \in open :
         /\ turnOf[i] # i
         /\ LET L == turnOf[i]
@@ -228,25 +198,13 @@ SteerErrored ==
               /\ turnOf' = t2
               /\ st' = IF requeue THEN [st EXCEPT ![i] = "queued"] ELSE st
               /\ refusedIn' = IF requeue THEN [refusedIn EXCEPT ![i] = L] ELSE refusedIn
-              /\ uncertain' = IF requeue THEN uncertain ELSE [uncertain EXCEPT ![i] = TRUE]
+              /\ steerFailed' = IF requeue THEN steerFailed ELSE [steerFailed EXCEPT ![i] = TRUE]
               /\ Finish(L, L \notin OpenTurns(rest, t2))
               /\ cancelReq' = EndCancel(rest) /\ cancelSent' = EndCancelSent(rest)
-    /\ steerRefuseLeft' = steerRefuseLeft - 1
+    /\ steerFailLeft' = steerFailLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, posts, zombie, wrongDone, badSend,
-                   served, returning, retMem, orphan, discarded, clearPosts, crashLeft, dieLeft,
-                   stopLeft, clearLeft, refuseLeft>>
-
-\* The Returning record (or the mutant's memory) puts the input back at the queue front, then
-\* the record is cleared; the destination actor runs this and /clear one at a time, and the
-\* ticketless requeue counts an already queued copy as returned, so a replay after boot is safe.
-ReturnToQueue(i) ==
-    /\ running /\ (returning[i] \/ retMem[i])
-    /\ st' = [st EXCEPT ![i] = "queued"]
-    /\ returning' = [returning EXCEPT ![i] = FALSE]
-    /\ retMem' = [retMem EXCEPT ![i] = FALSE]
-    /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, posts,
-                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   uncertain, orphan, discarded, clearPosts, budgetVars>>
+                   served, noticed, orphan, clearedSent, crashLeft, dieLeft, stopLeft, clearLeft,
+                   refuseLeft>>
 
 \* Close every turn that still has an open prompt with the given outcome.
 FailOpenTurns(kind) ==
@@ -262,7 +220,7 @@ AgyDies ==
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    zombie, wrongDone, badSend, served, crashLeft, stopLeft, clearLeft, refuseLeft,
-                   steerRefuseLeft, extraVars>>
+                   steerFailLeft, extraVars>>
 
 \* No update within the inactivity budget, or no cancelled answer within the cancel budget:
 \* kill the child's own process group and close the open turns.
@@ -292,7 +250,7 @@ UserStop ==
     /\ cancelReq' = TRUE /\ stopLeft' = stopLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft, dieLeft,
-                   clearLeft, refuseLeft, steerRefuseLeft, extraVars>>
+                   clearLeft, refuseLeft, steerFailLeft, extraVars>>
 
 SendCancel ==
     /\ running /\ proc = "up" /\ cancelReq /\ ~cancelSent /\ open # {}
@@ -300,27 +258,19 @@ SendCancel ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, zombie, wrongDone, badSend, served, budgetVars, extraVars>>
 
-\* /clear retires the stored session; a running turn is stopped like !stop. A rejected steer
-\* still being returned is the person's discarded input too: one durable write ends its
-\* Returning record before the queue purge, and the clear reply covers it. The mutant
-\* discards it but leaves the record, which still returns it to the queue.
+\* /clear retires the stored session; a running turn is stopped like !stop. Inputs already sent
+\* stay members of their turn: its cancel or failure post covers them, also when a steer error
+\* arrives after the clear.
 Clear ==
-    LET hit == {i \in Inputs : returning[i] \/ retMem[i]}
-        ends == ClearMode # "returns_old"
-    IN
     /\ running /\ clearLeft > 0 /\ clearLeft' = clearLeft - 1
     /\ clearedGen' = Max2(clearedGen, Max2(stored, attached))
     /\ stored' = NoGen
-    /\ attached' = IF ClearMode = "keep" THEN attached ELSE NoGen
+    /\ attached' = IF ClearMode = "detach" THEN NoGen ELSE attached
     /\ cancelReq' = (open # {})
-    /\ discarded' = [i \in Inputs |-> discarded[i] \/ i \in hit]
-    /\ st' = [i \in Inputs |-> IF i \in hit THEN "done" ELSE st[i]]
-    /\ clearPosts' = [i \in Inputs |-> IF i \in hit THEN clearPosts[i] + 1 ELSE clearPosts[i]]
-    /\ returning' = IF ends THEN [i \in Inputs |-> returning[i] /\ i \notin hit] ELSE returning
-    /\ retMem' = IF ends THEN [i \in Inputs |-> retMem[i] /\ i \notin hit] ELSE retMem
-    /\ UNCHANGED <<running, proc, nextGen, loading, sentCount, turnOf, open, done, outcome,
+    /\ clearedSent' = [i \in Inputs |-> clearedSent[i] \/ st[i] = "sent"]
+    /\ UNCHANGED <<running, proc, nextGen, loading, st, sentCount, turnOf, open, done, outcome,
                    posts, refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft,
-                   dieLeft, stopLeft, refuseLeft, steerRefuseLeft, uncertain, orphan>>
+                   dieLeft, stopLeft, refuseLeft, steerFailLeft, steerFailed, noticed, orphan>>
 
 \* One-turn lifetime: the child is closed after its last prompt settles.
 CloseAfterTurn ==
@@ -330,13 +280,18 @@ CloseAfterTurn ==
                    outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend,
                    served, budgetVars, extraVars>>
 
-\* The writer posts the turn's recorded disposition once; that post covers every member.
+\* The writer posts the turn's recorded disposition once; that post covers every member, and
+\* carries one notice line for each member whose steer failed (the mutant leaves it out).
 Settle(L) ==
     /\ running /\ L \in Leaders /\ done[L] /\ posts[L] = 0
     /\ posts' = [i \in Inputs |-> IF turnOf[i] = L THEN posts[i] + 1 ELSE posts[i]]
     /\ st' = [i \in Inputs |-> IF turnOf[i] = L THEN "done" ELSE st[i]]
+    /\ noticed' = [i \in Inputs |->
+                     IF turnOf[i] = L /\ SteerMode # "error_silent" THEN steerFailed[i]
+                     ELSE noticed[i]]
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, refusedIn,
-                   cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars, extraVars>>
+                   cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars,
+                   steerFailed, orphan, clearedSent>>
 
 \* AgentDesk restart: memory is lost. The child has its own process group, so it may outlive
 \* AgentDesk as an orphan until boot sweeps it.
@@ -346,17 +301,17 @@ Crash ==
     /\ proc' = IF proc = "up" THEN "dead" ELSE proc
     /\ attached' = NoGen /\ loading' = FALSE /\ open' = {} /\ zombie' = FALSE
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE
-    /\ orphan' = (proc = "up") /\ retMem' = [i \in Inputs |-> FALSE]
+    /\ orphan' = (proc = "up")
     /\ UNCHANGED <<stored, nextGen, clearedGen, st, sentCount, turnOf, done, outcome, posts,
                    refusedIn, wrongDone, badSend, served, dieLeft, stopLeft, clearLeft, refuseLeft,
-                   steerRefuseLeft, returning, uncertain, discarded, clearPosts>>
+                   steerFailLeft, steerFailed, noticed, clearedSent>>
 
 \* Boot sweeps the recorded child group of the previous AgentDesk before any new spawn.
 SweepOrphan ==
     /\ running /\ orphan /\ orphan' = FALSE
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   returning, retMem, uncertain, discarded, clearPosts, budgetVars>>
+                   steerFailed, noticed, clearedSent, budgetVars>>
 
 \* Boot: a turn with written prompts and no terminal record is failed with a notice (the mutant
 \* re-queues its inputs and writes them again).
@@ -376,26 +331,24 @@ AllSettled == \A i \in Inputs : st[i] = "done"
 Rest == AllSettled /\ UNCHANGED vars
 
 Next ==
-    \/ \E i \in Inputs : Arrive(i) \/ ReplayOld(i) \/ Settle(i) \/ ReturnToQueue(i)
+    \/ \E i \in Inputs : Arrive(i) \/ ReplayOld(i) \/ Settle(i)
     \/ Spawn \/ NewSession \/ Reattach \/ ReattachRefused \/ LoadAnswered
-    \/ SendPrompt \/ AgyResponds \/ SteerRejected \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
+    \/ SendPrompt \/ AgyResponds \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
     \/ UserStop \/ SendCancel \/ Clear \/ CloseAfterTurn \/ Crash \/ SweepOrphan \/ Boot \/ Rest
 
-\* agy itself is not assumed to answer (no fairness on AgyResponds, SteerRejected or SteerErrored): only
+\* agy itself is not assumed to answer (no fairness on AgyResponds or SteerErrored): only
 \* AgentDesk's own steps, the watchdog included, are fair.
 Fairness ==
     /\ WF_vars(Spawn) /\ WF_vars(NewSession) /\ WF_vars(Reattach) /\ WF_vars(LoadAnswered)
     /\ WF_vars(SendPrompt) /\ WF_vars(SendCancel) /\ WF_vars(WatchdogKill)
     /\ WF_vars(ZombieResponse) /\ WF_vars(Boot) /\ WF_vars(CloseAfterTurn)
     /\ WF_vars(SweepOrphan)
-    /\ \A i \in Inputs : WF_vars(Settle(i)) /\ WF_vars(ReturnToQueue(i))
+    /\ \A i \in Inputs : WF_vars(Settle(i))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 \* Rules
-\* Terminal posts that cover an input: its turn's post or a /clear reply.
-Covered(i) == posts[i] + clearPosts[i]
-AtMostOnePost == \A i \in Inputs : Covered(i) <= 1
+AtMostOnePost == \A i \in Inputs : posts[i] <= 1
 NoDuplicateExecution == \A i \in Inputs : sentCount[i] <= 1
 NoForeignResponse == ~wrongDone
 NoPromptToClearedSession == ~badSend
@@ -403,25 +356,21 @@ PostOnlyWithDisposition ==
     \A i \in Inputs : posts[i] >= 1 => turnOf[i] # None /\ done[turnOf[i]]
 \* A turn's answer is posted only after every steered prompt in it has been answered.
 AnswerCoversWholeSteer == \A i \in Inputs : posts[i] >= 1 => i \notin open
-\* A refused steer is not counted as answered by the turn that never received it.
-NoAnswerForRefusedSteer ==
-    \A i \in Inputs : refusedIn[i] # None /\ turnOf[i] = refusedIn[i] => posts[i] = 0
-\* A sent input always has a durable owner: its turn or a Returning record.
-DurableOwner == \A i \in Inputs : st[i] = "sent" => turnOf[i] # None \/ returning[i]
-\* An input /clear discarded stays closed: never queued or sent again.
-NoReviveAfterClear == \A i \in Inputs : discarded[i] => st[i] = "done"
+\* A failed steer is never covered as a plain answer: the post that covers it names the failure.
+NoAnswerForRefusedSteer == \A i \in Inputs : posts[i] >= 1 /\ steerFailed[i] => noticed[i]
+\* A sent input always has a durable owner: the turn whose origin list holds it.
+DurableOwner == \A i \in Inputs : st[i] = "sent" => turnOf[i] # None
+\* An input that had been sent when /clear ran is never queued again.
+NoReviveAfterClear == \A i \in Inputs : clearedSent[i] => st[i] # "queued"
 \* Reachability witnesses (expected to break when checked alone): a steered input answered by
-\* its turn, an unknown-outcome steer closed by its turn's post, a rejected steer answered
-\* later by a turn of its own, and a returning steer discarded by /clear.
+\* its turn, a failed steer covered by its turn's post, and a steer that fails after /clear.
 NoSteeredAnswer ==
     ~\E i \in Inputs : turnOf[i] \notin {None, i} /\ posts[i] = 1 /\ outcome[turnOf[i]] = "answer"
 NoUncertainCovered ==
-    ~\E i \in Inputs : uncertain[i] /\ posts[i] = 1
-NoRefusedThenAnswered ==
-    ~\E i \in Inputs : refusedIn[i] # None /\ turnOf[i] = i /\ posts[i] = 1 /\ outcome[i] = "answer"
-\* A rejected steer still being returned is discarded by /clear.
-NoClearedReturning == ~\E i \in Inputs : discarded[i]
+    ~\E i \in Inputs : steerFailed[i] /\ posts[i] = 1
+NoSteerFailAfterClear ==
+    ~\E i \in Inputs : clearedSent[i] /\ steerFailed[i] /\ posts[i] = 1
 \* Liveness: every accepted input is eventually covered by one terminal post
-\* (answer, failure, cancel or clear notice), steered inputs included.
-EveryInputSettles == \A i \in Inputs : (st[i] # "absent") ~> (Covered(i) >= 1)
+\* (answer, failure notice or cancel notice), steered inputs included.
+EveryInputSettles == \A i \in Inputs : (st[i] # "absent") ~> (posts[i] >= 1)
 =============================================================================

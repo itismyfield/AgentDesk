@@ -6,8 +6,8 @@ stateDiagram-v2
     lg0: Process
     lg1: Turn
     lg2: Session
-    lg3: Breaks AtMostOnePost or NoReviveAfterClear in some cases
-    lg4: Path to the AtMostOnePost or NoReviveAfterClear bug
+    lg3: Breaks NoDuplicateExecution or NoReviveAfterClear in some cases
+    lg4: Path to the NoDuplicateExecution or NoReviveAfterClear bug
   }
   class lg0 tan
   class lg1 blue
@@ -19,23 +19,18 @@ stateDiagram-v2
   s2: Session idle
   s3: Prompt open
   s4: Turn steered: two prompts open
-  s5: Rejected steer held by Returning record
-  s6: Turn answered, post pending
+  s5: Turn answered, post pending
   [*] --> s0
   s0 --> s0: a person sends a message
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new
   s2 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
   s3 --> s4: session/prompt for the next input (new turn, or steer while a prompt is open)
-  s4 --> s5: steer prompt rejected before execution
+  s4 --> s1: person runs /clear
   s4 --> s3: agy answers the prompt (stopReason)
-  s5 --> s5: person runs /clear (a steer being returned is discarded too)
-  s3 --> s5: steer prompt rejected before execution
-  s5 --> s1: rejected steer put back at the queue front
-  s1 --> s6: session/new
-  s6 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
-  s3 --> s6: agy answers the prompt (stopReason)
-  s6 --> s6: writer posts the turn's one terminal message (covers steered inputs)
+  s1 --> s1: steer prompt fails#59; the input is put back in the queue
+  s3 --> s5: steer prompt fails#59; the input is put back in the queue
+  s5 --> s3: session/prompt for the next input (new turn, or steer while a prompt is open)
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
@@ -44,10 +39,9 @@ stateDiagram-v2
   class s2 teal
   class s2 bugPath
   class s3 blue
+  class s3 mayBreak
   class s3 bugPath
   class s4 blue
   class s4 bugPath
+  class s5 teal
   class s5 bugPath
-  class s6 teal
-  class s6 mayBreak
-  class s6 bugPath

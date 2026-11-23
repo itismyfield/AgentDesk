@@ -9,20 +9,18 @@
 # Applies to: intake-consent/IntakeConsentBookkeeping.cfg, intake-consent/IntakeConsentCurrent.cfg, intake-consent/IntakeConsentD1Public.cfg, intake-consent/IntakeConsentForge.cfg, intake-consent/IntakeConsentOwnerOnly.cfg, intake-consent/IntakeConsentProposed.cfg, intake-consent/IntakeConsentReuse.cfg, intake-consent/IntakeConsentScopeOpen.cfg, intake-consent/IntakeConsentStale.cfg
 # Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
 agy-acp/AgyAcpClearKeeps.cfg	AgyAcpSession	NoPromptToClearedSession	-
-agy-acp/AgyAcpClearReturnsOld.cfg	AgyAcpSession	AtMostOnePost,NoReviveAfterClear	-
 agy-acp/AgyAcpDesign.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpDesignLoad.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpLoadLeak.cfg	AgyAcpSession	AtMostOnePost	-
-agy-acp/AgyAcpMutants.cfg	AgyAcpSession	AtMostOnePost,NoDuplicateExecution,NoForeignResponse,NoPromptToClearedSession	-
+agy-acp/AgyAcpMutants.cfg	AgyAcpSession	AtMostOnePost,NoDuplicateExecution,NoForeignResponse,NoPromptToClearedSession,NoReviveAfterClear	-
 agy-acp/AgyAcpNoFence.cfg	AgyAcpSession	NoForeignResponse	-
 agy-acp/AgyAcpNoWatchdog.cfg	AgyAcpSession	-	EveryInputSettles
 agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
-agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution	-
-agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,AtMostOnePost,PostOnlyWithDisposition	-
-agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,AtMostOnePost,PostOnlyWithDisposition	-
-agy-acp/AgyAcpSteerErrorRequeue.cfg	AgyAcpSession	NoDuplicateExecution	-
-agy-acp/AgyAcpSteerRefuseDrop.cfg	AgyAcpSession	NoAnswerForRefusedSteer	-
-agy-acp/AgyAcpSteerReturnVolatile.cfg	AgyAcpSession	DurableOwner	EveryInputSettles
+agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
+agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
+agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
+agy-acp/AgyAcpSteerErrorRequeue.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
+agy-acp/AgyAcpSteerErrorSilent.cfg	AgyAcpSession	NoAnswerForRefusedSteer	-
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 campaign-execution/CampaignApprovalGate.cfg	CampaignApprovalGate	-	-
