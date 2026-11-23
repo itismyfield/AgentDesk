@@ -8,6 +8,26 @@
 # WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
 # Applies to: intake-consent/IntakeConsentBookkeeping.cfg, intake-consent/IntakeConsentCurrent.cfg, intake-consent/IntakeConsentD1Public.cfg, intake-consent/IntakeConsentForge.cfg, intake-consent/IntakeConsentOwnerOnly.cfg, intake-consent/IntakeConsentProposed.cfg, intake-consent/IntakeConsentReuse.cfg, intake-consent/IntakeConsentScopeOpen.cfg, intake-consent/IntakeConsentStale.cfg
 # Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
+agy-acp/AgyAcpClearKeeps.cfg	AgyAcpSession	NoPromptToClearedSession	-
+agy-acp/AgyAcpDesign.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpDesignLoad.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpForceCancelFirst.cfg	AgyAcpSession	-	ForceEndsChild
+agy-acp/AgyAcpForceFirstOnly.cfg	AgyAcpSession	-	ForceEndsTurn
+agy-acp/AgyAcpForceNoWatchdog.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpLoadLeak.cfg	AgyAcpSession	AtMostOnePost	-
+agy-acp/AgyAcpMutants.cfg	AgyAcpSession	AtMostOnePost,NoDuplicateExecution,NoForeignResponse,NoPromptToClearedSession,NoReviveAfterClear	-
+agy-acp/AgyAcpNoFence.cfg	AgyAcpSession	NoForeignResponse	-
+agy-acp/AgyAcpNoWatchdog.cfg	AgyAcpSession	-	EveryInputSettles
+agy-acp/AgyAcpPathBoot.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpPathPerTurn.cfg	AgyAcpSession	SessionKeepsPath	-
+agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpReceiptFromMemory.cfg	AgyAcpSession	NoMissingOrigin	-
+agy-acp/AgyAcpRecordWaiter.cfg	AgyAcpSession	ChildRecorded	-
+agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
+agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
+agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
+agy-acp/AgyAcpSteerErrorRequeue.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
+agy-acp/AgyAcpSteerErrorSilent.cfg	AgyAcpSession	NoAnswerForRefusedSteer	-
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 campaign-execution/CampaignApprovalGate.cfg	CampaignApprovalGate	-	-

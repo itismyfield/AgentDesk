@@ -83,6 +83,7 @@ pub(crate) fn install_boot_snapshots(
     crate::config::session_hosts::install_selected(selection);
     #[cfg(unix)]
     crate::services::session_host::managed_config::maintenance::boot();
+    crate::services::agy_acp::install(config);
     crate::config_live_reload::install(config.clone());
     Ok(())
 }

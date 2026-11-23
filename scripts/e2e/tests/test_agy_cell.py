@@ -105,6 +105,14 @@ class E65Verdict(unittest.TestCase):
         # A turn that never terminates stops the sequence: no further input is sent.
         self.assertEqual(Cell(no_footer).run()["transmissions"], 1)
 
+    def test_only_the_fresh_session_banner_on_the_first_body_is_ignored(self):
+        def first(lead, extra=()):
+            return lambda i, p: [(1, 1, lead + p.rsplit(" ", 1)[-1]), *extra, (2, 2, FOOTER)] if i == 0 else good(i, p)
+        for lead in ("🆕 새 세션 시작\n\n", "🆕 새 세션 시작 (최근 대화 7개를 읽어들였습니다)\n\n"):
+            self.assertEqual(Cell(first(lead)).run()["status"], "PASS")
+        for cell in (Cell(first("안녕\n\n")), Cell(first("🆕 새 세션 시작\n\n", [(1, 5, "🆕 새 세션 시작\n\nAGY-r1-T1")]))):
+            self.assertIn("short_body_mismatch", cell.run()["reasons"].get("T1", []))
+
     def test_last_turn_needs_its_late_duplicate_window(self):
         turn = judge.Turn("short", "AGY-r1-T2", "3000", "-# ⏱️", done_at=10.0, idle_at=11.0, session="s1",
                           lease_turn={"user_message_id": 3000, "turn_nonce": "x"}, observed_until=14.0)
@@ -155,7 +163,7 @@ class DeployRequests(unittest.TestCase):
             "profile": paths["profile"], "admission": paths["admission"], "resources": paths["resources"],
             "deploy_lock": str(self.root / "deploy.lock"),
             "credentials": {name: f"op://AgentDesk/Test/{name}" for name in
-                            ("antigravity_bot_token", "announce_bot_token", "notify_bot_token")}}))
+                            ("antigravity_bot_token", "announce_bot_token", "notify_bot_token", "gemini_api_key")}}))
 
     def test_switched_off_queues_and_runs_nothing(self):
         self.save(False)
@@ -191,9 +199,17 @@ class DeployRequests(unittest.TestCase):
         self.assertEqual(instance.ensure(config, HEAD, execute=execute, pipe=lambda *a: pipes.append(a)), "u1")
         self.assertEqual([source for source, _, _ in pipes],
                          [["agent-op", "read", f"op://AgentDesk/Test/{name}"]
-                          for name in ("announce_bot_token", "antigravity_bot_token", "notify_bot_token")])
+                          for name in ("announce_bot_token", "antigravity_bot_token", "gemini_api_key", "notify_bot_token")])
         self.assertTrue(all("op://" not in " ".join(call) for call in calls))
         self.assertEqual(pipes[0][2]["PATH"].split(":")[0], str(self.root / "worktree/target/debug"))
+        # Same head reuses the instance only while its credential references are unchanged.
+        prepares = lambda: sum("prepare" in call for call in calls)
+        instance.ensure(config, HEAD, execute=execute, pipe=lambda *a: None)
+        self.assertEqual(prepares(), 1)
+        for refs in ({**config["credentials"], "gemini_api_key": "op://AgentDesk/Other/credential"},
+                     {k: v for k, v in config["credentials"].items() if k != "gemini_api_key"}):
+            instance.ensure({**config, "credentials": refs}, HEAD, execute=execute, pipe=lambda *a: None)
+        self.assertEqual(prepares(), 3)
         replies["status"] = " M dirty\n"
         (self.root / "state/instance.json").unlink()
         calls.clear()

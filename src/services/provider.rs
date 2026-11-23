@@ -261,6 +261,8 @@ pub struct CancelToken {
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
     pub(crate) pid_kill_claim: AtomicU8,
     pub(crate) name_kill_claim: AtomicU8,
+    /// Set when a destructive cleanup is admitted: the turn's process must end, not only stop.
+    termination_requested: AtomicBool,
     /// The exact Codex episode record owed delivery checks; unset on every current path.
     codex_owed: std::sync::OnceLock<std::sync::Arc<cancel_token_codex_owed::Record>>,
 }
@@ -301,6 +303,7 @@ impl CancelToken {
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),
+            termination_requested: AtomicBool::new(false),
             codex_owed: std::sync::OnceLock::new(),
         }
     }

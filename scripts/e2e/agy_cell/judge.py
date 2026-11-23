@@ -4,8 +4,11 @@ A verdict is PASS only when every required piece of evidence was observed; a mis
 observation is a reason, never a silent success.
 """
 from dataclasses import dataclass, field
+import re
 
 LATE_WINDOW_S = 5.0
+# The relay's one-shot fresh-session line (session_panel.rs `SessionPanelKind::Fresh`) on a turn's first body.
+SESSION_BANNER = re.compile(r"🆕 새 세션 시작(?: \(최근 대화 \d+개를 읽어들였습니다\))?\n+")
 
 
 def long_lines(run):
@@ -54,7 +57,13 @@ class Turn:
         return self.done_at is not None and self.lease_turn is not None and self.idle_at is not None
 
     def ordered(self):
-        return [self.bodies[key] for key in sorted(self.bodies, key=int)]
+        """Bodies by message ID; only the first may carry the fresh-session banner, which is not answer text."""
+        bodies = [dict(self.bodies[key]) for key in sorted(self.bodies, key=int)]
+        if bodies and (banner := SESSION_BANNER.match(bodies[0]["content"])):
+            bodies[0]["content"] = bodies[0]["content"][banner.end():]
+            if not bodies[0]["content"].strip():
+                bodies.pop(0)
+        return bodies
 
 
 def judge_turn(turn, last):

@@ -1875,6 +1875,10 @@ fn claude_login_username_comes_from_effective_user_only() {
         if let Some(overlay) = overlay {
             command.envs(overlay.env);
         }
+        // Outside an instance an agy-marked child stays as given even beside a key file.
+        if mode == "operating" {
+            command.env("AGENTDESK_TEST_AGY_LOGIN", "1");
+        }
         environment::configure_child_command(&mut command).unwrap();
         let values = command
             .get_envs()
@@ -1901,7 +1905,7 @@ fn claude_login_username_comes_from_effective_user_only() {
             assert!(!values.contains_key(std::ffi::OsStr::new("USER")));
             assert!(!values.contains_key(std::ffi::OsStr::new("LOGNAME")));
             if mode == "operating" {
-                assert!(values.is_empty());
+                assert_eq!(values.len(), 1, "{values:?}");
             }
         }
         assert_eq!(command.get_program(), std::ffi::OsStr::new("/usr/bin/true"));
@@ -1924,6 +1928,8 @@ fn claude_login_username_comes_from_effective_user_only() {
             .env("LOGNAME", "forged-parent-logname");
         if mode == "operating" {
             child.env_remove("AGENTDESK_TEST_MANIFEST");
+            std::fs::create_dir_all(root.join("credential")).unwrap();
+            std::fs::write(root.join("credential/gemini_api_key"), "SYNTHETIC_GEMINI").unwrap();
         }
         tests::assert_single_test_passed(&child.output().unwrap(), NAME);
     }

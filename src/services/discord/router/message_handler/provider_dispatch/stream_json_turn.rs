@@ -7,6 +7,7 @@ use poise::serenity_prelude::MessageId;
 use uuid::Uuid;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::agy_acp;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::router::TurnKind;
 use crate::services::imsg_reply::agy_input;
@@ -27,6 +28,10 @@ pub(in crate::services::discord::router::message_handler) struct AgyForeground {
     session_key: String,
     ready: Option<ReadyWriter>,
     imessage: Result<Option<ImessageSource>, &'static str>,
+    /// A person wrote this input: a live human Discord author or an exact iMessage claim.
+    human: bool,
+    /// `None` starts the installed `agy acp`.
+    acp_launch: Option<agy_acp::Launch>,
 }
 
 #[derive(Clone)]
@@ -54,6 +59,7 @@ impl AgyForeground {
         inflight_saved: bool,
         state: &InflightTurnState,
         cancel: &CancelToken,
+        human_author: bool,
     ) -> Option<Self> {
         let message = source?.get();
         let nonce = cancel.turn_nonce()?;
@@ -75,6 +81,8 @@ impl AgyForeground {
             // Writer selection supplies this permit once the agy reader is wired.
             ready: None,
             imessage: Ok(None),
+            human: human_author,
+            acp_launch: None,
         })
     }
 
@@ -118,6 +126,8 @@ impl AgyForeground {
             imessage: exact
                 .then_some(Some(claim.source))
                 .ok_or("agy iMessage claim is not durable or exact"),
+            human: exact,
+            acp_launch: None,
         })
     }
 
@@ -184,6 +194,24 @@ fn execute_request(
     request: ProviderTurnRequest,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    if acp_selected(dialect, turn)
+        && let Some(input) = &turn.agy_foreground
+    {
+        // ACP never resumes the `-p` conversation; the shared session value passes through untouched.
+        let request = ProviderTurnRequest {
+            session: None,
+            ..request
+        };
+        let mut spool = input.reserve(turn, &request)?;
+        let acp = agy_acp::AcpTurn {
+            destination: turn.channel_id,
+            request,
+            shared_session: turn.session_id,
+            launch: input.acp_launch.clone(),
+            spool: spool.as_mut(),
+        };
+        return agy_acp::run_turn(acp, sender);
+    }
     if matches!(dialect, StreamJsonDialectId::Agy)
         && let Some(input) = &turn.agy_foreground
         && let Some(mut spool) = input.reserve(turn, &request)?
@@ -191,6 +219,19 @@ fn execute_request(
         return agy::execute_recorded(request, sender, &mut spool);
     }
     execute_streaming(dialect, request, sender)
+}
+
+/// The boot-time switch is read first, so a turn that stays on `-p` locks or spawns nothing extra.
+fn acp_selected(dialect: StreamJsonDialectId, turn: &StreamingTurn<'_>) -> bool {
+    agy_acp::ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        && matches!(dialect, StreamJsonDialectId::Agy)
+        && *turn.provider == ProviderKind::Antigravity
+        && turn.registration_origin == Some(false)
+        && turn.dispatch_type.is_none()
+        && turn
+            .agy_foreground
+            .as_ref()
+            .is_some_and(|input| input.human)
 }
 
 pub(super) fn request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, String> {
