@@ -89,6 +89,7 @@ pub(super) fn spawn(record_dir: Option<PathBuf>, deadlines: Deadlines) -> Handle
         tx: tx.clone(),
         incarnation: 0,
         recorded: 0,
+        finished: 0,
         resident: None,
         pending: HashMap::new(),
         turn: None,
@@ -125,6 +126,8 @@ struct Actor {
     incarnation: u64,
     /// The incarnation whose `child.json` this actor wrote; only its exit removes the file.
     recorded: u64,
+    /// The last turn that finished; its late Terminate still ends the idle child.
+    finished: u64,
     resident: Option<Resident>,
     pending: HashMap<(u64, u64), Step>,
     turn: Option<Open>,
@@ -189,6 +192,9 @@ impl Actor {
             Event::Terminate { turn } if self.owns(turn) => {
                 self.stop_child();
                 self.finish(Err(Failure::Cancelled));
+            }
+            Event::Terminate { turn } if self.turn.is_none() && turn == self.finished => {
+                self.stop_child();
             }
             Event::Line {
                 incarnation,
@@ -439,6 +445,7 @@ impl Actor {
 
     fn finish(&mut self, result: Result<StopReason, Failure>) {
         if let Some(open) = self.turn.take() {
+            self.finished = open.request.turn;
             let _ = open.request.events.send(TurnEvent::Finished(result));
         }
     }

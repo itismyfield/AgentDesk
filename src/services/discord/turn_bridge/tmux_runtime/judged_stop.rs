@@ -168,6 +168,14 @@ impl ChannelStop {
         &self.token
     }
 
+    /// A forced stop's intent on the judged token, recorded before its cancel is published.
+    pub(in crate::services::discord) fn intend_termination(&self, policy: TmuxCleanupPolicy) {
+        if self.target.effective_policy(policy).should_cleanup_tmux() {
+            let expected = self.target.expected_binding();
+            self.token.intend_termination(Some(expected));
+        }
+    }
+
     /// Cancels the judged token only while it is still the channel's turn, then records the
     /// tombstone under the name judged with it and binds the name the judge read.
     pub(in crate::services::discord) async fn cancel(&self) -> CancelActiveTurnResult {

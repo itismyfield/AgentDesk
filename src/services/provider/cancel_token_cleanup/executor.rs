@@ -47,6 +47,17 @@ impl<'a> ExpectedBinding<'a> {
     }
 }
 
+/// Why a destructive cleanup of `name` kills nothing: the binding moved off `expected`, or its
+/// host marker is not tmux. A force-kill's verdict judged the host once, so only others read it.
+fn host_refusal(name: Option<&str>, expected: Option<ExpectedBinding<'_>>) -> Option<String> {
+    if expected.is_some_and(|expected| expected.name() != name) {
+        return Some("binding moved".into());
+    }
+    let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
+    name.filter(|_| !judged)
+        .and_then(crate::services::tmux_common::host_marker::marker_refusal)
+}
+
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupOutcome {
@@ -70,6 +81,23 @@ impl CancelToken {
     /// Whether a forced stop was admitted; a cancel cause alone never sets it.
     pub(crate) fn termination_requested(&self) -> bool {
         self.termination_requested.load(Ordering::Acquire)
+    }
+
+    /// Records a forced stop ahead of its cancel, so the turn never ends on a plain cancel;
+    /// a stale generation or a refused or moved host records nothing.
+    pub(crate) fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
+        let binding = self
+            .tmux_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let stale = matches!(
+            authority::authorize(binding.as_ref()),
+            KillAuthorization::Stale { .. }
+        );
+        if !stale && host_refusal(binding.as_ref().map(TmuxBinding::name), expected).is_none() {
+            self.termination_requested.store(true, Ordering::Release);
+        }
     }
 
     /// Execute all token-owned destructive cleanup behind one generation fence.
@@ -161,14 +189,8 @@ impl CancelToken {
         let name = binding.as_ref().map(TmuxBinding::name);
         // Checked before either claim, so a refused host leaves both kills untaken.
         let destructive = !matches!(request.intent, TmuxCleanupIntent::PreserveSession);
-        let moved = destructive && expected.is_some_and(|expected| expected.name() != name);
-        // A force-kill's verdict judged the host once; every other cleanup reads the marker here.
-        let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
-        let marker = crate::services::tmux_common::host_marker::marker_refusal;
-        let refusal = name
-            .filter(|_| destructive && !moved && !judged)
-            .and_then(marker);
-        if moved || refusal.is_some() {
+        let refusal = destructive.then(|| host_refusal(name, expected)).flatten();
+        if refusal.is_some() {
             let source = &request.cancel_source;
             tracing::warn!(?name, ?expected, ?refusal, %source, "cleanup refused before any kill");
             return CleanupOutcome {

@@ -112,13 +112,21 @@ pub(super) async fn stop_judged_channel_runtime(
             Some(result)
         } else {
             match stop.refused() {
-                false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
+                false => {
+                    // A forced stop's intent precedes its cancel: the turn never ends on a plain one.
+                    if cleanup_requested {
+                        stop.intend_termination(cleanup_policy);
+                    }
+                    Some(stop.cancel().await).filter(|result| result.token.is_some())
+                }
                 true => None,
             }
         };
         let Some(result) = result else {
             return host_guard_preserved(&shared, channel_id).await;
         };
+        #[cfg(all(test, unix))]
+        agy_acp_stop_tests::after_cancel(channel_id).await;
         // The cancel just published ends the judged execution; its receipt commits before this
         // stop's kill, so the pane death that kill causes cannot settle it as failed.
         if !native_published {

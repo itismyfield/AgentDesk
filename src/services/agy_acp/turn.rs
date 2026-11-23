@@ -53,7 +53,16 @@ pub(super) fn drive(
         match rx.recv_timeout(EXIT_POLL) {
             Ok(TurnEvent::Attached { session }) => out.attached(&session),
             Ok(TurnEvent::Update(update)) => out.update(update, &mut body),
-            Ok(TurnEvent::Finished(result)) => return out.finish(result, body),
+            Ok(TurnEvent::Finished(result)) => {
+                // A forced stop that agy's answer outran still ends the child.
+                if sent != Some(true)
+                    && cancel_requested(out.cancel)
+                    && out.cancel.is_some_and(forced)
+                {
+                    handle.send(Event::Terminate { turn });
+                }
+                return out.finish(result, body);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return out.finish(Err(Failure::Exited), body),
         }

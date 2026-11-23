@@ -30,14 +30,14 @@ while IFS= read -r line; do
     eof) exit 0 ;;
     hang|cancel) held=$id ;;
     deaf) exec sleep 1000 ;;
-    group) sleep 1000 & echo $! > "$log.grandchild"; held=$id ;;
+    group|gcancel) sleep 1000 & echo $! > "$log.grandchild"; held=$id ;;
     perm) held=$id; send '{"jsonrpc":"2.0","id":"p","method":"session/request_permission","params":{"options":[{"optionId":"always","kind":"allow_always"},{"optionId":"once","kind":"allow_once"}]}}' ;;
     empty) stop $id end_turn ;;
     long) i=0; while [ $i -lt 30 ]; do chunk "line $i of a long answer\\n"; i=$((i+1)); done; stop $id end_turn ;;
     *) chunk hello; stop $id end_turn ;;
     esac ;;
   *'"outcome"'*) chunk hello; stop $held end_turn ;;
-  *'"method":"session/cancel"'*) [ "$mode" = cancel ] && stop $held cancelled ;;
+  *'"method":"session/cancel"'*) case "$mode" in cancel|gcancel) stop $held cancelled ;; esac ;;
   esac
 done
 "#;
@@ -494,6 +494,40 @@ fn hard_stop_kills_only_that_destination_child_and_its_descendants() {
     assert!(alive(kept.0) && alive(kept.1) && alive(std::process::id()));
     drop(handles);
     assert!(eventually(WAIT_CAP, || !alive(kept.0) && !alive(kept.1)));
+}
+
+#[test]
+fn a_forced_stop_that_agys_answer_outran_still_ends_the_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path().to_path_buf();
+    let patient = Deadlines {
+        inactivity: WAIT_CAP,
+        cancel: WAIT_CAP,
+    };
+    let handle = actor::spawn(None, patient);
+    let token = std::sync::Arc::new(CancelToken::new());
+    let (stopper, at, actor) = (token.clone(), dir.clone(), handle.clone());
+    let answer = std::thread::spawn(move || {
+        assert!(eventually(WAIT_CAP, || log(&at, "hang").contains("session/prompt")));
+        stopper.publish_cancel("explicit_stop");
+        assert!(eventually(WAIT_CAP, || log(&at, "hang").contains("session/cancel")));
+        // The forced stop is recorded, then agy's cancelled answer reaches the actor first.
+        stopper.intend_termination(None);
+        let outcome = Ok(serde_json::json!({"stopReason": "cancelled"}));
+        let inbound = Inbound::Response { id: 3, outcome };
+        assert!(actor.send(Event::Line {
+            incarnation: 1,
+            inbound
+        }));
+    });
+    let turn = run(&handle, fake_launch(&dir, "hang"), None, None, Some(&token));
+    join_within(answer, WAIT_CAP);
+    assert_eq!(turn, (Ok(()), vec![]));
+    let child = pid_file(&dir, "hang.log.pid");
+    assert!(
+        eventually(WAIT_CAP, || !alive(child)),
+        "the forced stop ends the child"
+    );
 }
 
 #[test]
