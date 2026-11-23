@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { request } from "../../api/httpClient";
 import { getServerCampaignSummaries } from "../../api/serverCampaigns";
 import { todoStatus, type HomeTurn } from "./homeModel";
@@ -20,6 +20,12 @@ vi.mock("../../api/serverCampaigns", () => ({
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
 describe("home data", () => {
+  // A failed assertion must not leave fake timers or a never-answering request to the tests after it.
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(request).mockReset().mockImplementation(async () => ({ status: "working" }));
+  });
+
   it("leaves the campaign to-dos partial, never empty, when a campaign detail fails to load", async () => {
     const data = await loadHomeCampaigns();
     expect([data.documents.length, data.detailFailed, data.detailsCut]).toEqual([1, 1, 0]);
@@ -59,7 +65,6 @@ describe("home data", () => {
     }
     expect(reads().filter((id) => id === "a").length).toBeGreaterThanOrEqual(2);
     await act(async () => root.unmount());
-    vi.useRealTimers();
   });
 
   it("keeps the newer turn when an older read of the same agent answers last", async () => {

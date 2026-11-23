@@ -6,7 +6,7 @@ import {
   Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
 } from "../common/KitPrimitives";
 import { describeRoutinePurpose, formatClock } from "../dashboard/routineModel";
-import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, usageDetail, type Tr } from "./homeModel";
+import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, pauseMeterScale, usageDetail, type Tr } from "./homeModel";
 import { loadHomeRoutines, loadHomeUsage, loadRuntimeConfig, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's lower row: campaigns, today's routines and account usage.
@@ -140,11 +140,13 @@ function usageLabels(tr: Tr): Partial<UsageMeterLabels> {
     limits: tr("공급자별 한도", "Limits by provider"),
     limitReached: tr("한도 도달", "Limit reached"),
     nearLimit: tr("한도에 가까움", "Close to the limit"),
+    danger: tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause"),
     notMeasured: tr("측정 안 됨", "Not measured"),
     unlimited: tr("무제한", "Unlimited"),
     announce: (state, title, actual, percent) => state === "limit"
       ? tr(`${title}, 한도 도달. ${actual}.`, `${title}, limit reached. ${actual}.`)
       : state === "warn" ? tr(`${title}, ${percent}% 썼어요.`, `${title}, ${percent}% used.`) : tr(`${title}, ${actual} 썼어요.`, `${title}, ${actual} used.`),
+    announceDanger: (title, _actual, percent) => tr(`${title}, 자동 진행 멈춤 기준 이상이에요. ${percent}%.`, `${title}, at or past the auto-run pause. ${percent}%.`),
   };
 }
 
@@ -206,6 +208,7 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
             title={tr("공급자별 한도", "Limits by provider")}
             locale={isKo ? "ko-KR" : "en-US"}
             limits={rows.map((row) => ({ group: row.group ?? undefined, label: row.label, used: row.pct, total: 100, unit: "%", detail: usageDetail(row, rule, tr) }))}
+            {...pauseMeterScale(rule)}
             labels={usageLabels(tr)}
           />
           {pauseFooter}

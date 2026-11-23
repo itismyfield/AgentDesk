@@ -6,7 +6,7 @@ import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, systemNeedsAttention, todoStatus, usageDetail,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, pauseMeterScale, systemNeedsAttention, todoStatus, usageDetail,
   type HomeHealth,
 } from "./homeModel";
 
@@ -198,9 +198,12 @@ describe("home routines and usage", () => {
     expect(autoPauseRule(null)).toBeNull();
   });
 
-  it("names the auto-run pause on a row at or past its threshold only", () => {
-    const [high, low] = buildUsageRows([{ provider: "claude", buckets: [{ name: "7d", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "5h", limit: 100, used: 85, remaining: 15, reset: 0 }], stale: false }], true);
-    expect([usageDetail(high, { enabled: true, pct: 90 }, tr), usageDetail(low, { enabled: true, pct: 90 }, tr)]).toEqual(["자동 진행 멈춤 기준 이상", undefined]);
-    expect(usageDetail(high, { enabled: false, pct: 90 }, tr)).toBeUndefined();
+  it("hands a pause below 100% to the kit meter and names it on the row only for a rule at 100% or more", () => {
+    const [high, full] = buildUsageRows([{ provider: "claude", buckets: [{ name: "7d", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "5h", limit: 100, used: 100, remaining: 0, reset: 0 }], stale: false }], true);
+    expect([{ enabled: true, pct: 90 }, { enabled: true, pct: 70 }, { enabled: true, pct: 100 }, { enabled: false, pct: 90 }, null].map(pauseMeterScale))
+      .toEqual([{ warnAt: 0.8, dangerAt: 0.9 }, { warnAt: 0.7, dangerAt: 0.7 }, {}, {}, {}]);
+    expect(usageDetail(high, { enabled: true, pct: 90 }, tr)).toBeUndefined();
+    expect([usageDetail(full, { enabled: true, pct: 100 }, tr), usageDetail(high, { enabled: true, pct: 100 }, tr)]).toEqual(["자동 진행 멈춤 기준 이상", undefined]);
+    expect(usageDetail(full, { enabled: false, pct: 100 }, tr)).toBeUndefined();
   });
 });
