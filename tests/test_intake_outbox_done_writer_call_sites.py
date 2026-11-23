@@ -112,7 +112,7 @@ class DiscriminationTests(unittest.TestCase):
         copied_script = root / "scripts/check_intake_outbox_done_writer_call_sites.py"
         copied_script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SCRIPT, copied_script)
-        for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "registration_fragments.py"):
+        for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "registration_fragments.py", "rust_cfg.py"):
             shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
         shutil.copytree(ROOT / "scripts/test_only_module_skip_pin.d", root / "scripts/test_only_module_skip_pin.d")
         shutil.copy2(
@@ -206,6 +206,50 @@ class DiscriminationTests(unittest.TestCase):
             ok, message = self.run_guard(root)
             self.assertFalse(ok)
             self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+    def test_test_support_gate_is_judged_on_the_composed_cfg(self):
+        F = 'feature = "test-support"'
+        call = "fn w() { crate::db::intake_outbox::mark_done(); }\n"
+        comment_mounts = ("/* test-support helpers */ unix", 'any(test, feature = "production" /* "test-support" */)')
+        feature_only = {
+            "src/services/w.rs": [f"#[cfg(any(test, {F}))]\n#[cfg(not(test))]\n{call}",
+                                  f"#[cfg(not(test))]\n#[cfg(any(test, {F}))]\n{call}",
+                                  f"#[cfg_attr(test, cfg(any()))]\n#[cfg(any(test, {F}))]\n{call}",
+                                  f"#[cfg(any(test, {F}))]\nmod m {{\n    #[cfg(not(test))]\n    {call}}}\n"],
+            "src/services/seam.rs": [f"#[cfg(not(test))]\n{call}"],
+            "src/services/plain.rs": [f"#[cfg(any(test, {F}))]\n{call}"],
+            "src/services/attr.rs": [f"#[cfg(any(test, {F}))]\n{call}"],
+            "src/services/both.rs": [call],
+        }
+        mounts = {"src/services/seam.rs": f"#[cfg(any(test, {F}))]\nmod seam;\n",
+                  "src/services/plain.rs": "#[cfg(not(test))]\nmod plain;\n",
+                  "src/services/attr.rs": "#[cfg_attr(test, cfg(any()))]\nmod attr;\n",
+                  "src/services/both.rs": f"#[cfg(any(test, {F}))]\n#[cfg_attr(test, cfg(any()))]\nmod both;\n"}
+        for predicate in comment_mounts:
+            root = self.fixture()
+            write(root, "src/lib.rs", f'#[cfg({predicate})]\n#[path = "helpers_tests.rs"]\npub mod helpers;\n')
+            write(root, "src/helpers_tests.rs", call)
+            with self.subTest(mount=predicate):
+                self.assertIn("production module mounts basename test file", self.run_guard(root)[1])
+        for rel, bodies in feature_only.items():
+            for body in bodies:
+                root = self.fixture()
+                write(root, "src/services.rs", mounts.get(rel, "mod w;\n"))
+                write(root, rel, body)
+                negated = rel.endswith(("plain.rs", "attr.rs"))
+                expected = "only in feature-linked builds" if negated else "mark_done: UNLISTED"
+                with self.subTest(rel=rel, body=body):
+                    self.assertIn(expected, self.run_guard(root)[1])
+        for body in (f"#[cfg(any(test, {F}))]\n{call}", f"#[cfg(all(any(test, {F}), unix))]\n{call}"):
+            root = self.fixture()
+            write(root, "src/services/w.rs", body)
+            with self.subTest(control=body):
+                self.assertEqual(self.run_guard(root), (True, self.run_guard(root)[1]))
+        root = self.fixture()
+        write(root, "src/services.rs", f"#[cfg(any(test, {F}))]\n#[cfg_attr(test, allow(dead_code))]\nmod kept;\n")
+        write(root, "src/services/kept.rs", call)
+        ok, message = guard.check(root, None, pinned_test_only_files=frozenset({"src/services/kept.rs"}))
+        self.assertTrue(ok, message)
 
     def test_lifetime_does_not_hide_later_fully_qualified_writer(self):
         root = self.fixture()
