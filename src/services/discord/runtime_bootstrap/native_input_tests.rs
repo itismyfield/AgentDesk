@@ -1,4 +1,4 @@
-//! #8351: a held native boot restore is retried instead of dropping the Claude runtime.
+//! A held native boot restore is retried instead of dropping the Claude runtime.
 use super::{NativeBoot, await_native_boot};
 use crate::services::discord::health::boot_hold;
 use crate::services::provider::ProviderKind;
@@ -56,12 +56,8 @@ async fn run_busy_then_ready(busy: usize, slot: &Slot) -> (bool, usize, Vec<Vec<
     (ready, calls, seen)
 }
 
-// The holds table is process-wide; one test owns the claude entry at a time.
-static HOLDS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn held_restore_is_retried_until_ready_and_health_shows_the_wait() {
-    let _guard = HOLDS_LOCK.lock().await;
     let slot = Slot::new(false);
     let (ready, calls, seen) = run_busy_then_ready(3, &slot).await;
     assert!(ready, "a history-busy restore must not end the runtime");
@@ -77,7 +73,6 @@ async fn held_restore_is_retried_until_ready_and_health_shows_the_wait() {
 
 #[tokio::test]
 async fn refused_preparation_still_stops_but_is_visible() {
-    let _guard = HOLDS_LOCK.lock().await;
     let slot = Slot::new(false);
     let mut calls = 0;
     let ready = await_native_boot(
@@ -99,19 +94,34 @@ async fn refused_preparation_still_stops_but_is_visible() {
         vec!["provider:claude:native_boot_refused:reaper_preparation_incomplete".to_string()]
     );
     assert_eq!(slot.remaining.load(Ordering::Acquire), 3, "slot unchanged");
+    let registry = crate::services::discord::health::HealthRegistry::new();
+    let health = crate::services::discord::health::build_health_snapshot(&registry).await;
+    let json = serde_json::to_value(health).unwrap();
+    assert!(
+        json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(
+                "provider:claude:native_boot_refused:reaper_preparation_incomplete"
+            )),
+        "{json}"
+    );
     boot_hold::release("claude");
 }
 
 #[tokio::test]
 async fn shutdown_ends_the_retry_and_gives_up_the_slot_once() {
-    let _guard = HOLDS_LOCK.lock().await;
     let slot = Slot::new(true);
     for _ in 0..2 {
         let (ready, calls, _) = run_busy_then_ready(usize::MAX, &slot).await;
         assert!(!ready);
         assert_eq!(calls, 1, "shutdown stops after the held attempt");
     }
-    assert_eq!(slot.remaining.load(Ordering::Acquire), 2, "decremented once");
+    assert_eq!(
+        slot.remaining.load(Ordering::Acquire),
+        2,
+        "decremented once"
+    );
     assert!(slot.counted.load(Ordering::Acquire));
     boot_hold::release("claude");
 }
@@ -124,7 +134,6 @@ async fn held_restore_then_ready_reaches_preferred_waiter_pg() {
     use crate::services::discord::runtime_bootstrap::gateway_lease::{
         acquire_as_preferred_gateway, try_acquire_discord_gateway_lease,
     };
-    let _guard = HOLDS_LOCK.lock().await;
     let root = tempfile::tempdir().unwrap();
     let _live = crate::config_live_reload::test_live_guard(
         crate::config::test_env_lock::acquire_shared_test_env_lock(),
@@ -166,19 +175,23 @@ async fn held_restore_then_ready_reaches_preferred_waiter_pg() {
     let slot = Slot::new(false);
     let (ready, calls, _) = run_busy_then_ready(2, &slot).await;
     let waiting = if ready {
-        let mut breaker = GatewayHandbackBreaker::with_sources(
-            "claude",
-            token,
-            None,
-            || 0,
-            Default::default,
-        );
+        let mut breaker =
+            GatewayHandbackBreaker::with_sources("claude", token, None, || 0, Default::default);
         let polled = tokio::time::timeout(
             Duration::from_secs(1),
-            acquire_as_preferred_gateway(&pool, token, &ProviderKind::Claude, &shared, &mut breaker),
+            acquire_as_preferred_gateway(
+                &pool,
+                token,
+                &ProviderKind::Claude,
+                &shared,
+                &mut breaker,
+            ),
         )
         .await;
-        assert!(polled.is_err(), "the held lease keeps preferred-poll waiting");
+        assert!(
+            polled.is_err(),
+            "the held lease keeps preferred-poll waiting"
+        );
         let capabilities: serde_json::Value =
             sqlx::query_scalar("SELECT capabilities FROM worker_nodes WHERE instance_id=$1")
                 .bind(&instance)

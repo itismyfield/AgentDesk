@@ -1,7 +1,7 @@
 //! Native boot custody settles before this runtime opens any intake surface.
 use super::*;
 
-/// Retry interval while a native boot restore is held (#8351).
+/// Retry interval while a native boot restore is held.
 #[cfg(unix)]
 const NATIVE_RESTORE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Repeat interval of the held-restore warning.
@@ -75,10 +75,8 @@ async fn prepare_claude_native_boot(shared: &Arc<SharedData>) -> NativeBoot {
     }
 }
 
-/// Repeats `attempt` while restore is held, so a transient restore failure cannot
-/// leave this provider without a runtime (and the preferred gateway without a
-/// waiter) for the life of the process. Every outcome is published to health.
-/// Returns `true` once ready; `false` on refusal or shutdown.
+/// Repeats `attempt` while restore is held, so a transient hold cannot drop the runtime and its
+/// gateway waiter; outcomes go to health. `true` once ready, `false` on refusal or shutdown.
 #[cfg(unix)]
 pub(super) async fn await_native_boot<F, Fut>(
     provider: &ProviderKind,
