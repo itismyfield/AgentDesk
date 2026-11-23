@@ -286,12 +286,49 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
+    let result = no_key_round(8148963, "herdr", None, false).await;
+    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
+}
+
+/// A no-key record that meets a brief registry contention still lands, so the input stays held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_no_key_record_outlasts_a_brief_registry_contention() {
+    let hold = std::time::Duration::from_millis(200);
+    let result = no_key_round(8148964, "herdr", Some(hold), false).await;
+    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
+}
+
+/// A busy no-key record still frees the channel; a restart before it lands settles at boot from the
+/// owner's retained or refused proof and ACKs the source pin of a channel already told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
+    for (channel, host, due) in [
+        (8148965, "herdr", false),
+        (8148966, "tmux", false),
+        (8148967, "tmux", true),
+    ] {
+        let result = no_key_round(channel, host, Some(WAIT_CAP), due).await;
+        assert!(
+            matches!(&result, Completion::NotSent(r) if r.contains("busy")),
+            "{result:?}"
+        );
+    }
+}
+
+/// One unkeyed native turn on `host`, the registry lock held for `hold` (`WAIT_CAP`: until released
+/// here); `due_passed` gives the original a readiness due the leaf outlives, so the owner refuses it.
+async fn no_key_round(
+    channel: u64,
+    host: &str,
+    hold: Option<std::time::Duration>,
+    due_passed: bool,
+) -> Completion {
     let guard = crate::config::TestRuntimeRootGuard::new();
     let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
     let root = guard.path().join("runtime");
     std::fs::create_dir_all(&root).unwrap();
-    let channel = ChannelId::new(8148963);
-    let id = 8_000_000_000_000_814_963;
+    let id = 8_000_000_000_000_000_000 + channel;
+    let channel = ChannelId::new(channel);
     let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
     std::sync::Arc::get_mut(&mut shared)
         .unwrap()
@@ -319,24 +356,50 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
         RelayOwnerKind::Watcher,
         &shared,
     );
-    mailbox
-        .v2_adopt(
-            root.as_path().join("no-key-owner.json"),
-            format!("claude/{}", shared.token_hash),
-        )
-        .await
-        .unwrap();
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        &shared.token_hash,
+        None,
+    );
+    let (queue, namespace) =
+        crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
+    mailbox.v2_adopt(queue.clone(), namespace).await.unwrap();
     let item=serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
     let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
+    if due_passed {
+        let due = mailbox.v2_request(|s| {
+            let owner = s.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.hold_readiness(&front, "fixture", 0).map(drop)
+        });
+        due.await.unwrap();
+    }
     let producer = Producer::at(shared.clone(), key, Some(token.clone()));
     let intent = producer.intent.clone();
-    let prepared = PreparedPayload {
+    let mut prepared = PreparedPayload {
         frame: "our input".into(),
         sources: vec![id.to_string()],
         attempt: cold_attempt(&root, channel.get()).0,
     };
-    let leaf: effect::Leaf = Box::new(|_| {
+    prepared.attempt["target"]["host"] = json!(host);
+    let (lock, (released, done)) = (
+        root.join("injected_frames.lock"),
+        std::sync::mpsc::channel(),
+    );
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let leaf: effect::Leaf = Box::new(move |_| {
         assert_eq!(scope::key_attempted(), Some(false));
+        if let Some(hold) = hold {
+            let mut file = std::fs::File::options();
+            let file = file.create(true).truncate(false).write(true);
+            let file = file.open(&lock).unwrap();
+            file.lock().unwrap();
+            std::thread::spawn(move || {
+                let _ = release_rx.recv_timeout(hold);
+                drop(file);
+                released.send(()).unwrap();
+            });
+        }
         scope::vetoed("fixture refusal");
         Ok(Completion::Held("fixture refusal".into()))
     });
@@ -353,7 +416,6 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     )
     .await
     .unwrap();
-    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
     assert!(mailbox.snapshot().await.cancel_token.is_none());
     assert_eq!(
         shared
@@ -371,7 +433,35 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
         .v2_request(|s| s.as_ref().unwrap().json())
         .await
         .unwrap();
-    assert!(snapshot.to_string().contains("our input"));
+    assert_eq!(snapshot.to_string().contains("our input"), !due_passed);
+    let refused = snapshot["refused_inputs"].as_array().map_or(0, Vec::len);
+    assert_eq!(refused, usize::from(due_passed));
+    let next = std::sync::Arc::new(CancelToken::new());
+    let user = poise::serenity_prelude::UserId::new(7);
+    assert!(mailbox.try_start_turn(next, user, (id + 1).into()).await);
+    let frames = root.join("injected_frames.json");
+    if hold == Some(WAIT_CAP) {
+        // The drive's notice drain has told the person, so no input is owed any more.
+        let entry = &snapshot[if due_passed {
+            "refused_inputs"
+        } else {
+            "retained_inputs"
+        }][0];
+        let key =
+            json!({"identity": entry["input"]["identity"], "attempt": entry["input"]["attempt"]});
+        let told = mailbox.v2_request(move |s| {
+            let key = serde_json::from_value(key).map_err(|e| e.to_string())?;
+            s.as_mut().ok_or("no owner")?.notice_enqueued(&key)
+        });
+        told.await.unwrap();
+    }
+    let crashed = (hold == Some(WAIT_CAP)).then(|| {
+        (
+            std::fs::read(&frames).unwrap(),
+            std::fs::read(&queue).unwrap(),
+        )
+    });
+    release.send(()).ok();
     let history = Registry::runtime().unwrap().json().unwrap();
     let settlements: Vec<_> = ["planned", "live", "passive"]
         .into_iter()
@@ -391,6 +481,72 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
         assert!(settlement["outcome"].is_null());
         assert_ne!(settlement["any_key"], true);
     }
+    if hold.is_some() {
+        done.recv_timeout(WAIT_CAP).unwrap();
+    }
+    if let Some((frames_at_crash, queue_at_crash)) = crashed {
+        // In process the deferred record and source ACK land once the lock frees.
+        await_within(
+            async {
+                while !(Registry::runtime()
+                    .unwrap()
+                    .json()
+                    .unwrap()
+                    .to_string()
+                    .contains("\"not_sent\":true")
+                    && !mailbox
+                        .v2_request(|s| s.as_ref().unwrap().json())
+                        .await
+                        .unwrap()
+                        .to_string()
+                        .contains("\"pin\""))
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        // A process that died before that leaves these bytes; the next generation boots on them.
+        std::fs::write(&frames, frames_at_crash).unwrap();
+        std::fs::write(&queue, &queue_at_crash).unwrap();
+        let mut next = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        std::sync::Arc::get_mut(&mut next)
+            .unwrap()
+            .restart
+            .current_generation = 2;
+        let plan = native_prepare::BootInputs::prepare(&root, 2).unwrap();
+        plan.restore(&next).await.unwrap();
+        assert!(native_prepare::boot_ready(&next, channel).await);
+        assert_eq!(
+            std::fs::read(&queue).unwrap(),
+            queue_at_crash,
+            "the retained original and its notice stay"
+        );
+        let census = crate::services::turn_orchestrator::v2_channels(
+            &ProviderKind::Claude,
+            &next.token_hash,
+        );
+        assert!(
+            census.contains(&channel),
+            "a told channel still owes its source ACK"
+        );
+        super::recover(&next, channel).await;
+        let recovered = std::fs::read_to_string(&queue).unwrap();
+        let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+        let pins = recovered["source_bindings"].as_array().map_or(0, Vec::len);
+        assert_eq!(pins, 0, "the settled attempt's pin is ACKed: {recovered}");
+        let kept = if due_passed {
+            "refused_inputs"
+        } else {
+            "retained_inputs"
+        };
+        assert_eq!(
+            recovered[kept][0]["notice"]["enqueued"], true,
+            "{recovered}"
+        );
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
