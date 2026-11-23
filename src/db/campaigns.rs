@@ -572,6 +572,32 @@ pub async fn replace(
     Ok(campaign)
 }
 
+/// Removes a campaign and its revision history; an active campaign is refused as a conflict.
+pub async fn delete(pool: &PgPool, id: &str) -> Result<(), CampaignError> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query_scalar::<_, Json<Campaign>>(
+        "SELECT document FROM campaigns WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(CampaignError::NotFound)?
+    .0;
+    if current.status == CampaignStatus::Active {
+        return Err(CampaignError::Conflict);
+    }
+    sqlx::query("DELETE FROM campaign_revisions WHERE campaign_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM campaigns WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Writes `campaign` over the locked row still at `expected_revision`, with its history snapshot.
 async fn store_revision(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
