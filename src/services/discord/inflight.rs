@@ -142,14 +142,15 @@ use self::rebind_reap::{
     reap_dead_watcher_rebind_origin_locked_in_root, should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+#[cfg(all(test, unix))]
+use removal::persist_native_boot_record;
 #[cfg(test)]
 pub(in crate::services::discord) use removal::{
     invalidate_stale_generation_scoped, load_inflight_probe_scoped,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use removal::{
-    native_boot_records, persist_native_boot_record, persist_native_boot_record_off_worker,
-    preserve_native_before_discard,
+    native_boot_records, persist_native_boot_record_off_worker, preserve_native_before_discard,
 };
 mod restart_mark;
 #[cfg(test)]
