@@ -1,185 +1,45 @@
-import { createPortal } from "react-dom";
-import { useEffect, useRef } from "react";
-import type { Agent, Department, DispatchedSession } from "../../types";
-import { useI18n } from "../../i18n";
-import { SurfaceActionButton, SurfaceCard, SurfaceMetaBadge } from "../common/SurfacePrimitives";
-import TooltipLabel from "../common/TooltipLabel";
-import {
-  formatDuration,
-  formatTimeAgo,
-  isStaleIdleSession,
-  linkedAgentLabel,
-  normalizeTimestamp,
-  sessionDisplayName,
-  sessionProviderLabel,
-  sessionProviderTone,
-  sessionPersona,
-} from "./SessionPanelModel";
-import AgentPersona from "../AgentPersona";
+import type { ReactNode } from "react";
+import type { Department, DispatchedSession } from "../../types";
+import { localeName } from "../../i18n";
+import { getProviderMeta } from "../../app/providerTheme";
+import { formatRelativeTime } from "../../app/shellFormatting";
+import { agentStateLabel } from "../home/homeModel";
+import type { Translator } from "../agent-manager/types";
+import { normalizeTimestamp, sessionState } from "./SessionPanelModel";
 
-export function SessionInfoCard({
-  session: s,
-  departments,
-  agents,
-  onClose,
-}: {
+/** What the server sends about one unlinked session, under its row: state, Provider, summary, signals and the key. */
+export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo }: {
+  id: string;
   session: DispatchedSession;
   departments: Department[];
-  agents: Agent[];
-  onClose: () => void;
+  locale: string;
+  tr: Translator;
+  isKo: boolean;
 }) {
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const dept = departments.find((d) => d.id === s.department_id);
-  const isDisconnected = s.status === "disconnected";
-  const connectedAt = normalizeTimestamp(s.connected_at);
-  const lastSeenAt = normalizeTimestamp(s.last_seen_at);
-  const uptime = connectedAt ? Math.max(0, Date.now() - connectedAt) : 0;
-  const staleIdle = isStaleIdleSession(s);
-  const linkedAgent = linkedAgentLabel(s, agents);
-  const { t, language } = useI18n();
-  const isKo = language === "ko";
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-
-  const statusLabel: Record<string, string> = {
-    working: t({ ko: "작업 중", en: "Working" }),
-    idle: t({ ko: "대기", en: "Idle" }),
-    disconnected: t({ ko: "연결 종료", en: "Disconnected" }),
-  };
-  const statusTone = isDisconnected ? "neutral" : s.status === "working" ? "success" : staleIdle ? "warn" : "info";
-
-  return createPortal(
-    <>
-    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "rgba(0,0,0,0.6)" }} />
-    <div
-      ref={overlayRef}
-      className="fixed inset-0 z-[80] flex items-center justify-center p-4"
-      onClick={(e) => {
-        if (e.target === overlayRef.current) onClose();
-      }}
-    >
-      <div className="w-full max-w-lg" role="dialog" aria-modal="true" aria-label="Session details">
-        <SurfaceCard
-          className="overflow-hidden rounded-lg p-0 shadow-2xl"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 76%, transparent)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)",
-          }}
-        >
-          <div className="max-h-[min(78vh,720px)] overflow-y-auto">
-            <div className="flex items-start gap-4 border-b px-5 py-5 sm:px-6" style={{ borderColor: "var(--th-border-subtle)" }}>
-              <AgentPersona {...sessionPersona(s)} size={56} animated />
-
-              <div className="min-w-0 flex-1">
-                <TooltipLabel
-                  className="text-base font-bold text-th-text-primary"
-                  text={sessionDisplayName(s).label}
-                  tooltip={sessionDisplayName(s).full}
-                />
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <SurfaceMetaBadge tone={statusTone}>{statusLabel[s.status] ?? s.status}</SurfaceMetaBadge>
-                  {dept ? (
-                    <SurfaceMetaBadge className="text-white" style={{ backgroundColor: s.department_color || "var(--th-accent-primary)" }}>
-                      {s.department_name_ko || dept.name}
-                    </SurfaceMetaBadge>
-                  ) : (
-                    <SurfaceMetaBadge>{t({ ko: "부서 미배정", en: "Dept Unassigned" })}</SurfaceMetaBadge>
-                  )}
-                  {staleIdle && <SurfaceMetaBadge tone="warn">{t({ ko: "7일+ stale", en: "7d+ stale" })}</SurfaceMetaBadge>}
-                  {s.provider && (
-                    <SurfaceMetaBadge tone={sessionProviderTone(s.provider)}>
-                      {sessionProviderLabel(s.provider)}
-                    </SurfaceMetaBadge>
-                  )}
-                </div>
-              </div>
-
-              <SurfaceActionButton tone="neutral" compact onClick={onClose} className="shrink-0">
-                {t({ ko: "닫기", en: "Close" })}
-              </SurfaceActionButton>
-            </div>
-
-            <div className="space-y-4 px-5 py-4 sm:px-6">
-              <div
-                className="rounded-lg border px-4 py-4"
-                style={{
-                  borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
-                }}
-              >
-                <div className="space-y-3">
-                  {s.model && <InfoRow label={t({ ko: "모델", en: "Model" })} value={s.model} />}
-                  {s.session_info && <InfoRow label={t({ ko: "최근 도구", en: "Recent Tool" })} value={s.session_info} />}
-                  {linkedAgent && <InfoRow label={t({ ko: "연결 에이전트", en: "Linked Agent" })} value={linkedAgent} />}
-                  <InfoRow label={t({ ko: "세션 키", en: "Session Key" })} value={s.session_key} mono />
-                  {connectedAt && (
-                    <InfoRow
-                      label={t({ ko: "접속 시각", en: "Connected At" })}
-                      value={new Date(connectedAt).toLocaleString(isKo ? "ko-KR" : "en-US")}
-                    />
-                  )}
-                  {connectedAt && !isDisconnected && (
-                    <InfoRow label={t({ ko: "가동 시간", en: "Uptime" })} value={formatDuration(uptime, isKo)} />
-                  )}
-                  {lastSeenAt && (
-                    <InfoRow label={t({ ko: "마지막 신호", en: "Last Seen" })} value={formatTimeAgo(lastSeenAt, isKo)} />
-                  )}
-                </div>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <SurfaceCard
-                  className="rounded-lg p-4"
-                  style={{
-                    borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                    background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-                  }}
-                >
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "세션 식별", en: "Session Identity" })}
-                  </div>
-                  <div className="mt-2 space-y-2">
-                    <div className="text-sm font-medium text-th-text-primary">{sessionProviderLabel(s.provider)}</div>
-                    <div className="text-xs font-mono text-th-text-muted">
-                      ID: {String(s.id).slice(0, 8)}
-                    </div>
-                  </div>
-                </SurfaceCard>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end border-t px-5 py-3 sm:px-6" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <SurfaceActionButton onClick={onClose} tone="neutral">
-              {t({ ko: "닫기", en: "Close" })}
-            </SurfaceActionButton>
-          </div>
-        </SurfaceCard>
-      </div>
-    </div>
-    </>,
-    document.body,
-  );
-}
-
-function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  const department = departments.find((entry) => entry.id === s.department_id);
+  const lastSeen = normalizeTimestamp(s.last_seen_at);
+  const connected = normalizeTimestamp(s.connected_at);
+  const at = (time: number) => new Date(time).toLocaleString(isKo ? "ko-KR" : "en-US");
+  // Rows the server left empty are dropped, never filled in.
+  const rows = ([
+    [tr("상태", "State"), `${agentStateLabel(sessionState(s), tr)} (${s.status})`],
+    ["Provider", getProviderMeta(s.provider).label],
+    [tr("모델", "Model"), s.model],
+    [tr("세션 요약", "Summary"), s.session_info, "whitespace-pre-line"],
+    [tr("마지막 신호", "Last signal"), lastSeen && `${formatRelativeTime(lastSeen, isKo)} · ${at(lastSeen)}`],
+    [tr("접속", "Connected"), connected && at(connected)],
+    [tr("부서", "Department"), department && localeName(locale, department)],
+    [tr("세션 ID", "Session ID"), s.id, "font-mono"],
+    [tr("세션 키", "Session key"), s.session_key, "font-mono text-xs break-all"],
+  ] satisfies Array<[string, ReactNode, string?]>).filter(([, value]) => value);
   return (
-    <div className="grid gap-1 sm:grid-cols-[6.75rem_minmax(0,1fr)] sm:gap-3">
-      <span className="pt-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-th-text-muted">
-        {label}
-      </span>
-      <span
-        className={`text-sm leading-6 text-th-text-primary ${mono ? "break-all font-mono text-[11px]" : "break-words"}`}
-      >
-        {value}
-      </span>
-    </div>
+    <dl id={id} className="m-0 grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-t border-(--line-soft) bg-(--bg-1) px-3 py-3 text-[13px] leading-5 sm:px-4">
+      {rows.map(([label, value, valueClass]) => (
+        <div key={label} className="contents">
+          <dt className="text-(--fg-muted)">{label}</dt>
+          <dd className={`m-0 min-w-0 text-(--fg) [overflow-wrap:anywhere] ${valueClass ?? ""}`}>{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

@@ -29,9 +29,8 @@ interface AgentManagerViewProps {
   language: UiLanguage;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
-  /** Sessions not linked to an agent, offered for attaching. */
+  /** Sessions not linked to an agent, listed read-only. */
   sessions?: DispatchedSession[];
-  onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   /** Keeps the shell's tab in step; the page itself follows `?tab=`, so links and the back button agree with it. */
   onTabChange?: (tab: AgentManagerTab) => void;
   autoOpenCreate?: boolean;
@@ -47,7 +46,6 @@ export default function AgentManagerView({
   onAgentsChange,
   onDepartmentsChange,
   sessions,
-  onAssign,
   onTabChange,
   autoOpenCreate = false,
   onAutoOpenConsumed,
@@ -226,7 +224,6 @@ export default function AgentManagerView({
             selectedAgentId={selectedAgentId}
             onSelectAgent={selectAgent}
             unlinkedSessions={unlinkedSessions}
-            onAssign={onAssign}
             onCreateAgent={openCreateAgent}
             onEditAgent={openEditAgent}
             onDuplicateAgent={openDuplicateAgent}

@@ -13,9 +13,10 @@ import { Select } from "../../kit/free/select-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { ActionMenu } from "../common/ActionMenu";
-import { Cap, SectionCard, StatusDot, type DotTone } from "../common/KitPrimitives";
+import { Cap, KitCard, SectionCard, StatusDot, type DotTone } from "../common/KitPrimitives";
 import { AGENT_STATES, agentLine, agentStateLabel, monitorView, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 import { useAgentTurns } from "../home/useHomeData";
+import { UnlinkedSessions } from "../session-panel/SessionPanel";
 import AgentInfoCard from "./AgentInfoCard";
 import { AgentInfoCardContent } from "./AgentInfoCardContent";
 import AgentRow from "./AgentRow";
@@ -48,8 +49,8 @@ interface AgentsTabProps {
   setIncludeTests: (next: boolean) => void;
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
+  /** Live sessions no agent owns: a summary line on desktop, a card under the list on phones. */
   unlinkedSessions?: DispatchedSession[];
-  onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   onCreateAgent: () => void;
   onEditAgent: (agent: Agent) => void;
   onDuplicateAgent: (agent: Agent) => void;
@@ -83,7 +84,6 @@ export default function AgentsTab({
   selectedAgentId,
   onSelectAgent,
   unlinkedSessions = [],
-  onAssign,
   onCreateAgent,
   onEditAgent,
   onDuplicateAgent,
@@ -349,6 +349,11 @@ export default function AgentsTab({
               </Cap>
             ) : null}
           </SectionCard>
+          {isMobile && unlinkedSessions.length > 0 ? (
+            <KitCard pad="sm">
+              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} />
+            </KitCard>
+          ) : null}
         </div>
 
         {!isMobile ? (
@@ -380,14 +385,13 @@ export default function AgentsTab({
               <AgentsSummaryPane
                 counted={counted}
                 entries={listed}
-                agents={listedAgents}
                 departments={departments}
                 locale={locale}
                 tr={tr}
+                isKo={isKo}
                 deptTab={deptTab}
                 onSelectDept={setDeptTab}
                 unlinkedSessions={unlinkedSessions}
-                onAssign={onAssign}
               />
             )}
           </section>

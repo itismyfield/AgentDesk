@@ -1,14 +1,10 @@
-import { X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { localeName } from "../../i18n";
-import { Button } from "../../kit/free/button-clean";
-import { IconButton } from "../../kit/free/icon-button-clean";
 import { CompactBreakdown } from "../../kit/pro/compact-breakdown";
-import type { Agent, Department, DispatchedSession } from "../../types";
+import type { Department, DispatchedSession } from "../../types";
 import { Cap, StatusDot, type DotTone } from "../common/KitPrimitives";
 import { AGENT_STATES, agentStateLabel, type HomeAgent, type HomeAgentState } from "../home/homeModel";
-import { SessionPanel } from "../session-panel/SessionPanel";
-import { AgentOverlay } from "./AgentOverlay";
+import { UnlinkedSessions } from "../session-panel/SessionPanel";
 import { NO_DEPARTMENT, hasDepartment } from "./agent-list-controls";
 import type { Translator } from "./types";
 
@@ -16,21 +12,19 @@ import type { Translator } from "./types";
 const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
 
 /** Right pane while no agent is picked: counts per state, agents per department (a row filters the list), and the
- * sessions not linked to an agent, which open in a sheet to attach. */
-export function AgentsSummaryPane({ counted, entries, agents, departments, locale, tr, deptTab, onSelectDept, unlinkedSessions, onAssign }: {
+ * sessions not linked to an agent, which open in a sheet. */
+export function AgentsSummaryPane({ counted, entries, departments, locale, tr, isKo, deptTab, onSelectDept, unlinkedSessions }: {
   /** Home's counted set for the state counts; `entries` are the real agents. */
   counted: HomeAgent[];
   entries: HomeAgent[];
-  agents: Agent[];
   departments: Department[];
   locale: string;
   tr: Translator;
+  isKo: boolean;
   deptTab: string;
   onSelectDept: (deptId: string) => void;
   unlinkedSessions: DispatchedSession[];
-  onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
 }) {
-  const [sessionsOpen, setSessionsOpen] = useState(false);
   const counts = AGENT_STATES.map((state) => [state, counted.filter((entry) => entry.state === state).length] as const)
     .filter(([state, count]) => count > 0 || state !== "unknown");
   const byDept = useMemo(() => {
@@ -77,32 +71,7 @@ export function AgentsSummaryPane({ counted, entries, agents, departments, local
           }}
         />
       ) : null}
-      {unlinkedSessions.length > 0 && onAssign ? (
-        <section aria-label={tr("연결되지 않은 세션", "Unlinked sessions")} className="flex min-w-0 items-center gap-3 border-t border-(--line-soft) pt-4">
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm leading-5 font-medium text-(--fg)">
-              {tr(`에이전트에 연결되지 않은 세션 ${unlinkedSessions.length}`, `Sessions without an agent: ${unlinkedSessions.length}`)}
-            </span>
-            <Cap className="mt-0.5 block">{tr("부서나 에이전트에 붙일 수 있어요", "Attach them to a department or agent")}</Cap>
-          </span>
-          <Button variant="secondary" size="lg" onClick={() => setSessionsOpen(true)}>{tr("붙이기", "Attach")}</Button>
-        </section>
-      ) : null}
-      {sessionsOpen && onAssign ? (
-        <AgentOverlay
-          variant="sheet"
-          ariaLabel={tr("연결되지 않은 세션", "Unlinked sessions")}
-          onClose={() => setSessionsOpen(false)}
-          header={(
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-sm font-semibold">{tr("연결되지 않은 세션", "Unlinked sessions")}</span>
-              <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={() => setSessionsOpen(false)} />
-            </div>
-          )}
-        >
-          <SessionPanel sessions={unlinkedSessions} departments={departments} agents={agents} onAssign={onAssign} />
-        </AgentOverlay>
-      ) : null}
+      <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} className="border-t border-(--line-soft) pt-4" />
     </div>
   );
 }

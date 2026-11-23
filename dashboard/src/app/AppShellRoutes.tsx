@@ -1,7 +1,6 @@
 import { lazy } from "react";
 import { Navigate, Route, Routes } from "react-router";
 
-import * as api from "../api/client";
 import type { Agent, CompanySettings, DashboardStats, Department, DispatchedSession } from "../types";
 import type { Notification } from "../components/NotificationCenter";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
@@ -21,7 +20,6 @@ export interface AppShellRoutesContext {
   openDefaultAgentInfo: (agent: Agent) => void;
   pushNotification: (message: string, type?: Notification["type"]) => string;
   setAgentsPageTab: (tab: AgentManagerTab) => void;
-  setSessions: React.Dispatch<React.SetStateAction<DispatchedSession[]>>;
   settings: CompanySettings;
   stats: DashboardStats | null;
   updateNotification: (id: string, message: string, type?: Notification["type"]) => void;
@@ -52,7 +50,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     openDefaultAgentInfo,
     pushNotification,
     setAgentsPageTab,
-    setSessions,
     settings,
     stats,
     visibleDispatchedSessions,
@@ -69,10 +66,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
       onAgentsChange={refreshAgents}
       onDepartmentsChange={refreshDepartments}
       sessions={visibleDispatchedSessions}
-      onAssign={async (id, patch) => {
-        const updated = await api.assignDispatchedSession(id, patch);
-        setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
-      }}
       onTabChange={setAgentsPageTab}
       autoOpenCreate={autoOpenCreate}
       onAutoOpenConsumed={autoOpenCreate ? () => navigateToRoute("/agents") : undefined}

@@ -192,6 +192,18 @@ async function openAgents(page: Page, theme: "dark" | "light" = "dark", extra?: 
   await expect(page.getByTestId("agents-row-agent-ada")).toBeVisible();
 }
 
+/** Two live sessions no agent owns (a thread and its background child) and a finished one the page leaves out. */
+const UNLINKED_KEY = "claude/discord_1/mac-mini:AgentDesk-claude-adk-cc-t1490145076658307001";
+async function mockUnlinkedSessions(page: Page) {
+  const session = (id: string, session_key: string, status: string, extra: Record<string, unknown> = {}) =>
+    ({ id, session_key, name: session_key, status, provider: "claude", linked_agent_id: null, department_id: null, last_seen_at: new Date(Date.now() - 600_000).toISOString(), ...extra });
+  await page.route(/\/api\/dispatched-sessions(?:\?.*)?$/, (route) => route.fulfill({ json: { sessions: [
+    session("41", UNLINKED_KEY, "idle"),
+    session("42", `${UNLINKED_KEY}:child:toolu_01Dd`, "turn_active", { session_info: "릴레이 확인\n둘째 줄" }),
+    session("43", "codex/discord_1/mac-mini:AgentDesk-codex-old-cdx", "aborted"),
+  ] } }));
+}
+
 const shotDir = process.env.AGENTS_SHOT_DIR;
 async function shot(page: Page, testInfo: TestInfo, name: string) {
   const file = `${name}.png`;
@@ -341,6 +353,28 @@ test.describe("Agents tab", () => {
     await expect.poll(lazy).toEqual(["/api/agents/agent-ada/cron", "/api/agents/agent-ada/timeline", "/api/agents/agent-ada/transcripts", "/api/audit-logs"]);
   });
 
+  test("sessions no agent owns open read-only from the summary, or under the list on phones", async ({ page }) => {
+    await openAgents(page, "dark", mockUnlinkedSessions);
+    const entry = page.getByRole("region", { name: "연결되지 않은 세션" });
+    await expect(entry).toContainText("에이전트에 연결되지 않은 세션 2");
+    await expect(entry).toContainText("작업 중 1 · 쉬는 중 1");
+    await entry.getByRole("button", { name: "보기" }).click();
+    const sheet = page.getByRole("dialog", { name: "연결되지 않은 세션" });
+    const rows = sheet.locator("[data-session-row]");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.first()).toContainText("#adk-cc-t1490145076658307001");
+    await expect(rows.first()).toContainText("작업 중 · 백그라운드 작업 · 릴레이 확인");
+    await expect(rows.nth(1)).toContainText("쉬는 중 · 마지막 신호 10분 전");
+    // The server takes no agent or department for a session, so nothing here saves.
+    await expect(sheet.getByRole("combobox")).toHaveCount(0);
+    await rows.first().click();
+    await expect(rows.first()).toHaveAttribute("aria-expanded", "true");
+    await expect(sheet.getByRole("definition").filter({ hasText: `${UNLINKED_KEY}:child:toolu_01Dd` })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+  });
+
   test("create window and edit form open as sheets on phones", async ({ page }, testInfo) => {
     await openAgents(page);
     const isMobile = testInfo.project.name === "mobile";
@@ -401,6 +435,10 @@ test.describe("Shared agent detail overlay", () => {
       await overlay.getByRole("button", { name: "닫기" }).click();
     }
     await expect(overlay).toHaveCount(0);
+    // The overlay speaks home's session-based state: Luna has no session, so not the old "idle".
+    if (isMobile) await page.getByTestId("home-agents").getByRole("button", { name: /명 더 보기$/ }).click();
+    await page.getByTestId("home-agents").getByRole("button", { name: /^(루나 옵스|Luna Ops)/ }).click();
+    await expect(page.getByRole("dialog", { name: /루나 옵스 — 에이전트 상세/ }).locator("dd").first()).toContainText("세션 없음");
     await expectNoHorizontalOverflow(page);
   });
 });
@@ -572,6 +610,23 @@ test.describe("Agents tab on a touch phone", () => {
     await expectNoHorizontalOverflow(page);
     expect(await smallTargets(wizard)).toEqual([]);
     expect(await smallInputFonts(wizard)).toEqual([]);
+  });
+});
+
+test.describe("Unlinked sessions on a touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("keeps 44px targets and no horizontal overflow", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Phone-only check");
+    await openAgents(page, "dark", mockUnlinkedSessions);
+    const entry = page.getByRole("region", { name: "연결되지 않은 세션" });
+    expect(await smallTargets(entry)).toEqual([]);
+    await entry.getByRole("button", { name: "보기" }).tap();
+    const sheet = page.getByRole("dialog", { name: "연결되지 않은 세션" });
+    await sheet.locator("[data-session-row]").first().tap();
+    await expect(sheet.getByRole("definition").first()).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(sheet)).toEqual([]);
   });
 });
 
