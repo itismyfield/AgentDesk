@@ -1,5 +1,5 @@
-use super::retired_durability_tests::{SyncFault, hold_path};
 use super::*;
+use crate::services::herdr_launch::retired_durability_tests::{SyncFault, hold_path};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn retired_launch_requires_absent_n1_hold_durability_before_n2_create_pg() {

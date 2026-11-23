@@ -4,7 +4,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use super::*;
+use crate::config::session_hosts::EndpointMode;
+use crate::db::dispatched_sessions::hosted_execution::{
+    ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedLookup,
+    HostedLookupKey, HostedRecord, HostedState, install_pending_pg, load_hosted_execution_pg,
+    record_launch_evidence_pg,
+};
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::herdr_launch::*;
+use crate::services::session_host::{EvidenceGap, HostKind, RestoreResume};
+use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+use sqlx::PgPool;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(unix)]
 #[path = "herdr_launch/clear_epoch/launch_pg_tests.rs"]
 mod clear_epoch_tests;
@@ -935,10 +947,6 @@ mod retired_hold_tests;
 #[cfg(unix)]
 #[path = "herdr_launch_tests/runtime_marker_launch_tests.rs"]
 mod runtime_marker_launch_tests;
-
-#[cfg(unix)]
-#[path = "herdr_launch/retired_hold/tests.rs"]
-pub(crate) mod retired_durability_tests;
 
 #[cfg(unix)]
 #[path = "herdr_launch/policy_tests.rs"]

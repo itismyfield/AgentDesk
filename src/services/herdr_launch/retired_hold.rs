@@ -116,6 +116,6 @@ pub(crate) fn release(_nonce: &str) -> RetiredHoldOutcome {
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(test)]
-    super::tests::retired_durability_tests::before_sync(path)?;
+    super::retired_durability_tests::before_sync(path)?;
     crate::domain::file_sync::fsync_parent_dir(path)
 }

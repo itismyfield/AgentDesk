@@ -36,7 +36,7 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
-mod o_input;
+pub(crate) mod o_input;
 #[cfg(test)]
 mod o_route_tests;
 pub(crate) mod owner_record;
@@ -842,11 +842,11 @@ async fn agent_preferred_labels_for_channel(
 }
 
 #[cfg(test)]
-mod pg_tests {
+pub(crate) mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
-    pub(super) fn ctx_for_channel<'a>(
+    pub(crate) fn ctx_for_channel<'a>(
         mode: IntakeRoutingMode,
         channel: &'a str,
     ) -> IntakeRouterContext<'a> {

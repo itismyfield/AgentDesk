@@ -910,7 +910,7 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
         "claude",
         "o",
         &not_cancelled,
-        crate::services::cluster::intake_worker::test_executor::PORT,
+        crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
     );
     assert_eq!(tick.await.unwrap(), TickOutcome::Processed);
     assert_eq!(
@@ -921,7 +921,7 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
             "claude",
             "o",
             &not_cancelled,
-            crate::services::cluster::intake_worker::test_executor::PORT
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT
         )
         .await
         .unwrap(),
