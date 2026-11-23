@@ -26,7 +26,7 @@ stateDiagram-v2
   s7: Turn answered, post pending
   s8: Session loading (replay)
   [*] --> s0
-  s0 --> s0: a person sends a message or writer posts the turn's one terminal message (covers steered inputs, notes failed steers)
+  s0 --> s0: a person sends a message or writer posts the turn's one terminal message and commits its receipt
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new or agy refuses the stored id#59; session/new
   s2 --> s2: person runs /clear

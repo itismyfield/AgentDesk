@@ -8,6 +8,9 @@
 \* covers it with a notice.
 \* The child runs in its own process group, so an AgentDesk restart can leave it orphaned;
 \* boot sweeps that group before a new child is spawned.
+\* A steered input's origin is written ahead into the turn's durable row, but the bridge's
+\* in-memory copy learns it only at its next stream tick. A stop, /clear or restart can come
+\* first, so the completion receipt merges the latest durable origins before it commits.
 \* The platform kill calls (Unix group signals, Windows taskkill /T and the dcserver job
 \* object) are outside the model: Kill and Crash stand for both, and process tests check them.
 \* Output custody (spool -> writer -> Discord receipt) is abstracted to Settle; its
@@ -20,7 +23,8 @@ CONSTANTS Lifetime,    \* "resident" | "per_turn"
           BootMode,    \* "fail" | "rerun_sent"
           Watchdog,    \* TRUE | FALSE
           ClearMode,   \* "detach" | "keep"
-          Fence        \* TRUE: responses carry the child incarnation
+          Fence,       \* TRUE: responses carry the child incarnation
+          ReceiptMode  \* "merge": the receipt merges the durable origins | "memory"
 
 Inputs == 1..2
 NoGen == 0
@@ -50,12 +54,15 @@ VARIABLES running,     \* AgentDesk process is up
           noticed,     \* per input: the post that covered it carried the steer-error notice
           orphan,      \* a child from before the restart may still run in its own group
           clearedSent, \* per input: it had been sent when /clear ran
+          settlerView, \* per input: the receipt writer's state already holds its origin
+          receiptHas,  \* per input: the committed receipt names its origin
+          merged,      \* per input: only the durable merge put it in the receipt
           crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft
 
 vars == <<running, proc, attached, stored, nextGen, clearedGen, loading, st, sentCount, turnOf,
           open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone,
-          badSend, served, steerFailed, noticed, orphan, clearedSent, crashLeft, dieLeft, stopLeft,
-          clearLeft, refuseLeft, steerFailLeft>>
+          badSend, served, steerFailed, noticed, orphan, clearedSent, settlerView, receiptHas,
+          merged, crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft>>
 
 Queued == {i \in Inputs : st[i] = "queued"}
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
@@ -69,7 +76,8 @@ OpenTurns(o, t) == {t[i] : i \in o}
 
 sessionVars == <<attached, stored, nextGen, clearedGen, loading>>
 budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft>>
-extraVars == <<steerFailed, noticed, orphan, clearedSent>>
+receiptVars == <<settlerView, receiptHas, merged>>
+extraVars == <<steerFailed, noticed, orphan, clearedSent, receiptVars>>
 
 Init ==
     /\ running = TRUE /\ proc = "none" /\ attached = NoGen /\ stored = NoGen /\ nextGen = 1
@@ -84,6 +92,8 @@ Init ==
     /\ steerFailLeft = 1
     /\ steerFailed = [i \in Inputs |-> FALSE] /\ noticed = [i \in Inputs |-> FALSE]
     /\ orphan = FALSE /\ clearedSent = [i \in Inputs |-> FALSE]
+    /\ settlerView = [i \in Inputs |-> FALSE] /\ receiptHas = [i \in Inputs |-> FALSE]
+    /\ merged = [i \in Inputs |-> FALSE]
 
 \* A person posts in Discord (or an authenticated iMessage arrives); the mailbox keeps it.
 Arrive(i) ==
@@ -156,9 +166,20 @@ SendPrompt ==
           /\ sentCount' = [sentCount EXCEPT ![i] = sentCount[i] + 1]
           /\ open' = open \cup {i}
           /\ badSend' = (badSend \/ attached <= clearedGen)
+          /\ settlerView' = [settlerView EXCEPT ![i] = ~steer]
     /\ served' = TRUE
     /\ UNCHANGED <<running, proc, sessionVars, outcome, posts, refusedIn, cancelReq, cancelSent,
-                   zombie, wrongDone, budgetVars, extraVars>>
+                   zombie, wrongDone, budgetVars, steerFailed, noticed, orphan, clearedSent,
+                   receiptHas, merged>>
+
+\* The bridge's stream tick reads the durable row and learns a steered origin. Not fair: a
+\* stop, /clear or restart may come before it.
+StreamTick(i) ==
+    /\ running /\ turnOf[i] # None /\ ~settlerView[i] /\ posts[i] = 0
+    /\ settlerView' = [settlerView EXCEPT ![i] = TRUE]
+    /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptHas, merged>>
 
 EndCancel(o) == IF o = {} THEN FALSE ELSE cancelReq
 EndCancelSent(o) == IF o = {} THEN FALSE ELSE cancelSent
@@ -203,8 +224,8 @@ SteerErrored ==
               /\ cancelReq' = EndCancel(rest) /\ cancelSent' = EndCancelSent(rest)
     /\ steerFailLeft' = steerFailLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, posts, zombie, wrongDone, badSend,
-                   served, noticed, orphan, clearedSent, crashLeft, dieLeft, stopLeft, clearLeft,
-                   refuseLeft>>
+                   served, noticed, orphan, clearedSent, receiptVars, crashLeft, dieLeft, stopLeft,
+                   clearLeft, refuseLeft>>
 
 \* Close every turn that still has an open prompt with the given outcome.
 FailOpenTurns(kind) ==
@@ -270,7 +291,8 @@ Clear ==
     /\ clearedSent' = [i \in Inputs |-> clearedSent[i] \/ st[i] = "sent"]
     /\ UNCHANGED <<running, proc, nextGen, loading, st, sentCount, turnOf, open, done, outcome,
                    posts, refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft,
-                   dieLeft, stopLeft, refuseLeft, steerFailLeft, steerFailed, noticed, orphan>>
+                   dieLeft, stopLeft, refuseLeft, steerFailLeft, steerFailed, noticed, orphan,
+                   receiptVars>>
 
 \* One-turn lifetime: the child is closed after its last prompt settles.
 CloseAfterTurn ==
@@ -281,7 +303,9 @@ CloseAfterTurn ==
                    served, budgetVars, extraVars>>
 
 \* The writer posts the turn's recorded disposition once; that post covers every member, and
-\* carries one notice line for each member whose steer failed (the mutant leaves it out).
+\* carries one notice line for each member whose steer failed (the mutant leaves it out). The
+\* receipt commits with it: the writer's own origins merged with the turn's durable row (the
+\* mutant uses only the writer's in-memory origins).
 Settle(L) ==
     /\ running /\ L \in Leaders /\ done[L] /\ posts[L] = 0
     /\ posts' = [i \in Inputs |-> IF turnOf[i] = L THEN posts[i] + 1 ELSE posts[i]]
@@ -289,9 +313,15 @@ Settle(L) ==
     /\ noticed' = [i \in Inputs |->
                      IF turnOf[i] = L /\ SteerMode # "error_silent" THEN steerFailed[i]
                      ELSE noticed[i]]
+    /\ receiptHas' = [i \in Inputs |->
+                        IF turnOf[i] = L THEN ReceiptMode = "merge" \/ settlerView[i]
+                        ELSE receiptHas[i]]
+    /\ merged' = [i \in Inputs |->
+                    IF turnOf[i] = L THEN ReceiptMode = "merge" /\ ~settlerView[i]
+                    ELSE merged[i]]
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, refusedIn,
                    cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars,
-                   steerFailed, orphan, clearedSent>>
+                   steerFailed, orphan, clearedSent, settlerView>>
 
 \* AgentDesk restart: memory is lost. The child has its own process group, so it may outlive
 \* AgentDesk as an orphan until boot sweeps it.
@@ -301,20 +331,21 @@ Crash ==
     /\ proc' = IF proc = "up" THEN "dead" ELSE proc
     /\ attached' = NoGen /\ loading' = FALSE /\ open' = {} /\ zombie' = FALSE
     /\ cancelReq' = FALSE /\ cancelSent' = FALSE
-    /\ orphan' = (proc = "up")
+    /\ orphan' = (proc = "up") /\ settlerView' = [i \in Inputs |-> FALSE]
     /\ UNCHANGED <<stored, nextGen, clearedGen, st, sentCount, turnOf, done, outcome, posts,
                    refusedIn, wrongDone, badSend, served, dieLeft, stopLeft, clearLeft, refuseLeft,
-                   steerFailLeft, steerFailed, noticed, clearedSent>>
+                   steerFailLeft, steerFailed, noticed, clearedSent, receiptHas, merged>>
 
 \* Boot sweeps the recorded child group of the previous AgentDesk before any new spawn.
 SweepOrphan ==
     /\ running /\ orphan /\ orphan' = FALSE
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
-                   steerFailed, noticed, clearedSent, budgetVars>>
+                   steerFailed, noticed, clearedSent, receiptVars, budgetVars>>
 
 \* Boot: a turn with written prompts and no terminal record is failed with a notice (the mutant
-\* re-queues its inputs and writes them again).
+\* re-queues its inputs and writes them again). Boot settles from the durable row, so its view
+\* holds every member's origin.
 Boot ==
     /\ ~running /\ running' = TRUE
     /\ IF BootMode = "rerun_sent"
@@ -324,14 +355,16 @@ Boot ==
          ELSE /\ done' = [L \in Inputs |-> done[L] \/ L \in Active]
               /\ outcome' = [L \in Inputs |-> IF L \in Active THEN "failure" ELSE outcome[L]]
               /\ UNCHANGED <<st, turnOf>>
+    /\ settlerView' = [i \in Inputs |-> turnOf[i] # None]
     /\ UNCHANGED <<proc, sessionVars, sentCount, open, posts, refusedIn, cancelReq, cancelSent,
-                   zombie, wrongDone, badSend, served, budgetVars, extraVars>>
+                   zombie, wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
+                   clearedSent, receiptHas, merged>>
 
 AllSettled == \A i \in Inputs : st[i] = "done"
 Rest == AllSettled /\ UNCHANGED vars
 
 Next ==
-    \/ \E i \in Inputs : Arrive(i) \/ ReplayOld(i) \/ Settle(i)
+    \/ \E i \in Inputs : Arrive(i) \/ ReplayOld(i) \/ Settle(i) \/ StreamTick(i)
     \/ Spawn \/ NewSession \/ Reattach \/ ReattachRefused \/ LoadAnswered
     \/ SendPrompt \/ AgyResponds \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
     \/ UserStop \/ SendCancel \/ Clear \/ CloseAfterTurn \/ Crash \/ SweepOrphan \/ Boot \/ Rest
@@ -362,14 +395,20 @@ NoAnswerForRefusedSteer == \A i \in Inputs : posts[i] >= 1 /\ steerFailed[i] => 
 DurableOwner == \A i \in Inputs : st[i] = "sent" => turnOf[i] # None
 \* An input that had been sent when /clear ran is never queued again.
 NoReviveAfterClear == \A i \in Inputs : clearedSent[i] => st[i] # "queued"
+\* Every input a post covered, steered ones included, is named by that turn's receipt.
+NoMissingOrigin == \A i \in Inputs : posts[i] >= 1 => receiptHas[i]
 \* Reachability witnesses (expected to break when checked alone): a steered input answered by
-\* its turn, a failed steer covered by its turn's post, and a steer that fails after /clear.
+\* its turn, a failed steer covered by its turn's post, a steer that fails after /clear, and a
+\* cancelled receipt that needed the durable merge.
 NoSteeredAnswer ==
     ~\E i \in Inputs : turnOf[i] \notin {None, i} /\ posts[i] = 1 /\ outcome[turnOf[i]] = "answer"
 NoUncertainCovered ==
     ~\E i \in Inputs : steerFailed[i] /\ posts[i] = 1
 NoSteerFailAfterClear ==
     ~\E i \in Inputs : clearedSent[i] /\ steerFailed[i] /\ posts[i] = 1
+\* Witness: a cancelled turn's receipt names a steered input only through the durable merge.
+NoMergeOnCancel ==
+    ~\E i \in Inputs : merged[i] /\ turnOf[i] # None /\ outcome[turnOf[i]] = "cancelled"
 \* Liveness: every accepted input is eventually covered by one terminal post
 \* (answer, failure notice or cancel notice), steered inputs included.
 EveryInputSettles == \A i \in Inputs : (st[i] # "absent") ~> (posts[i] >= 1)

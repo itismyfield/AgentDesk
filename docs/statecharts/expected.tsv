@@ -16,6 +16,7 @@ agy-acp/AgyAcpMutants.cfg	AgyAcpSession	AtMostOnePost,NoDuplicateExecution,NoFor
 agy-acp/AgyAcpNoFence.cfg	AgyAcpSession	NoForeignResponse	-
 agy-acp/AgyAcpNoWatchdog.cfg	AgyAcpSession	-	EveryInputSettles
 agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpReceiptFromMemory.cfg	AgyAcpSession	NoMissingOrigin	-
 agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
 agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
 agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-

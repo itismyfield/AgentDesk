@@ -1,6 +1,6 @@
 # #8339 antigravity 채널을 `agy acp` 클라이언트로 옮기는 설계
 
-<!-- doc-path-refs: proposed src/services/agy_acp/ src/services/agy_acp/turn.rs src/services/agy_acp/steer.rs src/services/agy_acp/mod.rs src/services/agy_acp/child.rs src/services/discord/router/intake_gate/busy_inject/acp_steer.rs -->
+<!-- doc-path-refs: proposed src/services/agy_acp/ src/services/agy_acp/turn.rs src/services/agy_acp/steer.rs src/services/agy_acp/mod.rs src/services/agy_acp/child.rs src/services/discord/router/intake_gate/busy_inject/acp_steer.rs src/services/discord/turn_bridge/receipt_origins.rs -->
 <!-- doc-path-refs: external src/v1/error.rs apps/server/ packages/provider-acp/ AcpSessionRuntime.ts AntigravityAcpSupport.ts AntigravityAdapterV2.ts AntigravityProtocol.ts AntigravitySessionFiles.ts AntigravityTurnOutcome.ts AntigravityEditLocation.ts antigravityAuthSupport.ts adapter.ts acp_agent.rs jsonrpc.rs -->
 
 저장소 기준은 `5021d25794`(origin/main)이고, 확인한 agy CLI는 1.5.14(`agy --version`)다. 이 문서는 설계만 담는다. Rust 코드는 바꾸지 않는다. 상태 차트는 [agy-acp 모델](../../statecharts/agy-acp/AgyAcpSession.tla)과 [보고서](../../statecharts/agy-acp/agy-acp.report.md)다. 미확인 가정은 [U]로 표시하고 확인 방법을 함께 적는다.
@@ -20,7 +20,7 @@
 | 모델 | 세션의 `configOptions`(`id:"model"`) 안에서만 고른다(일반 외부 클라이언트는 Gemini만). 목록에 없으면 실패를 한 번 게시하고, `-p`로 몰래 되돌아가지 않는다. |
 | SDK | 공식 crate는 쓰지 않는다. v1의 필요한 부분만 tokio·serde_json으로 직접 구현한다(13절). |
 | 사용 형태 전제(D0) | **사용자 결정(agy-acp-1123)으로 전제를 확정했다.** 사람이 직접 모는 대화형 클라이언트로 `agy acp`를 띄우는 방식을 허용된 형태로 본다. |
-| 조각 | 4개(1, 2a, 2b, 3), 추정 합계 prod 28파일 / +2,500이다(파일 중복 포함). 조각마다 상한 아래다(16절). |
+| 조각 | 4개(1, 2a, 2b, 3), 추정 합계 prod 31파일 / +2,550이다(파일 중복 포함). 조각마다 상한 아래다(16절). |
 
 ## 1. 근거
 
@@ -133,8 +133,8 @@ ACP 어댑터(`agy_acp::turn`)는 기존 runner와 같은 두 출구로만 내�
 
 ### 4.4 바뀌는 파일과 그대로 두는 파일
 
-- **새 파일:** `src/services/agy_acp/{mod,rpc,wire,child,turn,store,attach,steer,permission,outcome}.rs`, `src/services/discord/router/intake_gate/busy_inject/acp_steer.rs`
-- **바뀌는 파일:** `stream_json_turn.rs`(분기, 플래그), `intake_turn.rs`(인자 하나), `src/config` 한 곳(`agy_acp.enabled`, 기한), `src/services/mod.rs`(mod 한 줄), `intake_gate/busy_inject.rs`(ACP 호출 한 곳), `control.rs`, `retry_state.rs`, `host_recovery_guard.rs`, `model_picker.rs`, `model_catalog.rs`, `recovery_engine/restore_inflight.rs`(호출 한 줄)
+- **새 파일:** `src/services/agy_acp/{mod,rpc,wire,child,turn,store,attach,steer,permission,outcome}.rs`, `src/services/discord/router/intake_gate/busy_inject/acp_steer.rs`, `src/services/discord/turn_bridge/receipt_origins.rs`
+- **바뀌는 파일:** `stream_json_turn.rs`(분기, 플래그), `intake_turn.rs`(인자 하나), `src/config` 한 곳(`agy_acp.enabled`, 기한), `src/services/mod.rs`(mod 한 줄), `intake_gate/busy_inject.rs`(ACP 호출 한 곳), `control.rs`, `retry_state.rs`, `host_recovery_guard.rs`, `model_picker.rs`, `model_catalog.rs`, `recovery_engine/restore_inflight.rs`(호출 한 줄), `turn_bridge/turn_analytics.rs`(영수증 병합 호출), `turn_bridge/mod.rs`(mod 한 줄)
 - **가시성만 바꾸는 giant 파일:** `src/services/process.rs`(`from_persisted`의 `cfg(test)` 제거, `unix_process_presence`를 `pub(crate)`로)
 - **그대로:** 3절의 유지 행 전부. `intake_gate.rs`(1,414줄)는 손대지 않는다.
 
@@ -223,10 +223,40 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
    - prompt를 쓰기 전에 B의 원본을 T의 기존 inflight `input_origin_ids` 칸(`src/services/discord/inflight/model.rs:151`)에 더한다. 저장은 기존 identity-gated 저장 `save_inflight_state_if_identity_unchanged`(`src/services/discord/inflight/save_store/identity_gate.rs:44-53`)를 쓴다. 새 칸도 새 저장 함수도 없다. `inflight/model.rs`(1,441줄)는 giant라 손대지 않는다.
    - 저장이 `Saved`가 아니면(T의 행이 바뀌었거나 IO 오류) B를 보내지 않고 `NotSent` → 지금 큐로 보낸다. 보내지 않았으므로 중복도 유실도 없다.
    - 저장한 뒤에만 checkpoint를 B 너머로 옮기고 prompt를 쓴다. 그래서 catch-up은 B를 다시 실행하지 않는다.
-   - 종료 영수증(`src/services/discord/receipt_settle.rs:69-76`이 그 칸을 쓰고, `src/db/turns.rs:239-289`가 합집합으로 누적)과 부팅 실패 안내는 이 칸을 그대로 읽는다. 그래서 B는 T의 답, 취소, 실패 중 어느 쪽이든 T의 게시 하나에 덮인다. 영수증 쪽 코드는 바꾸지 않는다.
+   - 부팅·표시된 행·강제 정지의 영수증(`src/services/discord/receipt_settle.rs`)은 디스크 행의 이 칸을 그대로 읽는다. `src/db/turns.rs:239-289`가 합집합으로 누적한다. 다만 bridge의 완료 영수증은 메모리 사본을 쓴다. 그래서 완료 직전에 디스크 원본을 병합한다(아래 3a). 그러면 B는 T의 답, 취소, 실패 중 어느 쪽이든 T의 게시 하나와 영수증 하나에 덮인다.
    - 칸에서 원본을 빼는 일은 없다. steer 오류가 와도 B는 T의 구성원으로 남는다(6.4). 그래서 제거와 저장 사이의 경계가 없다.
    - 그래서 steer가 실패한 B도 T의 `consumed_origin_ids`에 남는다. 이것은 의도다. catch-up과 부팅이 B를 다시 실행하지 않게 하고, 다시 보낼지는 안내를 본 사람이 정한다. 다시 보낸 글은 새 message id다.
    - 어느 steer가 오류로 끝났는지와 그 종류는 actor 메모리에만 둔다. 게시의 안내 문구를 고르는 데만 쓴다. 재시작으로 잃어도 부팅 실패 안내가 B를 덮으므로 유실은 아니다.
+3a. **완료 영수증 직전 디스크 원본 병합:**
+   - **문제:** bridge는 시작할 때 inflight를 메모리로 복제한다(`src/services/discord/turn_bridge/mod.rs:427`, `turn_bridge/stream_loop.rs:121-133`). B의 write-ahead는 디스크 행에만 들어가고, bridge 사본은 다음 stream tick 병합에서야 B를 안다. 그 전에 취소가 오면 bridge는 tick 없이 끝난다(`stream_loop.rs:220-225`). 종료 저장 병합은 pending message 후보가 있을 때만 돈다(`turn_bridge/stream_loop/exit_reconcile.rs:179-207`). 그래서 완료 영수증(`turn_bridge/completion_postlude.rs:904-919` → `turn_bridge/turn_analytics.rs:26-67`, `consumed_origin_ids: &inflight_state.input_origin_ids`는 `:49`)에 B가 빠질 수 있다. 영수증 뒤에 행을 지우면 B를 소유한 내구 증거도 사라진다. 1e 델타 리뷰 P1이다.
+   - **계약:** `record_terminal_receipt`(`turn_analytics.rs:26-67`)가 `TurnReceipt`를 만들기 직전에 새 child `turn_bridge/receipt_origins.rs`의 `latest_origins(provider, channel_id, &inflight_state) -> ReceiptOrigins`를 부른다. 이 함수는 그 턴의 최신 디스크 행을 읽어 메모리 원본과 병합한다.
+     - 읽기는 기존 `inflight::load_inflight_state_read_only_result`(`src/services/discord/inflight.rs:909-925`)다. 없음(`Ok(None)`)과 읽기 실패(`Err`)를 구분한다.
+     - 소유 판정은 bridge 완료 경로가 이미 쓰는 두 검사다. `InflightTurnIdentity::from_state(&inflight_state).matches_state(&row)`(`inflight/model/identity.rs:57-63`)와 `row.owned_by_turn_nonce(inflight_state.turn_nonce.as_deref())`(`inflight/save_store/identity_gate/captured_nonce.rs:12-15`)다.
+     - 새 원장도 새 inflight 필드도 없다. 거대 파일 `completion_postlude.rs`(1,078줄)는 손대지 않는다. 바뀌는 곳은 `turn_analytics.rs`(562줄)의 호출 몇 줄과 새 child 하나, 부모 `turn_bridge/mod.rs`의 `mod` 한 줄이다.
+
+   | 디스크 읽기 결과 | 처리 | 이유 |
+   |---|---|---|
+   | 같은 identity·nonce의 행 | 메모리 원본 뒤에 디스크에만 있는 원본을 순서대로 더한다(중복 제거). 그 목록으로 기록한다 | B를 포함한다 |
+   | 다른 턴의 행(identity 또는 nonce 불일치) | 합치지 않는다. 메모리 원본만 기록한다 | 남의 원본을 이 턴의 소비로 적지 않는다 |
+   | 행 없음(`Ok(None)`) | 메모리 원본만 기록한다 | 행을 지우는 다른 주인은 모두 지우기 전에 디스크 행으로 영수증을 기록한다(`receipt_settle.rs` 모듈 계약 1-2행, 아래 표). 영수증은 합집합으로 누적되므로 잃는 원본이 없다 |
+   | 읽기 실패(`Err`) | **기록하지 않는다.** 빈 목록 성공으로 보지 않는다. 기존 보류 경로 `receipt_settle::keep_marked`(`receipt_settle.rs:111-144`)로 행에 표시를 남기고 false를 돌려준다. 그러면 `completion_postlude.rs:904-919`의 `receipt_kept`가 참이 되어 행을 지우지 않는다. 다음 admission의 `settle_marked_row`(`:186-195`)나 부팅의 `settle_boot`(`:204-243`)가 디스크 행 그대로(B 포함) 기록한다 | 소유권을 확인하지 못한 채 행을 지우면 B의 증거가 사라진다 |
+
+   - **같은 경계를 쓰는 경로 전수(ACP 턴):**
+
+   | 경로 | 영수증을 쓰는 곳 | 읽는 원본 | 병합 |
+   |---|---|---|---|
+   | 정상 완료 | `completion_postlude.rs:904-919` → `turn_analytics.rs:26-67` | bridge 메모리 | **거친다** |
+   | `!stop`·`/stop`·API cancel | 토큰 취소 → `stream_loop.rs:220-225`(cancel 분기, tick 없음) → 같은 postlude | bridge 메모리 | **거친다** |
+   | `/clear`·`!clear` | `commands/control/clear_teardown.rs:243-255` `stop_released_turn`(`PreserveSession`: 행을 지우지 않음) → 토큰 취소 → 같은 postlude | bridge 메모리 | **거친다** |
+   | Terminate·기한 초과·자식 EOF | actor가 자식 종료(5.2-13) → 턴 `Error` → bridge → 같은 postlude | bridge 메모리 | **거친다** |
+   | DB 기록 실패 뒤 | `keep_marked` → `settle_marked_row`(`router/message_handler/foreign_row.rs:45,84`) 또는 `settle_boot` | 디스크 행 | 필요 없음 |
+   | 크래시 재시작 | `recovery_engine/restore_inflight.rs:104` `settle_boot`(`receipt_settle.rs:204-243`), `BootReceipts::settle_cleared`(`:245-266`), 2a의 ACP 부팅 실패(5.2-10) | 디스크 행 | 필요 없음(디스크가 정본) |
+   | 계획 재시작(`restart_mode`) | bridge는 영수증을 쓰지 않고 행을 남긴다(`completion_postlude.rs:896-902`의 `bridge_epilogue_clears_inflight`) → 부팅 | 디스크 행 | 필요 없음 |
+   | health 강제 정지 | `health/recovery/runtime_stop.rs:124,163,244` → `receipt_settle::stopped`(`receipt_settle.rs:347-364`) | 디스크 행 | 필요 없음 |
+   | bridge 진입 거절 | `turn_bridge/bridge_entry_persist.rs:510` → `entry_aborted`(`receipt_settle.rs:403-420`) | 디스크 행 | 필요 없음 |
+   | tmux·watcher·herdr·native 경로(`tmux_watcher/*`, `turn_finalizer/native_*`, `recovery_engine/herdr_admitted_restart.rs:173`, `health/recovery/carried_turn_close.rs:454`) | ACP 턴은 tmux·watcher·herdr·native를 쓰지 않는다 | — | 해당 없음 |
+
+   - **모델:** 새 변수 `settlerView`(영수증을 쓰는 쪽이 이미 아는 원본)와 동작 `StreamTick`을 두었다. `StreamTick`은 fair가 아니어서, 취소·`/clear`·종료·재시작이 tick보다 먼저 올 수 있다. 새 규칙 `NoMissingOrigin`(게시가 덮은 입력은 그 턴의 영수증에 있다)을 더했다. 변이 ReceiptFromMemory(병합 없이 메모리 원본만)가 이 규칙을 깬다.
 4. **전송:** 같은 세션에 `session/prompt{prompt:[B 본문, 첨부]}`를 새 request id로 보낸다. 시스템 봉투는 붙이지 않는다. B 메시지에 ➕ 반응을 단다(`INJECTED_REACTION`과 같다).
 5. **응답:**
    - T의 앞 prompt A가 `end_turn`으로 응답해도 B의 prompt가 열려 있으면 T는 계속된다. Done을 내지 않는다.
@@ -247,6 +277,7 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
   - `DurableOwner`: 보낸 입력은 언제나 그 원본을 inflight에 가진 턴의 구성원이다
   - `PostOnlyWithDisposition`: 게시 뒤에는 그 턴의 내구 종료 기록이 있다
   - `NoReviveAfterClear`: clear 때 이미 보낸 입력은 다시 큐에 들어가지 않는다(clear 뒤 늦게 온 steer 오류 포함)
+  - `NoMissingOrigin`: 게시가 덮은 입력은 steering 입력을 포함해 그 턴의 영수증 `consumed_origin_ids`에 있다(6.2-3a)
 - 이 규칙들을 Design에서 확인했다. 도달성 증인 세 가지도 Design에서 실제로 일어남을 확인했다. "steering된 입력이 턴의 답으로 덮임", "실패한 steer가 턴 게시에 덮임", "clear 뒤에 실패한 steer가 턴 게시에 덮임"이다(17절).
 
 ### 6.4 (d) 거절, 무시, 실패의 처리
@@ -399,28 +430,33 @@ T3 Code(MIT, `c89ca0a2f2c1d996d9b461568860991febaca04f`)는 읽기만 했다. �
 |---|---|---|---|---|---|
 | 1. 판정과 ACP 핵심(dormant) | `agy_acp.enabled`(기본 꺼짐), `acp_selected`, 사람 출처 판정(8절, [U8]), JSON-RPC 전송, wire 타입, actor(spawn, initialize, new, prompt, cancel, EOF, 기한, incarnation fence), **`StreamChild` 기반 자식 수명과 `child.json`, 플랫폼별 종료, Unix 부팅 전 옛 그룹 정리**(5.2-1, 5.2-12, 5.2-13), 4.1절 매핑, 스풀 기록 | `agy_acp/{mod,rpc,wire,child,turn}.rs`, `stream_json_turn.rs`, `intake_turn.rs`(인자), `src/config` 한 곳, `services/mod.rs`, `process.rs`(가시성 2줄) | 10파일 / +1,050 | ① **자동 경로 불변:** 스위치가 꺼져 있으면 어떤 agy 턴도 ACP 준비를 부르지 않는다. 켜져 있어도 루틴, `provider_exec`, dispatch, 봇 작성(E2E Test-Announce), 원본 claim이 없는 HTTP 헤드리스, 위임 작업 입력은 `execute_streaming`/`execute_recorded`로 간다. 이것을 생산 진입점 `execute_request`에서 단언한다. ② 가짜 에이전트 fixture로 짧은 답, 긴 답, 빈 답, cancelled, EOF, 기한, 옛 incarnation 응답을 넣어 메시지열과 스풀을 확인한다. ③ 긴 답에서 `-p`와 ACP가 같은 메시지열을 낸다. ④ 공용 세션 칸이 그대로다(최초 입력·clear 직후의 None 포함, [U4]). ⑤ **그룹 격리:** 두 destination에 가짜 에이전트(손자 프로세스 하나씩)를 띄우고 한쪽에 hard stop을 하면, 그 자식과 손자만 죽고 시험 부모 프로세스와 다른 destination은 산다. 자식 전용 그룹을 끈 변이에서는 이 시험이 실패한다. 같은 시험의 `cfg(windows)` 판은 `taskkill /T /F` 경로로 손자까지 죽는지 본다(ci-nightly `full_windows`, windows-latest). ⑥ **Unix 부팅 정리:** `child.json`이 맞는 살아 있는 그룹만 정리하고, pid만 같고 시작 시각이 다르면 건드리지 않는다. 리더는 죽고 손자만 남은 그룹(리더 PID 없음, 그룹 `Live`)은 정리한 뒤 spawn한다. probe 오류는 보류와 실패 안내 1회로 끝나고 spawn하지 않는다. Windows 부팅은 기록만 지우고 신호를 보내지 않는다. | 없음 |
 | 2a. 세션 수명 | `session.json`, resume/load/거절, 부팅 orphan 실패, clear·리셋·호스트 복구, 모델, 유휴 만료 | `agy_acp/{store,attach}.rs`, `control.rs`, `retry_state.rs`, `host_recovery_guard.rs`, `model_picker.rs`, `model_catalog.rs`, `recovery_engine/restore_inflight.rs` | 8파일 / +700 | LoadLeak, RerunSent, ClearKeeps를 각각 RED 재현에서 GREEN으로 만든다. 거절 resume은 new와 안내 1회, 목록 밖 모델은 실패 1회다. PG 시험은 `pg_throwaway.sh`로 돌린다. | 시험 채널에서 짧은 답, 긴 답, `!stop`, `/clear`, dcserver 재시작 뒤 이어 말하기를 1회씩 확인한다. [U1][U12]를 닫는다. |
-| 2b. steering | **busy 입력 → steering**(`acp_steer::offer`, 사람 작성 확인), prompt 전 원본의 inflight write-ahead(6.2-3), steer 오류의 안내 문구(6.4, 6.4.1) | `agy_acp/steer.rs`, `agy_acp/mod.rs`(mod 한 줄), `agy_acp/turn.rs`(안내 줄), `intake_gate/busy_inject/acp_steer.rs`, `busy_inject.rs`(mod 한 줄과 호출 한 곳) | 5파일 / +400 | SteerEarlyClose, SteerAfterClose, SteerErrorSilent, SteerErrorRequeue를 각각 RED에서 GREEN으로 만든다. steering 입력은 게시 0개 추가, ➕와 `consumed_origin_ids`, 재시작 뒤 catch-up 재실행 0. steer 오류(두 종류 각각)는 재전송 0, 큐 반환 0, 종류에 맞는 안내 1줄. steering 중 `/clear`를 하고 steer 오류를 늦게 넣으면 큐 반환 0, B를 덮는 게시는 T의 취소 게시 정확히 1. 같은 상황에서 clear 직후 재시작해도 재전송·재큐잉 0. write-ahead 저장이 실패하면 prompt 0, `NotSent` → 큐 1. 봇 작성 입력은 steering하지 않는다. | 시험 채널에서 **실행 중 입력(steer)**과 steer 오류를 프로토콜 로그로 확인한다. [U13]의 wire 순서와 거절 빈도를 기록한다. [U6][U7]을 닫은 뒤 `agy_acp.enabled`를 켠다. 오류 코드 분류 확정은 스위치 전 필수가 아니다. |
+| 2b. steering | **busy 입력 → steering**(`acp_steer::offer`, 사람 작성 확인), prompt 전 원본의 inflight write-ahead(6.2-3), steer 오류의 안내 문구(6.4, 6.4.1) | `agy_acp/steer.rs`, `agy_acp/mod.rs`(mod 한 줄), `agy_acp/turn.rs`(안내 줄), `intake_gate/busy_inject/acp_steer.rs`, `busy_inject.rs`(mod 한 줄과 호출 한 곳), `turn_bridge/receipt_origins.rs`, `turn_bridge/turn_analytics.rs`(호출 몇 줄), `turn_bridge/mod.rs`(mod 한 줄) | 8파일 / +450 | SteerEarlyClose, SteerAfterClose, SteerErrorSilent, SteerErrorRequeue, ReceiptFromMemory를 각각 RED에서 GREEN으로 만든다. **원본 영수증(6.2-3a):** 가짜 ACP 에이전트로 B의 write-ahead 저장 직후 stream tick을 막고 `!stop` → 디스크 영수증 `consumed_origin_ids`에 A·B 모두. 같은 지점에서 `/clear`도, 재시작도(부팅 영수증에 A·B). 디스크 읽기 실패를 넣으면 영수증 미기록·행 표시 유지·다음 admission에서 A·B 기록. 디스크 행이 다른 턴이면 그 원본을 합치지 않음. 병합 호출을 지운 뮤턴트는 `!stop`·`/clear` 시험이 B 누락으로 RED. steering 입력은 게시 0개 추가, ➕와 `consumed_origin_ids`, 재시작 뒤 catch-up 재실행 0. steer 오류(두 종류 각각)는 재전송 0, 큐 반환 0, 종류에 맞는 안내 1줄. steering 중 `/clear`를 하고 steer 오류를 늦게 넣으면 큐 반환 0, B를 덮는 게시는 T의 취소 게시 정확히 1. 같은 상황에서 clear 직후 재시작해도 재전송·재큐잉 0. write-ahead 저장이 실패하면 prompt 0, `NotSent` → 큐 1. 봇 작성 입력은 steering하지 않는다. | 시험 채널에서 **실행 중 입력(steer)**과 steer 오류를 프로토콜 로그로 확인한다. [U13]의 wire 순서와 거절 빈도를 기록한다. [U6][U7]을 닫은 뒤 `agy_acp.enabled`를 켠다. 오류 코드 분류 확정은 스위치 전 필수가 아니다. |
 | 3. 상호작용과 진단 | `interaction_*` 중계, 업스트림 오류 판정, `thought_level`, 진단(destination별 자식, incarnation, 턴 밖 출력 수, steer 수, 거절 수, 결과 불명 수) | `agy_acp/{permission,outcome}.rs`, `agy_acp/turn.rs`, 진단 route 한 곳, `model_picker.rs` | 5파일 / +350 | `interaction_*` 기한 뒤 거절, 취소 때 `cancelled` 응답, 오류 step fixture | 시험 채널에서 선택지 질문 1회 |
-| 합계 | | 파일 중복 포함 | 28파일 / +2,500 | | |
+| 합계 | | 파일 중복 포함 | 31파일 / +2,550 | | |
 
-- 조각 1은 +1,050, 2a는 +700, 2b는 +400으로 각각 +1,200 정지선 아래다(추정).
-- 2b +400의 근거: 가장 가까운 기존 코드인 `busy_inject.rs:221-453`(Discord 쪽 offer·attempt·settle과 핸드백)이 빈 줄과 주석을 뺀 코드 209줄이다(1e에서 측정). `acp_steer.rs`는 예약과 핸드백이 없어 그보다 작게 약 150줄로 잡았다. actor 쪽 `agy_acp/steer.rs`(열린 prompt 판정, write-ahead 저장, 전송, 오류 종류 기록)는 약 180줄, `turn.rs` 안내 줄은 약 30줄, mod·호출 줄은 약 10줄이다. 합계 약 +370이고 여유를 두어 +400으로 적었다. 1d의 +750에서 원장, 반환 결과 표, 부팅·clear 호출, 가시성 변경이 빠졌다. 1이 +1,150을 넘을 것 같으면 그룹 격리와 옛 그룹 정리(`child.rs`의 해당 부분)를 1b로 나눈다. 1b가 끝나기 전에는 스위치를 켜지 않는다.
+- 조각 1은 +1,050, 2a는 +700, 2b는 +450으로 각각 +1,200 정지선 아래다(추정).
+- 2b +450 = 아래 +400에 영수증 병합 약 +50(새 child `receipt_origins.rs` 약 40줄: 읽기·판정·병합·보류 분기, `turn_analytics.rs` 호출과 보류 연결 약 8줄, mod 한 줄)을 더한 값이다.
+- steering 본체 +400의 근거: 가장 가까운 기존 코드인 `busy_inject.rs:221-453`(Discord 쪽 offer·attempt·settle과 핸드백)이 빈 줄과 주석을 뺀 코드 209줄이다(1e에서 측정). `acp_steer.rs`는 예약과 핸드백이 없어 그보다 작게 약 150줄로 잡았다. actor 쪽 `agy_acp/steer.rs`(열린 prompt 판정, write-ahead 저장, 전송, 오류 종류 기록)는 약 180줄, `turn.rs` 안내 줄은 약 30줄, mod·호출 줄은 약 10줄이다. 합계 약 +370이고 여유를 두어 +400으로 적었다. 1d의 +750에서 원장, 반환 결과 표, 부팅·clear 호출, 가시성 변경이 빠졌다. 1이 +1,150을 넘을 것 같으면 그룹 격리와 옛 그룹 정리(`child.rs`의 해당 부분)를 1b로 나눈다. 1b가 끝나기 전에는 스위치를 켜지 않는다.
 - 스위치는 2b 운영 확인 뒤 켠다. 2a만 있을 때 실행 중 입력은 지금처럼 큐로 간다(`acp_steer::offer`가 없으므로 기존 `NotSent` 경로).
 - 1,000줄이 넘는 파일(`intake_turn.rs`, `intake_gate.rs`, `provider_dispatch.rs`)에는 인자 전달이나 호출 한 줄만 더하거나 아예 손대지 않는다. 본체는 `agy_acp/`와 `intake_gate/busy_inject/acp_steer.rs`에 둔다. `acp_steer`는 `intake_gate.rs`(1,414줄)가 아니라 `busy_inject.rs`(547줄)의 자식으로 둔다. 그래야 giant에 `mod` 줄도 더하지 않는다.
 - 추정 근거는 #8274 조각 실측(1/+340, 2/+465, 3/+560)과 SDK 조사의 LOC 추정이다. 구현 뒤 `pr_cap_prod.py`로 실측한다.
 
 ## 17. 상태 차트 결과 요약
 
-- **규칙(안전 9개와 PROPERTY 1개):** 입력마다 게시 1개 이하(`AtMostOnePost`), 받은 입력은 결국 덮임(`EveryInputSettles`, PROPERTY), prompt 실행 1회(`NoDuplicateExecution`), 남의 응답으로 닫지 않음(`NoForeignResponse`), clear 뒤 옛 세션 금지(`NoPromptToClearedSession`), 게시에는 내구 종료 기록이 있음(`PostOnlyWithDisposition`), steering 입력 조건 2개(`AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer`), 보낸 입력의 내구 소유자(`DurableOwner`), clear 뒤 되살아남 0(`NoReviveAfterClear`).
-- **결과:** 설계 3구성(Design: 상주·resume·steering·steer 오류는 턴에 남기고 안내·옛 자식 정리, DesignLoad, PerTurn)은 모든 규칙을 통과한다. 변이 9개와 합본 1개는 각각 `expected.tsv`의 규칙만 깬다. 13개 구성 모두 `scripts/ci/statecharts_tlc.py`에서 일치한다(보고서).
+- **규칙(안전 10개와 PROPERTY 1개):** 입력마다 게시 1개 이하(`AtMostOnePost`), 받은 입력은 결국 덮임(`EveryInputSettles`, PROPERTY), prompt 실행 1회(`NoDuplicateExecution`), 남의 응답으로 닫지 않음(`NoForeignResponse`), clear 뒤 옛 세션 금지(`NoPromptToClearedSession`), 게시에는 내구 종료 기록이 있음(`PostOnlyWithDisposition`), steering 입력 조건 2개(`AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer`), 보낸 입력의 내구 소유자(`DurableOwner`), clear 뒤 되살아남 0(`NoReviveAfterClear`), steering 입력의 영수증 누락 0(`NoMissingOrigin`).
+- **결과:** 설계 3구성(Design: 상주·resume·steering·steer 오류는 턴에 남기고 안내·완료 영수증 직전 원본 병합·옛 자식 정리, DesignLoad, PerTurn)은 모든 규칙을 통과한다. 변이 10개와 합본 1개는 각각 `expected.tsv`의 규칙만 깬다. 14개 구성 모두 `scripts/ci/statecharts_tlc.py`에서 일치한다(보고서).
 - **1e(B-noreturn)에서 바뀐 것:**
   - `SteerRejected`, `ReturnToQueue`, Returning 변수를 걷어 냈다. steer 오류는 두 종류 모두 `SteerErrored` 하나로 모았다. 입력은 턴에 남고, `Settle`이 실패 안내를 붙인다(`noticed`).
   - 반환 변이 3개(SteerRefuseDrop, SteerReturnVolatile, ClearReturnsOld)를 지웠다.
   - `NoAnswerForRefusedSteer`를 "실패한 steer를 덮는 게시는 실패 안내를 갖는다"로 개정했다. 새 변이 SteerErrorSilent(안내 없이 덮음)가 이를 깬다.
   - `NoReviveAfterClear`는 "clear 때 이미 보낸 입력은 다시 큐에 들어가지 않는다"로 넓혔다. 1d 델타 리뷰의 반례는 "clear 때 Member였던 입력이 늦게 거절되어 되살아남"이었다. 이것을 변이 SteerErrorRequeue(오류 난 steer를 큐로 돌림)가 8걸음으로 재현하고 이 규칙을 깬다. 두 prompt 열림 → `/clear` → steer 실패 → 큐로 돌아감이다. Design에서는 막힌다. 경계가 같은 이유로 RerunSent와 합본 Mutants도 이 규칙을 깬다.
   - SteerEarlyClose·SteerAfterClose는 이제 `AnswerCoversWholeSteer`와 `NoAnswerForRefusedSteer`를 깬다. 일찍 게시된 steer가 그 뒤 실패하면 안내가 빠진 게시가 된다.
+- **1f에서 더한 것:** bridge 메모리와 디스크 write-ahead의 경계를 넣었다(`settlerView`, `StreamTick`, `receiptHas`). 새 규칙 `NoMissingOrigin`과 변이 ReceiptFromMemory를 더했다.
+  - 변이의 최단 경로는 8걸음이다: 두 prompt 열림 → agy 종료(EOF) → 게시와 영수증(B 없음).
+  - 취소 경로도 따로 확인했다: 두 prompt 열림 → `!stop` → `session/cancel` → 취소 기한 → 게시와 영수증(B 없음). 같은 모델에 검사용 불변식을 더해 rc=12로 확인했고, 이 불변식은 커밋하지 않았다.
+  - Design에서는 증인 `NoMergeOnCancel`이 "취소된 턴의 영수증에 B가 병합으로만 들어감"이 실제로 일어남을 보인다. 재시작은 부팅이 디스크 행으로 정산하므로 병합 없이도 B가 들어간다.
 - **모델 밖:** 플랫폼별 종료 호출(Unix 그룹 신호, Windows `taskkill /T`와 dcserver job). Windows는 job이 크래시 때 트리를 닫아 orphan이 생기지 않는다. 그래서 모델의 orphan 경로가 두 플랫폼을 함께 덮는다. 신호가 남의 프로세스에 닿지 않는지는 조각 1 프로세스 시험 ⑤⑥이 맡는다.
-- **도달성:** Design에서 steering 응답, 실패한 steer의 턴 게시, clear 뒤 실패한 steer의 턴 게시가 실제로 일어남을 증인 불변식 위반(rc=12)으로 확인했다.
+- **도달성:** Design에서 steering 응답, 실패한 steer의 턴 게시, clear 뒤 실패한 steer의 턴 게시, 취소된 턴의 영수증 병합이 실제로 일어남을 증인 불변식 위반(rc=12)으로 확인했다.
 - 상세는 [보고서](../../statecharts/agy-acp/agy-acp.report.md)에 있다.
 
 ## 18. 사용자 결정과 미확인 가정

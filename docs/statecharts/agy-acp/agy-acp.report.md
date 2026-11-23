@@ -4,7 +4,7 @@
 
 Code reference: `5021d25794` (origin/main). The ACP client does not exist yet, so this is a design model. Its counterexamples are checked against the design and against the T3 Code reference behaviour. They are not replayed against current Rust code. The output side (spool → writer → Discord receipt) stays the contract of [WriterAdoption AgySpec](../tui-o-writer/agy-adoption.report.md); in this model it is one receipt-guarded `Settle` step.
 
-Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `dcd67b738ded6b5f787d0ac67a9182955032a4a2154706c91b37af95837da986`.
+Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `dd0574e53c4055e97abbf7e451bde874717bfa2e813687eb8743411af350378c`.
 
 ## Scope
 
@@ -13,6 +13,8 @@ The model covers one person-driven antigravity destination with two inputs. A pe
 Each fault happens at most once: one AgentDesk restart, one agy exit, one `!stop`, one `/clear`, one refused `session/resume` and one failed steer prompt.
 
 A failed steer prompt (`SteerErrored`) is either kind from design §6.4.1: rejected before execution, or an unknown outcome. Both are handled the same way, because the scope cut B-noreturn takes out the return to the queue. The input stays a member of the turn and is never sent again. The turn's one post covers it with a notice line, recorded as `noticed`. The kind only picks the wording, so the model does not split it.
+
+A steered input's origin is written ahead into the turn's durable row before its prompt (design §6.2-3). The bridge's in-memory copy learns that origin only at its next stream tick (`StreamTick`, not fair). A stop, `/clear`, child exit or restart may come before the tick. The completion receipt therefore merges the turn's latest durable origins under the same identity and nonce before it commits (§6.2-3a). After a restart, the boot settler reads the durable row itself.
 
 agy is not fair. It may never answer a prompt or a cancel. It may answer the older prompt first (steer) or finish it normally before the newer one (queueing agy 1.4). Only AgentDesk's own steps are fair: spawn, attach, prompt, cancel, watchdog, boot and settle.
 
@@ -36,27 +38,29 @@ The child runs in its own process group, so on Unix an AgentDesk restart may lea
 | `NoAnswerForRefusedSteer` | A failed steer is never covered as a plain answer: the post that covers it carries the failure notice. |
 | `DurableOwner` | An input that was sent is always a member of a turn whose origin list holds it. |
 | `NoReviveAfterClear` | An input that had been sent when `/clear` ran is never queued again, also when its steer fails after the clear. |
+| `NoMissingOrigin` | Every input a post covered, steered ones included, is named by that turn's receipt (`consumed_origin_ids`). |
 | `EveryInputSettles` (PROPERTY) | Every accepted input, steered inputs included, is eventually covered by one terminal post: an answer, a failure notice or a cancel notice. |
 
 ## Results
 
-All 13 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts come from the `statechart` command on the same model.
+All 14 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts come from the `statechart` command on the same model.
 
 | Config | What it fixes | Distinct states | Broken |
 |---|---|---:|---|
-| Design | Resident child in its own group, `session/resume`, steering, a failed steer stays in the turn with a notice, orphan sweep, watchdog, incarnation fence | 24,375 | none |
-| DesignLoad | Fallback `session/load` with replay dropped until the load response | 25,071 | none |
-| PerTurn | Alternative: one `agy acp` child per turn | 31,933 | none |
-| LoadLeak | Mutant: load replay is forwarded to the channel | 30,832 | `AtMostOnePost` |
-| RerunSent | Mutant: boot re-queues the inputs of a turn whose prompts were written | 57,511 | `NoDuplicateExecution`, `NoReviveAfterClear` |
-| ClearKeeps | Mutant: `/clear` forgets the id but the live child keeps the old session | 22,884 | `NoPromptToClearedSession` |
-| NoFence | Mutant: responses matched by JSON-RPC id alone across incarnations | 29,113 | `NoForeignResponse` |
-| NoWatchdog | Mutant: no inactivity or cancel deadline | 12,307 | `EveryInputSettles` |
-| SteerEarlyClose | Mutant: the steered first prompt's `end_turn` closes the turn | 25,322 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
-| SteerAfterClose | Mutant: an input is steered into a turn whose last prompt already answered | 21,365 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
-| SteerErrorRequeue | Mutant: a failed steer is put back in the queue | 45,052 | `NoDuplicateExecution`, `NoReviveAfterClear` |
-| SteerErrorSilent | Mutant: the turn post covers a failed steer without its notice | 24,375 | `NoAnswerForRefusedSteer` |
-| Mutants | Session safety mutants together (source of `agy-acp.chart.mmd`) | 87,957 | the four session safety rules and `NoReviveAfterClear` |
+| Design | Resident child in its own group, `session/resume`, steering, a failed steer stays in the turn with a notice, receipt merges durable origins, orphan sweep, watchdog, incarnation fence | 27,165 | none |
+| DesignLoad | Fallback `session/load` with replay dropped until the load response | 27,861 | none |
+| PerTurn | Alternative: one `agy acp` child per turn | 35,489 | none |
+| LoadLeak | Mutant: load replay is forwarded to the channel | 33,622 | `AtMostOnePost` |
+| RerunSent | Mutant: boot re-queues the inputs of a turn whose prompts were written | 63,523 | `NoDuplicateExecution`, `NoReviveAfterClear` |
+| ClearKeeps | Mutant: `/clear` forgets the id but the live child keeps the old session | 25,208 | `NoPromptToClearedSession` |
+| NoFence | Mutant: responses matched by JSON-RPC id alone across incarnations | 31,903 | `NoForeignResponse` |
+| NoWatchdog | Mutant: no inactivity or cancel deadline | 14,085 | `EveryInputSettles` |
+| SteerEarlyClose | Mutant: the steered first prompt's `end_turn` closes the turn | 29,102 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
+| SteerAfterClose | Mutant: an input is steered into a turn whose last prompt already answered | 30,005 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
+| SteerErrorRequeue | Mutant: a failed steer is put back in the queue | 50,174 | `NoDuplicateExecution`, `NoReviveAfterClear` |
+| SteerErrorSilent | Mutant: the turn post covers a failed steer without its notice | 27,165 | `NoAnswerForRefusedSteer` |
+| ReceiptFromMemory | Mutant: the completion receipt uses only the bridge's in-memory origins | 27,165 | `NoMissingOrigin` |
+| Mutants | Session safety mutants together (source of `agy-acp.chart.mmd`) | 93,625 | the four session safety rules and `NoReviveAfterClear` |
 
 Mutants stops at its first break, and its later runs stop at 100,000 distinct states, so its rows do not give one total.
 
@@ -64,10 +68,11 @@ SteerEarlyClose and SteerAfterClose break `NoAnswerForRefusedSteer` too: the tur
 
 ### Reachability
 
-Steering is not vacuous in Design. Three witness invariants were checked alone against the Design constants, and each breaks (TLC exit 12):
+Steering is not vacuous in Design. Four witness invariants were checked alone against the Design constants, and each breaks (TLC exit 12):
 
 - `NoSteeredAnswer`: a steered input is answered by its turn.
 - `NoUncertainCovered`: a failed steer is covered by its turn's post.
+- `NoMergeOnCancel`: a cancelled turn's receipt names a steered input only through the durable merge.
 - `NoSteerFailAfterClear`: a steer that fails after `/clear` is covered by its turn's post. This is the path of the 1d delta review's counterexample, and in Design it ends in one post with no requeue.
 
 The witnesses are in the module and are not part of any committed config.
@@ -79,6 +84,7 @@ Charts:
 - [Session chart](agy-acp.chart.mmd) draws the four session safety bug paths (`AgyAcpMutants`).
 - [Steering chart](agy-acp-steer.chart.mmd) draws `AgyAcpSteerEarlyClose`.
 - [Steer requeue chart](agy-acp-steer-requeue.chart.mmd) draws `AgyAcpSteerErrorRequeue`.
+- [Receipt chart](agy-acp-receipt.chart.mmd) draws `AgyAcpReceiptFromMemory`.
 
 Shortest paths, in the charts' words:
 
@@ -98,6 +104,7 @@ Shortest paths, in the charts' words:
 - **SteerErrorRequeue (`NoReviveAfterClear`, 8 steps):** two prompts open → `/clear` → "steer prompt fails; the input is put back in the queue". This is the 1d delta review's counterexample: an input that was a member when `/clear` ran comes back after a late steer error. In the design, a failed steer stays in its turn, and the cancel post that `/clear` causes covers it.
 - **SteerErrorRequeue (`NoDuplicateExecution`):** the re-queued steer is written as a second `session/prompt`.
 - **SteerErrorSilent:** two prompts open → agy answers the first → the steer prompt fails → the turn posts without the notice line. In the design, the post carries one notice line per failed steer: "not delivered, please resend" or "outcome unknown, not run again".
+- **ReceiptFromMemory (`NoMissingOrigin`, 8 steps):** two prompts open (the steer written ahead, no stream tick yet) → agy exits → the turn posts and commits a receipt without the steered input. The `!stop` variant was checked separately with a scratch invariant: two prompts open → `!stop` → `session/cancel` → cancel deadline → the receipt has no steered input (TLC exit 12, not committed). In the design, the receipt merges the durable row under the same identity and nonce (§6.2-3a).
 - **NoWatchdog (liveness):** `!stop` → `session/cancel` → agy never answers → "Prompt open, cancel sent" forever. The design kills the child's own group after the cancel deadline (15 s) or the inactivity deadline (15 min).
 
 ## Not covered
@@ -106,6 +113,7 @@ Shortest paths, in the charts' words:
 - Signals reaching other process groups are not modelled. Group isolation is a slice 1 process test (design §16), not a model property. The model only fixes the order: no new spawn while an orphan of the old child may run.
 - The two kinds of steer failure are one action. Their only difference is the notice wording (§6.4.1).
 - The Unix sweep's hold branch (probe error: no spawn, failure notice) is a slice 1 process test, not modelled.
+- The durable-row read in the receipt merge failing (receipt held, row marked) and the row belonging to another turn are slice 2b tests, not modelled.
 - The write-ahead save of a steered input's origin failing is a slice 2b test. In that case the prompt is not written and the input goes to the queue unsent.
 - The queue drop done by `/clear` is abstracted.
 - Unsolicited output after a turn is dropped by design and not modelled.
@@ -113,4 +121,4 @@ Shortest paths, in the charts' words:
 - Steering of HTTP iMessage inputs is out of scope: they stay queued.
 - Whether agy reflects a steer in its answer cannot be observed at the protocol level.
 
-Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1e/`. These are model results, not Rust test results.
+Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1f/`. These are model results, not Rust test results.
