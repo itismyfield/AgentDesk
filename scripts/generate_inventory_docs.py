@@ -140,7 +140,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
     "krx_config_tests.rs": "Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate.",
     "krx_config_tests/": "Test functions moved out of KRX config/services inline test modules because they call root-crate items.",
-    "krx_config_unix_tests.rs": "Test-only host for KRX config/tui_input tests declared under cfg(all(test, unix)) that call root-crate items.",
+    "krx_config_unix_tests.rs": "Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
     "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
     "test_support/": "Test runtime that holds fixture serialization for the whole async body.",

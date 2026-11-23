@@ -5482,7 +5482,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |
-| `src/krx_config_unix_tests.rs` | Test-only host for KRX config/tui_input tests declared under cfg(all(test, unix)) that call root-crate items. |
+| `src/krx_config_unix_tests.rs` | Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

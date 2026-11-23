@@ -1,4 +1,4 @@
-//! KRX config tests under `cfg(all(test, unix))` that call root or discord items;
+//! KRX config tests under `cfg(all(test, unix))` that call root-crate items;
 //! a separate host keeps that single cfg predicate so each declaration key stays the same.
 
 #[path = "config/test_instance/api_boundary_tests.rs"]

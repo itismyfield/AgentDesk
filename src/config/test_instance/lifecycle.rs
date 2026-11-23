@@ -509,7 +509,7 @@ pub(crate) fn prepare_control(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn dispatch_control(
+fn dispatch_control(
     _peer: std::net::SocketAddr,
     _body: &[u8],
 ) -> Result<serde_json::Value, String> {
