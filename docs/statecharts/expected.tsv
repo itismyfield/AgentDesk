@@ -18,6 +18,7 @@ agy-acp/AgyAcpLoadLeak.cfg	AgyAcpSession	AtMostOnePost	-
 agy-acp/AgyAcpMutants.cfg	AgyAcpSession	AtMostOnePost,NoDuplicateExecution,NoForeignResponse,NoPromptToClearedSession,NoReviveAfterClear	-
 agy-acp/AgyAcpNoFence.cfg	AgyAcpSession	NoForeignResponse	-
 agy-acp/AgyAcpNoWatchdog.cfg	AgyAcpSession	-	EveryInputSettles
+agy-acp/AgyAcpPathPerTurn.cfg	AgyAcpSession	SessionKeepsPath	-
 agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpReceiptFromMemory.cfg	AgyAcpSession	NoMissingOrigin	-
 agy-acp/AgyAcpRecordWaiter.cfg	AgyAcpSession	ChildRecorded	-

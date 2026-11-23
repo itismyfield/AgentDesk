@@ -17,6 +17,8 @@
 \* cancel, and ends the child even after a person's session/cancel went out or agy's answer
 \* closed the turn first. Each child's record names its incarnation; a stopped child's
 \* exit report reaches AgentDesk late, after the next child may have written its own record.
+\* The ACP switch is read once at boot; a config reload changes only the live snapshot, so an
+\* input never goes to `agy --print` while the channel's ACP child is up.
 \* Output custody (spool -> writer -> Discord receipt) is abstracted to Settle; its
 \* exactly-once delivery is checked by tui-o-writer/WriterAdoption (AgySpec).
 EXTENDS Naturals, FiniteSets
@@ -31,7 +33,8 @@ CONSTANTS Lifetime,    \* "resident" | "per_turn"
           ReceiptMode, \* "merge": the receipt merges the durable origins | "memory"
           ForceMode,   \* "promote": a forced stop follows a sent cancel | "first_only" | "off"
           RecordMode,  \* "owner": an exit removes only its own record | "waiter" | "off"
-          ForceOrder   \* "intent_first": intent before the cancel | "cancel_first"
+          ForceOrder,  \* "intent_first": intent before the cancel | "cancel_first"
+          PathPick     \* "boot": the switch is read at boot | "turn": at every input | "off"
 
 Inputs == 1..2
 NoGen == 0
@@ -70,13 +73,17 @@ VARIABLES running,     \* AgentDesk process is up
           recorded,    \* the latest spawned child's record is on disk
           curExit,     \* the latest child ended and its exit report has not arrived yet
           oldExits,    \* exit reports of earlier children that have not arrived yet
+          cfgOn,       \* the config's agy_acp.enabled in the live snapshot
+          pathAcp,     \* the path fixed at this boot is ACP
+          reloadLeft,  \* budget for one config reload that turns the switch off
+          switched,    \* an input went to `agy --print` while the ACP child was up
           crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft, forceLeft
 
 vars == <<running, proc, attached, stored, nextGen, clearedGen, loading, st, sentCount, turnOf,
           open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone,
           badSend, served, steerFailed, noticed, orphan, clearedSent, settlerView, receiptHas,
           merged, forceReq, forceAsked, intentDue, recorded, curExit, oldExits, crashLeft, dieLeft, stopLeft, clearLeft,
-          refuseLeft, steerFailLeft, forceLeft>>
+          refuseLeft, steerFailLeft, forceLeft, cfgOn, pathAcp, reloadLeft, switched>>
 
 Queued == {i \in Inputs : st[i] = "queued"}
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
@@ -92,7 +99,10 @@ sessionVars == <<attached, stored, nextGen, clearedGen, loading>>
 budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft, forceLeft>>
 receiptVars == <<settlerView, receiptHas, merged>>
 childVars == <<forceReq, forceAsked, intentDue, recorded, curExit, oldExits>>
-extraVars == <<steerFailed, noticed, orphan, clearedSent, receiptVars, childVars>>
+pathVars == <<cfgOn, pathAcp, reloadLeft, switched>>
+extraVars == <<steerFailed, noticed, orphan, clearedSent, receiptVars, childVars, pathVars>>
+\* The path a queued input takes: fixed at boot, or (mutant) the live switch at every input.
+UsesAcp == IF PathPick = "turn" THEN cfgOn ELSE pathAcp
 
 Init ==
     /\ running = TRUE /\ proc = "none" /\ attached = NoGen /\ stored = NoGen /\ nextGen = 1
@@ -110,6 +120,8 @@ Init ==
     /\ settlerView = [i \in Inputs |-> FALSE] /\ receiptHas = [i \in Inputs |-> FALSE]
     /\ merged = [i \in Inputs |-> FALSE]
     /\ forceReq = FALSE /\ forceAsked = FALSE /\ intentDue = FALSE /\ recorded = FALSE /\ curExit = FALSE /\ oldExits = 0 /\ forceLeft = 1
+    /\ cfgOn = TRUE /\ pathAcp = TRUE /\ switched = FALSE
+    /\ reloadLeft = IF PathPick = "off" THEN 0 ELSE 1
 
 \* A person posts in Discord (or an authenticated iMessage arrives); the mailbox keeps it.
 Arrive(i) ==
@@ -118,14 +130,15 @@ Arrive(i) ==
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars, extraVars>>
 
+\* src/services/agy_acp/mod.rs actor_for: the first ACP input of a destination starts its child.
 Spawn ==
-    /\ running /\ proc # "up" /\ Queued # {} /\ ~orphan
+    /\ running /\ proc # "up" /\ Queued # {} /\ ~orphan /\ UsesAcp
     /\ proc' = "up" /\ served' = FALSE /\ attached' = NoGen /\ loading' = FALSE
     /\ recorded' = TRUE /\ curExit' = FALSE /\ oldExits' = oldExits + (IF curExit THEN 1 ELSE 0)
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, open, done,
                    outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq,
-                   forceAsked, intentDue>>
+                   forceAsked, intentDue, pathVars>>
 
 NewSession ==
     /\ running /\ proc = "up" /\ attached = NoGen /\ stored = NoGen /\ nextGen <= 3
@@ -171,6 +184,7 @@ JoinTarget ==
     IF SteerMode = "after_close" /\ Active = {} THEN Closing ELSE Active
 SendPrompt ==
     /\ running /\ proc = "up" /\ attached # NoGen /\ ~loading /\ Queued # {} /\ ~cancelReq
+    /\ UsesAcp
     /\ ~forceReq
     /\ LET i == Min(Queued)
            target == JoinTarget \ {refusedIn[i]}
@@ -189,7 +203,7 @@ SendPrompt ==
     /\ served' = TRUE
     /\ UNCHANGED <<running, proc, sessionVars, outcome, posts, refusedIn, cancelReq, cancelSent,
                    zombie, wrongDone, budgetVars, steerFailed, noticed, orphan, clearedSent,
-                   receiptHas, merged, childVars>>
+                   receiptHas, merged, childVars, pathVars>>
 
 \* The bridge's stream tick reads the durable row and learns a steered origin. Not fair: a
 \* stop, /clear or restart may come before it.
@@ -199,7 +213,7 @@ StreamTick(i) ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptHas, merged,
-                   childVars>>
+                   childVars, pathVars>>
 
 EndCancel(o) == IF o = {} THEN FALSE ELSE cancelReq
 EndCancelSent(o) == IF o = {} THEN FALSE ELSE cancelSent
@@ -222,7 +236,7 @@ AgyResponds ==
           /\ cancelReq' = EndCancel(rest) /\ cancelSent' = EndCancelSent(rest)
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, posts, refusedIn, zombie,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, childVars>>
+                   clearedSent, receiptVars, childVars, pathVars>>
 
 \* The steer prompt fails: rejected before execution, or an unknown outcome (internal error,
 \* request aborted, any other code, deadline or lost pipe after the write). Either way the
@@ -246,7 +260,7 @@ SteerErrored ==
     /\ steerFailLeft' = steerFailLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, posts, zombie, wrongDone, badSend,
                    served, noticed, orphan, clearedSent, receiptVars, crashLeft, dieLeft, stopLeft,
-                   clearLeft, refuseLeft, forceLeft, childVars>>
+                   clearLeft, refuseLeft, forceLeft, childVars, pathVars>>
 
 \* Close every turn that still has an open prompt with the given outcome.
 FailOpenTurns(kind) ==
@@ -265,7 +279,7 @@ AgyDies ==
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    zombie, wrongDone, badSend, served, crashLeft, stopLeft, clearLeft, refuseLeft,
                    steerFailLeft, forceLeft, steerFailed, noticed, orphan, clearedSent,
-                   receiptVars, intentDue, recorded, oldExits>>
+                   receiptVars, intentDue, recorded, oldExits, pathVars>>
 
 \* No update within the inactivity budget, or no cancelled answer within the cancel budget:
 \* kill the child's own process group and close the open turns.
@@ -277,7 +291,7 @@ WatchdogKill ==
     /\ forceAsked' = FALSE /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, intentDue, recorded, oldExits>>
+                   clearedSent, receiptVars, intentDue, recorded, oldExits, pathVars>>
 
 \* The killed child's buffered response is read after a new prompt is open.
 ZombieResponse ==
@@ -288,7 +302,7 @@ ZombieResponse ==
               IN /\ open' = rest
                  /\ Finish(turnOf[j], turnOf[j] \notin OpenTurns(rest, turnOf))
                  /\ wrongDone' = TRUE
-         ELSE UNCHANGED <<open, done, outcome, wrongDone>>
+         ELSE UNCHANGED <<open, done, outcome, wrongDone, pathVars>>
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, posts, refusedIn, cancelReq,
                    cancelSent, badSend, served, budgetVars, extraVars>>
 
@@ -308,7 +322,7 @@ ForceStop ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft, dieLeft,
                    stopLeft, clearLeft, refuseLeft, steerFailLeft, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, recorded, curExit, oldExits>>
+                   clearedSent, receiptVars, recorded, curExit, oldExits, pathVars>>
 
 \* cancel_first: the intent lands only after the cancel; a turn that agy's answer already
 \* closed has no drive left to read it, so its child keeps running.
@@ -317,7 +331,7 @@ ForceIntent ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceAsked,
-                   recorded, curExit, oldExits>>
+                   recorded, curExit, oldExits, pathVars>>
 
 \* The turn sends Terminate: the child's own group is killed and its open turns end cancelled,
 \* also after agy's answer closed the turn. The mutant sends it only when no session/cancel
@@ -331,7 +345,7 @@ SendTerminate ==
     /\ forceAsked' = FALSE /\ curExit' = (RecordMode # "off")
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, st, sentCount, turnOf, posts, refusedIn,
                    wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptVars, intentDue, recorded, oldExits>>
+                   clearedSent, receiptVars, intentDue, recorded, oldExits, pathVars>>
 
 \* A stopped child's exit report: the record goes only if it is that child's (the mutant removes
 \* whatever record is on disk). A report from an earlier child arrives after the next spawn.
@@ -342,7 +356,7 @@ ExitReported(latest) ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, forceReq,
-                   forceAsked, intentDue>>
+                   forceAsked, intentDue, pathVars>>
 
 SendCancel ==
     /\ running /\ proc = "up" /\ cancelReq /\ ~cancelSent /\ open # {}
@@ -363,7 +377,7 @@ Clear ==
     /\ UNCHANGED <<running, proc, nextGen, loading, st, sentCount, turnOf, open, done, outcome,
                    posts, refusedIn, cancelSent, zombie, wrongDone, badSend, served, crashLeft,
                    dieLeft, stopLeft, refuseLeft, steerFailLeft, forceLeft, steerFailed, noticed,
-                   orphan, receiptVars, childVars>>
+                   orphan, receiptVars, childVars, pathVars>>
 
 \* One-turn lifetime: the child is closed after its last prompt settles.
 CloseAfterTurn ==
@@ -373,7 +387,7 @@ CloseAfterTurn ==
     /\ UNCHANGED <<running, stored, nextGen, clearedGen, loading, st, sentCount, turnOf, open, done,
                    outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend,
                    served, budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars,
-                   intentDue, recorded, oldExits>>
+                   intentDue, recorded, oldExits, pathVars>>
 
 \* The writer posts the turn's recorded disposition once; that post covers every member, and
 \* carries one notice line for each member whose steer failed (the mutant leaves it out). The
@@ -394,7 +408,7 @@ Settle(L) ==
                     ELSE merged[i]]
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, refusedIn,
                    cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars,
-                   steerFailed, orphan, clearedSent, settlerView, childVars>>
+                   steerFailed, orphan, clearedSent, settlerView, childVars, pathVars>>
 
 \* AgentDesk restart: memory is lost. The child has its own process group, so it may outlive
 \* AgentDesk as an orphan until boot sweeps it.
@@ -409,7 +423,7 @@ Crash ==
     /\ UNCHANGED <<stored, nextGen, clearedGen, st, sentCount, turnOf, done, outcome, posts,
                    refusedIn, wrongDone, badSend, served, dieLeft, stopLeft, clearLeft, refuseLeft,
                    steerFailLeft, forceLeft, steerFailed, noticed, clearedSent, receiptHas, merged,
-                   recorded>>
+                   recorded, pathVars>>
 
 \* Boot sweeps the recorded child group of the previous AgentDesk before any new spawn.
 SweepOrphan ==
@@ -417,7 +431,7 @@ SweepOrphan ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    steerFailed, noticed, clearedSent, receiptVars, budgetVars, forceReq, forceAsked,
-                   intentDue, curExit, oldExits>>
+                   intentDue, curExit, oldExits, pathVars>>
 
 \* Boot: a turn with written prompts and no terminal record is failed with a notice (the mutant
 \* re-queues its inputs and writes them again). Boot settles from the durable row, so its view
@@ -432,9 +446,34 @@ Boot ==
               /\ outcome' = [L \in Inputs |-> IF L \in Active THEN "failure" ELSE outcome[L]]
               /\ UNCHANGED <<st, turnOf>>
     /\ settlerView' = [i \in Inputs |-> turnOf[i] # None]
+    /\ pathAcp' = cfgOn
     /\ UNCHANGED <<proc, sessionVars, sentCount, open, posts, refusedIn, cancelReq, cancelSent,
                    zombie, wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
-                   clearedSent, receiptHas, merged, childVars>>
+                   clearedSent, receiptHas, merged, childVars, cfgOn, reloadLeft, switched>>
+
+\* src/config_live_reload.rs:146 reload_from_path: a reload turns the switch off. It replaces the
+\* live snapshot only; agy_acp is a restart field, so the path fixed at boot stays.
+Reload ==
+    /\ running /\ reloadLeft > 0 /\ reloadLeft' = 0 /\ cfgOn' = FALSE
+    /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, childVars,
+                   pathAcp, switched>>
+
+\* stream_json_turn.rs execute_request `-p` branch: an input not on the ACP path runs as its own
+\* `agy --print` turn. With the ACP child still up, the channel would run on two paths.
+PrintTurn ==
+    /\ running /\ ~UsesAcp /\ Queued # {} /\ Active = {}
+    /\ LET i == Min(Queued)
+       IN /\ st' = [st EXCEPT ![i] = "sent"]
+          /\ turnOf' = [turnOf EXCEPT ![i] = i]
+          /\ done' = [done EXCEPT ![i] = TRUE]
+          /\ outcome' = [outcome EXCEPT ![i] = "answer"]
+          /\ settlerView' = [settlerView EXCEPT ![i] = TRUE]
+    /\ switched' = (switched \/ proc = "up")
+    /\ UNCHANGED <<running, proc, sessionVars, sentCount, open, posts, refusedIn, cancelReq,
+                   cancelSent, zombie, wrongDone, badSend, served, budgetVars, steerFailed, noticed,
+                   orphan, clearedSent, receiptHas, merged, childVars, cfgOn, pathAcp, reloadLeft>>
 
 AllSettled == \A i \in Inputs : st[i] = "done"
 Rest == AllSettled /\ UNCHANGED vars
@@ -445,6 +484,7 @@ Next ==
     \/ SendPrompt \/ AgyResponds \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
     \/ UserStop \/ SendCancel \/ Clear \/ CloseAfterTurn \/ Crash \/ SweepOrphan \/ Boot \/ Rest
     \/ ForceStop \/ ForceIntent \/ SendTerminate \/ \E latest \in BOOLEAN : ExitReported(latest)
+    \/ Reload \/ PrintTurn
 
 \* agy itself is not assumed to answer (no fairness on AgyResponds or SteerErrored): only
 \* AgentDesk's own steps, the watchdog included, are fair.
@@ -453,6 +493,7 @@ Fairness ==
     /\ WF_vars(SendPrompt) /\ WF_vars(SendCancel) /\ WF_vars(WatchdogKill)
     /\ WF_vars(ZombieResponse) /\ WF_vars(Boot) /\ WF_vars(CloseAfterTurn)
     /\ WF_vars(SweepOrphan) /\ WF_vars(SendTerminate) /\ WF_vars(ForceIntent)
+    /\ WF_vars(PrintTurn)
     /\ \A i \in Inputs : WF_vars(Settle(i))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -491,6 +532,8 @@ NoMergeOnCancel ==
 \* Witnesses: a forced stop arrives after session/cancel went out, and an earlier child's exit
 \* report is still due while the next child runs.
 NoPromotion == ~(forceReq /\ cancelSent /\ proc = "up")
+\* The path fixed at boot holds for the whole process: no input goes to `-p` beside an ACP child.
+SessionKeepsPath == ~switched
 NoLateExit == ~(oldExits > 0 /\ proc = "up" /\ recorded)
 \* Liveness: every accepted input is eventually covered by one terminal post
 \* (answer, failure notice or cancel notice), steered inputs included.
