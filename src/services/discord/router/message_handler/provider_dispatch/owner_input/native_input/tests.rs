@@ -298,9 +298,8 @@ async fn native_no_key_record_outlasts_a_brief_registry_contention() {
     assert_eq!(result, Completion::NotSent("fixture refusal".into()));
 }
 
-/// A no-key turn whose record stays busy past the retries frees its channel on either host, and a
-/// restart before the deferred record lands settles it at boot from the owner's proof, retained or
-/// refused past its readiness due, then ACKs its source pin though its notice already went.
+/// A busy no-key record still frees the channel; a restart before it lands settles at boot from the
+/// owner's retained or refused proof and ACKs the source pin of a channel already told.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
     for (channel, host, due) in [
@@ -316,9 +315,8 @@ async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
     }
 }
 
-/// Runs one unkeyed native turn on `host` with the registry lock held from the leaf's end for
-/// `hold` (`WAIT_CAP`: until released here), and checks the next turn starts under that lock;
-/// `due_passed` gives the original a readiness due the leaf outlives, so the owner refuses it.
+/// One unkeyed native turn on `host`, the registry lock held for `hold` (`WAIT_CAP`: until released
+/// here); `due_passed` gives the original a readiness due the leaf outlives, so the owner refuses it.
 async fn no_key_round(
     channel: u64,
     host: &str,
