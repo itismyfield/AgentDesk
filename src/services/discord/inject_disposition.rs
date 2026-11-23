@@ -241,7 +241,7 @@ pub(crate) fn claim_source(
     message: MessageId,
     now: Instant,
 ) -> Option<SourceGuard> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::note_call("claim_source", message.get());
     let mut tables = lock_table(TABLE.get_or_init(Default::default));
     let table = tables.entry(provider.as_str().to_string()).or_default();
@@ -266,7 +266,7 @@ pub(crate) fn claim_source(
 /// Lets a thread take a message its parent passed on, recording the thread's intake, unless the
 /// parent's injection owns it or already ended it. Called only on a parent the gate opens.
 pub(crate) fn promote_thread(provider: &ProviderKind, message: MessageId, now: Instant) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::note_call("promote_thread", message.get());
     let mut tables = lock_table(TABLE.get_or_init(Default::default));
     let table = tables.entry(provider.as_str().to_string()).or_default();
@@ -289,7 +289,7 @@ pub(crate) fn taken(
     now_ms: i64,
     now: Instant,
 ) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::note_call("taken", message.get());
     let ended = terminal(Some(provider), message, now).is_some();
     if ended || in_progress(Some(provider), message, now) {
@@ -342,7 +342,7 @@ fn ring_path(provider: &ProviderKind) -> Option<PathBuf> {
 
 /// The ring's entries; missing reads as empty, unreadable or malformed as empty with a warning.
 fn load(path: &Path) -> (Vec<DiskEntry>, bool) {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::note_read(path);
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -370,7 +370,7 @@ pub(crate) fn record_terminal(
     now_ms: i64,
 ) -> Result<(), String> {
     let path = ring_path(provider).ok_or("runtime root unavailable")?;
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::before_lock(&path);
     let _lock = super::runtime_store::record_lock::lock_record_path(&path)?;
     let (mut entries, readable) = load(&path);
@@ -378,7 +378,7 @@ pub(crate) fn record_terminal(
         // An unreadable ring is replaced; the terminals it held stop blocking replays.
         tracing::warn!(path = %path.display(), "injected_inputs_corrupt_overwritten");
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     test_support::pause_before_write(&path);
     entries.retain(|entry| {
         entry.message_id != message.get() && now_ms - entry.at_epoch_ms < DISK_TTL_MS
@@ -454,7 +454,7 @@ impl InjectedView {
         if observed + unconfirmed == 0 {
             return;
         }
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         test_support::note_hits(channel, observed, unconfirmed);
         tracing::info!(
             phase,
@@ -466,7 +466,7 @@ impl InjectedView {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[path = "inject_disposition_test_support.rs"]
 pub(crate) mod test_support;
 

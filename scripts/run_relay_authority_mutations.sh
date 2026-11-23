@@ -440,8 +440,8 @@ register_mutation \
 # Release the judgment lock before destruction to expose a racing acquire.
 register_mutation \
   S4-m7 "$WATCHER_FENCES" \
-  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n            }' \
-  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n            }' \
+  $'            #[cfg(any(test, feature = "test-support"))]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n            }' \
+  $'            Some(())\n        })?;\n        #[cfg(any(test, feature = "test-support"))]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n            }' \
   'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'
 
 validate_shards

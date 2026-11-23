@@ -7,7 +7,7 @@ mod dispatch_query;
 mod dispatch_status;
 #[cfg(test)]
 mod fresh_worktree_pg_tests;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) mod test_support;
 mod types;
 
