@@ -108,7 +108,8 @@ impl NativePrepared {
         history: &Registry,
         shared: &Arc<SharedData>,
     ) -> Result<(), String> {
-        history.try_native_not_sent(&self.namespace, &self.ticket)?;
+        // The leaf proved no key left, so custody goes even when the no-key record could not land.
+        let recorded = history.native_not_sent(&self.namespace, &self.ticket).await;
         if self.actor.is_some() {
             let input = serde_json::to_string(&(&self.namespace, &self.ticket.key))
                 .map_err(|e| e.to_string())?;
@@ -119,7 +120,7 @@ impl NativePrepared {
                 return Err("native no-key custody removal unconfirmed".into());
             }
         }
-        Ok(())
+        recorded
     }
 
     async fn settle_control(

@@ -109,19 +109,21 @@ impl Producer {
                 }
             };
             let unkeyed = scope::key_attempted() == Some(false);
-            handle.finish()?;
-            if unkeyed {
-                tokio::runtime::Handle::current().block_on(
-                    native_prepare::release_unkeyed_source(
-                        &self.shared,
-                        &history,
-                        &namespace,
-                        &ticket,
-                    ),
-                )?;
-                self.unwind();
+            let finished = handle.finish();
+            if !unkeyed {
+                return finished.and(result);
             }
-            result
+            // No key left, so the turn unwinds even when its no-key record or source ack failed.
+            let released = finished.and_then(|()| {
+                tokio::runtime::Handle::current().block_on(native_prepare::release_unkeyed_source(
+                    &self.shared,
+                    &history,
+                    &namespace,
+                    &ticket,
+                ))
+            });
+            self.unwind();
+            released.and(result)
         })
     }
 }

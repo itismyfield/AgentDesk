@@ -162,7 +162,7 @@ impl Handle {
         ticket: Ticket,
     ) -> Result<Self, String> {
         if let Err(error) = bind_hosted_row(shared, key, actor.as_ref(), &ticket).await {
-            history.try_native_not_sent(&namespace, &ticket)?;
+            history.native_not_sent(&namespace, &ticket).await?;
             return Err(error);
         }
         // The bridge registers the primary's Start concurrently; a bounded wait covers that race.
@@ -431,12 +431,12 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                         .await;
                     return prepared.any_key(&history);
                 }
-                prepared.remove_control(&history, &shared).await?;
+                let removed = prepared.remove_control(&history, &shared).await;
                 entry.native_inputs.remove(&input);
                 if entry.native_inputs.is_empty() {
                     entry.completion_admission.native_input = None;
                 }
-                Ok(())
+                removed
             }
             .await;
             let _ = ack.send(result);
