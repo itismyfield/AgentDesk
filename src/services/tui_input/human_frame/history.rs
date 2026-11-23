@@ -351,18 +351,6 @@ pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
     })
 }
 
-pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
-    if v2::scoped() {
-        return false;
-    }
-    path().and_then(|path| read(&path)).is_ok_and(|store| {
-        !store
-            .entries
-            .iter()
-            .any(|entry| entry.id == id && entry.path == transcript)
-    })
-}
-
 /// The injection history state [`known`] answers from; `None` when it cannot vouch for one.
 pub(crate) fn known_token() -> Option<KnownToken> {
     stamped::token(&path().ok()?)

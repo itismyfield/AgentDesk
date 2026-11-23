@@ -69,18 +69,6 @@ fn pending_plain_composer_protects_only_its_session_and_frame_until_receipt() {
 }
 
 #[test]
-fn injected_nonce_residue_is_never_classified_as_a_persons_draft() {
-    for frame in [
-        "[User: ann (ID: 7) · 📱 v1 mode=inject source=discord:1:2 · 1234abcd]\npending body",
-        "[📱 discord:1:2 · 7 · 1234abcd]\npending body",
-    ] {
-        let shown = capture(&frame);
-        assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{frame}");
-        assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{frame}");
-    }
-}
-
-#[test]
 fn an_empty_composer_keeps_the_older_unmeasured_footer_policy() {
     let shown = "────────────────────────\n❯ \n────────────────────────\n";
     assert_eq!(screen::read(shown).footer, screen::Footer::Unknown);

@@ -442,7 +442,7 @@ fn owner_herdr_modal_holds_the_front_without_a_key() {
 }
 
 /// One busy Claude screen per composer case, and whether the owner parks it with C-s.
-fn composer_cases() -> [(&'static str, String, usize); 5] {
+fn composer_cases() -> [(&'static str, String, usize); 4] {
     let border = "─".repeat(60);
     let thinking = "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n";
     let screen = |above: &str, composer: &str| {
@@ -452,11 +452,6 @@ fn composer_cases() -> [(&'static str, String, usize); 5] {
     };
     [
         ("person draft", screen("", "half typed"), 1),
-        (
-            "injected frame",
-            screen("", "[📱 tester] earlier question"),
-            0,
-        ),
         ("existing stash", screen("› stashed", "half typed"), 0),
         ("empty composer", screen("", ""), 0),
         ("unreadable", thinking.into(), 0),
@@ -464,7 +459,7 @@ fn composer_cases() -> [(&'static str, String, usize); 5] {
 }
 
 /// Herdr and tmux owners read the same capture alike: only a person's draft is parked with C-s,
-/// never an injected frame, a draft beside a stash, an empty or an unread composer.
+/// never a draft beside a stash, an empty or an unread composer.
 #[test]
 fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
     for (at, (case, screen, parks)) in composer_cases().into_iter().enumerate() {

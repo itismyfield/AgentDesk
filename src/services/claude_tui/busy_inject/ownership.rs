@@ -1,17 +1,11 @@
 //! Session-scoped composer ownership; idle Discord headers retain their original meaning.
 use super::screen;
 use crate::services::claude_tui::composer_lock::DraftSighting;
-use crate::services::tui_input::human_frame::{holds_inject, shows_inject};
 
 fn injected_rows(rows: &[String], session: Option<&str>) -> bool {
-    rows.iter().any(|row| row.contains("[📱 "))
-        || holds_inject(rows)
-        || session.is_some_and(|session| {
-            crate::services::tui_input::human_frame::history::screen_pending(
-                session,
-                &rows.join("\n"),
-            )
-        })
+    session.is_some_and(|session| {
+        crate::services::tui_input::human_frame::history::screen_pending(session, &rows.join("\n"))
+    })
 }
 
 /// How a protected pane's draft reads in one capture.
@@ -41,14 +35,9 @@ fn draft_sighting_for(capture: &str, session: Option<&str>) -> DraftSighting {
     }
 }
 
-/// Whether the composer may hold a person's text that C-s did not park: an unread box, or text
-/// that is not an injected frame.
+/// Whether the composer may hold a person's text that C-s did not park: any text or an unread box.
 pub(crate) fn draft_unproven(capture: &str) -> bool {
-    match screen::read(capture).composer {
-        screen::Composer::Empty => false,
-        screen::Composer::Text(rows) => !injected_rows(&rows, None),
-        screen::Composer::Unknown => true,
-    }
+    screen::read(capture).composer != screen::Composer::Empty
 }
 
 /// Whose text the composer holds before an automatic key.
@@ -104,7 +93,6 @@ fn agentdesk_prompt(rows: &[String], session: Option<&str>) -> bool {
     first
         .get(..6)
         .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
-        && !shows_inject(rows)
         && !session.is_some_and(|session| {
             crate::services::tui_input::human_frame::history::screen_pending(
                 session,

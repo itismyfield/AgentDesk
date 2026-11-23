@@ -1,35 +1,6 @@
 use super::human_frame::{
-    history, idle, opens_inject, parse, plain_inject, preserved_decision_body, shows_inject,
+    history, idle, opens_inject, parse, plain_inject, preserved_decision_body,
 };
-
-/// A v1 header as composer rows still show one.
-const V1_HEADER: &str =
-    "[User: ann (ID: 343742347365974026) · 📱 v1 mode=inject source=discord:7:9 · abcdef12]";
-
-/// Wrapped composer rows still show an inject header; one shown after a person's keys does not.
-#[test]
-fn wrapped_composer_rows_still_show_an_inject_header() {
-    let (head, tail) = V1_HEADER.split_at(V1_HEADER.find("mode=").unwrap() + 3);
-    assert!(shows_inject(&[head.to_string(), tail.to_string()]));
-    assert!(shows_inject(&[V1_HEADER]));
-    assert!(!shows_inject(&["[User: ann (ID: 1)] · 📱 v1 mode=inject"]));
-    assert!(!shows_inject(&["draft · 📱 v1 mode=inject ]"]));
-}
-
-/// Pane-line readers keep a running turn's input in the composer a draft, as they kept the older
-/// `[📱 …]` one, while an idle header there stays submitted Discord history.
-#[test]
-fn pane_line_readers_keep_an_inject_line_a_draft() {
-    use crate::services::tmux_common::claude_tui_prompt_draft_backspace_budget_from_line as budget;
-    let inject_line = format!("❯ {V1_HEADER}");
-    let legacy_line = "❯ [📱 discord · 1 · abcdef12]";
-    assert_eq!(
-        budget(&inject_line).is_some(),
-        budget(legacy_line).is_some()
-    );
-    assert!(budget(&inject_line).is_some());
-    assert_eq!(budget("❯ [User: ann (ID: 1)] hi"), None);
-}
 
 #[test]
 fn busy_header_bytes_equal_idle_plus_attempt_tag_for_one_line_and_multiline() {
