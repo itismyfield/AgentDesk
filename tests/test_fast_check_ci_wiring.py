@@ -384,6 +384,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "just fmt-check",
                 "npm run test:policies",
@@ -931,6 +932,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 if line.strip()
             ],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "npm run test:policies",
                 "just fmt-check",
