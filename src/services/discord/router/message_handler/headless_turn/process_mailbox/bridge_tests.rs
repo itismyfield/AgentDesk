@@ -396,9 +396,8 @@ async fn a_scheduled_bridge_completion_settles_on_the_next_poll_pg() {
 #[path = "routine_presentation_tests.rs"]
 mod routine_presentation_tests;
 
-/// A stream-json answer whose first two parts were already frozen by rollover. A Done that starts
-/// with the posted parts sends only the rest and ends the turn; a Done that changed them takes the
-/// full replay, so no tail of the new body is ever joined to the old parts.
+/// After two rollover parts, a Done starting with them sends only the rest and ends the turn;
+/// a Done that changed them takes the full replay, never joining its tail to the old parts.
 #[tokio::test]
 async fn stream_json_long_done_keeps_frozen_parts_only_when_it_starts_with_them() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
