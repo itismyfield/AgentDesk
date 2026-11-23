@@ -13,8 +13,8 @@ use crate::services::tui_prompt_dedupe::{
     },
 };
 
-const CANARY_CHANNEL: u64 = crate::services::codex_tui::canary::CANARY_CHANNEL;
-const CANARY_TMUX: &str = crate::services::codex_tui::canary::CANARY_TMUX;
+pub(crate) const CANARY_CHANNEL: u64 = crate::services::codex_tui::canary::CANARY_CHANNEL;
+pub(crate) const CANARY_TMUX: &str = crate::services::codex_tui::canary::CANARY_TMUX;
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 
 fn context(root: &Path, tmux: &str, policy: &str) -> BindingContext {

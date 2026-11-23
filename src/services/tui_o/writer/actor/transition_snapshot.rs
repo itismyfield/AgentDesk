@@ -273,7 +273,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// What the actor and the channel's POSTs still owe; an unread POST count is an error.
-    pub(super) fn obligations(&mut self) -> Result<Obligations, String> {
+    pub(crate) fn obligations(&mut self) -> Result<Obligations, String> {
         let channel = self.writer.channel();
         let posting = super::super::deliver::posts_in_flight(channel)
             .ok_or("the channel's POSTs in flight are not counted")?;

@@ -1,16 +1,23 @@
-use super::*;
 use crate::services::tui_o::shadow::{SourceId, SourceRange};
+use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::fault::{self, Keep, Step as At};
 use crate::services::tui_o::store::ledger::input_notices::{
     MigrationHistory, MigrationSnapshot, NoticeEntry, NoticeEvidence,
 };
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::input_notices::{
     NoticeOrigin,
     admission::tests::{BindingRoot, bind},
 };
+use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
+use crate::services::tui_o::writer::tests::*;
+use chrono::Utc;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
-pub(super) fn materialized_notice(
+pub(crate) fn materialized_notice(
     harness: &Harness,
     native_key: &str,
     prompt: &str,
@@ -19,7 +26,7 @@ pub(super) fn materialized_notice(
 }
 
 /// Without `freeze`, no migration is recorded, as before the released build froze its cohort.
-pub(super) fn materialized_notice_in(
+pub(crate) fn materialized_notice_in(
     harness: &Harness,
     native_key: &str,
     prompt: &str,

@@ -37,12 +37,12 @@ const UNSCOPED: &str =
 
 /// A channel switched over source 0, then `hops` sources each bound from the one before in one
 /// pane by a launch record no hook made, so no hop is proven. The last source is current.
-struct Chain {
-    harness: Harness,
-    bindings: Arc<FakeBindings>,
-    pane: String,
-    sources: Vec<SourceId>,
-    paths: Vec<PathBuf>,
+pub(crate) struct Chain {
+    pub(crate) harness: Harness,
+    pub(crate) bindings: Arc<FakeBindings>,
+    pub(crate) pane: String,
+    pub(crate) sources: Vec<SourceId>,
+    pub(crate) paths: Vec<PathBuf>,
     _hosts: Option<ForcedSessionHosts>,
 }
 
@@ -57,7 +57,11 @@ fn chain_on(hops: usize, herdr: bool) -> Chain {
 }
 
 /// As `chain_on`, with hop `n`'s session and transcript body from `hop(n)`.
-fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>)) -> Chain {
+pub(crate) fn chain_named(
+    hops: usize,
+    herdr: bool,
+    hop: impl Fn(usize) -> (String, Vec<u8>),
+) -> Chain {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
     let pane = format!("hrot-{}", uuid::Uuid::new_v4().simple());
     let (mut sources, mut paths) = (vec![a], vec![a_path.clone()]);
@@ -91,11 +95,11 @@ fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>
 }
 
 impl Chain {
-    fn hops(&self) -> u64 {
+    pub(crate) fn hops(&self) -> u64 {
         self.sources.len() as u64 - 1
     }
 
-    fn request(&self, job: &str) -> Request {
+    pub(crate) fn request(&self, job: &str) -> Request {
         let end = ExecutionEnd {
             host: "mac-mini".into(),
             pane: self.pane.clone(),
@@ -114,7 +118,7 @@ impl Chain {
         }
     }
 
-    fn context(&self) -> Context {
+    pub(crate) fn context(&self) -> Context {
         Context {
             codex: None,
             tmux: self.pane.clone(),
@@ -165,7 +169,7 @@ impl Chain {
     }
 
     /// An Apply of `request` under the digest its Inspect gives, or one no scope has.
-    fn apply(&self, request: Request) -> Operation {
+    pub(crate) fn apply(&self, request: Request) -> Operation {
         let digest = self
             .digest(&request)
             .unwrap_or_else(|| ScopeDigest::parse(UNSCOPED).unwrap());
@@ -173,12 +177,12 @@ impl Chain {
     }
 
     /// The pane's execution holds only the current source.
-    fn current(&self) -> impl Drop {
+    pub(crate) fn current(&self) -> impl Drop {
         let current = self.sources.last().unwrap();
         force_execution_for_tests(Ok(execution(current, Utc::now())))
     }
 
-    fn cursor(&self, n: usize) -> Cursor {
+    pub(crate) fn cursor(&self, n: usize) -> Cursor {
         self.harness
             .channel()
             .cursor(&self.sources[n])
@@ -186,7 +190,7 @@ impl Chain {
             .unwrap()
     }
 
-    fn key(&self, n: usize) -> String {
+    pub(crate) fn key(&self, n: usize) -> String {
         source_key(&self.sources[n])
     }
 
@@ -200,7 +204,7 @@ impl Chain {
         std::fs::read(self.dir().join(CURSOR_DIR).join(name)).ok()
     }
 
-    fn audit(&self, n: usize) -> Option<String> {
+    pub(crate) fn audit(&self, n: usize) -> Option<String> {
         let cursor = self.cursor(n);
         cursor.transition_cleanup.map(|audit| audit.job_id)
     }
@@ -220,7 +224,10 @@ fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
-fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, SourceHistory) {
+pub(crate) fn execution(
+    current: &SourceId,
+    seen: DateTime<Utc>,
+) -> (Option<SourceId>, SourceHistory) {
     let visit = Visit {
         session: current.session_id.clone(),
         pin: Some(current.clone()),
@@ -237,16 +244,16 @@ fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, Sour
     (Some(current.clone()), history)
 }
 
-struct Run {
+pub(crate) struct Run {
     port: TransitionPort,
-    stop: watch::Sender<bool>,
+    pub(crate) stop: watch::Sender<bool>,
     /// The host's stop, which the actor's own stop follows only later.
     host: watch::Sender<bool>,
-    task: Actor,
+    pub(crate) task: Actor,
     unsettled: watch::Receiver<Option<usize>>,
 }
 
-fn run(chain: &Chain) -> Run {
+pub(crate) fn run(chain: &Chain) -> Run {
     run_with(chain, None, Arc::default())
 }
 
@@ -304,7 +311,7 @@ fn run_writer<A: AlarmSink + 'static>(
 }
 
 /// Polls until every hop's row is posted.
-async fn settle(chain: &Chain) {
+pub(crate) async fn settle(chain: &Chain) {
     for _ in 0..40 {
         polls(1).await;
         if chain.harness.port.posts().len() as u64 >= chain.hops() {
@@ -321,7 +328,7 @@ fn send(run: &Run, operation: Operation, context: Context) -> Asked {
     tokio::spawn(async move { port.request(operation, context).await })
 }
 
-async fn ask(run: &Run, operation: Operation, context: Context) -> Reply {
+pub(crate) async fn ask(run: &Run, operation: Operation, context: Context) -> Reply {
     answered(send(run, operation, context)).await
 }
 
@@ -1244,9 +1251,6 @@ mod route_tests;
 
 #[path = "transition_apply_tests.rs"]
 mod apply_tests;
-
-#[path = "transition_automatic_tests.rs"]
-mod automatic_tests;
 
 #[tokio::test(start_paused = true)]
 async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_restore() {

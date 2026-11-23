@@ -124,7 +124,3 @@ pub(crate) async fn guard_terminal_in_tx(
     // Association projection and CAS are deliberately unavailable until activation.
     Ok(TerminalDisposition::Deferred)
 }
-
-#[cfg(test)]
-#[path = "exact_pg_tests.rs"]
-mod tests;
