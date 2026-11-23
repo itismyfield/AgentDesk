@@ -28,7 +28,7 @@ HEAD_SHA = "a" * 40
 def judge_log(failed):
     """The `CI required` judge step's real log when the jobs in `failed` fail and every other judged job passes."""
     jobs = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
-    outputs = {name: "true" for name in ("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
+    outputs = {name: "true" for name in ("rust_build", "rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
                                          "dashboard", "rust_tests_skip", "cross_os_rust")}
     outputs["rust_tests_skip"] = "false"
     needs = {"changes": {"result": "success", "outputs": outputs},
