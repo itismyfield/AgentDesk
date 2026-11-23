@@ -295,6 +295,10 @@ pub fn run_from_args() -> Result<()> {
 #[cfg(test)]
 mod krx_claude_tests;
 #[cfg(test)]
+mod krx_db_b_tests;
+#[cfg(test)]
+mod krx_db_tests;
+#[cfg(test)]
 mod krx_tui_o_tests;
 #[cfg(all(test, unix))]
 mod krx_tui_o_unix_tests;

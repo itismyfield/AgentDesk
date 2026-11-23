@@ -14,7 +14,7 @@ use crate::db::dispatched_sessions::HookSessionUpsert;
 
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
 const SCHEDULED_SNAPSHOT_KIND: &str = "scheduled_snapshot";
-const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
+pub(crate) const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionIdentityKind {
@@ -1055,10 +1055,6 @@ fn database_error(error: impl std::fmt::Display) -> HookSessionUpsertError {
         &error.to_string(),
     ))
 }
-
-#[cfg(test)]
-#[path = "canonical_identity_pg_tests.rs"]
-pub(crate) mod pg_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,5 @@
-use super::*;
+use crate::db::intake_outbox::{self, FailedPreAcceptSweepOutcome};
+use crate::db::replay_disposition::tests::*;
 
 #[tokio::test]
 async fn dormant_schema_keeps_runtime_delivery_and_preaccept_retry_attempt_policy_pg() {
@@ -38,7 +39,7 @@ async fn dormant_schema_keeps_runtime_delivery_and_preaccept_retry_attempt_polic
         .unwrap();
     sqlx::query("INSERT INTO auto_queue_entries (id,run_id,status) VALUES ('normal-entry','normal-run','dispatched')")
         .execute(&pool).await.unwrap();
-    let result = crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+    let result = crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg(
         &pool,
         "normal-entry",
         3,

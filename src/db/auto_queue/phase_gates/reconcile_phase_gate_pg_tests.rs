@@ -1,8 +1,9 @@
-use super::{
-    PhaseGateReconciliation, PhaseGateRepairOptions, PhaseGateStateWrite, parse_phase_gate_context,
-    phase_gate_verdict_matches, save_phase_gate_state_on_pg,
-};
+use crate::db::auto_queue::phase_gate_verdict::verdict_matches as phase_gate_verdict_matches;
 use crate::db::auto_queue::phase_gate_verdict::{VerdictResolution, resolve_verdict};
+use crate::db::auto_queue::phase_gates::{
+    PhaseGateReconciliation, PhaseGateRepairOptions, PhaseGateStateWrite, parse_phase_gate_context,
+    save_phase_gate_state_on_pg,
+};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::auto_queue::transactions::{
     reconcile_phase_gate_for_terminal_dispatch_on_pg_tx, repair_phase_gates_for_run_on_pg,

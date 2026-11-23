@@ -7,14 +7,16 @@ use std::time::Duration;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 
-use super::phase_gates::{PhaseGateStateWrite, save_phase_gate_state_on_pg};
-use super::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
-use super::test_support::TestPostgresDb;
-use super::{
-    ENTRY_STATUS_PENDING, EntryStatusUpdateOptions, update_entry_status_on_pg,
-    update_entry_status_on_pg_tx,
+use crate::db::auto_queue::phase_gates::{PhaseGateStateWrite, save_phase_gate_state_on_pg};
+use crate::db::auto_queue::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::auto_queue::{ENTRY_STATUS_PENDING, EntryStatusUpdateOptions};
+use crate::services::auto_queue::transactions::{
+    finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg,
 };
-use super::{finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg};
+use crate::services::auto_queue::transactions::{
+    update_entry_status_on_pg, update_entry_status_on_pg_tx,
+};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -130,7 +132,7 @@ async fn try_completion(pool: &PgPool) -> RunCompletionOutcome {
 }
 
 /// True once a backend of this database waits on a lock; false if `task` finished first.
-pub(super) async fn lock_waiter_sample<T>(
+pub(crate) async fn lock_waiter_sample<T>(
     pool: &PgPool,
     task: &tokio::task::JoinHandle<T>,
 ) -> Result<bool, String> {
@@ -158,7 +160,7 @@ async fn join<T>(task: tokio::task::JoinHandle<T>) -> T {
 
 fn reopen(
     pool: &PgPool,
-) -> tokio::task::JoinHandle<Result<super::EntryStatusUpdateResult, String>> {
+) -> tokio::task::JoinHandle<Result<crate::db::auto_queue::EntryStatusUpdateResult, String>> {
     let pool = pool.clone();
     tokio::spawn(async move {
         update_entry_status_on_pg(
@@ -176,7 +178,8 @@ fn save_gate(
     pool: &PgPool,
     status: &str,
     dispatch_ids: Vec<String>,
-) -> tokio::task::JoinHandle<Result<super::phase_gates::PhaseGateSaveResult, String>> {
+) -> tokio::task::JoinHandle<Result<crate::db::auto_queue::phase_gates::PhaseGateSaveResult, String>>
+{
     let pool = pool.clone();
     let state = PhaseGateStateWrite {
         status: status.to_string(),
@@ -500,7 +503,7 @@ async fn gate_save_waiting_on_phase_key_holds_no_run_row_lock_pg() {
     pg_db.drop().await;
 }
 
-pub(super) fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
+pub(crate) fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
@@ -508,7 +511,7 @@ pub(super) fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
         .expect("create policy engine")
 }
 
-pub(super) fn begin_grace(
+pub(crate) fn begin_grace(
     engine: &crate::engine::PolicyEngine,
     run_id: &'static str,
 ) -> tokio::task::JoinHandle<String> {

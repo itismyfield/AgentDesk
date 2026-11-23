@@ -74,7 +74,3 @@ pub(crate) async fn return_legacy_pg(
 fn database_error(error: sqlx::Error) -> HostedTransitionError {
     HostedTransitionError::Database(format!("return legacy: {error}"))
 }
-
-#[cfg(test)]
-#[path = "legacy_return_tests.rs"]
-mod high_risk_recovery;

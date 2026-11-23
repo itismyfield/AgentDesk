@@ -1,4 +1,4 @@
-use super::{
+use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, HookSessionActorPin, SessionIdentityConflictKind,
     SessionIdentityKind, capture_hook_session_actor_pin_pg, upsert_hook_session_with_actor_pin_pg,
     upsert_hook_session_with_identity_pg,
@@ -9,11 +9,11 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{
 use crate::db::dispatched_sessions::hosted_execution::*;
 use crate::db::dispatched_sessions::{
     HookSessionUpsert, clear_session_id_by_key_pg, disconnect_stale_fixed_session_by_key_pg,
-    gc_stale_thread_sessions_with_probe_pg, load_force_kill_session_pg,
-    load_provider_session_ids_pg, load_session_rebind_context_pg, rebind_session_provider_pg,
-    refresh_session_heartbeat_by_key_to_unix_nanos_pg, session_last_seen_unix_nanos_pg,
-    update_raw_provider_transcript_len_watermark_pg,
+    load_force_kill_session_pg, load_provider_session_ids_pg, load_session_rebind_context_pg,
+    rebind_session_provider_pg, refresh_session_heartbeat_by_key_to_unix_nanos_pg,
+    session_last_seen_unix_nanos_pg, update_raw_provider_transcript_len_watermark_pg,
 };
+use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg;
 use crate::services::dispatched_sessions::hosted_cleanup::{
     cleanup_disconnected_sessions_pg, delete_session_by_key_pg,
 };
@@ -384,9 +384,11 @@ async fn canonical_identity_concurrent_upsert_and_alias_resolution_pg() {
     assert_eq!(alias_count, 1);
 
     for locator in [first_key, second_key] {
-        let resolved = super::resolve_session_key_pg(&pool, locator)
-            .await
-            .expect("resolve primary or alias locator");
+        let resolved = crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(
+            &pool, locator,
+        )
+        .await
+        .expect("resolve primary or alias locator");
         assert_eq!(resolved.as_deref(), Some(first.session_key.as_str()));
     }
 
@@ -680,24 +682,26 @@ async fn canonical_identity_resolver_requires_convergent_exact_alias_and_canonic
     .await
     .expect("seed conflicting exact locator");
 
-    let resolved = super::resolve_session_key_with_identity_pg(
-        &pool,
-        "missing-exact-locator",
-        Some("claude"),
-        Some(identity(channel_id)),
-    )
-    .await
-    .expect("unique canonical fallback resolves");
+    let resolved =
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_with_identity_pg(
+            &pool,
+            "missing-exact-locator",
+            Some("claude"),
+            Some(identity(channel_id)),
+        )
+        .await
+        .expect("unique canonical fallback resolves");
     assert_eq!(resolved.as_deref(), Some(canonical_key));
 
-    let error = super::resolve_session_key_with_identity_pg(
-        &pool,
-        conflicting_key,
-        Some("claude"),
-        Some(identity(channel_id)),
-    )
-    .await
-    .expect_err("conflicting exact and canonical evidence must fail closed");
+    let error =
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_with_identity_pg(
+            &pool,
+            conflicting_key,
+            Some("claude"),
+            Some(identity(channel_id)),
+        )
+        .await
+        .expect_err("conflicting exact and canonical evidence must fail closed");
     assert_eq!(
         error.conflict_kind(),
         Some(SessionIdentityConflictKind::EvidenceDivergence)
@@ -1431,7 +1435,7 @@ async fn canonical_identity_manual_rebind_alias_converges_without_new_primary_pg
             .expect("load override from primary");
     assert_eq!(stored_id.as_deref(), Some(override_id));
     assert_eq!(
-        super::resolve_session_key_pg(&pool, alias_key)
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(&pool, alias_key)
             .await
             .expect("resolve manual rebind alias")
             .as_deref(),
@@ -1657,7 +1661,7 @@ async fn canonical_identity_namespace_primary_alias_race_has_one_owner_pg() {
             .expect("count racing alias owner");
     assert_eq!(primary_count + alias_count, 1);
     assert!(
-        super::resolve_session_key_pg(&pool, racing_key)
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(&pool, racing_key)
             .await
             .expect("resolve race winner")
             .is_some()
@@ -2676,22 +2680,26 @@ async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergen
             .unwrap();
         let mut live_params = params(live, channel);
         live_params.status = live_status;
-        super::upsert_legacy_hook_session_pg(&pool, live_params)
-            .await
-            .unwrap();
+        crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+            &pool,
+            live_params,
+        )
+        .await
+        .unwrap();
         let before: Vec<Value> =
             sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        let read = super::resolve_session_key_with_identity_pg(
-            &pool,
-            live,
-            Some("claude"),
-            Some(identity(channel)),
-        )
-        .await
-        .unwrap_err();
+        let read =
+            crate::db::dispatched_session_canonical_identity::resolve_session_key_with_identity_pg(
+                &pool,
+                live,
+                Some("claude"),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             read.conflict_kind(),
             Some(SessionIdentityConflictKind::EvidenceDivergence),
@@ -2699,9 +2707,14 @@ async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergen
         );
         if live_status == "idle" {
             let nameless =
-                super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
-                    .await
-                    .unwrap_err();
+                crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                    &pool,
+                    None,
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
+                .await
+                .unwrap_err();
             assert_eq!(
                 nameless.conflict_kind(),
                 Some(SessionIdentityConflictKind::EvidenceDivergence)
@@ -2747,13 +2760,16 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
         upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
             .await
             .unwrap();
-        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
-            .await
-            .unwrap();
+        crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+            &pool,
+            params(live, channel),
+        )
+        .await
+        .unwrap();
         let before = actor_pin_session_snapshot(&pool, old).await;
         if entry == 2 {
             let live_before = actor_pin_session_snapshot(&pool, live).await;
-            let error = super::resolve_session_row_pg(
+            let error = crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
                 &pool,
                 Some(old),
                 Some("claude"),
@@ -2778,7 +2794,7 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
             .unwrap();
         } else if entry == 3 {
             let (read, hook) = tokio::join!(
-                super::resolve_session_row_pg(
+                crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
                     &pool,
                     Some(live),
                     Some("claude"),
@@ -2795,18 +2811,27 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
         } else {
             let key = (entry == 1).then_some(live);
             let (_, resolved) =
-                super::resolve_session_row_pg(&pool, key, Some("claude"), Some(identity(channel)))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(resolved, live);
-        }
-        // Repeated tuple lookups must keep the new owner beside the released shell.
-        let again =
-            super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+                crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                    &pool,
+                    key,
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(resolved, live);
+        }
+        // Repeated tuple lookups must keep the new owner beside the released shell.
+        let again = crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+            &pool,
+            None,
+            Some("claude"),
+            Some(identity(channel)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(again.1, live);
         let mut expected_old = before;
         expected_old["identity_kind"] = Value::Null;
@@ -2848,12 +2873,15 @@ async fn canonical_identity_same_host_rename_handoff_converges_and_refuses_reviv
         upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
             .await
             .unwrap();
-        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
-            .await
-            .unwrap();
+        crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+            &pool,
+            params(live, channel),
+        )
+        .await
+        .unwrap();
         let before = actor_pin_session_snapshot(&pool, old).await;
         if named_read {
-            let resolved = super::resolve_session_key_with_identity_pg(
+            let resolved = crate::db::dispatched_session_canonical_identity::resolve_session_key_with_identity_pg(
                 &pool,
                 live,
                 Some("claude"),
@@ -2954,7 +2982,7 @@ async fn assert_concurrent_identity_promotion(
     let mut barrier = control_pool.begin().await.unwrap();
     // Hold only the identity fence so neither call can hide behind a shared locator.
     sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
-        .bind(super::ADVISORY_LOCK_NAMESPACE)
+        .bind(crate::db::dispatched_session_canonical_identity::ADVISORY_LOCK_NAMESPACE)
         .bind(format!("identity:discord_channel:claude:{TOKEN}:{channel}"))
         .execute(&mut *barrier)
         .await
@@ -3008,7 +3036,12 @@ async fn assert_concurrent_identity_promotion(
     };
     let work = async {
         tokio::join!(
-            super::resolve_session_row_pg(race_pool, None, Some("claude"), Some(identity(channel))),
+            crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                race_pool,
+                None,
+                Some("claude"),
+                Some(identity(channel))
+            ),
             upsert_hook_session_with_identity_pg(
                 race_pool,
                 params(live, channel),
@@ -3040,16 +3073,24 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
             .unwrap();
         let mut stale = params(old, channel);
         stale.status = "disconnected";
-        super::upsert_legacy_hook_session_pg(&pool, stale)
-            .await
-            .unwrap();
-        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
-            .await
-            .unwrap();
+        crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+            &pool, stale,
+        )
+        .await
+        .unwrap();
+        crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+            &pool,
+            params(live, channel),
+        )
+        .await
+        .unwrap();
         if entry == 4 {
-            super::upsert_legacy_hook_session_pg(&pool, params(alias, channel))
-                .await
-                .unwrap();
+            crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+                &pool,
+                params(alias, channel),
+            )
+            .await
+            .unwrap();
         } else if entry == 1 {
             sqlx::query("INSERT INTO session_key_aliases (session_key, session_id) SELECT $1, id FROM sessions WHERE session_key = $2")
                 .bind(alias).bind(old).execute(&pool).await.unwrap();
@@ -3061,14 +3102,15 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
                 .unwrap();
         if entry == 4 {
             for key in [Some(live), None] {
-                let error = super::resolve_session_row_pg(
-                    &pool,
-                    key,
-                    Some("claude"),
-                    Some(identity(channel)),
-                )
-                .await
-                .unwrap_err();
+                let error =
+                    crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                        &pool,
+                        key,
+                        Some("claude"),
+                        Some(identity(channel)),
+                    )
+                    .await
+                    .unwrap_err();
                 assert_eq!(
                     error.conflict_kind(),
                     Some(SessionIdentityConflictKind::EvidenceDivergence)
@@ -3095,14 +3137,15 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
         }
         if entry == 1 {
             for key in [old, alias] {
-                let error = super::resolve_session_row_pg(
-                    &pool,
-                    Some(key),
-                    Some("claude"),
-                    Some(identity(channel)),
-                )
-                .await
-                .unwrap_err();
+                let error =
+                    crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                        &pool,
+                        Some(key),
+                        Some("claude"),
+                        Some(identity(channel)),
+                    )
+                    .await
+                    .unwrap_err();
                 assert_eq!(
                     error.conflict_kind(),
                     Some(SessionIdentityConflictKind::EvidenceDivergence)
@@ -3159,17 +3202,26 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
         } else {
             let key = (entry == 1).then_some(live);
             let resolved =
-                super::resolve_session_row_pg(&pool, key, Some("claude"), Some(identity(channel)))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(resolved.1, live);
-        }
-        let again =
-            super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+                crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                    &pool,
+                    key,
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(resolved.1, live);
+        }
+        let again = crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+            &pool,
+            None,
+            Some("claude"),
+            Some(identity(channel)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(again.1, live);
         let after: Vec<Value> =
             sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
@@ -3189,22 +3241,32 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
         .await
         .unwrap();
     assert!(
-        super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
-            .await
-            .unwrap()
-            .is_none()
+        crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+            &pool,
+            None,
+            Some("claude"),
+            Some(identity(channel))
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     let mut stale = params(old, channel);
     stale.status = "disconnected";
-    super::upsert_legacy_hook_session_pg(&pool, stale)
+    crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(&pool, stale)
         .await
         .unwrap();
     let before = actor_pin_session_snapshot(&pool, old).await;
     assert!(
-        super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
-            .await
-            .unwrap()
-            .is_none()
+        crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+            &pool,
+            None,
+            Some("claude"),
+            Some(identity(channel))
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(actor_pin_session_snapshot(&pool, old).await, before);
     db.drop().await;
@@ -3236,9 +3298,12 @@ async fn canonical_identity_hosted_handoff_preserves_both_rows_pg() {
             upsert_hook_session_with_identity_pg(&pool, stale, Some(identity(channel)))
                 .await
                 .unwrap();
-            super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
-                .await
-                .unwrap();
+            crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(
+                &pool,
+                params(live, channel),
+            )
+            .await
+            .unwrap();
             set_raw(&pool, if on_old { old } else { live }, Some(raw)).await;
             let before: Vec<Value> =
                 sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
@@ -3250,14 +3315,15 @@ async fn canonical_identity_hosted_handoff_preserves_both_rows_pg() {
             let live_lookup =
                 load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(live)).await;
             for key in [Some(live), None] {
-                let error = super::resolve_session_row_pg(
-                    &pool,
-                    key,
-                    Some("claude"),
-                    Some(identity(channel)),
-                )
-                .await
-                .unwrap_err();
+                let error =
+                    crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                        &pool,
+                        key,
+                        Some("claude"),
+                        Some(identity(channel)),
+                    )
+                    .await
+                    .unwrap_err();
                 assert_eq!(
                     error.conflict_kind(),
                     Some(SessionIdentityConflictKind::EvidenceDivergence)

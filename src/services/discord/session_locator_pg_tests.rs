@@ -496,7 +496,7 @@ async fn key_promotion_current_primary_thread_gc_keeps_live_thread_pg() {
     let observed = calls.clone();
     let name = rig.name.clone();
     let current = rig.key.clone();
-    let deleted = crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(
+    let deleted = crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(
         &rig.pool,
         move |key| {
             assert_eq!(key, current);

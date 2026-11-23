@@ -1,12 +1,11 @@
 //! Hosted synthetic claims keep their observed execution across deferred and post-claim races.
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::dispatched_session_canonical_identity::{
-    self as canonical, pg_tests as canonical_fixture,
-};
+use crate::db::dispatched_session_canonical_identity as canonical;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedOwner, HostedState, SourceRef,
 };
+use crate::krx_db_tests::canonical_identity_pg as canonical_fixture;
 use crate::services::discord::{inflight, tui_direct_pending_start as pending};
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
 use std::io::Write;

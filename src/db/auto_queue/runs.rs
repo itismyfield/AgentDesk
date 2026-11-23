@@ -279,7 +279,7 @@ pub(crate) async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
         .try_get("in_grace")
         .map_err(|error| format!("decode auto-queue grace window for {run_id}: {error}"))?;
     #[cfg(test)]
-    super::run_completion_pg_tests::pause_completion_at("grace_read").await;
+    super::run_completion_barrier_tests::pause_completion_at("grace_read").await;
     if matches!(run_status.as_str(), "completed" | "cancelled") {
         return Ok(RunCompletionPrepared::Unchanged(AlreadyTerminal));
     }
@@ -300,7 +300,7 @@ pub(crate) async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
     }
 
     #[cfg(test)]
-    super::run_completion_pg_tests::pause_completion_at("readiness_read").await;
+    super::run_completion_barrier_tests::pause_completion_at("readiness_read").await;
 
     // Recheck grace (same row, no token) and blockers committed outside the token since the reads;
     // only a successful status transition authorizes releasing slots and notifying.
