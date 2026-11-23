@@ -28,13 +28,40 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
     if *provider == ProviderKind::Claude
         && super::super::super::turn_finalizer::native_prepare::enabled()
     {
+        use super::super::super::turn_finalizer::native_prepare::BootInputs;
+        let attempt = || async move {
+            let prepared = crate::services::discord::runtime_store::runtime_root()
+                .ok_or_else(|| "native boot root unavailable".to_string())
+                .and_then(|root| BootInputs::prepare(&root, shared.restart.current_generation));
+            let plan = match prepared {
+                Ok(plan) => plan,
+                Err(error) => {
+                    tracing::warn!(%error, "native boot preparation refused; rows and custody retained");
+                    return NativeBoot::Refused(error);
+                }
+            };
+            // The reaper runs once per process; a retry reads its cached report.
+            let reaped = super::super::super::inflight::reap_inflight_rows_at_boot_blocking(
+                provider,
+                shared.pg_pool.clone(),
+            )
+            .await;
+            if !reaped.native_preparation_complete() {
+                tracing::warn!("native boot reaper preparation incomplete; restore kept pending");
+                return NativeBoot::Refused("reaper preparation incomplete".into());
+            }
+            match plan.restore(shared).await {
+                Ok(()) => NativeBoot::Ready,
+                Err(error) => NativeBoot::RestoreHeld(error),
+            }
+        };
         return await_native_boot(
             provider,
             &shared.restart.shutting_down,
             &shared.restart.shutdown_counted,
             &shared.restart.shutdown_remaining,
             NATIVE_RESTORE_RETRY_INTERVAL,
-            || prepare_claude_native_boot(shared),
+            attempt,
         )
         .await;
     }
@@ -44,35 +71,6 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
     )
     .await;
     true
-}
-
-#[cfg(unix)]
-async fn prepare_claude_native_boot(shared: &Arc<SharedData>) -> NativeBoot {
-    use super::super::super::turn_finalizer::native_prepare::BootInputs;
-    let prepared = crate::services::discord::runtime_store::runtime_root()
-        .ok_or_else(|| "native boot root unavailable".to_string())
-        .and_then(|root| BootInputs::prepare(&root, shared.restart.current_generation));
-    let plan = match prepared {
-        Ok(plan) => plan,
-        Err(error) => {
-            tracing::warn!(%error, "native boot preparation refused; rows and custody retained");
-            return NativeBoot::Refused(error);
-        }
-    };
-    // The reaper runs once per process; a retry reads its cached report.
-    let reaped = super::super::super::inflight::reap_inflight_rows_at_boot_blocking(
-        &ProviderKind::Claude,
-        shared.pg_pool.clone(),
-    )
-    .await;
-    if !reaped.native_preparation_complete() {
-        tracing::warn!("native boot reaper preparation incomplete; restore kept pending");
-        return NativeBoot::Refused("reaper preparation incomplete".into());
-    }
-    match plan.restore(shared).await {
-        Ok(()) => NativeBoot::Ready,
-        Err(error) => NativeBoot::RestoreHeld(error),
-    }
 }
 
 /// Repeats `attempt` while restore is held, so a transient hold cannot drop the runtime and its
