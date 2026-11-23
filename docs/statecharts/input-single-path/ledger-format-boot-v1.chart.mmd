@@ -1,0 +1,16 @@
+---
+title: "Frame ledger file: V2 owner and out-of-scope writer"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the OwnerProgress bug
+    lg1: Repeats forever, so OwnerProgress breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: file v1 #183; owner input owner #183; out-of-scope input queued
+  s1: file v1 #183; owner input owner #183; out-of-scope input owner
+  [*] --> s0
+  s0 --> s1: XRegister
+  class s0 bugPath
+  class s1 repeats

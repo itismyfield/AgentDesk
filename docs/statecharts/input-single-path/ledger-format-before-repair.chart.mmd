@@ -1,0 +1,51 @@
+---
+title: "Frame ledger file: V2 owner and out-of-scope writer"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the OwnerProgress bug
+    lg1: Repeats forever, so OwnerProgress breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: file none #183; owner input owner #183; out-of-scope input queued
+  s1: file v1 #183; owner input owner #183; out-of-scope input pasted
+  s2: file v2 #183; owner input pasted #183; out-of-scope input queued
+  s3: file v1 #183; owner input owner #183; out-of-scope input done
+  s4: file v1 #183; owner input owner #183; out-of-scope input unknown
+  s5: file v2 #183; owner input pasted #183; out-of-scope input owner
+  s6: file v2 #183; owner input done #183; out-of-scope input queued
+  s7: file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s8: file v2 #183; owner input done #183; out-of-scope input owner
+  s9: file v2 #183; owner input pasted #183; out-of-scope input done
+  s10: file v2 #183; owner input done #183; out-of-scope input pasted
+  s11: file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s12: file v2 #183; owner input done #183; out-of-scope input done
+  s13: file v2 #183; owner input done #183; out-of-scope input unknown
+  [*] --> s0
+  s0 --> s1: XRegister
+  s0 --> s2: OwnerPrepare
+  s1 --> s3: Settle
+  s1 --> s4: Crash
+  s1 --> s7: OwnerPrepare
+  s2 --> s5: XRegister
+  s2 --> s6: Settle
+  s3 --> s9: OwnerPrepare
+  s4 --> s3: Mend
+  s4 --> s11: OwnerPrepare
+  s5 --> s7: OwnerPrepare
+  s5 --> s8: Settle
+  s6 --> s8: XRegister
+  s7 --> s9: Settle
+  s7 --> s10: Settle
+  s7 --> s11: Crash
+  s8 --> s10: OwnerPrepare
+  s9 --> s12: Settle
+  s10 --> s12: Settle
+  s10 --> s13: Crash
+  s11 --> s13: Settle
+  class s0 bugPath
+  class s1 bugPath
+  class s4 bugPath
+  class s11 bugPath
+  class s13 repeats
