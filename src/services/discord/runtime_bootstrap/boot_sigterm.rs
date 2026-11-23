@@ -11,7 +11,6 @@ pub(super) fn subscribe() -> watch::Receiver<bool> {
     LATCH
         .get_or_init(|| {
             let (latch, _) = watch::channel(false);
-            #[cfg(unix)]
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(mut sigterm) => {
                     let latch = latch.clone();
