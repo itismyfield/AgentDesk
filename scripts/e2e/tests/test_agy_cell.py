@@ -105,6 +105,14 @@ class E65Verdict(unittest.TestCase):
         # A turn that never terminates stops the sequence: no further input is sent.
         self.assertEqual(Cell(no_footer).run()["transmissions"], 1)
 
+    def test_only_the_fresh_session_banner_on_the_first_body_is_ignored(self):
+        def first(lead, extra=()):
+            return lambda i, p: [(1, 1, lead + p.rsplit(" ", 1)[-1]), *extra, (2, 2, FOOTER)] if i == 0 else good(i, p)
+        for lead in ("🆕 새 세션 시작\n\n", "🆕 새 세션 시작 (최근 대화 7개를 읽어들였습니다)\n\n"):
+            self.assertEqual(Cell(first(lead)).run()["status"], "PASS")
+        for cell in (Cell(first("안녕\n\n")), Cell(first("🆕 새 세션 시작\n\n", [(1, 5, "🆕 새 세션 시작\n\nAGY-r1-T1")]))):
+            self.assertIn("short_body_mismatch", cell.run()["reasons"].get("T1", []))
+
     def test_last_turn_needs_its_late_duplicate_window(self):
         turn = judge.Turn("short", "AGY-r1-T2", "3000", "-# ⏱️", done_at=10.0, idle_at=11.0, session="s1",
                           lease_turn={"user_message_id": 3000, "turn_nonce": "x"}, observed_until=14.0)
