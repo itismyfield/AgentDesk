@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router";
 import { Button } from "../../kit/free/button-clean";
+import { UsageMeter, type UsageMeterLabels } from "../../kit/pro/usage-meter";
 import {
-  Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, KeyValue, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
+  Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
 } from "../common/KitPrimitives";
 import { describeRoutinePurpose, formatClock } from "../dashboard/routineModel";
-import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, type Tr } from "./homeModel";
+import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, type Tr, type UsageRow } from "./homeModel";
 import { loadHomeRoutines, loadHomeUsage, loadRuntimeConfig, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's lower row: campaigns, today's routines and account usage.
@@ -131,14 +132,35 @@ export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolea
 }
 
 const AUTO_PAUSE_SETTINGS = "/settings?category=usage";
+const USAGE_METER_STYLE = { "--aui-usage-meter-meter-fill": "var(--accent)" } as CSSProperties;
 
-/** Account limits from the limit tracker as bars, when they were measured, and the auto-run pause rule. */
+/** Kit texts the limit list can show or speak. */
+function usageLabels(tr: Tr): Partial<UsageMeterLabels> {
+  return {
+    limits: tr("공급자별 한도", "Limits by provider"),
+    limitReached: tr("한도 도달", "Limit reached"),
+    nearLimit: tr("한도에 가까움", "Close to the limit"),
+    notMeasured: tr("측정 안 됨", "Not measured"),
+    unlimited: tr("무제한", "Unlimited"),
+    announce: (state, title, actual, percent) => state === "limit"
+      ? tr(`${title}, 한도 도달. ${actual}.`, `${title}, limit reached. ${actual}.`)
+      : state === "warn" ? tr(`${title}, ${percent}% 썼어요.`, `${title}, ${percent}% used.`) : tr(`${title}, ${actual} 썼어요.`, `${title}, ${actual} used.`),
+  };
+}
+
+/** Account limits from the limit tracker as the kit's per-provider limit list, when they were measured, and the
+ * auto-run pause rule. No upgrade button: home has nothing to upgrade. */
 export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
   const usage = usePolled(loadHomeUsage, 60_000);
   const runtime = usePolled(loadRuntimeConfig, 300_000);
   const rows = buildUsageRows(usage.data ?? [], isKo);
   const measured = rows.map((row) => row.measuredAt).filter((time): time is number => time !== null);
   const unknown = tr("확인 불가", "Unknown");
+  // The kit draws a window without a value as a dash; the line under a row says why, or how old its value is.
+  const usageDetail = (row: UsageRow) => row.unmeasured
+    ? tr("측정 안 됨", "Not measured")
+    : row.pct === null ? row.note ?? unknown
+      : row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : undefined;
   const rule = autoPauseRule(runtime.data);
   const hasRows = Boolean(usage.data && rows.length > 0);
   const ruleText = rule
@@ -182,35 +204,15 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
           {pauseFooter}
         </>
       ) : (
-        <InspSection className="gap-3">
-          <ul className="m-0 flex list-none flex-col gap-3 p-0">
-            {rows.map((row) => {
-              const levelTone = row.level === "danger" ? "err" : row.level === "warning" ? "warn" : undefined;
-              return (
-                <li key={row.key} className="min-w-0">
-                  <KeyValue
-                    truncate="label"
-                    label={<span title={row.note ?? row.label}>{row.label}</span>}
-                    meta={row.stale && row.measuredAt !== null ? (
-                      <Cap className="shrink-0 font-display tabular-nums">{tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`)}</Cap>
-                    ) : null}
-                    tone={row.pct === null ? undefined : levelTone}
-                    num={row.pct !== null}
-                    valueClassName={row.pct === null ? "text-[var(--fg-muted)]" : undefined}
-                  >
-                    {row.pct !== null ? `${row.pct}%` : row.unmeasured ? tr("측정 안 됨", "Not measured") : unknown}
-                  </KeyValue>
-                  {row.pct === null ? null : (
-                    <MeterBar
-                      ratio={row.pct / 100}
-                      tone={levelTone ?? "accent"}
-                      className="mt-1.5"
-                    />
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+        // The kit caps its card at 460px; home lets it fill the column and fills the bars with the accent, as the design does.
+        <InspSection className="gap-3 [&_.aui-usage-meter]:max-w-none!" style={USAGE_METER_STYLE}>
+          <UsageMeter
+            layout="limits"
+            title={tr("공급자별 한도", "Limits by provider")}
+            locale={isKo ? "ko-KR" : "en-US"}
+            limits={rows.map((row) => ({ group: row.group ?? undefined, label: row.label, used: row.pct, total: 100, unit: "%", detail: usageDetail(row) }))}
+            labels={usageLabels(tr)}
+          />
           {pauseFooter}
         </InspSection>
       )}

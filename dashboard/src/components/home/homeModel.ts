@@ -9,12 +9,7 @@ import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager
 import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
-import {
-  formatRateLimitWindowLabel,
-  transformRLProviders,
-  type RateLimitLevel,
-  type RawRLProvider,
-} from "../dashboard/MiniRateLimitBarModel";
+import { formatRateLimitWindowLabel, transformRLProviders, type RawRLProvider } from "../dashboard/MiniRateLimitBarModel";
 import { parseTime } from "../dashboard/routineModel";
 
 export type Tr = (ko: string, en: string) => string;
@@ -126,14 +121,21 @@ const TOOL_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
   [/^(Bash|exec_command)$/, "run"], [/^WebFetch$/, "web"],
 ];
 
+const CLOCK_AHEAD_MS = 60_000;
+const CLOCK_MAX_MS = 12 * 3_600_000;
+
 /** A working agent's live turn for the kit monitor, or null to keep the one-line cell. No steps are passed: the turn
  * reports no step times, and the monitor would show each as zero. */
-export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr): MonitorView | null {
+export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
   if (!turn || entry.state !== "working" || turn.status === "idle") return null;
   const tool = turn.current_tool_line ? turn.tool_events?.filter((event) => event.kind === "tool").at(-1)?.tool_name ?? "" : "";
+  // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
+  const updated = coerceTimestampMs(turn.updated_at);
+  const started = updated === null ? null : coerceTimestampMs(turn.started_at);
+  // In-flight times carry no offset, and a leftover in-flight file keeps an old start: an implausible start hides the clock.
+  const plausible = started !== null && updated !== null && started <= updated + CLOCK_AHEAD_MS && now - started <= CLOCK_MAX_MS;
   return {
-    // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
-    started: turn.updated_at ? coerceTimestampMs(turn.started_at) : null,
+    started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
     role: turn.provider,
@@ -245,11 +247,12 @@ export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
   return items.sort((left, right) => KIND_ORDER.indexOf(left.kind) - KIND_ORDER.indexOf(right.kind));
 }
 
-export type SourceState = "loading" | "ok" | "failed";
+/** `partial`: the source answered but left part of its to-dos unread. */
+export type SourceState = "loading" | "ok" | "partial" | "failed";
 
-/** The to-do list is empty only when every source answered; a failed source leaves it partial. */
+/** The to-do list is empty only when every source answered in full; a failed or partial source leaves it partial. */
 export function todoStatus(count: number, sources: SourceState[]): "loading" | "empty" | "partial" | "ready" {
-  if (sources.includes("failed")) return "partial";
+  if (sources.some((source) => source === "failed" || source === "partial")) return "partial";
   if (count > 0) return "ready";
   return sources.includes("loading") ? "loading" : "empty";
 }
@@ -478,13 +481,13 @@ export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: T
 export type RawUsageProvider = RawRLProvider & { fetched_at?: number | null };
 
 export interface UsageRow {
-  key: string;
+  /** Provider heading, with the profile when it is not the default one; null on a provider without windows. */
+  group: string | null;
   label: string;
   /** Null when the tracker has no measurement for this window. */
   pct: number | null;
   /** The provider reports a limit but no usage, so there is nothing to measure. */
   unmeasured: boolean;
-  level: RateLimitLevel;
   stale: boolean;
   measuredAt: number | null;
   note: string | null;
@@ -493,28 +496,20 @@ export interface UsageRow {
 // The server reads Gemini's quota limits but no usage and fills `used: 0` (`build_gemini_rate_limit_buckets`).
 const unmeasuredBucket = (provider: string | undefined, bucket: string) => provider === "gemini" && (bucket === "rpm" || bucket === "rpd");
 
-/** Limit tracker windows as bars; GitHub and hidden buckets stay out, as on the old usage widget. Only measured
- * rows carry a measurement time. */
+/** Limit tracker windows grouped by provider; GitHub and hidden buckets stay out, as on the old usage widget. Only
+ * measured rows carry a measurement time. */
 export function buildUsageRows(raw: RawUsageProvider[], isKo: boolean): UsageRow[] {
   return raw.flatMap((source) => transformRLProviders([source]).flatMap((provider): UsageRow[] => {
     const fetchedAt = coerceTimestampMs(source.fetched_at ?? null);
-    const common = { stale: provider.stale, level: "normal" as RateLimitLevel, unmeasured: false };
+    const name = provider.profileId === "default" ? provider.provider : `${provider.provider} ${provider.profileId}`;
     if (provider.unsupported || provider.buckets.length === 0) {
-      return [{ ...common, key: `${provider.provider}:${provider.profileId}`, label: provider.provider, pct: null, measuredAt: null, note: provider.reason }];
+      return [{ group: null, label: name, pct: null, unmeasured: false, stale: provider.stale, measuredAt: null, note: provider.reason }];
     }
     return provider.buckets.map((bucket) => {
       const unmeasured = unmeasuredBucket(source.provider, bucket.id);
       const pct = unmeasured ? null : bucket.utilization;
-      return {
-        ...common,
-        key: `${provider.provider}:${provider.profileId}:${bucket.id}`,
-        label: `${provider.provider} ${formatRateLimitWindowLabel(bucket.label, isKo)}`,
-        pct,
-        unmeasured,
-        measuredAt: pct === null ? null : fetchedAt,
-        level: unmeasured ? "normal" : bucket.level,
-        note: null,
-      };
+      const label = formatRateLimitWindowLabel(bucket.label, isKo);
+      return { group: name, label, pct, unmeasured, stale: provider.stale, measuredAt: pct === null ? null : fetchedAt, note: null };
     });
   }));
 }

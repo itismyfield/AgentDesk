@@ -1,8 +1,8 @@
 import { ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
-import { AgentMonitor } from "../../kit/pro/agent-monitor";
+import { AgentMonitor, type AgentMonitorLabels } from "../../kit/pro/agent-monitor";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import {
@@ -13,7 +13,7 @@ import {
   AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, monitorView, systemNeedsAttention, todoStatus,
   type HomeAgent, type HomeAgentState, type HomeTone, type MonitorView, type SourceState, type TodoItem, type Tr,
 } from "./homeModel";
-import { loadAgentTurns, loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
+import { loadHomeHealth, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's first three sections: what needs a person, how the system is, and who is working.
 
@@ -52,12 +52,13 @@ function TodoAction({ item, tr, onOpen }: { item: TodoItem; tr: Tr; onOpen: () =
 const approvalNote = (tr: Tr) => tr("결정 포럼에서 승인해요", "Approve in the Decision forum");
 
 /** What only a person can move, at the top of home. Each row opens the screen where it is handled; desktop rows
- * add the approval, decision or deploy button. */
-export function HomeTodoCard({ items, agents, cards, campaigns, isMobile, tr, className }: {
+ * add the approval, decision or deploy button. `details` counts the server campaigns whose to-dos went unread. */
+export function HomeTodoCard({ items, agents, cards, campaigns, details, isMobile, tr, className }: {
   items: TodoItem[];
   agents: Agent[];
   cards: SourceState;
   campaigns: SourceState;
+  details?: { failed: number; cut: number };
   isMobile: boolean;
   tr: Tr;
   className?: string;
@@ -115,6 +116,8 @@ export function HomeTodoCard({ items, agents, cards, campaigns, isMobile, tr, cl
           ) : null}
           {cards === "failed" ? <CardNote>{tr("작업 카드를 읽지 못해 할 일 일부는 확인 불가예요.", "Task cards did not load, so some to-dos are unknown.")}</CardNote> : null}
           {campaigns === "failed" ? <CardNote>{tr("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", "Campaign summaries did not load, so some to-dos are unknown.")}</CardNote> : null}
+          {details?.failed ? <CardNote>{tr("캠페인 상세 일부를 읽지 못해 할 일 일부는 확인 불가예요.", "Some campaign details did not load, so some to-dos are unknown.")}</CardNote> : null}
+          {details?.cut ? <CardNote>{tr(`나머지 캠페인 ${details.cut}개의 할 일은 캠페인 화면에서 확인해요.`, `To-dos of ${details.cut} more campaigns are on the Campaigns screen.`)}</CardNote> : null}
         </>
       )}
     </SectionCard>
@@ -201,10 +204,23 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
   );
 }
 
+/** Monitor texts home can show or speak: a running monitor without steps, with fold and log buttons. */
+const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
+  agent: tr("에이전트", "Agent"),
+  statusRunning: tr("실행 중", "Running"),
+  log: tr("로그", "Log"),
+  elapsed: tr("경과 시간", "Elapsed"),
+  expand: (label) => tr(`${label}, 펼치기`, `${label}, expand`),
+  fold: (name) => tr(`${name} 모니터 접기`, `Collapse ${name} monitor`),
+  timeline: (steps) => tr(`실행한 단계: ${steps}`, `Steps run: ${steps}`),
+  recent: tr("완료한 단계", "Finished steps"),
+});
+
 /** Working agents with a live turn as kit monitors: what runs now and for how long. The host clock ticks once a
  * second instead of the monitor's own 100ms clock; the log button opens the agent detail with its activity log. */
-function AgentMonitors({ items, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; isKo: boolean; onOpen: (agent: Agent) => void }) {
+function AgentMonitors({ items, tr, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; tr: Tr; isKo: boolean; onOpen: (agent: Agent) => void }) {
   const [now, setNow] = useState(() => Date.now());
+  const labels = useMemo(() => monitorLabels(tr), [tr]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
@@ -220,6 +236,7 @@ function AgentMonitors({ items, isKo, onOpen }: { items: Array<{ entry: HomeAgen
             started={view.started ?? undefined}
             now={now}
             onOpenLog={() => onOpen(entry.agent)}
+            labels={labels}
             style={{ width: "100%" }}
           />
         </li>
@@ -239,11 +256,10 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
   onOpenAgent: (agent: Agent) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const workingIds = isMobile ? "" : everyone.filter((entry) => entry.state === "working").map((entry) => entry.agent.id).join("|");
-  const loadTurns = useCallback(() => loadAgentTurns(workingIds ? workingIds.split("|") : []), [workingIds]);
-  const turns = usePolled(loadTurns, 30_000);
-  const monitors = everyone.flatMap((entry) => {
-    const view = monitorView(turns.data?.get(entry.agent.id), entry, tr);
+  // Phones show no monitors, so they read no turns either.
+  const turns = useAgentTurns(isMobile ? [] : everyone.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
+  const monitors = isMobile ? [] : everyone.flatMap((entry) => {
+    const view = monitorView(turns.get(entry.agent.id), entry, tr);
     return view ? [{ entry, view }] : [];
   });
   const monitored = new Set(monitors.map(({ entry }) => entry.agent.id));
@@ -276,7 +292,7 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
 
   return (
     <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : everyone.length} aside={legend} testId="home-agents">
-      {monitors.length > 0 ? <AgentMonitors items={monitors} isKo={isKo} onOpen={onOpenAgent} /> : null}
+      {monitors.length > 0 ? <AgentMonitors items={monitors} tr={tr} isKo={isKo} onOpen={onOpenAgent} /> : null}
       {everyone.length === 0 ? (
         <CardNote>{tr("등록된 에이전트가 없어요.", "No agents yet.")}</CardNote>
       ) : entries.length === 0 ? null : isMobile ? (
