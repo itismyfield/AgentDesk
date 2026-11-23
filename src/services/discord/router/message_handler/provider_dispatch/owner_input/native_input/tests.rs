@@ -535,8 +535,18 @@ async fn no_key_round(
         );
         super::recover(&next, channel).await;
         let recovered = std::fs::read_to_string(&queue).unwrap();
-        assert!(!recovered.contains("\"pin\""), "{recovered}");
-        assert!(recovered.contains("\"enqueued\":true"), "{recovered}");
+        let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+        let pins = recovered["source_bindings"].as_array().map_or(0, Vec::len);
+        assert_eq!(pins, 0, "the settled attempt's pin is ACKed: {recovered}");
+        let kept = if due_passed {
+            "refused_inputs"
+        } else {
+            "retained_inputs"
+        };
+        assert_eq!(
+            recovered[kept][0]["notice"]["enqueued"], true,
+            "{recovered}"
+        );
     }
     result
 }
