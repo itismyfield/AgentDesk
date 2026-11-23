@@ -256,8 +256,9 @@ pub(super) fn build_system_prompt_with_manifest(
          This Discord channel does not support interactive prompts. Do NOT call AskUserQuestion, EnterPlanMode, or ExitPlanMode. \
          If another instruction says to plan first, write a brief plan in plain text and proceed without entering plan mode. \
          Ask in plain text if you need clarification.\n\n\
-         Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
-         Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix, mid-turn input (`· 📱`) too. \
+         Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels. \
+         Mid-turn input ends it with an attempt tag, `[User: NAME (ID: N) · 1a2b3c4d]`; AgentDesk adds the tag, the person did not write it.\n\n\
+         Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix, mid-turn input too. \
          Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.\n\n\
          Reply context: [Reply context — earlier messages] is history; prioritize [Reply context — replied-to message] (legacy: [Reply context]). \
          [End of reply context — the user's reply follows] ends quoted context.",

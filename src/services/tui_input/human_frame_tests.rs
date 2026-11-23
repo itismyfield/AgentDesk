@@ -1,6 +1,6 @@
 use super::human_frame::{
-    Mode, author_name, inject, opens_inject, parse, plain_inject, preserved_decision_body,
-    shows_inject,
+    Mode, author_name, history, idle, inject, opens_inject, parse, plain_inject,
+    preserved_decision_body, shows_inject,
 };
 
 const ID: &str = "343742347365974026";
@@ -121,14 +121,14 @@ fn pane_line_readers_keep_an_inject_line_a_draft() {
 }
 
 #[test]
-fn busy_header_bytes_equal_idle_for_one_line_and_multiline() {
+fn busy_header_bytes_equal_idle_plus_attempt_tag_for_one_line_and_multiline() {
     let frame = crate::services::claude_tui::busy_inject::frame;
     for (body, expected) in [
-        ("one line", "[User: ann (ID: 200)] one line"),
-        ("one\ntwo", "[User: ann (ID: 200)]\none\ntwo"),
+        ("one line", "[User: ann (ID: 200) · abcdef12] one line"),
+        ("one\ntwo", "[User: ann (ID: 200) · abcdef12]\none\ntwo"),
         (
             "one\r\ntwo\rthree",
-            "[User: ann (ID: 200)]\none\ntwo\nthree",
+            "[User: ann (ID: 200) · abcdef12]\none\ntwo\nthree",
         ),
     ] {
         assert_eq!(
@@ -173,5 +173,30 @@ fn decision_preserved_plan_needs_an_event_that_approved_the_exact_opinion() {
         ),
     ] {
         assert!(!plan.contains("\\r"), "{plan}");
+    }
+}
+
+/// Two attempts of one text differ by their tag; tagged and untagged frames the ledger holds both
+/// read as injected, and a header nobody recorded keeps the class it has without a tag.
+#[test]
+fn a_tagged_busy_frame_reads_as_its_untagged_one() {
+    use crate::services::tui_prompt_dedupe::is_discord_relayed_user_prompt as relayed;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let [first, second] =
+        ["abcdef12", "0123abcd"].map(|n| plain_inject("d", "7", "ann", n, "same"));
+    assert_ne!(first, second);
+    let transcript = crate::config::runtime_root().unwrap().join("t.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    for (nonce, frame) in [("abcdef12", first), ("1e1e1e1e", idle("ann", "7", "same"))] {
+        history::register(("claude", "s", nonce, "7"), &transcript, 0, &frame).unwrap();
+        let (header, body) = parse(&frame).expect("a recorded frame reads as injected");
+        let read = (header.name, header.author, header.mode, body);
+        assert_eq!(read, ("ann", "7", Mode::Inject, " same"), "{frame}");
+        assert!(opens_inject(&frame) && !relayed(&frame), "{frame}");
+    }
+    for (typed, new_turn) in [("", true), (" · deadbeef", true), (" · beef", false)] {
+        let typed = format!("[User: bob (ID: 8){typed}] hi");
+        assert!(parse(&typed).is_none() && !opens_inject(&typed), "{typed}");
+        assert_eq!(relayed(&typed), new_turn, "{typed}");
     }
 }

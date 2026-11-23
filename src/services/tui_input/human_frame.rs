@@ -1,5 +1,5 @@
-//! Ordinary user headers are shared by idle and injected input; the durable ledger identifies
-//! injected frames. The earlier v1 and `[📱 …]` formats remain readable.
+//! Injected input uses the idle user header plus its attempt's nonce, ` · <nonce>]`; the durable
+//! ledger identifies injected frames. Untagged, v1 and `[📱 …]` frames remain readable.
 
 pub(crate) mod history;
 
@@ -24,7 +24,9 @@ pub(crate) struct Header<'a> {
     pub(crate) name: &'a str,
     pub(crate) author: &'a str,
     pub(crate) mode: Mode,
+    /// Empty for a plain header.
     pub(crate) source: &'a str,
+    /// Empty for a plain header written without an attempt tag.
     pub(crate) nonce: &'a str,
 }
 
@@ -95,7 +97,11 @@ fn source_key(source: &str) -> String {
 }
 
 pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
-    let prefix = format!("[User: {} (ID: {author})]", author_name(name, author));
+    framed(name, author, "", body)
+}
+
+fn framed(name: &str, author: &str, tag: &str, body: &str) -> String {
+    let prefix = format!("[User: {} (ID: {author}){tag}]", author_name(name, author));
     let body = body.replace("\r\n", "\n").replace('\r', "\n");
     if body.is_empty() {
         prefix
@@ -136,14 +142,33 @@ pub fn preserved_decision_body(
     Some(PreservedFrame(format!("{prefix}{gap}{body}")))
 }
 
+/// The idle frame tagged with the attempt's nonce, so two attempts of one text differ; a nonce
+/// not shaped like `fresh_nonce`'s adds no tag.
 pub(crate) fn plain_inject(
     _source: &str,
     author: &str,
     name: &str,
-    _id: &str,
+    nonce: &str,
     body: &str,
 ) -> String {
-    idle(name, author, body)
+    let tag = if is_nonce(nonce) {
+        format!(" · {nonce}")
+    } else {
+        String::new()
+    };
+    framed(name, author, &tag, body)
+}
+
+fn is_nonce(text: &str) -> bool {
+    text.len() == 8 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A plain header's inside without its attempt tag, and the tag, empty when there is none.
+pub(crate) fn untagged(inner: &str) -> (&str, &str) {
+    match inner.rsplit_once(" · ") {
+        Some((who, nonce)) if who.ends_with(')') && is_nonce(nonce) => (who, nonce),
+        _ => (inner, ""),
+    }
 }
 
 /// The v1 formatter remains only for reconstructing already written frames.
@@ -189,23 +214,21 @@ pub(crate) fn opens_legacy_inject(text: &str) -> bool {
     else {
         return false;
     };
-    nonce.len() == 8
-        && nonce
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    is_nonce(nonce)
         && !author.is_empty()
         && author.bytes().all(|b| b.is_ascii_digit())
         && !source.trim().is_empty()
 }
 
-/// A durable-owned plain user header or a v1 header, with the bytes after its closing bracket.
-/// V1 metadata is read from the right, so a name that looks like metadata never supplies it.
+/// A durable-owned plain user header, tagged or not, or a v1 header, with the bytes after its
+/// closing bracket. Metadata is read from the right, so a name that looks like it never supplies it.
 pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     let rest = text.strip_prefix(USER)?;
     let close = rest.find(']')?;
     let (inner, after) = (&rest[..close], &rest[close + 1..]);
     if !inner.contains(SCHEMA) {
-        let (name, author) = inner.strip_suffix(')')?.rsplit_once(" (ID: ")?;
+        let (who, nonce) = untagged(inner);
+        let (name, author) = who.strip_suffix(')')?.rsplit_once(" (ID: ")?;
         if name.is_empty()
             || author.is_empty()
             || !author.bytes().all(|b| b.is_ascii_digit())
@@ -219,14 +242,13 @@ pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
                 author,
                 mode: Mode::Inject,
                 source: "",
-                nonce: "",
+                nonce,
             },
             after,
         ));
     }
     let (meta, nonce) = inner.rsplit_once(" · ")?;
-    let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
-    if nonce.len() != 8 || !nonce.bytes().all(hex) {
+    if !is_nonce(nonce) {
         return None;
     }
     let (who, meta) = meta.rsplit_once(SCHEMA)?;

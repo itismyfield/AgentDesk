@@ -227,8 +227,8 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
 /// (`tmux_watcher/prompt_observe.rs`) submits `join("")` / `join(" ")` /
 /// `join("\n")` variants of one block, so a line-anchored check would miss the
 /// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
-/// following `(ID: <digits>)]` (author may itself contain parens). A v1 header counts only as a
-/// new turn's; input pasted into a running turn is settled by the injected-input ledger.
+/// following `(ID: <digits>)]`, attempt tag allowed (author may itself contain parens). A v1 header
+/// counts only as a new turn's; input pasted into a running turn is settled by the injected-input ledger.
 pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
@@ -243,9 +243,11 @@ pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let mut tail = &prompt[user_at + "[User: ".len()..];
     while let Some(id_at) = tail.find("(ID: ") {
         let after_id = &tail[id_at + "(ID: ".len()..];
-        if let Some(close) = after_id.find(")]") {
-            let digits = &after_id[..close];
-            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        if let Some(close) = after_id.find(']') {
+            let digits = human_frame::untagged(&after_id[..close])
+                .0
+                .strip_suffix(')');
+            if digits.is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())) {
                 return true;
             }
         }
