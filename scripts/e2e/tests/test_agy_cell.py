@@ -202,6 +202,14 @@ class DeployRequests(unittest.TestCase):
                           for name in ("announce_bot_token", "antigravity_bot_token", "gemini_api_key", "notify_bot_token")])
         self.assertTrue(all("op://" not in " ".join(call) for call in calls))
         self.assertEqual(pipes[0][2]["PATH"].split(":")[0], str(self.root / "worktree/target/debug"))
+        # Same head reuses the instance only while its credential references are unchanged.
+        prepares = lambda: sum("prepare" in call for call in calls)
+        instance.ensure(config, HEAD, execute=execute, pipe=lambda *a: None)
+        self.assertEqual(prepares(), 1)
+        for refs in ({**config["credentials"], "gemini_api_key": "op://AgentDesk/Other/credential"},
+                     {k: v for k, v in config["credentials"].items() if k != "gemini_api_key"}):
+            instance.ensure({**config, "credentials": refs}, HEAD, execute=execute, pipe=lambda *a: None)
+        self.assertEqual(prepares(), 3)
         replies["status"] = " M dirty\n"
         (self.root / "state/instance.json").unlink()
         calls.clear()

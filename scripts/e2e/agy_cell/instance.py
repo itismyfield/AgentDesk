@@ -115,8 +115,10 @@ def ensure(config, head, *, execute=_execute, pipe=_pipe):
         raise InstanceError("ensure needs a full lowercase head")
     worktree, state = config["worktree"], config["state_dir"]
     script, env = worktree / "scripts/dev-instance.sh", instance_env(config)
+    # References only, never values: a changed reference set needs a freshly written instance.
+    references = hashlib.sha256(json.dumps(config["credentials"], sort_keys=True).encode()).hexdigest()
     current = read_json(state / "instance.json", {})
-    if current.get("head") == head:
+    if current.get("head") == head and current.get("credentials") == references:
         return current["instance_id"]
     execute(["git", "-C", worktree, "fetch", "origin"], 120)
     execute(["git", "-C", worktree, "checkout", "--detach", head], 60)
@@ -131,7 +133,7 @@ def ensure(config, head, *, execute=_execute, pipe=_pipe):
              [script, "credential", "--instance", instance_id, "--name", name], env)
     if json.loads(execute([script, "validate", "--instance", instance_id], 60, env=env))["status"] != "DECLARATION_VALID":
         raise InstanceError("prepared agy instance did not validate")
-    write_json(state / "instance.json", {"head": head, "instance_id": instance_id})
+    write_json(state / "instance.json", {"head": head, "instance_id": instance_id, "credentials": references})
     previous = current.get("instance_id")
     if previous and previous != instance_id:
         try:
