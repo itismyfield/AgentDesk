@@ -106,9 +106,12 @@ export function AgentInfoCardContent({
     setSelectedProvider(agent.cli_provider ?? "claude");
   }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
 
+  // An override belongs to one Provider, so another Provider (switched here or in the edit form) shows the primary account.
   useEffect(() => {
-    if (profiles) setSelectedAuthProfile(profiles.agent_profile_overrides?.find((entry) => entry.agent_id === agent.id)?.profile_id ?? "__primary__");
-  }, [profiles, agent.id]);
+    if (!profiles) return;
+    const override = profiles.agent_profile_overrides?.find((entry) => entry.agent_id === agent.id && entry.provider === selectedProvider);
+    setSelectedAuthProfile(override?.profile_id ?? "__primary__");
+  }, [profiles, agent.id, selectedProvider]);
 
   const saveAlias = async () => {
     const newAlias = aliasValue.trim() || null;
@@ -203,7 +206,7 @@ export function AgentInfoCardContent({
   const cron = useReadWhenOpen(cronFold.open, agent.id, readCron);
   const timeline = useReadWhenOpen(activityFold.open, agent.id, readTimeline);
   const audit = useReadWhenOpen(activityFold.open, agent.id, readAudit);
-  const calls = useMemo(() => (shared.skillCalls ? agentSkillCalls(shared.skillCalls, agent) : shared.skillCalls), [shared.skillCalls, agent]);
+  const calls = useMemo(() => (shared.skillCalls ? agentSkillCalls(shared.skillCalls, agent.id) : shared.skillCalls), [shared.skillCalls, agent.id]);
 
   const { kanbanCards } = useKanban();
   const ownReasons = useMemo(
@@ -222,10 +225,12 @@ export function AgentInfoCardContent({
   };
 
   const department = departments.find((entry) => entry.id === selectedDeptId);
+  // Counts show once read, so an unread list never reads as zero.
+  const routeCount = shared.bindings === undefined ? null : bindings.length;
   const liveCount = sessions ? live.length : null;
   const connectionSummary = isMobile
-    ? [tr(`경로 ${bindings.length}`, `${bindings.length} routes`), liveCount === null ? null : tr(`세션 ${liveCount}`, `${liveCount} sessions`)]
-    : [tr(`Discord 경로 ${bindings.length}`, `${bindings.length} Discord routes`), liveCount === null ? null : tr(`살아 있는 세션 ${liveCount}`, `${liveCount} live sessions`)];
+    ? [routeCount === null ? null : tr(`경로 ${routeCount}`, `${routeCount} routes`), liveCount === null ? null : tr(`세션 ${liveCount}`, `${liveCount} sessions`)]
+    : [routeCount === null ? null : tr(`Discord 경로 ${routeCount}`, `${routeCount} Discord routes`), liveCount === null ? null : tr(`살아 있는 세션 ${liveCount}`, `${liveCount} live sessions`)];
   const primaryName = localeName(locale, agent);
   const secondaryName = agentSecondaryLine(agent, locale);
 

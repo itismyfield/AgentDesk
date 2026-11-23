@@ -1,6 +1,6 @@
 import type { SkillRankingByAgentRow } from "../../api";
 import type { CronJob, DiscordBinding } from "../../api/client";
-import type { Agent, DispatchedSession } from "../../types";
+import type { DispatchedSession } from "../../types";
 
 // Same live set as home's `classifyAgents`; aborted and disconnected sessions are finished.
 const LIVE_SESSION_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
@@ -15,10 +15,10 @@ export function splitLinkedSessions(sessions: DispatchedSession[]): { live: Disp
   return { live, finished, closed: finished.length };
 }
 
-/** The agent's 30-day skill calls, most first. The server keys rows by agent id; older fixtures used the role id. */
-export function agentSkillCalls(rows: SkillRankingByAgentRow[], agent: Pick<Agent, "id" | "role_id">) {
+/** The agent's 30-day skill calls, most first. The server keys rows by agent id (`agents.id`), despite the field name. */
+export function agentSkillCalls(rows: SkillRankingByAgentRow[], agentId: string) {
   return rows
-    .filter((row) => row.agent_role_id === agent.id || (agent.role_id != null && row.agent_role_id === agent.role_id))
+    .filter((row) => row.agent_role_id === agentId)
     .sort((left, right) => right.calls - left.calls)
     .map((row) => ({ id: row.skill_name, label: row.skill_name, value: row.calls }));
 }

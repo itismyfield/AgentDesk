@@ -21,17 +21,23 @@ export interface AgentDetailShared {
 }
 
 /** One read per page of what the details share, while `active`. Routes come at once (the list marks agents without
- * one); accounts and skill calls wait for the first open detail. */
-export function useAgentDetailShared(active: boolean, detailOpen = active): AgentDetailShared {
+ * one) and again when `routesKey` changes; accounts and skill calls wait for the first open detail. */
+export function useAgentDetailShared(active: boolean, detailOpen = active, routesKey = ""): AgentDetailShared {
   const [bindings, setBindings] = useState<Read<DiscordBinding[]>>();
   const [authProfiles, setAuthProfiles] = useState<Read<ProviderAuthProfilesResponse>>();
   const [skillCalls, setSkillCalls] = useState<Read<api.SkillRankingByAgentRow[]>>();
-  const started = useRef({ routes: false, details: false });
+  const started = useRef<{ routes: string | null; reads: number; shown: number; details: boolean }>({ routes: null, reads: 0, shown: 0, details: false });
   useEffect(() => {
-    if (!active || started.current.routes) return;
-    started.current.routes = true;
-    void settle(api.getDiscordBindings({ suppressErrorToast: true }), setBindings);
-  }, [active]);
+    if (!active || started.current.routes === routesKey) return;
+    started.current.routes = routesKey;
+    // The last list stays on screen while it is read again; an answer lands unless a newer one already did.
+    const read = ++started.current.reads;
+    void settle(api.getDiscordBindings({ suppressErrorToast: true }), (value) => {
+      if (read < started.current.shown) return;
+      started.current.shown = read;
+      setBindings(value);
+    });
+  }, [active, routesKey]);
   useEffect(() => {
     if (!active || !detailOpen || started.current.details) return;
     started.current.details = true;
@@ -76,13 +82,15 @@ export function useReadWhenOpen<T>(open: boolean, agentId: string, read: (agentI
   return state?.id === agentId ? state.value : undefined;
 }
 
-/** Discord names of the given channels and their parents; an id that fails keeps showing as the id. */
+/** Discord names of the given channels and their parents; an id that fails keeps showing as the id. A set already read
+ * is not read again, so folding a section and opening it again sends nothing. */
 export function useDiscordChannels(ids: Array<string | null | undefined> | null): Record<string, api.DiscordChannelInfo> {
   const key = ids ? Array.from(new Set(ids.filter(isDiscordSnowflake))).sort().join(",") : "";
   const [byId, setById] = useState<Record<string, api.DiscordChannelInfo>>({});
+  const asked = useRef("");
   useEffect(() => {
-    if (!key) return undefined;
-    let active = true;
+    if (!key || key === asked.current) return;
+    asked.current = key;
     const load = async (list: string[]) => Object.fromEntries((await Promise.all(list.map((id) =>
       api.getDiscordChannelInfo(id).then((info) => (info?.id ? [[id, info] as const] : []), () => []),
     ))).flat());
@@ -90,9 +98,8 @@ export function useDiscordChannels(ids: Array<string | null | undefined> | null)
       const found = await load(key.split(","));
       const parents = Array.from(new Set(Object.values(found).map((info) => info.parent_id).filter((id): id is string => isDiscordSnowflake(id) && !(id in found))));
       const more = parents.length > 0 ? await load(parents) : {};
-      if (active) setById({ ...found, ...more });
+      if (asked.current === key) setById({ ...found, ...more });
     })();
-    return () => { active = false; };
   }, [key]);
   return byId;
 }

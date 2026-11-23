@@ -102,8 +102,11 @@ export default function AgentsTab({
   const listedAgents = useMemo(() => listed.map((entry) => entry.agent), [listed]);
   const testAgentCount = entries.filter((entry) => isTestAgent(entry.agent)).length;
   const attention = useAgentsAttention(listedAgents, tr, isKo);
-  // Routes, accounts and skill calls are read once here and handed to every detail.
-  const shared = useAgentDetailShared(true, selectedAgentId !== null);
+  // Routes, accounts and skill calls are read once here and handed to every detail. A new, removed or re-routed agent
+  // reads the routes again, so a fresh agent never shows "no route".
+  const routesKey = useMemo(() => entries.filter((entry) => !isStandIn(entry.agent)).map(({ agent }) =>
+    [agent.id, agent.discord_channel_id, agent.discord_channel_alt, agent.discord_channel_cc, agent.discord_channel_cdx].join(":")).sort().join("|"), [entries]);
+  const shared = useAgentDetailShared(true, selectedAgentId !== null, routesKey);
   const bound = useMemo(() => (shared.bindings ? new Set(shared.bindings.map((binding) => binding.agentId)) : null), [shared.bindings]);
   // Phones show no tool line, so they read no turns either (as home).
   const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));

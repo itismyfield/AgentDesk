@@ -26,12 +26,11 @@ describe("splitLinkedSessions", () => {
 });
 
 describe("agentSkillCalls", () => {
-  it("keeps this agent's rows by id or role id, most calls first", () => {
+  it("keeps this agent's rows by agent id only, most calls first", () => {
     const row = (agent_role_id: string, skill_name: string, calls: number) => ({ agent_role_id, agent_name: "", skill_name, skill_desc_ko: "desc", calls, last_used_at: 0 });
-    const rows = [row("ada", "a", 1), row("adk-dashboard", "b", 8), row("luna", "c", 9), row("ada", "d", 3)];
-    expect(agentSkillCalls(rows, { id: "ada", role_id: "adk-dashboard" })).toEqual([
-      { id: "b", label: "b", value: 8 }, { id: "d", label: "d", value: 3 }, { id: "a", label: "a", value: 1 },
-    ]);
-    expect(agentSkillCalls(rows, { id: "nova", role_id: null })).toEqual([]);
+    // "adk-dashboard" is another agent whose id equals Ada's role id: its calls stay apart.
+    const rows = [row("ada", "a", 1), row("adk-dashboard", "a", 8), row("luna", "c", 9), row("ada", "d", 3)];
+    expect(agentSkillCalls(rows, "ada")).toEqual([{ id: "d", label: "d", value: 3 }, { id: "a", label: "a", value: 1 }]);
+    expect(agentSkillCalls(rows, "nova")).toEqual([]);
   });
 });

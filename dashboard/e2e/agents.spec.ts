@@ -69,7 +69,7 @@ const SKILL_RANKING = {
   window: "30d",
   overall: [],
   byAgent: [
-    { agent_role_id: "adk-dashboard", agent_name: "Ada Dashboard", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 4, last_used_at: NOW - 3_600_000 },
+    { agent_role_id: "agent-ada", agent_name: "Ada Dashboard", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 4, last_used_at: NOW - 3_600_000 },
   ],
 };
 
@@ -426,6 +426,8 @@ test.describe("Agents tab on a touch phone", () => {
     await drawer.getByRole("button", { name: "편집" }).tap();
     const form = page.getByRole("dialog", { name: "에이전트 수정" });
     await expect(form).toBeVisible();
+    // Measure once the sheet and its fields stop moving.
+    await form.evaluate((node) => Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished)));
     expect(await smallTargets(form)).toEqual([]);
     expect(await smallInputFonts(form)).toEqual([]);
 
