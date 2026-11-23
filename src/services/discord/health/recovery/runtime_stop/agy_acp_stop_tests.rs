@@ -1,6 +1,5 @@
-//! The channel stop services reach a running ACP turn: a preserving stop asks agy to cancel and
-//! keeps its child, a force-kill ends only that destination's child tree, also mid-cancel and
-//! when agy answers the force's own cancel first.
+//! Channel stops reach a running ACP turn: a preserving stop keeps its child, a force-kill ends
+//! only that child tree, also mid-cancel and when agy answers the force's own cancel first.
 
 use std::cell::RefCell;
 use std::sync::Arc;
