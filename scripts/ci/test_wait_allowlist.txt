@@ -183,7 +183,6 @@ src/services/process/stream_child/stream_queue/tests.rs
 src/services/provider.rs
 src/services/provider/cancel_token_cleanup/authority.rs
 src/services/provider/cancel_token_cleanup/executor.rs
-src/services/qwen.rs
 src/services/recovery_defer/tests.rs
 src/services/routines/agent_executor/owner_review_tests.rs
 src/services/scheduled_messages/owner_input_tests.rs
@@ -200,7 +199,6 @@ src/services/session_host/herdr/policy/consent/settlement_tests.rs
 src/services/session_host/herdr/policy/consent/workflow_tests.rs
 src/services/session_host/herdr/transport_tests.rs
 src/services/session_host/herdr/unplaced_rig_tests.rs
-src/services/stream_json_cli/runner.rs
 src/services/tui_input/bounded_tmux_tests.rs
 src/services/tui_input/writer_lease_tests.rs
 src/services/tui_o/alarm.rs
