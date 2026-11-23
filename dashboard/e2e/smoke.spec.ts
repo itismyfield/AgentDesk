@@ -811,7 +811,7 @@ async function mockAgentsHubApis(page: Page) {
     });
   });
 
-  await page.route(/\/api\/skills\/ranking\?window=30d&limit=120$/, async (route) => {
+  await page.route(/\/api\/skills\/ranking\?window=30d&limit=\d+$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2009,6 +2009,11 @@ test.describe("Dashboard smoke tests", () => {
       : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
+    // Phones fold the run settings with every section but "now".
+    const openRunSettings = async () => {
+      if (testInfo.project.name !== "desktop") await dialog.getByRole("button", { name: /^(실행 설정|Run settings)/ }).click();
+    };
+    await openRunSettings();
     await expect(device).toBeEnabled();
     await expect(device).toHaveValue("");
     await expect(device.locator('option[value="fixture-hub"]')).toContainText(/(?:허브|Hub) · macOS/);
@@ -2020,6 +2025,7 @@ test.describe("Dashboard smoke tests", () => {
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
     await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
     await page.getByTestId("agents-row-agent-ada").click();
+    await openRunSettings();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
     await device.selectOption("linux-2");
