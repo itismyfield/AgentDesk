@@ -1029,6 +1029,7 @@ async fn s2b_on_bidirectional_claims_and_reserved_front_protection() {
             f.channel,
             None,
             crate::services::discord::router::queued_head_inject_covers,
+            crate::services::discord::health::InjectOrigin::queued_head_gate_enabled,
         )
         .await;
     assert!(
@@ -1066,7 +1067,8 @@ async fn s2b_on_bidirectional_claims_and_reserved_front_protection() {
                     context(),
                     f.channel,
                     None,
-                    crate::services::discord::router::queued_head_inject_covers
+                    crate::services::discord::router::queued_head_inject_covers,
+                    crate::services::discord::health::InjectOrigin::queued_head_gate_enabled,
                 )
                 .await,
             QueuedHeadClaim::Contended
@@ -1082,6 +1084,7 @@ async fn s2b_on_bidirectional_claims_and_reserved_front_protection() {
             f.channel,
             None,
             crate::services::discord::router::queued_head_inject_covers,
+            crate::services::discord::health::InjectOrigin::queued_head_gate_enabled,
         )
         .await;
     let QueuedHeadClaim::Reserved(ticket) = claim else {

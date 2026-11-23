@@ -39,11 +39,11 @@ mod id_bridge;
 mod idle_detector;
 mod idle_relay_drift;
 mod inflight;
-pub(crate) use inflight::install_codex_absence_reader;
 #[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
+pub(crate) use inflight::{install_codex_absence_reader, install_engine_probes};
 mod inflight_heartbeat_sweeper;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
@@ -183,6 +183,10 @@ mod tmux_watcher_registry;
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
 #[cfg(test)]
+mod krx_claude_tests;
+#[cfg(all(test, unix))]
+mod krx_claude_unix_tests;
+#[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
@@ -198,17 +202,17 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+#[cfg(test)]
+pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
+pub(crate) use session_notice::input_notice::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
-#[cfg(test)]
-pub(crate) use tui_prompt_relay::INPUT_NOTICE_RUNS;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use tui_prompt_relay::{
-    input_notice_content, input_notice_line, scheduled_input_notice_content,
-};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
@@ -659,42 +663,8 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     )
 }
 
-async fn has_active_session_for_thread_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    let Some(pool) = pg_pool else {
-        return Ok(false);
-    };
-
-    let row = sqlx::query(
-        "SELECT 1
-         FROM sessions
-         WHERE thread_channel_id = $1
-           AND LOWER(COALESCE(status, '')) IN ('turn_active', 'working')
-           AND COALESCE(last_heartbeat, created_at) > NOW() - INTERVAL '10 minutes'
-         LIMIT 1",
-    )
-    .bind(thread_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load active session for thread {thread_id}: {error}"))?;
-
-    Ok(row.is_some())
-}
-
-pub(crate) async fn should_defer_thread_archive_pg(
-    pg_pool: Option<&sqlx::PgPool>,
-    thread_id: &str,
-) -> Result<bool, String> {
-    if let Ok(channel_id) = thread_id.parse::<u64>()
-        && has_fresh_inflight_for_channel(channel_id)
-    {
-        return Ok(true);
-    }
-
-    has_active_session_for_thread_pg(pg_pool, thread_id).await
-}
+#[cfg(test)]
+pub(crate) use crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg;
 
 /// Consume a legacy deferred-restart signal.
 ///
@@ -1121,6 +1091,7 @@ pub(crate) struct SharedData {
         tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
+    pub(in crate::services::discord) router_ports: shared_state::RouterPorts,
 }
 
 pub(crate) use session_transition::{
@@ -1439,6 +1410,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         turn_completion_events: turn_completion_events::turn_completion_event_bus(),
         turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
         readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
+        router_ports: router::ROUTER_PORTS,
     })
 }
 

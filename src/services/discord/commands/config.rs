@@ -308,7 +308,7 @@ fn runtime_model_for_turn(
 mod effort;
 mod provider_settings;
 pub(in crate::services::discord) use effort::{
-    channel_effort_level, effort_entry_choices, herdr_now, update_channel_effort,
+    channel_effort_level, effort_entry_choices, herdr_codex, herdr_now, update_channel_effort,
     validate_effort_entry,
 };
 pub(in crate::services::discord) use provider_settings::{

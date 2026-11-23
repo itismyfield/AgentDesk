@@ -31,7 +31,7 @@ mod postgres_tests;
 mod restore_window_tests;
 
 /// A test-only durable store for one task, so a test never attaches the process one.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_store {
     use super::*;
 

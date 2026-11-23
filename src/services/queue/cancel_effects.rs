@@ -6,7 +6,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use crate::domain::session_identity::SessionIdentity;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::QueueCancelPort;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_cancel_queue_guard::PurgeCounts;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
@@ -75,28 +75,24 @@ async fn run_pre_purge_hook_for_test(
 }
 
 /// Schedule preserved work and return only the depth observed after the drain attempt.
-pub(crate) async fn schedule_post_cancel_queue_drain(
-    health_registry: Option<&Arc<HealthRegistry>>,
+pub(crate) async fn schedule_post_cancel_queue_drain<R: QueueCancelPort>(
+    health_registry: Option<&Arc<R>>,
     target: &TurnLifecycleTarget,
     reason: &'static str,
 ) -> Option<usize> {
     let registry = health_registry?;
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
-    let outcome = crate::services::discord::health::schedule_pending_queue_drain_after_cancel(
-        registry.as_ref(),
-        provider.as_str(),
-        channel_id,
-        reason,
-    )
-    .await;
-    outcome.queue_depth_after
+    registry
+        .as_ref()
+        .schedule_pending_queue_drain_after_cancel(provider.as_str(), channel_id, reason)
+        .await
 }
 
 /// Purge through the actor and retain its measured removal counts and post-rollback depth.
 /// Without a global mirror, sweep files only; another registry's actor may still hold a queue.
-pub(crate) async fn force_purge_channel_mailbox(
-    health_registry: Option<&Arc<HealthRegistry>>,
+pub(crate) async fn force_purge_channel_mailbox<R: QueueCancelPort>(
+    health_registry: Option<&Arc<R>>,
     target: &TurnLifecycleTarget,
     session_key: Option<&str>,
 ) -> Option<PurgeCounts> {
@@ -137,7 +133,7 @@ pub(crate) async fn force_purge_channel_mailbox(
         true,
     )
     .await?;
-    let finish = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
+    let finish = QueueCancelPort::finish_cancelled_provider_channel_mailbox(
         health_registry.map(Arc::as_ref),
         Some(provider.as_str()),
         Some(channel_id.get()),
@@ -161,8 +157,8 @@ pub(crate) async fn force_purge_channel_mailbox(
 }
 
 /// The forced purge, then the receipts its owner owes for each removed origin.
-pub(crate) async fn force_purge_and_settle(
-    health_registry: Option<&Arc<HealthRegistry>>,
+pub(crate) async fn force_purge_and_settle<R: QueueCancelPort>(
+    health_registry: Option<&Arc<R>>,
     target: &TurnLifecycleTarget,
     session_key: Option<&str>,
     pool: Option<&sqlx::PgPool>,
@@ -179,12 +175,12 @@ pub(crate) async fn force_purge_and_settle(
 
 /// Purges `handle`'s queue; `None` when the actor did not answer or refused for a queued head.
 /// A V2 owner's refusal answers with nothing drained, the depth it kept and why it kept it.
-async fn purge_on(
+async fn purge_on<R: QueueCancelPort>(
     handle: &ChannelMailboxHandle,
     provider: &ProviderKind,
     channel_id: ChannelId,
     session_key: Option<&str>,
-    health_registry: Option<&HealthRegistry>,
+    health_registry: Option<&R>,
     clear_cancelled_active_anchor: bool,
 ) -> Option<(PurgeQueueResult, Option<String>)> {
     let mut token_hash = session_key
@@ -194,11 +190,9 @@ async fn purge_on(
     // Resolve only a sessionless request; the actor still checks the actual owner's file and CAS.
     if session_key.is_none()
         && let Some(registry) = health_registry
-        && let Some(shared) = registry
-            .shared_for_provider_on_channel(provider, channel_id)
-            .await
+        && let Some(channel_token_hash) = registry.channel_token_hash(provider, channel_id).await
     {
-        token_hash = shared.token_hash.clone();
+        token_hash = channel_token_hash;
     }
     let persistence = QueuePersistenceContext::new(provider, &token_hash, None);
     #[cfg(test)]

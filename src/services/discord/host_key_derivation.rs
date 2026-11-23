@@ -1,7 +1,6 @@
 //! Sessions-row lookup for a caller that holds no bot token hash or no channel name: every
 //! hash registered for the provider, each tried under exact keys only, never a name match.
 
-use serde_json::Value;
 use sqlx::PgPool;
 
 use super::health::HealthRegistry;
@@ -15,15 +14,6 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::HostLiveness;
-
-/// The turn channel a routine run recorded: a decimal string as the executor writes it.
-pub(crate) fn recorded_channel_id(value: Option<&Value>) -> Option<u64> {
-    let value = value?;
-    match value.as_str() {
-        Some(text) => text.parse().ok(),
-        None => value.as_u64(),
-    }
-}
 
 /// Reads each hash's namespaced key and its `(provider, hash, channel)` tuple, then merges.
 pub(super) async fn derive_hosted_lookup(

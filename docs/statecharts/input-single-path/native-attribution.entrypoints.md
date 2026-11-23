@@ -34,7 +34,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
-| `src/services/discord/admin_host_guard.rs:256` | `apply` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/admin_host_guard.rs:236` | `apply` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/catch_up/retry_state.rs:538` | `clear_channel_discarding_catch_up_backlog` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/health/recovery.rs:285` | `clear_provider_channel_runtime` | BootRestore / Reconstruct |
 | `src/services/discord/health/recovery/inflight_repair.rs:188` | `clear_idle_tmux_stale_turn` | BootRestore / Reconstruct |
@@ -66,11 +66,11 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/mailbox_finish.rs:341` | `mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/mailbox_finish.rs:350` | `mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/mailbox_finish.rs:362` | `mailbox_clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/mod.rs:1259` | `record_tmux_watcher_reconnect` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/mod.rs:1569` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1576` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1591` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
-| `src/services/discord/mod.rs:1599` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1232` | `record_tmux_watcher_reconnect` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/mod.rs:1543` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1550` | `mailbox_try_start_turn` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1565` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
+| `src/services/discord/mod.rs:1573` | `mailbox_try_start_turn_kinded` | Inject(배타 lease claim) |
 | `src/services/discord/placeholder_live_events/mod.rs:129` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/placeholder_live_events/mod.rs:134` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/placeholder_live_events/panel_cache_invalidation.rs:51` | `clear_channel` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
@@ -79,7 +79,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/placeholder_sweeper/abandon_guard.rs:376` | `finalize_abandoned_mailbox_admitted` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/queue_dispatch.rs:345` | `mailbox_take_next_automatic_intervention` | BootRestore / Reconstruct |
 | `src/services/discord/queue_dispatch.rs:487` | `mailbox_restore_dequeued_head` | BootRestore / Reconstruct |
-| `src/services/discord/queue_dispatch/kickoff.rs:282` | `kickoff_queue_channel_inner` | BootRestore / Reconstruct |
+| `src/services/discord/queue_dispatch/kickoff.rs:284` | `kickoff_queue_channel_inner` | BootRestore / Reconstruct |
 | `src/services/discord/queue_io/turn_admission.rs:7` | `mailbox_try_start_turn_kinded_with_feedback` | Inject(배타 lease claim) |
 | `src/services/discord/queue_io/turn_admission.rs:15` | `mailbox_try_start_turn_kinded_with_feedback` | Inject(배타 lease claim) |
 | `src/services/discord/queue_io/turn_admission.rs:30` | `mailbox_try_start_turn_behind_queue` | Inject(배타 lease claim) |
@@ -128,7 +128,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_finalizer/finalize.rs:189` | `do_finalize_with_probe` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/turn_finalizer/guarded_finish_residue.rs:164` | `release` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/turn_lease.rs:299` | `claim` | OperatorRelease |
-| `src/services/discord/zombie_foreground_release.rs:354` | `release_zombie_foreground_turn_guarded` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/zombie_foreground_release.rs:300` | `release_zombie_foreground_turn_guarded` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/queue/cancel_effects.rs:212` | `purge_on` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/turn_orchestrator.rs:646` | `try_start_turn` | Inject(배타 lease claim) |
 | `src/services/turn_orchestrator.rs:653` | `try_start_turn` | Inject(배타 lease claim) |
@@ -431,10 +431,10 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_lease.rs:261` | `clear_late_projection` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/turn_lease.rs:309` | `claim` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/watchers/dispatched_origin_ghost.rs:103` | `consume_dispatched_origin_ghost_if_current` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:522` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/turn_lifecycle.rs:524` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:976` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:980` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:526` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:979` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:983` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 
 ## inflight_alias: 64행 (시험·주석 제외 20행)
 
@@ -526,31 +526,31 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/health/recovery/zombie_reclaim.rs:41` | `release_zombie_foreground_turn_by_tmux_name` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/live_bridge.rs:337` | `defer_unstarted_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/mailbox_finish.rs:255` | `unwind_unstarted_turn` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1471` | `cleanup_retry_inflight_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1544` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:1550` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2109` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2163` | `maybe_schedule_catch_up_retry_after_queue_drain` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2190` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/mod.rs:2232` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1445` | `cleanup_retry_inflight_blocks_idle_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1518` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:1524` | `idle_queue_snapshot_has_kickable_backlog` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2083` | `enqueue_internal_followup` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2137` | `maybe_schedule_catch_up_retry_after_queue_drain` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2164` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/mod.rs:2206` | `idle_queue_take_next_soft_if_ready` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/placeholder_sweeper/abandon_guard.rs:390` | `finalize_abandoned_mailbox_admitted` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch.rs:88` | `log_kickoff_rejected_restore` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch.rs:264` | `mailbox_take_next_automatic_intervention` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch.rs:317` | `mailbox_take_next_automatic_intervention` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:94` | `kickoff_idle_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:99` | `kickoff_idle_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:102` | `kickoff_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:109` | `kickoff_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:115` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:125` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:243` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:252` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:359` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:365` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:378` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:400` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:421` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:433` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:95` | `kickoff_idle_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:100` | `kickoff_idle_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:103` | `kickoff_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:110` | `kickoff_queue_channel` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:116` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:126` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:272` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:227` | `kickoff_queue_channel_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:361` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:367` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:380` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:402` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:423` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs:435` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:319` | `schedule_race_loss_requeue_post_enqueue_idle_recheck` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:379` | `schedule_writer_ready_queue_kick` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:506` | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -569,7 +569,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/queue_io/backstop.rs:834` | `schedule_deferred_idle_queue_kickoff_inner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/claude_handoff.rs:303` | `schedule` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/closed.rs:28` | `closed` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_io/input_owner/ingress.rs:458` | `admit_raw` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io/input_owner/ingress.rs:453` | `admit_raw` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/input_owner/routine.rs:380` | `owner_input_wake` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/turn_admission.rs:219` | `mailbox_recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/turn_admission.rs:239` | `mailbox_recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
@@ -662,7 +662,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/turn_presence/supervisor.rs:858` | `kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_presence/supervisor.rs:869` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/turn_presence/supervisor.rs:874` | `wake_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/zombie_foreground_release.rs:386` | `release_zombie_foreground_turn_guarded` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/zombie_foreground_release.rs:332` | `release_zombie_foreground_turn_guarded` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:142` | `module` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:829` | `recovery_kickoff` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/turn_orchestrator.rs:1157` | `wait` | Kick(wake/event/queue admission, 같은 head 재검증) |

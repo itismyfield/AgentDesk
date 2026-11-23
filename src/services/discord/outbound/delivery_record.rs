@@ -66,6 +66,8 @@ use crate::services::provider::ProviderKind;
 mod content;
 mod frontier;
 mod owner_context;
+#[cfg(unix)]
+pub(in crate::services::discord) mod parked_owner;
 mod rollout;
 mod store;
 

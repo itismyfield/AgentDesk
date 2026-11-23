@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::QueueCancelPort;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
 
 /// The response to a non-forced cancel of a live Herdr turn: the holder's answer, never a
 /// completion; `None` leaves every other turn, and any forced cancel, to the existing cancel.
-pub(super) async fn live_turn(
+pub(super) async fn live_turn<R: QueueCancelPort>(
     force: bool,
-    health_registry: Option<&Arc<HealthRegistry>>,
+    health_registry: Option<&Arc<R>>,
     target: &TurnLifecycleTarget,
     session_key: Option<&str>,
 ) -> Option<Value> {
@@ -21,8 +21,7 @@ pub(super) async fn live_turn(
     }
     let (registry, provider) = (health_registry?, target.provider.as_ref()?);
     let channel = target.channel_id?.get();
-    let stop = crate::services::discord::zombie_foreground_release::run_herdr_cancel;
-    let mut answer = stop(registry, provider, channel).await?;
+    let mut answer = registry.run_herdr_cancel(provider, channel).await?;
     // Only an admitted intent shows the token still held the mailbox; nothing else was observed.
     let stopping = matches!(
         answer["intent"].as_str(),

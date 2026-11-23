@@ -108,6 +108,7 @@ pub async fn tmux_output(
         headers,
         Path(id),
         Query(params),
+        crate::services::discord::admin_host_guard::session_key_refusal_port,
     )
     .await
 }
@@ -176,13 +177,15 @@ pub async fn reconcile_stale_turn(
         crate::services::dispatched_sessions::current_session_key_pg(pool, &session_key)
             .await
             .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
-    let outcome =
-        crate::services::stale_turn_reconciler::reconcile_stale_turn_by_key_pg(pool, &session_key)
-            .await
-            .map_err(|error| {
-                AppError::internal(format!("reconcile stale turn: {error}"))
-                    .with_code(ErrorCode::Database)
-            })?;
+    let outcome = crate::services::stale_turn_reconciler::reconcile_stale_turn_by_key_pg(
+        pool,
+        &session_key,
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
+    )
+    .await
+    .map_err(|error| {
+        AppError::internal(format!("reconcile stale turn: {error}")).with_code(ErrorCode::Database)
+    })?;
 
     match outcome {
         crate::services::stale_turn_reconciler::SessionReconcileOutcome::Reconciled(

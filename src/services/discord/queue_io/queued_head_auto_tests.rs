@@ -682,6 +682,7 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
         raced.channel,
         None,
         gate,
+        crate::services::discord::health::InjectOrigin::queued_head_gate_enabled,
     );
     let QueuedHeadClaim::Reserved(ticket) = claim.await else {
         panic!("the other worker reserves H");

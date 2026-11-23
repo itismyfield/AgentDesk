@@ -2378,7 +2378,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 .await
                 .compact_pct_for(&provider);
         if !state.silent_turn {
-            super::super::router::message_handler::typing_indicator::spawn_native_typing_indicator(
+            super::super::turn_presence::typing_indicator::spawn_native_typing_indicator(
                 shared,
                 http.clone(),
                 channel_id,

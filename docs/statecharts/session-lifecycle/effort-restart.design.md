@@ -598,12 +598,12 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | Codex config argv | codex.rs:417-437 | -c model_reasoning_effort="<value>", -m model |
 | Codex exec resume | codex.rs:485-496 | exec resume ID |
 | Codex wrapper | codex.rs:332-358,499-516 | env effort→--reasoning-effort, --resume-session-id |
-| Codex tmux TUI resume argv | codex/tui_session_launch/launch_policy.rs:147-164 | resume 먼저, common options, ID 마지막 |
+| Codex tmux TUI resume argv | codex/tui_session_launch/launch_policy.rs:147-162 | resume 먼저, common options, ID 마지막 |
 | Codex warm/absence launch | codex/absence_launch.rs:121-138,171-198,326-395 | env effort, same session selection/preflight, new incarnation, launch, resume proof |
 | Codex process launch | codex/process_session_launch.rs:110 | env effort로만 시작 |
-| Codex Herdr launch options | codex/herdr_turn.rs:176-187 | turn.model + env effort; channel effort 없음 |
-| Codex Herdr identity | codex/herdr_turn.rs:190-197 | expected_native_session_id=None, resume=false |
-| Codex Herdr fresh guard | codex/tui_session_launch/launch_policy.rs:178-182,210-214,229-260 | resume launch 거절(다음 단락 참조) |
+| Codex Herdr launch options | codex/herdr_turn.rs:182-193 | turn.model + env effort; channel effort 없음 |
+| Codex Herdr identity | codex/herdr_turn.rs:196-203 | expected_native_session_id=None, resume=false |
+| Codex Herdr fresh guard | codex/tui_session_launch/launch_policy.rs:176-180,208-212,227-258 | resume launch 거절(다음 단락 참조) |
 | Codex warm fingerprint | codex_tui/warm_followup.rs:125-126 | reasoning_effort도 launch fingerprint에 포함 |
 | wrapper default | codex_tmux_wrapper/input.rs:279-290 | explicit effort 없고 model 지정이면 high, 양쪽 없으면 None |
 | incarnation 새 nonce | tui_prompt_dedupe/binding_context.rs:333-363 | 새 UUID execution_nonce, expected_native_session_id, launch_mode resume/fresh |
@@ -612,7 +612,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 
 ### Codex Herdr resume는 별도 구현 의존
 
-현재 CodexHerdrTurn에는 native session_id 자체가 없고, fresh launch만 있다(`herdr_turn.rs:174-195`). `prepare_codex_herdr_launch`는 준비 전·후 모두 `validate_herdr_fresh_argv`를 호출한다. 이 validator는 `mode != fresh`, resume session이 있음, argv command가 resume 중 하나면 거절한다(`launch_policy.rs:256-260`). 시험 `herdr_fresh_argv_rejects_resume_without_rejecting_option_values`(fresh_tests.rs:4), `codex_herdr_prepare_rejects_resume_before_launch_effects`(:67)가 이를 고정한다.
+현재 CodexHerdrTurn에는 native session_id 자체가 없고, fresh launch만 있다(`herdr_turn.rs:174-195`). `prepare_codex_herdr_launch`는 준비 전·후 모두 `validate_herdr_fresh_argv`를 호출한다. 이 validator는 `mode != fresh`, resume session이 있음, argv command가 resume 중 하나면 거절한다(`launch_policy.rs:254-258`). 시험 `herdr_fresh_argv_rejects_resume_without_rejecting_option_values`(fresh_tests.rs:4), `codex_herdr_prepare_rejects_resume_before_launch_effects`(:67)가 이를 고정한다.
 
 따라서 #8109 Herdr Codex 같은 thread 재기동은 launch option 하나 배선으로 끝나지 않는다. 기존 fresh 경로 계약은 유지하고, 검증된 native thread·account root·expected session·새 execution nonce를 받는 explicit resume launch 경로를 child module로 추가해야 한다. blanket validator 완화는 잘못된 세션 resume·fresh 경로 변경을 함께 허용하므로 금지한다. 이 별도 조각의 RED 대상은 `resume context accepts exact native ID / rejects another ID before pane I/O / fresh validator unchanged / resume launch same thread`이다.
 
@@ -676,7 +676,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | legacy managed process 종료 | `src/services/discord/commands/control/managed_reset.rs:75`, `:110`, `:146` | runtime hint fence 아래 process handle/tree + exact tmux end, kill 확인 후 temp cleanup. 임의 name kill 권한을 새로 만들면 안 됨 |
 | verified Codex reset refusal | `src/services/discord/commands/control/managed_reset.rs:13`, `:45`, `:60` | verified incarnation output proof 전 reset 불가. effort라는 이름으로 우회하지 말고 종료·writer proof 연동 수용 시험 필요 |
 | process resume launch | `src/services/claude/tui_session_launch.rs:12`, `:154`, `:166`; `src/services/codex/tui_session_launch.rs` | Claude Herdr prepare는 context.launch_mode=resume 및 expected_native_session_id 일치 요구. 새 native session으로 fallback하는 즉시 restart 성공 보고 금지 |
-| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:236`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:126`, `:174`, `:188` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
+| Herdr 최초 launch+첫 입력 | `src/services/claude/herdr_turn.rs:236`, `:590`, `:617`, `:665`; `src/services/codex/herdr_turn.rs:132`, `:180`, `:194` | launch/SessionStart/confirm_bound 뒤 gated 첫 prompt. unclear send는 hold. 재기동을 위해 이 경로를 타더라도 continuation original은 별도 custody를 유지 |
 | 부팅 시 Herdr 재획득 | `src/services/discord/recovery_engine/herdr_reader.rs:220`, `:228`, `:506` | Bound Herdr row read/reconnect→existing source attach. effort pending debt도 attach 성공과 구분해야 함 |
 | 부팅 시 watcher 재획득 | `src/services/discord/watchers/lifecycle/restore_retry.rs:83`, `:93`; `runtime_bootstrap/recovery_flush.rs:55`, `:73` | recovery handled channel skip으로 duplicate watcher 방지. restart local command도 같은 registry fences 보존 |
 | stream active inflight 재생성 | `src/services/discord/tmux_watcher/liveness.rs:462`, `:473`, `:486`; `tmux_watcher/loop_poll_prologue.rs:483`; `tmux_watcher/streaming_status_tick.rs:268` | turn-mode 채널은 synthetic reacquire 안 함. legacy active stream은 recovery gate + save-if-absent. old watcher가 restart 후 원치 않는 inflight를 다시 만들지 않도록 exact generation 종료 필요 |
@@ -698,7 +698,7 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 | presence nonce | `src/services/discord/turn_presence/activity/unbound/live_ownership.rs:80`, `:176`, `:253`, `:307`; `unbound/binding_metadata.rs:107`, `:128` | spawn nonce/registry generation/source binding이 바뀌면 이전 measurement로 admission 못 함. 새 incarnation publish 필요 |
 | queue front/custody | `src/services/turn_orchestrator/queued_head/v2.rs:26`, `:123`, `:369`, `:482`; `queue_io/input_owner/effect.rs:19`, `:105` | original/ticket/attempt를 owner가 보존. Held=정확히 no-key proof인 재시도 가능 front, WriteUncertain=may-have-sent로 자동 재전송 금지 |
 | Held wake | `queue_io/input_owner/drive.rs:118`; `held_watch.rs:73`, `:104` | no-key hold는 real wake 대기. Gone pane은 watcher를 끝내며 wake하지 않음. restart completion 및 writer ready에서 owner wake가 반드시 필요 |
-| legacy stop preserve | `src/services/turn_lifecycle.rs:98`, `:104`, `:123` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
+| legacy stop preserve | `src/services/turn_lifecycle.rs:95`, `:101`, `:120` | existing queue-preserving stop은 HotSwapHandoff restart mode로 inflight 보존. effort shutdown이 실제 CLI restart 전용일 때 dcserver hot-swap와 섞지 말 것 |
 
 위 표에서 약칭 `turn_finalizer`, `queue_io`, `tmux_watcher`, `runtime_bootstrap`는 `src/services/discord/` 아래다.
 
@@ -749,6 +749,5 @@ Codex effort 설정은 `/fast`의 candidate-save·owner·thread scope 계약을 
 <!-- doc-path-refs: proposed src/services/codex/herdr_turn/resume.rs -->
 <!-- doc-path-refs: proposed src/services/codex/tui_session_launch/launch_policy/resume.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/cancel.rs -->
-<!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/herdr.rs -->
 <!-- doc-path-refs: proposed src/services/discord/commands/effort_restart/state.rs -->
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/effort_restart.rs -->

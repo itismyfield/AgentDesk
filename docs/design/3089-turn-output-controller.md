@@ -18,7 +18,7 @@ Agent **turn output** (live streaming, terminal/final delivery, recovery/standby
 |---|---|---|---|
 | `turn_bridge/mod.rs` (+ terminal_delivery.rs, headless_delivery.rs, status_panel.rs, single_message_footer.rs) | #3016 | send-ordered terminal, replace-with-outcome ×3 (cancel / prompt-too-long / normal), streaming rollover, headless enqueue+direct fallback | **yes** (Bridge, `terminal_delivery.rs:517/563`) |
 | `tmux_watcher.rs` | #3016 | ordered terminal fallback, replace-with-outcome, send-with-reference, streaming rollover, placeholder delete/orphan | **yes** (Watcher, `tmux_watcher.rs`) |
-| `session_relay_sink.rs` | #3036 | send-long-rollback (long), replace-with-outcome (short), send-with-reference (new) | **yes** (Sink, `session_relay_sink.rs:332/766`) |
+| `session_relay_sink.rs` | #3036 | send-long-rollback (long), replace-with-outcome (short), send-with-reference (new) | **yes** (Sink, `session_relay_sink.rs:330/766`) |
 | `standby_relay.rs` | — | send-long-rollback (long), replace-with-outcome (short), send (new) | no |
 | `recovery_engine.rs` | — | replace-long-raw (anchored), send-long-raw (TUI-direct), panel completion | no |
 | `placeholder_sweeper.rs` | — | edit (abandoned badge), delete (orphan panel) | no |
@@ -168,7 +168,7 @@ are retired; existing responsibilities may grow for fixes and clarification.
 ### Phase A — Gateway / surface unification (AC 1–5)
 - **A0 characterization** — pin all ~15 send/replace sites: ordering, edit-fail preserve vs delete (#2757 both arms), the five failure signals, streaming rollover. Tests go in **whole `#[cfg(test)] mod tests` blocks** (M5) → prod-LoC-neutral → ratchet green. Must pass before any cutover.
 - **A1 controller skeleton** — new `outbound/turn_output_controller.rs`: `deliver_turn_output` (commit+advance internal, I1) + `OutputPlan::from_length_decision` + `DeliveryOutcome`/`EditFailPlaceholderPolicy`. Wires `PlaceholderController.transition` + `outbound::deliver_outbound`. Blocking fake-gateway test for I1 (advance-before-post-send-await). No owner connected (pure add, no cap).
-- **A2 cut over `session_relay_sink` first** (review M6) — the lease-using surface (`session_relay_sink.rs:766`), behind a flag, to validate lease/outcome semantics end-to-end (not standby, which doesn't lease). Frozen #3036, so cutover shrinks it → baseline lowers → green.
+- **A2 cut over `session_relay_sink` first** (review M6) — the lease-using surface (`session_relay_sink.rs:764`), behind a flag, to validate lease/outcome semantics end-to-end (not standby, which doesn't lease). Frozen #3036, so cutover shrinks it → baseline lowers → green.
 - **A3 standby_relay** — transport-only validation (no lease); not frozen, lowest LoC risk.
 - **A4 watcher (#3016), A5 turn_bridge (#3038), A6a recovery_engine** — one PR per owner, verbatim `git mv` of the send body into the controller + a call site; each owner shrinks; `relay-e2e` per PR. `EditFailPlaceholderPolicy` injected explicitly per owner (no default) so watcher's conditional-delete never reaches sink/standby (#2757 fence).
 - **A6b `tui_prompt_relay` external-input tail** (review M7) — route external-input delivery (`tui_prompt_relay.rs:282`) through the controller. This is what actually makes #3088 mechanical; without it #3088 stays open.

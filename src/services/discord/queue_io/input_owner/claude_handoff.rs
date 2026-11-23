@@ -239,7 +239,7 @@ async fn target(
     context: &serde_json::Value,
     journal_key: &str,
 ) -> Target {
-    let key = crate::services::discord::router::message_handler::owner_start_session_key;
+    let key = shared.router_ports.owner_start_session_key;
     match key(shared, channel, context).await {
         None => Target::Unresolved,
         Some(key) if key == journal_key => Target::Same,
@@ -471,7 +471,7 @@ fn schedule(shared: Shared, channel: Channel, id: String, failures: u32) {
             Ok(Some(at)) if at > now_ms() => schedule(shared, channel, id, failures),
             Ok(Some(_)) => {
                 recover(shared.clone(), channel);
-                crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+                (shared.router_ports.owner_wake)(&shared, channel);
             }
             Err(_) => schedule(shared, channel, id, failures.saturating_add(1)),
             Ok(None) => (),

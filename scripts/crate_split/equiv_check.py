@@ -9,12 +9,17 @@ The first output line is the verdict, `EQUIV_OK class=<move|vis|C>` or
 `EQUIV_FAIL <item>[,<item>...]`, followed by a detail table and line evidence.
 
   a cargo     `cargo check --workspace --all-targets` at head; when the diff touches a
-              unix/windows cfg also `cargo check --lib --tests --target x86_64-pc-windows-gnu`
+              unix/windows cfg (on the line, or a changed line inside a multi-line platform
+              cfg, cfg_attr or an item one gates) also `cargo check --lib --tests --target x86_64-pc-windows-gnu`
               in target-win (EQUIV_WIN_TARGET_DIR), with mingw headers for bindgen.
-  b class     move: every changed line is moved (`git diff --color-moved=blocks`)
-              or a use/mod item, a path-only or visibility-only rewrite, a comment
-              or generated docs. vis: only visibility modifiers changed. C: anything
-              else; each C line is printed as evidence. Fails only with --require.
+  b class     move: every changed line is a whole item moved at item level
+              (`git diff --color-moved=blocks`; statements reordered inside a body are not),
+              a use/mod item that binds no existing name to another path, a path-only
+              rewrite whose changed paths name moved items, a comment or generated docs
+              (Cargo.lock included). vis: each changed line pair differs only in the
+              visibility of the item or field it declares. C: anything else, any Cargo.toml
+              edit included; string literals are compared whole. Each C line is printed as
+              evidence. Fails only with --require.
   c tests     the static list of test function names is the same before and after
               (moved tests are listed with their old and new file).
   d features  every `feature = "..."` in a file that received moved code is
@@ -39,22 +44,23 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import equiv_class  # noqa: E402
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11 falls back to a [features] key scan.
     tomllib = None
 
-GENERATED = ("ARCHITECTURE.md", "docs/generated/*")
-MANIFESTS = ("Cargo.toml", "*/Cargo.toml", "Cargo.lock")
+GENERATED = ("ARCHITECTURE.md", "docs/generated/*", "Cargo.lock", "*/Cargo.lock")
+# A manifest edit (default features, dependencies) changes what compiles: never move/vis (KR-C1 review P2-1).
+MANIFESTS = ("Cargo.toml", "*/Cargo.toml")
 WINDOWS_TARGET = "x86_64-pc-windows-gnu"
 MINGW_INCLUDE = "/opt/homebrew/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32/include"
 OLD_MOVED, NEW_MOVED = "\x1b[35m", "\x1b[36m"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-USE_START = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s")
-MOD_DECL = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+\w+\s*;")
-ATTR_LINE = re.compile(r"^\s*#\[.*\]\s*$")
-TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|::|\S")
+PLATFORM_WORD = re.compile(r"\b(?:unix|windows|target_os|target_family)\b")
 PLATFORM_CFG = re.compile(
     r"cfg!?\s*\(.*\b(?:unix|windows|target_os|target_family)\b|std::os::(?:unix|windows)"
 )
@@ -87,13 +93,6 @@ class Line:
     text: str
     moved: bool
     kind: str = ""
-
-
-@dataclass
-class Run:
-    path: str
-    lines: list = field(default_factory=list)
-    verdict: str = ""
 
 
 def git(repo: str, *args: str, check: bool = True) -> str:
@@ -180,119 +179,38 @@ def diff_lines(repo: str, base: str, head: str, paths) -> list:
     return result
 
 
-def use_mod_lines(lines: list) -> set:
-    """1-based numbers of lines inside use items, mod declarations and their attributes."""
-    marked, i = set(), 0
-    while i < len(lines):
-        start = i
-        while i < len(lines) and ATTR_LINE.match(lines[i]):
-            i += 1
-        if i < len(lines) and (USE_START.match(lines[i]) or MOD_DECL.match(lines[i])):
-            end = i
-            while end < len(lines) and ";" not in lines[end]:
-                end += 1
-            marked.update(range(start + 1, end + 2))
-            i = end + 1
-        else:
-            i = max(i, start + 1)
-    return marked
-
-
-def strip_visibility(tokens: list) -> list:
-    out, i = [], 0
-    while i < len(tokens):
-        if tokens[i] == "pub":
-            i += 1
-            if i < len(tokens) and tokens[i] == "(":
-                depth = 0
-                while i < len(tokens):
-                    depth += {"(": 1, ")": -1}.get(tokens[i], 0)
-                    i += 1
-                    if depth == 0:
-                        break
+def known_crates(tree: Tree, paths) -> set:
+    """Crate names a path may start with: std's, and every dependency and package of the nearest manifests."""
+    names = set(equiv_class.STD_CRATES)
+    for path in {nearest_manifest(tree, p) for p in paths} | {"Cargo.toml"}:
+        text = tree.text(path) if path else None
+        if not text:
             continue
-        out.append(tokens[i])
-        i += 1
-    return out
+        for table in ("dependencies", "dev-dependencies", "build-dependencies", "package", "workspace"):
+            data = manifest_table(text, table)
+            if table == "package":
+                names.add(str(data.get("name", "")).replace("-", "_"))
+            elif table == "workspace":
+                names.update(k.replace("-", "_") for k in data.get("dependencies", {}))
+            else:
+                names.update(k.replace("-", "_") for k in data)
+    return names - {""}
 
 
-def strip_paths(tokens: list) -> list:
-    """Collapses `a::b::c` to `c`, so only the named item has to stay the same."""
-    out = []
-    for tok in tokens:
-        if tok == "::":
-            if out and out[-1] != "::":
-                out.pop()
-            out.append("::")
-        elif out and out[-1] == "::":
-            out[-1] = tok
-        else:
-            out.append(tok)
-    return [tok for tok in out if tok != "::"]
-
-
-def tokens_of(lines: list) -> list:
-    return TOKEN.findall(" ".join(line.text for line in lines))
-
-
-def classify_runs(entries: list, base: Tree, head: Tree):
-    runs, current = [], None
-    marks = {}
-    for entry in entries:
-        if entry is None:
-            current = None
+def classify(repo, files, base: Tree, head: Tree) -> "equiv_class.Verdict":
+    """The allow-list class (equiv_class.py) of the Rust files, and C for any manifest or other file."""
+    rust = [p for _, p in files if p.endswith(".rs")]
+    modules = {(side, p): tuple(module_of(tree, p).split("::")) for side, tree in (("-", base), ("+", head))
+               for p in rust}
+    crates = known_crates(base, rust) | known_crates(head, rust)
+    verdict = equiv_class.classify({p: base.text(p) for p in rust}, {p: head.text(p) for p in rust}, modules, crates)
+    for status, path in files:
+        if path.endswith(".rs") or matches(path, GENERATED):
             continue
-        if current is None or current.path != entry.path:
-            current = Run(entry.path)
-            runs.append(current)
-        current.lines.append(entry)
-        tree = base if entry.side == "-" else head
-        stripped = entry.text.strip()
-        if entry.moved:
-            entry.kind = "moved"
-        elif matches(entry.path, GENERATED):
-            entry.kind = "generated"
-        elif matches(entry.path, MANIFESTS):
-            entry.kind = "manifest"
-        elif not entry.path.endswith(".rs"):
-            entry.kind = "other"
-        elif not stripped or stripped.startswith("//"):
-            entry.kind = "comment"
-        else:
-            key = (entry.side, entry.path)
-            if key not in marks:
-                marks[key] = use_mod_lines(tree.lines(entry.path))
-            entry.kind = "usemod" if entry.lineno in marks[key] else "code"
-    for run in runs:
-        rest = [line for line in run.lines if line.kind in ("usemod", "code", "other")]
-        removed = [line for line in rest if line.side == "-"]
-        added = [line for line in rest if line.side == "+"]
-        code_r = [line for line in removed if line.kind != "usemod"]
-        code_a = [line for line in added if line.kind != "usemod"]
-        if not rest:
-            run.verdict = "neutral"
-        elif any(line.kind == "other" for line in rest):
-            run.verdict = "C"
-        elif strip_visibility(tokens_of(removed)) == strip_visibility(tokens_of(added)):
-            run.verdict = "vis"
-        elif not code_r and not code_a:
-            run.verdict = "usemod"
-        elif strip_paths(strip_visibility(tokens_of(code_r))) == strip_paths(
-            strip_visibility(tokens_of(code_a))
-        ):
-            run.verdict = "path"
-        else:
-            run.verdict = "C"
-    return runs
-
-
-def overall_class(runs: list, entries: list) -> str:
-    verdicts = {run.verdict for run in runs}
-    if "C" in verdicts:
-        return "C"
-    if any(e is not None and e.moved for e in entries) or verdicts & {"usemod", "path"}:
-        return "move"
-    return "vis" if "vis" in verdicts else "move"
+        kind = "manifest" if matches(path, MANIFESTS) else "non-Rust file"
+        verdict.c(path, 0, f"{kind} changed ({status})")
+        verdict.klass = "C"
+    return verdict
 
 
 def test_names(tree: Tree, path: str) -> list:
@@ -398,16 +316,89 @@ def check_log_targets(repo, head_sha, entries, base: Tree, head: Tree, touched):
                 broken = any(not (dest + "::").startswith(source + "::") for dest in dests)
                 risky = broken or exact
                 refs.append((path, lineno, source, "risky" if risky else "covered", path in touched))
-    failing = [r for r in refs if r[3] == "risky" and not r[4]] if logs else []
+    # Touching the filter file proves nothing: a reference left on the old module is checked as is (P2-3).
+    failing = [r for r in refs if r[3] == "risky"] if logs else []
     return sources, dests, logs, refs, failing
 
 
 def check_macros(entries):
+    """Path-sensitive macro lines moved in; each must be matched by the same line moved out of the same file
+    (a swap between two files no longer passes on the file set alone, KR-C1 review P2-2)."""
     moved = [e for e in entries if e is not None and e.moved]
-    files = {(e.side, e.path) for e in moved}
-    same_file = {p for _, p in files} and all(("-", p) in files and ("+", p) in files for _, p in files)
+    origin = collections.Counter((e.path, e.text.strip()) for e in moved if e.side == "-")
     hits = [e for e in moved if e.side == "+" and PATH_MACRO.search(e.text)]
-    return ([] if same_file else hits), hits
+    failing = []
+    for e in hits:
+        key = (e.path, e.text.strip())
+        if origin[key]:
+            origin[key] -= 1
+        else:
+            failing.append(e)
+    return failing, hits
+
+
+def close_of(text: str, start: int):
+    """Index of the bracket closing text[start] (one of `([{`); strings are skipped."""
+    pairs, stack, i = {"(": ")", "[": "]", "{": "}"}, [], start
+    while i < len(text):
+        lit = re.match(r'b?r(#*)"[\s\S]*?"\1|b?"(?:\\.|[^"\\])*"', text[i:]) if text[i] in 'br"' else None
+        if lit and lit.end():
+            i += lit.end()
+            continue
+        if text[i] in pairs:
+            stack.append(pairs[text[i]])
+        elif stack and text[i] == stack[-1]:
+            stack.pop()
+            if not stack:
+                return i
+        i += 1
+    return None
+
+
+def platform_lines(text: str) -> set:
+    """1-based lines inside a platform cfg (`#[cfg(..)]`, `#[cfg_attr(..)]`, `cfg!(..)` naming unix, windows,
+    target_os or target_family), including the whole item an attribute gates (KR-C1 review P2-4)."""
+    out, line_at = set(), lambda pos: text.count("\n", 0, pos) + 1
+    for m in re.finditer(r"#(!?)\[\s*cfg(?:_attr)?\s*\(|\bcfg!\s*\(", text):
+        end = close_of(text, m.end() - 1)
+        if end is None or not PLATFORM_WORD.search(text[m.end():end]):
+            continue
+        if m.group(1) == "!":
+            return set(range(1, line_at(len(text)) + 1))
+        last = end
+        if m.group(0).startswith("#"):
+            j = (close_of(text, m.start() + 1) or end) + 1
+            while True:
+                j += len(text[j:]) - len(text[j:].lstrip())
+                if not text.startswith("#[", j):
+                    break
+                j = (close_of(text, j + 1) or j) + 1
+            depth, last = 0, len(text) - 1
+            for k in range(j, len(text)):
+                if text[k] in "([":
+                    depth += 1
+                elif text[k] in ")]":
+                    depth -= 1
+                elif depth == 0 and text[k] in ";{":
+                    last = k if text[k] == ";" else (close_of(text, k) or k)
+                    break
+        out.update(range(line_at(m.start()), line_at(last) + 1))
+    return out
+
+
+def windows_needed(lines: list, base: Tree, head: Tree) -> bool:
+    cache = {}
+    for e in lines:
+        if not e.path.endswith(".rs"):
+            continue
+        if PLATFORM_CFG.search(e.text):
+            return True
+        key = (e.side, e.path)
+        if key not in cache:
+            cache[key] = platform_lines((base if e.side == "-" else head).text(e.path) or "")
+        if e.lineno in cache[key]:
+            return True
+    return False
 
 
 def run_cargo(repo, head_sha, log_dir, targets):
@@ -457,8 +448,8 @@ def main(argv=None) -> int:
         print(f"EQUIV_FAIL git ({err})")
         return 2
     lines = [e for e in entries if e is not None]
-    runs = classify_runs(entries, base, head)
-    klass = overall_class(runs, entries)
+    verdict = classify(repo, files, base, head)
+    klass = verdict.klass
     removed, added, moved_tests, test_count = check_tests(files, base, head)
     dest_files = {e.path for e in lines if e.moved and e.side == "+" and e.path.endswith(".rs")}
     dest_files |= {p for s, p in files if s == "A" and p.endswith(".rs")}
@@ -467,9 +458,7 @@ def main(argv=None) -> int:
     sources, dests, logs, refs, risky_refs = check_log_targets(repo, head_sha, entries, base, head, touched)
     macro_fail, macro_hits = check_macros(entries)
 
-    windows = args.windows == "always" or (
-        args.windows == "auto" and any(e.path.endswith(".rs") and PLATFORM_CFG.search(e.text) for e in lines)
-    )
+    windows = args.windows == "always" or (args.windows == "auto" and windows_needed(lines, base, head))
     rows, failed = [], []
     if args.skip_cargo:
         rows.append(("a cargo", "NOT_RUN", f"--skip-cargo (windows target {'needed' if windows else 'not needed'})"))
@@ -485,12 +474,10 @@ def main(argv=None) -> int:
         rows.append(("a cargo", "PASS" if ok else "FAIL", detail))
         if not ok:
             failed.append("a")
-    counts = collections.Counter(e.kind for e in lines)
-    verdicts = collections.Counter(run.verdict for run in runs)
     class_ok = args.require is None or klass == args.require
     rows.append(("b class", klass if class_ok else f"FAIL ({klass}, required {args.require})",
-                 " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + " | runs "
-                 + " ".join(f"{k}={v}" for k, v in sorted(verdicts.items()))))
+                 f"units moved={verdict.moved} inplace={verdict.inplace} vis={verdict.vis} paths={verdict.paths} "
+                 f"uses={verdict.uses} moddecl={verdict.moddecls} | C={len(verdict.reasons)}"))
     if not class_ok:
         failed.append("b")
     tests_ok = not removed and (args.allow_added_tests or not added)
@@ -517,11 +504,10 @@ def main(argv=None) -> int:
     print("| check | result | detail |\n|---|---|---|")
     for check, result, detail in rows:
         print(f"| {check} | {result} | {detail} |")
-    print("\n## b. non-moved line evidence (run verdict, side, file:line, text)")
-    for run in runs:
-        for line in run.lines:
-            if line.kind in ("code", "usemod", "other"):
-                print(f"{run.verdict:7s} {line.side} {line.path}:{line.lineno} [{line.kind}] {line.text.strip()}")
+    if verdict.reasons:
+        print("\n## b. why not move/vis (file:line, reason)")
+        for path, lineno, why in verdict.reasons:
+            print(f"C       {path}:{lineno} {why}")
     for title, items in (
         ("c. moved tests (name, from, to)", moved_tests),
         ("d. missing features (file, feature, manifest)", missing),

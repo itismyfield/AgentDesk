@@ -1,5 +1,5 @@
-//! The inflight row as runtime replay, follow-up retries and Codex absence checks read it,
-//! without naming this store.
+//! The inflight row as runtime replay, follow-up retries, Codex absence checks and engine
+//! probes reach it, without naming this store.
 
 use super::{InflightTurnIdentity, InflightTurnState};
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -11,6 +11,14 @@ use crate::services::provider::ProviderKind;
 /// Installs the read-only Codex row load before any command can reach an absence check.
 pub(crate) fn install_codex_absence_reader() {
     row::install(read_codex_row);
+}
+
+/// Installs the inflight-store probes engine code reaches without naming this store.
+pub(crate) fn install_engine_probes() {
+    crate::services::dispatches::thread_archive_defer::install(
+        crate::services::discord::has_fresh_inflight_for_channel,
+    );
+    crate::engine::ops::install_policy_op_remove(crate::services::discord::policy_op::remove_row);
 }
 
 fn read_codex_row(channel: u64) -> Result<Option<CodexRow>, String> {

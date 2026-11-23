@@ -1,6 +1,11 @@
-use super::regression_tests::regression_attached;
-use super::*;
+use crate::services::claude::herdr_turn::Attached;
+use crate::services::claude::herdr_turn::first_input::regression_tests::regression_attached;
+use crate::services::claude::herdr_turn::first_input::*;
 use crate::services::claude::herdr_turn::hold_record::{self, Held, SendOutcome, UnsentProof};
+use crate::services::claude_tui::guarded_outcome;
+use crate::services::claude_tui::host_input::InputRun;
+use std::path::Path;
+use std::sync::Arc;
 
 /// A8, A9: a hold left before its first key keeps the owner's front Held and watched, then
 /// releases unconfirmed after its notice row; the next input submits once.

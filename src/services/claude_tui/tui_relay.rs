@@ -632,7 +632,7 @@ fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
 /// `/tui/send` without touching tmux. Kept next to the trait it implements; the
 /// auth-boundary assertions live under `crate::server` because middleware
 /// composition is a server-layer responsibility (#3311).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct FakeSendBackend;
 
 #[cfg(test)]

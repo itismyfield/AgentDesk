@@ -1,5 +1,10 @@
 //! What the persisted inflight records say about one tmux session's episode.
 
+use crate::services::provider::ProviderKind;
+
+/// Reads which persisted inflight record claims `tmux_name`; the owner runtime supplies it.
+pub(crate) type InflightEpisodeProbe = fn(&ProviderKind, &str) -> InflightEpisodeLookup;
+
 /// Stable identity of one persisted inflight episode.
 ///
 /// Progress fields are deliberately excluded. `current_msg_id`, `last_offset`,

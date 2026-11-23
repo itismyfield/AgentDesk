@@ -48,7 +48,7 @@ Relevant types (`inflight.rs`):
   `SessionBoundRelay` · `Unknown`.
 - `InflightTurnState.rebind_origin: bool`.
 
-Sink ownership gate (`session_relay_sink.rs:40`):
+Sink ownership gate (`session_relay_sink.rs:43`):
 
 ```rust
 fn session_bound_discord_relay_can_own_terminal_delivery(inflight, tmux) -> bool {
@@ -177,7 +177,7 @@ causes were confirmed by reading the tree and the live runtime sessions dir.
   the Claude project rollout transcript via the relay-offset file and the
   watcher, **not** the cluster jsonl sink.
 - Consequence A (cosmetic): `run_idle_jsonl_relay_loop` `fs::metadata` on the
-  absent `.jsonl` fails and `continue`s (session_relay_sink.rs:398). So
+  absent `.jsonl` fails and `continue`s (session_relay_sink.rs:396). So
   `relay_frames_received = 0` for adk-cc is *expected and harmless* — that path
   was never the claude-TUI relay owner. The cluster monitor showing the session
   "active/recovering with 0 frames" is a **reporting artifact**, not the stall.

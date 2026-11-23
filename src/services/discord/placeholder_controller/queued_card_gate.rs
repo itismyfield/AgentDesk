@@ -22,8 +22,18 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 use crate::services::turn_orchestrator::{Intervention, MailboxUnreachable};
 
 use super::super::http::{delete_channel_message, edit_channel_message};
-use super::super::runtime_bootstrap::StalePlaceholderDeleter;
 use super::super::{QueueExitVisibleCard, SharedData};
+
+/// Deletes one stale queued placeholder card; boot cleanup and deferred retries plug in here.
+pub(in crate::services::discord) trait StalePlaceholderDeleter:
+    Send + Sync
+{
+    fn delete<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        placeholder_msg_id: MessageId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+}
 
 /// Outcome of [`release_or_rekey`] / [`release_or_rekey_locked`].
 pub(in crate::services::discord) enum QueuedCardDisposition {

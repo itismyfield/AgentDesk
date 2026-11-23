@@ -418,6 +418,7 @@ pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
                     working_dir: ".",
                     system_prompt: None,
                     model: None,
+                    effort: None,
                     allowed_tools: &[],
                     fast_mode: None,
                     goals: None,

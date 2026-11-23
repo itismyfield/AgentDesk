@@ -39,7 +39,7 @@ r2b 모델 SHA256 `511bbb35abf2af5f943d79189cd56403a052d84e8dccc8d4ab836e1452049
 | `src/cli/direct.rs:363-374`, `discord/agent_handoff.rs:340-370` | 기존 send-to-agent의 실제 Announce 게시 선례. 새 direct turn-start를 호출하지 않음 |
 | `src/server/outbox_worker.rs:75-113`, `outbox_actionable_delivery.rs:117-133`, `discord/outbound/send_gate.rs:404-433` | LoadOutbox→PostOutbox. 기존 delivery IDs와 writer/source/bot/target 권한을 유지 |
 | `discord/router/intake_gate.rs:325-363,764-813`, `intake_gate/gate.rs:84-120`, `dispatch_policy.rs:226-261` | ExistingBotIntake/AllowedBot. 인증된 실제 봇 identity·메시지 ID를 사용하고 기존 gate의 실제 봇 identity와 허용 조건을 그대로 사용. 전역 author_is_bot 변경은 H 범위 밖 |
-| `discord/router/intake_dispatch.rs:784-824`, `queue_io/input_owner/ingress.rs:395-473`, `provider_dispatch/owner_input.rs:831-920` | ExistingOwnerStarts. 기존 admission/claim/Busy 경로의 계속 가능한 effect를 추상화. 실제 host/current-source/key-time 증거는 별도 수용 시험 |
+| `discord/router/intake_dispatch.rs:784-824`, `queue_io/input_owner/ingress.rs:395-468`, `provider_dispatch/owner_input.rs:831-920` | ExistingOwnerStarts. 기존 admission/claim/Busy 경로의 계속 가능한 effect를 추상화. 실제 host/current-source/key-time 증거는 별도 수용 시험 |
 | `src/domain/outbound/result.rs:103-105`, `src/services/discord/outbound/manual_delivery.rs:650-654`, `src/services/discord/outbound/manual_delivery/headless_nonce.rs:71-97` | 현재 generic Unknown→Failed/retry gap. BlindUnknownRepost mutant가 이를 H의 금지 계약으로 드러냄 |
 | `message_outbox.rs:292-294,766-770` | Unknown은 failed/cancelled로 바꾸면 key가 해제됨. held+NULLexpiry로 key/row를 남기는 H 계약을 row=held와 completion_unconfirmed로 추상화. GC 실제 실행은 모델 밖 |
 
@@ -148,7 +148,7 @@ H1 의 `PostOutbox` 한 걸음을 같은 outbox row 의 전송 단계로 나눴�
 
 | 진입점 | 좌표 | 사건 row 에 대한 동작 |
 |---|---|---|
-| outbox drain | `src/server/mod.rs:2238` `is_incident` 분기 → `server/outbox_actionable_delivery/routine_incident.rs:50` `deliver` | circuit fence 뒤 posting CAS, post, ACK/unknown/NotSent 정산. 일반 settle(`mark_message_outbox_sent_pg`·retry) 을 타지 않는다 |
+| outbox drain | `src/server/mod.rs:2240` `is_incident` 분기 → `server/outbox_actionable_delivery/routine_incident.rs:50` `deliver` | circuit fence 뒤 posting CAS, post, ACK/unknown/NotSent 정산. 일반 settle(`mark_message_outbox_sent_pg`·retry) 을 타지 않는다 |
 | Discord nonce | `outbound/manual_delivery/routine_incident_nonce.rs`, `headless_nonce.rs:15`, `resolved.rs:161`, `manual_delivery.rs:613` `with_create_nonce` | trusted outbox + `routine-runtime` + incident correlation 일 때만 row id 로 고정 nonce. headless_turn 제한은 그대로 |
 | staging activation·activate_or_confirm·cancel | `src/services/message_outbox.rs:707,723,740` | 0192 트리거가 transport_state 가 있는 row 의 status 변경·삭제를 건너뛴다(rows_affected 0) |
 | circuit activation·revoke | `src/services/message_outbox_circuit_authority.rs:416,533,573` | circuit 좌표가 NULL 이라 대상이 아니고, 트리거가 한 번 더 막는다 |

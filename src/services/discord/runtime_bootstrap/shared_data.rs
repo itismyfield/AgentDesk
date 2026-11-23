@@ -267,6 +267,7 @@ pub(super) fn run_bot_build_shared_data(
             crate::services::discord::turn_view_reconciler::TurnViewReconciler::default(),
         readopted_mailbox_ledger:
             crate::services::discord::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
+        router_ports: crate::services::discord::router::ROUTER_PORTS,
     })
 }
 

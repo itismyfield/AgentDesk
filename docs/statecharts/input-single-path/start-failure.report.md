@@ -35,11 +35,11 @@ Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exi
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
 Historical RED replay at the historical SHA above:
-ingress admits A/B (`input_owner/ingress.rs:400–468`); wake grants A (`drive.rs:96–123,168–180`,
+ingress admits A/B (`input_owner/ingress.rs:400–463`); wake grants A (`drive.rs:96–123,168–180`,
 `v2.rs:300–313`); wrapper fails before reserve (`owner_input.rs:510–571,702–735`). The bound refusal
-is now `provider_dispatch.rs:724–749`, through `claude/herdr_turn.rs:288–287` before its hook.
+is now `provider_dispatch.rs:725–758`, through `claude/herdr_turn.rs:288–287` before its hook.
 Generic Error renders the placeholder (`content_arms.rs:437` onward). QueueEligible completion
-(`queue_io/backstop.rs:689–723`, `queue_dispatch/kickoff.rs:125`) opens a fresh pass with
+(`queue_io/backstop.rs:689–723`, `queue_dispatch/kickoff.rs:126`) opens a fresh pass with
 `stalled=false`, regranting A for a second and third start. NotSent-only suppression
 (`content_arms.rs:418–436`, `terminal_outcome_delivery.rs:247–255`) deletes the placeholder and
 emits no completion; quiet recovery supplies no wake. Existing holds are uncounted.

@@ -13,6 +13,9 @@ mod response_chunks;
 mod retired_metadata;
 mod store;
 mod terminal_identity;
+// Background-child completions from transcript task notifications, re-imported by `tui_prompt_relay`.
+#[cfg(unix)]
+pub(in crate::services::discord) mod background_child_completion;
 
 #[cfg(test)]
 mod footer_retirement_tests;

@@ -1,5 +1,5 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
-mod herdr;
+pub(crate) mod herdr;
 mod tmux;
 pub(crate) use herdr::observe as observe_herdr;
 pub(crate) use tmux::{cause, loads};
@@ -139,7 +139,7 @@ pub(crate) enum BusyState {
 /// The immutable target read for this front and the source its later key must still name.
 #[derive(Clone)]
 pub(crate) struct BusyObservation {
-    context: Option<Arc<herdr::Context>>,
+    pub(crate) context: Option<Arc<herdr::Context>>,
     state: BusyState,
     source: Option<herdr::Source>,
 }
@@ -228,7 +228,7 @@ impl BusyObservation {
         }
     }
 
-    fn admits(&self, request: &Request<'_>) -> bool {
+    pub(crate) fn admits(&self, request: &Request<'_>) -> bool {
         let Some(expected) = self
             .source
             .as_ref()

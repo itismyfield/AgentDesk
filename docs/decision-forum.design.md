@@ -193,7 +193,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 |---|---|---|
 | E01 | 기존 CLI src/cli/args.rs:408, src/cli/run.rs:367, src/cli/direct.rs:800 | PostBegin 전 포럼 생성. 현 Text 전용·동시성 잠금 없음 |
 | E02 | 기존 src/cli/discord_thread_create.rs:308 | PostFinish; forum starter payload 재사용 후보. CLI는 announce HTTP이므로 결정 게시에 직접 호출 금지 |
-| E03 | 기존 API src/server/routes/agents.rs:659 | 단일 workflow 내부 idle start. 원래 session ID는 조건 아님, 현재 route와 실행권 확인 |
+| E03 | 기존 API src/server/routes/agents.rs:660 | 단일 workflow 내부 idle start. 원래 session ID는 조건 아님, 현재 route와 실행권 확인 |
 | E04 | 기존 API src/server/routes/agents_turn_deliver.rs:126 | Submit; 사람 입력의 idle/busy 처리 공통 경로 |
 | E05 | 기존 src/server/routes/agents_turn_target.rs:15 | 논리 agent/channel 및 thread 부모 권한. 선택 저장 전에 live session을 검사하지 않음 |
 | E06 | 기존 src/server/routes/auth.rs:260 | 생성·조회 API 호출자 인증. HumanInputCaller를 새 API에도 적용 |
@@ -231,12 +231,12 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E38 | 기존 src/services/tui_input/target_epoch.rs:51, src/services/turn_host.rs:182 | 현재 물리 실행기 fence만 유지. 요청 시점 session fence 제거. Herdr start는 #8125 |
 | E39 | 기존 src/services/discord/router/message_handler/intake_turn/adk_thread.rs:82 | thread의 현재 부모/category·정확한 thread 세션 시작은 #8125 계약 소비 |
 | E40 | 기존 src/config.rs:195, src/db/postgres.rs:25 | 새 설정 타입 연결·migration 부팅. 운영 설정 파일을 읽거나 바꾸지 않음 |
-| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:115, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
+| E41 | 기존 src/services/discord/queue_dispatch/kickoff.rs:116, :272, :280 | DrainCurrent(non-owner); 실패 뒤 무조건 restore_dequeued_head하지 않도록 decision 결과 분기 |
 | E42 | 기존 src/services/discord/router/intake_dispatch/queued.rs:85, :291 | 원본 origin으로 PG 선택/논리 route 복원. queued_submission의 metadata 소실을 source=queued로 우회하지 않음 |
 | E43 | 기존 src/services/discord/router/intake_dispatch/queued.rs:337, :46; src/services/discord/router/intake_dispatch/queued/race_loss.rs:17 | finish/restore/race loss 경로. 정상 busy만 원본 복귀, 확정 실패는 Finalize |
 | E44 | 기존 src/services/discord/queue_io/queued_head_inject.rs:122 | 현재 source=queued/metadata=None. decision origin 감지 후 검증 context 복원과 closed 검사 |
-| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:378, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
-| E46 | 기존 src/server/routes/agents.rs:1077, :1120 | handoff HTTP source 전달. decision source 명시 거절 |
+| E45 | 기존 src/services/discord/queue_dispatch/kickoff.rs:380, src/services/discord/runtime_bootstrap/queued_recovery.rs:70 | 재시작 non-owner drain 진입. failed 원본 제외, 정상 wait는 같은 ticket으로 현재 세션 해석 |
+| E46 | 기존 src/server/routes/agents.rs:1078, :1120 | handoff HTTP source 전달. decision source 명시 거절 |
 | E47 | 기존 src/services/discord/agent_handoff.rs:529, :564, src/services/discord/health/headless_turn.rs:100 | handoff 내부 source ingress→공통 headless. HTTP 우회 호출도 앞에서 decision 거절; HandoffDecision 대조 |
 | E48 | 기존 src/services/discord/router/thread_binding.rs:80, :89, :95; src/services/discord/http.rs:306 | 기존 helper는 locked 거부/unarchive만, edit helper는 message PATCH만. 새 transport가 Unlock→Unarchive→Render 수행 |
 | N01 | 신규 src/server/routes/decisions.rs:NEW ask/get | PostBegin/GET/입력별 상태. ask의 requester capability hash를 저장, GET에는 raw cap 없음 |
@@ -281,7 +281,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | N32 | 신규 src/db/decisions/followups.rs:NEW begin_once/settle | reply/close idempotency·may-have-posted·동일 message 재확인, 새 POST 재시도 큐 없음 |
 | N33 | 신규 src/services/discord/decisions/followup.rs:NEW post/restore_lifecycle | 닫힌 글 reply도 논리 gate 유지, 임시 editable 뒤 기존 archived/locked flags 복원 |
 | N34 | 확장 src/services/discord/decisions/scan.rs:NEW boot_scan, src/services/discord/decisions/worker.rs:NEW recover_event | 복구 scan과 입력 attempt 재시작 분리. 닫힌 thread 최종 scan은 ignored_closed만 기록 |
-| E57 | 기존 src/server/routes/agents_turn_deliver.rs:136, :226; src/server/routes/agents.rs:659 | 일반 text trim 전 검증된 decision raw 경로. OpinionRawPreserved의 API 경계 |
+| E57 | 기존 src/server/routes/agents_turn_deliver.rs:136, :226; src/server/routes/agents.rs:660 | 일반 text trim 전 검증된 decision raw 경로. OpinionRawPreserved의 API 경계 |
 | E58 | 기존 src/services/discord/router/message_handler/headless_turn.rs:54, :711 | prompt.trim 및 sanitize_user_input 대조. 승인된 opinion만 raw body 유지 child로 호출 교체 |
 | E59 | 기존 src/services/discord/router/message_handler/intake_turn.rs:762 | non-owner/일반 drain prompt sanitizer. PG 승인 event 복원 후 같은 raw 정책 |
 | E60 | 기존 src/services/tui_input/human_frame.rs:97, :99, :109; src/services/discord/router/response_format.rs:161 | idle/CRLF 정규화·plain_inject·author wrapper 경계. 일반 형식 유지, 승인 의견 원문 정책만 분리 |

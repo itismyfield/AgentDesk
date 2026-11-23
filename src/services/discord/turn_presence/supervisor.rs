@@ -873,10 +873,7 @@ impl Effects for LiveEffects {
     fn wake_owner(&self, channel: u64) {
         tracing::info!(channel, "[turn_presence] owner wake channel={channel}");
         #[cfg(unix)]
-        crate::services::discord::router::message_handler::owner_wake(
-            &self.shared,
-            ChannelId::new(channel),
-        );
+        (self.shared.router_ports.owner_wake)(&self.shared, ChannelId::new(channel));
         #[cfg(not(unix))]
         self.kickoff(channel);
     }
@@ -888,7 +885,7 @@ impl Effects for LiveEffects {
     }
 
     async fn legacy_gate_blocked(&self, channel: u64) -> bool {
-        let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+        let blocked = self.shared.router_ports.promote_readiness_blocked;
         blocked(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 

@@ -32,13 +32,15 @@ impl TurnLifecycleStopResult {
 }
 
 pub(super) fn native_preserved(
-    runtime: crate::services::discord::health::RuntimeTurnStopResult,
+    lifecycle_path: &'static str,
+    queue_depth: usize,
+    mailbox_foreground_free: bool,
     observed: Option<String>,
 ) -> TurnLifecycleStopResult {
     TurnLifecycleStopResult {
-        lifecycle_path: runtime.lifecycle_path,
-        queue_depth: Some(runtime.queue_depth),
-        mailbox_foreground_free: Some(runtime.mailbox_foreground_free),
+        lifecycle_path,
+        queue_depth: Some(queue_depth),
+        mailbox_foreground_free: Some(mailbox_foreground_free),
         ..kept_by_host_guard(observed)
     }
 }

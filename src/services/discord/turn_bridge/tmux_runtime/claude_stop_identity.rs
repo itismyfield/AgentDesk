@@ -502,39 +502,49 @@ fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (created_ns, 0)
 }
 
+/// The latest prompt row's turn: the last 256 KiB first, then the whole file when that tail holds
+/// none, as a Code Mode turn's context can push its prompt out of it.
 fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentity> {
-    use std::hash::{Hash, Hasher};
-
     const MAX_TAIL_BYTES: u64 = 256 * 1024;
+    match scan_user_turn(path, MAX_TAIL_BYTES)? {
+        (None, false) => scan_user_turn(path, u64::MAX)?.0,
+        (latest, _) => latest,
+    }
+}
+
+/// The last prompt row within the file's last `window` bytes, and whether that read the whole
+/// file; `None` when the file could not be read.
+fn scan_user_turn(path: &Path, window: u64) -> Option<(Option<ClaudeStopTurnIdentity>, bool)> {
+    use std::hash::{Hash, Hasher};
 
     let mut file = std::fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    let len = metadata.len();
     let file_identity = transcript_file_identity(&metadata);
-    let start = len.saturating_sub(MAX_TAIL_BYTES);
+    let start = metadata.len().saturating_sub(window);
     file.seek(std::io::SeekFrom::Start(start)).ok()?;
     let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut offset = start;
     if start > 0 {
         // The seek can land inside a multi-byte character, so the cut row is skipped as bytes.
-        let mut cut = Vec::new();
-        offset = offset.saturating_add(reader.read_until(b'\n', &mut cut).ok()? as u64);
+        offset = offset.saturating_add(reader.read_until(b'\n', &mut line).ok()? as u64);
     }
 
     let mut latest = None;
     loop {
         line.clear();
         let line_start = offset;
-        let bytes_read = reader.read_line(&mut line).ok()?;
-        if bytes_read == 0 {
-            return latest;
-        }
+        let bytes_read = reader.read_until(b'\n', &mut line).ok()?;
         offset = offset.saturating_add(bytes_read as u64);
-        if !line.ends_with('\n') {
-            return latest;
+        // A row still being written ends the read, even one cut inside a character.
+        if bytes_read == 0 || !line.ends_with(b"\n") {
+            return Some((latest, start == 0));
         }
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        // Only a row naming `user` can be a prompt, so a long turn's other rows go unparsed.
+        if !line.windows(6).any(|word| word == b"\"user\"") {
+            continue;
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&line) else {
             continue;
         };
         let Some((_prompt, user_entry_id)) =
@@ -545,7 +555,7 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
             continue;
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        line.as_bytes().hash(&mut hasher);
+        line.hash(&mut hasher);
         latest = Some(ClaudeStopTurnIdentity {
             output_path: path.display().to_string(),
             file_identity,

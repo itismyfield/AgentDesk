@@ -42,6 +42,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::stale_sweep_port;
 
 const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
@@ -334,7 +335,8 @@ pub(crate) async fn run(
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
         &cluster_instance_id,
-        health_registry.as_deref(),
+        stale_sweep_port(health_registry.as_deref()),
+        crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
     )
     .await?;
     drop(boot_reconcile_engine);
@@ -526,8 +528,9 @@ async fn policy_tick_loop(
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
                 match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
                     pool,
-                    health_registry.as_deref(),
+                    stale_sweep_port(health_registry.as_deref()),
                     crate::services::discord::relay_recovery::AxisBSite::PolicyTickStaleSweep,
+                    crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
                 )
                 .await
                 {

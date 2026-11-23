@@ -643,6 +643,7 @@ mod herdr {
                 system_prompt: turn.system_prompt,
                 allowed_tools: turn.allowed_tools,
                 model: turn.model,
+                effort: turn.effort,
                 fast_mode: turn.native_fast_mode,
                 goals: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
@@ -733,6 +734,14 @@ mod herdr {
             target: &HerdrTarget,
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
+        }
+
+        fn effort_resume(
+            &self,
+        ) -> Option<crate::services::codex::herdr_turn::restart_intent::EffortResume> {
+            let owed = crate::services::discord::commands::effort_restart::herdr_resume;
+            let channel = poise::serenity_prelude::ChannelId::new(self.channel_id);
+            Handle::current().block_on(owed(self.shared?, channel))
         }
 
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {

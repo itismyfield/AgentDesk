@@ -20,6 +20,7 @@ use crate::services::provider::ProviderKind;
 //   * `headless_turn` — headless agent-turn reserve/start API
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
+mod consumer_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
@@ -157,18 +158,18 @@ pub(crate) use turn_deliver::{
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.
+#[cfg(all(test, unix))]
+pub(crate) use recovery::InflightDisposition;
 #[cfg(test)]
 pub(crate) use recovery::STALL_WATCHDOG_INTERVAL_SECS;
 #[cfg(all(test, unix))]
 pub(crate) use recovery::StaleSweepWarrantFixture;
+#[cfg(test)]
+pub(crate) use recovery::TOKEN_SUPERSEDED_PATH;
 #[allow(unused_imports)]
 pub(crate) use recovery::self_watchdog;
 #[cfg(test)]
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
-pub(crate) use recovery::{
-    FINISH_UNOBSERVED_PATH, InflightDisposition, TOKEN_SUPERSEDED_PATH,
-    judge_provider_channel_stop, stop_judged_provider_channel,
-};
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
@@ -186,6 +187,7 @@ pub(crate) use recovery::{
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown, stop_channel_runtime,
 };
+pub(crate) use recovery::{judge_provider_channel_stop, stop_judged_provider_channel};
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
 pub use runtime_resolve::resolve_bot_http;

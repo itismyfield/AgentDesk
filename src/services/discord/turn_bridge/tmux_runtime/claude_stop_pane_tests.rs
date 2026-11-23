@@ -406,3 +406,71 @@ fn claude_stop_identity_reads_a_tail_cut_inside_a_character() {
         assert!(identity.is_some(), "pad={pad}");
     }
 }
+
+/// A Code Mode turn as Claude Code 2.1.328 writes it: the prompt, the turn's context
+/// attachments, a `REPL` call that returns at once and the progress of the tool it started.
+fn code_mode_turn(context_bytes: usize) -> String {
+    use serde_json::json;
+    let prompt = json!({"type":"user","uuid":"turn-b","sessionId":"s1","message":{"role":"user","content":"[User: tester (ID: 1)] Run a 90s foreground Bash."}});
+    let context = json!({"type":"attachment","sessionId":"s1","attachment":{"type":"deferred_tools_delta","addedLines":["x".repeat(32 * 1024)]}});
+    let call = json!({"type":"assistant","sessionId":"s1","message":{"content":[{"type":"tool_use","id":"t1","name":"REPL","input":{"code":"await Bash({command: 'sleep 90'})"}}]}});
+    let returned = json!({"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"started"}]}});
+    let mut rows = vec![prompt];
+    rows.extend(std::iter::repeat_n(
+        context,
+        context_bytes.div_ceil(32 * 1024),
+    ));
+    rows.extend([call, returned]);
+    rows.extend((1..=5).map(|s| json!({"type":"progress","sessionId":"s1","data":{"type":"bash_progress","elapsedTimeSeconds":s}})));
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+// A Code Mode turn whose context pushed its prompt out of the last 256 KiB, and one whose
+// reply row is half written inside a character, still yield that prompt's turn.
+#[test]
+fn claude_stop_identity_reads_a_code_mode_turn_running_or_generating() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let head = serde_json::json!({"type":"user","uuid":"turn-a","message":{"role":"user","content":"earlier"}});
+    let running = format!("{head}\n{}", code_mode_turn(300 * 1024));
+    let mut generating = format!("{head}\n{}", code_mode_turn(0)).into_bytes();
+    let reply =
+        r#"{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"작업"#;
+    generating.extend_from_slice(&reply.as_bytes()[..reply.len() - 1]);
+    let mut observed = Vec::new();
+    for (name, body) in [
+        ("tool running", running.into_bytes()),
+        ("generating", generating),
+    ] {
+        std::fs::write(&path, &body).unwrap();
+        let identity = ClaudeStopTurnIdentity::capture(path.to_str().unwrap());
+        let current = identity
+            .as_ref()
+            .is_some_and(ClaudeStopTurnIdentity::still_current);
+        let named = identity.is_some_and(|turn| format!("{turn:?}").contains(r#"Some("turn-b")"#));
+        observed.push((name, named, current));
+    }
+    assert_eq!(
+        observed,
+        [("tool running", true, true), ("generating", true, true)]
+    );
+}
+
+// A transcript with no prompt row anywhere, or no file, still leaves the turn unread.
+#[test]
+fn claude_stop_identity_without_a_prompt_row_stays_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let turn = code_mode_turn(300 * 1024);
+    let (_, rest) = turn.split_once('\n').unwrap();
+    std::fs::write(&path, rest).unwrap();
+    assert_eq!(
+        ClaudeStopTurnIdentity::capture(path.to_str().unwrap()),
+        None
+    );
+    let missing = dir.path().join("missing.jsonl");
+    assert_eq!(
+        ClaudeStopTurnIdentity::capture(missing.to_str().unwrap()),
+        None
+    );
+}

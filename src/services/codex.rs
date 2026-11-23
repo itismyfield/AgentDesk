@@ -1,7 +1,7 @@
 mod command_streaming;
 mod effort;
 use crate::services::process::reaping::CommandReapExt;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
 pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
@@ -26,7 +26,7 @@ use followup_reader::send_followup_to_tmux;
 mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
-mod tui_session_launch;
+pub(crate) mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
@@ -239,13 +239,13 @@ pub fn resolve_codex_path() -> Option<String> {
     crate::services::platform::resolve_provider_binary("codex").resolved_path
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
 pub(crate) use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
 
-fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+pub(crate) fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
     log_codex_binary_probe(&probe);
     probe.resolution
@@ -1246,11 +1246,11 @@ fn cleanup_existing_codex_tui_session(
 
 /// Paths and timing produced while preparing a Codex Direct TUI launch script.
 #[cfg(unix)]
-struct CodexTuiLaunchScript {
+pub(crate) struct CodexTuiLaunchScript {
     fence: crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
-    prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
-    script_path: String,
-    owner_path: String,
+    pub(crate) prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
+    pub(crate) script_path: String,
+    pub(crate) owner_path: String,
     rollout_modified_since: std::time::SystemTime,
     /// The Discord handoff reserved before launch, held until the tail returns.
     handoff: crate::services::tui_prompt_dedupe::HandoffGuard,

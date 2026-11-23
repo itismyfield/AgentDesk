@@ -259,7 +259,8 @@ fn row_item(
             Item("row", source, bytes, None, Some("the row does not parse")),
         );
     };
-    let owner = crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+    let owner =
+        crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
     let tui_direct =
         row.request_owner_user_id == owner && row.turn_source == TurnSource::ExternalInput;
     let segment = tui_direct.then(|| {

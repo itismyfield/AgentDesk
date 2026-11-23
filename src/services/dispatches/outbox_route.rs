@@ -686,7 +686,10 @@ async fn should_defer_done_card_thread_archive(
     thread_id: &str,
     _dispatch_id: &str,
 ) -> Result<bool, String> {
-    crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await
+    crate::services::dispatches::thread_archive_defer::should_defer_thread_archive_pg(
+        pg_pool, thread_id,
+    )
+    .await
 }
 
 async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> Result<(), String> {
@@ -701,7 +704,7 @@ async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> 
 
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID.
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
-    crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
+    crate::config::resolve_channel_alias(alias)
 }
 
 pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {

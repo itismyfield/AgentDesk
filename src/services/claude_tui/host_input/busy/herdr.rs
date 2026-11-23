@@ -168,25 +168,25 @@ fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget
 }
 
 #[derive(Clone)]
-pub(super) struct Source {
-    pub(super) id: SourceId,
-    pub(super) offset: u64,
+pub(crate) struct Source {
+    pub(crate) id: SourceId,
+    pub(crate) offset: u64,
 }
 
-pub(super) struct Context {
-    channel: u64,
-    pub(super) logical: String,
-    nonce: String,
-    output_ready: fn(u64) -> bool,
-    pub(super) target: HerdrTarget,
-    pub(super) writer: String,
-    pub(super) attempt_target: serde_json::Value,
+pub(crate) struct Context {
+    pub(crate) channel: u64,
+    pub(crate) logical: String,
+    pub(crate) nonce: String,
+    pub(crate) output_ready: fn(u64) -> bool,
+    pub(crate) target: HerdrTarget,
+    pub(crate) writer: String,
+    pub(crate) attempt_target: serde_json::Value,
 }
 
-pub(super) struct Reading {
-    pub(super) state: BusyState,
+pub(crate) struct Reading {
+    pub(crate) state: BusyState,
     pub(super) source: Option<Source>,
-    pub(super) idle_verified: bool,
+    pub(crate) idle_verified: bool,
 }
 
 impl Reading {
@@ -230,7 +230,7 @@ pub(crate) fn observe(
 }
 
 impl Context {
-    pub(super) fn read(&self) -> Reading {
+    pub(crate) fn read(&self) -> Reading {
         if !self.target.execution_alive() {
             return Reading::held();
         }
@@ -326,7 +326,7 @@ impl Context {
             .is_some()
     }
 
-    fn current_source(
+    pub(crate) fn current_source(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> Option<Source> {
@@ -371,7 +371,3 @@ impl Context {
         })
     }
 }
-
-#[cfg(test)]
-#[path = "herdr_tests.rs"]
-mod observation_tests;

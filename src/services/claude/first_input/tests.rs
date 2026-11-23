@@ -1,6 +1,9 @@
 #![cfg(unix)]
-use super::*;
+use crate::services::claude::CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS;
+use crate::services::claude::first_input::*;
+use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};
+use crate::services::provider::CancelToken;
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 
 #[test]

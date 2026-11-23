@@ -232,7 +232,7 @@ class Driver(Fixture):
                     row["marker_counts"][marker] = 1
                     kind = dict(enumerate(answers)).get(index)
                     lines(session[-1], asked(marker), *([] if kind == "silent" else [
-                        claude(f"{args.run_id}-{index}", output_tokens=500 if kind == "huge" else 2)]))
+                        claude(f"{args.run_id}-{index}", output_tokens=500 if kind == "huge" else 2, cache_read_input_tokens=500 if kind == "cached" else 3)]))
                     if stray and index == 0:
                         client.send("20", stray)
                 except turn_gate.Stop as stop:
@@ -320,7 +320,7 @@ class Driver(Fixture):
         # The harness wrote to its log; the driver's own stdout still carries the report to the runner.
         self.assertTrue(os.path.samestat(os.fstat(1), stdout) and "[e2e] harness output" in Path(report["evidence_paths"][1]).read_text())
         planned = next(row for row in plan.deploy_occurrences(plan.load()) if row["scenario"] == "E-50")
-        self.assertEqual((report["status"], report["native_turns"], report["tokens"], report["budget_checked"]), ("PASS", 3, 30, 3))
+        self.assertEqual((report["status"], report["native_turns"], report["tokens"], report["budget_checked"]), ("PASS", 3, 21, 3))
         self.assertEqual(report["usage"], {"native_turns": 3, "input_tokens": 3, "output_tokens": 6,
                                            "cache_read_tokens": 9, "cache_write_tokens": 12})
         self.assertEqual(report["actual_occurrence_key"], summary.occurrence_key({**planned, **CONTRACT}, "default"))
@@ -342,12 +342,14 @@ class Driver(Fixture):
         self.assertEqual((report["native_turns"], report["tokens"], report["usage"]["input_tokens"]), (None, None, None))
         report, prompts, _ = self.drive(answers=["huge"])
         self.assertEqual((len(prompts), report["status"], report["reason"]), (1, "UNEVALUABLE", "TURN_OVER_BUDGET"))
-        self.assertEqual((report["native_turns"], report["tokens"], report["budget_checked"]), (1, 508, 1))
+        self.assertEqual((report["native_turns"], report["tokens"], report["budget_checked"]), (1, 505, 1))
+        report, prompts, _ = self.drive(answers=["cached"] * 3)  # Cache reads stay in usage but are not charged.
+        self.assertEqual((len(prompts), report["status"], report["tokens"], report["usage"]["cache_read_tokens"]), (3, "PASS", 21, 1500))
         # The last turn is settled after the scenario passed; its unknown or over-limit usage still holds the result.
         report, prompts, _ = self.drive(answers=[None, None, "silent"])
         self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_USAGE_UNKNOWN", None))
         report, prompts, _ = self.drive(answers=[None, None, "huge"])
-        self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_OVER_BUDGET", 528))
+        self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_OVER_BUDGET", 519))
         report, prompts, _ = self.drive(budget_left={"turns": 3, "tokens": 300, "time_s": 10, "deadline": self.now - 1})
         self.assertEqual((prompts, report["reason"], report["native_turns"]), ([], "TURN_BUDGET_EXHAUSTED", 0))
         for stray in ("an unplanned prompt", "!stop"):

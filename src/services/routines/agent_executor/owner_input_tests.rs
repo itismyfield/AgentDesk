@@ -1,6 +1,7 @@
 use super::super::store::NewRoutine;
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::reserve_headless_agent_turn;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 

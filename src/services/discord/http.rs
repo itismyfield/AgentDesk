@@ -110,12 +110,7 @@ fn channel_message_builder(
 /// in the delivery-lease consolidation (it must not break directed pings).
 pub(crate) use crate::services::message_outbox::mentions::relay_allowed_mentions;
 
-pub(crate) fn relay_message_payload(content: &str) -> serde_json::Value {
-    serde_json::json!({
-        "content": content,
-        "allowed_mentions": relay_allowed_mentions(),
-    })
-}
+pub(crate) use crate::services::message_outbox::mentions::relay_message_payload;
 
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,

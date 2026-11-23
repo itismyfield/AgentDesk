@@ -25,6 +25,7 @@ use std::{
 };
 
 use crate::engine::PolicyEngine;
+use crate::services::stale_turn_reconciler::SweepWarrantPort;
 
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
 pub(crate) const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
@@ -301,7 +302,8 @@ impl BootReconcileStats {
 pub(crate) async fn reconcile_boot_db_pg(
     pool: &PgPool,
     current_instance_id: &str,
-    health_registry: Option<&crate::services::discord::health::HealthRegistry>,
+    health_registry: Option<SweepWarrantPort<'_>>,
+    inflight_lookup: crate::services::stale_turn_reconciler::InflightEpisodeProbe,
 ) -> Result<BootReconcileStats> {
     let notify_recovery::BootNotifyRecoveryStats {
         stale_processing_outbox_reset,
@@ -315,6 +317,7 @@ pub(crate) async fn reconcile_boot_db_pg(
             pool,
             health_registry,
             crate::services::discord::relay_recovery::AxisBSite::BootReconcileSweep,
+            inflight_lookup,
         )
         .await?;
 
@@ -335,10 +338,11 @@ pub(crate) async fn reconcile_boot_runtime(
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
     current_instance_id: &str,
-    health_registry: Option<&crate::services::discord::health::HealthRegistry>,
+    health_registry: Option<SweepWarrantPort<'_>>,
+    inflight_lookup: crate::services::stale_turn_reconciler::InflightEpisodeProbe,
 ) -> Result<BootReconcileStats> {
     let mut stats = if let Some(pool) = pg_pool {
-        reconcile_boot_db_pg(pool, current_instance_id, health_registry).await?
+        reconcile_boot_db_pg(pool, current_instance_id, health_registry, inflight_lookup).await?
     } else {
         {
             return Err(anyhow!("Postgres pool required for boot reconcile"));
@@ -1163,7 +1167,7 @@ mod dispatch_delivery_reconcile_tests {
         .await
         .expect("seed peer-owned processing outbox row");
 
-        let stats = reconcile_boot_db_pg(&pool, "current-instance", None)
+        let stats = reconcile_boot_db_pg(&pool, "current-instance", None, crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
             .await
             .expect("boot reconcile succeeds");
         assert_eq!(stats.stale_processing_outbox_reset, 0);

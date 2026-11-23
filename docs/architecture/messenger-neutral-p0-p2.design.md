@@ -19,13 +19,13 @@
 
 | 전제 | main의 코드 좌표 | 보존할 의미 |
 |---|---|---|
-| 봇별 상태 생성 | `src/services/discord/runtime_bootstrap/shared_data.rs:88`, 시험 생성 `src/services/discord/mod.rs:1337` | 생성 횟수·provider/token namespace·주입 Arc의 동일성 유지 |
-| 원자 세션 상태 | `src/services/discord/mod.rs:966` | sessions를 한 Mutex로 잠그는 단위 유지 |
+| 봇별 상태 생성 | `src/services/discord/runtime_bootstrap/shared_data.rs:88`, 시험 생성 `src/services/discord/mod.rs:1310` | 생성 횟수·provider/token namespace·주입 Arc의 동일성 유지 |
+| 원자 세션 상태 | `src/services/discord/mod.rs:938` | sessions를 한 Mutex로 잠그는 단위 유지 |
 | transition lease | `src/services/discord/session_transition.rs:136`, `src/services/discord/session_transition.rs:157` | Drop 뒤 기존 owner wake를 동일 시점에 실행; map 이전과 wake 구현 이전을 구별 |
 | finalizer | `src/services/discord/turn_finalizer.rs:350`, `src/services/discord/turn_finalizer.rs:618` | 한 actor·기존 Weak 순환 방지·토큰 해제 뒤 완료 발행을 보존 |
 | 완료 버스 | `src/services/discord/turn_completion_events.rs:13`, `src/services/discord/turn_completion_events.rs:82` | capacity 64·phase·lag 후 reconcile 동작 유지 |
-| HTTP fallback | `src/services/discord/shared_state.rs:62` | ready ctx 우선, token REST fallback, 둘 다 없으면 hard failure 유지 |
-| answer flush | `src/services/discord/mod.rs:1046`, `src/services/discord/gateway/outbound_messages.rs` | RAII 해제와 queued notice bounded wait의 위치 유지 |
+| HTTP fallback | `src/services/discord/shared_state.rs:67` | ready ctx 우선, token REST fallback, 둘 다 없으면 hard failure 유지 |
+| answer flush | `src/services/discord/mod.rs:1018`, `src/services/discord/gateway/outbound_messages.rs` | RAII 해제와 queued notice bounded wait의 위치 유지 |
 | 실제 nonce | `src/services/discord/outbound/transport.rs:22` | nonce 문자열·enforce_nonce 플래그를 요청까지 보존 |
 | 관측 scope | `src/services/discord/outbound/raw_output.rs:26`, `src/services/discord/outbound/transport.rs:292` | task-local census를 현재 future·tx/savepoint에서 실행; spawn/선관측 금지 |
 | replay 재시도 권한 | `src/services/discord/replay_policy.rs:138` | sealed permit을 DTO 생성자로 대체하지 않으며 exact retry의 Refused/Started 유지 |
@@ -78,7 +78,7 @@
 | `turn_view_reconciler` (1137) | `turn_view_reconciler::TurnViewReconciler` | 40/40 | M 유지. reaction/view reconciliation 실행 객체; engine 완료 bus와 구별. |
 | `readopted_mailbox_ledger` (1138) | `readopted_mailbox_ledger::ReadoptedMailboxLedger` | 0/1 | E 저장/M 접근 경계로 잔류. 값 필드는 ProviderKind/u64/String/bool뿐이고 엔진 원장이다. 단 from_state(26행)는 D 범위 InflightTurnState를 읽고 SharedData helper가 private entries를 갱신하므로 이번 P0의 pure state 폐쇄에서 보류; 봇 전용이라고 분류하지 않음. |
 
-분류의 추가 좌표: `src/services/discord/shared_state.rs:26`(ui), `src/services/discord/shared_state.rs:48`(http), `src/services/discord/shared_state.rs:58`(policy), `src/services/discord/shared_state.rs:410`(override UI 혼합), `src/services/discord/shared_state.rs:440`(dispatch), `src/services/discord/shared_state.rs:622`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:14`(lease 포함), `src/services/discord/inflight.rs:939`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
+분류의 추가 좌표: `src/services/discord/shared_state.rs:31`(ui), `src/services/discord/shared_state.rs:53`(http), `src/services/discord/shared_state.rs:63`(policy), `src/services/discord/shared_state.rs:415`(override UI 혼합), `src/services/discord/shared_state.rs:445`(dispatch), `src/services/discord/shared_state.rs:627`(restart), `src/services/discord/session_runtime.rs:34`(session 값), `src/services/discord/tmux_watcher_registry.rs:209`(registry 저장), `src/services/discord/relay_coord.rs:18`(lease 포함), `src/services/discord/inflight.rs:939`(signal), `src/services/discord/readopted_mailbox_ledger.rs:87`(ledger). 대표 실제 소비자는 session_runtime/turn_bridge, bot event router/catch_up, bootstrap/shared_data이며 전수 검색 원문은 레인 logs에 보관한다.
 
 ### 1.2 기존 송신 port와 구현
 
@@ -97,7 +97,7 @@
 
 | prod 구현 5개 | impl 좌표 | override | 기본값을 통해 남는 의미 |
 |---|---|---|---|
-| SerenityTurnOutboundClient | `src/services/discord/gateway.rs:323` | post, reference, nonce, reference+nonce, edit | DM Err |
+| SerenityTurnOutboundClient | `src/services/discord/gateway.rs:324` | post, reference, nonce, reference+nonce, edit | DM Err |
 | HttpOutboundClient | `src/services/discord/outbound/transport.rs:286` | post, edit, DM | reference/nonce 무시하는 기존 fallback |
 | SerenityManualOutboundClient | `src/services/discord/outbound/manual_delivery.rs:185` | post, nonce, DM | edit Err; reference default는 post/nonce 보존 조합에 주의 |
 | SerenityReferenceOutboundClient | `src/services/discord/outbound/serenity_reference.rs:92` | post, reference, reference+nonce | nonce 단독은 default plain post; edit/DM Err |
@@ -117,7 +117,7 @@ P0-D의 `overrides`와 `restart`는 bot wrapper의 별도 UI/gateway 필드를 �
 
 P0-E에서 완료 값과 sender를 이전하고, **메일박스 조회·cache 관측처럼 봇 IO가 없는 실제 함수만** `&EngineRuntime`으로 바꾼다. `session_transition_completion`, finalizer, health_registry, reaction/view 등 혼합 실행 객체는 SharedData를 계속 받는다. 이 조각은 그 실행 객체를 추상화한 G05/G07/G08 port를 새로 만들지 않는다. 전체 엔진 이동은 후속 계획이며, 그때 이동할 함수에 SharedData를 다시 넣는 우회는 허용하지 않는다.
 
-P0-E의 첫 실제 engine borrow 대상은 `src/services/discord/mod.rs:1151`의 has_runtime_storage와 `src/services/discord/mod.rs:1167`의 mailbox_snapshots_for_idle_detector, `src/services/discord/session_transition.rs:165`의 session_transition_lock 및 acquire_session_transition이다. 순수 조회/락 획득 본체는 EngineRuntime inherent impl로 옮기고 SharedData에서는 필요 시 같은 호출만 전달한다. 락 획득의 반환값 SessionTransitionBusy와 SESSION_TRANSITION_LOCK_WAIT_TIMEOUT(기존 session_transition 4/8행)은 legacy_state의 아래 값 계약으로 함께 소유 이전하고 기존 경로에 같은 이름으로 재수출한다. engine helper가 그 상수를 얻으려고 Discord 모듈을 import하지 않는다. session_transition_completion의 SharedData identity/Drop wake는 유지한다. helper를 부르는 engine 함수는 &EngineRuntime으로 좁히되 mixed caller에 &SharedData를 다시 cast하는 API를 만들지 않는다.
+P0-E의 첫 실제 engine borrow 대상은 `src/services/discord/mod.rs:1123`의 has_runtime_storage와 `src/services/discord/mod.rs:1140`의 mailbox_snapshots_for_idle_detector, `src/services/discord/session_transition.rs:165`의 session_transition_lock 및 acquire_session_transition이다. 순수 조회/락 획득 본체는 EngineRuntime inherent impl로 옮기고 SharedData에서는 필요 시 같은 호출만 전달한다. 락 획득의 반환값 SessionTransitionBusy와 SESSION_TRANSITION_LOCK_WAIT_TIMEOUT(기존 session_transition 4/8행)은 legacy_state의 아래 값 계약으로 함께 소유 이전하고 기존 경로에 같은 이름으로 재수출한다. engine helper가 그 상수를 얻으려고 Discord 모듈을 import하지 않는다. session_transition_completion의 SharedData identity/Drop wake는 유지한다. helper를 부르는 engine 함수는 &EngineRuntime으로 좁히되 mixed caller에 &SharedData를 다시 cast하는 API를 만들지 않는다.
 
 ### 타입 폐쇄와 가시성의 구체 경계
 
@@ -176,7 +176,7 @@ P0-C2는 기존 mixed coord map의 단일 entry 생성 경로와 바깥 Arc를 D
 | post_message_with_reference_and_nonce (118) | send_message(..., reply_to + idempotency) | nonce 미지원 client에서도 reference를 잃지 않는 dispatch 분기 |
 | edit_message (136) | edit_message(conv, message, body) → MessageRef | target/returned ID 및 typed length/transient error 유지 |
 | resolve_dm_channel (150) | open_dm(user_ref) → ConversationId | 미지원 Err/실제 DM 생성 동작 보존 |
-| TurnGateway::output_pool (`src/services/discord/gateway.rs:60`) | 기존 TurnContext의 관측 accessor | 송신 caps가 아님. pool handle/None 유지 |
+| TurnGateway::output_pool (`src/services/discord/gateway.rs:61`) | 기존 TurnContext의 관측 accessor | 송신 caps가 아님. pool handle/None 유지 |
 | has_raw_output_boundaries (64) | TurnContext의 관측 accessor | task-local scope 존재 여부를 static caps로 캐시하지 않음 |
 | output_provider (68) | TurnContext 관측 accessor | bot_owner_provider default 위임 보존 |
 | send_message (72) | MessengerOutbound::send_message | send wrapper의 policy/dedup/raw boundary를 기존 위치에서 실행 |
@@ -593,7 +593,7 @@ main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**
 
 행동 변경이 없는 이전이라도 ID/옵션/closure wiring을 실제로 틀리게 만드는 뮤턴트는 유효하다. 같은 Arc 대신 새 registry 생성, nonce 옵션 누락, reference+nonce→nonce 단독 dispatch, UTF16→bytes, rollback 실패→성공, partial continuation→Edited, deferred fallback을 권한 재검증 전에 실행하는 변이를 각각 해당 대상 시험에서 RED로 확인하고 원복 SHA256를 남긴다. 재현 가능한 기존 결함을 수정하게 되면 별도 RED→GREEN→원인 제거 뮤턴트 RED가 필요하며 문서만으로 수정됐다고 하지 않는다.
 
-기존 결함을 넓히지 않는 범위: nonce 미지원 client default(`src/domain/outbound/port.rs:106`), fake delete default Ok(`src/services/discord/gateway.rs:155`), bounded flush timeout, transitional SDK ID map, provider당 bot 배치 관계는 이번에 강한 보장으로 바꾸지 않는다. 신규 Slack delivery의 exactly-once/ledger 보장은 아직 설계하지 않았으며 지금 nonce를 일반 멱등 보장으로 이름만 바꾸지 않는다.
+기존 결함을 넓히지 않는 범위: nonce 미지원 client default(`src/domain/outbound/port.rs:106`), fake delete default Ok(`src/services/discord/gateway.rs:156`), bounded flush timeout, transitional SDK ID map, provider당 bot 배치 관계는 이번에 강한 보장으로 바꾸지 않는다. 신규 Slack delivery의 exactly-once/ledger 보장은 아직 설계하지 않았으며 지금 nonce를 일반 멱등 보장으로 이름만 바꾸지 않는다.
 
 코디네이터는 2026-11-17 혼합 실행 객체 잔류와 P0-C1/C2 분할, cancel-handoff custody의 Discord wrapper 잔류를 승인했다. C1에서 private 폐쇄나 파일/층 승인이 추가로 필요하면 DESIGN_DELTA/FILES를 따로 보고한다. C2는 C1 리뷰 뒤 진행하며, P2의 실행 확장 보존과 나머지 공유 파일 슬롯은 각 조각의 입력을 따른다.
 

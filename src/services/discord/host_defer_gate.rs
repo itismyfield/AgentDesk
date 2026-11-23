@@ -13,6 +13,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::host_decision::{HostDecision, host_decision};
 
 /// The caller the guard's refusal log names for a channel-keyed check.
 const CALLER: &str = "router_idle_host_check";
@@ -291,6 +292,28 @@ pub(crate) async fn resume_host_refusal(
         KeyedTeardown::RowMissing => Some("the session has no sessions row".to_string()),
         KeyedTeardown::Kept => Some("the session is not a legacy tmux session".to_string()),
     }
+}
+
+/// The host `channel`'s operation acts on now, read with this runtime's database and token.
+pub(crate) async fn host_decision_of(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> HostDecision {
+    let pool = shared.pg_pool.as_ref();
+    let token = Some(shared.token_hash.as_str());
+    host_decision(pool, token, Some(provider), channel_id).await
+}
+
+/// Why `channel`'s tmux session is left as it is: a Herdr host, or no host decided.
+pub(crate) async fn configured_refusal(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<String> {
+    host_decision_of(shared, provider, channel_id)
+        .await
+        .tmux_refusal()
 }
 
 #[cfg(all(test, unix))]

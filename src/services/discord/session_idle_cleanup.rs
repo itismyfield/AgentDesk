@@ -72,7 +72,7 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     let mut safe_expired = Vec::new();
     for mut candidate in expired {
         // A Herdr-configured channel keeps its session, returned input, mailbox and worktree.
-        let configured = super::admin_host_guard::configured_refusal;
+        let configured = super::host_defer_gate::configured_refusal;
         if configured(shared, &provider, candidate.channel_id.get())
             .await
             .is_some()

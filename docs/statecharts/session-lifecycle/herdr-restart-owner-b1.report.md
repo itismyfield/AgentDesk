@@ -22,11 +22,11 @@ TLA SHA256 `0bfe4d61abc4dc24a9fb99f93377c5efea85bb70a77546b534f3f2f9bf36b3eb`. �
 | 모델 경계 | 실제 코드 좌표 | 확인한 계약 |
 |---|---|---|
 | ClearBegin | src/services/herdr_launch/clear_epoch.rs:43, src/services/discord/commands/control.rs:523 | 같은 mutex에서 즉시 epoch++/clearing 증가. 기존 effects가 있어도 시작 |
-| LaunchBegin/OwnerFree | src/services/herdr_launch/clear_epoch.rs:98, :190; src/services/claude/herdr_turn.rs:243; src/services/codex/herdr_turn.rs:135; src/services/herdr_launch.rs:393 | provider/token/channel scope. clearing 중 새 startup 등록 거절, 완료 뒤 새 입력 허용 |
+| LaunchBegin/OwnerFree | src/services/herdr_launch/clear_epoch.rs:98, :190; src/services/claude/herdr_turn.rs:243; src/services/codex/herdr_turn.rs:141; src/services/herdr_launch.rs:393 | provider/token/channel scope. clearing 중 새 startup 등록 거절, 완료 뒤 새 입력 허용 |
 | CheckCreateEpoch | src/services/herdr_launch.rs:531 | Pending 이후 scope epoch 관찰. 거절은 retire_unsent |
 | BeginCreateEffect/Create | src/services/herdr_launch/clear_epoch.rs:154; src/services/herdr_launch/prepared.rs:46, :71 | worker 안에서 live epoch/clearing 재검사, create_user_default/create 반환까지 EffectPermit 보유 |
 | worker scope 전달 | src/services/herdr_launch/clear_epoch.rs:236; src/services/claude/herdr_turn/first_input.rs:49; src/services/codex/herdr_turn/first_input.rs:54 | CreatedSubmit 별도 thread에 Arc를 전달하고 동기 TLS scope 설치 |
-| BeginSubmitEffect/SubmitEffect | src/services/claude/herdr_turn/first_input.rs:105; src/services/codex/herdr_turn/first_input.rs:172; src/services/codex/herdr_turn.rs:659 | 실제 composer mutation/run_herdr 앞에서 허가, 물리 반환까지 보유 |
+| BeginSubmitEffect/SubmitEffect | src/services/claude/herdr_turn/first_input.rs:105; src/services/codex/herdr_turn/first_input.rs:172; src/services/codex/herdr_turn.rs:691 | 실제 composer mutation/run_herdr 앞에서 허가, 물리 반환까지 보유 |
 | startup/effect 반환 | src/services/herdr_launch/clear_epoch.rs:132, :166; src/services/claude/herdr_turn/first_input.rs:115; src/services/codex/herdr_turn/first_input.rs:182 | 첫 submit 반환에 startup 감소, effect RAII로 effects 감소·Notify |
 | clear 배수와 exact 종료 | src/services/herdr_launch/clear_epoch.rs:64; src/services/discord/commands/control/clear_teardown.rs:72, :164, :202 | transition을 놓고 startups/effects0 대기, row 재읽기, exact terminate·Retired selector CAS |
 | sticky overlap | src/services/herdr_launch/clear_epoch.rs:49, :56; src/services/discord/commands/control.rs:546 | 관측한 startup/effect가 먼저 끝나도 clear guard가 살아 있는 동안 recovery Held 특수 경로를 피함 |

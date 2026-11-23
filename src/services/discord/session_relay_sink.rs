@@ -35,7 +35,10 @@ use crate::services::provider::ProviderKind;
 use tracing::Instrument;
 
 mod routing;
-pub(in crate::services::discord) use routing::session_bound_discord_relay_can_own_terminal_delivery;
+use super::relay_coord::SESSION_BOUND_DISCORD_DELIVERY_ENABLED;
+pub(in crate::services::discord) use super::relay_coord::{
+    session_bound_discord_delivery_enabled, session_bound_discord_relay_can_own_terminal_delivery,
+};
 use routing::{
     SessionBoundExternalInputLeaseGuard, SessionBoundTerminalDeliveryRoute,
     SessionBoundTerminalDeliveryRouteDecision, SessionRelayTraceContext, SinkDeliveryLeaseGuard,
@@ -84,14 +87,9 @@ use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
 use crate::services::tui_o::cutover::{BodySite, IdentityError, claim_then_send_at};
 
-static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE: Duration = Duration::from_secs(10);
 const IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK: u64 = 1_048_576;
-
-pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> bool {
-    SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
-}
 
 #[cfg(test)]
 fn session_bound_terminal_delivery_route_decision(

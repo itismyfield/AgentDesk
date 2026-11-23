@@ -10,7 +10,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::AppHealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::routines::provider_choice::{owned_session_route, session_route};
 use crate::services::turn_lifecycle::{
@@ -77,7 +77,7 @@ pub struct RoutineSessionControlResult {
 #[derive(Clone)]
 pub struct RoutineSessionController {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
+    health_registry: Option<Arc<AppHealthRegistry>>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +98,7 @@ struct RoutineSessionRow {
 }
 
 impl RoutineSessionController {
-    pub fn new(pool: Arc<PgPool>, health_registry: Option<Arc<HealthRegistry>>) -> Self {
+    pub fn new(pool: Arc<PgPool>, health_registry: Option<Arc<AppHealthRegistry>>) -> Self {
         Self {
             pool,
             health_registry,

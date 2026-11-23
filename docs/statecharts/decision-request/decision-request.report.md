@@ -86,8 +86,8 @@ producer가 없어 운영 경로에서는 실행되지 않는다(`agentdesk::dec
 | NormalizeFailure | `decision_target.rs:223` | failed(사유) |
 | AbsentAfterNormalize·RefusalFinal | `decision_target.rs:208` | 정상화를 이미 썼으면 failed |
 | Uncertain(정상화 결과 불명) | `decision_target.rs:224` | may_have_sent로 남기고 재전송 0. 닫기는 2b |
-| HandoffDecision(대조) | `src/services/discord/queue_io/decision_drain.rs:22`, 호출 `src/services/discord/agent_handoff.rs:541`·`src/server/routes/agents.rs:1080` | service·HTTP 모두 backend 전에 거절 |
-| SelfDeclared(대조, 신규) | `src/services/discord/queue_io/decision_drain.rs:7`, 호출 `src/server/routes/agents.rs:675`·`src/server/routes/agents_turn_deliver.rs:161`; 보존 planner 입구 `src/services/tui_input/human_frame.rs:120` | 본문이 source=decision을 자기 선언하면 400. 보존 frame은 승인 event가 그 바이트를 승인했을 때만 만들어짐 |
+| HandoffDecision(대조) | `src/services/discord/queue_io/decision_drain.rs:22`, 호출 `src/services/discord/agent_handoff.rs:541`·`src/server/routes/agents.rs:1081` | service·HTTP 모두 backend 전에 거절 |
+| SelfDeclared(대조, 신규) | `src/services/discord/queue_io/decision_drain.rs:7`, 호출 `src/server/routes/agents.rs:676`·`src/server/routes/agents_turn_deliver.rs:161`; 보존 planner 입구 `src/services/tui_input/human_frame.rs:120` | 본문이 source=decision을 자기 선언하면 400. 보존 frame은 승인 event가 그 바이트를 승인했을 때만 만들어짐 |
 
 모델에 없는 종료(코드가 더 보수적인 곳): owner 수용의 pending/거절과 owner 시작 오류는 미전송 증거로 쓰지 않고
 정상화 없이 failed로 닫는다(`decision_target.rs:116`). InvalidTarget도 정상화 없이 failed다.

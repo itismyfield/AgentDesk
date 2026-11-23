@@ -14,6 +14,7 @@ use poise::serenity_prelude as serenity;
 
 #[cfg(test)]
 pub(super) mod judged_finish_tests;
+mod turn_stop_port;
 
 /// The runtime a stop resolved for a provider channel and its turn's verdict; nothing written.
 pub(crate) struct ProviderChannelStop(Option<JudgedChannel>);

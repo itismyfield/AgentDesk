@@ -330,7 +330,10 @@ async fn command_unattributed_legacy_stop_and_dispatch_keep_off_fallback_pg() {
         tmux.take_calls();
         if dispatch_case {
             let result = crate::services::queue::QueueService::new(Some(pool.clone()))
-                .cancel_dispatch(None, &label)
+                .cancel_dispatch(
+                    None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
+                    &label,
+                )
                 .await;
             assert!(result.unwrap()["ok"].as_bool().unwrap());
         } else {

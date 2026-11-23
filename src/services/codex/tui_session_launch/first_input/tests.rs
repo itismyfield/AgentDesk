@@ -1,8 +1,13 @@
 #[path = "native_tests.rs"]
 mod native_tests;
 
-use super::*;
 use crate::config::TestEnvVarGuard as Guard;
+use crate::services::codex::tui_session_launch::first_input::*;
+use crate::services::codex::{
+    CodexLaunchOptions, CodexSourceMode, SOURCE_MODE_TEST, resolve_codex_binary,
+};
+use crate::services::process::shell_escape;
+use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests as fixture};
 use std::os::unix::fs::PermissionsExt;
 
@@ -40,7 +45,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
             ProviderKind::Codex,
         );
-        let launch = super::super::prepare_codex_tui_launch_script(
+        let launch = crate::services::codex::tui_session_launch::prepare_codex_tui_launch_script(
             name,
             None,
             prompt,
@@ -171,16 +176,17 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
             let name = format!("{}-codex-native-env", instance.tmux.prefix);
             let prompt = "instance native argv 한글";
             let options = CodexLaunchOptions::new(prompt).with_cwd(instance.root.to_str());
-            let launch = super::super::prepare_codex_tui_launch_script(
-                &name,
-                None,
-                prompt,
-                &options,
-                (None, None),
-                false,
-                &overlay,
-            )
-            .unwrap();
+            let launch =
+                crate::services::codex::tui_session_launch::prepare_codex_tui_launch_script(
+                    &name,
+                    None,
+                    prompt,
+                    &options,
+                    (None, None),
+                    false,
+                    &overlay,
+                )
+                .unwrap();
             let run = |script: &str| {
                 let output = std::process::Command::new("/bin/bash")
                     .arg(script)
@@ -201,12 +207,12 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
             let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
                 "http://127.0.0.1:9".into(),
             );
-            let launchable = super::super::CodexHerdrLaunchable {
+            let launchable = crate::services::codex::tui_session_launch::CodexHerdrLaunchable {
                 codex_bin: binary.to_string_lossy().into_owned(),
                 resolution: resolve_codex_binary(),
                 policy: "legacy",
             };
-            let herdr = super::super::prepare_codex_herdr_launch(
+            let herdr = crate::services::codex::tui_session_launch::prepare_codex_herdr_launch(
                 &launch.prepared,
                 &launchable,
                 &options,

@@ -425,7 +425,7 @@ async fn idle_queue_backstop_backlog_units_all(
 fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, coalesced: bool) {
     if coalesced {
         #[cfg(unix)]
-        crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
+        (shared.router_ports.owner_wake)(shared, channel_id);
     }
 }
 
@@ -831,7 +831,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let direct = owned(&shared, channel_id).await;
         #[cfg(unix)]
         if direct {
-            crate::services::discord::router::message_handler::owner_wake(&shared, channel_id);
+            (shared.router_ports.owner_wake)(&shared, channel_id);
         }
         let initial_presleep = profile.initial_presleep();
         if !direct && !initial_presleep.is_zero() {

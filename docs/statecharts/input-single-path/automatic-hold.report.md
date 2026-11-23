@@ -6,7 +6,7 @@ A recovery admission can notify its original once, then a handoff can encounter 
 
 | Boundary | Production coordinate | Model coordinate |
 |---|---|---|
-| Automatic ingress | `queue_io/input_owner/ingress.rs:448-458`, `held_once:254-261` | `InputOwnership.tla:794 AutoIngressHold` |
+| Automatic ingress | `queue_io/input_owner/ingress.rs:443-453`, `held_once:254-261` | `InputOwnership.tla:794 AutoIngressHold` |
 | Recovery opens and wakes existing owner | `runtime_bootstrap.rs:35-42` | `:804 AutoRecoveryCompletes` |
 | Refusal maps idle_unobserved to ScreenMissing | `provider_dispatch/owner_input.rs:194-199`; `ingress.rs:158-169`, `handoff_held:237` | `:811 AutoHandoffHold` |
 | One atomic notice decision and record | existing `NOTICED:274`, same mutex predicate and insert `:281-288` | Each notice action reads the previous notice count and updates it atomically |
