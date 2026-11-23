@@ -2026,6 +2026,7 @@ src/
 │   │   │   │   ├── boot_reaper.rs
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
+│   │   │   │   ├── herdr_stale_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
 │   │   │   │   ├── native_input_custody.rs
 │   │   │   │   ├── native_input_tests.rs
