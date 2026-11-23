@@ -186,7 +186,7 @@ pub use remote_stub as remote;
 #[cfg(test)]
 mod krx_claude_tests;
 #[cfg(test)]
-pub(crate) mod krx_db_tests;
+mod krx_db_tests;
 #[cfg(test)]
 mod provider_output_guard_tests;
 

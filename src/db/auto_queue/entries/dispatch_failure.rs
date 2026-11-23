@@ -199,7 +199,7 @@ mod tests {
         run_status: &str,
         retry_count: i64,
     ) {
-        crate::services::krx_db_tests::status_check_migration::execute_with_status_check_lifted(
+        crate::db::status_check_migration_tests::execute_with_status_check_lifted(
             pool,
             "auto_queue_runs",
             &format!(

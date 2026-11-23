@@ -30,5 +30,3 @@ mod server_campaigns_verification_store;
 #[path = "../db/session_observability/background_ordering_pg_tests.rs"]
 mod session_observability_background_ordering_pg;
 mod session_transcripts_clear_fence_tests;
-#[path = "../db/status_check_migration_tests.rs"]
-pub(crate) mod status_check_migration;

@@ -477,7 +477,7 @@ async fn resume_activation_maps_deliverable_terminal_and_unknown_states_pg() {
         ("cancelled", ResumeActivation::RevokedOrFenced),
         ("unexpected_status", ResumeActivation::Unknown),
     ] {
-        crate::services::krx_db_tests::status_check_migration::execute_with_status_check_lifted(
+        crate::db::status_check_migration_tests::execute_with_status_check_lifted(
             &pool,
             "message_outbox",
             &format!(
