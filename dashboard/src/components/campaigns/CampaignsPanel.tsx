@@ -23,6 +23,7 @@ import CampaignList, { EntrySplit } from "./CampaignList";
 import { campaignIssueLabel } from "./campaignModel";
 import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
 import CampaignOverview, { type TaskView } from "./CampaignOverview";
+import CampaignPipeline from "./CampaignPipeline";
 import {
   LEDGER_STATUS_LABELS, entryKey, legacyEntry, legacyTask, recentServerEvents, recentTaskChanges, serverEntry, serverTasks, statusSentence, type CampaignEntry,
 } from "./campaignOverviewModel";
@@ -315,6 +316,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
     board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
+    pipeline={<CampaignPipeline source={{ kind: "legacy" }} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
     onCloseTask={() => setNode(null)} />;
@@ -348,6 +350,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
       board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
+      pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of }} tr={tr} />}
       task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
         gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
       onCloseTask={() => setNode(null)} />;
