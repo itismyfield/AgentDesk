@@ -1744,12 +1744,16 @@ test.describe("Dashboard smoke tests", () => {
       agent_id: "agent-ada", status: "working", started_at: new Date(Date.now() - 95_000).toISOString(), updated_at: new Date().toISOString(),
       provider: "codex", current_tool_line: "npm run build", tool_events: [{ kind: "tool", status: "running", tool_name: "Bash", summary: "", line: "" }], tool_count: 1,
     } }));
+    let turnReads = 0;
+    page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/turn")) turnReads++; });
     await page.goto("/home");
 
     const monitor = page.getByTestId("home-agent-monitor-agent-ada");
     if (testInfo.project.name === "mobile") {
       await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toBeVisible({ timeout: 15000 });
       await expect(monitor).toHaveCount(0);
+      // Phones draw no monitor, so they never capture a turn on the server.
+      expect(turnReads).toBe(0);
       return;
     }
     await expect(monitor).toContainText("npm run build", { timeout: 15000 });
