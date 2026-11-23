@@ -8,11 +8,24 @@ import tempfile
 import unittest
 
 from tests import test_comment_only_ci_gate as harness
+from tests.test_fast_check_ci_wiring import job_block
 from tests.test_high_risk_recovery_path_filter import load_filters, pattern_to_regex
 
 
 WORKFLOW = ".github/workflows/ci-pr.yml"
 WORKERS = ("base_compare", "rust_scope", "rust_tests", "pg15_owner_proof")
+EXECUTION_FILES = (
+    "scripts/ci/nextest_ci.py",
+    "scripts/ci/nextest-pr-worker.sh",
+    "scripts/ci/nextest-base-diff.sh",
+    "scripts/ci/lib-test-artifact.py",
+    "scripts/ci/rust_test_sources.py",
+    "scripts/ci/pg15_required_ids.txt",
+    "scripts/check_relay_authority_contract.py",
+    "tests/fixtures/herdr_t14_fake_provider.py",
+    "scripts/ci/new-worker-helper.py",
+)
+SRC_FILTER = "              - 'src/**'"
 BASE = """on: pull_request
 jobs:
   rust_build:
@@ -25,7 +38,7 @@ jobs:
   test_evidence: {timeout-minutes: 15}
   lint:
     steps: [{run: lint}]
-"""
+""" + job_block(harness.PR_WORKFLOW.read_text(encoding="utf-8"), "changes")
 
 
 class CiMetadataRustGateTests(unittest.TestCase):
@@ -34,21 +47,23 @@ class CiMetadataRustGateTests(unittest.TestCase):
         self.repo.setUp()
         self.addCleanup(self.repo.tearDown)
         self.repo.write(WORKFLOW, BASE)
+        for path in EXECUTION_FILES[:-1]:
+            self.repo.write(path, "# execution input\n")
         self.repo.base = self.repo.commit("workflow baseline")
 
     def run_case(self, changes, skip, gate_outcome="success", forced=None, alter_merge=None):
         for path, body in changes.items():
             self.repo.write(path, body)
-        raw = harness.outputs(**{
-            name: [path for path in changes if any(pattern_to_regex(p).match(path) for p in patterns)]
-            for name, patterns in load_filters().items()
-        })
         head = self.repo.commit("change")
         if alter_merge is not None:
             self.repo.git("checkout", "-q", "--detach", self.repo.base)
             self.repo.git("merge", "-q", "--no-ff", "--no-commit", head)
             self.repo.write(WORKFLOW, alter_merge)
             self.repo.commit("merge checkout")
+        raw = harness.outputs(**{
+            name: [path for path in changes if any(pattern_to_regex(p).match(path) for p in patterns)]
+            for name, patterns in load_filters(self.repo.root / WORKFLOW).items()
+        })
         result, raw_outputs = self.repo.run_gate(head, filters=json.dumps(raw))
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = dict(line.split("=", 1) for line in raw_outputs.splitlines())
@@ -60,8 +75,8 @@ class CiMetadataRustGateTests(unittest.TestCase):
     def test_ci_metadata_with_unchanged_test_jobs_skips_workers_and_keeps_build(self):
         run = self.run_case({
             WORKFLOW: BASE.replace("run: build", "run: install-and-build").replace("run: lint", "run: lint-with-tool"),
-            "scripts/ci/install-tool.sh": "#!/bin/bash\n",
-            "scripts/check-tool.sh": "#!/bin/bash\n",
+            "scripts/ci/preinstalled-tool.sh": "#!/bin/bash\n",
+            "scripts/check-ci-runner-hardening.sh": "#!/bin/bash\n",
             "tests/test_tool.py": "# Python test\n",
             "tests/test_tool.rb": "# Ruby test\n",
             "docs/tool.md": "# Notes\n",
@@ -82,7 +97,32 @@ class CiMetadataRustGateTests(unittest.TestCase):
                                            "src/lib.rs": "pub fn one() -> u32 { 2 }\n"}, skip=False))
 
     def test_ci_script_without_workflow_retains_full_run(self):
-        self.assert_full_run(self.run_case({"scripts/ci/install-tool.sh": "#!/bin/bash\n"}, skip=False))
+        self.assert_full_run(self.run_case({"scripts/ci/nextest-pr-worker.sh": "#!/bin/bash\n"}, skip=False))
+
+    def test_execution_files_with_workflow_metadata_run_workers(self):
+        for path in EXECUTION_FILES:
+            with self.subTest(path=path):
+                self.repo.git("checkout", "-q", "--detach", self.repo.base)
+                self.assert_full_run(self.run_case({WORKFLOW: BASE + "# comment\n", path: "# new input\n"}, skip=False))
+
+    def test_changes_path_filter_edit_runs_workers(self):
+        self.assertIn(SRC_FILTER, BASE)
+        self.assert_full_run(self.run_case({WORKFLOW: BASE.replace(SRC_FILTER, SRC_FILTER.replace("-", "# -", 1), 1)},
+                                          skip=False))
+
+    def test_changes_gate_command_edit_runs_workers(self):
+        old_command = "python3 scripts/ci/comment_only_gate.py"
+        self.assertIn(old_command, BASE)
+        self.assert_full_run(self.run_case({WORKFLOW: BASE.replace(old_command, old_command + " --changed", 1)},
+                                          skip=False))
+
+    def test_rust_source_mixed_with_changed_filter_runs_workers(self):
+        self.assertIn(SRC_FILTER, BASE)
+        self.assert_full_run(self.run_case({WORKFLOW: BASE.replace(SRC_FILTER + "\n", "", 1),
+                                           "src/lib.rs": "pub fn one() -> u32 { 2 }\n"}, skip=False))
+
+    def test_rust_source_only_runs_workers(self):
+        self.assert_full_run(self.run_case({"src/lib.rs": "pub fn one() -> u32 { 2 }\n"}, skip=False))
 
     def test_duplicate_yaml_job_falls_back_to_full_run(self):
         self.assert_full_run(self.run_case({WORKFLOW: BASE + "  rust_tests: {steps: []}\n"}, skip=False))
@@ -120,5 +160,8 @@ class CiMetadataRustGateTests(unittest.TestCase):
                 self.assertEqual((observed["reason"], observed["mode"]), (reason, mode))
 
     def assert_full_run(self, run):
+        self.assertEqual(run.changes["rust_build"], "true")
+        self.assertEqual(run.changes["rust_tests"], "true")
+        self.assertEqual(run.results["rust_build"], "success")
         self.assertEqual({job: run.results[job] for job in WORKERS}, dict.fromkeys(WORKERS, "success"))
         self.assertEqual(run.gate(), "success", run.verdicts())
