@@ -475,7 +475,7 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
         .map(|(offset, _)| offset)
         .collect();
     assert_eq!(reaps.len(), 2, "native and fallback reapers remain guarded");
-    let prepare = native_boot.find("BootInputs::prepare(").unwrap();
+    let prepare = native_boot.find("BootInputs::prepare_off_worker(").unwrap();
     let restore = native_boot.find("plan.restore(shared).await").unwrap();
     assert!(prepare < reaps[0] && reaps[0] < restore && restore < reaps[1]);
     let drain_source = source(
