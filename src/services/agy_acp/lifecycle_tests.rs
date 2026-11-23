@@ -576,6 +576,17 @@ impl Orphan {
     }
 }
 
+impl Drop for Orphan {
+    /// Ends the whole group, also on a panic: dash's `sh -c` keeps `sleep` as a child holding
+    /// the test's output. A live group's number is never reissued, so it is still this one.
+    fn drop(&mut self) {
+        if process_group_probe(self.0.id()) == ProcessGroupProbe::Live {
+            crate::services::process::kill_pid_tree(self.0.id());
+        }
+        let _ = self.0.wait();
+    }
+}
+
 fn write_record(dir: &Path, pid: u32, starttime: Option<u128>, lstart: Option<u128>) -> PathBuf {
     let path = dir.join(child::RECORD);
     let record = serde_json::json!({"pid": pid, "pgid": pid, "starttime": starttime, "macos_lstart_hash": lstart});
@@ -630,8 +641,7 @@ fn boot_sweep_clears_only_the_recorded_group_and_holds_on_probe_errors() {
         log(dir, "short").is_empty(),
         "no spawn while the sweep holds"
     );
-    other.0.kill().unwrap();
-    other.0.wait().unwrap();
+    drop(other);
 
     // Leader gone, a grandchild left in its group: the group is stopped, then the child spawns.
     let (pid, identity, mut leader) = Orphan::start("sleep 1000 & exit 0");
