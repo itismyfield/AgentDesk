@@ -257,7 +257,7 @@ impl ProcessIdentity {
         }
         ProcessIdentityProbe::ProbeError
     }
-    #[cfg(test)]
+    #[cfg(any(test, unix))]
     pub(crate) fn from_persisted(starttime: Option<u128>, _lstart_hash: Option<u128>) -> Self {
         Self {
             starttime,
@@ -336,7 +336,7 @@ fn unix_kill_zero_probe(target: libc::pid_t) -> ProcessGroupProbe {
 }
 
 #[cfg(unix)]
-fn unix_process_presence(pid: u32) -> ProcessGroupProbe {
+pub(crate) fn unix_process_presence(pid: u32) -> ProcessGroupProbe {
     unix_kill_zero_probe(pid as libc::pid_t)
 }
 

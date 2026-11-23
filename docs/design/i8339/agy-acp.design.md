@@ -1,6 +1,6 @@
 # #8339 antigravity 채널을 `agy acp` 클라이언트로 옮기는 설계
 
-<!-- doc-path-refs: proposed src/services/agy_acp/ src/services/agy_acp/turn.rs src/services/agy_acp/steer.rs src/services/agy_acp/mod.rs src/services/agy_acp/child.rs src/services/discord/router/intake_gate/busy_inject/acp_steer.rs src/services/discord/turn_bridge/receipt_origins.rs -->
+<!-- doc-path-refs: proposed src/services/agy_acp/steer.rs src/services/discord/router/intake_gate/busy_inject/acp_steer.rs src/services/discord/turn_bridge/receipt_origins.rs -->
 <!-- doc-path-refs: external src/v1/error.rs apps/server/ packages/provider-acp/ AcpSessionRuntime.ts AntigravityAcpSupport.ts AntigravityAdapterV2.ts AntigravityProtocol.ts AntigravitySessionFiles.ts AntigravityTurnOutcome.ts AntigravityEditLocation.ts antigravityAuthSupport.ts adapter.ts acp_agent.rs jsonrpc.rs -->
 
 저장소 기준은 `5021d25794`(origin/main)이고, 확인한 agy CLI는 1.5.14(`agy --version`)다. 이 문서는 설계만 담는다. Rust 코드는 바꾸지 않는다. 상태 차트는 [agy-acp 모델](../../statecharts/agy-acp/AgyAcpSession.tla)과 [보고서](../../statecharts/agy-acp/agy-acp.report.md)다. 미확인 가정은 [U]로 표시하고 확인 방법을 함께 적는다.

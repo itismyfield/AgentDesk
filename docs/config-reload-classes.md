@@ -199,6 +199,7 @@ seconds with content comparison, independently of native filesystem notification
 | `tui_o.tool_cards.enabled` | live | `src/services/tui_o/store/tool_card_switch.rs` global_enabled (current()) |
 | `tui_o.turn` | restart | `src/services/discord/tui_direct_pending_start/turn_retirement.rs` confirm_at_boot (turn_mode CONFIRMED set) |
 | `tui_o.alert_channel_id` | restart | `src/services/tui_o/alarm.rs` AlarmRouter::for_process (runtime_bootstrap/o_writer_host.rs:parts at gateway boot) |
+| `agy_acp` | live | `src/services/agy_acp/mod.rs` enabled (current() per turn) |
 | `session_hosts` | restart | `src/config/session_hosts.rs` install_selected (BOOT OnceLock; bootstrap::install_boot_snapshots) |
 | `config_hot_reload` | restart | `src/bootstrap.rs` prepare_dcserver_boot + `src/launch.rs` after_database_ready (watcher guard owned by bot/server lifetime) |
 
