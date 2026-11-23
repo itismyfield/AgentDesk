@@ -196,12 +196,15 @@ pub(super) async fn recover(shared: &Shared, channel: ChannelId) {
         (Ok(queue), Ok(history)) => {
             let at = (shared.provider.as_str(), channel.get(), now);
             let pool = shared.pg_pool.as_ref();
-            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
+            let namespace = queue.1.clone();
+            (recovery::recover(&shared.mailbox(channel), queue, history.clone(), pool, at).await)
+                .map(|_| (history, namespace))
         }
         (Err(error), _) | (_, Err(error)) => Err(error),
     };
     match recovered {
-        Ok(_) => {
+        Ok((history, namespace)) => {
+            release_unkeyed_sources(shared, channel, history, namespace).await;
             claude_handoff::recover(shared.clone(), channel);
             crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;
             if native_prepare::boot_ready(shared, channel).await {
@@ -209,5 +212,31 @@ pub(super) async fn recover(shared: &Shared, channel: ChannelId) {
             }
         }
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
+    }
+}
+
+/// A cold source pin whose attempt boot settled as no-key gets the ACK its leaf could not give;
+/// a pin without that history proof stays owed.
+async fn release_unkeyed_sources(
+    shared: &Shared,
+    channel: ChannelId,
+    history: crate::services::tui_input::human_frame::history::v2::Registry,
+    namespace: String,
+) {
+    let mailbox = shared.mailbox(channel);
+    let tickets = mailbox.v2_request(|slot| {
+        Ok(slot
+            .as_ref()
+            .map(|owner| owner.source_binding_tickets())
+            .unwrap_or_default())
+    });
+    for ticket in tickets.await.unwrap_or_default() {
+        let (shared, history, namespace) = (shared.clone(), history.clone(), namespace.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(native_prepare::release_unkeyed_source(
+                &shared, &history, &namespace, &ticket,
+            ))
+        })
+        .await;
     }
 }

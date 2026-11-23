@@ -149,26 +149,16 @@ impl Registry {
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<(), String> {
-        self.try_control_transaction(|state| {
-            let (registration, _) = state
-                .locate(namespace, &ticket.key)
-                .ok_or("native no-key registration missing")?;
-            registration
-                .native_settlement
-                .as_ref()
-                .ok_or("native no-key ticket missing")?
-                .validate(registration)?;
-            let native = settlement_mut(state, namespace, &ticket.key)?;
-            if !native.matches_key_witness(ticket)
-                || native.outcome.is_some()
-                || native.extra.get("any_key") == Some(&Value::Bool(true))
-            {
-                return Err("native no-key witness superseded".into());
-            }
-            native.extra.insert("not_sent".into(), Value::Bool(true));
-            state.version = 3;
-            Ok(())
-        })
+        self.try_control_transaction(|state| mark_not_sent(state, namespace, ticket))
+    }
+
+    /// The same no-key record, waiting for the registry lock; only off the async workers.
+    pub(crate) fn native_not_sent_blocking(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.transaction(|state| mark_not_sent(state, namespace, ticket))
     }
 
     /// The no-key record outlasts a brief registry contention by awaiting between tries, so it
@@ -343,6 +333,27 @@ impl Registry {
             }
         }
     }
+}
+
+fn mark_not_sent(state: &mut Snapshot, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+    let (registration, _) = state
+        .locate(namespace, &ticket.key)
+        .ok_or("native no-key registration missing")?;
+    registration
+        .native_settlement
+        .as_ref()
+        .ok_or("native no-key ticket missing")?
+        .validate(registration)?;
+    let native = settlement_mut(state, namespace, &ticket.key)?;
+    if !native.matches_key_witness(ticket)
+        || native.outcome.is_some()
+        || native.extra.get("any_key") == Some(&Value::Bool(true))
+    {
+        return Err("native no-key witness superseded".into());
+    }
+    native.extra.insert("not_sent".into(), Value::Bool(true));
+    state.version = 3;
+    Ok(())
 }
 
 fn settlement_mut<'a>(

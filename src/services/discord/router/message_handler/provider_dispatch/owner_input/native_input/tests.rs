@@ -298,12 +298,12 @@ async fn native_no_key_record_outlasts_a_brief_registry_contention() {
     assert_eq!(result, Completion::NotSent("fixture refusal".into()));
 }
 
-/// A no-key turn whose record never lands still returns its custody and token on either host.
+/// A no-key turn whose record stays busy past the retries frees its channel on either host, and a
+/// restart before the deferred record lands settles it at boot from the owner's retained proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
     for (channel, host) in [(8148965, "herdr"), (8148966, "tmux")] {
-        let hold = std::time::Duration::from_millis(2500);
-        let result = no_key_round(channel, host, Some(hold)).await;
+        let result = no_key_round(channel, host, Some(WAIT_CAP)).await;
         assert!(
             matches!(&result, Completion::NotSent(r) if r.contains("busy")),
             "{result:?}"
@@ -311,8 +311,8 @@ async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
     }
 }
 
-/// Runs one unkeyed native turn on `host`, the registry lock held for `hold` once the leaf ends,
-/// and checks the channel is free for the next turn with the original kept unkeyed.
+/// Runs one unkeyed native turn on `host` with the registry lock held from the leaf's end for
+/// `hold` (`WAIT_CAP`: until released here), and checks the next turn starts under that lock.
 async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration>) -> Completion {
     let guard = crate::config::TestRuntimeRootGuard::new();
     let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
@@ -347,13 +347,14 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
         RelayOwnerKind::Watcher,
         &shared,
     );
-    mailbox
-        .v2_adopt(
-            root.as_path().join("no-key-owner.json"),
-            format!("claude/{}", shared.token_hash),
-        )
-        .await
-        .unwrap();
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        &shared.token_hash,
+        None,
+    );
+    let (queue, namespace) =
+        crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
+    mailbox.v2_adopt(queue.clone(), namespace).await.unwrap();
     let item=serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
     let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
     let producer = Producer::at(shared.clone(), key, Some(token.clone()));
@@ -368,6 +369,7 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
         root.join("injected_frames.lock"),
         std::sync::mpsc::channel(),
     );
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let leaf: effect::Leaf = Box::new(move |_| {
         assert_eq!(scope::key_attempted(), Some(false));
         if let Some(hold) = hold {
@@ -376,7 +378,7 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
             let file = file.open(&lock).unwrap();
             file.lock().unwrap();
             std::thread::spawn(move || {
-                std::thread::sleep(hold);
+                let _ = release_rx.recv_timeout(hold);
                 drop(file);
                 released.send(()).unwrap();
             });
@@ -415,6 +417,17 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
         .await
         .unwrap();
     assert!(snapshot.to_string().contains("our input"));
+    let next = std::sync::Arc::new(CancelToken::new());
+    let user = poise::serenity_prelude::UserId::new(7);
+    assert!(mailbox.try_start_turn(next, user, (id + 1).into()).await);
+    let frames = root.join("injected_frames.json");
+    let crashed = (hold == Some(WAIT_CAP)).then(|| {
+        (
+            std::fs::read(&frames).unwrap(),
+            std::fs::read(&queue).unwrap(),
+        )
+    });
+    release.send(()).ok();
     let history = Registry::runtime().unwrap().json().unwrap();
     let settlements: Vec<_> = ["planned", "live", "passive"]
         .into_iter()
@@ -434,11 +447,48 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
         assert!(settlement["outcome"].is_null());
         assert_ne!(settlement["any_key"], true);
     }
-    let next = std::sync::Arc::new(CancelToken::new());
-    let user = poise::serenity_prelude::UserId::new(7);
-    assert!(mailbox.try_start_turn(next, user, (id + 1).into()).await);
     if hold.is_some() {
         done.recv_timeout(WAIT_CAP).unwrap();
+    }
+    if let Some((frames_at_crash, queue_at_crash)) = crashed {
+        // In process the deferred record and source ACK land once the lock frees.
+        await_within(
+            async {
+                while !(Registry::runtime()
+                    .unwrap()
+                    .json()
+                    .unwrap()
+                    .to_string()
+                    .contains("\"not_sent\":true")
+                    && !mailbox
+                        .v2_request(|s| s.as_ref().unwrap().json())
+                        .await
+                        .unwrap()
+                        .to_string()
+                        .contains("\"pin\""))
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+            WAIT_CAP,
+        )
+        .await;
+        // A process that died before that leaves these bytes; the next generation boots on them.
+        std::fs::write(&frames, frames_at_crash).unwrap();
+        std::fs::write(&queue, &queue_at_crash).unwrap();
+        let mut next = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        std::sync::Arc::get_mut(&mut next)
+            .unwrap()
+            .restart
+            .current_generation = 2;
+        let plan = native_prepare::BootInputs::prepare(&root, 2).unwrap();
+        plan.restore(&next).await.unwrap();
+        assert!(native_prepare::boot_ready(&next, channel).await);
+        assert_eq!(
+            std::fs::read(&queue).unwrap(),
+            queue_at_crash,
+            "the retained original and its notice stay"
+        );
     }
     result
 }

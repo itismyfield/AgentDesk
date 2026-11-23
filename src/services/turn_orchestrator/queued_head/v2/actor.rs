@@ -90,3 +90,25 @@ pub(crate) fn v2_queue(
     let namespace = format!("{}/{token}", provider.as_str());
     Ok((path.ok_or("pending queue root unavailable")?, namespace))
 }
+
+/// Whether the queue file at `path` still holds the owner's retained proof that the exact attempt
+/// `key` sent no key; an unreadable file proves nothing.
+pub(crate) fn proves_not_sent(
+    path: &std::path::Path,
+    namespace: &str,
+    key: &serde_json::Value,
+) -> bool {
+    let (Ok(raw), Ok(key)) = (
+        std::fs::read_to_string(path),
+        serde_json::from_value::<AttemptRef>(key.clone()),
+    ) else {
+        return false;
+    };
+    super::sources::restore(&raw, namespace).is_ok_and(|snapshot| {
+        snapshot.retained_inputs.iter().any(|entry| {
+            matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
+                && entry.input.phase == HeadPhase::Reserved
+                && key.matches(&entry.input)
+        })
+    })
+}
