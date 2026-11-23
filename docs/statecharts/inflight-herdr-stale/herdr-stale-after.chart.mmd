@@ -1,0 +1,879 @@
+---
+title: "Herdr inflight row: stale-age verdict against the recorded pane"
+---
+stateDiagram-v2
+  s0: this process path-less row: turn running, row kept, fresh
+  s1: this process row: turn running, row kept, fresh
+  s2: this process path-less row: pane closed, row kept, fresh
+  s3: this process row: pane closed, row kept, fresh
+  s4: this process path-less row: turn running, replacing server lists none, row kept, fresh
+  s5: this process row: turn running, replacing server lists none, row kept, fresh
+  s6: this process path-less row: turn running, Herdr silent, row kept, fresh, after an outage
+  s7: this process path-less row: turn ended, pane idle, row kept, fresh
+  s8: this process path-less row: turn running, row kept
+  s9: this process row: turn running, Herdr silent, row kept, fresh, after an outage
+  s10: this process row: turn ended, pane idle, row kept, fresh
+  s11: this process row: turn running, row kept
+  s12: prior process path-less row: turn running, row kept, fresh
+  s13: prior process row: turn running, row kept, fresh
+  s14: this process path-less row: pane closed, replacing server lists none, row kept, fresh
+  s15: this process row: pane closed, replacing server lists none, row kept, fresh
+  s16: this process path-less row: pane closed, row deleted, fresh
+  s17: this process row: pane closed, row deleted, fresh
+  s18: this process path-less row: pane closed, Herdr silent, row kept, fresh, after an outage
+  s19: this process path-less row: pane closed, row kept
+  s20: this process row: pane closed, Herdr silent, row kept, fresh, after an outage
+  s21: this process row: pane closed, row kept
+  s22: prior process path-less row: pane closed, row kept, fresh
+  s23: prior process row: pane closed, row kept, fresh
+  s24: this process path-less row: turn running, replacing server lists none, row kept, fresh, after an outage
+  s25: this process path-less row: turn ended, pane idle, replacing server lists none, row kept, fresh
+  s26: this process path-less row: turn running, replacing server lists none, row kept
+  s27: this process row: turn running, replacing server lists none, row kept, fresh, after an outage
+  s28: this process row: turn ended, pane idle, replacing server lists none, row kept, fresh
+  s29: this process row: turn running, replacing server lists none, row kept
+  s30: prior process path-less row: turn running, replacing server lists none, row kept, fresh
+  s31: prior process row: turn running, replacing server lists none, row kept, fresh
+  s32: this process path-less row: turn ended, pane idle, row deleted, fresh
+  s33: this process row: turn ended, pane idle, row deleted, fresh
+  s34: this process path-less row: turn ended, pane idle, Herdr silent, row kept, fresh, after an outage
+  s35: this process path-less row: turn running, Herdr silent, row kept, after an outage
+  s36: this process path-less row: turn ended, pane idle, row kept
+  s37: this process path-less row: turn running, row kept, fresh, after an outage
+  s38: this process row: turn ended, pane idle, Herdr silent, row kept, fresh, after an outage
+  s39: this process row: turn running, Herdr silent, row kept, after an outage
+  s40: this process row: turn ended, pane idle, row kept
+  s41: this process row: turn running, row kept, fresh, after an outage
+  s42: prior process path-less row: turn running, Herdr silent, row kept, fresh, after an outage
+  s43: prior process path-less row: turn ended, pane idle, row kept, fresh
+  s44: prior process path-less row: turn running, row kept
+  s45: prior process row: turn running, Herdr silent, row kept, fresh, after an outage
+  s46: prior process row: turn ended, pane idle, row kept, fresh
+  s47: prior process row: turn running, row kept
+  s48: this process path-less row: pane closed, replacing server lists none, row deleted, fresh
+  s49: this process row: pane closed, replacing server lists none, row deleted, fresh
+  s50: this process path-less row: pane closed, replacing server lists none, row kept, fresh, after an outage
+  s51: this process path-less row: pane closed, replacing server lists none, row kept
+  s52: this process row: pane closed, replacing server lists none, row kept, fresh, after an outage
+  s53: this process row: pane closed, replacing server lists none, row kept
+  s54: prior process path-less row: pane closed, replacing server lists none, row kept, fresh
+  s55: prior process row: pane closed, replacing server lists none, row kept, fresh
+  s56: this process path-less row: pane closed, Herdr silent, row deleted, fresh, after an outage
+  s57: this process path-less row: pane closed, row deleted
+  s58: this process row: pane closed, Herdr silent, row deleted, fresh, after an outage
+  s59: this process row: pane closed, row deleted
+  s60: prior process path-less row: pane closed, row deleted, fresh
+  s61: prior process row: pane closed, row deleted, fresh
+  s62: this process path-less row: pane closed, Herdr silent, row kept, after an outage
+  s63: this process path-less row: pane closed, row kept, fresh, after an outage
+  s64: this process row: pane closed, Herdr silent, row kept, after an outage
+  s65: this process row: pane closed, row kept, fresh, after an outage
+  s66: prior process path-less row: pane closed, Herdr silent, row kept, fresh, after an outage
+  s67: prior process path-less row: pane closed, row kept
+  s68: prior process row: pane closed, Herdr silent, row kept, fresh, after an outage
+  s69: prior process row: pane closed, row kept
+  s70: this process path-less row: turn ended, pane idle, replacing server lists none, row deleted, fresh
+  s71: this process row: turn ended, pane idle, replacing server lists none, row deleted, fresh
+  s72: this process path-less row: turn ended, pane idle, replacing server lists none, row kept, fresh, after an outage
+  s73: this process path-less row: turn running, replacing server lists none, row kept, after an outage
+  s74: this process path-less row: turn ended, pane idle, replacing server lists none, row kept
+  s75: this process row: turn ended, pane idle, replacing server lists none, row kept, fresh, after an outage
+  s76: this process row: turn running, replacing server lists none, row kept, after an outage
+  s77: this process row: turn ended, pane idle, replacing server lists none, row kept
+  s78: prior process path-less row: turn running, replacing server lists none, row kept, fresh, after an outage
+  s79: prior process path-less row: turn ended, pane idle, replacing server lists none, row kept, fresh
+  s80: prior process path-less row: turn running, replacing server lists none, row kept
+  s81: prior process row: turn running, replacing server lists none, row kept, fresh, after an outage
+  s82: prior process row: turn ended, pane idle, replacing server lists none, row kept, fresh
+  s83: prior process row: turn running, replacing server lists none, row kept
+  s84: this process path-less row: turn ended, pane idle, Herdr silent, row deleted, fresh, after an outage
+  s85: this process path-less row: turn ended, pane idle, row deleted
+  s86: this process row: turn ended, pane idle, Herdr silent, row deleted, fresh, after an outage
+  s87: this process row: turn ended, pane idle, row deleted
+  s88: prior process path-less row: turn ended, pane idle, row deleted, fresh
+  s89: prior process row: turn ended, pane idle, row deleted, fresh
+  s90: this process path-less row: turn ended, pane idle, Herdr silent, row kept, after an outage
+  s91: this process path-less row: turn ended, pane idle, row kept, fresh, after an outage
+  s92: this process path-less row: turn running, row kept, after an outage
+  s93: this process row: turn ended, pane idle, Herdr silent, row kept, after an outage
+  s94: this process row: turn ended, pane idle, row kept, fresh, after an outage
+  s95: this process row: turn running, row kept, after an outage
+  s96: prior process path-less row: turn ended, pane idle, Herdr silent, row kept, fresh, after an outage
+  s97: prior process path-less row: turn running, Herdr silent, row kept, after an outage
+  s98: prior process path-less row: turn ended, pane idle, row kept
+  s99: prior process path-less row: turn running, row kept, fresh, after an outage
+  s100: prior process row: turn ended, pane idle, Herdr silent, row kept, fresh, after an outage
+  s101: prior process row: turn running, Herdr silent, row kept, after an outage
+  s102: prior process row: turn ended, pane idle, row kept
+  s103: prior process row: turn running, row kept, fresh, after an outage
+  s104: this process path-less row: pane closed, replacing server lists none, row deleted, fresh, after an outage
+  s105: this process path-less row: pane closed, replacing server lists none, row deleted
+  s106: this process row: pane closed, replacing server lists none, row deleted, fresh, after an outage
+  s107: this process row: pane closed, replacing server lists none, row deleted
+  s108: prior process path-less row: pane closed, replacing server lists none, row deleted, fresh
+  s109: prior process row: pane closed, replacing server lists none, row deleted, fresh
+  s110: this process path-less row: pane closed, replacing server lists none, row kept, after an outage
+  s111: this process row: pane closed, replacing server lists none, row kept, after an outage
+  s112: prior process path-less row: pane closed, replacing server lists none, row kept, fresh, after an outage
+  s113: prior process path-less row: pane closed, replacing server lists none, row kept
+  s114: prior process row: pane closed, replacing server lists none, row kept, fresh, after an outage
+  s115: prior process row: pane closed, replacing server lists none, row kept
+  s116: this process path-less row: pane closed, Herdr silent, row deleted, after an outage
+  s117: this process path-less row: pane closed, row deleted, fresh, after an outage
+  s118: this process row: pane closed, Herdr silent, row deleted, after an outage
+  s119: this process row: pane closed, row deleted, fresh, after an outage
+  s120: prior process path-less row: pane closed, Herdr silent, row deleted, fresh, after an outage
+  s121: prior process path-less row: pane closed, row deleted
+  s122: prior process row: pane closed, Herdr silent, row deleted, fresh, after an outage
+  s123: prior process row: pane closed, row deleted
+  s124: prior process row: pane closed, row hidden from scans
+  s125: this process path-less row: pane closed, row kept, after an outage
+  s126: this process row: pane closed, row kept, after an outage
+  s127: prior process path-less row: pane closed, Herdr silent, row kept, after an outage
+  s128: prior process path-less row: pane closed, row kept, fresh, after an outage
+  s129: prior process row: pane closed, Herdr silent, row kept, after an outage
+  s130: prior process row: pane closed, row kept, fresh, after an outage
+  s131: this process path-less row: turn ended, pane idle, replacing server lists none, row deleted, fresh, after an outage
+  s132: this process path-less row: turn ended, pane idle, replacing server lists none, row deleted
+  s133: this process row: turn ended, pane idle, replacing server lists none, row deleted, fresh, after an outage
+  s134: this process row: turn ended, pane idle, replacing server lists none, row deleted
+  s135: prior process path-less row: turn ended, pane idle, replacing server lists none, row deleted, fresh
+  s136: prior process row: turn ended, pane idle, replacing server lists none, row deleted, fresh
+  s137: this process path-less row: turn ended, pane idle, replacing server lists none, row kept, after an outage
+  s138: this process row: turn ended, pane idle, replacing server lists none, row kept, after an outage
+  s139: prior process path-less row: turn ended, pane idle, replacing server lists none, row kept, fresh, after an outage
+  s140: prior process path-less row: turn running, replacing server lists none, row kept, after an outage
+  s141: prior process path-less row: turn ended, pane idle, replacing server lists none, row kept
+  s142: prior process row: turn ended, pane idle, replacing server lists none, row kept, fresh, after an outage
+  s143: prior process row: turn running, replacing server lists none, row kept, after an outage
+  s144: prior process row: turn ended, pane idle, replacing server lists none, row kept
+  s145: this process path-less row: turn ended, pane idle, Herdr silent, row deleted, after an outage
+  s146: this process path-less row: turn ended, pane idle, row deleted, fresh, after an outage
+  s147: this process row: turn ended, pane idle, Herdr silent, row deleted, after an outage
+  s148: this process row: turn ended, pane idle, row deleted, fresh, after an outage
+  s149: prior process path-less row: turn ended, pane idle, Herdr silent, row deleted, fresh, after an outage
+  s150: prior process path-less row: turn ended, pane idle, row deleted
+  s151: prior process row: turn ended, pane idle, Herdr silent, row deleted, fresh, after an outage
+  s152: prior process row: turn ended, pane idle, row deleted
+  s153: this process path-less row: turn ended, pane idle, row kept, after an outage
+  s154: this process row: turn ended, pane idle, row kept, after an outage
+  s155: prior process path-less row: turn ended, pane idle, Herdr silent, row kept, after an outage
+  s156: prior process path-less row: turn ended, pane idle, row kept, fresh, after an outage
+  s157: prior process path-less row: turn running, row kept, after an outage
+  s158: prior process row: turn ended, pane idle, Herdr silent, row kept, after an outage
+  s159: prior process row: turn ended, pane idle, row kept, fresh, after an outage
+  s160: prior process row: turn running, row kept, after an outage
+  s161: this process path-less row: pane closed, replacing server lists none, row deleted, after an outage
+  s162: this process row: pane closed, replacing server lists none, row deleted, after an outage
+  s163: prior process path-less row: pane closed, replacing server lists none, row deleted, fresh, after an outage
+  s164: prior process path-less row: pane closed, replacing server lists none, row deleted
+  s165: prior process row: pane closed, replacing server lists none, row deleted, fresh, after an outage
+  s166: prior process row: pane closed, replacing server lists none, row deleted
+  s167: prior process row: pane closed, replacing server lists none, row hidden from scans
+  s168: prior process path-less row: pane closed, replacing server lists none, row kept, after an outage
+  s169: prior process row: pane closed, replacing server lists none, row kept, after an outage
+  s170: this process path-less row: pane closed, row deleted, after an outage
+  s171: this process row: pane closed, row deleted, after an outage
+  s172: prior process path-less row: pane closed, Herdr silent, row deleted, after an outage
+  s173: prior process path-less row: pane closed, row deleted, fresh, after an outage
+  s174: prior process row: pane closed, Herdr silent, row deleted, after an outage
+  s175: prior process row: pane closed, row deleted, fresh, after an outage
+  s176: prior process row: pane closed, Herdr silent, row hidden from scans, after an outage
+  s177: prior process path-less row: pane closed, row kept, after an outage
+  s178: prior process row: pane closed, row kept, after an outage
+  s179: this process path-less row: turn ended, pane idle, replacing server lists none, row deleted, after an outage
+  s180: this process row: turn ended, pane idle, replacing server lists none, row deleted, after an outage
+  s181: prior process path-less row: turn ended, pane idle, replacing server lists none, row deleted, fresh, after an outage
+  s182: prior process path-less row: turn ended, pane idle, replacing server lists none, row deleted
+  s183: prior process row: turn ended, pane idle, replacing server lists none, row deleted, fresh, after an outage
+  s184: prior process row: turn ended, pane idle, replacing server lists none, row deleted
+  s185: prior process path-less row: turn ended, pane idle, replacing server lists none, row kept, after an outage
+  s186: prior process row: turn ended, pane idle, replacing server lists none, row kept, after an outage
+  s187: this process path-less row: turn ended, pane idle, row deleted, after an outage
+  s188: this process row: turn ended, pane idle, row deleted, after an outage
+  s189: prior process path-less row: turn ended, pane idle, Herdr silent, row deleted, after an outage
+  s190: prior process path-less row: turn ended, pane idle, row deleted, fresh, after an outage
+  s191: prior process row: turn ended, pane idle, Herdr silent, row deleted, after an outage
+  s192: prior process row: turn ended, pane idle, row deleted, fresh, after an outage
+  s193: prior process path-less row: turn ended, pane idle, row kept, after an outage
+  s194: prior process row: turn ended, pane idle, row kept, after an outage
+  s195: prior process path-less row: pane closed, replacing server lists none, row deleted, after an outage
+  s196: prior process row: pane closed, replacing server lists none, row deleted, after an outage
+  s197: prior process row: pane closed, replacing server lists none, row hidden from scans, after an outage
+  s198: prior process path-less row: pane closed, row deleted, after an outage
+  s199: prior process row: pane closed, row deleted, after an outage
+  s200: prior process row: pane closed, row hidden from scans, after an outage
+  s201: prior process path-less row: turn ended, pane idle, replacing server lists none, row deleted, after an outage
+  s202: prior process row: turn ended, pane idle, replacing server lists none, row deleted, after an outage
+  s203: prior process path-less row: turn ended, pane idle, row deleted, after an outage
+  s204: prior process row: turn ended, pane idle, row deleted, after an outage
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: pane closed or retired
+  s0 --> s4: another server answers with no panes
+  s0 --> s6: Herdr stops answering
+  s0 --> s7: turn finishes
+  s0 --> s8: row passes stale age
+  s0 --> s12: dcserver restarts (boot reaper)
+  s1 --> s3: pane closed or retired
+  s1 --> s5: another server answers with no panes
+  s1 --> s9: Herdr stops answering
+  s1 --> s10: turn finishes
+  s1 --> s11: row passes stale age
+  s1 --> s13: dcserver restarts (boot reaper)
+  s2 --> s14: another server answers with no panes
+  s2 --> s16: owner finalizes its turn
+  s2 --> s18: Herdr stops answering
+  s2 --> s19: row passes stale age
+  s2 --> s22: dcserver restarts (boot reaper)
+  s3 --> s15: another server answers with no panes
+  s3 --> s17: owner finalizes its turn
+  s3 --> s20: Herdr stops answering
+  s3 --> s21: row passes stale age
+  s3 --> s23: dcserver restarts (boot reaper)
+  s4 --> s14: pane closed or retired
+  s4 --> s24: Herdr stops answering
+  s4 --> s25: turn finishes
+  s4 --> s26: row passes stale age
+  s4 --> s30: dcserver restarts (boot reaper)
+  s5 --> s15: pane closed or retired
+  s5 --> s27: Herdr stops answering
+  s5 --> s28: turn finishes
+  s5 --> s29: row passes stale age
+  s5 --> s31: dcserver restarts (boot reaper)
+  s6 --> s18: pane closed or retired
+  s6 --> s24: another server answers with no panes
+  s6 --> s34: turn finishes
+  s6 --> s35: row passes stale age
+  s6 --> s37: Herdr answers again
+  s6 --> s42: dcserver restarts (boot reaper)
+  s7 --> s2: pane closed or retired
+  s7 --> s25: another server answers with no panes
+  s7 --> s32: owner finalizes its turn
+  s7 --> s34: Herdr stops answering
+  s7 --> s36: row passes stale age
+  s7 --> s43: dcserver restarts (boot reaper)
+  s8 --> s19: pane closed or retired
+  s8 --> s26: another server answers with no panes
+  s8 --> s35: Herdr stops answering
+  s8 --> s36: turn finishes
+  s8 --> s44: dcserver restarts (boot reaper)
+  s9 --> s20: pane closed or retired
+  s9 --> s27: another server answers with no panes
+  s9 --> s38: turn finishes
+  s9 --> s39: row passes stale age
+  s9 --> s41: Herdr answers again
+  s9 --> s45: dcserver restarts (boot reaper)
+  s10 --> s3: pane closed or retired
+  s10 --> s28: another server answers with no panes
+  s10 --> s33: owner finalizes its turn
+  s10 --> s38: Herdr stops answering
+  s10 --> s40: row passes stale age
+  s10 --> s46: dcserver restarts (boot reaper)
+  s11 --> s21: pane closed or retired
+  s11 --> s29: another server answers with no panes
+  s11 --> s39: Herdr stops answering
+  s11 --> s40: turn finishes
+  s11 --> s47: dcserver restarts (boot reaper)
+  s12 --> s22: pane closed or retired
+  s12 --> s30: another server answers with no panes
+  s12 --> s42: Herdr stops answering
+  s12 --> s43: turn finishes
+  s12 --> s44: row passes stale age
+  s13 --> s23: pane closed or retired
+  s13 --> s31: another server answers with no panes
+  s13 --> s45: Herdr stops answering
+  s13 --> s46: turn finishes
+  s13 --> s47: row passes stale age
+  s14 --> s48: owner finalizes its turn
+  s14 --> s50: Herdr stops answering
+  s14 --> s51: row passes stale age
+  s14 --> s54: dcserver restarts (boot reaper)
+  s15 --> s49: owner finalizes its turn
+  s15 --> s52: Herdr stops answering
+  s15 --> s53: row passes stale age
+  s15 --> s55: dcserver restarts (boot reaper)
+  s16 --> s48: another server answers with no panes
+  s16 --> s56: Herdr stops answering
+  s16 --> s57: row passes stale age
+  s16 --> s60: dcserver restarts (boot reaper)
+  s17 --> s49: another server answers with no panes
+  s17 --> s58: Herdr stops answering
+  s17 --> s59: row passes stale age
+  s17 --> s61: dcserver restarts (boot reaper)
+  s18 --> s50: another server answers with no panes
+  s18 --> s56: owner finalizes its turn
+  s18 --> s62: row passes stale age
+  s18 --> s63: Herdr answers again
+  s18 --> s66: dcserver restarts (boot reaper)
+  s19 --> s51: another server answers with no panes
+  s19 --> s57: owner finalizes its turn
+  s19 --> s62: Herdr stops answering
+  s19 --> s67: dcserver restarts (boot reaper)
+  s20 --> s52: another server answers with no panes
+  s20 --> s58: owner finalizes its turn
+  s20 --> s64: row passes stale age
+  s20 --> s65: Herdr answers again
+  s20 --> s68: dcserver restarts (boot reaper)
+  s21 --> s53: another server answers with no panes
+  s21 --> s59: owner finalizes its turn
+  s21 --> s64: Herdr stops answering
+  s21 --> s69: dcserver restarts (boot reaper)
+  s22 --> s54: another server answers with no panes
+  s22 --> s60: Herdr row-end pass settles row
+  s22 --> s66: Herdr stops answering
+  s22 --> s67: row passes stale age
+  s23 --> s55: another server answers with no panes
+  s23 --> s68: Herdr stops answering
+  s23 --> s69: row passes stale age
+  s24 --> s50: pane closed or retired
+  s24 --> s72: turn finishes
+  s24 --> s73: row passes stale age
+  s24 --> s78: dcserver restarts (boot reaper)
+  s25 --> s14: pane closed or retired
+  s25 --> s70: owner finalizes its turn
+  s25 --> s72: Herdr stops answering
+  s25 --> s74: row passes stale age
+  s25 --> s79: dcserver restarts (boot reaper)
+  s26 --> s51: pane closed or retired
+  s26 --> s73: Herdr stops answering
+  s26 --> s74: turn finishes
+  s26 --> s80: dcserver restarts (boot reaper)
+  s27 --> s52: pane closed or retired
+  s27 --> s75: turn finishes
+  s27 --> s76: row passes stale age
+  s27 --> s81: dcserver restarts (boot reaper)
+  s28 --> s15: pane closed or retired
+  s28 --> s71: owner finalizes its turn
+  s28 --> s75: Herdr stops answering
+  s28 --> s77: row passes stale age
+  s28 --> s82: dcserver restarts (boot reaper)
+  s29 --> s53: pane closed or retired
+  s29 --> s76: Herdr stops answering
+  s29 --> s77: turn finishes
+  s29 --> s83: dcserver restarts (boot reaper)
+  s30 --> s54: pane closed or retired
+  s30 --> s78: Herdr stops answering
+  s30 --> s79: turn finishes
+  s30 --> s80: row passes stale age
+  s31 --> s55: pane closed or retired
+  s31 --> s81: Herdr stops answering
+  s31 --> s82: turn finishes
+  s31 --> s83: row passes stale age
+  s32 --> s16: pane closed or retired
+  s32 --> s70: another server answers with no panes
+  s32 --> s84: Herdr stops answering
+  s32 --> s85: row passes stale age
+  s32 --> s88: dcserver restarts (boot reaper)
+  s33 --> s17: pane closed or retired
+  s33 --> s71: another server answers with no panes
+  s33 --> s86: Herdr stops answering
+  s33 --> s87: row passes stale age
+  s33 --> s89: dcserver restarts (boot reaper)
+  s34 --> s18: pane closed or retired
+  s34 --> s72: another server answers with no panes
+  s34 --> s84: owner finalizes its turn
+  s34 --> s90: row passes stale age
+  s34 --> s91: Herdr answers again
+  s34 --> s96: dcserver restarts (boot reaper)
+  s35 --> s62: pane closed or retired
+  s35 --> s73: another server answers with no panes
+  s35 --> s90: turn finishes
+  s35 --> s92: Herdr answers again
+  s35 --> s97: dcserver restarts (boot reaper)
+  s36 --> s19: pane closed or retired
+  s36 --> s74: another server answers with no panes
+  s36 --> s85: owner finalizes its turn
+  s36 --> s90: Herdr stops answering
+  s36 --> s98: dcserver restarts (boot reaper)
+  s37 --> s63: pane closed or retired
+  s37 --> s24: another server answers with no panes
+  s37 --> s91: turn finishes
+  s37 --> s92: row passes stale age
+  s37 --> s99: dcserver restarts (boot reaper)
+  s38 --> s20: pane closed or retired
+  s38 --> s75: another server answers with no panes
+  s38 --> s86: owner finalizes its turn
+  s38 --> s93: row passes stale age
+  s38 --> s94: Herdr answers again
+  s38 --> s100: dcserver restarts (boot reaper)
+  s39 --> s64: pane closed or retired
+  s39 --> s76: another server answers with no panes
+  s39 --> s93: turn finishes
+  s39 --> s95: Herdr answers again
+  s39 --> s101: dcserver restarts (boot reaper)
+  s40 --> s21: pane closed or retired
+  s40 --> s77: another server answers with no panes
+  s40 --> s87: owner finalizes its turn
+  s40 --> s93: Herdr stops answering
+  s40 --> s102: dcserver restarts (boot reaper)
+  s41 --> s65: pane closed or retired
+  s41 --> s27: another server answers with no panes
+  s41 --> s94: turn finishes
+  s41 --> s95: row passes stale age
+  s41 --> s103: dcserver restarts (boot reaper)
+  s42 --> s66: pane closed or retired
+  s42 --> s78: another server answers with no panes
+  s42 --> s96: turn finishes
+  s42 --> s97: row passes stale age
+  s42 --> s99: Herdr answers again
+  s43 --> s22: pane closed or retired
+  s43 --> s79: another server answers with no panes
+  s43 --> s88: Herdr row-end pass settles row
+  s43 --> s96: Herdr stops answering
+  s43 --> s98: row passes stale age
+  s44 --> s67: pane closed or retired
+  s44 --> s80: another server answers with no panes
+  s44 --> s97: Herdr stops answering
+  s44 --> s98: turn finishes
+  s45 --> s68: pane closed or retired
+  s45 --> s81: another server answers with no panes
+  s45 --> s100: turn finishes
+  s45 --> s101: row passes stale age
+  s45 --> s103: Herdr answers again
+  s46 --> s23: pane closed or retired
+  s46 --> s82: another server answers with no panes
+  s46 --> s100: Herdr stops answering
+  s46 --> s102: row passes stale age
+  s47 --> s69: pane closed or retired
+  s47 --> s83: another server answers with no panes
+  s47 --> s101: Herdr stops answering
+  s47 --> s102: turn finishes
+  s48 --> s104: Herdr stops answering
+  s48 --> s105: row passes stale age
+  s48 --> s108: dcserver restarts (boot reaper)
+  s49 --> s106: Herdr stops answering
+  s49 --> s107: row passes stale age
+  s49 --> s109: dcserver restarts (boot reaper)
+  s50 --> s104: owner finalizes its turn
+  s50 --> s110: row passes stale age
+  s50 --> s112: dcserver restarts (boot reaper)
+  s51 --> s105: owner finalizes its turn
+  s51 --> s110: Herdr stops answering
+  s51 --> s113: dcserver restarts (boot reaper)
+  s52 --> s106: owner finalizes its turn
+  s52 --> s111: row passes stale age
+  s52 --> s114: dcserver restarts (boot reaper)
+  s53 --> s107: owner finalizes its turn
+  s53 --> s111: Herdr stops answering
+  s53 --> s115: dcserver restarts (boot reaper)
+  s54 --> s108: Herdr row-end pass settles row
+  s54 --> s112: Herdr stops answering
+  s54 --> s113: row passes stale age
+  s55 --> s114: Herdr stops answering
+  s55 --> s115: row passes stale age
+  s56 --> s104: another server answers with no panes
+  s56 --> s116: row passes stale age
+  s56 --> s117: Herdr answers again
+  s56 --> s120: dcserver restarts (boot reaper)
+  s57 --> s105: another server answers with no panes
+  s57 --> s116: Herdr stops answering
+  s57 --> s121: dcserver restarts (boot reaper)
+  s58 --> s106: another server answers with no panes
+  s58 --> s118: row passes stale age
+  s58 --> s119: Herdr answers again
+  s58 --> s122: dcserver restarts (boot reaper)
+  s59 --> s107: another server answers with no panes
+  s59 --> s118: Herdr stops answering
+  s59 --> s123: dcserver restarts (boot reaper)
+  s60 --> s108: another server answers with no panes
+  s60 --> s120: Herdr stops answering
+  s60 --> s121: row passes stale age
+  s61 --> s109: another server answers with no panes
+  s61 --> s122: Herdr stops answering
+  s61 --> s123: row passes stale age
+  s62 --> s110: another server answers with no panes
+  s62 --> s116: owner finalizes its turn
+  s62 --> s125: Herdr answers again
+  s62 --> s127: dcserver restarts (boot reaper)
+  s63 --> s50: another server answers with no panes
+  s63 --> s117: owner finalizes its turn
+  s63 --> s125: row passes stale age
+  s63 --> s128: dcserver restarts (boot reaper)
+  s64 --> s111: another server answers with no panes
+  s64 --> s118: owner finalizes its turn
+  s64 --> s126: Herdr answers again
+  s64 --> s129: dcserver restarts (boot reaper)
+  s65 --> s52: another server answers with no panes
+  s65 --> s119: owner finalizes its turn
+  s65 --> s126: row passes stale age
+  s65 --> s130: dcserver restarts (boot reaper)
+  s66 --> s112: another server answers with no panes
+  s66 --> s120: Herdr row-end pass settles row
+  s66 --> s127: row passes stale age
+  s66 --> s128: Herdr answers again
+  s67 --> s113: another server answers with no panes
+  s67 --> s121: Herdr row-end pass settles row
+  s67 --> s127: Herdr stops answering
+  s68 --> s114: another server answers with no panes
+  s68 --> s129: row passes stale age
+  s68 --> s130: Herdr answers again
+  s69 --> s115: another server answers with no panes
+  s69 --> s124: stale check reads pane gone
+  s69 --> s129: Herdr stops answering
+  s70 --> s48: pane closed or retired
+  s70 --> s131: Herdr stops answering
+  s70 --> s132: row passes stale age
+  s70 --> s135: dcserver restarts (boot reaper)
+  s71 --> s49: pane closed or retired
+  s71 --> s133: Herdr stops answering
+  s71 --> s134: row passes stale age
+  s71 --> s136: dcserver restarts (boot reaper)
+  s72 --> s50: pane closed or retired
+  s72 --> s131: owner finalizes its turn
+  s72 --> s137: row passes stale age
+  s72 --> s139: dcserver restarts (boot reaper)
+  s73 --> s110: pane closed or retired
+  s73 --> s137: turn finishes
+  s73 --> s140: dcserver restarts (boot reaper)
+  s74 --> s51: pane closed or retired
+  s74 --> s132: owner finalizes its turn
+  s74 --> s137: Herdr stops answering
+  s74 --> s141: dcserver restarts (boot reaper)
+  s75 --> s52: pane closed or retired
+  s75 --> s133: owner finalizes its turn
+  s75 --> s138: row passes stale age
+  s75 --> s142: dcserver restarts (boot reaper)
+  s76 --> s111: pane closed or retired
+  s76 --> s138: turn finishes
+  s76 --> s143: dcserver restarts (boot reaper)
+  s77 --> s53: pane closed or retired
+  s77 --> s134: owner finalizes its turn
+  s77 --> s138: Herdr stops answering
+  s77 --> s144: dcserver restarts (boot reaper)
+  s78 --> s112: pane closed or retired
+  s78 --> s139: turn finishes
+  s78 --> s140: row passes stale age
+  s79 --> s54: pane closed or retired
+  s79 --> s135: Herdr row-end pass settles row
+  s79 --> s139: Herdr stops answering
+  s79 --> s141: row passes stale age
+  s80 --> s113: pane closed or retired
+  s80 --> s140: Herdr stops answering
+  s80 --> s141: turn finishes
+  s81 --> s114: pane closed or retired
+  s81 --> s142: turn finishes
+  s81 --> s143: row passes stale age
+  s82 --> s55: pane closed or retired
+  s82 --> s142: Herdr stops answering
+  s82 --> s144: row passes stale age
+  s83 --> s115: pane closed or retired
+  s83 --> s143: Herdr stops answering
+  s83 --> s144: turn finishes
+  s84 --> s56: pane closed or retired
+  s84 --> s131: another server answers with no panes
+  s84 --> s145: row passes stale age
+  s84 --> s146: Herdr answers again
+  s84 --> s149: dcserver restarts (boot reaper)
+  s85 --> s57: pane closed or retired
+  s85 --> s132: another server answers with no panes
+  s85 --> s145: Herdr stops answering
+  s85 --> s150: dcserver restarts (boot reaper)
+  s86 --> s58: pane closed or retired
+  s86 --> s133: another server answers with no panes
+  s86 --> s147: row passes stale age
+  s86 --> s148: Herdr answers again
+  s86 --> s151: dcserver restarts (boot reaper)
+  s87 --> s59: pane closed or retired
+  s87 --> s134: another server answers with no panes
+  s87 --> s147: Herdr stops answering
+  s87 --> s152: dcserver restarts (boot reaper)
+  s88 --> s60: pane closed or retired
+  s88 --> s135: another server answers with no panes
+  s88 --> s149: Herdr stops answering
+  s88 --> s150: row passes stale age
+  s89 --> s61: pane closed or retired
+  s89 --> s136: another server answers with no panes
+  s89 --> s151: Herdr stops answering
+  s89 --> s152: row passes stale age
+  s90 --> s62: pane closed or retired
+  s90 --> s137: another server answers with no panes
+  s90 --> s145: owner finalizes its turn
+  s90 --> s153: Herdr answers again
+  s90 --> s155: dcserver restarts (boot reaper)
+  s91 --> s63: pane closed or retired
+  s91 --> s72: another server answers with no panes
+  s91 --> s146: owner finalizes its turn
+  s91 --> s153: row passes stale age
+  s91 --> s156: dcserver restarts (boot reaper)
+  s92 --> s125: pane closed or retired
+  s92 --> s73: another server answers with no panes
+  s92 --> s153: turn finishes
+  s92 --> s157: dcserver restarts (boot reaper)
+  s93 --> s64: pane closed or retired
+  s93 --> s138: another server answers with no panes
+  s93 --> s147: owner finalizes its turn
+  s93 --> s154: Herdr answers again
+  s93 --> s158: dcserver restarts (boot reaper)
+  s94 --> s65: pane closed or retired
+  s94 --> s75: another server answers with no panes
+  s94 --> s148: owner finalizes its turn
+  s94 --> s154: row passes stale age
+  s94 --> s159: dcserver restarts (boot reaper)
+  s95 --> s126: pane closed or retired
+  s95 --> s76: another server answers with no panes
+  s95 --> s154: turn finishes
+  s95 --> s160: dcserver restarts (boot reaper)
+  s96 --> s66: pane closed or retired
+  s96 --> s139: another server answers with no panes
+  s96 --> s149: Herdr row-end pass settles row
+  s96 --> s155: row passes stale age
+  s96 --> s156: Herdr answers again
+  s97 --> s127: pane closed or retired
+  s97 --> s140: another server answers with no panes
+  s97 --> s155: turn finishes
+  s97 --> s157: Herdr answers again
+  s98 --> s67: pane closed or retired
+  s98 --> s141: another server answers with no panes
+  s98 --> s150: Herdr row-end pass settles row
+  s98 --> s155: Herdr stops answering
+  s99 --> s128: pane closed or retired
+  s99 --> s78: another server answers with no panes
+  s99 --> s156: turn finishes
+  s99 --> s157: row passes stale age
+  s100 --> s68: pane closed or retired
+  s100 --> s142: another server answers with no panes
+  s100 --> s158: row passes stale age
+  s100 --> s159: Herdr answers again
+  s101 --> s129: pane closed or retired
+  s101 --> s143: another server answers with no panes
+  s101 --> s158: turn finishes
+  s101 --> s160: Herdr answers again
+  s102 --> s69: pane closed or retired
+  s102 --> s144: another server answers with no panes
+  s102 --> s158: Herdr stops answering
+  s103 --> s130: pane closed or retired
+  s103 --> s81: another server answers with no panes
+  s103 --> s159: turn finishes
+  s103 --> s160: row passes stale age
+  s104 --> s161: row passes stale age
+  s104 --> s163: dcserver restarts (boot reaper)
+  s105 --> s161: Herdr stops answering
+  s105 --> s164: dcserver restarts (boot reaper)
+  s106 --> s162: row passes stale age
+  s106 --> s165: dcserver restarts (boot reaper)
+  s107 --> s162: Herdr stops answering
+  s107 --> s166: dcserver restarts (boot reaper)
+  s108 --> s163: Herdr stops answering
+  s108 --> s164: row passes stale age
+  s109 --> s165: Herdr stops answering
+  s109 --> s166: row passes stale age
+  s110 --> s161: owner finalizes its turn
+  s110 --> s168: dcserver restarts (boot reaper)
+  s111 --> s162: owner finalizes its turn
+  s111 --> s169: dcserver restarts (boot reaper)
+  s112 --> s163: Herdr row-end pass settles row
+  s112 --> s168: row passes stale age
+  s113 --> s164: Herdr row-end pass settles row
+  s113 --> s168: Herdr stops answering
+  s114 --> s169: row passes stale age
+  s115 --> s169: Herdr stops answering
+  s116 --> s161: another server answers with no panes
+  s116 --> s170: Herdr answers again
+  s116 --> s172: dcserver restarts (boot reaper)
+  s117 --> s104: another server answers with no panes
+  s117 --> s170: row passes stale age
+  s117 --> s173: dcserver restarts (boot reaper)
+  s118 --> s162: another server answers with no panes
+  s118 --> s171: Herdr answers again
+  s118 --> s174: dcserver restarts (boot reaper)
+  s119 --> s106: another server answers with no panes
+  s119 --> s171: row passes stale age
+  s119 --> s175: dcserver restarts (boot reaper)
+  s120 --> s163: another server answers with no panes
+  s120 --> s172: row passes stale age
+  s120 --> s173: Herdr answers again
+  s121 --> s164: another server answers with no panes
+  s121 --> s172: Herdr stops answering
+  s122 --> s165: another server answers with no panes
+  s122 --> s174: row passes stale age
+  s122 --> s175: Herdr answers again
+  s123 --> s166: another server answers with no panes
+  s123 --> s174: Herdr stops answering
+  s124 --> s167: another server answers with no panes
+  s124 --> s176: Herdr stops answering
+  s125 --> s110: another server answers with no panes
+  s125 --> s170: owner finalizes its turn
+  s125 --> s177: dcserver restarts (boot reaper)
+  s126 --> s111: another server answers with no panes
+  s126 --> s171: owner finalizes its turn
+  s126 --> s178: dcserver restarts (boot reaper)
+  s127 --> s168: another server answers with no panes
+  s127 --> s172: Herdr row-end pass settles row
+  s127 --> s177: Herdr answers again
+  s128 --> s112: another server answers with no panes
+  s128 --> s173: Herdr row-end pass settles row
+  s128 --> s177: row passes stale age
+  s129 --> s169: another server answers with no panes
+  s129 --> s178: Herdr answers again
+  s130 --> s114: another server answers with no panes
+  s130 --> s178: row passes stale age
+  s131 --> s104: pane closed or retired
+  s131 --> s179: row passes stale age
+  s131 --> s181: dcserver restarts (boot reaper)
+  s132 --> s105: pane closed or retired
+  s132 --> s179: Herdr stops answering
+  s132 --> s182: dcserver restarts (boot reaper)
+  s133 --> s106: pane closed or retired
+  s133 --> s180: row passes stale age
+  s133 --> s183: dcserver restarts (boot reaper)
+  s134 --> s107: pane closed or retired
+  s134 --> s180: Herdr stops answering
+  s134 --> s184: dcserver restarts (boot reaper)
+  s135 --> s108: pane closed or retired
+  s135 --> s181: Herdr stops answering
+  s135 --> s182: row passes stale age
+  s136 --> s109: pane closed or retired
+  s136 --> s183: Herdr stops answering
+  s136 --> s184: row passes stale age
+  s137 --> s110: pane closed or retired
+  s137 --> s179: owner finalizes its turn
+  s137 --> s185: dcserver restarts (boot reaper)
+  s138 --> s111: pane closed or retired
+  s138 --> s180: owner finalizes its turn
+  s138 --> s186: dcserver restarts (boot reaper)
+  s139 --> s112: pane closed or retired
+  s139 --> s181: Herdr row-end pass settles row
+  s139 --> s185: row passes stale age
+  s140 --> s168: pane closed or retired
+  s140 --> s185: turn finishes
+  s141 --> s113: pane closed or retired
+  s141 --> s182: Herdr row-end pass settles row
+  s141 --> s185: Herdr stops answering
+  s142 --> s114: pane closed or retired
+  s142 --> s186: row passes stale age
+  s143 --> s169: pane closed or retired
+  s143 --> s186: turn finishes
+  s144 --> s115: pane closed or retired
+  s144 --> s186: Herdr stops answering
+  s145 --> s116: pane closed or retired
+  s145 --> s179: another server answers with no panes
+  s145 --> s187: Herdr answers again
+  s145 --> s189: dcserver restarts (boot reaper)
+  s146 --> s117: pane closed or retired
+  s146 --> s131: another server answers with no panes
+  s146 --> s187: row passes stale age
+  s146 --> s190: dcserver restarts (boot reaper)
+  s147 --> s118: pane closed or retired
+  s147 --> s180: another server answers with no panes
+  s147 --> s188: Herdr answers again
+  s147 --> s191: dcserver restarts (boot reaper)
+  s148 --> s119: pane closed or retired
+  s148 --> s133: another server answers with no panes
+  s148 --> s188: row passes stale age
+  s148 --> s192: dcserver restarts (boot reaper)
+  s149 --> s120: pane closed or retired
+  s149 --> s181: another server answers with no panes
+  s149 --> s189: row passes stale age
+  s149 --> s190: Herdr answers again
+  s150 --> s121: pane closed or retired
+  s150 --> s182: another server answers with no panes
+  s150 --> s189: Herdr stops answering
+  s151 --> s122: pane closed or retired
+  s151 --> s183: another server answers with no panes
+  s151 --> s191: row passes stale age
+  s151 --> s192: Herdr answers again
+  s152 --> s123: pane closed or retired
+  s152 --> s184: another server answers with no panes
+  s152 --> s191: Herdr stops answering
+  s153 --> s125: pane closed or retired
+  s153 --> s137: another server answers with no panes
+  s153 --> s187: owner finalizes its turn
+  s153 --> s193: dcserver restarts (boot reaper)
+  s154 --> s126: pane closed or retired
+  s154 --> s138: another server answers with no panes
+  s154 --> s188: owner finalizes its turn
+  s154 --> s194: dcserver restarts (boot reaper)
+  s155 --> s127: pane closed or retired
+  s155 --> s185: another server answers with no panes
+  s155 --> s189: Herdr row-end pass settles row
+  s155 --> s193: Herdr answers again
+  s156 --> s128: pane closed or retired
+  s156 --> s139: another server answers with no panes
+  s156 --> s190: Herdr row-end pass settles row
+  s156 --> s193: row passes stale age
+  s157 --> s177: pane closed or retired
+  s157 --> s140: another server answers with no panes
+  s157 --> s193: turn finishes
+  s158 --> s129: pane closed or retired
+  s158 --> s186: another server answers with no panes
+  s158 --> s194: Herdr answers again
+  s159 --> s130: pane closed or retired
+  s159 --> s142: another server answers with no panes
+  s159 --> s194: row passes stale age
+  s160 --> s178: pane closed or retired
+  s160 --> s143: another server answers with no panes
+  s160 --> s194: turn finishes
+  s161 --> s195: dcserver restarts (boot reaper)
+  s162 --> s196: dcserver restarts (boot reaper)
+  s163 --> s195: row passes stale age
+  s164 --> s195: Herdr stops answering
+  s165 --> s196: row passes stale age
+  s166 --> s196: Herdr stops answering
+  s167 --> s197: Herdr stops answering
+  s168 --> s195: Herdr row-end pass settles row
+  s170 --> s161: another server answers with no panes
+  s170 --> s198: dcserver restarts (boot reaper)
+  s171 --> s162: another server answers with no panes
+  s171 --> s199: dcserver restarts (boot reaper)
+  s172 --> s195: another server answers with no panes
+  s172 --> s198: Herdr answers again
+  s173 --> s163: another server answers with no panes
+  s173 --> s198: row passes stale age
+  s174 --> s196: another server answers with no panes
+  s174 --> s199: Herdr answers again
+  s175 --> s165: another server answers with no panes
+  s175 --> s199: row passes stale age
+  s176 --> s197: another server answers with no panes
+  s176 --> s200: Herdr answers again
+  s177 --> s168: another server answers with no panes
+  s177 --> s198: Herdr row-end pass settles row
+  s178 --> s169: another server answers with no panes
+  s178 --> s200: stale check reads pane gone
+  s179 --> s161: pane closed or retired
+  s179 --> s201: dcserver restarts (boot reaper)
+  s180 --> s162: pane closed or retired
+  s180 --> s202: dcserver restarts (boot reaper)
+  s181 --> s163: pane closed or retired
+  s181 --> s201: row passes stale age
+  s182 --> s164: pane closed or retired
+  s182 --> s201: Herdr stops answering
+  s183 --> s165: pane closed or retired
+  s183 --> s202: row passes stale age
+  s184 --> s166: pane closed or retired
+  s184 --> s202: Herdr stops answering
+  s185 --> s168: pane closed or retired
+  s185 --> s201: Herdr row-end pass settles row
+  s186 --> s169: pane closed or retired
+  s187 --> s170: pane closed or retired
+  s187 --> s179: another server answers with no panes
+  s187 --> s203: dcserver restarts (boot reaper)
+  s188 --> s171: pane closed or retired
+  s188 --> s180: another server answers with no panes
+  s188 --> s204: dcserver restarts (boot reaper)
+  s189 --> s172: pane closed or retired
+  s189 --> s201: another server answers with no panes
+  s189 --> s203: Herdr answers again
+  s190 --> s173: pane closed or retired
+  s190 --> s181: another server answers with no panes
+  s190 --> s203: row passes stale age
+  s191 --> s174: pane closed or retired
+  s191 --> s202: another server answers with no panes
+  s191 --> s204: Herdr answers again
+  s192 --> s175: pane closed or retired
+  s192 --> s183: another server answers with no panes
+  s192 --> s204: row passes stale age
+  s193 --> s177: pane closed or retired
+  s193 --> s185: another server answers with no panes
+  s193 --> s203: Herdr row-end pass settles row
+  s194 --> s178: pane closed or retired
+  s194 --> s186: another server answers with no panes
+  s198 --> s195: another server answers with no panes
+  s199 --> s196: another server answers with no panes
+  s200 --> s197: another server answers with no panes
+  s201 --> s195: pane closed or retired
+  s202 --> s196: pane closed or retired
+  s203 --> s198: pane closed or retired
+  s203 --> s201: another server answers with no panes
+  s204 --> s199: pane closed or retired
+  s204 --> s202: another server answers with no panes

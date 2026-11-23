@@ -418,7 +418,10 @@ pub(super) fn set_test_tmux_alive_override(names: Option<&[&str]>) {
 fn tmux_pane_alive_for_stale_check(name: &str, state: &InflightTurnState) -> bool {
     use crate::services::discord::host_liveness;
     if !host_liveness::local_tmux(name, Some(state)) {
-        return host_liveness::not_dead(host_liveness::observe_herdr_liveness(name, state));
+        // A path-less Herdr row is the Herdr row-end pass's to settle, so its scan keeps seeing it.
+        let path_less = state.output_path.as_deref().is_none_or(str::is_empty);
+        return path_less
+            || host_liveness::not_dead(host_liveness::observe_herdr_liveness(name, state));
     }
     #[cfg(test)]
     {
@@ -1691,3 +1694,6 @@ mod host_liveness_stale_tests {
 
 #[cfg(all(test, unix))]
 mod native_input_tests;
+
+#[cfg(all(test, unix))]
+mod herdr_stale_tests;

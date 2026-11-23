@@ -49,9 +49,8 @@ pub(in crate::services::discord) fn observe_liveness(
     TmuxHost.liveness(HostSessionRef::tmux(name)).into()
 }
 
-/// A Herdr row's recorded pane on this node: `Missing` once a complete snapshot of its endpoint
-/// lacks it, `Alive` while listed. A row its marker and locator do not both record as Herdr,
-/// another node's row or an unread server is `Unknown`.
+/// A Herdr row's recorded pane on this node: `Missing` once its endpoint's snapshot lacks it,
+/// `Alive` while listed; a row not Herdr by marker and locator, or an unread one, is `Unknown`.
 pub(in crate::services::discord) fn observe_herdr_liveness(
     name: &str,
     row: &InflightTurnState,

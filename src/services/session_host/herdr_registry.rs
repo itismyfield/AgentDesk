@@ -307,9 +307,8 @@ impl HerdrRegistry {
         entry.host.current_working_dir(reference).ok().flatten()
     }
 
-    /// `pane` in a complete session snapshot, the read `agentdesk herdr status` starts with, of
-    /// the one endpoint serving `node`'s `session`. No single such endpoint, an incomplete answer
-    /// or a server listing no pane at all (one just restarted) is a failed probe.
+    /// `pane` in a complete snapshot, as `herdr status` reads it, of the one endpoint serving
+    /// `node`'s `session`; any other endpoint count, partial answer or empty list is unread.
     pub(crate) fn pane_presence(&self, node: &str, session: &str, pane: &str) -> HostPresence {
         use super::herdr::contract::labeled_snapshot;
         use super::herdr::model::HerdrRequest;

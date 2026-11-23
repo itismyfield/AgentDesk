@@ -1,0 +1,2 @@
+key: 740-inflight-herdr-stale
+| `inflight-herdr-stale` Herdr 행 stale-age 판정 (#8343 H) | `bdf9ad22279dee9812e82255a559b4edff38da06` + 레인 수정 | Before: Herdr 행은 pane을 닫아도 stale 판정이 늘 보존(ClosedPaneRowRetires RED). Dead 판정 제거 변형은 같은 RED, 빈 목록을 부재로 읽는 변형은 실행 중 턴 행을 숨김(NoLiveTurnRowHidden), 경로 없는 행까지 숨기는 변형은 row-end 소유 행을 숨김(NoPathlessHidden) | After GREEN: 기록된 pane이 끝점의 완전한 스냅숏에서 빠지면 이전 프로세스의 경로 있는 행이 스캔에서 빠지고 부팅 reaper가 지움. 응답 없음·빈 목록·다른 노드·현 세대·경로 없는 행은 보존. 이전 프로세스의 끝난 턴이 pane을 연 채 남는 경우는 기대 RED(IdlePaneRowRetires)로 남김. [보고서](inflight-herdr-stale/herdr-stale.report.md) |

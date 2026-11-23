@@ -298,6 +298,12 @@ hosted-cleanup/ThreadGCAfterGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentL
 hosted-cleanup/ThreadGCBefore.cfg	HostedCleanup	-	-
 hosted-cleanup/ThreadGCBeforeGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
 hosted-cleanup/ThreadGCNoRecheck.cfg	HostedCleanup	GCConditionalRefusalsKept,GCNewTurnKept	-
+inflight-herdr-stale/HerdrStaleAfter.cfg	InflightHerdrStale	-	-
+inflight-herdr-stale/HerdrStaleAfterIdleGap.cfg	InflightHerdrStale	-	IdlePaneRowRetires
+inflight-herdr-stale/HerdrStaleBefore.cfg	InflightHerdrStale	-	ClosedPaneRowRetires
+inflight-herdr-stale/HerdrStaleNoDead.cfg	InflightHerdrStale	-	ClosedPaneRowRetires
+inflight-herdr-stale/HerdrStaleNoEmptyGuard.cfg	InflightHerdrStale	NoLiveTurnRowHidden	-
+inflight-herdr-stale/HerdrStaleNoPathGuard.cfg	InflightHerdrStale	NoPathlessHidden	-
 input-single-path/ClaudeReadinessCurrentClearIgnoreCertificate.cfg	ClaudeReadiness	CurrentReadyRequiresCertificate	-
 input-single-path/ClaudeReadinessCurrentClearInvalid.cfg	ClaudeReadiness	-	-
 input-single-path/ClaudeReadinessCurrentClearToctou.cfg	ClaudeReadiness	-	-
