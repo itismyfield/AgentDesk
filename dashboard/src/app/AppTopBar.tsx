@@ -1,5 +1,5 @@
 import { Bell, Moon, Palette, Search, Sun, WifiOff, X } from "lucide-react";
-import type { CSSProperties, Dispatch, SetStateAction } from "react";
+import type { CSSProperties, Dispatch, MouseEvent, SetStateAction } from "react";
 import { Cap, CardNote, CountBadge, Row, StatusDot } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 import { IconButton } from "../kit/free/icon-button-clean";
@@ -106,6 +106,12 @@ export function AppTopBar({
       ? tr(`알림 ${notificationBadgeCount}개`, `${notificationBadgeCount} notifications`)
       : tr("알림", "Notifications");
 
+  // Safari does not focus a clicked button; focus it so closing the palette can return here.
+  const openCommandPalette = (event: MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.focus();
+    setShowCommandPalette(true);
+  };
+
   return (
     <header
       data-testid="topbar"
@@ -143,13 +149,13 @@ export function AppTopBar({
             label={tr("찾기", "Search")}
             icon={<Search />}
             style={PHONE_ICON_BUTTON_STYLE}
-            onClick={() => setShowCommandPalette(true)}
+            onClick={openCommandPalette}
           />
         ) : (
           <button
             type="button"
             data-testid="topbar-search"
-            onClick={() => setShowCommandPalette(true)}
+            onClick={openCommandPalette}
             aria-label={tr("찾기", "Search")}
             aria-keyshortcuts="Meta+K Control+K"
             className={`ml-auto flex h-9 w-[280px] min-w-0 shrink items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--bg-2)] px-3 text-[13px] leading-5 text-[var(--fg-muted)] transition-colors hover:bg-[var(--bg-3)] pointer-coarse:h-11 ${FOCUS_CLASS}`}

@@ -1370,8 +1370,9 @@ test.describe("Dashboard smoke tests", () => {
 
     const search = palette.getByPlaceholder(/검색|Search/);
     await expect(search).toBeFocused();
-    await search.fill("stats");
-    await expect(palette.getByText(/통계|Stats/)).toBeVisible();
+    // cmdk-style abbreviation: "sts" still finds the stats route and ranks it first.
+    await search.fill("sts");
+    await expect(palette.getByRole("option").first()).toHaveText(/통계|Stats/);
 
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/stats$/);
@@ -1381,6 +1382,13 @@ test.describe("Dashboard smoke tests", () => {
     // Esc closes at once even with a query typed (the kit alone would clear the query first).
     await search.fill("zz");
     await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+    await expect(page.getByLabel(/^찾기$|^Search$/)).toBeFocused();
+
+    // Esc pressed while Hangul is still composing closes in one press too.
+    await page.getByLabel(/^찾기$|^Search$/).click();
+    await search.fill("통계");
+    await search.dispatchEvent("keydown", { key: "Escape", isComposing: true });
     await expect(palette).toHaveCount(0);
   });
 

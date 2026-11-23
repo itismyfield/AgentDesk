@@ -1,8 +1,9 @@
-import { type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Folder } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { CommandMenu, type CommandMenuGroup, type CommandMenuLabels } from "../kit/pro/command-menu";
 import AgentPersona from "./AgentPersona";
+import { filterCommandGroups } from "./commandPaletteSearch";
 
 function searchTerms(...values: Array<string | null | undefined>): string[] {
   return values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
@@ -40,6 +41,12 @@ export default function CommandPalette({
   departmentRouteId = "settings_organization",
 }: CommandPaletteProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const [query, setQuery] = useState("");
+  // Closing hands focus back to what opened the palette: the search button, or what had focus before ⌘K.
+  const [opener] = useState(() => (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  useEffect(() => () => {
+    if (opener?.isConnected && opener !== document.body) opener.focus({ preventScroll: true });
+  }, [opener]);
 
   // Every row runs through its own onSelect and the palette closes after it. There is no onRun,
   // so the kit adds no assistant row and never calls onRun for these rows.
@@ -103,9 +110,9 @@ export default function CommandPalette({
     searchKey: tr("찾기", "Search"),
   };
 
-  // Esc closes at once, as before; the kit's own Esc would clear the query first.
+  // Esc closes at once, even mid-composition, as the old palette did; the kit's own Esc would clear the query first.
   const closeOnEscape = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+    if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
     onClose();
@@ -116,12 +123,16 @@ export default function CommandPalette({
       className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[8dvh]"
       style={OVERLAY_STYLE}
       onKeyDownCapture={closeOnEscape}
+      // The kit keeps its query to itself; follow its search field to filter like the old palette.
+      onChange={(event: FormEvent<HTMLDivElement>) => {
+        if (event.target instanceof HTMLInputElement) setQuery(event.target.value);
+      }}
     >
       <CommandMenu
         open
         modal
         autoFocus
-        groups={groups}
+        groups={filterCommandGroups(groups, query)}
         onClose={onClose}
         label={tr("명령 팔레트", "Command Palette")}
         placeholder={tr("검색... (에이전트, 메뉴, 부서)", "Search... (agents, menu, departments)")}
