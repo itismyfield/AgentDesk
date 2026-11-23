@@ -285,6 +285,9 @@ execution-authority/ExecutionChildViewAlias.cfg	ExecutionChildView	ChildOwnPermi
 execution-authority/ExecutionChildViewBefore.cfg	ExecutionChildView	-	ChildRecordRead
 execution-authority/ExecutionChildViewFixed.cfg	ExecutionChildView	-	-
 execution-authority/ExecutionChildViewRest.cfg	ExecutionChildView	ChildRecordedNoRest	-
+gateway-lease/GatewayLeaseAfter.cfg	GatewayLease	-	-
+gateway-lease/GatewayLeaseBefore.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
+gateway-lease/GatewayLeaseNoYield.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-

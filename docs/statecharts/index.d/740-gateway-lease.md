@@ -1,0 +1,2 @@
+key: 740-gateway-lease
+| `gateway-lease` Claude 게이트웨이 lease 선호 노드 반환 (#8351) | `b012692aa3a98bdc4ed4c0543a81013a5a332ff6` | Before RED: 선호 노드 Claude 부팅에서 native 부팅 준비가 거절되면 run_bot이 lease 단계 전에 돌아가 waiter를 광고하지 않고, 비선호 노드가 lease를 영구히 쥔다(LeaseReturnsToPreferred·ForeignQueueDrains). NoYield RED: keepalive 양보를 지우면 같은 두 규칙이 깨진다 | After GREEN(설계안): 거절을 재시도해 preferred-poll에 들어가면 두 규칙 모두 성립. 3 cfg. [보고서](gateway-lease/gateway-lease.report.md) |

@@ -1737,6 +1737,54 @@ assert_eq "restart skill ignores ambient dual-root variables" "0" "$RUN_RC"
 assert_eq "restart skill passes sole canonical release root" \
   "$SKILL_FIX/home/.adk/release" "$(cat "$SKILL_FIX/home/request-root" 2>/dev/null || true)"
 
+# #8351: launchd still holds the job for a moment after bootout returns, and a
+# bootstrap in that window fails with "5: Input/output error". The skill must
+# wait for the unload and retry the bootstrap instead of exiting for a manual one.
+EIO_FIX="$S3A_TMP/restart-skill-eio"
+mkdir -p "$EIO_FIX/bin"
+cat >"$EIO_FIX/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+state="${LAUNCHCTL_FAKE_STATE:?}"
+case "$1" in
+  bootout) printf 'bootout\n' >>"$state/calls"; exit 0 ;;
+  print)
+    printf 'print\n' >>"$state/calls"
+    prints=$(grep -c '^print$' "$state/calls")
+    # Still loaded for the first two looks after bootout.
+    if [ "$prints" -le 2 ]; then echo 'state = exiting'; exit 0; fi
+    exit 113 ;;
+  bootstrap)
+    printf 'bootstrap\n' >>"$state/calls"
+    tries=$(grep -c '^bootstrap$' "$state/calls")
+    if [ "$tries" -le 2 ]; then
+      echo 'Bootstrap failed: 5: Input/output error' >&2
+      exit 5
+    fi
+    exit 0 ;;
+esac
+exit 0
+EOF
+cp "$SKILL_FIX/bin/id" "$EIO_FIX/bin/id"
+chmod +x "$EIO_FIX/bin/launchctl"
+mkdir -p "$EIO_FIX/state"
+run_rc env -u TMUX -u TMUX_PANE \
+  HOME="$SKILL_FIX/home" PATH="$EIO_FIX/bin:/usr/bin:/bin" \
+  LAUNCHCTL_FAKE_STATE="$EIO_FIX/state" \
+  AGENTDESK_RESTART_BOOTSTRAP_RETRY_DELAY=0 \
+  AGENTDESK_REPO_DIR="$SKILL_FIX/home/.adk/release/workspaces/agentdesk" \
+  bash "$REPO_ROOT/skills/agentdesk-restart/scripts/restart_agentdesk.sh" release \
+  >"$EIO_FIX/out" 2>&1
+assert_eq "restart skill retries bootstrap after launchd EIO (#8351)" "0" "$RUN_RC"
+assert_eq "restart skill bootstraps until launchd accepts (#8351)" "3" \
+  "$(grep -c '^bootstrap$' "$EIO_FIX/state/calls" 2>/dev/null || true)"
+first_bootstrap=$( (grep -n '^bootstrap$' "$EIO_FIX/state/calls" || true) | head -n 1 | cut -d: -f1)
+third_print=$( (grep -n '^print$' "$EIO_FIX/state/calls" || true) | sed -n 3p | cut -d: -f1)
+if [ -n "$first_bootstrap" ] && [ -n "$third_print" ] && [ "$third_print" -lt "$first_bootstrap" ]; then
+  pass "restart skill waits for bootout to unload before bootstrap (#8351)"
+else
+  fail "restart skill waits for bootout to unload before bootstrap (#8351)"
+fi
+
 cat >"$SKILL_FIX/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf 'AgentDesk-live-work\n'
