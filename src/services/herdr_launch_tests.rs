@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use crate::config::session_hosts::EndpointMode;
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedLookup,
     HostedLookupKey, HostedRecord, HostedState, install_pending_pg, load_hosted_execution_pg,
