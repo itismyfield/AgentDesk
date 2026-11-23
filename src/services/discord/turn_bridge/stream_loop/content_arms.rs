@@ -314,6 +314,7 @@ pub(super) async fn handle_stream_content_message(
                                 full_response.clone_from(&inflight_state.full_response);
                                 response_sent_offset = inflight_state.response_sent_offset;
                             }
+                            let posted = full_response.get(..response_sent_offset).map(str::to_owned);
                             if (!preserve_progress || result.starts_with(&full_response))
                                 && let Some(resolved) = resolve_done_response(
                                 &full_response,
@@ -336,7 +337,7 @@ pub(super) async fn handle_stream_content_message(
                                     inflight_state,
                                 );
                             }
-                            if !preserve_progress && !rollover_parts_stay_posted(&provider) && done_result_requires_full_terminal_replay(
+                            if !preserve_progress && !rollover_parts_stay_posted(&provider, posted.as_deref(), &full_response) && done_result_requires_full_terminal_replay(
                                 &full_response,
                                 &result,
                                 response_sent_offset,

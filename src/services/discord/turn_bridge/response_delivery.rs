@@ -113,12 +113,17 @@ pub(super) fn no_answer(full_response: &str, response_sent_offset: usize, delive
             .is_empty()
 }
 
-/// Stream-json CLIs post rollover parts as final text, so Done never re-sends them from offset 0.
-pub(super) fn rollover_parts_stay_posted(provider: &ProviderKind) -> bool {
+/// Stream-json CLIs post rollover parts as final text; Done keeps them only when its body starts
+/// with exactly the posted text, otherwise the full terminal replay still runs.
+pub(super) fn rollover_parts_stay_posted(
+    provider: &ProviderKind,
+    posted: Option<&str>,
+    done_body: &str,
+) -> bool {
     matches!(
         provider.execution_adapter(),
         Some(crate::services::provider::ProviderExecutionAdapter::StreamJsonCli(_))
-    )
+    ) && posted.is_some_and(|posted| done_body.starts_with(posted))
 }
 
 pub(super) fn done_result_requires_full_terminal_replay(
