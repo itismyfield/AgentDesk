@@ -286,12 +286,40 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
+    let result = no_key_round(8148963, "herdr", None).await;
+    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
+}
+
+/// A no-key record that meets a brief registry contention still lands, so the input stays held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_no_key_record_outlasts_a_brief_registry_contention() {
+    let hold = std::time::Duration::from_millis(200);
+    let result = no_key_round(8148964, "herdr", Some(hold)).await;
+    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
+}
+
+/// A no-key turn whose record never lands still returns its custody and token on either host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
+    for (channel, host) in [(8148965, "herdr"), (8148966, "tmux")] {
+        let hold = std::time::Duration::from_millis(2500);
+        let result = no_key_round(channel, host, Some(hold)).await;
+        assert!(
+            matches!(&result, Completion::NotSent(r) if r.contains("busy")),
+            "{result:?}"
+        );
+    }
+}
+
+/// Runs one unkeyed native turn on `host`, the registry lock held for `hold` once the leaf ends,
+/// and checks the channel is free for the next turn with the original kept unkeyed.
+async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration>) -> Completion {
     let guard = crate::config::TestRuntimeRootGuard::new();
     let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
     let root = guard.path().join("runtime");
     std::fs::create_dir_all(&root).unwrap();
-    let channel = ChannelId::new(8148963);
-    let id = 8_000_000_000_000_814_963;
+    let id = 8_000_000_000_000_000_000 + channel;
+    let channel = ChannelId::new(channel);
     let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
     std::sync::Arc::get_mut(&mut shared)
         .unwrap()
@@ -330,13 +358,29 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
     let producer = Producer::at(shared.clone(), key, Some(token.clone()));
     let intent = producer.intent.clone();
-    let prepared = PreparedPayload {
+    let mut prepared = PreparedPayload {
         frame: "our input".into(),
         sources: vec![id.to_string()],
         attempt: cold_attempt(&root, channel.get()).0,
     };
-    let leaf: effect::Leaf = Box::new(|_| {
+    prepared.attempt["target"]["host"] = json!(host);
+    let (lock, (released, done)) = (
+        root.join("injected_frames.lock"),
+        std::sync::mpsc::channel(),
+    );
+    let leaf: effect::Leaf = Box::new(move |_| {
         assert_eq!(scope::key_attempted(), Some(false));
+        if let Some(hold) = hold {
+            let mut file = std::fs::File::options();
+            let file = file.create(true).truncate(false).write(true);
+            let file = file.open(&lock).unwrap();
+            file.lock().unwrap();
+            std::thread::spawn(move || {
+                std::thread::sleep(hold);
+                drop(file);
+                released.send(()).unwrap();
+            });
+        }
         scope::vetoed("fixture refusal");
         Ok(Completion::Held("fixture refusal".into()))
     });
@@ -353,7 +397,6 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     )
     .await
     .unwrap();
-    assert_eq!(result, Completion::NotSent("fixture refusal".into()));
     assert!(mailbox.snapshot().await.cancel_token.is_none());
     assert_eq!(
         shared
@@ -391,6 +434,13 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
         assert!(settlement["outcome"].is_null());
         assert_ne!(settlement["any_key"], true);
     }
+    let next = std::sync::Arc::new(CancelToken::new());
+    let user = poise::serenity_prelude::UserId::new(7);
+    assert!(mailbox.try_start_turn(next, user, (id + 1).into()).await);
+    if hold.is_some() {
+        done.recv_timeout(WAIT_CAP).unwrap();
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
