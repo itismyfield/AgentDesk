@@ -94,7 +94,7 @@ impl Retry {
     }
 
     fn send(&self, provider: &str, event: &str, command: &str, payload: Value) {
-        handoff_non_wait_hook_event(&self.endpoint, provider, event, command, payload).unwrap();
+        enqueue_non_wait(&self.endpoint, provider, event, command, payload);
     }
 
     fn hook(&self, event: &str, session: &str, source: Option<&str>) {
@@ -164,40 +164,46 @@ async fn proxy_with_rule(
     seen: Attempts,
     rule: Rule,
 ) {
-    let counts: Mutex<HashMap<String, usize>> = Mutex::default();
+    let counts: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
     while let Ok((mut socket, _)) = listener.accept().await {
-        let encoded = read_async_http_request(&mut socket).await;
-        let path = request_path(&encoded);
-        let mut parts = path.split('?').next().unwrap_or_default().rsplit('/');
-        let event = parts.next().unwrap_or_default().to_owned();
-        let provider = parts.next().unwrap_or_default().to_owned();
-        let header = |name| request_header(&encoded, name).unwrap_or_default();
-        let id = header(RELAY_REQUEST_ID_HEADER);
-        let attempt = {
-            let mut counts = counts.lock().unwrap();
-            let count = counts.entry(id.clone()).or_default();
-            *count += 1;
-            *count
-        };
-        let fate = rule(&provider, &event, attempt);
-        let (published, deadline) = (
-            header(RELAY_PUBLISHED_AT_HEADER),
-            header(RELAY_DEADLINE_HEADER),
-        );
-        seen.lock()
-            .unwrap()
-            .push((id, provider, event, published, deadline, fate));
-        match fate {
-            Fate::Drop => drop(socket),
-            Fate::Status(code) => {
-                let status = axum::http::StatusCode::from_u16(code).unwrap();
-                answer_actual_request(&mut socket, status, b"{}").await;
+        let (app, seen, rule, counts) = (app.clone(), seen.clone(), rule.clone(), counts.clone());
+        // A connection that is not a relay request, such as a local port probe, panics the
+        // reader; the panic ends that connection only, as in `proxy_every_request`.
+        let _ = tokio::spawn(async move {
+            let encoded = read_async_http_request(&mut socket).await;
+            let path = request_path(&encoded);
+            let mut parts = path.split('?').next().unwrap_or_default().rsplit('/');
+            let event = parts.next().unwrap_or_default().to_owned();
+            let provider = parts.next().unwrap_or_default().to_owned();
+            let header = |name| request_header(&encoded, name).unwrap_or_default();
+            let id = header(RELAY_REQUEST_ID_HEADER);
+            let attempt = {
+                let mut counts = counts.lock().unwrap();
+                let count = counts.entry(id.clone()).or_default();
+                *count += 1;
+                *count
+            };
+            let fate = rule(&provider, &event, attempt);
+            let (published, deadline) = (
+                header(RELAY_PUBLISHED_AT_HEADER),
+                header(RELAY_DEADLINE_HEADER),
+            );
+            seen.lock()
+                .unwrap()
+                .push((id, provider, event, published, deadline, fate));
+            match fate {
+                Fate::Drop => drop(socket),
+                Fate::Status(code) => {
+                    let status = axum::http::StatusCode::from_u16(code).unwrap();
+                    answer_actual_request(&mut socket, status, b"{}").await;
+                }
+                Fate::Forward => {
+                    let (status, body) = forward_read_request(&encoded, app).await;
+                    answer_actual_request(&mut socket, status, &body).await;
+                }
             }
-            Fate::Forward => {
-                let (status, body) = forward_read_request(&encoded, app.clone()).await;
-                answer_actual_request(&mut socket, status, &body).await;
-            }
-        }
+        })
+        .await;
     }
 }
 

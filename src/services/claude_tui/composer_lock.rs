@@ -226,6 +226,10 @@ mod claude_tui_composer_lock_tests {
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
 
+    /// How long a wait for something that must happen polls before failing: a hang detector, not a
+    /// bound of the contract, so a slow runner only makes a broken build fail later.
+    const LIVENESS: Duration = Duration::from_secs(10);
+
     #[test]
     fn try_composer_lock_rejects_held_and_poisoned_lock() {
         let session = format!("composer-try-{}", uuid::Uuid::new_v4());
@@ -235,7 +239,7 @@ mod claude_tui_composer_lock_tests {
             std::thread::spawn(move || {
                 let _ = sent.send(try_with_composer_mutation_lock(&session, || 7));
             });
-            received.recv_timeout(Duration::from_secs(1))
+            received.recv_timeout(LIVENESS)
         });
         assert_eq!(result, Ok(None));
         let _ = std::panic::catch_unwind(|| {
@@ -259,11 +263,11 @@ mod claude_tui_composer_lock_tests {
                     let _ = entered_tx.send(());
                 });
             }));
-            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            started_rx.recv_timeout(LIVENESS).unwrap();
             entered_rx.recv_timeout(Duration::from_millis(100))
         });
         assert_eq!(result, Some(Err(mpsc::RecvTimeoutError::Timeout)));
-        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        entered_rx.recv_timeout(LIVENESS).unwrap();
         writer.unwrap().join().unwrap();
         assert_eq!(try_with_composer_mutation_lock(&session, || 7), Some(7));
     }
