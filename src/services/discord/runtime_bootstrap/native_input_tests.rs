@@ -256,30 +256,36 @@ fn sigterm_child(dir: std::path::PathBuf, mode: Child) {
             }
             super::super::super::shutdown::run_bot_spawn_sigterm_handler(&codex, ProviderKind::Codex)
         });
-        let release = dir.join("release");
-        let hold = matches!(mode, Child::Pair | Child::PairClaudeLast | Child::AloneWait);
-        let mut announced = false;
-        let ready = await_native_boot(
-            &ProviderKind::Claude,
-            &claude,
-            super::super::super::boot_sigterm::watch(),
-            Duration::from_millis(20),
-            || {
-                let held = hold && !release.exists();
-                if held && !announced {
-                    announced = true;
-                    println!("HELD");
-                }
-                async move {
-                    if held {
-                        NativeBoot::RestoreHeld(BUSY.into())
-                    } else {
-                        NativeBoot::Ready
+        let ready = if matches!(mode, Child::AloneLeaseFailed | Child::AlonePreferred) {
+            // The production gate over an empty runtime root: nothing to restore, so Ready.
+            let ready = super::prepare_native_boot(&claude, &ProviderKind::Claude).await;
+            println!("GATE ready={ready}");
+            ready
+        } else {
+            let release = dir.join("release");
+            let mut announced = false;
+            await_native_boot(
+                &ProviderKind::Claude,
+                &claude,
+                super::super::super::boot_sigterm::watch(),
+                Duration::from_millis(20),
+                || {
+                    let held = !release.exists();
+                    if held && !announced {
+                        announced = true;
+                        println!("HELD");
                     }
-                }
-            },
-        )
-        .await;
+                    async move {
+                        if held {
+                            NativeBoot::RestoreHeld(BUSY.into())
+                        } else {
+                            NativeBoot::Ready
+                        }
+                    }
+                },
+            )
+            .await
+        };
         match mode {
             Child::AloneLeaseFailed => {
                 super::super::super::boot_sigterm::release_boot_slot(
@@ -449,6 +455,10 @@ fn real_sigterm_after_a_lone_claude_lease_failure_ends_the_process() {
             .any(|line| line.contains("LEASE_FAILED remaining=0")),
         "{seen:?}"
     );
+    assert!(
+        seen.iter().any(|line| line.contains("GATE ready=true")),
+        "{seen:?}"
+    );
 }
 
 /// (가) A lone Claude in preferred-poll behind a held lease ends on SIGTERM.
@@ -457,10 +467,14 @@ fn real_sigterm_in_preferred_wait_of_a_lone_claude_ends_the_process_pg() {
     if let Some(dir) = child_mode() {
         return sigterm_child(dir, Child::AlonePreferred);
     }
-    assert_ended(
+    let seen = assert_ended(
         "real_sigterm_in_preferred_wait_of_a_lone_claude_ends_the_process_pg",
         "PREFERRED_WAIT",
         true,
+    );
+    assert!(
+        seen.iter().any(|line| line.contains("GATE ready=true")),
+        "{seen:?}"
     );
 }
 

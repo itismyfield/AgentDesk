@@ -81,7 +81,7 @@ Rules:
 | utility bot skip | `runtime_bootstrap.rs:191` raw `fetch_sub` before any SharedData (unchanged) | not modeled |
 | preferred-poll wait | `gateway_lease.rs:229-319` (reads only its own `shutting_down` `:297` and the restart file) | CLeaseStart / CLeaseEnd fairness |
 | SIGTERM handler install | `runtime_bootstrap.rs:333` (worker), `:409` (gateway), `:454` (standby) | CLeaseStart → started |
-| SIGTERM handler | `shutdown.rs:14-54`: `legacy_sigterm` `:21`, mark `:22`, CAS + last `exit(0)` `:37-56`; signal source `:95-104` (own stream raced with the mark) | OHandle / CHandle |
+| SIGTERM handler | `shutdown.rs:14-54`: `legacy_sigterm` `:21`, mark `:22`, CAS + last `exit(0)` `:37-56`; signal stream registered when the handler is spawned (`:10` → `:93-96`), then raced with the mark `:109-117` | OHandle / CHandle |
 | process mark | `boot_sigterm.rs:7-22` (static `watch`; registers no signal) | `mark` |
 | deferred restart slot | `deferred_restart.rs:94` CAS, `:121-131` `fetch_sub`, `:195-208` rollback `fetch_add`; final `exit(0)` `spawns.rs:366-395` | not modeled (no SIGTERM) |
 | per-runtime flag / shared barrier | `shared_data.rs:163-180`, `shared_state.rs:617-621`, flag writers `:728-774` | model premise |

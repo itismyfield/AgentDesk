@@ -65,6 +65,10 @@ type Boundary = Box<dyn FnOnce() + Send>;
 
 /// Where the handler's signal comes from; a test source never installs the process-wide handler.
 enum SigtermSource {
+    /// Registered when the handler is spawned, so it is armed once spawning returns.
+    #[cfg(unix)]
+    Os(Option<tokio::signal::unix::Signal>),
+    #[cfg(not(unix))]
     Os,
     #[cfg(all(test, unix))]
     Test(SigtermForTest),
@@ -83,6 +87,16 @@ impl SigtermSource {
         if let Some(test) = SIGTERM_FOR_TEST.with(|slot| slot.borrow_mut().take()) {
             return Self::Test(test);
         }
+        Self::os()
+    }
+
+    #[cfg(unix)]
+    fn os() -> Self {
+        Self::Os(tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok())
+    }
+
+    #[cfg(not(unix))]
+    fn os() -> Self {
         Self::Os
     }
 
@@ -92,9 +106,8 @@ impl SigtermSource {
         let none = || -> (Boundary, Boundary) { (Box::new(|| {}), Box::new(|| {})) };
         match self {
             // A peer handler may have taken the signal while this runtime was still booting.
-            Self::Os => {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm = signal(SignalKind::terminate()).ok()?;
+            Self::Os(sigterm) => {
+                let mut sigterm = sigterm?;
                 let mut mark = super::boot_sigterm::watch();
                 tokio::select! {
                     _ = sigterm.recv() => {}
