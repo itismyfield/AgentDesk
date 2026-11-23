@@ -87,20 +87,19 @@ fn parse_channel_id(raw: &str) -> AppResult<ChannelId> {
 /// or `org_schema`) — the goal is "is this channel known to
 /// the operator?" not "which agent owns it?". Threads inherit the parent's
 /// binding via the resolver's parent walk where applicable.
-async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
-    use crate::services::discord::resolve_channel_role_binding as resolve_role_binding;
-
+async fn ensure_channel_is_role_mapped(
+    read: &DiscordRead<'_>,
+    channel_id: ChannelId,
+) -> AppResult<()> {
     // First pass: try without a channel name (fast path for `byChannelId`
     // entries). `byChannelName` fallback requires the channel name so we
     // fetch it from Discord when the cheap lookup misses — same trade-off as
     // the `/api/discord/send` handler.
-    if resolve_role_binding(channel_id, None).is_some() {
+    if (read.mapped)(channel_id, None) {
         return Ok(());
     }
 
-    let token = match crate::credential::read_bot_token(
-        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
-    ) {
+    let token = match (read.token)() {
         Some(token) => token,
         None => {
             // Without a bot token we can't fetch the channel name; behave as
@@ -114,10 +113,10 @@ async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
     };
 
     let client = reqwest::Client::new();
-    let channel_info = fetch_discord_channel_info(&client, &token, channel_id).await;
+    let channel_info = fetch_discord_channel_info(&client, read.api_base, &token, channel_id).await;
     let channel_name = channel_info.as_ref().and_then(discord_channel_name);
 
-    if resolve_role_binding(channel_id, channel_name.as_deref()).is_some() {
+    if (read.mapped)(channel_id, channel_name.as_deref()) {
         return Ok(());
     }
 
@@ -134,9 +133,10 @@ async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
                 "[tui_o] API thread parent not recorded"
             );
         }
-        let parent_info = fetch_discord_channel_info(&client, &token, parent_id).await;
+        let parent_info =
+            fetch_discord_channel_info(&client, read.api_base, &token, parent_id).await;
         let parent_name = parent_info.as_ref().and_then(discord_channel_name);
-        if resolve_role_binding(parent_id, parent_name.as_deref()).is_some() {
+        if (read.mapped)(parent_id, parent_name.as_deref()) {
             return Ok(());
         }
     };
@@ -150,10 +150,11 @@ async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
 
 async fn fetch_discord_channel_info(
     client: &reqwest::Client,
+    api_base: &str,
     token: &str,
     channel_id: ChannelId,
 ) -> Option<Value> {
-    let url = format!("https://discord.com/api/v10/channels/{}", channel_id.get());
+    let url = format!("{api_base}/channels/{}", channel_id.get());
     client
         .get(&url)
         .header("Authorization", format!("Bot {token}"))
@@ -197,75 +198,91 @@ pub async fn channel_messages(
     Query(params): Query<MessagesQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let channel_id = parse_channel_id(&channel_id_raw)?;
-    ensure_channel_is_role_mapped(channel_id).await?;
-
-    let token = match crate::credential::read_bot_token(
-        crate::domain::bot_role::UtilityBotRole::Announce.alias(),
-    ) {
-        Some(t) => t,
-        None => {
-            return Err(
-                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
-            );
-        }
-    };
-
-    let limit = params.limit.unwrap_or(10).min(100);
-
-    // Issue #2047 Finding 12 — build the query with `Client::query` so values
-    // are URL-encoded and cannot inject extra parameters.
-    let mut query_params: Vec<(&str, String)> = vec![("limit", limit.to_string())];
-    if let Some(before) = params.before.as_ref().and_then(snowflake_or_none) {
-        query_params.push(("before", before));
-    }
-    if let Some(after) = params.after.as_ref().and_then(snowflake_or_none) {
-        query_params.push(("after", after));
-    }
-
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages",
-        channel_id.get()
-    );
-
-    // #2723 diagnostic: log the query we forward to Discord so the
-    // driver-side timeout symptom can be correlated with the upstream
-    // request. Logged at info because this is an E2E investigation
-    // and we want it visible in the default rolling log.
-    tracing::info!(
-        channel_id = channel_id.get(),
-        limit,
-        before = params.before.as_deref().unwrap_or(""),
-        after = params.after.as_deref().unwrap_or(""),
-        "[#2723] channel_messages → upstream"
-    );
-
-    let messages = fetch_channel_messages(
-        channel_id.get(),
-        &url,
-        &token,
-        &query_params,
-        CHANNEL_MESSAGES_TIMEOUT,
-    )
-    .await?;
+    let messages = read_channel_messages(&DiscordRead::LIVE, channel_id, &params).await?;
     Ok((StatusCode::OK, Json(json!({"messages": messages}))))
 }
 
-/// Upper bound for one upstream message read; a stalled Discord used to hold the caller forever.
-const CHANNEL_MESSAGES_TIMEOUT: Duration = Duration::from_secs(10);
+/// Discord endpoint, read deadline and role-map lookups; tests point them at a stub upstream.
+struct DiscordRead<'a> {
+    api_base: &'a str,
+    deadline: Duration,
+    token: fn() -> Option<String>,
+    mapped: fn(ChannelId, Option<&str>) -> bool,
+}
 
-/// Send the upstream read with a whole-request timeout; split out so a stub upstream can drive it.
+impl DiscordRead<'static> {
+    /// A stalled Discord used to hold the caller forever; a whole read now ends within 10 s.
+    const LIVE: Self = Self {
+        api_base: "https://discord.com/api/v10",
+        deadline: Duration::from_secs(10),
+        token: live_announce_token,
+        mapped: live_role_mapped,
+    };
+}
+
+fn live_announce_token() -> Option<String> {
+    crate::credential::read_bot_token(crate::domain::bot_role::UtilityBotRole::Announce.alias())
+}
+
+fn live_role_mapped(channel_id: ChannelId, channel_name: Option<&str>) -> bool {
+    crate::services::discord::resolve_channel_role_binding(channel_id, channel_name).is_some()
+}
+
+/// One deadline spans the role-map lookups and the message read, so no stage restarts the clock.
+async fn read_channel_messages(
+    read: &DiscordRead<'_>,
+    channel_id: ChannelId,
+    params: &MessagesQuery,
+) -> AppResult<Value> {
+    let work = async {
+        ensure_channel_is_role_mapped(read, channel_id).await?;
+
+        let Some(token) = (read.token)() else {
+            return Err(
+                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
+            );
+        };
+
+        let limit = params.limit.unwrap_or(10).min(100);
+
+        // Issue #2047 Finding 12 — build the query with `Client::query` so values
+        // are URL-encoded and cannot inject extra parameters.
+        let mut query_params: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+        if let Some(before) = params.before.as_ref().and_then(snowflake_or_none) {
+            query_params.push(("before", before));
+        }
+        if let Some(after) = params.after.as_ref().and_then(snowflake_or_none) {
+            query_params.push(("after", after));
+        }
+
+        let url = format!("{}/channels/{}/messages", read.api_base, channel_id.get());
+
+        // #2723 diagnostic: log the query we forward to Discord so the
+        // driver-side timeout symptom can be correlated with the upstream
+        // request. Logged at info because this is an E2E investigation
+        // and we want it visible in the default rolling log.
+        tracing::info!(
+            channel_id = channel_id.get(),
+            limit,
+            before = params.before.as_deref().unwrap_or(""),
+            after = params.after.as_deref().unwrap_or(""),
+            "[#2723] channel_messages → upstream"
+        );
+
+        fetch_channel_messages(channel_id.get(), &url, &token, &query_params).await
+    };
+    tokio::time::timeout(read.deadline, work)
+        .await
+        .unwrap_or_else(|_| Err(channel_messages_timed_out(channel_id.get())))
+}
+
 async fn fetch_channel_messages(
     channel_id: u64,
     url: &str,
     token: &str,
     query_params: &[(&str, String)],
-    timeout: Duration,
 ) -> AppResult<Value> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|error| AppError::internal(format!("discord client build failed: {error}")))?;
-    let response = match client
+    let response = match reqwest::Client::new()
         .get(url)
         .header("Authorization", format!("Bot {token}"))
         .query(query_params)
@@ -273,7 +290,6 @@ async fn fetch_channel_messages(
         .await
     {
         Ok(resp) => resp,
-        Err(error) if error.is_timeout() => return Err(channel_messages_timed_out(channel_id)),
         Err(error) => {
             tracing::warn!(
                 channel_id,
@@ -322,7 +338,6 @@ async fn channel_messages_outcome(
 
     let body = match response.json::<serde_json::Value>().await {
         Ok(data) => Some(data),
-        Err(error) if error.is_timeout() => return Err(channel_messages_timed_out(channel_id)),
         Err(error) => {
             tracing::warn!(
                 channel_id,
@@ -456,7 +471,7 @@ pub async fn channel_info(
     Path(channel_id_raw): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let channel_id = parse_channel_id(&channel_id_raw)?;
-    ensure_channel_is_role_mapped(channel_id).await?;
+    ensure_channel_is_role_mapped(&DiscordRead::LIVE, channel_id).await?;
 
     let token = match crate::credential::read_bot_token(
         crate::domain::bot_role::UtilityBotRole::Announce.alias(),
@@ -518,8 +533,7 @@ mod tests {
 
     /// Serve one canned HTTP response so a test can drive the real `reqwest`
     /// decode path instead of handing the helper a ready-made `Value`.
-    /// `hold` keeps the socket open afterwards, like a stalled upstream.
-    async fn serve_stub(raw: &'static [u8], hold: bool) -> String {
+    async fn stub_upstream(raw: &'static [u8]) -> reqwest::Response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -530,46 +544,136 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept stub request");
             let _ = socket.read(&mut [0u8; 1024]).await;
             let _ = socket.write_all(raw).await;
-            if hold {
-                std::future::pending::<()>().await;
-            }
         });
-        format!("http://{addr}/messages")
-    }
 
-    async fn stub_upstream(raw: &'static [u8]) -> reqwest::Response {
         reqwest::Client::new()
-            .get(serve_stub(raw, false).await)
+            .get(format!("http://{addr}/messages"))
             .send()
             .await
             .expect("stub upstream response")
     }
 
-    async fn fetch_with_short_timeout(url: String) -> AppResult<Value> {
-        fetch_channel_messages(7, &url, "token", &[], Duration::from_millis(300)).await
+    type Route = (&'static str, u64, &'static [u8]);
+    const STALL: &[u8] = b"";
+    const PARTIAL: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{";
+    const THREAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\n\r\n{\"type\":11,\"parent_id\":\"22\"}";
+    const PLAIN: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"name\":\"p\"}";
+    const MSGS: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n[{\"id\":\"1\"}]";
+
+    /// Answer each request by exact path after its delay, keeping the socket open like a stalled upstream.
+    async fn serve_routes(routes: &'static [Route]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    while let Ok(n @ 1..) = socket.read(&mut buf).await {
+                        let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        let path = head.split([' ', '?']).nth(1).unwrap_or("");
+                        let Some((_, delay, raw)) = routes.iter().find(|r| r.0 == path) else {
+                            return;
+                        };
+                        tokio::time::sleep(Duration::from_millis(*delay)).await;
+                        let _ = socket.write_all(raw).await;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Read channel 11 (a thread under mapped parent 22) or 22 itself; the outer bound fails a deadline that never fires.
+    async fn read_status(
+        base: &str,
+        channel: u64,
+        deadline_ms: u64,
+    ) -> Option<(StatusCode, ErrorCode)> {
+        let read = DiscordRead {
+            api_base: base,
+            deadline: Duration::from_millis(deadline_ms),
+            token: || Some("token".to_string()),
+            mapped: |id, _| id.get() == 22,
+        };
+        let query = MessagesQuery {
+            limit: None,
+            before: None,
+            after: None,
+        };
+        let outcome = read_channel_messages(&read, ChannelId::new(channel), &query);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), outcome).await;
+        outcome
+            .expect("the read deadline must end the request")
+            .err()
+            .map(|e| (e.status(), e.code()))
     }
 
     #[tokio::test]
-    async fn fetch_channel_messages_answers_504_only_for_a_stalled_upstream() {
-        // Silent before the headers, and silent after a partial body.
-        for stalled in [&b""[..], b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n[{"] {
-            let error = fetch_with_short_timeout(serve_stub(stalled, true).await).await;
-            let error = error.expect_err("a stalled upstream is not a success");
-            assert_eq!(error.status(), StatusCode::GATEWAY_TIMEOUT);
-            assert_eq!(error.code(), ErrorCode::Discord);
+    async fn channel_messages_read_ends_within_one_deadline_across_role_lookups() {
+        let timed_out = Some((StatusCode::GATEWAY_TIMEOUT, ErrorCode::Discord));
+        let cases: [(&'static [Route], u64, u64, Option<(StatusCode, ErrorCode)>); 9] = [
+            (&[("/channels/11", 0, STALL)], 11, 300, timed_out),
+            (&[("/channels/11", 0, PARTIAL)], 11, 300, timed_out),
+            (
+                &[("/channels/11", 0, THREAD), ("/channels/22", 0, STALL)],
+                11,
+                300,
+                timed_out,
+            ),
+            (
+                &[("/channels/11", 0, THREAD), ("/channels/22", 0, PARTIAL)],
+                11,
+                300,
+                timed_out,
+            ),
+            (&[("/channels/22/messages", 0, STALL)], 22, 300, timed_out),
+            (&[("/channels/22/messages", 0, PARTIAL)], 22, 300, timed_out),
+            // Each stage fits the deadline alone; together they overrun it.
+            (
+                &[
+                    ("/channels/11", 250, THREAD),
+                    ("/channels/22", 250, PLAIN),
+                    ("/channels/11/messages", 250, MSGS),
+                ],
+                11,
+                600,
+                timed_out,
+            ),
+            (
+                &[
+                    ("/channels/11", 250, THREAD),
+                    ("/channels/22", 250, PLAIN),
+                    ("/channels/11/messages", 250, MSGS),
+                ],
+                11,
+                3000,
+                None,
+            ),
+            (
+                &[("/channels/11", 0, PLAIN)],
+                11,
+                300,
+                Some((StatusCode::FORBIDDEN, ErrorCode::Discord)),
+            ),
+        ];
+        for (index, (routes, channel, deadline_ms, want)) in cases.into_iter().enumerate() {
+            let base = serve_routes(routes).await;
+            assert_eq!(
+                read_status(&base, channel, deadline_ms).await,
+                want,
+                "case {index}"
+            );
         }
-        let prompt: &'static [u8] =
-            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n[{\"id\":\"1\"}]";
-        let ok = fetch_with_short_timeout(serve_stub(prompt, true).await).await;
-        assert_eq!(ok.unwrap(), json!([{"id": "1"}]));
         // A refused connection stays a plain transport failure.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind closed port");
-        let url = format!("http://{}/messages", closed.local_addr().unwrap());
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
-        let error = fetch_with_short_timeout(url).await.unwrap_err();
-        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        let refused = read_status(&base, 22, 300).await;
+        assert_eq!(refused, Some((StatusCode::BAD_GATEWAY, ErrorCode::Discord)));
     }
-
     #[tokio::test]
     async fn channel_messages_outcome_keeps_rate_limit_status_for_non_json_body() {
         // Cloudflare answers an edge 429 with an HTML page, so the decode fails
