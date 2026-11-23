@@ -58,8 +58,6 @@ async function render(overrides: Partial<Parameters<typeof StatsBreakdown>[0]> =
       failed={false}
       models={buildModelItems(data)}
       agents={buildAgentItems(data)}
-      modelSegments={[]}
-      totalTokens={1000}
       overallCacheHitRate={42}
       agentSkillRows={skills}
       series={dailySeries(t)}
@@ -67,22 +65,18 @@ async function render(overrides: Partial<Parameters<typeof StatsBreakdown>[0]> =
     />,
   ));
 }
-const rows = () => Array.from(container.querySelectorAll<HTMLButtonElement>("[data-item]"));
+const rows = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".aui-compact-breakdown-row"));
 
-it("lists models by tokens with their share, and switches to agents with cache hit rates", async () => {
+it("lists models by tokens with their share in the kit list, and switches to agents with the overall cache hit", async () => {
   await render();
-  expect(rows().map((row) => row.dataset.item)).toEqual(["claude-big-0", "codex-small-1"]);
-  expect(rows()[0].getAttribute("aria-label")).toBe("Big Model, 800 tokens, 점유율 80%, $2.50, Claude");
-  expect(rows()[0].textContent).toContain("점유율 80%");
+  expect(rows().map((row) => row.dataset.itemId)).toEqual(["claude-big-0", "codex-small-1"]);
+  expect(rows()[0].getAttribute("aria-label")).toBe("Big Model, 800, 전체의 80%");
   expect(container.querySelector('[data-testid="stats-model-share"]')).not.toBeNull();
 
   const agentsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.includes("에이전트"))!;
   await act(async () => agentsTab.click());
-  expect(container.querySelector('[data-testid="stats-agent-cache"]')?.textContent).toContain("42.0% 전체");
-  expect(rows().map((row) => row.dataset.item)).toEqual(["pm", "qa"]);
-  expect(rows()[0].textContent).toContain("캐시 히트 50%");
-  // An agent without a token split shows no cache line instead of a fake 0%.
-  expect(rows()[1].textContent).not.toContain("캐시 히트");
+  expect(container.querySelector('[data-testid="stats-agent-cache"]')?.textContent).toContain("전체 캐시 히트 42.0%");
+  expect(rows().map((row) => row.dataset.itemId)).toEqual(["pm", "qa"]);
 });
 
 it("opens the selected row's detail with its facts and the agent's top skills", async () => {
@@ -90,7 +84,6 @@ it("opens the selected row's detail with its facts and the agent's top skills", 
   const agentsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.includes("에이전트"))!;
   await act(async () => agentsTab.click());
   await act(async () => rows()[0].click());
-  expect(rows()[0].getAttribute("aria-current")).toBe("true");
   const detail = document.querySelector<HTMLElement>('[data-testid="stats-detail-body"]')!;
   expect(detail.dataset.item).toBe("pm");
   expect(detail.textContent).toContain("캐시 절감$0.50");

@@ -218,21 +218,15 @@ test.describe("stats page", () => {
     const breakdown = page.getByTestId("stats-breakdown");
     await expect(breakdown.getByRole("tab", { name: /모델/ })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
     const panel = page.getByTestId("stats-model-share");
-    await expect(panel.locator("[data-item]")).toHaveCount(3);
+    const kitRows = panel.locator(".aui-compact-breakdown-row");
+    await expect(kitRows).toHaveCount(3);
 
-    const firstRow = panel.locator("[data-item]").first();
-    await expect(firstRow).toContainText("Claude Opus 4.6");
-    // Under 620px the share moves to the row's second line; wide rows keep a share column.
-    if (mobile) {
-      await expect(firstRow.getByText("점유율 63%")).toBeVisible();
-    } else {
-      await expect(firstRow.getByText("점유율 63%")).toBeHidden();
-      await expect(firstRow.getByText("63%", { exact: true })).toBeVisible();
-      await expect(page.getByTestId("stats-detail-empty")).toBeVisible();
-    }
+    // The kit share list reads every model's tokens and share; a row opens the cost and cache detail.
+    const firstRow = kitRows.first();
+    await expect(firstRow).toHaveAttribute("aria-label", "Claude Opus 4.6, 2.5M, 전체의 63%");
+    if (!mobile) await expect(page.getByTestId("stats-detail-empty")).toBeVisible();
 
     await firstRow.click();
-    await expect(firstRow).toHaveAttribute("aria-current", "true");
     if (mobile) {
       const dialog = page.getByTestId("stats-detail-dialog");
       await expect(dialog).toBeVisible();
@@ -257,9 +251,9 @@ test.describe("stats page", () => {
 
     await breakdown.getByRole("tab", { name: /에이전트/ }).click();
     const agentPanel = page.getByTestId("stats-agent-cache");
-    await expect(agentPanel.locator("[data-item]")).toHaveCount(4);
-    await expect(agentPanel).toContainText("캐시 히트");
-    await agentPanel.locator('[data-item="adk-dashboard"]').click();
+    await expect(agentPanel.locator(".aui-compact-breakdown-row")).toHaveCount(4);
+    await expect(agentPanel).toContainText("전체 캐시 히트");
+    await agentPanel.locator('.aui-compact-breakdown-row[data-item-id="adk-dashboard"]').click();
     const body = mobile ? page.getByTestId("stats-detail-dialog") : page.getByTestId("stats-detail");
     await expect(body.getByTestId("stats-detail-body")).toHaveAttribute("data-item", "adk-dashboard");
     await expect(body).toContainText("agentdesk-issue-pipeline");
@@ -273,7 +267,7 @@ test.describe("stats page", () => {
     await page.setViewportSize({ width: 820, height: 1180 });
     await mockApi(page);
     await page.goto("/stats");
-    const row = page.getByTestId("stats-model-share").locator("[data-item]").first();
+    const row = page.getByTestId("stats-model-share").locator(".aui-compact-breakdown-row").first();
     await row.click({ timeout: 15_000 });
     await expect(page.getByTestId("stats-detail")).toHaveCount(0);
     const dialog = page.getByTestId("stats-detail-dialog");
@@ -324,7 +318,7 @@ test.describe("stats page", () => {
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     await expectNoHorizontalOverflow(page);
     const small = await page.evaluate(() => {
-      const scopes = ["stats-page-header", "stats-breakdown", "stats-daily-token-chart", "stats-summary-grid", "stats-skill-usage"]
+      const scopes = ["stats-page-header", "stats-breakdown", "stats-daily-token-chart", "stats-summary-grid", "stats-claude-accounts", "stats-skill-usage"]
         .map((id) => document.querySelector(`[data-testid="${id}"]`))
         .filter((node): node is Element => node !== null);
       const selector = 'button, a[href], input, select, textarea, summary, [tabindex="0"], [role="tab"], [role="radio"]';
@@ -358,7 +352,7 @@ test.describe("stats page", () => {
         await page.waitForTimeout(300);
         await page.screenshot({ path: `${SHOTS}/${name}-full.png` });
         await page.setViewportSize({ width, height });
-        await page.getByTestId("stats-model-share").locator("[data-item]").first().click();
+        await page.getByTestId("stats-model-share").locator(".aui-compact-breakdown-row").first().click();
         if (width < 900) await expect(page.getByTestId("stats-detail-dialog")).toBeVisible();
         await page.waitForTimeout(400);
         await page.screenshot({ path: `${SHOTS}/${name}-detail.png` });

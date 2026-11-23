@@ -1854,7 +1854,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-summary-api-spend")).toContainText("데이터 확인 불가");
   });
 
-  test("stats: mobile pairs summary cards without horizontal overflow", async ({ page }, testInfo) => {
+  test("stats: phones stack the summary charts without horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/stats");
 
@@ -1872,8 +1872,8 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
-    expect(Math.abs(secondBox!.y - firstBox!.y)).toBeLessThanOrEqual(1);
-    expect(secondBox!.x).toBeGreaterThan(firstBox!.x + firstBox!.width);
+    expect(secondBox!.y).toBeGreaterThanOrEqual(firstBox!.y + firstBox!.height);
+    expect(Math.abs(secondBox!.x - firstBox!.x)).toBeLessThanOrEqual(1);
     await expectNoHorizontalOverflow(page);
   });
 
