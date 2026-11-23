@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
 import type { ServerCampaignView } from "../src/api/serverCampaigns";
+import pipelineTemplate from "./fixtures/pipeline-template-campaign-development-9-v1.json" with { type: "json" };
 
 // Set CAMPAIGNS_SHOTS to a directory to also save 390/1440 x light/dark screenshots, plus dark fixture shots of a server campaign.
 const SHOTS = process.env.CAMPAIGNS_SHOTS;
@@ -870,6 +871,115 @@ test("relations editor: a draft kept while another page shows asks before a relo
   await editor.getByRole("button", { name: "버리기", exact: true }).click();
   await reload();
   expect(asked).toEqual(["beforeunload", "beforeunload"]);
+});
+
+/** The live template as a server campaign's saved pipeline, with a run's tasks in three states, a timeout and an event;
+ * a ledger campaign reads the template list and that template instead. */
+async function openPipeline(page: Page, kind: "server" | "ledger", theme: "dark" | "light" = "dark") {
+  await page.clock.install({ time: new Date(NOW) });
+  const calls = await mockApi(page, theme);
+  const pipeline = structuredClone(pipelineTemplate.pipeline) as Record<string, unknown> & { states: Record<string, unknown>[]; events: unknown[] };
+  pipeline.states.find((state) => state.id === "review")!.timeout = { after_seconds: 3600, transition_id: "review-to-failed" };
+  pipeline.events = [{ id: "review-timer", state_id: "review", type: "timer.expired" }];
+  await json(page, /\/api\/server-campaigns\/pipeline\/templates$/, { templates: [pipelineTemplate.template] });
+  await json(page, /\/api\/server-campaigns\/pipeline\/templates\/campaign-development-9\/1$/, pipelineTemplate);
+  if (kind === "server") {
+    await serveServerCampaign(page);
+    await json(page, /\/api\/server-campaigns\/release\/pipeline$/, { pipeline, definition_revision: 7, execution_hash: "b".repeat(64), source: "saved", editable: false, migration_available: false,
+      execution: { mode: "legacy_stage", run_id: "run-1", definition_revision: 7, state_ids: { A: "implementation", B: "requirements", C: "landing" } } });
+  }
+  await page.goto(kind === "server" ? "/campaigns?mode=server&campaign=release" : "/campaigns?mode=legacy&campaign=open-issues-dag");
+  await page.getByRole("tab", { name: "파이프라인" }).click();
+  return { view: page.locator(".campaign-pipeline"), calls };
+}
+/** With CAMPAIGNS_SHOTS set, both pipelines in dark and light at the page's size. */
+async function pipelineShots(page: Page) {
+  for (const [kind, theme] of SHOTS ? [["server", "dark"], ["server", "light"], ["ledger", "dark"], ["ledger", "light"]] as const : []) {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await openPipeline(page, kind, theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${SHOTS}/pipeline-${kind}-${page.viewportSize()!.width}x${page.viewportSize()!.height}-${theme}.png` });
+    if (kind === "server") {
+      if (await page.locator(".react-flow").count()) await page.locator('.react-flow__node[data-id="review"]').click();
+      else { await page.getByRole("button", { name: /^리뷰/ }).click(); await page.getByRole("button", { name: /^흐름 밖 상태/ }).click(); }
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: `${SHOTS}/pipeline-${kind}-${page.viewportSize()!.width}x${page.viewportSize()!.height}-${theme}-chosen.png` });
+    }
+  }
+}
+
+test("pipeline: a server campaign's states left to right with result lines, tasks in each state, gates, an event, a keyboard-chosen inspector and a minimap", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The canvas is for wide screens");
+  await page.setViewportSize({ width: 1440, height: 980 });
+  const { view, calls } = await openPipeline(page, "server");
+  const card = (id: string) => view.locator(`.react-flow__node[data-id="${id}"]`);
+  await expect(view.locator(".react-flow__node-pipelineState")).toHaveCount(10);
+  await expect(view.locator(".react-flow__node-pipelineEvent")).toContainText("시간 만료→ 리뷰");
+  // 21 transitions and 3 spent retry budgets, less the retry in place, plus the event's line.
+  await expect(view.locator(".react-flow__edge")).toHaveCount(24);
+  const left = async (id: string) => (await card(id).boundingBox())!.x;
+  expect([await left("requirements") < await left("design"), await left("review") < await left("landing"), await left("final_verification") < await left("complete")]).toEqual([true, true, true]);
+  expect((await card("failed").boundingBox())!.y).toBeGreaterThan((await card("review").boundingBox())!.y + 100);
+  await expect(card("implementation")).toContainText("작업 1");
+  await expect(card("review")).not.toContainText(/작업 \d/);
+  await expect(card("requirements")).toContainText("시작");
+  await expect(card("landing")).toContainText("착지 승인");
+  await expect(card("review")).toContainText("1시간");
+  await expect(view.getByRole("complementary", { name: "파이프라인 요약" })).toContainText("정의 rev 7 · 실행 run-1");
+  await expect(view.locator(".react-flow__minimap")).toBeVisible();
+  await expect(view.getByRole("toolbar", { name: "보기 도구" }).getByRole("button")).toHaveCount(3);
+  await expect(view.getByRole("list", { name: "주 흐름" }).locator(":scope > li")).toHaveCount(9);
+  // Tab walks the main flow left to right, then the row below, each card outlined; Enter opens it in the inspector.
+  await card("requirements").focus();
+  const seen = [];
+  for (let step = 0; step < 9; step += 1) { await page.keyboard.press("Tab"); seen.push(await page.evaluate(() => [document.activeElement?.getAttribute("data-id"), getComputedStyle(document.activeElement!.firstElementChild!).outlineStyle])); }
+  expect(seen).toEqual(["design", "design_review", "implementation", "review", "landing", "main_verification", "final_verification", "complete", "failed"].map((id) => [id, "solid"]));
+  await card("review").focus();
+  await page.keyboard.press("Enter");
+  const aside = view.getByRole("complementary", { name: "선택 상태" });
+  await expect(aside).toContainText("담당review");
+  const out = aside.getByRole("list", { name: "나가는 전환" });
+  await expect(out.locator(":scope > li")).toHaveCount(3);
+  await expect(out).toContainText("성공→ 착지· 착지 승인");
+  await expect(out).toContainText("review.verdict = clean");
+  await expect(out).toContainText("3회까지, 그다음 작업 실패");
+  await expect(aside.getByRole("list", { name: "들어오는 전환" })).toContainText("구현· 성공");
+  expect(calls.filter((call) => !call.startsWith("GET") && !call.startsWith("POST /api/auth/ws-ticket"))).toEqual([]);
+  await pipelineShots(page);
+});
+
+test("pipeline: a ledger campaign says it uses no server pipeline and shows the built-in template without task counts", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "One width is enough for the source line");
+  const { view, calls } = await openPipeline(page, "ledger");
+  await expect(view.getByText("원장 캠페인은 서버 파이프라인을 쓰지 않아요. 기본 템플릿을 보여 드려요.")).toBeVisible();
+  await expect(view.getByText("템플릿 campaign-development-9 v1")).toBeVisible();
+  await expect(view.locator(".react-flow__node-pipelineState")).toHaveCount(10);
+  await expect(view.locator(".react-flow__node-pipelineState").filter({ hasText: /작업 \d/ })).toHaveCount(0);
+  expect(calls.filter((call) => call.includes("/pipeline"))).toEqual(["GET /api/server-campaigns/pipeline/templates", "GET /api/server-campaigns/pipeline/templates/campaign-development-9/1"]);
+});
+
+test.describe("pipeline at 390px touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test("pipeline: phones list the main flow numbered with task counts, open a state's results, fold the rest, with no sideways scroll and 44px targets", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Phone width");
+    const { view } = await openPipeline(page, "server");
+    await expect(view.locator(".react-flow")).toHaveCount(0);
+    const flow = view.getByRole("list", { name: "주 흐름" });
+    await expect(flow.locator(":scope > li")).toHaveCount(9);
+    await expect(flow.locator(":scope > li").nth(3)).toContainText("구현에이전트 작업작업 1");
+    await expect(flow.locator(":scope > li").nth(4)).toContainText("성공 → 착지 · 품질 실패 ↻3 → 구현");
+    await flow.getByRole("button", { name: /^리뷰/ }).click();
+    await expect(flow.getByRole("list", { name: "나가는 전환" })).toContainText("3회까지, 그다음 작업 실패");
+    await view.getByRole("button", { name: /^흐름 밖 상태 1/ }).click();
+    await expect(view.getByRole("button", { name: /^작업 실패/ })).toBeVisible();
+    await view.getByRole("button", { name: /^이벤트 1/ }).click();
+    await expect(view.getByText("시간 만료 → 리뷰")).toBeVisible();
+    await expect(view.getByText("상태 10 · 전환 21").filter({ visible: true })).toHaveCount(1);
+    await expectNoHorizontalOverflow(page);
+    expect([await view.evaluate(small), await view.evaluate(tiny)]).toEqual([[], []]);
+    await pipelineShots(page);
+  });
 });
 
 test("home campaigns: campaigns under way lead, unread stages say so, and a row opens its campaign", async ({ page }, testInfo) => {
