@@ -78,10 +78,11 @@ fn a_previous_same_author_drain_does_not_contaminate_the_next_receipt() {
         .join("runtime/injected_frames.json");
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
-    let receipts = stored["entries"]
+    let receipts = stored["passive"]
         .as_array()
         .unwrap()
         .iter()
+        .map(|passive| &passive["entry"])
         .find(|entry| entry["id"] == "ca720252")
         .unwrap()["events"]
         .as_array()

@@ -126,8 +126,8 @@ async fn s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg() {
     recorded_paste_left_unknown(6_813_443, false).await;
 }
 
-/// The same paste is still consumed once its history moved to V2; B waits in the queue, since the
-/// unscoped writer this fixture pastes with cannot register into a V2 history.
+/// The same paste is still consumed once its history moved to V2, and B follows through the
+/// unscoped writer's keyless V2 registration.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_a_recorded_paste_is_consumed_after_its_history_moved_to_v2_pg() {
     recorded_paste_left_unknown(6_813_452, true).await;
@@ -186,12 +186,6 @@ async fn recorded_paste_left_unknown(channel: u64, moved: bool) {
         fixture.reconciled_rows() == 1
     })
     .await;
-    if moved {
-        let queued: Vec<_> = fixture.queue().await.iter().map(|i| i.message_id).collect();
-        assert_eq!((fixture.terminal(), queued), (vec![h.get()], vec![b]));
-        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-        return;
-    }
     fixture.slow_check().await;
     until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
     assert_eq!(fixture.pane.keys().len(), 4);

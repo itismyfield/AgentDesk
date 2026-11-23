@@ -90,7 +90,12 @@ pub(super) fn v2_prefix(path: &Path) -> std::io::Result<bool> {
         let (parses, bytes, inspects) = cost.get();
         cost.set((parses, bytes + filled, inspects));
     });
-    Ok(head[..filled].starts_with(V2_PREFIX) || head[..filled].starts_with(V3_PREFIX))
+    Ok(v2_head(&head[..filled]))
+}
+
+/// Whether `head` opens with the V2 writer's envelope.
+pub(super) fn v2_head(head: &[u8]) -> bool {
+    head.starts_with(V2_PREFIX) || head.starts_with(V3_PREFIX)
 }
 
 pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {

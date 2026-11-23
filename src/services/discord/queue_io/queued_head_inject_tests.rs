@@ -793,8 +793,8 @@ async fn s2b_a_received_queued_head_lets_the_same_body_be_injected_again_pg() {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        stored["entries"].as_array().is_some_and(|entries| {
-            entries.iter().any(|entry| {
+        stored["passive"].as_array().is_some_and(|passive| {
+            passive.iter().map(|p| &p["entry"]).any(|entry| {
                 entry["id"] == nonce.as_str()
                     && entry["events"].as_array().is_some_and(|e| !e.is_empty())
             })

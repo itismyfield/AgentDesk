@@ -134,23 +134,12 @@ fn readable(path: &Path) -> Result<std::sync::Arc<Store>, String> {
 }
 
 /// What the V1 append readers match against: the V1 store, or a V2 history's owned entries when
-/// it holds any migrated append entry.
+/// it holds any append entry.
 fn readable_append(path: &Path) -> Result<std::sync::Arc<Store>, String> {
     if let Some(store) = v2::append_store(path)? {
         return Ok(store);
     }
     read(path).map(std::sync::Arc::new)
-}
-
-/// A V1 append mutation: on the V1 store, or on a V2 history's migrated append entries.
-fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
-    {
-        let path = path()?;
-        if v2::is_v2(&path)? {
-            return v2::update_migrated(&path, apply);
-        }
-    }
-    update(apply)
 }
 
 /// The attempt a diagnostic receipt thread records into, with no pane write right. A receipt is
@@ -174,25 +163,23 @@ impl ReceiptScope {
     }
 }
 
+/// A non-scoped writer's change; the ledger's format is chosen under its lock.
 fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
-    let path = path()?;
-    std::fs::create_dir_all(path.parent().ok_or("frame ledger parent missing")?)
-        .map_err(|error| error.to_string())?;
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path.with_extension("lock"))
-        .map_err(|error| error.to_string())?;
-    lock.lock().map_err(|error| error.to_string())?;
-    let mut store = read(&path)?;
+    v2::keyless::update(&path()?, apply)
+}
+
+/// The V1 store's change, run by [`v2::keyless::update`] under the ledger lock.
+fn update_v1<T>(
+    path: &Path,
+    apply: impl FnOnce(&mut Store) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut store = read(path)?;
     let result = apply(&mut store)?;
     let raw = serde_json::to_string(&store).map_err(|error| error.to_string())?;
-    let written = crate::services::discord::runtime_store::atomic_write(&path, &raw);
+    let written = crate::services::discord::runtime_store::atomic_write(path, &raw);
     stamped::published();
     written?;
-    crate::domain::file_sync::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
+    crate::domain::file_sync::fsync_parent_dir(path).map_err(|error| error.to_string())?;
     Ok(result)
 }
 
