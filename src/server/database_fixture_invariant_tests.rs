@@ -39,14 +39,18 @@ mod tests {
     /// cluster fixtures above. The bounded constructor inventory below checks
     /// both lists against direct calls in `src/**/*.rs`, including the fixture
     /// in `db::postgres::tests`.
-    /// `engine::ops::config_ops` delegates base selection through the listed
-    /// `dispatch::test_support` and is an explicit exception to direct base-call checks only.
+    /// `engine::ops::config_ops` delegates base selection through `dispatch::test_support`, which
+    /// re-exports the listed `db::dispatch_test_db_tests`; it is an exception to direct base-call checks only.
     /// Its source still participates in the address/environment token checks. Target-parser and tunnel contract
     /// tests have no direct constructor calls and need no inventory exception.
     const PG_FIXTURE_SOURCES: &[(&str, &str)] = &[
         (
             "db::auto_queue::test_support",
             include_str!("../db/auto_queue/test_support.rs"),
+        ),
+        (
+            "db::dispatch_test_db_tests",
+            include_str!("../db/dispatch_test_db_tests.rs"),
         ),
         (
             "db::dispatched_sessions",
@@ -75,10 +79,6 @@ mod tests {
         (
             "db::prompt_manifests::tests",
             include_str!("../db/prompt_manifests/tests.rs"),
-        ),
-        (
-            "dispatch::test_support",
-            include_str!("../dispatch/test_support.rs"),
         ),
         (
             "engine::ops::db_ops",
