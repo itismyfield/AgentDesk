@@ -10,7 +10,7 @@ import { TextArea } from "../../kit/free/text-area-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { Eyebrow, Well } from "../common/KitPrimitives";
 import type { Tr } from "./campaignPresentation";
-import { changedDefinitionValues, newIdempotencyKey, nodeDefinitionText, rejectionText } from "./serverCampaignModel";
+import { changedDefinitionValues, editedDefinition, newIdempotencyKey, nodeDefinitionText, rejectionText } from "./serverCampaignModel";
 
 type Definition = ServerCampaignDefinition;
 type Node = Definition["nodes"][number];
@@ -57,6 +57,7 @@ const DEFINITION_ERRORS: Record<string, [string, string]> = {
   missing_dependency: ["없는 작업을 선행으로 지정했습니다", "A dependency names no task"],
   repeated_dependency: ["같은 선행 작업을 두 번 지정했습니다", "A dependency is listed twice"],
   cycle: ["선행 관계가 순환합니다", "The dependencies form a cycle"],
+  invalid_pipeline: ["파이프라인이 올바르지 않아요", "The pipeline is not valid"],
 };
 
 function submittedChange(draft: DefinitionDraft): DefinitionDraft["change"] | null {
@@ -153,7 +154,8 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
   const save = async (expectedRevision = draft.baseRevision, baseDefinition = draft.baseDefinition) => {
     if (sending.current || saving || disabled) return;
     const change = submittedChange(draft);
-    const body = JSON.stringify([draft.mode, draft.id, expectedRevision, definition, change]);
+    const outgoing = draft.mode === "edit" ? editedDefinition(definition, baseDefinition) : definition;
+    const body = JSON.stringify([draft.mode, draft.id, expectedRevision, outgoing, change]);
     const key = draft.sent?.body === body ? draft.sent.key : draft.newKey();
     // Answers merge only their own state into the latest draft, so edits made while waiting survive,
     // and only into the draft they were sent from, so a draft reopened meanwhile is left alone.
@@ -165,10 +167,10 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
     try {
       const result = draft.mode === "create"
         ? await createServerCampaign(draft.id, definition, key)
-        : await editServerCampaignDefinition(draft.id, expectedRevision ?? 0, definition, change, key);
+        : await editServerCampaignDefinition(draft.id, expectedRevision ?? 0, outgoing, change, key);
       // Edits made after sending stay open as a draft on top of the saved revision.
       answer((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
-        ...current, mode: "edit", id: draft.id, baseRevision: result.definition_revision, baseDefinition: definition,
+        ...current, mode: "edit", id: draft.id, baseRevision: result.definition_revision, baseDefinition: outgoing,
         saved: savedTasks(current, definition), sent: null, status: { kind: "saved", revision: result.definition_revision },
       });
       onSaved(draft.id, result);
@@ -189,8 +191,10 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
           : { kind: "error", text: tr("다른 곳에서 정의가 바뀌었습니다. 초안은 그대로 둡니다.", "The definition changed elsewhere. Your draft is kept.") }, true);
       } else {
         const detail = refusal.definitionError;
+        // state_in_use carries a pipeline detail too; its own code says why the named state cannot change.
+        const named = refusal.rejection === "state_in_use" ? rejectionText(refusal.rejection, tr) : null;
         const text = detail
-          ? [tr(...(DEFINITION_ERRORS[detail.code] ?? [detail.code, detail.code])), detail.path.length ? detail.path.join(" → ") : detail.target].filter(Boolean).join(" · ")
+          ? [named ?? tr(...(DEFINITION_ERRORS[detail.code] ?? [detail.code, detail.code])), detail.path.length ? detail.path.join(" → ") : detail.target].filter(Boolean).join(" · ")
           : refusal.rejection ? rejectionText(refusal.rejection, tr)
             : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : refusal.message;
         settle({ kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" }, true);

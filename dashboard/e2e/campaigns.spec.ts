@@ -336,6 +336,27 @@ test("server campaign: a waiting approval and blocked work lead, and approving s
   await expect(sheet).toHaveCount(0);
 });
 
+test("server campaign: saving an edited definition sends back the workflow options and pipeline it was read with", async ({ page }) => {
+  await page.clock.install({ time: new Date(NOW) });
+  await mockApi(page);
+  const release = structuredClone(serverCampaignFixtures.prepared);
+  Object.assign(release.definition, { workflow_options: { start: true, implementation: false, review: true, landing: false, merge: true, deploy: false }, pipeline: pipelineTemplate.pipeline });
+  await serveServerCampaign(page, release);
+  let sent: { definition?: unknown } = {};
+  await page.route(/\/api\/server-campaigns\/release\/definition$/, (route) => {
+    sent = route.request().postDataJSON();
+    return route.fulfill({ json: { result: { definition_revision: 8, run_id: null, control_version: null, event_sequence: 2, control: "prepared" } } });
+  });
+  await page.goto("/campaigns?mode=server&campaign=release");
+  await page.getByRole("button", { name: "정의 편집" }).click();
+  const form = page.locator(".campaign-server-form");
+  await form.getByRole("textbox", { name: "이름", exact: true }).fill("릴리스 정의 편집");
+  await expectNoHorizontalOverflow(page);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/definition-edit-${page.viewportSize()!.width}x${page.viewportSize()!.height}-dark.png` });
+  await form.getByRole("button", { name: "저장", exact: true }).click();
+  await expect.poll(() => sent.definition).toEqual({ ...release.definition, title: "릴리스 정의 편집" });
+});
+
 test.describe("touch at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
