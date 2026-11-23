@@ -387,7 +387,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
           selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
-      {legacyError}
+      {/* Behind the pipeline editor nothing may take the focus. */}
+      {!wideEditor && legacyError}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
       {/* The pipeline editor takes the list's width too; it comes back once editing ends. */}
       <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${wideEditor ? "" : folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
@@ -408,7 +409,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <div className="grid min-w-0 content-start gap-4">
           {/* Nothing is called empty until both lists have answered without an error. */}
           {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
-          {renderForm(NEW_DRAFT, serverDown)}
+          {!wideEditor && renderForm(NEW_DRAFT, serverDown)}
           {mode === "legacy" ? legacyDetail : serverSelected && (serverDetail
             ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
               : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}

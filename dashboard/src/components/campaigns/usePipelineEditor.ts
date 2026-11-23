@@ -18,12 +18,15 @@ export type Notice = { kind: "saved"; revision: number } | { kind: "lost" } | { 
 const kept = new Map<string, Edit & { sent: { current: Sent | null } }>();
 const keptGuard = (event: BeforeUnloadEvent) => warnBeforeUnload(event);
 const watchers = new Set<() => void>();
+const tell = () => { for (const watcher of watchers) watcher(); };
 /** Keeps or drops a campaign's draft and tells every editor on screen, so one that came back meanwhile stops offering it. */
 const store = (id: string, value: Edit & { sent: { current: Sent | null } } | null) => {
   if (value) kept.set(id, value); else if (!kept.delete(id)) return;
   if (kept.size) window.addEventListener("beforeunload", keptGuard); else window.removeEventListener("beforeunload", keptGuard);
-  for (const watcher of watchers) watcher();
+  tell();
 };
+/** Saves that landed after their page left, by campaign: the page showing it next reads it again and says so. */
+const landed = new Map<string, number>();
 const watch = (watcher: () => void) => { watchers.add(watcher); return () => { watchers.delete(watcher); }; };
 /** The history entry a full-window editor adds, so the browser's back button leaves the editor first. */
 const ENTRY = "adkPipelineEditor";
@@ -38,6 +41,7 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
 }) {
   const [edit, setEdit] = useState<Edit | null>(null);
   const waiting = useSyncExternalStore(watch, () => id ? kept.get(id) ?? null : null);
+  const arrived = useSyncExternalStore(watch, () => id ? landed.get(id) ?? null : null);
   const [checks, setChecks] = useState<Checks | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -78,6 +82,7 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
   keep.current = dirty ? edit : null;
   useEffect(() => () => { if (id && keep.current) store(id, { ...keep.current, sent }); }, [id]);
   const forget = () => { if (id) store(id, null); };
+  useEffect(() => { if (!id || arrived === null) return; landed.delete(id); setNotice({ kind: "saved", revision: arrived }); reload(); }, [id, arrived]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Closing takes the editor's history entry off once, unless the page has gone (a save that landed after leaving).
   const live = useRef(true), shown = useRef(false);
@@ -99,6 +104,8 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
     return () => window.removeEventListener("popstate", back);
   }, [opened, entry]);
   const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline });
+  // While a save is out the draft holds still, whatever asks to change it: what it sends is what closes.
+  const busy = useRef(false);
   const save = async (over?: Detail) => {
     if (!edit || !id || saving) return;
     const revision = over?.definition_revision ?? edit.revision;
@@ -106,12 +113,14 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
     const body = JSON.stringify([revision, edit.draft]);
     const key = sent.current?.body === body ? sent.current.key : newIdempotencyKey();
     sent.current = { body, key };
-    setSaving(true);
+    setSaving(true); busy.current = true;
     setNotice(null);
     try {
       const result = await saveServerCampaignPipeline(id, revision, edit.draft, key);
       // The page may have gone while waiting and kept this draft; it is saved now.
       store(id, null);
+      if (!live.current) { landed.set(id, result.definition_revision); tell(); }
+      setLeaving(null);
       stop();
       setNotice({ kind: "saved", revision: result.definition_revision });
       reload();
@@ -130,7 +139,7 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
       setNotice({ kind: "error", text: (refusal.rejection ? rejectionText(refusal.rejection, tr) : refusal.status === 409 ? rejectionText("idempotency_conflict", tr)
         : refusal.status === 422 ? tr("서버 검사에서 오류가 나왔어요. 아래 목록을 확인해 주세요.", "The server's checks found errors. See the list below.") : refusal.message) + places });
     } finally {
-      setSaving(false);
+      setSaving(false); busy.current = false;
     }
   };
 
@@ -140,8 +149,8 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
     /** Picks up the kept draft over the revision it was made against; a save then reports any newer one as a conflict. */
     // The key travels with a kept draft (by reference, so an answer that came after leaving still counts).
     resume: () => { if (waiting) { const { sent: last, ...next } = waiting; open(next); sent.current = last.current; } },
-    update: (change: (draft: PipelineDefinition) => PipelineDefinition) => setEdit((current) => current && { ...current, draft: change(current.draft) }),
-    revert: () => setEdit((current) => current && { ...current, draft: current.base }),
+    update: (change: (draft: PipelineDefinition) => PipelineDefinition) => { if (!busy.current) setEdit((current) => current && { ...current, draft: change(current.draft) }); },
+    revert: () => { if (!busy.current) setEdit((current) => current && { ...current, draft: current.base }); },
     close: () => dirty ? setLeaving(() => stop) : stop(),
     decide: (discard: boolean) => { const proceed = leaving; setLeaving(null); if (discard) { stop(); proceed?.(); } },
   };

@@ -105,7 +105,8 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
   chosen: string | null; onChoose: (id: string | null) => void; inspector: ReactNode; children: ReactNode; tr: Tr;
   /** A state to bring into view (a check pointed at it). */
   reveal?: { id: string; n: number } | null;
-  edit?: { onLink: (from: string, pin: string, to: string) => void; onDrop: (from: string, pin: string, at: PinDrop) => void; onAdd: (button: HTMLElement) => void };
+  /** `busy` (a save is out) holds the pins and the tools that change the draft. */
+  edit?: { busy: boolean; onLink: (from: string, pin: string, to: string) => void; onDrop: (from: string, pin: string, at: PinDrop) => void; onAdd: (button: HTMLElement) => void };
   checks?: ReactNode;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
@@ -151,7 +152,7 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
           onInit={(instance) => { flow.current = instance; open(instance); }}
           minZoom={0.1} maxZoom={1.5} nodesDraggable={false} edgesFocusable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false}
-          nodesConnectable={full && !moving} elementsSelectable={!moving} connectOnClick={false} onConnectEnd={dropped} connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2, strokeDasharray: "6 5" }}
+          nodesConnectable={full && !moving && !edit.busy} elementsSelectable={!moving} connectOnClick={false} onConnectEnd={dropped} connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2, strokeDasharray: "6 5" }}
           deleteKeyCode={null} selectionKeyCode={null} multiSelectionKeyCode={null}
           // A click or Enter on a focused card arrives as a select change; the pane lets it go.
           onNodesChange={(changes) => {
@@ -176,7 +177,7 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
         {edit && <div role="toolbar" aria-orientation="vertical" aria-label={tr("캔버스 도구", "Canvas tools")} className={`${FLOAT} top-1/2 left-4 flex -translate-y-1/2 flex-col gap-0.5 p-1`}>
           <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택 · 핀을 끌어 이어요", "Select · drag a pin to connect")} pressed={tool === "select"} onClick={() => setTool("select")} />
           <IconButton icon={<Hand aria-hidden />} className={TOOL} label={tr("이동", "Move")} pressed={tool === "move"} onClick={() => setTool("move")} />
-          <IconButton icon={<SquarePlus aria-hidden />} className={TOOL} label={tr("상태 추가", "Add a state")} onClick={(event) => edit.onAdd(event.currentTarget)} />
+          <IconButton icon={<SquarePlus aria-hidden />} className={TOOL} label={tr("상태 추가", "Add a state")} disabled={edit.busy} onClick={(event) => edit.onAdd(event.currentTarget)} />
           <IconButton icon={<Maximize aria-hidden />} className={TOOL} label={tr("맞춤", "Fit")} onClick={() => void flow.current?.fitView(FIT)} />
         </div>}
         {children}

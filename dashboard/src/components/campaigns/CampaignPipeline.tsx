@@ -64,7 +64,7 @@ export default function CampaignPipeline({ source, title, dispositions, approval
   const shown = edit?.draft ?? loaded?.pipeline;
   const [picking, setPicking] = useState<Picking | null>(null);
   const spot = useRef<HTMLSpanElement>(null);
-  useEffect(() => { if (!edit) setPicking(null); }, [!!edit]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!edit || editor.saving) setPicking(null); }, [!!edit, editor.saving]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (!onEditing) return; onEditing(!!edit); return () => onEditing(false); }, [!!edit, onEditing]); // eslint-disable-line react-hooks/exhaustive-deps
   const placeOf = (value: PipelineDiagnostic) => { const id = edit && diagnosticState(value, [edit.draft]); return edit?.draft.states.some((state) => state.id === id) ? id : null; };
   // Errors mark their states on the canvas and their transitions in the form.
@@ -139,7 +139,7 @@ export default function CampaignPipeline({ source, title, dispositions, approval
   return <div className={full ? "campaign-pipeline fixed inset-0 z-50 flex min-w-0 flex-col bg-[var(--bg)]" : "campaign-pipeline grid min-w-0 gap-3"}>
     <div className={full ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0 overflow-hidden rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-1)]"}>
       {full ? <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line-soft)] px-6 py-2">
-        <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={editor.close}>{tr("캠페인", "Campaign")}</Button>
+        <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} disabled={editor.saving} onClick={editor.close}>{tr("캠페인", "Campaign")}</Button>
         <div className="grid min-w-0 flex-[0_1_auto] gap-0.5">
           <strong className="truncate text-[15px] text-[var(--fg)]">{title ?? tr("파이프라인", "Pipeline")}</strong>
           <Cap className="truncate"><Num>{[tr("파이프라인 편집", "Editing the pipeline"), template && tr(`템플릿 ${template.id} v${template.version}`, `Template ${template.id} v${template.version}`), tr(`정의 rev ${edit.revision}`, `Definition rev ${edit.revision}`)].filter(Boolean).join(" · ")}</Num></Cap>
@@ -163,7 +163,7 @@ export default function CampaignPipeline({ source, title, dispositions, approval
           : tr("폰에서는 보기만 해요. 넓은 화면에서 그래프로 볼 수 있어요.", "Phones only show the list. Wider screens draw the graph.")}</p>
         <PipelineStateList graph={graph} chosen={chosen} onChoose={setChosen} tr={tr} />
       </div> : <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} tr={tr}
-        edit={edit ? { onLink: link, onDrop: (state, pin, at) => { setChosen(state); setPicking({ from: { state, pin }, anchor: spot, at }); }, onAdd: (button) => setPicking({ from: null, anchor: { current: button } }) } : undefined}
+        edit={edit ? { busy: editor.saving, onLink: link, onDrop: (state, pin, at) => { setChosen(state); setPicking({ from: { state, pin }, anchor: spot, at }); }, onAdd: (button) => setPicking({ from: null, anchor: { current: button } }) } : undefined}
         checks={edit && <PipelineChecks checks={checks} graphs={[edit.draft, edit.base]} onPick={(value) => { const id = placeOf(value); if (id) choose(id); }} tr={tr} />}
         inspector={edit ? <PipelineEditPanel graph={graph} draft={edit.draft} revision={edit.revision} chosen={chosen} flagged={flagged} changes={changes} busy={editor.saving} update={editor.update} onChoose={setChosen}
           onFind={(transition, button) => setPicking({ from: { state: transition.from, pin: transition.id }, anchor: { current: button } })} tr={tr} />
