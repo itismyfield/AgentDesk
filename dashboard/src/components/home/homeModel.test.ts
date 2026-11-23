@@ -6,7 +6,7 @@ import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, systemNeedsAttention, todoStatus,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, pauseMeterScale, systemNeedsAttention, todoStatus, usageDetail,
   type HomeHealth,
 } from "./homeModel";
 
@@ -47,8 +47,12 @@ describe("home agents", () => {
     const turn = { status: "working", started_at: "2026-11-18T00:00:00Z", updated_at: null, provider: "codex", current_tool_line: null };
     expect(monitorView(turn, ada, tr)).toEqual({ started: null, label: "PR 리뷰", kind: "think", role: "codex" });
     const live = { ...turn, updated_at: "2026-11-18T00:05:00Z", current_tool_line: "npm test", tool_events: [{ kind: "tool", tool_name: "Bash" }] };
-    expect(monitorView(live, ada, tr)).toMatchObject({ started: Date.parse(turn.started_at), label: "npm test", kind: "run" });
-    expect(monitorView({ ...turn, status: "idle" }, ada, tr)).toBeNull();
+    const now = Date.parse("2026-11-18T00:06:00Z");
+    expect(monitorView(live, ada, tr, now)).toMatchObject({ started: Date.parse(turn.started_at), label: "npm test", kind: "run" });
+    expect(monitorView({ ...turn, status: "idle" }, ada, tr, now)).toBeNull();
+    // A start well after the snapshot (another time zone) or 13 hours back (a leftover file) hides the clock.
+    expect(monitorView({ ...live, started_at: "2026-11-18T09:00:00Z" }, ada, tr, now)?.started).toBeNull();
+    expect(monitorView(live, ada, tr, now + 13 * 3_600_000)?.started).toBeNull();
   });
 
   it("tells an empty session list from one that failed to load", () => {
@@ -93,6 +97,7 @@ describe("home to-dos", () => {
   it("shows the empty state only once every source answered", () => {
     expect(todoStatus(0, ["ok", "loading"])).toBe("loading");
     expect(todoStatus(0, ["ok", "failed"])).toBe("partial");
+    expect(todoStatus(0, ["ok", "partial"])).toBe("partial");
     expect(todoStatus(0, ["ok", "ok"])).toBe("empty");
   });
 });
@@ -185,9 +190,20 @@ describe("home routines and usage", () => {
       { provider: "gemini", buckets: [{ name: "rpm", limit: 15, used: 0, remaining: 15, reset: 0 }], stale: false, fetched_at: 1_795_033_600 },
       { provider: "github", buckets: [{ name: "core", limit: 5000, used: 3, remaining: 4997, reset: 0 }], stale: false },
     ], true);
-    expect(rows.map((row) => [row.pct, row.unmeasured, row.measuredAt])).toEqual([[83, false, 1_795_033_577_000], [0, false, 1_795_033_577_000], [null, true, null]]);
-    expect(rows[0]).toMatchObject({ label: "Claude 7일", level: "warning", stale: true });
+    expect(rows.map((row) => [row.group, row.label, row.pct, row.unmeasured, row.measuredAt])).toEqual([
+      ["Claude", "7일", 83, false, 1_795_033_577_000], ["Claude", "5시간", 0, false, 1_795_033_577_000], ["Gemini", "rpm", null, true, null],
+    ]);
+    expect(rows[0].stale).toBe(true);
     expect(autoPauseRule({ current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {} })).toEqual({ enabled: true, pct: 90 });
     expect(autoPauseRule(null)).toBeNull();
+  });
+
+  it("hands a pause below 100% to the kit meter and names it on the row only for a rule at 100% or more", () => {
+    const [high, full] = buildUsageRows([{ provider: "claude", buckets: [{ name: "7d", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "5h", limit: 100, used: 100, remaining: 0, reset: 0 }], stale: false }], true);
+    expect([{ enabled: true, pct: 90 }, { enabled: true, pct: 70 }, { enabled: true, pct: 100 }, { enabled: false, pct: 90 }, null].map(pauseMeterScale))
+      .toEqual([{ warnAt: 0.8, dangerAt: 0.9 }, { warnAt: 0.7, dangerAt: 0.7 }, {}, {}, {}]);
+    expect(usageDetail(high, { enabled: true, pct: 90 }, tr)).toBeUndefined();
+    expect([usageDetail(full, { enabled: true, pct: 100 }, tr), usageDetail(high, { enabled: true, pct: 100 }, tr)]).toEqual(["자동 진행 멈춤 기준 이상", undefined]);
+    expect(usageDetail(full, { enabled: false, pct: 100 }, tr)).toBeUndefined();
   });
 });

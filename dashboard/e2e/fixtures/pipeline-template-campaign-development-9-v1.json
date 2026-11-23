@@ -1,0 +1,533 @@
+{
+ "execution_hash": "68c9fc691471cdb0570706848ec16f10ce44b28d971fdf7119654c0839589d34",
+ "pipeline": {
+  "evaluator_version": 1,
+  "events": [],
+  "policy": {
+   "design_enabled": false
+  },
+  "registry_version": 1,
+  "schema_version": 1,
+  "start": "requirements",
+  "states": [
+   {
+    "executor": {
+     "id": "r8.requirements",
+     "parameters": {
+      "effect_gates": [
+       "start"
+      ]
+     },
+     "version": 1
+    },
+    "id": "requirements",
+    "kind": "auto_check"
+   },
+   {
+    "executor": {
+     "id": "r8.design",
+     "parameters": {
+      "effect_gates": []
+     },
+     "version": 1
+    },
+    "id": "design",
+    "kind": "agent_task",
+    "owner": "implementation"
+   },
+   {
+    "executor": {
+     "id": "r8.design_review",
+     "parameters": {
+      "effect_gates": []
+     },
+     "version": 1
+    },
+    "id": "design_review",
+    "kind": "agent_task",
+    "owner": "review"
+   },
+   {
+    "executor": {
+     "id": "r8.work",
+     "parameters": {
+      "effect_gates": []
+     },
+     "version": 1
+    },
+    "id": "implementation",
+    "kind": "agent_task",
+    "owner": "implementation"
+   },
+   {
+    "executor": {
+     "id": "r8.review",
+     "parameters": {
+      "effect_gates": []
+     },
+     "version": 1
+    },
+    "id": "review",
+    "kind": "agent_task",
+    "owner": "review"
+   },
+   {
+    "executor": {
+     "id": "r8.landing",
+     "parameters": {
+      "effect_gates": [
+       "merge",
+       "deploy"
+      ]
+     },
+     "version": 1
+    },
+    "id": "landing",
+    "kind": "auto_action"
+   },
+   {
+    "executor": {
+     "id": "r8.main_check",
+     "parameters": {
+      "effect_gates": []
+     },
+     "version": 1
+    },
+    "id": "main_verification",
+    "kind": "auto_check"
+   },
+   {
+    "executor": {
+     "id": "r8.final_check",
+     "parameters": {
+      "effect_gates": [
+       "deploy"
+      ]
+     },
+     "version": 1
+    },
+    "id": "final_verification",
+    "kind": "auto_action"
+   },
+   {
+    "id": "complete",
+    "kind": "end_success"
+   },
+   {
+    "id": "failed",
+    "kind": "end_failure"
+   }
+  ],
+  "template_id": "campaign-development-9",
+  "template_version": 1,
+  "transitions": [
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "requirements",
+    "id": "requirements-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "design",
+    "id": "design-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "design_review",
+    "id": "design_review-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "implementation",
+    "id": "implementation-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "review",
+    "id": "review-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "landing",
+    "id": "landing-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "main_verification",
+    "id": "main_verification-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "failed"
+    },
+    "from": "final_verification",
+    "id": "final_verification-to-failed",
+    "priority": 5,
+    "to": "failed"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "policy.design_enabled",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "requirements.ready",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "requirements",
+    "gate": "implementation",
+    "id": "requirements-to-design",
+    "priority": 20,
+    "to": "design"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "policy.design_enabled",
+       "op": "eq",
+       "value": false
+      },
+      {
+       "field": "requirements.ready",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "requirements",
+    "gate": "implementation",
+    "id": "requirements-to-implementation",
+    "priority": 30,
+    "to": "implementation"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      }
+     ]
+    },
+    "from": "design",
+    "gate": "review",
+    "id": "design-to-design_review",
+    "priority": 20,
+    "to": "design_review"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "review.verdict",
+       "op": "eq",
+       "value": "clean"
+      }
+     ]
+    },
+    "from": "design_review",
+    "gate": "implementation",
+    "id": "design_review-to-implementation",
+    "priority": 20,
+    "to": "implementation"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "work.seal_valid",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "verification.review_start_passed",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "implementation",
+    "gate": "review",
+    "id": "implementation-to-review",
+    "priority": 20,
+    "to": "review"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "review.verdict",
+       "op": "eq",
+       "value": "clean"
+      },
+      {
+       "field": "review.p0_count",
+       "op": "eq",
+       "value": 0
+      },
+      {
+       "field": "review.p1_count",
+       "op": "eq",
+       "value": 0
+      },
+      {
+       "field": "review.scope_complete",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "verification.verdict",
+       "op": "eq",
+       "value": "pass"
+      }
+     ]
+    },
+    "from": "review",
+    "gate": "landing",
+    "id": "review-to-landing",
+    "priority": 20,
+    "to": "landing"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "pr.merged",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "main.contains_candidate",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "landing",
+    "id": "landing-to-main_verification",
+    "priority": 20,
+    "to": "main_verification"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "acceptance.complete",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "evidence.current",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "actions.settled",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "main_verification",
+    "id": "main_verification-to-complete",
+    "priority": 20,
+    "to": "complete"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "acceptance.complete",
+       "op": "eq",
+       "value": false
+      }
+     ]
+    },
+    "from": "main_verification",
+    "id": "main_verification-to-final_verification",
+    "priority": 30,
+    "to": "final_verification"
+   },
+   {
+    "condition": {
+     "all": [
+      {
+       "field": "state.outcome",
+       "op": "eq",
+       "value": "succeeded"
+      },
+      {
+       "field": "acceptance.complete",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "evidence.current",
+       "op": "eq",
+       "value": true
+      },
+      {
+       "field": "actions.settled",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    },
+    "from": "final_verification",
+    "id": "final_verification-to-complete",
+    "priority": 20,
+    "to": "complete"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "quality_failed"
+    },
+    "from": "design_review",
+    "gate": "implementation",
+    "id": "design_review-to-design",
+    "priority": 10,
+    "retry": {
+     "budget_id": "design_repair",
+     "max": 1,
+     "then_to": "failed"
+    },
+    "to": "design"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "quality_failed"
+    },
+    "from": "implementation",
+    "gate": "implementation",
+    "id": "implementation-to-implementation",
+    "priority": 10,
+    "retry": {
+     "budget_id": "quality_repair",
+     "max": 3,
+     "then_to": "failed"
+    },
+    "to": "implementation"
+   },
+   {
+    "condition": {
+     "field": "state.outcome",
+     "op": "eq",
+     "value": "quality_failed"
+    },
+    "from": "review",
+    "gate": "implementation",
+    "id": "review-to-implementation",
+    "priority": 10,
+    "retry": {
+     "budget_id": "quality_repair",
+     "max": 3,
+     "then_to": "failed"
+    },
+    "to": "implementation"
+   }
+  ],
+  "vocabulary_version": 1
+ },
+ "template": {
+  "design_enabled": false,
+  "execution_readiness": "unavailable",
+  "id": "campaign-development-9",
+  "version": 1
+ }
+}

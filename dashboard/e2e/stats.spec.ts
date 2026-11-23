@@ -94,7 +94,7 @@ const SKILL_RANKING = {
 const json = (page: Page, pattern: RegExp, body: unknown) => page.route(pattern, (route) => route.fulfill({ json: body }));
 
 /** Minimal API for /stats: everything else answers 404, never the real operator API. */
-async function mockApi(page: Page, options: { theme?: "light" | "dark"; analytics?: (period: Period) => unknown | null } = {}) {
+async function mockApi(page: Page, options: { theme?: "light" | "dark"; language?: "ko" | "en"; analytics?: (period: Period) => unknown | null } = {}) {
   const theme = options.theme ?? "dark";
   await page.route(/\/api\//, (route) => route.fulfill({ status: 404, json: { error: "not mocked" } }));
   await page.addInitScript((value) => {
@@ -114,13 +114,17 @@ async function mockApi(page: Page, options: { theme?: "light" | "dark"; analytic
   await json(page, /\/api\/agents(?:\?.*)?$/, { agents: [] });
   await json(page, /\/api\/departments(?:\?.*)?$/, { departments: [] });
   await json(page, /\/api\/dispatched-sessions(?:\?.*)?$/, { sessions: [] });
-  await json(page, /\/api\/settings$/, { language: "ko", theme });
+  await json(page, /\/api\/settings$/, { language: options.language ?? "ko", theme });
+  await json(page, /\/api\/settings\/runtime-config$/, { current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {} });
   await json(page, /\/api\/skills\/catalog$/, { catalog: [] });
   await json(page, /\/api\/skills\/ranking(?:\?.*)?$/, SKILL_RANKING);
   await json(page, /\/api\/claude-accounts$/, {
     schemaVersion: 1, status: "ok", hostname: "mac-mini", fetchedAt: new Date(START).toISOString(), servedAt: new Date(START).toISOString(),
     cacheTtlSeconds: 60, usageDataStale: false, activeAccountNumber: 1,
-    accounts: [{ number: 1, email: "ops@example.com", active: true, usageStatus: "ok", usage: { fiveHour: { pct: 34 }, sevenDay: { pct: 61 } } }],
+    accounts: [
+      { number: 1, email: "ops@example.com", active: true, usageStatus: "ok", usage: { fiveHour: { pct: 34 }, sevenDay: { pct: 61 } } },
+      { number: 2, email: "backup@example.com", active: false, usageStatus: "ok", usage: { fiveHour: { pct: 92 }, sevenDay: { pct: 70 } } },
+    ],
   });
   await page.route(/\/api\/receipt(?:\?.*)?$/, (route) => {
     const period = (new URL(route.request().url()).searchParams.get("period") ?? "30d") as Period;
@@ -218,21 +222,15 @@ test.describe("stats page", () => {
     const breakdown = page.getByTestId("stats-breakdown");
     await expect(breakdown.getByRole("tab", { name: /모델/ })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
     const panel = page.getByTestId("stats-model-share");
-    await expect(panel.locator("[data-item]")).toHaveCount(3);
+    const kitRows = panel.locator(".aui-compact-breakdown-row");
+    await expect(kitRows).toHaveCount(3);
 
-    const firstRow = panel.locator("[data-item]").first();
-    await expect(firstRow).toContainText("Claude Opus 4.6");
-    // Under 620px the share moves to the row's second line; wide rows keep a share column.
-    if (mobile) {
-      await expect(firstRow.getByText("점유율 63%")).toBeVisible();
-    } else {
-      await expect(firstRow.getByText("점유율 63%")).toBeHidden();
-      await expect(firstRow.getByText("63%", { exact: true })).toBeVisible();
-      await expect(page.getByTestId("stats-detail-empty")).toBeVisible();
-    }
+    // The kit share list reads every model's tokens and share; a row opens the cost and cache detail.
+    const firstRow = kitRows.first();
+    await expect(firstRow).toHaveAttribute("aria-label", "Claude Opus 4.6, 2.5M, 전체의 63%");
+    if (!mobile) await expect(page.getByTestId("stats-detail-empty")).toBeVisible();
 
     await firstRow.click();
-    await expect(firstRow).toHaveAttribute("aria-current", "true");
     if (mobile) {
       const dialog = page.getByTestId("stats-detail-dialog");
       await expect(dialog).toBeVisible();
@@ -253,13 +251,24 @@ test.describe("stats page", () => {
       const [listBox, detailBox] = await Promise.all([panel.boundingBox(), detail.boundingBox()]);
       expect(detailBox!.x).toBeGreaterThan(listBox!.x + listBox!.width);
       await expect(page.getByTestId("stats-detail-dialog")).toHaveCount(0);
+      // Tab reaches the next row and Enter or Space opens it; the list marks the open row.
+      await expect(firstRow).toHaveAttribute("aria-current", "true");
+      await page.keyboard.press("Tab");
+      await expect(kitRows.nth(1)).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(detail.getByRole("heading", { name: "GPT-5.4" })).toBeVisible();
+      await expect(kitRows.nth(1)).toHaveAttribute("aria-current", "true");
+      await expect(firstRow).not.toHaveAttribute("aria-current", "true");
+      await page.keyboard.press("Tab");
+      await page.keyboard.press(" ");
+      await expect(detail.getByRole("heading", { name: "Claude Haiku 4.5" })).toBeVisible();
     }
 
     await breakdown.getByRole("tab", { name: /에이전트/ }).click();
     const agentPanel = page.getByTestId("stats-agent-cache");
-    await expect(agentPanel.locator("[data-item]")).toHaveCount(4);
-    await expect(agentPanel).toContainText("캐시 히트");
-    await agentPanel.locator('[data-item="adk-dashboard"]').click();
+    await expect(agentPanel.locator(".aui-compact-breakdown-row")).toHaveCount(4);
+    await expect(agentPanel).toContainText("전체 캐시 히트");
+    await agentPanel.locator('.aui-compact-breakdown-row[data-item-id="adk-dashboard"]').click();
     const body = mobile ? page.getByTestId("stats-detail-dialog") : page.getByTestId("stats-detail");
     await expect(body.getByTestId("stats-detail-body")).toHaveAttribute("data-item", "adk-dashboard");
     await expect(body).toContainText("agentdesk-issue-pipeline");
@@ -273,7 +282,7 @@ test.describe("stats page", () => {
     await page.setViewportSize({ width: 820, height: 1180 });
     await mockApi(page);
     await page.goto("/stats");
-    const row = page.getByTestId("stats-model-share").locator("[data-item]").first();
+    const row = page.getByTestId("stats-model-share").locator(".aui-compact-breakdown-row").first();
     await row.click({ timeout: 15_000 });
     await expect(page.getByTestId("stats-detail")).toHaveCount(0);
     const dialog = page.getByTestId("stats-detail-dialog");
@@ -324,7 +333,7 @@ test.describe("stats page", () => {
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     await expectNoHorizontalOverflow(page);
     const small = await page.evaluate(() => {
-      const scopes = ["stats-page-header", "stats-breakdown", "stats-daily-token-chart", "stats-summary-grid", "stats-skill-usage"]
+      const scopes = ["stats-page-header", "stats-breakdown", "stats-daily-token-chart", "stats-summary-grid", "stats-claude-accounts", "stats-skill-usage"]
         .map((id) => document.querySelector(`[data-testid="${id}"]`))
         .filter((node): node is Element => node !== null);
       const selector = 'button, a[href], input, select, textarea, summary, [tabindex="0"], [role="tab"], [role="radio"]';
@@ -336,6 +345,30 @@ test.describe("stats page", () => {
     });
     expect(small).toEqual([]);
     await context.close();
+  });
+
+  test("account limits mark the auto-run pause from the runtime config", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/stats");
+    const limits = page.getByTestId("stats-claude-accounts");
+    // The gate reads provider usage, so an account row names only the line's value and the card says so.
+    await expect(limits.getByRole("meter", { name: "backup@example.com · #2 5시간" })).toHaveAttribute("aria-valuetext", /멈춤 기준 90% 이상$/, { timeout: 15_000 });
+    await expect(limits.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1);
+    await expect(limits).toContainText("자동 진행 멈춤은 공급자 사용량으로 판정해요");
+  });
+
+  test("English: the kit charts, share list and account limits show and speak no Korean", async ({ page }, testInfo) => {
+    await mockApi(page, { language: "en" });
+    await page.goto("/stats");
+    // Only the narrow chart shows its reading hint; the pause line marks the 92% account row.
+    if (testInfo.project.name === "mobile") await expect(page.locator(".aui-kpi-chart-reading-hint").first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1, { timeout: 15_000 });
+    const text = await page.locator(".aui-kpi-chart, .aui-compact-breakdown, .aui-usage-meter").evaluateAll((nodes) => nodes.flatMap((node) => [
+      (node as HTMLElement).innerText,
+      ...Array.from(node.querySelectorAll(".aui-kpi-chart-sr, .aui-compact-breakdown-sr, .aui-usage-meter-sr-only"), (sr) => sr.textContent ?? ""),
+      ...Array.from(node.querySelectorAll("[aria-label], [aria-valuetext], [title]"), (el) => ["aria-label", "aria-valuetext", "title"].map((name) => el.getAttribute(name) ?? "").join(" ")),
+    ]).join("\n"));
+    expect(text.match(/[가-힣]+/g)).toBeNull();
   });
 
   test("screenshots for review", async ({ browser }, testInfo) => {
@@ -358,7 +391,7 @@ test.describe("stats page", () => {
         await page.waitForTimeout(300);
         await page.screenshot({ path: `${SHOTS}/${name}-full.png` });
         await page.setViewportSize({ width, height });
-        await page.getByTestId("stats-model-share").locator("[data-item]").first().click();
+        await page.getByTestId("stats-model-share").locator(".aui-compact-breakdown-row").first().click();
         if (width < 900) await expect(page.getByTestId("stats-detail-dialog")).toBeVisible();
         await page.waitForTimeout(400);
         await page.screenshot({ path: `${SHOTS}/${name}-detail.png` });

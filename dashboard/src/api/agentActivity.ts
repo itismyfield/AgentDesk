@@ -16,7 +16,7 @@ export async function getTaskDispatches(filters?: {
   from_agent_id?: string;
   to_agent_id?: string;
   limit?: number;
-}): Promise<TaskDispatch[]> {
+}, opts?: RequestOptions): Promise<TaskDispatch[]> {
   const params = new URLSearchParams();
   if (filters?.status) params.set("status", filters.status);
   if (filters?.from_agent_id)
@@ -26,6 +26,7 @@ export async function getTaskDispatches(filters?: {
   const q = params.toString();
   const data = await request<{ dispatches: TaskDispatch[] }>(
     `/api/dispatches${q ? `?${q}` : ""}`,
+    opts,
   );
   return data.dispatches;
 }
@@ -239,9 +240,10 @@ export interface DiscordBinding {
   source?: string;
 }
 
-export async function getDiscordBindings(): Promise<DiscordBinding[]> {
+export async function getDiscordBindings(opts?: RequestOptions): Promise<DiscordBinding[]> {
   const data = await request<{ bindings: DiscordBinding[] }>(
     "/api/discord/bindings",
+    opts,
   );
   return data.bindings;
 }
@@ -254,10 +256,11 @@ export interface DiscordChannelInfo {
   type?: number | null;
 }
 
+/** Channels outside the role map answer 403; every caller falls back to the raw id, so no toast. */
 export async function getDiscordChannelInfo(
   channelId: string,
 ): Promise<DiscordChannelInfo> {
-  return request(`/api/discord/channels/${channelId}`);
+  return request(`/api/discord/channels/${channelId}`, { suppressErrorToast: true });
 }
 
 export interface GitHubRepoOption {

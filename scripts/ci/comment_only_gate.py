@@ -164,23 +164,46 @@ def regular_files(rev: str, paths: set[str]) -> bool:
     return all(modes.get(path) in ("100644", "100755") for path in paths)
 
 
-def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str], bool]:
+def regular_changes(base, head, entries):
+    return (regular_files(base, {old for status, old, _new in entries if status != "A"})
+            and regular_files(head, {new for status, _old, new in entries if status != "D"}))
+
+
+def changed_entries(base, head):
+    from check_comment_only_change import parse_name_status
+
+    return parse_name_status(git("diff", "--name-status", "--find-renames", "-z", base, head))
+
+
+def ci_metadata_skip(base, head, entries):
+    from rust_test_workflow_gate import is_ci_metadata, is_workflow, test_wiring
+
+    workflows = [(status, old, new) for status, old, new in entries if is_workflow(old) or is_workflow(new)]
+    if not workflows:
+        return False, "no workflow change"
+    if not all(is_ci_metadata(path) for _status, old, new in entries for path in (old, new)):
+        return False, "changed paths include files outside CI metadata"
+    if not regular_changes(base, head, entries):
+        return False, "changed path is not a regular tracked file"
+
+    for status, old, new in workflows:
+        before = test_wiring(blob(base, old)) if status != "A" and is_workflow(old) else {}
+        after = test_wiring(blob(head, new)) if status != "D" and is_workflow(new) else {}
+        if old != new and (before or after):
+            return False, f"{old} -> {new}: Rust test workflow moved"
+        changed = sorted(key for key in before.keys() | after.keys() if before.get(key) != after.get(key))
+        if changed:
+            return False, f"{new}: changed Rust test wiring: {', '.join(changed)}"
+    return True, "Rust test job definitions are unchanged"
+
+
+def evaluate(base, head, raw_filters, merge_base, entries) -> tuple[bool, list[str], str, bool, list[str], bool]:
     """(comment_only, refusals, judge log, sweep may skip, sweep notes, no Rust edits)."""
-    if not SHA.match(base) or not SHA.match(head):
-        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, [], False
-    if yaml is None:
-        return False, ["PyYAML unavailable"], "", False, [], False
     judge = subprocess.run(
         [sys.executable, str(JUDGE), base, head, "--allow-non-rust"],
         check=False, capture_output=True, text=True,
     )
     judge_log = (judge.stdout + judge.stderr).strip()
-    # Imported here so a broken judge module is caught by main() like any other failure.
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    from check_comment_only_change import parse_name_status
-
-    merge_base = git("merge-base", base, head).strip()
-    entries = parse_name_status(git("diff", "--name-status", "--find-renames", "-z", merge_base, head))
     try:
         filter_outputs = json.loads(raw_filters) if raw_filters else None
     except json.JSONDecodeError:
@@ -191,7 +214,7 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
         reasons = other_line_breaks(
             {f"{path} ({side})": blob(rev, path) for path in rust for side, rev in (("base", merge_base), ("head", head))}
         )
-        if not regular_files(merge_base, {old for status, old, _new in entries if status != "A"}) or not regular_files(head, {new for status, _old, new in entries if status != "D"}):
+        if not regular_changes(merge_base, head, entries):
             reasons.append("changed path is not a regular tracked file")
         for _status, _old, path in entries:
             if path.endswith((".yaml", ".yml")):
@@ -231,13 +254,31 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
 
 def main() -> int:
     try:
+        base, head = os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", "")
+        if not SHA.fullmatch(base) or not SHA.fullmatch(head):
+            raise ValueError(f"base/head are not full SHAs: {base!r} {head!r}")
+        if yaml is None:
+            raise RuntimeError("PyYAML unavailable")
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        merge_base = git("merge-base", base, head).strip()
+        entries = changed_entries(merge_base, head)
         verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = evaluate(
-            os.environ.get("BASE_SHA", ""),
-            os.environ.get("HEAD_SHA", ""),
-            os.environ.get("FILTER_OUTPUTS"),
+            base, head, os.environ.get("FILTER_OUTPUTS"), merge_base, entries,
         )
+        try:
+            metadata_only, metadata_note = ci_metadata_skip(merge_base, head, entries)
+            if metadata_only:
+                candidate = git("rev-parse", "HEAD").strip()
+                if candidate != head:
+                    # The workers consume the checkout, which is normally GitHub's merge commit.
+                    if git("show", "-s", "--format=%P", candidate).split() != [base, head]:
+                        raise ValueError("checkout does not match the PR head or base/head merge")
+                    metadata_only, metadata_note = ci_metadata_skip(base, candidate, changed_entries(base, candidate))
+        except Exception as error:
+            metadata_only, metadata_note = False, f"comparison error: {error!r}"
     except Exception as error:  # every failure falls back to the full run
         verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = False, [f"gate error: {error!r}"], "", False, [], False
+        metadata_only, metadata_note = False, "changed paths unavailable"
 
     value = "true" if verdict else "false"
     skip = "true" if verdict and skip_sweep else "false"
@@ -249,6 +290,7 @@ def main() -> int:
               f"comment_only={value}", *(f"- {reason}" for reason in reasons)]
     if verdict:
         report += [f"rust_tests_skip={skip}", f"rust_lint_skip={lint}", *(f"- {note}" for note in sweep_notes)]
+    report.append(f"ci_metadata_only={str(metadata_only).lower()} ({metadata_note})")
     report += ["", "check_comment_only_change.py:", *(judge_lines or ["<not run>"])]
     print("\n".join(report))
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -259,6 +301,8 @@ def main() -> int:
     if output_path:
         with open(output_path, "a", encoding="utf-8") as output:
             output.write(f"comment_only={value}\nrust_tests_skip={skip}\nrust_lint_skip={lint}\n")
+            if metadata_only:
+                output.write("ci_metadata_only=true\n")
     return 0
 
 

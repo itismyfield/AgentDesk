@@ -1,9 +1,8 @@
-import { useId } from "react";
-import { BarChart3, Sparkles, Users } from "lucide-react";
-import { Badge } from "../../kit/free/badge-clean";
+import { BarChart3, Users } from "lucide-react";
+import { Cap, MeterBar, SectionCard } from "../common/KitPrimitives";
 import type { TFunction } from "../dashboard/model";
 import { msg, type AgentSkillRow, type SkillUsageRow } from "./statsModel";
-import { NUMERIC_STYLE, StatsCard, StatsEmpty, StatsMeter, StatsSection } from "./StatsCardPrimitives";
+import { NUMERIC_STYLE, StatsEmpty } from "./StatsCardPrimitives";
 
 function CallCount({ t, calls }: { t: TFunction; calls: number }) {
   return (
@@ -27,30 +26,20 @@ export function SkillUsageCard({
   byAgentRows: AgentSkillRow[];
   windowCalls: number;
 }) {
-  const id = useId();
   const maxCalls = Math.max(1, ...rows.map((row) => row.windowCalls));
   const noDescription = t(msg("설명 없음", "No description"));
 
   return (
-    <StatsSection
-      id={`${id}-skills`}
-      icon={<Sparkles />}
+    <SectionCard
       title={t(msg("스킬 사용", "Skill Usage", "スキル使用量", "技能使用"))}
-      description={t(
-        msg(
-          "현재 기간에 가장 자주 호출된 스킬",
-          "Most-invoked skills in the selected period",
-          "選択期間で最も多く呼ばれたスキル",
-          "所选期间调用最多的技能",
-        ),
-      )}
-      actions={
-        <Badge style={NUMERIC_STYLE}>
-          {windowCalls.toLocaleString()} {t(msg("회", "calls", "回", "次"))}
-        </Badge>
+      testId="stats-skill-usage"
+      aside={
+        <Cap className="font-display tabular-nums">
+          {t(msg(`이 기간 ${windowCalls.toLocaleString()}회 호출`, `${windowCalls.toLocaleString()} calls in this range`, `この期間 ${windowCalls.toLocaleString()} 回`, `本期 ${windowCalls.toLocaleString()} 次`))}
+        </Cap>
       }
     >
-      <StatsCard className="@container">
+      <div className="@container border-t border-[var(--line-soft)]">
         {rows.length === 0 && byAgentRows.length === 0 ? (
           <StatsEmpty
             icon={<BarChart3 size={18} />}
@@ -78,7 +67,7 @@ export function SkillUsageCard({
                       </div>
                       <CallCount t={t} calls={row.windowCalls} />
                     </div>
-                    <StatsMeter ratio={row.windowCalls / maxCalls} color="var(--accent)" />
+                    <MeterBar ratio={row.windowCalls / maxCalls} />
                   </li>
                 ))}
               </ol>
@@ -112,7 +101,7 @@ export function SkillUsageCard({
             </div>
           </div>
         )}
-      </StatsCard>
-    </StatsSection>
+      </div>
+    </SectionCard>
   );
 }

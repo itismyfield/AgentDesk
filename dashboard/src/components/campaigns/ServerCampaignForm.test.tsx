@@ -3,7 +3,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiRequestError } from "../../api/httpClient";
-import { createServerCampaign, editServerCampaignDefinition, getServerCampaign } from "../../api/serverCampaigns";
+import { createServerCampaign, DEFAULT_WORKFLOW_OPTIONS, editServerCampaignDefinition, getServerCampaign, serverCampaignDetailResponseSchema, serverCampaignViewSchema } from "../../api/serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "../../api/serverCampaignsFixtures";
 import ServerCampaignForm, { createDraft, editDraft, type DefinitionDraft } from "./ServerCampaignForm";
 
@@ -143,7 +143,9 @@ function latestValues(scope = '[aria-label="Values in revision 8"]') {
 
 it("keeps the draft on a 409 and shows the newer definition's changed values next to it", async () => {
   edit.mockRejectedValueOnce(rejection(409, { rejection: "stale_definition", target: "release" })).mockResolvedValueOnce(result);
-  read.mockResolvedValueOnce(revisionEight());
+  const r8 = revisionEight();
+  r8.definition.pipeline = { start: "requirements" };
+  read.mockResolvedValueOnce(r8);
   let next = 0;
   await mount(editDraft(fixtures.prepared, () => `key-${++next}`));
   await type(field("Name"), "My new name");
@@ -162,7 +164,29 @@ it("keeps the draft on a 409 and shows the newer definition's changed values nex
   // Saving over the newer revision is an explicit choice; the draft is still the user's.
   expect(edit).toHaveBeenCalledOnce();
   await press("Save over revision 8");
-  expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name" }]);
+  expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name", workflow_options: DEFAULT_WORKFLOW_OPTIONS, pipeline: r8.definition.pipeline }]);
+});
+
+it("sends back a read definition's workflow options and pipeline, or the server's default options when it has none", async () => {
+  edit.mockResolvedValue(result);
+  const extra = { workflow_options: { ...DEFAULT_WORKFLOW_OPTIONS, start: true }, pipeline: { start: "requirements", states: [], later_field: 1 } };
+  const opened = (more: object) => editDraft(serverCampaignDetailResponseSchema.parse({ campaign: { ...fixtures.prepared, definition: { ...fixtures.prepared.definition, ...more } } }).campaign);
+  await mount(opened(extra));
+  await press("Save");
+  await act(async () => replaceDraft(opened({})));
+  await press("Save");
+  expect(edit.mock.calls.map((call) => call[2])).toStrictEqual([{ ...fixtures.prepared.definition, ...extra }, { ...fixtures.prepared.definition, workflow_options: DEFAULT_WORKFLOW_OPTIONS }]);
+});
+
+it.each([
+  ["definition_schema_upgrade_required", {}, "The request left out the saved pipeline"],
+  ["state_in_use", { definition_error: { code: "invalid_pipeline", target: "design", path: [] } }, "Work in the run still uses this state · design"],
+])("reads %s in a view and in a 409, and names it", async (code, context, text) => {
+  expect(serverCampaignViewSchema.safeParse({ ...fixtures.prepared.view, commands: [{ command: "edit_definition", rejection: code }] }).success).toBe(true);
+  edit.mockRejectedValueOnce(rejection(409, { rejection: code, target: "release", ...context }));
+  await mount(editDraft(fixtures.prepared, () => "k"));
+  await press("Save");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(text);
 });
 
 it("measures the next conflict from the revision the user saved over", async () => {
@@ -219,7 +243,7 @@ it("keeps edits made while a save was in flight as a draft on the saved revision
   expect(field("Name").value).toBe("Typed while waiting");
   // The next save builds on the saved revision; with nothing typed after it, the draft closes.
   await press("Save");
-  expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "Typed while waiting" }]);
+  expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "Typed while waiting", workflow_options: DEFAULT_WORKFLOW_OPTIONS }]);
   expect(container.textContent).toBe("closed");
 });
 

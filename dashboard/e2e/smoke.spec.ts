@@ -14,7 +14,7 @@ const ROUTES = [
 // Removed pages keep their links working by redirecting into the new IA.
 const LEGACY_REDIRECTS = [
   { path: "/kanban", to: /\/campaigns\?tab=queue$/ },
-  { path: "/meetings", to: /\/agents$/ },
+  { path: "/meetings", to: /\/agents\?tab=skills$/ },
   { path: "/achievements", to: /\/stats$/ },
   { path: "/voice", to: /\/home$/ },
   { path: "/ops", to: /\/settings\?category=connections$/ },
@@ -811,7 +811,7 @@ async function mockAgentsHubApis(page: Page) {
     });
   });
 
-  await page.route(/\/api\/skills\/ranking\?window=30d&limit=120$/, async (route) => {
+  await page.route(/\/api\/skills\/ranking\?window=30d&limit=\d+$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1370,15 +1370,41 @@ test.describe("Dashboard smoke tests", () => {
 
     const search = palette.getByPlaceholder(/검색|Search/);
     await expect(search).toBeFocused();
-    await search.fill("stats");
-    await expect(palette.getByText(/통계|Stats/)).toBeVisible();
+    // cmdk-style abbreviation: "sts" still finds the stats route and ranks it first.
+    await search.fill("sts");
+    await expect(palette.getByRole("option").first()).toHaveText(/통계|Stats/);
 
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/stats$/);
 
     await page.getByLabel(/^찾기$|^Search$/).click();
     await expect(palette).toBeVisible();
+    // Esc closes at once even with a query typed (the kit alone would clear the query first).
+    await search.fill("zz");
     await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+    await expect(page.getByLabel(/^찾기$|^Search$/)).toBeFocused();
+
+    // Esc pressed while Hangul is still composing closes in one press too.
+    await page.getByLabel(/^찾기$|^Search$/).click();
+    await search.fill("통계");
+    await search.dispatchEvent("keydown", { key: "Escape", isComposing: true });
+    await expect(palette).toHaveCount(0);
+  });
+
+  test("command palette opens and closes on the phone with touch-size controls", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "Phone layout coverage");
+    await page.goto("/home");
+    await page.getByTestId("topbar-search").click();
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    const search = palette.getByPlaceholder(/검색|Search/);
+    await expect(search).toBeFocused();
+    expect(parseFloat(await search.evaluate((input) => getComputedStyle(input).fontSize))).toBeGreaterThanOrEqual(16);
+    const close = palette.getByRole("button", { name: /명령 팔레트 닫기|Close command palette/ });
+    expect((await close.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    expect((await palette.getByRole("option").first().boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    await expectNoHorizontalOverflow(page);
+    await close.click();
     await expect(palette).toHaveCount(0);
   });
 
@@ -1596,13 +1622,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     const home = page.getByTestId("home-page");
-    await expect(page.getByTestId("home-usage")).toContainText("83%", { timeout: 15000 });
+    // The kit's limit list: one heading per provider and a meter per window. Its visible percent counts up only once the
+    // card scrolls into view, so the meter value is read instead.
+    await expect(page.getByTestId("home-usage").getByRole("meter", { name: "Claude 7일" })).toHaveAttribute("aria-valuenow", "83", { timeout: 15000 });
     expect(await home.locator("section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")))).toEqual(HOME_SECTIONS);
     // Only what the server leaves to a person: the blocked failed card, not the review in progress or new requests.
     await expect(page.getByTestId("home-todo")).toContainText("판단 필요");
     await expect(page.getByTestId("home-todo")).not.toContainText(/검토 대기|수락 대기/);
     await expect(page.getByTestId("home-system-memento")).toContainText("확인 불가");
-    await expect(page.getByTestId("home-usage")).toContainText("Claude 7일");
     await expect(page.getByTestId("home-usage")).toContainText("90% 이상이면 자동 진행을 멈춰요");
     await expect(page.getByTestId("home-usage").getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
 
@@ -1686,6 +1713,19 @@ test.describe("Dashboard smoke tests", () => {
     await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
   });
 
+  test("home: the limit list marks a row past the auto-run pause once, in the meter", async ({ page }) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "5h", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "7d", limit: 100, used: 83, remaining: 17, reset: 0 }] },
+    ] } }));
+    await page.goto("/home");
+
+    const usage = page.getByTestId("home-usage");
+    await expect(usage.getByRole("meter", { name: "Claude 5시간" })).toHaveAttribute("aria-valuetext", /자동 진행 멈춤 기준 이상/, { timeout: 15000 });
+    await expect(usage.locator(".aui-usage-meter-mini-row").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-state")))).resolves.toEqual(["danger", "warn"]);
+    await expect(usage.locator(".aui-usage-meter-mini-detail")).toHaveCount(0);
+  });
+
   test("home: after empty lists a failed campaign poll reads unknown on both cards until it recovers", async ({ page }) => {
     let down = false;
     await page.clock.install();
@@ -1743,12 +1783,16 @@ test.describe("Dashboard smoke tests", () => {
       agent_id: "agent-ada", status: "working", started_at: new Date(Date.now() - 95_000).toISOString(), updated_at: new Date().toISOString(),
       provider: "codex", current_tool_line: "npm run build", tool_events: [{ kind: "tool", status: "running", tool_name: "Bash", summary: "", line: "" }], tool_count: 1,
     } }));
+    let turnReads = 0;
+    page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/turn")) turnReads++; });
     await page.goto("/home");
 
     const monitor = page.getByTestId("home-agent-monitor-agent-ada");
     if (testInfo.project.name === "mobile") {
       await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toBeVisible({ timeout: 15000 });
       await expect(monitor).toHaveCount(0);
+      // Phones draw no monitor, so they never capture a turn on the server.
+      expect(turnReads).toBe(0);
       return;
     }
     await expect(monitor).toContainText("npm run build", { timeout: 15000 });
@@ -1759,6 +1803,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByRole("dialog", { name: /에이전트 상세/ })).toBeVisible();
     await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
+    // The kit texts follow the English UI.
+    await page.route(/\/api\/settings$/, (route) => route.fulfill({ json: { language: "en", theme: "dark" } }));
+    await page.reload();
+    await expect(monitor.getByRole("button", { name: "Log" })).toBeVisible({ timeout: 15000 });
+    await expect(monitor).toContainText("Running");
+    await expect(page.getByTestId("home-usage").getByRole("group", { name: "Limits by provider" })).toBeVisible();
   });
 
   test("home: on a phone a failed session list reads unknown where an empty one reads resting", async ({ page }, testInfo) => {
@@ -1843,7 +1893,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-summary-api-spend")).toContainText("데이터 확인 불가");
   });
 
-  test("stats: mobile pairs summary cards without horizontal overflow", async ({ page }, testInfo) => {
+  test("stats: phones stack the summary charts without horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/stats");
 
@@ -1861,8 +1911,8 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
-    expect(Math.abs(secondBox!.y - firstBox!.y)).toBeLessThanOrEqual(1);
-    expect(secondBox!.x).toBeGreaterThan(firstBox!.x + firstBox!.width);
+    expect(secondBox!.y).toBeGreaterThanOrEqual(firstBox!.y + firstBox!.height);
+    expect(Math.abs(secondBox!.x - firstBox!.x)).toBeLessThanOrEqual(1);
     await expectNoHorizontalOverflow(page);
   });
 
@@ -1952,15 +2002,18 @@ test.describe("Dashboard smoke tests", () => {
       await route.fulfill({ json: { default_node_id: saved, routing_enforced: true } });
     });
     await page.goto("/agents");
-    // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
     // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
     const dialog = testInfo.project.name === "desktop"
       ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
       : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
+    // Phones fold the run settings with every section but "now".
+    const openRunSettings = async () => {
+      if (testInfo.project.name !== "desktop") await dialog.getByRole("button", { name: /^(실행 설정|Run settings)/ }).click();
+    };
+    await openRunSettings();
     await expect(device).toBeEnabled();
     await expect(device).toHaveValue("");
     await expect(device.locator('option[value="fixture-hub"]')).toContainText(/(?:허브|Hub) · macOS/);
@@ -1971,7 +2024,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
     await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
+    await openRunSettings();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
     await device.selectOption("linux-2");
@@ -1992,16 +2046,12 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/agents");
 
     await expect(page.getByTestId("agents-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("agents-tab-bar")).toBeVisible();
-    await expect(page.getByTestId("agents-tab-button-agents")).toHaveAttribute("aria-selected", "true");
+    const sections = page.getByRole("tablist", { name: /에이전트 관리 화면|Agent manager views/ });
+    await expect(sections.getByRole("tab", { name: /^(에이전트|Agents)/ })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("agents-tab")).toBeVisible();
-    await expect(page.getByTestId("agents-view-grid")).toBeVisible();
-    await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
+    await expect(page.getByTestId("agents-list")).toBeVisible();
 
-    await page.getByRole("radio", { name: /리스트|List/ }).click();
-    await expect(page.getByTestId("agents-view-list")).toBeVisible();
-
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
     const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
@@ -2012,22 +2062,23 @@ test.describe("Dashboard smoke tests", () => {
     const addButton = page.getByRole("button", { name: /에이전트 추가|Add agent/ });
     const before = await addButton.boundingBox();
 
-    await page.getByTestId("agents-tab-button-departments").click();
+    await sections.getByRole("tab", { name: /^(부서|Departments)/ }).click();
     await expect(page.getByTestId("agents-departments-tab")).toBeVisible();
-    await expect(page.getByTestId("agents-department-card-dept-platform")).toBeVisible();
+    await expect(page.getByTestId("agents-department-row-dept-platform")).toBeVisible();
+    await expect(page).toHaveURL(/\/agents\?tab=departments$/);
     expect(await addButton.boundingBox()).toEqual(before);
 
-    await page.getByTestId("agents-tab-button-skills").click();
+    await sections.getByRole("tab", { name: /^(스킬|Skills)/ }).click();
     await expect(page.getByPlaceholder(/스킬 검색|Search skills/).first()).toBeVisible();
     expect(await addButton.boundingBox()).toEqual(before);
-    await expect(page.getByTestId("agents-tab-button-backlog")).toHaveCount(0);
+    await expect(sections.getByRole("tab")).toHaveCount(3);
   });
 
   test("agents: old meetings link opens the skills tab", async ({ page }) => {
     await mockAgentsHubApis(page);
     await page.goto("/meetings");
-    await expect(page).toHaveURL(/\/agents$/);
-    await expect(page.getByTestId("agents-tab-button-skills")).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\/agents\?tab=skills$/);
+    await expect(page.getByRole("tab", { name: /^(스킬|Skills)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   test("connections: server status carries the old ops signals and bottlenecks", async ({ page }, testInfo) => {
@@ -2214,13 +2265,15 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toBeVisible();
     await page.keyboard.press("ControlOrMeta+k");
     const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
-    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
-    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)$/ })).toHaveCount(0);
 
     await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
-    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    const department = palette.getByRole("option", { name: /^플랫폼/ });
     await expect(department).toBeVisible();
     await expect(palette).not.toContainText("📁");
+    // Rows run through their own onSelect only, so no assistant row is offered.
+    await expect(palette.getByRole("option")).toHaveCount(1);
     await department.click();
     await expect(page).toHaveURL(/\/agents$/);
   });

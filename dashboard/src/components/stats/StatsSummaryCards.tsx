@@ -1,217 +1,152 @@
-import type { TokenAnalyticsResponse } from "../../types";
+import type { TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
+import { KpiChart, type KpiChartText } from "../../kit/pro/kpi-chart";
+import { Cap, SectionCard } from "../common/KitPrimitives";
 import {
+  formatAxisCurrency,
   formatCompactDate,
   formatCurrency,
+  formatDateLabel,
   formatTokens,
   msg,
   type MetricDelta,
 } from "./statsModel";
-import { Info } from "lucide-react";
-import type { ReactNode } from "react";
-import { Skeleton } from "../../kit/free/skeleton-clean";
-import { DeltaBadge, NUMERIC_STYLE } from "./StatsCardPrimitives";
-import type { MetricDeltaTone } from "./statsModel";
+import { NUMERIC_STYLE } from "./StatsCardPrimitives";
 
-/** One cell of the kit stats strip: label with an explainer, value, note and an optional change badge. */
-function SummaryCell({
-  testId,
-  title,
-  value,
-  sub,
-  tip,
-  delta,
-  deltaTone,
-  loading,
-  loadingLabel,
-}: {
-  testId: string;
-  title: string;
-  value: ReactNode;
-  sub: string;
-  tip: string;
-  delta?: string;
-  deltaTone?: MetricDeltaTone;
-  loading: boolean;
-  loadingLabel: string;
-}) {
+/** A summary fact without a daily series: label, value and its note. */
+function SummaryFact({ testId, label, value, note }: { testId: string; label: string; value: string; note: string }) {
   return (
-    <div data-testid={testId} className="flex min-w-0 flex-col gap-1 bg-[var(--bg-1)] px-4 pb-3.5 pt-2.5">
-      <details className="group min-w-0">
-        <summary className="flex min-h-7 w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] text-xs font-medium text-[var(--fg-muted)] pointer-coarse:min-h-11 [&::-webkit-details-marker]:hidden">
-          <span className="min-w-0 [word-break:keep-all]">{title}</span>
-          <Info size={12} className="shrink-0 opacity-70 group-open:opacity-100" aria-hidden="true" />
-        </summary>
-        <p className="mb-1 text-xs leading-5 text-[var(--fg-dim)] [word-break:keep-all]">{tip}</p>
-      </details>
-      <div className="min-w-0 text-[22px] font-semibold leading-7 tracking-tight text-[var(--fg)] [overflow-wrap:anywhere]" style={NUMERIC_STYLE}>
-        {loading ? (
-          <span className="flex h-7 items-center" role="status" aria-label={loadingLabel}>
-            <Skeleton width={88} height={18} radius={5} />
-          </span>
-        ) : (
-          value
-        )}
-      </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[var(--fg-muted)]">
-        <span className="min-w-0 [overflow-wrap:anywhere]">{sub}</span>
-        {delta ? <DeltaBadge tone={deltaTone}>{delta}</DeltaBadge> : null}
-      </div>
+    <div data-testid={testId} className="flex min-w-0 flex-col gap-0.5 px-3 py-3 sm:px-4">
+      <dt className="text-xs leading-4 text-[var(--fg-muted)]">{label}</dt>
+      <dd className="m-0 flex min-w-0 flex-wrap items-baseline gap-x-2 text-lg leading-7 font-semibold text-[var(--fg)]" style={NUMERIC_STYLE}>
+        {value}
+        <Cap className="font-normal [overflow-wrap:anywhere]">{note}</Cap>
+      </dd>
     </div>
   );
 }
 
+/** Kit chart texts besides the empty notice, which the cards pass as `emptyLabel`. */
+function kpiText(t: TFunction): Partial<KpiChartText> {
+  return {
+    guidance: t(msg("그래프를 탭하거나 방향키로 날짜를 고르면 그날 값이 보여요.", "Tap the chart or use the arrow keys to pick a date and read its value.")),
+    increase: t(msg("증가", "up")),
+    decrease: t(msg("감소", "down")),
+    plot: (title, count) => t(msg(`${title}. 좌우 방향키로 ${count}일의 값을 읽어요.`, `${title}. Use the left and right arrow keys to read ${count} dates.`)),
+    help: (idle) => t(msg(
+      `초점만으로는 날짜를 고르지 않아요. 좌우 방향키로 날짜를 옮기고 Home·End로 처음과 끝을 골라요. Escape를 누르거나 초점이나 포인터가 벗어나면 ${idle === null ? "상세를 숨겨요" : `${idle}로 돌아가요`}. 탭으로 고른 날짜는 손을 떼도 남고 같은 날짜를 다시 탭하면 풀려요.`,
+      `Focus alone does not pick a date. Arrow keys move between dates and Home and End jump to the ends. Escape, leaving focus or moving the pointer away ${idle === null ? "hides the details" : `returns to ${idle}`}. A tapped date stays after lifting the finger; tap it again to let it go.`,
+    )),
+    noValue: t(msg("값 없음", "No value")),
+  };
+}
+
+/** Usage summary: tokens and spend as kit KPI charts over the range's days, then active days and the peak day.
+ * The server sends no previous-range totals, so the charts carry no change badge. */
 export function StatsSummaryGrid({
   t,
   numberFormatter,
+  localeTag,
   rangeDays,
   summary,
+  daily,
   loading,
+  failed,
   tokenMomentumDelta,
   cacheSavingsDelta,
 }: {
   t: TFunction;
   numberFormatter: Intl.NumberFormat;
+  localeTag: string;
   rangeDays: number;
   summary: TokenAnalyticsResponse["summary"] | null | undefined;
+  daily: TokenAnalyticsDailyPoint[];
   loading: boolean;
+  failed: boolean;
   tokenMomentumDelta: MetricDelta | null;
   cacheSavingsDelta: MetricDelta | null;
 }) {
-  const missingValue = "—";
-  const valueLoading = loading && !summary;
-  const missingNotice = t(loading
+  const missing = "—";
+  const notice = t(loading && !summary
     ? msg("데이터 불러오는 중", "Loading data", "データを読み込み中", "正在加载数据")
-    : msg("데이터 확인 불가", "Data unavailable", "データを確認できません", "数据不可用"));
+    : failed && !summary
+      ? msg("데이터 확인 불가", "Data unavailable", "データを確認できません", "数据不可用")
+      : msg("이 기간에 기록이 없어요", "Nothing recorded in this range"));
+  const labels = daily.map((day) => formatCompactDate(day.date));
+  const tooltipLabels = daily.map((day) => formatDateLabel(day.date, localeTag));
   const peakDay = summary?.peak_day ?? null;
-  const averageDailyTokens = summary?.average_daily_tokens ?? 0;
-  const peakRatio =
-    peakDay && averageDailyTokens > 0
-      ? peakDay.total_tokens / averageDailyTokens
-      : null;
+  const average = summary?.average_daily_tokens ?? 0;
+  const peakRatio = peakDay && average > 0 ? peakDay.total_tokens / average : null;
+  const days = numberFormatter.format(rangeDays);
+  const momentum = tokenMomentumDelta
+    ? t(msg(` · 앞 절반 대비 ${tokenMomentumDelta.value}`, ` · ${tokenMomentumDelta.value} vs first half`, ` · 前半比 ${tokenMomentumDelta.value}`, ` · 较前半 ${tokenMomentumDelta.value}`))
+    : "";
+  const savingsRate = cacheSavingsDelta ? `(${cacheSavingsDelta.value.replace("-", "")})` : "";
+  const text = kpiText(t);
 
   return (
-    <div className="grid grid-cols-2 gap-px border-b border-[var(--line-soft)] bg-[var(--line-soft)] @min-[620px]:grid-cols-4" data-testid="stats-summary-grid">
-      <SummaryCell
-        testId="stats-summary-total-tokens"
-        loading={valueLoading}
-        loadingLabel={missingNotice}
-        title={t(msg("총 토큰", "Total Tokens", "総トークン", "总代币"))}
-        value={summary ? formatTokens(summary.total_tokens) : missingValue}
-        sub={t(
-          msg(
-            `${numberFormatter.format(rangeDays)}일 누적`,
-            `${numberFormatter.format(rangeDays)} day total`,
-            `${numberFormatter.format(rangeDays)}日累計`,
-            `${numberFormatter.format(rangeDays)} 天累计`,
-          ),
-        )}
-        tip={t(
-          msg(
-            "입력·출력·캐시 읽기/쓰기 토큰을 모두 더한 값",
-            "Sum of input + output + cache read / write",
-            "input + output + cache read / write の合計",
-            "input + output + cache read / write 的总和",
-          ),
-        )}
-        delta={
-          tokenMomentumDelta
-            ? t(msg(`앞 절반 대비 ${tokenMomentumDelta.value}`, `${tokenMomentumDelta.value} vs first half`, `前半比 ${tokenMomentumDelta.value}`, `较前半 ${tokenMomentumDelta.value}`))
-            : undefined
-        }
-        deltaTone={tokenMomentumDelta?.tone}
-      />
-      <SummaryCell
-        testId="stats-summary-api-spend"
-        loading={valueLoading}
-        loadingLabel={missingNotice}
-        title={t(msg("API 비용", "API Spend", "API コスト", "API 成本"))}
-        value={summary ? formatCurrency(summary.total_cost) : missingValue}
-        sub={
-          summary
-            ? t(
-                msg(
-                  `${formatCurrency(summary.cache_discount)} 절감됨`,
-                  `${formatCurrency(summary.cache_discount)} saved`,
-                  `${formatCurrency(summary.cache_discount)} 節約`,
-                  `${formatCurrency(summary.cache_discount)} 已节省`,
-                ),
-              )
-            : missingNotice
-        }
-        tip={t(
-          msg(
-            "캐시 할인을 반영한 실제 결제 비용",
-            "Actual spend after cache discounts",
-            "キャッシュ割引を反映した実支出",
-            "计入缓存折扣后的实际支出",
-          ),
-        )}
-        delta={
-          cacheSavingsDelta
-            ? t(msg(`캐시로 ${cacheSavingsDelta.value.replace("-", "")} 절약`, `${cacheSavingsDelta.value.replace("-", "")} saved by cache`, `キャッシュで ${cacheSavingsDelta.value.replace("-", "")} 節約`, `缓存节省 ${cacheSavingsDelta.value.replace("-", "")}`))
-            : undefined
-        }
-        deltaTone={cacheSavingsDelta?.tone}
-      />
-      <SummaryCell
-        testId="stats-summary-cache-saved"
-        loading={valueLoading}
-        loadingLabel={missingNotice}
-        title={t(msg("활성 일수", "Active Days", "稼働日数", "活跃天数"))}
-        value={
-          summary
-            ? `${numberFormatter.format(summary.active_days)} / ${numberFormatter.format(rangeDays)}`
-            : missingValue
-        }
-        sub={
-          summary
-            ? t(
-                msg(
-                  `일 평균 ${formatTokens(Math.round(averageDailyTokens))}`,
-                  `Avg ${formatTokens(Math.round(averageDailyTokens))} per day`,
-                  `平均 ${formatTokens(Math.round(averageDailyTokens))} / 日`,
-                  `日均 ${formatTokens(Math.round(averageDailyTokens))}`,
-                ),
-              )
-            : missingNotice
-        }
-        tip={t(
-          msg(
-            "선택 기간 중 실제 활동이 있었던 일수",
-            "Days with activity in the selected range",
-            "選択期間で実際に稼働した日数",
-            "所选范围内有实际活动的天数",
-          ),
-        )}
-      />
-      <SummaryCell
-        testId="stats-summary-cache-hit"
-        loading={valueLoading}
-        loadingLabel={missingNotice}
-        title={t(msg("피크 데이", "Peak Day", "ピーク日", "峰值日"))}
-        value={peakDay ? formatCompactDate(peakDay.date) : "—"}
-        sub={
-          peakDay
-            ? t(
-                msg(
-                  `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `평균의 ${peakRatio.toFixed(1)}배` : "평균 대비"}`,
-                  `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x avg` : "vs average"}`,
-                  `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `平均の ${peakRatio.toFixed(1)}x` : "平均比"}`,
-                  `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x 平均` : "相对平均"}`,
-                ),
-              )
-            : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : missingNotice
-        }
-        tip={t(
-          msg(
-            "선택 기간 내 최고 사용량 날짜",
-            "Highest-usage day in the selected range",
-            "選択期間内の最高使用量日",
-            "所选范围内使用量最高的一天",
-          ),
-        )}
-      />
-    </div>
+    <SectionCard title={t(msg(`사용량 · 최근 ${rangeDays}일`, `Usage · last ${rangeDays} days`, `使用量 · 直近${rangeDays}日`, `用量 · 最近 ${rangeDays} 天`))} testId="stats-usage">
+      {/* The kit caps its card at 460px; here each chart fills its column, two columns once both fit their tooltip. */}
+      <div className="@container px-3 pb-3 sm:px-4 sm:pb-4">
+        <div data-testid="stats-summary-grid" className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none!">
+          <div data-testid="stats-summary-total-tokens" className="min-w-0">
+            <KpiChart
+              title={t(msg("총 토큰", "Total Tokens", "総トークン", "总代币"))}
+              value={summary ? formatTokens(summary.total_tokens) : missing}
+              labels={labels}
+              tooltipLabels={tooltipLabels}
+              series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: daily.map((day) => day.total_tokens), color: "var(--aui-accent)" }]}
+              format={formatTokens}
+              emptyLabel={notice}
+              text={text}
+              footer={t(msg(
+                `${days}일 누적 · 입력·출력·캐시 읽기/쓰기 합계${momentum}`,
+                `${days} day total · input + output + cache read / write${momentum}`,
+                `${days}日累計 · input + output + cache read / write${momentum}`,
+                `${days} 天累计 · input + output + cache read / write${momentum}`,
+              ))}
+            />
+          </div>
+          <div data-testid="stats-summary-api-spend" className="min-w-0">
+            <KpiChart
+              title={t(msg("API 비용", "API Spend", "API コスト", "API 成本"))}
+              value={summary ? formatCurrency(summary.total_cost) : missing}
+              labels={labels}
+              tooltipLabels={tooltipLabels}
+              series={[{ id: "cost", label: t(msg("비용", "Cost", "コスト", "成本")), values: daily.map((day) => day.cost), color: "var(--aui-info)" }]}
+              format={formatAxisCurrency}
+              emptyLabel={notice}
+              text={text}
+              footer={summary
+                ? t(msg(
+                    `캐시 할인 반영 · ${formatCurrency(summary.cache_discount)}${savingsRate} 절감`,
+                    `After cache discounts · ${formatCurrency(summary.cache_discount)}${savingsRate} saved`,
+                    `キャッシュ割引反映 · ${formatCurrency(summary.cache_discount)}${savingsRate} 節約`,
+                    `计入缓存折扣 · 已节省 ${formatCurrency(summary.cache_discount)}${savingsRate}`,
+                  ))
+                : notice}
+            />
+          </div>
+        </div>
+      </div>
+      <dl className="m-0 grid grid-cols-1 border-t border-[var(--line-soft)] sm:grid-cols-2 sm:divide-x sm:divide-[var(--line-soft)] max-sm:divide-y max-sm:divide-[var(--line-soft)]">
+        <SummaryFact
+          testId="stats-summary-cache-saved"
+          label={t(msg("활성 일수", "Active Days", "稼働日数", "活跃天数"))}
+          value={summary ? `${numberFormatter.format(summary.active_days)} / ${days}` : missing}
+          note={summary
+            ? t(msg(`일 평균 ${formatTokens(Math.round(average))}`, `Avg ${formatTokens(Math.round(average))} per day`, `平均 ${formatTokens(Math.round(average))} / 日`, `日均 ${formatTokens(Math.round(average))}`))
+            : notice}
+        />
+        <SummaryFact
+          testId="stats-summary-cache-hit"
+          label={t(msg("피크 데이", "Peak Day", "ピーク日", "峰值日"))}
+          value={peakDay ? formatCompactDate(peakDay.date) : missing}
+          note={peakDay
+            ? `${formatTokens(peakDay.total_tokens)}${peakRatio ? t(msg(` · 평균의 ${peakRatio.toFixed(1)}배`, ` · ${peakRatio.toFixed(1)}x avg`, ` · 平均の ${peakRatio.toFixed(1)}x`, ` · ${peakRatio.toFixed(1)}x 平均`)) : ""}`
+            : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : notice}
+        />
+      </dl>
+    </SectionCard>
   );
 }

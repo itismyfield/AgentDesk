@@ -6,11 +6,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
-import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
 import { HomeUsageCard } from "./home/HomeActivityCards";
 import OnboardingWizard from "./OnboardingWizard";
 import SettingsView from "./SettingsView";
+import { StatsAccountLimits } from "./stats/StatsAccountLimits";
 
 // A server with auth_token set: every /api call except the public probe needs this Bearer.
 const TOKEN = "tab-only-token";
@@ -161,7 +161,7 @@ describe("dashboard widgets under token authentication", () => {
 
   it("claude accounts load with the tab token and offer no account switch", async () => {
     serve({ "GET /api/claude-accounts": ok(accounts) });
-    const view = await render(<ClaudeAccountsWidget t={t} />);
+    const view = await render(<StatsAccountLimits t={t} locale="en-US" />);
     expectBearer("GET /api/claude-accounts");
     expect(view.textContent).toContain("spare@example.com");
     expect(view.textContent).not.toContain("Switch");
@@ -175,7 +175,7 @@ describe("dashboard widgets under token authentication", () => {
         body: { status: "not_installed", error: "cswap missing", install: { command: "uv tool install claude-swap" } },
       }),
     });
-    const view = await render(<ClaudeAccountsWidget t={t} />);
+    const view = await render(<StatsAccountLimits t={t} locale="en-US" />);
     expect(callsTo("GET /api/claude-accounts")).toHaveLength(1);
     expect(view.textContent).toContain("cswap is not installed");
     expect(view.textContent).toContain("uv tool install claude-swap · cswap missing");

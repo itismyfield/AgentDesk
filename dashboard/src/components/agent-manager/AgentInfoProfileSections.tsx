@@ -1,45 +1,22 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
-import { formatElapsedCompact } from "../../agent-insights";
+import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { AgentWarning } from "../../agent-insights";
 import { localeName } from "../../i18n";
+import { AgentMonitor } from "../../kit/pro/agent-monitor";
 import type { Agent, Department } from "../../types";
-import type { DiscordBinding } from "../../api/client";
-import { Badge } from "../../kit/free/badge-clean";
 import { Select } from "../../kit/free/select-clean";
+import AgentPersona from "../AgentPersona";
+import { Chip } from "../common/KitPrimitives";
+import { monitorLabels } from "../home/HomeSummaryCards";
+import { agentStateLabel, type HomeAgentState, type MonitorView } from "../home/homeModel";
+import type { AttentionReason } from "./agentsAttention";
 import type { Translator } from "./types";
-import { inferBindingSource } from "./AgentInfoCardModel";
-import { AgentDetailSection, SectionWell } from "./AgentInfoCardSections";
+import { AgentDetailSection, SectionWell, type DetailFold } from "./AgentInfoCardSections";
+import { AgentStatusBadge } from "./AgentRow";
 
-interface AgentInfoProfileSectionsProps {
-  agent: Agent;
-  departments: Department[];
-  locale: string;
-  isKo: boolean;
-  tr: Translator;
-  selectedDeptId: string;
-  savingDept: boolean;
-  onSaveDepartment: (nextDeptId: string) => void;
-  selectedProvider: string;
-  providerOptions: string[];
-  providerLabels?: Record<string, string>;
-  providerSelectDisabled?: boolean;
-  providerNotice?: string | null;
-  savingProvider: boolean;
-  onSaveProvider: (nextProvider: string) => void;
-  selectedAuthProfile: string;
-  authProfileOptions: string[];
-  savingAuthProfile: boolean;
-  onSaveAuthProfile: (profileId: string) => void;
-  currentWorkSummary: string | null;
-  currentWorkElapsedMs: number | null;
-  currentWorkDetails: string[];
-  discordBindings: DiscordBinding[];
-  warnings: Array<{ code: string; severity: "info" | "warning" | "error"; ko: string; en: string }>;
-}
-
-const WARNING_TONE = { error: "danger", warning: "warning", info: "info" } as const;
+const WARNING_TONE = { error: "err", warning: "warn", info: "info" } as const;
 
 /** Long free text: four lines, then a "show all" toggle (always offered past 140 characters). */
-function ClampedText({ text, tr }: { text: string; tr: Translator }) {
+export function ClampedText({ text, tr }: { text: string; tr: Translator }) {
   const [expanded, setExpanded] = useState(false);
   const [clipped, setClipped] = useState(false);
   const body = useRef<HTMLParagraphElement>(null);
@@ -79,12 +56,78 @@ function ClampedText({ text, tr }: { text: string; tr: Translator }) {
   );
 }
 
-export function AgentInfoProfileSections({
-  agent,
-  departments,
-  locale,
-  isKo,
+/** "Now": the state in home's words, what the agent does, what waits on it, and on desktop a running turn as the kit
+ * monitor whose log button opens the recent turns. */
+export function AgentNowSection({ agent, state, tr, isKo, summary, monitor, onOpenLog, reasons, warnings }: {
+  agent: Agent;
+  state?: HomeAgentState;
+  tr: Translator;
+  isKo: boolean;
+  summary: string | null;
+  monitor: MonitorView | null;
+  onOpenLog: () => void;
+  reasons: AttentionReason[];
+  warnings: AgentWarning[];
+}) {
+  const labels = useMemo(() => monitorLabels(tr), [tr]);
+  const source = agent.status === "working" && agent.activity_source === "agentdesk" ? tr("AgentDesk 작업", "AgentDesk") : null;
+  const term = "text-(--fg-muted)";
+  return (
+    <AgentDetailSection title={tr("지금", "Now")} testId="agent-detail-now">
+      <dl className="m-0 grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-1.5 text-[13px] leading-5">
+        <dt className={term}>{tr("상태", "Status")}</dt>
+        <dd className="m-0 flex min-w-0 flex-wrap items-center gap-1.5">
+          <AgentStatusBadge status={agent.status} state={state} tr={tr} />
+          {source ? <span className="text-xs text-(--fg-muted)">{source}</span> : null}
+        </dd>
+        {!monitor && summary ? (
+          <>
+            <dt className={term}>{tr("하는 일", "Doing")}</dt>
+            <dd className="m-0 min-w-0 text-(--fg-dim) [overflow-wrap:anywhere]">{summary}</dd>
+          </>
+        ) : null}
+        {reasons.length > 0 ? (
+          <>
+            <dt className={term}>{tr("걸린 일", "Waiting")}</dt>
+            <dd className="m-0 flex min-w-0 flex-col gap-1">
+              {reasons.map((reason) => (
+                <span key={reason.key} className="flex min-w-0 items-center gap-1.5">
+                  <Chip tone={reason.tone}>{reason.chip}</Chip>
+                  <span className="min-w-0 truncate text-xs text-(--fg-muted)" title={reason.detail}>{reason.detail}</span>
+                </span>
+              ))}
+            </dd>
+          </>
+        ) : null}
+      </dl>
+      {monitor ? (
+        <AgentMonitor
+          status="running"
+          agent={{ name: agentStateLabel("working", tr), role: monitor.role ?? undefined, mark: <AgentPersona agent={agent} state="working" size={28} /> }}
+          current={{ label: monitor.label, kind: monitor.kind }}
+          started={monitor.started ?? undefined}
+          onOpenLog={onOpenLog}
+          labels={labels}
+          style={{ width: "100%" }}
+        />
+      ) : null}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Chip className="tabular-nums">{tr(`완료 ${agent.stats_tasks_done.toLocaleString()}건`, `${agent.stats_tasks_done.toLocaleString()} done`)}</Chip>
+        {warnings.map((warning) => (
+          <Chip key={warning.code} tone={WARNING_TONE[warning.severity]} dot>{isKo ? warning.ko : warning.en}</Chip>
+        ))}
+      </div>
+    </AgentDetailSection>
+  );
+}
+
+/** Run settings: department, main Provider and account save as soon as they change; the device below has its own save. */
+export function AgentRunSettingsSection({
   tr,
+  locale,
+  fold,
+  summary,
+  departments,
   selectedDeptId,
   savingDept,
   onSaveDepartment,
@@ -99,69 +142,34 @@ export function AgentInfoProfileSections({
   authProfileOptions,
   savingAuthProfile,
   onSaveAuthProfile,
-  currentWorkSummary,
-  currentWorkElapsedMs,
-  currentWorkDetails,
-  discordBindings,
-  warnings,
-}: AgentInfoProfileSectionsProps) {
-  const dbBindings = discordBindings.filter((binding) => inferBindingSource(binding) !== "role-map");
+  children,
+}: {
+  tr: Translator;
+  locale: string;
+  fold: DetailFold;
+  summary: string;
+  departments: Department[];
+  selectedDeptId: string;
+  savingDept: boolean;
+  onSaveDepartment: (nextDeptId: string) => void;
+  selectedProvider: string;
+  providerOptions: string[];
+  providerLabels?: Record<string, string>;
+  providerSelectDisabled?: boolean;
+  providerNotice?: string | null;
+  savingProvider: boolean;
+  onSaveProvider: (nextProvider: string) => void;
+  selectedAuthProfile: string;
+  authProfileOptions: string[];
+  savingAuthProfile: boolean;
+  onSaveAuthProfile: (profileId: string) => void;
+  children: ReactNode;
+}) {
   const savingLabel = tr("저장 중...", "Saving...");
-
   return (
-    <>
-      <AgentDetailSection title={tr("상태 요약", "Status Summary")}>
-        <SectionWell>
-          <div className="mb-1 text-xs text-(--fg-muted)">{tr("현재 작업", "Current Work")}</div>
-          <p className="m-0 text-[13px] leading-5 text-(--fg-dim)">
-            {currentWorkSummary || tr("현재 작업 설명이 없습니다", "No current work detail")}
-          </p>
-        </SectionWell>
-        <div className="flex flex-wrap items-center gap-2">
-          {currentWorkElapsedMs != null && (
-            <Badge tone="info" size="md">
-              {tr("경과", "Elapsed")} {formatElapsedCompact(currentWorkElapsedMs, isKo)}
-            </Badge>
-          )}
-          <Badge tone="neutral" size="md">
-            {tr("DB 경로", "DB routes")} <span className="tabular-nums">{dbBindings.length}</span>
-          </Badge>
-        </div>
-        {currentWorkDetails.length > 0 && (
-          <ul className="m-0 flex list-disc flex-col gap-1 pl-5 text-xs text-(--fg-dim)">
-            {currentWorkDetails.map((line, index) => (
-              <li key={`${line}:${index}`}>{line}</li>
-            ))}
-          </ul>
-        )}
-      </AgentDetailSection>
-
-      {warnings.length > 0 && (
-        <AgentDetailSection title={tr("이상 징후", "Warnings")}>
-          <div className="flex flex-wrap gap-1.5">
-            {warnings.map((warning) => (
-              <Badge key={warning.code} tone={WARNING_TONE[warning.severity]} size="md" dot>
-                {isKo ? warning.ko : warning.en}
-              </Badge>
-            ))}
-          </div>
-        </AgentDetailSection>
-      )}
-
-      {agent.personality && (
-        <AgentDetailSection title={tr("성격", "Personality")}>
-          <ClampedText key={agent.id} text={agent.personality} tr={tr} />
-        </AgentDetailSection>
-      )}
-
-      {agent.session_info && (
-        <AgentDetailSection title={tr("현재 작업", "Current Session")}>
-          <p className="m-0 text-[13px] leading-5 text-(--fg-dim)">{agent.session_info}</p>
-        </AgentDetailSection>
-      )}
-
-      <AgentDetailSection title={tr("실행 설정", "Run settings")}>
-        <div className="grid min-w-0 gap-3">
+    <AgentDetailSection title={tr("실행 설정", "Run settings")} summary={fold.foldable ? summary : undefined} fold={fold} testId="agent-detail-run">
+      <div className="@container min-w-0">
+        <div className="grid min-w-0 gap-3 @md:grid-cols-2">
           <Select
             label={tr("소속 부서", "Department")}
             value={selectedDeptId}
@@ -175,6 +183,17 @@ export function AgentInfoProfileSections({
                 label: [department.icon, localeName(locale, department)].filter(Boolean).join(" "),
               })),
             ]}
+          />
+          <Select
+            label={tr("메인 Provider", "Main Provider")}
+            value={selectedProvider}
+            onChange={(value) => onSaveProvider(value)}
+            disabled={savingProvider || providerSelectDisabled}
+            hint={savingProvider ? savingLabel : providerNotice ?? undefined}
+            options={providerOptions.map((provider) => ({
+              value: provider,
+              label: providerLabels?.[provider] ?? provider,
+            }))}
           />
           <Select
             label={tr("Provider 계정", "Provider Account")}
@@ -192,19 +211,9 @@ export function AgentInfoProfileSections({
                     : profileId,
             }))}
           />
-          <Select
-            label={tr("메인 Provider", "Main Provider")}
-            value={selectedProvider}
-            onChange={(value) => onSaveProvider(value)}
-            disabled={savingProvider || providerSelectDisabled}
-            hint={savingProvider ? savingLabel : providerNotice ?? undefined}
-            options={providerOptions.map((provider) => ({
-              value: provider,
-              label: providerLabels?.[provider] ?? provider,
-            }))}
-          />
         </div>
-      </AgentDetailSection>
-    </>
+      </div>
+      {children}
+    </AgentDetailSection>
   );
 }

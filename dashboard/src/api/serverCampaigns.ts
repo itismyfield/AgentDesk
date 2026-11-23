@@ -18,13 +18,16 @@ const reasonSchema = z.enum([
   "predecessor_main", "predecessor_failed", "observation_unknown", "state_needs_inspection",
 ]);
 const rejectionSchema = z.enum([
-  "invalid_definition", "stale_definition", "stale_run", "stale_binding", "invalid_state",
-  "execution_unavailable", "sessions_not_gone", "unreconciled_actions", "fence_incomplete",
-  "stale_fence", "idempotency_conflict", "missing_change_reason", "completed_node_changed", "already_exists",
+  "invalid_definition", "definition_schema_upgrade_required", "state_in_use", "stale_definition", "stale_run",
+  "stale_binding", "invalid_state", "execution_unavailable", "sessions_not_gone", "unreconciled_actions", "fence_incomplete",
+  "stale_fence", "idempotency_conflict", "gate_not_passed", "missing_change_reason", "completed_node_changed", "already_exists",
 ]);
 
 const controlSchema = z.enum(["prepared", "running", "stopping", "stopped", "succeeded"]);
 
+const workflowOptionsSchema = z.strictObject({
+  start: z.boolean(), implementation: z.boolean(), review: z.boolean(), landing: z.boolean(), merge: z.boolean(), deploy: z.boolean(),
+});
 export const serverCampaignDefinitionSchema = z.strictObject({
   repository: repositorySchema,
   title: z.string(),
@@ -42,7 +45,14 @@ export const serverCampaignDefinitionSchema = z.strictObject({
     dependencies: z.array(z.string()),
     group: z.string().nullable(),
   })),
+  workflow_options: workflowOptionsSchema.optional(),
+  // Kept unread and sent back whole: an edit without the saved pipeline is refused.
+  pipeline: z.record(z.string(), z.unknown()).optional(),
 });
+// #[derive(Default)] WorkflowOptions (src/domain/campaign/workflow_options.rs:14), as effective_workflow_options reads it (definition.rs:30-32).
+export const DEFAULT_WORKFLOW_OPTIONS: z.infer<typeof workflowOptionsSchema> = {
+  start: false, implementation: false, review: false, landing: false, merge: false, deploy: false,
+};
 
 const hostGateSchema = z.looseObject({
   host: z.string(),

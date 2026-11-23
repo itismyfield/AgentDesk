@@ -195,7 +195,7 @@ class ScriptChecksJudgeAggregation(unittest.TestCase):
     def run_judge(self, job: dict, results: dict[str, str | None]) -> str:
         if job.get("if") != "${{ always() }}":
             raise AssertionError(f"unmodelled judge condition: {job.get('if')}")
-        outputs = dict.fromkeys(("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
+        outputs = dict.fromkeys(("rust_build", "rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
                                  "dashboard", "cross_os_rust"), "true") | {"rust_tests_skip": "false"}
         needs = {name: {"result": results[name], "outputs": outputs if name == "changes" else {}} for name in job["needs"] if results.get(name) is not None}
         step = next(step for step in job["steps"] if step.get("name") == "Judge required checks")

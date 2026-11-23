@@ -372,6 +372,14 @@ impl BootInputs {
                 }
                 continue;
             }
+            if owner_proves_not_sent(&record) {
+                // A refused record stays a boot input for this channel; no other channel waits on it.
+                match history.native_not_sent_blocking(&record.namespace, &record.settlement.ticket)
+                {
+                    Ok(()) => continue,
+                    Err(error) => tracing::warn!(%error, "native boot no-key settlement refused"),
+                }
+            }
             let id = serde_json::to_string(&(&record.namespace, &record.settlement.ticket.key))
                 .map_err(|e| e.to_string())?;
             inputs.insert(id, RestoredInput::capture(record, generation)?);
@@ -420,6 +428,34 @@ impl BootInputs {
             .map_err(|_| "native boot actor unavailable")?;
         rx.await.map_err(|_| "native boot acknowledgement lost")?
     }
+}
+
+/// A record whose no-key witness never landed settles only on the queue owner's retained proof for
+/// its exact attempt; key evidence, a result or a missing proof leaves it a boot input.
+fn owner_proves_not_sent(record: &RestoredRecord) -> bool {
+    let settlement = &record.settlement;
+    let Some(token) = record.namespace.strip_prefix("claude/") else {
+        return false;
+    };
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        token,
+        None,
+    );
+    settlement.outcome.is_none()
+        && settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+        && crate::services::turn_orchestrator::v2_queue(
+            &persistence,
+            ChannelId::new(settlement.ticket.channel_id),
+        )
+        .is_ok_and(|(path, namespace)| {
+            namespace == record.namespace
+                && crate::services::turn_orchestrator::proves_not_sent(
+                    &path,
+                    &namespace,
+                    &settlement.ticket.key,
+                )
+        })
 }
 
 pub(super) async fn restore(
