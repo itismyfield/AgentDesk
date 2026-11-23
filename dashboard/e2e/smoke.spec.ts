@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
 
 const ROUTES = [
   { path: "/home", label: /홈|Home/ },
@@ -1710,6 +1711,54 @@ test.describe("Dashboard smoke tests", () => {
     await page.clock.runFor(60_000);
     await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
     await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
+  });
+
+  test("home: server nodes waiting for a person lead the to-dos; approval stays disabled with its reason", async ({ page }, testInfo) => {
+    const isMobile = testInfo.project.name === "mobile";
+    const release = structuredClone(serverCampaignFixtures.prepared);
+    const statuses = ["decision_required", "awaiting_deploy", "awaiting_approval"];
+    release.view.nodes.forEach((node, index) => { node.runtime = { ...node.runtime, human_status: statuses[index], wait_started_at: null }; });
+    await mockHomeSources(page);
+    await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
+    await page.route(/\/api\/server-campaigns\?/, (route) => route.fulfill({ json: { campaigns: [release] } }));
+    await page.route(/\/api\/server-campaigns\/release$/, (route) => route.fulfill({ json: { campaign: release } }));
+    await page.goto("/home");
+
+    const todo = page.getByTestId("home-todo");
+    await expect(todo.locator("li")).toHaveCount(3, { timeout: 15000 });
+    await expect(todo.locator("li").first()).toContainText("승인 대기");
+    await expect(todo).toContainText("결정 포럼에서 승인해요");
+    if (isMobile) {
+      await expect(todo.getByRole("button")).toHaveCount(0);
+    } else {
+      await expect(todo.getByRole("button", { name: "승인" })).toBeDisabled();
+      await todo.getByRole("button", { name: "판단하기" }).click();
+      await expect(page).toHaveURL(/\/campaigns\?mode=server&campaign=release&node=A$/);
+    }
+  });
+
+  test("home: a working agent's live turn shows as a kit monitor without controls on desktop, a row on phones", async ({ page }, testInfo) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/agents\/agent-ada\/turn$/, (route) => route.fulfill({ json: {
+      agent_id: "agent-ada", status: "working", started_at: new Date(Date.now() - 95_000).toISOString(), updated_at: new Date().toISOString(),
+      provider: "codex", current_tool_line: "npm run build", tool_events: [{ kind: "tool", status: "running", tool_name: "Bash", summary: "", line: "" }], tool_count: 1,
+    } }));
+    await page.goto("/home");
+
+    const monitor = page.getByTestId("home-agent-monitor-agent-ada");
+    if (testInfo.project.name === "mobile") {
+      await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toBeVisible({ timeout: 15000 });
+      await expect(monitor).toHaveCount(0);
+      return;
+    }
+    await expect(monitor).toContainText("npm run build", { timeout: 15000 });
+    await expect(monitor).toContainText(/1:3\d/);
+    // Fold and the log link to the agent detail only; no pause, cancel or approval without a server action behind them.
+    await expect(monitor.getByRole("button")).toHaveCount(2);
+    await monitor.getByRole("button", { name: "로그" }).click();
+    await expect(page.getByRole("dialog", { name: /에이전트 상세/ })).toBeVisible();
+    await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("home: on a phone a failed session list reads unknown where an empty one reads resting", async ({ page }, testInfo) => {
