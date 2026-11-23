@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { useCallback, useMemo, useState, type DragEvent } from "react";
 import type { Agent, Department, DispatchedSession } from "../../types";
 import type { UiLanguage } from "../../i18n";
 import * as api from "../../api";
@@ -66,21 +66,30 @@ export function useAgentManagerController({
     open: boolean;
     editDept: Department | null;
   }>({ open: false, editDept: null });
-  const [deptOrder, setDeptOrder] = useState<Department[]>(departments);
-  const [deptOrderDirty, setDeptOrderDirty] = useState(false);
+  // A local order of department ids over the server list; `dirty` until saved or cancelled.
+  const [localOrder, setLocalOrder] = useState<{ ids: string[]; dirty: boolean } | null>(null);
   const [reorderSaving, setReorderSaving] = useState(false);
+  const [reorderFailed, setReorderFailed] = useState(false);
   const [draggingDeptId, setDraggingDeptId] = useState<string | null>(null);
   const [dragOverDeptId, setDragOverDeptId] = useState<string | null>(null);
   const [dragOverPosition, setDragOverPosition] = useState<"before" | "after" | null>(null);
-
-  useEffect(() => {
-    if (deptOrderDirty) return;
-    const currentIds = deptOrder.map((dept) => dept.id).join("|");
-    const nextIds = departments.map((dept) => dept.id).join("|");
-    if (currentIds !== nextIds) {
-      setDeptOrder(departments);
-    }
-  }, [departments, deptOrder, deptOrderDirty]);
+  // A saved order holds until the refreshed list arrives, so the rows never jump back for a moment.
+  const [seenDepartments, setSeenDepartments] = useState(departments);
+  if (seenDepartments !== departments) {
+    setSeenDepartments(departments);
+    if (localOrder && !localOrder.dirty) setLocalOrder(null);
+  }
+  const deptOrder = useMemo(() => {
+    if (!localOrder) return departments;
+    const byId = new Map(departments.map((dept) => [dept.id, dept]));
+    const kept = localOrder.ids.flatMap((id) => byId.get(id) ?? []);
+    return [...kept, ...departments.filter((dept) => !localOrder.ids.includes(dept.id))];
+  }, [departments, localOrder]);
+  const deptOrderDirty = localOrder?.dirty ?? false;
+  const reorder = useCallback((ids: string[]) => {
+    setLocalOrder({ ids, dirty: true });
+    setReorderFailed(false);
+  }, []);
 
   const handleTabChange = useCallback((nextTab: AgentManagerTab) => {
     onTabChange?.(nextTab);
@@ -195,42 +204,42 @@ export function useAgentManagerController({
   }, []);
 
   const handleMoveDept = useCallback((index: number, direction: -1 | 1) => {
-    setDeptOrder((prev) => {
-      const next = [...prev];
-      const target = index + direction;
-      if (target < 0 || target >= next.length) return prev;
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
-    setDeptOrderDirty(true);
-  }, []);
+    const target = index + direction;
+    if (target < 0 || target >= deptOrder.length) return;
+    const ids = deptOrder.map((dept) => dept.id);
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    reorder(ids);
+  }, [deptOrder, reorder]);
 
+  // The server takes only `name` on PATCH /api/departments/{id}, so the order goes through its reorder route.
   const handleSaveOrder = useCallback(async () => {
     setReorderSaving(true);
+    setReorderFailed(false);
     try {
-      for (let index = 0; index < deptOrder.length; index += 1) {
-        await api.updateDepartment(deptOrder[index].id, { sort_order: index });
-      }
-      setDeptOrderDirty(false);
+      await api.reorderDepartments(deptOrder.map((dept, index) => ({ id: dept.id, sort_order: index })));
+      setLocalOrder({ ids: deptOrder.map((dept) => dept.id), dirty: false });
       onDepartmentsChange();
     } catch (error) {
       console.error("Order save failed:", error);
+      setReorderFailed(true);
     } finally {
       setReorderSaving(false);
     }
   }, [deptOrder, onDepartmentsChange]);
 
   const handleCancelOrder = useCallback(() => {
-    setDeptOrder(departments);
-    setDeptOrderDirty(false);
-  }, [departments]);
-
-  const handleDragStart = useCallback((deptId: string, event: DragEvent<HTMLDivElement>) => {
-    setDraggingDeptId(deptId);
-    event.dataTransfer.effectAllowed = "move";
+    setLocalOrder(null);
+    setReorderFailed(false);
   }, []);
 
-  const handleDragOver = useCallback((deptId: string, event: DragEvent<HTMLDivElement>) => {
+  const handleDragStart = useCallback((deptId: string, event: DragEvent<HTMLElement>) => {
+    setDraggingDeptId(deptId);
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox starts a drag only with some data set.
+    event.dataTransfer.setData("text/plain", deptId);
+  }, []);
+
+  const handleDragOver = useCallback((deptId: string, event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     const rect = event.currentTarget.getBoundingClientRect();
@@ -239,28 +248,18 @@ export function useAgentManagerController({
     setDragOverPosition(event.clientY < midY ? "before" : "after");
   }, []);
 
-  const handleDrop = useCallback((targetId: string, _event: DragEvent<HTMLDivElement>) => {
-    if (!draggingDeptId || draggingDeptId === targetId) {
-      setDraggingDeptId(null);
-      setDragOverDeptId(null);
-      setDragOverPosition(null);
-      return;
+  const handleDrop = useCallback((targetId: string, event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    if (draggingDeptId && draggingDeptId !== targetId) {
+      const ids = deptOrder.map((dept) => dept.id).filter((id) => id !== draggingDeptId);
+      const targetIndex = ids.indexOf(targetId);
+      ids.splice(dragOverPosition === "after" ? targetIndex + 1 : targetIndex, 0, draggingDeptId);
+      reorder(ids);
     }
-
-    setDeptOrder((prev) => {
-      const next = prev.filter((dept) => dept.id !== draggingDeptId);
-      const targetIndex = next.findIndex((dept) => dept.id === targetId);
-      const insertAt = dragOverPosition === "after" ? targetIndex + 1 : targetIndex;
-      const dragged = prev.find((dept) => dept.id === draggingDeptId);
-      if (dragged) next.splice(insertAt, 0, dragged);
-      return next;
-    });
-
-    setDeptOrderDirty(true);
     setDraggingDeptId(null);
     setDragOverDeptId(null);
     setDragOverPosition(null);
-  }, [draggingDeptId, dragOverPosition]);
+  }, [deptOrder, draggingDeptId, dragOverPosition, reorder]);
 
   const handleDragEnd = useCallback(() => {
     setDraggingDeptId(null);
@@ -297,6 +296,7 @@ export function useAgentManagerController({
     openEditAgent,
     openEditDept,
     openDuplicateAgent,
+    reorderFailed,
     reorderSaving,
     saving,
     search,
