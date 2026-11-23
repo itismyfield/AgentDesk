@@ -55,8 +55,6 @@
 .campaign-server-latest > div { display: grid; grid-template-columns: minmax(90px, 180px) minmax(0, 1fr); gap: 8px; }
 .campaign-server-latest dt { color: var(--th-text-muted); overflow-wrap: anywhere; }
 .campaign-server-latest dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.campaign-tie { position: relative; display: grid; place-items: center; width: 100%; }
-.campaign-tie > i { width: 10px; height: calc(100% - 8px); border-radius: 5px; background: var(--th-accent-info); box-shadow: 0 0 0 2px var(--th-card-bg); }
 @media (prefers-reduced-motion: reduce) { .campaign-graph :is(.react-flow__edge-path, .react-flow__node) { transition: none; animation: none; } }
 @media (max-width: 900px) { .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaign-graph .react-flow__controls-button { min-height: 26px; } .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; } .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; } .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); } }
 @media (max-width: 600px) {

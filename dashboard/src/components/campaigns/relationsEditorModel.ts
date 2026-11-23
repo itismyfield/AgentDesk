@@ -99,7 +99,7 @@ export function layoutTasks(nodes: CampaignNode[], ids: string[]): Map<string, {
 }
 
 /** Each dependency cycle once, as ids from a task back to itself in dependency → dependent order; a self-dependency counts. */
-export function findCycles(nodes: CampaignNode[]): string[][] {
+export function findCycles(nodes: ReadonlyArray<{ id: string; dependencies: readonly string[] }>): string[][] {
   const next = new Map<string, string[]>(nodes.map((node) => [node.id, []]));
   for (const node of nodes) for (const id of node.dependencies) next.get(id)?.push(node.id);
   // Tarjan's strongly connected components: one with a loop in it holds at least one cycle.

@@ -1,4 +1,4 @@
-import { ArrowLeft, Cable, LayoutGrid, Maximize, MousePointer2, Plus, Spline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { Background, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -16,6 +16,7 @@ import { LEDGER_STATUS_LABELS } from "./campaignOverviewModel";
 import { Badge, LABELS, type Tr } from "./campaignPresentation";
 import { applyTieCommand, type TieCommand } from "./campaignTieEditor";
 import { definitionCleaner, editorViewScope, loadCampaignView, pruneStoredView, saveCampaignView, storedEditorScopes } from "./campaignViewStorage";
+import { FLOAT, RelationsLegend, TOOL, ZoomTools } from "./RelationsCanvasChrome";
 import RelationsInspector, { type ScopeOverview } from "./RelationsInspector";
 import { RelationsTaskNode, RelationsTieNode, type TaskNodeData, type TieMenu, type TieNodeData } from "./RelationsTaskNode";
 import { nodeMarker } from "./StatusMarker";
@@ -40,9 +41,6 @@ const READABLE_ZOOM = 0.8;
 const NODE_HEIGHT = 150;
 const WIDE = "(min-width: 1280px)";
 const FIELD: Record<EditField, readonly [string, string]> = { dependencies: ["선행", "dependencies"], title: ["제목", "title"], issue_url: ["이슈", "issue"] };
-/** Floating canvas chrome: a card over the dots, and 40px tool buttons as in the design. */
-const FLOAT = "absolute z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--th-card-bg)] shadow-[var(--shadow-sm)]";
-const TOOL = "!size-10 [&>span]:!size-[18px] aria-pressed:!bg-[var(--accent-soft)] aria-pressed:!text-[var(--fg)]";
 
 /** True at 1280px and up, where the inspector stays docked beside the canvas. */
 function useWide() {
@@ -485,11 +483,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           {tool === "tie" && <span role="status" className="text-xs text-[var(--fg)]">{chosenLines.length ? tr(`선 ${chosenLines.length}개를 골랐어요.`, `${chosenLines.length} lines chosen.`) : tr("묶을 선을 누르세요. 선 하나는 두 번 눌러도 그 자리에 묶여요.", "Choose the lines to tie. Double-click one line to tie it where it is.")}</span>}
           {tool === "tie" && chosenLines.length > 0 && <Button variant="primary" size="sm" disabled={saving} onClick={tieBundle}>{tr("묶기", "Tie")}<kbd className="ml-1.5 rounded border border-current/40 px-1 font-mono text-[11px]">B</kbd></Button>}
         </div>
-        <div data-editor-chrome="legend" className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(50%-9rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
-          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
-          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
-          <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" />{tr("케이블타이 · 실행에는 영향 없음", "Cable tie · no effect on runs")}</span>
-        </div>
+        <RelationsLegend data-editor-chrome="legend" className="max-w-[calc(50%-9rem)]" tr={tr} />
         <div data-editor-chrome="tools" role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className={`${FLOAT} bottom-4 left-1/2 flex -translate-x-1/2 gap-0.5 p-1`}>
           <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); setBundle([]); }} />
           <IconButton icon={<Plus aria-hidden />} className={TOOL} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
@@ -497,11 +491,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           <IconButton icon={<Cable aria-hidden />} className={TOOL} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
           <IconButton icon={<LayoutGrid aria-hidden />} className={TOOL} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
         </div>
-        <div data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} className={`${FLOAT} right-4 bottom-4 flex gap-0.5 p-1`}>
-          <IconButton icon={<ZoomOut aria-hidden />} className={TOOL} label={tr("축소", "Zoom out")} onClick={() => void flow.current?.zoomOut()} />
-          <IconButton icon={<ZoomIn aria-hidden />} className={TOOL} label={tr("확대", "Zoom in")} onClick={() => void flow.current?.zoomIn()} />
-          <IconButton icon={<Maximize aria-hidden />} className={TOOL} label={tr("전체 보기", "Show every task")} onClick={() => void flow.current?.fitView({ padding: 0.08, minZoom: 0.1, maxZoom: 1 })} />
-        </div>
+        <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fitLabel={tr("전체 보기", "Show every task")} tr={tr} />
       </div>
       {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
       {wide ? <div className="flex min-h-0 flex-col bg-[var(--bg-1)]">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">

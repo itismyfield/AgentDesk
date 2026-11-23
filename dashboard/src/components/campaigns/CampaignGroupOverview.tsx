@@ -1,135 +1,153 @@
-import { useMemo, useSyncExternalStore } from "react";
-import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import { useMemo, useRef, useSyncExternalStore, type CSSProperties } from "react";
+import { Background, MarkerType, ReactFlow, type Edge, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
-import { MeterBar } from "../common/KitPrimitives";
-import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
+import CampaignGroupInspector from "./CampaignGroupInspector";
+import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings, type RawEdgeKey } from "./campaignGraphRouting";
+import { GROUP_PIN_Y, GROUP_WIDTH, LOOP_LANE, layoutGroups } from "./campaignGroupLayout";
 import { campaignGroup, groupCampaignNodes } from "./campaignModel";
-import { TIE_WIDTH, tieHeight, tieSlots } from "./campaignTieGeometry";
-import { CampaignTieNode } from "./CampaignTieGraph";
+import type { Tr } from "./campaignPresentation";
 import { groupViewScope, loadCampaignView, readStoredRaw, subscribeCampaignView } from "./campaignViewStorage";
-
-type Props = {
-  campaignId: string;
-  nodes: CampaignNode[];
-  onSelectGroup: (group: string) => void;
-  tr: (ko: string, en: string) => string;
-};
+import { RelationsLegend, RelationsLine, ZoomTools, useLegible, type LineData } from "./RelationsCanvasChrome";
+import { RelationsGroupNode, RelationsTieNode, type GroupNodeData, type TieNodeData } from "./RelationsTaskNode";
+import { findCycles } from "./relationsEditorModel";
 
 /** The group key, not its sort position, names a group, so adding a group renames nothing. */
 const groupNodeId = (key: string) => `campaign-group:${encodeURIComponent(key)}`;
 const tieNodeId = (id: string) => `campaign-tie:${id}`;
-const GROUP_WIDTH = 244;
-const GROUP_HEIGHT = 145;
-const NODE_TYPES = { campaignTie: CampaignTieNode };
-
-/** A group projection can contain cycles even when the underlying task graph is a DAG. */
-export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: GraphViewSettings = NO_TIES) {
-  const groups = groupCampaignNodes(nodes).map((group, index) => ({
-    ...group,
-    id: groupNodeId(group.key),
-    position: { x: (index % 3) * 310, y: Math.floor(index / 3) * 210 },
-    internalDependencies: 0,
-  }));
-  const groupsById = new Map(groups.map((group) => [group.id, group]));
-  const displayOf = new Map(nodes.map((node) => [node.id, groupNodeId(campaignGroup(node))]));
-  const routed = routeEdges({ edges: campaignRawEdges(nodes), displayOf }, settings);
-  for (const [, target] of routed.internal) groupsById.get(displayOf.get(target)!)!.internalDependencies++;
-  return {
-    groups,
-    connections: routed.display
-      .map((line) => ({ ...line, count: line.edges.length }))
-      .sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
-    internalDependencies: routed.internal.length,
-    /** The stored ties without members that left the definition. */
-    ties: routed.settings.ties,
-  };
+/** A tie node is 44 units square; its lines meet at its centre. */
+const TIE_HALF = 22;
+/** A saved tie, only drawn, kept at its own size on screen when zoomed out; its lines meet at the centre it scales around. */
+function FixedTieNode(props: NodeProps) {
+  return <div style={{ transform: `scale(${useLegible()})` }}><RelationsTieNode {...props} /></div>;
 }
+const NODE_TYPES = { relationsGroup: RelationsGroupNode, relationsTie: FixedTieNode };
+const EDGE_TYPES = { relationsLine: RelationsLine };
+/** The canvas fills the window's height below the page header, never under 560px. */
+const CANVAS_HEIGHT = "max(560px, calc(100dvh - 21rem))";
+/** Fitting leaves the bottom strip to the legend and the zoom tools. */
+const FIT = { padding: { x: "32px", top: "24px", bottom: "72px" }, minZoom: 0.1, maxZoom: 1 } as const;
+
+export type GroupOverview = ReturnType<typeof buildCampaignGroupOverview>;
 
 /**
- * Every group and the dependencies between them. Ties saved for this graph are drawn as they were left and never
- * changed here: ties are made in the relations editor, on tasks.
+ * Groups placed by dependency direction, the lines between them and the loops among them: a group projection can
+ * hold a cycle even when the task graph is a DAG. Saved ties keep their lines and strand order; they sit where those
+ * lines now run, since the positions they were saved with belonged to the old grid.
  */
-export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup, tr }: Props) {
+export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: GraphViewSettings = NO_TIES) {
+  const displayOf = new Map(nodes.map((node) => [node.id, groupNodeId(campaignGroup(node))]));
+  const routed = routeEdges({ edges: campaignRawEdges(nodes), displayOf }, settings);
+  const lines = routed.display.sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
+  const grouped = groupCampaignNodes(nodes);
+  const { placed: positions, below } = layoutGroups(grouped.map((group) => groupNodeId(group.key)), lines.map((line) => [line.source, line.target]));
+  // An untied line that runs backwards loops under the linked groups, in its own lane.
+  let lane = 0;
+  const connections = lines.map((line) => ({ ...line, count: line.edges.length,
+    loopY: !line.via.length && positions.get(line.target)!.x <= positions.get(line.source)!.x ? below + 28 + LOOP_LANE * lane++ : undefined }));
+  const internal = new Map<string, number>();
+  for (const [, target] of routed.internal) internal.set(displayOf.get(target)!, (internal.get(displayOf.get(target)!) ?? 0) + 1);
+  const groups = grouped.map((group) => {
+    const id = groupNodeId(group.key);
+    return { ...group, id, position: positions.get(id)!, internalDependencies: internal.get(id) ?? 0 };
+  });
+  // A tie sits in the stretch every one of its lines crosses (between the last source and the first target), at their mean height.
+  const ties = routed.settings.ties.flatMap((tie) => {
+    const spans = connections.filter((line) => line.via.includes(tie.id)).map((line) => {
+      const from = positions.get(line.source)!, to = positions.get(line.target)!;
+      return { x0: from.x + GROUP_WIDTH, y0: from.y + GROUP_PIN_Y, x1: to.x, y1: to.y + GROUP_PIN_Y };
+    });
+    if (!spans.length) return [];
+    const lo = Math.max(...spans.map((span) => span.x0)), hi = Math.min(...spans.map((span) => span.x1));
+    const x = lo <= hi ? (lo + hi) / 2 : spans.reduce((sum, span) => sum + (span.x0 + span.x1) / 2, 0) / spans.length;
+    const y = spans.reduce((sum, span) => sum + span.y0 + (span.y1 - span.y0) * Math.min(1, Math.max(0, (x - span.x0) / (span.x1 - span.x0 || 1))), 0) / spans.length;
+    return [{ ...tie, position: { x: x - TIE_HALF, y: y - TIE_HALF } }];
+  });
+  const cycles = findCycles(groups.map((group) => ({ id: group.id, dependencies: connections.filter((line) => line.target === group.id).map((line) => line.source) })));
+  return { groups, connections, internalDependencies: routed.internal.length, ties, cycles };
+}
+
+/** One group loop as words: 순환 · A → B → A. */
+export const groupCycleText = (overview: GroupOverview, path: string[], tr: Tr) => {
+  const names = path.map((id) => { const key = overview.groups.find((group) => group.id === id)?.key ?? ""; return key || tr("미분류", "Ungrouped"); }).join(" → ");
+  return tr(`순환 · ${names}`, `Cycle · ${names}`);
+};
+
+/**
+ * Every group and the dependencies between them, with the chosen group (or the whole campaign) summed up beside it.
+ * Ties saved for this graph are drawn and never changed here: ties are made in the relations editor, on tasks.
+ */
+export default function CampaignGroupOverview({ campaignId, nodes, chosen, onChoose, onOpenGroup, onOpenTask, tr }: {
+  campaignId: string; nodes: CampaignNode[]; chosen: string | null; onChoose: (group: string | null) => void;
+  onOpenGroup: (group: string) => void; onOpenTask: (id: string) => void; tr: Tr;
+}) {
   const scope = useMemo(() => groupViewScope(campaignId), [campaignId]);
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
   const view = useMemo(() => loadCampaignView(scope, raw).view, [scope, raw]);
-  const overview = useMemo(() => buildCampaignGroupOverview(nodes, view), [nodes, view]);
   // A stored `showOriginal` is ignored: its switch is gone, so honouring it would hide these ties for good.
-  const lines = overview.connections;
-  const shownTies = useMemo(() => overview.ties.filter((tie) => lines.some((line) => line.via.includes(tie.id))), [overview.ties, lines]);
-  const slots = useMemo(() => tieSlots(shownTies, lines), [shownTies, lines]);
+  const overview = useMemo(() => buildCampaignGroupOverview(nodes, view), [nodes, view]);
+  const flow = useRef<ReactFlowInstance | null>(null);
+  const label = (key: string) => key || tr("미분류", "Ungrouped");
 
   const graphNodes: Node[] = overview.groups.map((group) => {
-    const label = group.key || tr("미분류", "Ungrouped");
     const { counts, percent, total } = group.progress;
-    return {
-      id: group.id,
-      position: group.position,
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left,
-      ariaLabel: tr(`${label}, 작업 ${total}개, 완료 ${percent}%, 진행 ${counts.running}, 막힘 ${counts.blocked}`, `${label}, ${total} tasks, ${percent}% completed, ${counts.running} running, ${counts.blocked} blocked`),
-      data: {
-        group: group.key,
-        label: <div style={{ display: "grid", gap: 8, textAlign: "left", fontSize: 12 }}>
-          <strong title={label} style={{ overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", fontSize: 14 }}>{label}</strong>
-          <div className="campaign-row"><span>{tr(`작업 ${total}개`, `${total} tasks`)}</span><span>{counts.completed}/{total} · {percent}%</span></div>
-          <progress value={percent} max={100} aria-label={tr(`${label} 완료율`, `${label} completion`)} className="sr-only" />
-          <MeterBar ratio={percent / 100} tone="ok" />
-          <div className="campaign-row"><span>{tr(`진행 ${counts.running}`, `${counts.running} running`)}</span><span>{tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)}</span></div>
-          <small className="campaign-muted">{tr(`그룹 내부 연결 ${group.internalDependencies}개`, `${group.internalDependencies} internal dependencies`)}</small>
-        </div>,
-      },
-      style: { width: GROUP_WIDTH, minHeight: GROUP_HEIGHT, padding: 14, border: `1px solid ${counts.blocked ? "var(--warn)" : "var(--line-soft)"}`, borderRadius: 14, background: "var(--bg-2)", color: "var(--fg)", cursor: "pointer" },
+    const finished = total > 0 && counts.completed + counts.skipped === total;
+    const data: GroupNodeData = {
+      title: label(group.key), meta: tr(`작업 ${total}개 · 완료 ${percent}%`, `${total} tasks · ${percent}% done`),
+      tone: finished ? "done" : counts.blocked ? "warn" : counts.running ? "progress" : "open", ratio: percent / 100, pins: [tr("선행", "Needs"), tr("다음", "Next")],
+      summary: tr(`진행 ${counts.running} · 막힘 ${counts.blocked} · 그룹 안 연결 ${group.internalDependencies}`, `${counts.running} running · ${counts.blocked} blocked · ${group.internalDependencies} inside`),
+      blocked: counts.blocked ? tr(`막힌 작업 ${counts.blocked}개`, `${counts.blocked} blocked tasks`) : null,
+      far: [`${percent}%`, counts.blocked > 0 && tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)].filter(Boolean).join(" · "),
     };
+    return { id: group.id, type: "relationsGroup", position: group.position, data, draggable: false, selected: group.key === chosen,
+      ariaLabel: tr(`${data.title}, 작업 ${total}개, 완료 ${percent}%, 진행 ${counts.running}, 막힘 ${counts.blocked}`, `${data.title}, ${total} tasks, ${percent}% completed, ${counts.running} running, ${counts.blocked} blocked`) };
   });
-  shownTies.forEach((tie, index) => graphNodes.push({
-    id: tieNodeId(tie.id), type: "campaignTie", position: tie.position, draggable: false, selectable: false,
-    ariaLabel: tr(`타이 ${index + 1}, 원본 선 ${tie.strandOrder.length}개`, `Tie ${index + 1}, ${tie.strandOrder.length} original lines`),
-    data: { slots: slots.get(tie.id)?.length ?? 0 },
-    style: { width: TIE_WIDTH, height: tieHeight(slots.get(tie.id)?.length ?? 0) },
+  for (const tie of overview.ties) {
+    const count = overview.connections.filter((line) => line.via.includes(tie.id)).reduce((sum, line) => sum + line.count, 0);
+    graphNodes.push({ id: tieNodeId(tie.id), type: "relationsTie", position: tie.position, draggable: false, selectable: false, focusable: false,
+      ariaLabel: tr(`케이블타이, 선 ${count}개`, `Cable tie, ${count} lines`), data: { count, menu: null, fixed: true } satisfies TieNodeData });
+  }
+  // A loop is labelled once, on its line that runs backwards across the columns when there is one.
+  const looped = new Map<string, string[]>();
+  for (const path of overview.cycles) path.slice(1).forEach((to, index) => looped.set(`${path[index]}->${to}`, path));
+  const at = (id: string) => overview.groups.find((group) => group.id === id)!.position.x;
+  const labelled = new Set(overview.cycles.map((path) => {
+    const pairs = path.slice(1).map((to, index) => `${path[index]}->${to}`);
+    return pairs.find((pair) => { const [from, to] = pair.split("->"); return at(to) <= at(from); }) ?? pairs[0];
   }));
-  const edges: Edge[] = lines.flatMap((line) => {
-    const style = { stroke: "var(--th-text-muted)", strokeWidth: 1.5 };
+  const edges: Edge[] = overview.connections.flatMap((line) => {
+    const pair = `${line.source}->${line.target}`, path = looped.get(pair);
+    const named = path && labelled.delete(pair) ? groupCycleText(overview, path, tr) : undefined;
     const chain = [line.source, ...line.via.map(tieNodeId), line.target];
-    const slotOf = (index: number) => slots.get(line.via[index - 1])?.indexOf(line.id) ?? 0;
     return chain.slice(1).map((target, index) => {
       const last = index === chain.length - 2;
-      return {
-        id: chain.length > 2 ? `${line.id}#${index}` : line.id,
-        source: chain[index],
-        target,
-        sourceHandle: index > 0 ? `out-${slotOf(index)}` : undefined,
-        targetHandle: last ? undefined : `in-${slotOf(index + 1)}`,
-        data: { edges: line.edges },
-        type: chain.length > 2 ? "straight" : "smoothstep",
-        style,
-        ...(last ? {
-          label: String(line.count),
-          ariaLabel: tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`),
-          markerEnd: { type: MarkerType.ArrowClosed, color: "var(--th-text-muted)" },
-          labelStyle: { fill: "var(--th-text-primary)", fontWeight: 600, fontSize: 12 },
-          labelBgStyle: { fill: "var(--th-card-bg)" },
-          labelBgPadding: [6, 3] as [number, number],
-          labelBgBorderRadius: 4,
-        } : {}),
-      };
+      const data: LineData & { edges: RawEdgeKey[] } = { error: !!path, edges: line.edges, loopY: line.loopY, ...last ? { count: line.count, cycle: named } : {} };
+      return { id: chain.length > 2 ? `${line.id}#${index}` : line.id, source: chain[index], target, type: "relationsLine", data, selectable: false, focusable: false,
+        ...last ? { ariaLabel: tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), markerEnd: { type: MarkerType.ArrowClosed, color: path ? "var(--err)" : "var(--fg-faint)", width: 12, height: 12 } } : {} };
     });
   });
 
-  const crossDependencies = overview.connections.reduce((sum, connection) => sum + connection.count, 0);
-  return <section className="campaign-neighborhood" aria-label={tr("그룹별 전체 관계", "All campaign group relationships")}>
-    <div className="campaign-row"><strong>{tr("그룹별 전체 관계", "All campaign group relationships")}</strong><span>{tr(`그룹 ${overview.groups.length}개 · 작업 ${nodes.length}개`, `${overview.groups.length} groups · ${nodes.length} tasks`)}</span></div>
-    <p className="campaign-muted">{tr("전체 작업의 그룹 관계입니다. 화살표는 선행 그룹 → 후속 그룹, 숫자는 연결된 의존성 수입니다. 그룹을 고르면 그 작업이 아래에 나와요.", "Groups across all tasks. Arrows point from dependency to dependent; numbers count the connecting dependencies. Select a group to list its tasks below.")}</p>
-    {nodes.length === 0 ? <p>{tr("표시할 작업이 없습니다.", "No tasks to display.")}</p> : <>
-      <div className="campaign-graph-scroll"><div className="campaign-graph [&_.react-flow\_\_controls]:shadow-none [&_.react-flow\_\_controls-button]:!bg-th-bg-surface [&_.react-flow\_\_controls-button]:!text-th-text-primary [&_.react-flow\_\_controls-button]:!border-th-border-subtle [&_.react-flow\_\_attribution]:!bg-th-bg-surface [&_.react-flow\_\_attribution_a]:!text-th-text-muted" style={{ height: Math.min(580, Math.max(300, Math.ceil(overview.groups.length / 3) * 210)) }}>
-        <ReactFlow nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.18, minZoom: 0.65, maxZoom: 1 }} minZoom={0.65} maxZoom={1.4}
-          nodesDraggable={false} nodesConnectable={false} panOnScroll zoomOnScroll={false}
-          onNodeClick={(_, node) => { if (node.type !== "campaignTie") onSelectGroup(String(node.data.group)); }}>
-          <Background /><Controls showInteractive={false} />
-        </ReactFlow>
-      </div></div>
-      <p className="campaign-muted">{tr(`그룹 간 연결 ${crossDependencies}개 · 내부 연결 ${overview.internalDependencies}개는 각 그룹에 요약됩니다. 드래그·스크롤로 이동하고 확대 버튼으로 조절하세요.`, `${crossDependencies} cross-group dependencies · ${overview.internalDependencies} internal dependencies summarized in their groups. Drag or scroll to pan; use the zoom controls to adjust.`)}</p>
-    </>}
+  return <section aria-label={tr("그룹별 전체 관계", "All campaign group relationships")}
+    className="grid min-w-0 min-[1280px]:h-[var(--relations-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]"
+    style={{ "--relations-height": CANVAS_HEIGHT } as CSSProperties}>
+    <div data-relations-canvas className="relative h-[var(--relations-height)] min-w-0 bg-[var(--bg)]">
+      <ReactFlow nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
+        onInit={(instance) => { flow.current = instance; }} fitView fitViewOptions={FIT}
+        minZoom={0.1} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} edgesFocusable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false}
+        deleteKeyCode={null} selectionKeyCode={null} multiSelectionKeyCode={null}
+        // Selection arrives as a change for a click and for Enter on a focused group; Escape or the pane lets it go.
+        onNodesChange={(changes) => {
+          const picked = changes.find((change) => change.type === "select" && change.selected);
+          if (picked && "id" in picked) onChoose(overview.groups.find((group) => group.id === picked.id)?.key ?? null);
+          else if (changes.some((change) => change.type === "select")) onChoose(null);
+        }}
+        onNodeDoubleClick={(_, node) => { const group = overview.groups.find((value) => value.id === node.id); if (group) onOpenGroup(group.key); }}
+        onPaneClick={() => onChoose(null)}>
+        <Background gap={20} size={1.6} color="var(--line)" />
+      </ReactFlow>
+      <RelationsLegend className="max-w-[calc(100%-12rem)]" tr={tr} />
+      <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")} tr={tr} />
+    </div>
+    <CampaignGroupInspector overview={overview} nodes={nodes} chosen={chosen} cycleText={(path) => groupCycleText(overview, path, tr)} onChoose={onChoose} onOpenGroup={onOpenGroup} onOpenTask={onOpenTask} tr={tr} />
   </section>;
 }

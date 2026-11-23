@@ -19,16 +19,10 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@xyflow/react", () => ({
-  ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (
+  ReactFlow: ({ nodes, onNodesChange }: { nodes: Array<{ id: string }>; onNodesChange?: (changes: unknown[]) => void }) => (
     <div data-graph-nodes={nodes.length}>
       Task graph
-      {nodes
-        .filter((node) => node.data.group !== undefined)
-        .map((node) => (
-          <button key={node.id} data-graph-group={node.data.group} onClick={() => onNodeClick?.({}, node)}>
-            {node.data.group || "Ungrouped"}
-          </button>
-        ))}
+      {nodes.map((node) => <button key={node.id} data-graph-node={node.id} onClick={() => onNodesChange?.([{ type: "select", id: node.id, selected: true }])} />)}
     </div>
   ),
   Background: () => null,
@@ -253,7 +247,8 @@ it("lists a group's tasks from the connections graph and opens one", async () =>
   await render();
   await act(async () => button("Connections").click());
   expect(container.querySelector("[data-graph-nodes]")?.getAttribute("data-graph-nodes")).toBe("4");
-  await act(async () => container.querySelector<HTMLButtonElement>('[data-graph-group="Gateway"]')!.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[data-graph-node="campaign-group:Gateway"]')!.click());
+  await act(async () => button("Open group").click());
   expect(container.querySelectorAll(".campaign-relations .campaign-task-row")).toHaveLength(30);
   await act(async () => container.querySelector<HTMLButtonElement>('.campaign-relations [data-node-id="task-30"]')!.click());
   expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 30");

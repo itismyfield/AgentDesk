@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
-import { act, type MouseEvent, type ReactNode } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Edge, Node } from "@xyflow/react";
+import type { Edge, Node, NodeChange } from "@xyflow/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { campaignNodeSchema, setCampaignAutoQueue, updateCampaignNode } from "../../api/campaigns";
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGroupOverview";
+import type { LineData } from "./RelationsCanvasChrome";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
@@ -17,17 +18,13 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
 }));
 
 vi.mock("@xyflow/react", () => ({
-  ReactFlow: ({ nodes, edges, onNodeClick, minZoom, children }: {
-    nodes: Node[]; edges: Edge[]; minZoom: number; children: ReactNode;
-    onNodeClick: (event: MouseEvent, node: Node) => void;
-  }) => <div data-testid="group-graph" data-min-zoom={minZoom}>
-    {nodes.map((node) => <button key={node.id} aria-label={node.ariaLabel} onClick={(event) => onNodeClick(event, node)}>{node.data.label as ReactNode}</button>)}
-    {edges.map((edge) => <output key={edge.id} data-source={edge.source} data-target={edge.target}>{edge.label as ReactNode}</output>)}
+  ReactFlow: ({ nodes, edges, onNodesChange, children }: { nodes: Node[]; edges: Edge[]; onNodesChange: (changes: NodeChange[]) => void; children: ReactNode }) => <div data-testid="group-graph">
+    {nodes.map((node) => <button key={node.id} aria-label={node.ariaLabel} onClick={() => onNodesChange([{ type: "select", id: node.id, selected: true }])} />)}
+    {edges.map((edge) => { const line = edge.data as LineData; return <output key={edge.id} data-error={line.error}>{line.count}{line.cycle}</output>; })}
     {children}
   </div>,
   Background: () => null,
-  Controls: () => null,
-  MarkerType: { ArrowClosed: "closed" }, Position: { Right: "right", Left: "left" },
+  MarkerType: { ArrowClosed: "closed" },
 }));
 
 function node(id: string, group: string | null, dependencies: string[] = [], status = "pending") {
@@ -59,6 +56,7 @@ it("keeps an unclassified group and displays both directions of a cyclic group p
     { source: b.id, target: a.id, edges: [["b1", "a2"]] },
     { source: a.id, target: unclassified.id, edges: [["a2", "unclassified"]] },
   ]));
+  expect(graph.cycles).toEqual([[a.id, b.id, a.id]]);
   expect(new Set(graph.groups.map((group) => `${group.position.x}:${group.position.y}`)).size).toBe(3);
   expect(buildCampaignGroupOverview([...nodes].reverse()).groups.map((group) => group.position)).toEqual(graph.groups.map((group) => group.position));
 });
@@ -71,28 +69,43 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
-it("renders counts and aggregated edges and selects null groups through the empty-string callback", async () => {
-  const select = vi.fn();
-  const nodes = [node("a1", "A", [], "completed"), node("a2", "A", [], "running"), node("b1", null, ["a1", "a2"], "blocked")];
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={nodes} onSelectGroup={select} tr={(_, en) => en} />));
-  expect(container.textContent).toContain("2 groups · 3 tasks");
-  expect(container.textContent).toContain("2 cross-group dependencies");
-  expect(container.querySelectorAll("output")).toHaveLength(1);
-  expect(container.querySelector("output")?.textContent).toBe("2");
-  expect(container.querySelector("progress")?.value).toBe(50);
-  const ungrouped = container.querySelector<HTMLButtonElement>('button[aria-label^="Ungrouped,"]')!;
-  expect(ungrouped.textContent).toContain("1 blocked");
-  await act(async () => ungrouped.click());
-  expect(select).toHaveBeenCalledWith("");
-  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label^="A,"]')!.click());
-  expect(select).toHaveBeenLastCalledWith("A");
-  expect(Number(container.querySelector('[data-testid="group-graph"]')?.getAttribute("data-min-zoom"))).toBeGreaterThanOrEqual(0.6);
+it("lays linked groups out left to right by dependency depth and groups without a line below them", () => {
+  const graph = buildCampaignGroupOverview([node("a", "A"), node("b", "B", ["a"]), node("c", "C", ["b", "a"]), node("s", "Solo")]);
+  const at = Object.fromEntries(graph.groups.map((group) => [group.key, group.position]));
+  expect([at.A.x < at.B.x, at.B.x < at.C.x, at.Solo.y > Math.max(at.A.y, at.B.y, at.C.y)]).toEqual([true, true, true]);
 });
 
-it("renders an empty state without mounting the graph", async () => {
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={[]} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
-  expect(container.textContent).toContain("No tasks to display.");
-  expect(container.querySelector('[data-testid="group-graph"]')).toBeNull();
+const en = (_: string, value: string) => value;
+async function render(nodes: ReturnType<typeof node>[], chosen: string | null) {
+  const calls = { choose: vi.fn(), open: vi.fn(), task: vi.fn() };
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={nodes} chosen={chosen} onChoose={calls.choose} onOpenGroup={calls.open} onOpenTask={calls.task} tr={en} />));
+  return calls;
+}
+const press = (name: string, scope: Element = container) => act(async () => [...scope.querySelectorAll<HTMLButtonElement>("button")]
+  .find((element) => (element.getAttribute("aria-label") ?? element.textContent ?? "").startsWith(name))!.click());
+
+it("draws counts on the lines between groups and chooses a group through its selection, null groups as the empty string", async () => {
+  const nodes = [node("a1", "A", [], "completed"), node("a2", "A", [], "running"), node("b1", null, ["a1", "a2"], "blocked")];
+  const { choose } = await render(nodes, null);
+  expect([...container.querySelectorAll("output")].map((line) => [line.textContent, line.dataset.error])).toEqual([["2", "false"]]);
+  expect(container.querySelector('button[aria-label^="Ungrouped,"]')?.getAttribute("aria-label")).toBe("Ungrouped, 1 tasks, 0% completed, 0 running, 1 blocked");
+  expect(container.querySelector('[aria-label="Campaign summary"]')?.textContent).toContain("2 groups · 3 tasks");
+  await press("Ungrouped,");
+  await press("A,");
+  expect(choose.mock.calls).toEqual([[""], ["A"]]);
+});
+
+it("sums up the chosen group with its blocked tasks and neighbours, and opens it or one of them", async () => {
+  const calls = await render([node("a1", "A"), node("b1", "B", ["a1"], "blocked"), node("b2", "B", ["a1"]), node("c1", "C", ["b2"])], "B");
+  const aside = container.querySelector('[aria-label="Selected group"]')!;
+  expect([...aside.querySelectorAll("li")].map((row) => row.textContent)).toEqual(["b1", "A2 dependencies", "C1 dependencies"]);
+  for (const name of ["Open group", "b1", "C"]) await press(name, aside);
+  expect([calls.open.mock.calls, calls.task.mock.calls, calls.choose.mock.calls]).toEqual([[["B"]], [["b1"]], [["C"]]]);
+});
+
+it("draws a loop between groups red and dashed, labelled once", async () => {
+  await render([node("a1", "A"), node("b1", "B", ["a1"]), node("a2", "A", ["b1"])], null);
+  expect([...container.querySelectorAll("output")].map((line) => [line.dataset.error, line.textContent])).toEqual([["true", "1"], ["true", "1Cycle · A → B → A"]]);
 });
 
 it("names a group by its key, so adding another group does not rename it", () => {
@@ -114,7 +127,7 @@ it("splits an aggregate line by its ties without touching the task graph, the ne
     { via: ["t1"], edges: [["a1", "b1"]] },
     { via: [], edges: [["a2", "b1"]] },
   ]);
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={nodes} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
+  await render(nodes, null);
   expect(nodes).toEqual(snapshot);
   expect(campaignRawEdges(nodes)).toEqual([["a1", "b1"], ["a2", "b1"]]);
   expect(fetchSpy).not.toHaveBeenCalled();
