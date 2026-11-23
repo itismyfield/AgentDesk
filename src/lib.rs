@@ -294,6 +294,8 @@ pub fn run_from_args() -> Result<()> {
 #[cfg(test)]
 mod krx_claude_tests;
 #[cfg(test)]
+mod krx_db_b_tests;
+#[cfg(test)]
 mod krx_db_tests;
 #[cfg(test)]
 mod test_env_panic_probe;

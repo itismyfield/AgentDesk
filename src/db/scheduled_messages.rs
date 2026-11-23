@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 mod agent;
 mod attachments;
-pub(crate) mod image_lifecycle;
+mod image_lifecycle;
 use attachments::{IMAGE_COLUMNS, LIST_IMAGE_COLUMNS};
 pub use attachments::{MAX_IMAGE_BYTES, ScheduledMessageImage, ScheduledMessageImageAttachment};
 pub use image_lifecycle::{get_scheduled_message_metadata_pg, reclaim_terminal_images_pg};

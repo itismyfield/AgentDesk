@@ -46,7 +46,5 @@ pub(crate) mod session_evidence;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;
-#[cfg(test)]
-pub(crate) mod status_check_migration_tests;
 pub(crate) mod timestamps;
 pub mod turns;

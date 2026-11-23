@@ -15,9 +15,9 @@ use tower::ServiceExt;
 
 use super::{AppState, domains};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::auto_queue::{
-    RunCompletionBlockedReason, RunCompletionOutcome, finalize_run_if_ready_on_pg_tx,
-    finalize_run_if_ready_pg,
+use crate::db::auto_queue::{RunCompletionBlockedReason, RunCompletionOutcome};
+use crate::services::auto_queue::transactions::{
+    finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg,
 };
 
 const AUTH_TOKEN: &str = "auto-queue-admission-test-token";

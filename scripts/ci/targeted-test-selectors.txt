@@ -116,4 +116,4 @@ engine::sql_guard::tests::
 
 [Fast targeted tests: Phase gate owner]
 engine::ops::phase_gate_owner_tests::
-db::auto_queue::phase_gate_verdict::tests::
+services::krx_db_b_tests::auto_queue_phase_gate_verdict_tests::
