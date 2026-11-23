@@ -281,6 +281,8 @@ jobs:
               - 'src/utils/**'
               - 'src/services/*'
               - 'src/services/agents/**'
+              # The agy ACP child signals its own process group behind cfg(unix).
+              - 'src/services/agy_acp/**'
               - 'src/services/analytics/**'
               - 'src/services/api_friction/**'
               - 'src/services/auto_queue/**'
