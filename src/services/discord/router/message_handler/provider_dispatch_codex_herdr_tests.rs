@@ -360,7 +360,7 @@ impl Fixture {
         ports: &Ports<'_>,
         codex: impl FnOnce(),
     ) -> (Result<(), String>, Vec<StreamMessage>) {
-        crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
         let (owner, cwd) = (self.owner.clone(), self.cwd.clone());
         let endpoint = HerdrLaunchEndpoint {

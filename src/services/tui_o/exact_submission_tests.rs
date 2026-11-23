@@ -17,7 +17,7 @@ fn pin() -> ExactEpisodePin {
 }
 
 async fn persist_pin(pool: &sqlx::PgPool, pin: &ExactEpisodePin) {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     record_episode_evidence(
         true,
         pool,

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn exact_metadata_pg_restore_and_terminal_port_stub() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let records = crate::services::tui_o::exact_episode::tests::fixture();
@@ -112,7 +112,7 @@ fn recursive_files(
 
 #[tokio::test]
 async fn exact_off_pg_statement_trace_and_files_zero() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     if let Ok(url) = std::env::var("C2A_OFF_DATABASE") {
         let proxy = crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy::start(
             &url,
@@ -223,7 +223,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
 
 #[tokio::test]
 async fn exact_ack_pg_waits_for_commit_barrier() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     use crate::services::tui_o::exact_submission::{COMMIT_BARRIER, CommitBarrier};
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -276,7 +276,7 @@ async fn exact_ack_pg_waits_for_commit_barrier() {
 
 #[tokio::test]
 async fn exact_pg_process_reader_uses_only_metadata() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     if let Ok(url) = std::env::var("C1_READER_DATABASE") {
         let pool = crate::db::postgres::connect_test_pool(&url, "exact child")
             .await
@@ -342,7 +342,7 @@ async fn exact_pg_process_reader_uses_only_metadata() {
 
 #[tokio::test]
 async fn exact_child_ack_precedes_terminal_seal_pg() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     for end in [30, 45] {
@@ -538,7 +538,7 @@ async fn exact_child_ack_precedes_terminal_seal_pg() {
 
 #[tokio::test]
 async fn exact_settled_ack_names_normalized_pg_payload() {
-    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     use sha2::{Digest, Sha256};
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
