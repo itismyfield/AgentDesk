@@ -573,6 +573,18 @@ fn a_recorded_proof_survives_the_history_moving_to_v2() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let transcript = Transcript::new(&chain(NONCE, AFTER));
     assert_eq!(transcript.proven().as_deref(), Some(NONCE));
+    let proof = |t: &Transcript, text: &str| {
+        let want = t.want(&[HEAD], text, Some(recorded(t, NONCE, 0)))?;
+        want.search().map(|proof| (proof.nonce, proof.offset))
+    };
+    // The V1 proof names the enqueue line, which the fixture writes after its opening user row.
+    let proven = proof(&transcript, "status?");
+    let written = std::fs::read_to_string(&transcript.path).unwrap();
+    let enqueue_at = written
+        .find(&format!("{}\n", chain(NONCE, AFTER)[0]))
+        .unwrap() as u64;
+    assert_ne!(enqueue_at, 0);
+    assert_eq!(proven, Some((NONCE.to_string(), enqueue_at)));
     let history = human_frame::history::v2::Registry::runtime().unwrap();
     // Another input's V2 owner moves the V1 registration into passive evidence.
     history
@@ -583,11 +595,6 @@ fn a_recorded_proof_survives_the_history_moving_to_v2() {
         .join("runtime/injected_frames.json");
     let v2 = std::fs::read_to_string(&file).unwrap();
     assert!(v2.starts_with("{\"version\":2,") && v2.contains("\"state\":\"retained\""));
-    let proof = |t: &Transcript, text: &str| {
-        let want = t.want(&[HEAD], text, Some(recorded(t, NONCE, 0)))?;
-        want.search().map(|proof| (proof.nonce, proof.offset))
-    };
-    let proven = Some((NONCE.to_string(), 0));
     assert_eq!(proof(&transcript, "status?"), proven, "passive evidence");
     assert_eq!(proof(&transcript, "status!"), None, "another body");
     std::fs::write(&file, v2.replacen("{\"version\":2,", "{\"version\":3,", 1)).unwrap();

@@ -123,8 +123,19 @@ impl Fixture {
 /// restart by the listener alone; H is typed once in all, and B follows at the slow check.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg() {
+    recorded_paste_left_unknown(6_813_443, false).await;
+}
+
+/// The same paste is still consumed once its history moved to V2; B waits in the queue, since the
+/// unscoped writer this fixture pastes with cannot register into a V2 history.
+#[tokio::test(flavor = "current_thread")]
+async fn s3_a_recorded_paste_is_consumed_after_its_history_moved_to_v2_pg() {
+    recorded_paste_left_unknown(6_813_452, true).await;
+}
+
+async fn recorded_paste_left_unknown(channel: u64, moved: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let mut fixture = Fixture::new(6_813_443, "all").await;
+    let mut fixture = Fixture::new(channel, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let queue = fixture.queue().await;
     let (h, b) = (queue[0].message_id, queue[1].message_id);
@@ -150,14 +161,16 @@ async fn s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg() {
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
 
     fixture.restart(true).await;
-    // Another input's V2 owner moves the paste's V1 registration into passive evidence.
-    let other = serde_json::json!({"identity": {"primary": 1, "queued_generation": 1,
-            "sources": [{"message_id": 1, "queued_generation": 1}]},
-        "attempt": {"nonce": "0e0e0e0e", "provider": "claude", "source": {"kind": "pre_source"},
-            "target": {"owner": "other-pane", "execution_nonce": "spawn"}},
-        "original": {"author_id": 7}, "payload": {"frame": "other input"}});
-    let history = crate::services::tui_input::human_frame::history::v2::Registry::runtime();
-    history.unwrap().prepare("mend-test", &other).unwrap();
+    if moved {
+        // Another input's V2 owner moves the paste's V1 registration into passive evidence.
+        let other = serde_json::json!({"identity": {"primary": 1, "queued_generation": 1,
+                "sources": [{"message_id": 1, "queued_generation": 1}]},
+            "attempt": {"nonce": "0e0e0e0e", "provider": "claude", "source": {"kind": "pre_source"},
+                "target": {"owner": "other-pane", "execution_nonce": "spawn"}},
+            "original": {"author_id": 7}, "payload": {"frame": "other input"}});
+        let history = crate::services::tui_input::human_frame::history::v2::Registry::runtime();
+        history.unwrap().prepare("mend-test", &other).unwrap();
+    }
     std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
     queue_io::spawn_turn_completion_idle_queue_listener(fixture.shared.clone(), CLAUDE);
     until("the recorded paste is consumed", || {
@@ -173,6 +186,12 @@ async fn s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg() {
         fixture.reconciled_rows() == 1
     })
     .await;
+    if moved {
+        let queued: Vec<_> = fixture.queue().await.iter().map(|i| i.message_id).collect();
+        assert_eq!((fixture.terminal(), queued), (vec![h.get()], vec![b]));
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+        return;
+    }
     fixture.slow_check().await;
     until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
     assert_eq!(fixture.pane.keys().len(), 4);
