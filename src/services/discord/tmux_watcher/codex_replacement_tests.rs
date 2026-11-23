@@ -778,6 +778,7 @@ async fn run_replacement_case(case: ReplacementCase, name: &str) {
 async fn codex_host_gate_rechecks_a_replacement_completed_inside_the_probe() {
     use crate::services::discord::codex_absence::replacement::Replacement;
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = Arc::new(CancelToken::new());
     crate::services::discord::save_actual_episode_for_tests(CHANNEL, TMUX, 30, &token);
     let shared = crate::services::discord::make_shared_data_for_tests();

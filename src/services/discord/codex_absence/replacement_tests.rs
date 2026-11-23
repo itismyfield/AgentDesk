@@ -18,6 +18,7 @@ fn token() -> Arc<CancelToken> {
 #[test]
 fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
     let guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
@@ -55,6 +56,7 @@ fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel(
 #[test]
 fn replacement_begin_and_terminal_cleanup_have_one_winner() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
     let cleanup = probe.cleanup().unwrap();
@@ -99,6 +101,7 @@ fn replacement_begin_and_terminal_cleanup_have_one_winner() {
 #[test]
 fn replacement_requires_its_exact_turn_and_unwinds_on_panic() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let stranger = Arc::new(CancelToken::new());
     assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&stranger)).is_err());

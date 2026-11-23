@@ -65,6 +65,8 @@ pub(crate) use routine_process::cancel_routine_process_turn;
 mod channel_home_seed;
 mod runtime_resolve;
 pub(crate) use channel_home_seed::inspect_at_boot as inspect_channel_home_seed_at_boot;
+#[cfg(test)]
+pub(in crate::services::discord) mod runtime_port_installs;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;

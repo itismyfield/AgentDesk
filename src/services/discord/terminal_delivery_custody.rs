@@ -181,6 +181,13 @@ pub(crate) fn install_runtime_reads() {
     });
 }
 
+/// Test entry points install the Codex row reader and these custody reads themselves.
+#[cfg(test)]
+pub(crate) fn install_dl_ports_for_tests() {
+    crate::services::discord::install_codex_absence_reader();
+    install_runtime_reads();
+}
+
 #[derive(Serialize, Deserialize)]
 struct Record {
     version: u8,

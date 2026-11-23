@@ -25,6 +25,7 @@ async fn observe_turn(channel: u64, tmux: &str, token: &Arc<CancelToken>) -> Opt
 }
 
 fn with_scope(run: impl FnOnce(&std::path::Path)) {
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root =

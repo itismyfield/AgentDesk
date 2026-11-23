@@ -25,6 +25,7 @@ fn tracked_retry_safe_draft_carries_replacement_through_its_pane_kill() {
         BindingContext, PreparedIncarnation,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     attempt::reset_for_tests();
     let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE",

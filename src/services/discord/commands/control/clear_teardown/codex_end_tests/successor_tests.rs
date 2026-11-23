@@ -972,6 +972,7 @@ fn actual_warm_kill_fallback_resumes_without_seal_and_preserves_managed_turn() {
     )) {
         return;
     }
+    crate::services::discord::health::runtime_port_installs::install_runtime_ports_for_tests();
     let fixture = Fixture::new();
     let sessions = fixture.logs.path().join("sessions");
     std::fs::create_dir(&sessions).unwrap();

@@ -17,9 +17,11 @@ pub(crate) fn install(readers: TerminalCustody) {
 }
 
 fn readers() -> Option<&'static TerminalCustody> {
-    #[cfg(test)]
-    crate::services::discord::terminal_delivery_custody::install_runtime_reads();
-    READERS.get()
+    let readers = READERS.get();
+    // Test builds panic instead: a test reaching this port installs it at its own entry point.
+    #[cfg(any(test, feature = "test-support"))]
+    let readers = Some(readers.expect("terminal delivery custody readers not installed"));
+    readers
 }
 
 /// Whether a retained episode may belong to `channel`; an uninstalled reader reads as an error.
