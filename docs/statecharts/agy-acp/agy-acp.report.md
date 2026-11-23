@@ -4,7 +4,7 @@
 
 Code reference: `5021d25794` (origin/main). The ACP client does not exist yet, so this is a design model. Its counterexamples are checked against the design and against the T3 Code reference behaviour. They are not replayed against current Rust code. The output side (spool → writer → Discord receipt) stays the contract of [WriterAdoption AgySpec](../tui-o-writer/agy-adoption.report.md); in this model it is one receipt-guarded `Settle` step.
 
-Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `2b655d0ae6030a9f79de781b2539e3180f53c4eeca2908a741d5a92b3d064c75`.
+Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `97c6b7b749e22fdadcf84c5cc8fd5a1a33361235a76f8e6dbda71e6cf7837e1b`. The slice 1 code coordinate of each transition is in [Transitions and code](#transitions-and-code).
 
 ## Scope
 
@@ -20,7 +20,7 @@ agy is not fair. It may never answer a prompt or a cancel. It may answer the old
 
 The child runs in its own process group, so on Unix an AgentDesk restart may leave it running (`orphan`). Boot must sweep that group (`SweepOrphan`) before it spawns a new child. On Windows the dcserver job object closes the child tree when dcserver ends, so no orphan exists there. The orphan path is a superset of that, so one model covers both platforms. The platform kill calls themselves (Unix group signals, Windows `taskkill /T`) are outside the model (design §5.2-13).
 
-A forced stop (`ForceStop`: a force-kill or session cleanup) can come after a person's `!stop`, also after its `session/cancel` went out. It records its intent before it publishes its cancel. The turn then sends Terminate (`SendTerminate`, fair): the child's own group is killed and its open turns end cancelled. Terminate also goes out when agy's answer closed the turn after the intent was recorded; the turn's own drive sends it on that answer. The mutant `ForceOrder = "cancel_first"` publishes the cancel first and records the intent later (`ForceIntent`); a turn that agy's answer closed in between has no drive left to read it. A child that exits while a cancel is out ends its turn as cancelled too. Each child writes its own record at spawn. A stopped child's exit report (`ExitReported`) can reach AgentDesk after the next child has written its record. Only the report of the child that wrote the current record removes it. The session safety mutant charts (ClearKeeps, LoadLeak, Mutants, NoFence, RerunSent, ReceiptFromMemory and the four Steer charts) set `ForceMode` and `RecordMode` to `"off"`, so their state spaces stay near the old size. A boot sees only durable state:
+A forced stop (`ForceStop`: a force-kill or session cleanup) can come after a person's `!stop`, also after its `session/cancel` went out. It records its intent before it publishes its cancel. The turn then sends Terminate (`SendTerminate`, fair): the child's own group is killed and its open turns end cancelled. Terminate also goes out when agy's answer closed the turn after the intent was recorded; the turn's own drive sends it on that answer. The mutant `ForceOrder = "cancel_first"` publishes the cancel first and records the intent later (`ForceIntent`); a turn that agy's answer closed in between has no drive left to read it. A child that exits while a cancel is out ends its turn as cancelled too. Each child writes its own record at spawn. A stopped child's exit report (`ExitReported`) can reach AgentDesk after the next child has written its record. Only the report of the child that wrote the current record removes it. The session safety mutant charts (ClearKeeps, LoadLeak, Mutants, NoFence, RerunSent, ReceiptFromMemory and the four Steer charts) set `ForceMode` and `RecordMode` to `"off"`, so their state spaces stay near the old size. The ACP path is picked at boot (`Boot` sets `pathAcp` from the switch; `PathPick = "boot"`). A config reload (`Reload`) turns the switch off in the live snapshot only, and an input not on the ACP path runs as its own `agy --print` turn (`PrintTurn`). The mutant `PathPick = "turn"` reads the live switch at every input, as the code did before. The other charts set `PathPick = "off"` (no reload), so their state spaces stay as they were. A boot sees only durable state:
 
 - the stored session id
 - the turn membership written before each prompt (spool `open` and the turn's origin list, steered inputs included)
@@ -42,13 +42,14 @@ A forced stop (`ForceStop`: a force-kill or session cleanup) can come after a pe
 | `NoReviveAfterClear` | An input that had been sent when `/clear` ran is never queued again, also when its steer fails after the clear. |
 | `NoMissingOrigin` | Every input a post covered, steered ones included, is named by that turn's receipt (`consumed_origin_ids`). |
 | `ChildRecorded` | A running child, or one a restart left running, always has its own record on disk for the sweep. |
+| `SessionKeepsPath` | No input goes to `agy --print` while the channel's ACP child is up: the path fixed at boot holds until the next boot. |
 | `ForceEndsTurn` (PROPERTY) | A forced stop ends the open turn even when agy never answers its cancel. |
 | `ForceEndsChild` (PROPERTY) | A forced stop ends its child, also when agy's answer closed the turn first. |
 | `EveryInputSettles` (PROPERTY) | Every accepted input, steered inputs included, is eventually covered by one terminal post: an answer, a failure notice or a cancel notice. |
 
 ## Results
 
-All 18 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts are the full state space of each config with every rule removed (plain TLC, the same method gives the earlier counts for the earlier model).
+All 20 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts are the full state space of each config with every rule removed (plain TLC, the same method gives the earlier counts for the earlier model).
 
 | Config | What it fixes | Distinct states | Broken |
 |---|---|---:|---|
@@ -58,6 +59,8 @@ All 18 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken se
 | ForceNoWatchdog | No deadline at all: the forced stop alone ends a turn whose cancel agy never answers | 101,588 | none |
 | ForceFirstOnly | Mutant: a forced stop after a sent `session/cancel` is not sent as Terminate (no deadline) | 101,588 | `ForceEndsTurn` |
 | ForceCancelFirst | Mutant: a forced stop publishes its cancel before it records its intent | 125,751 | `ForceEndsChild` |
+| PathBoot | The switch is read at boot; one reload turns it off while the child is up (forced stops and records off) | 69,638 | none |
+| PathPerTurn | Mutant: the live switch is read at every input (forced stops and records off) | 86,768 | `SessionKeepsPath` |
 | RecordWaiter | Mutant: a stopped child's late exit report removes whatever record is on disk | 91,388 | `ChildRecorded` |
 | LoadLeak | Mutant: load replay is forwarded to the channel | 36,339 | `AtMostOnePost` |
 | RerunSent | Mutant: boot re-queues the inputs of a turn whose prompts were written | 64,890 | `NoDuplicateExecution`, `NoReviveAfterClear` |
@@ -121,7 +124,38 @@ Shortest paths, in the charts' words:
 - **ForceFirstOnly (liveness):** prompt open → `!stop` → force-kill → `session/cancel` → the Terminate is never sent and agy never answers. In the design, the turn sends Terminate whenever a forced stop is pending, also after the cancel.
 - **ForceCancelFirst (liveness):** prompt open → force-kill publishes its cancel → agy's answer closes the turn → the intent lands with no drive left to read it → the child keeps running. In the design, the intent is recorded before the cancel, and the turn sends Terminate on that answer.
 - **RecordWaiter (`ChildRecorded`, 6 states):** spawn → the child exits → respawn writes the new record → the first child's late exit report removes it while the new child runs. In the design, an exit removes only the record its own child wrote.
+- **PathPerTurn (`SessionKeepsPath`, 5 states):** an input arrives → spawn → a reload turns the switch off → the next input goes to `agy --print` while the ACP child is still up. In the design, the switch is read once at boot (`bootstrap.rs:86`), so the reload changes nothing until the next boot.
 - **NoWatchdog (liveness):** `!stop` → `session/cancel` → agy never answers → "Prompt open, cancel sent" forever. The design kills the child's own group after the cancel deadline (15 s) or the inactivity deadline (15 min).
+
+## Transitions and code
+
+Coordinates at this slice's head. "Not in slice 1" marks a design step that a later slice builds.
+
+| Transition | Code |
+|---|---|
+| `Arrive` | `src/services/discord/router/message_handler/provider_dispatch/stream_json_turn.rs:188` `execute_request` |
+| `Boot` (path pick) | `src/bootstrap.rs:86` `agy_acp::install` → `src/services/agy_acp/mod.rs:43`; read at `stream_json_turn.rs:226` |
+| `Boot` (open turn settled) | `src/services/discord/recovery_engine/restore_inflight.rs:120` `restore_inflight_states` (existing boot restore) |
+| `Reload` | `src/config_live_reload.rs:146` `reload_from_path`; restart warning `:115`; row `src/config/reload_classes/table.rs:187` |
+| `PrintTurn` | `stream_json_turn.rs:215-221` (`execute_recorded` / `execute_streaming`) |
+| `Spawn` | `src/services/agy_acp/mod.rs:110` `actor_for` → `actor.rs:229` `start` → `child.rs:53` `spawn`, record `child.rs:107` |
+| `SweepOrphan` | `actor.rs:251` → `child.rs:133` `sweep_recorded` |
+| `NewSession` | `actor.rs:353` (`session/new`), `:360` |
+| `Reattach`, `ReattachRefused`, `LoadAnswered`, `ReplayOld` | Not in slice 1 (`session/resume`, `session/load`) |
+| `SendPrompt` | `actor.rs:391` `prompt` (`session/prompt` `:415`) |
+| `AgyResponds` | `actor.rs:372` → `turn.rs:151` `finish` |
+| `SteerErrored`, `StreamTick` | Not in slice 1 (steering, slice 2b) |
+| `AgyDies` | `actor.rs:208-212` (`Eof`/`Exited` → `lost`) |
+| `WatchdogKill` | `actor.rs:145`, `:160` `expire` |
+| `ZombieResponse` | incarnation fence `actor.rs:181`, `:223` `owns` |
+| `UserStop`, `SendCancel` | `src/services/discord/health/recovery/runtime_stop.rs:120` → `turn.rs:26` `drive` → `actor.rs:421` (`session/cancel` `:431`) |
+| `ForceStop` | `runtime_stop.rs:118`, `turn_bridge/tmux_runtime/judged_stop.rs:172`, `provider/cancel_token_cleanup/executor.rs:88` |
+| `ForceIntent` | Mutant only (`ForceOrder = "cancel_first"`) |
+| `SendTerminate` | `turn.rs:45`, `:62` → `actor.rs:192`, `:196` → `actor.rs:440` `stop_child` → `child.rs:31` |
+| `ExitReported` | `actor.rs:181` → `child.rs:122` `forget` |
+| `Clear`, `CloseAfterTurn` | Not in slice 1 (`/clear` handling; `per_turn` is the rejected alternative) |
+| `Crash` | Process exit (no code) |
+| `Settle` | `turn.rs:151` → spool `turn.rs:87` → turn_bridge |
 
 ## Not covered
 
@@ -137,4 +171,4 @@ Shortest paths, in the charts' words:
 - Steering of HTTP iMessage inputs is out of scope: they stay queued.
 - Whether agy reflects a steer in its answer cannot be observed at the protocol level.
 
-Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1f/` and, for the forced-stop and record rules, `hl-20260925/i8339/s1-2/` and `s1-3/`. These are model results, not Rust test results.
+Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1f/` and, for the forced-stop and record rules, `hl-20260925/i8339/s1-2/` and `s1-3/`; the path rule's in `s1-4-tlc/`. These are model results, not Rust test results.
