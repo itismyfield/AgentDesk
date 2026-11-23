@@ -753,7 +753,7 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
     let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     let long = "word ".repeat(900);
     let pieces = deriver.derive(&row("msg_1", &long));
-    let expected = crate::services::discord::formatting::split_for_shadow(long.trim());
+    let expected = crate::domain::message_split::split_for_shadow(long.trim());
     assert!(expected.len() >= 2);
     let payloads: Vec<String> = pieces
         .iter()

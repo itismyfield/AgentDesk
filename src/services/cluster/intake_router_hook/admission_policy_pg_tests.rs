@@ -2,7 +2,7 @@
 use super::pg_tests::{ctx_for_channel, seed_agent_with_preference, seed_session_owner};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use serde_json::json;
 use std::time::Duration;
 

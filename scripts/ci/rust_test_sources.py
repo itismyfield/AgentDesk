@@ -145,7 +145,7 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
     tokens = rust_tokens(raw, extended=True)
     state = StripState()
     code = "".join(strip_line(line, state).ljust(len(line)) for line in raw.splitlines(keepends=True))
-    matches = list(find_test_only_cfg_attributes(code))
+    matches = list(find_test_only_cfg_attributes(code, raw))
     gated = {match.start() for match in matches if not match.is_inner}
     inner = {match.start() for match in matches if match.is_inner}
     containers, braces = {}, []

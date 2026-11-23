@@ -389,7 +389,7 @@ mod tests {
     /// shut a never-tried row out of the claim until its age window closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deferred_rows_do_not_starve_a_never_tried_row_pg() {
-        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let pg_db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_relay_dlq_starvation",
             "relay dead letter redelivery starvation",
         )
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn redelivery_state_check_rejects_unknown_values_pg() {
-        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let pg_db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_relay_dlq_state_check",
             "relay dead letter redelivery state check",
         )
@@ -550,7 +550,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn insert_read_back_detached_and_retention_roundtrip_pg() {
-        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let pg_db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_relay_dead_letter",
             "relay dead letter roundtrip",
         )

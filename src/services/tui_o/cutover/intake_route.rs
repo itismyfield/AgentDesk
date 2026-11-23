@@ -175,7 +175,7 @@ fn writer_unready(channel: u64) -> IntakeRoute {
 }
 
 pub(super) fn accepts(channel: u64) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(answer) = test_probe::answer(channel) {
         return answer;
     }
@@ -183,7 +183,7 @@ pub(super) fn accepts(channel: u64) -> bool {
 }
 
 /// Stands in for this process's writer readiness on the current thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_probe {
     use std::cell::RefCell;
 

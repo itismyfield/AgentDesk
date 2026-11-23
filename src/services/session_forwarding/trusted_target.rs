@@ -250,7 +250,7 @@ fn validate_transport(
     if origin.scheme() == "https" {
         return Ok(());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let pinned: &[SocketAddr] = &loopback_seam::unregistered(pinned);
     if !node_config.allow_private_forwarding
         || !node_config.allow_insecure_http_forwarding
@@ -318,7 +318,7 @@ fn validate_addresses(
     }
     let mut unique = BTreeSet::new();
     for address in addresses {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if loopback_seam::admits(address, allow_private) {
             unique.insert(address);
             continue;
@@ -425,7 +425,7 @@ fn ipv6_is_allowed(address: Ipv6Addr, allow_private: bool) -> bool {
     true
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod loopback_seam {
     //! One exact loopback socket the registering thread treats as an operator-allowed private
     //! address, so a test can forward to an owner server on 127.0.0.1; consent checks still apply.

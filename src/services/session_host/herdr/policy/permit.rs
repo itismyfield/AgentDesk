@@ -194,7 +194,7 @@ impl ExistingMutationPermit {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn grant_for_test(
     endpoint: &HerdrLaunchEndpoint,
     nonce: &str,

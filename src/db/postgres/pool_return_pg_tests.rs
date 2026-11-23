@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::db::relay_dead_letter::{self as dlq, RelayDeadLetterRecord};
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 use sqlx::{Connection, PgConnection};
 
 fn runtime_options() -> PgPoolOptions {

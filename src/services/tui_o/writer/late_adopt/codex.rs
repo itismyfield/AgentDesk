@@ -360,7 +360,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "gateway ownership changed before O activation".into(),
             ));
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         activation::test_hook::run(channel, activation::test_hook::Step::BeforeFence)
             .map_err(Taken::Retry)?;
         let fence_sends = {
@@ -378,7 +378,7 @@ impl<I: HostIo> Takeover<'_, I> {
             queued_bodies,
         } = (io.intake_fence(channel, self.provider).await).map_err(Taken::Retry)?;
         let taken = (|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             activation::test_hook::run(channel, activation::test_hook::Step::AfterFence)
                 .map_err(Taken::Retry)?;
             if let Some(detail) = facts.final_blocker() {
