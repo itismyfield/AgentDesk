@@ -24,9 +24,8 @@ type FlowProps = { nodes: Node[]; edges: Edge[]; children: ReactNode };
 vi.mock("@xyflow/react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@xyflow/react")>()),
   ReactFlow: (props: FlowProps) => <div data-testid="flow">
-    {props.nodes.map((node) => <button key={node.id} data-node={node.id} data-type={node.type ?? "group"} aria-label={node.ariaLabel}>{node.type ? null : node.data.label as ReactNode}</button>)}
-    {props.edges.map((edge) => <output key={edge.id} data-source={edge.source} data-target={edge.target} data-source-handle={edge.sourceHandle ?? ""} data-target-handle={edge.targetHandle ?? ""}
-      data-edges={JSON.stringify(edge.data?.edges)} />)}
+    {props.nodes.map((node) => <button key={node.id} data-node={node.id} data-type={node.type} aria-label={node.ariaLabel} />)}
+    {props.edges.map((edge) => <output key={edge.id} data-source={edge.source} data-target={edge.target} data-edges={JSON.stringify(edge.data?.edges)} />)}
     {props.children}
   </div>,
   Background: () => null, Controls: () => null, Handle: () => null,
@@ -68,22 +67,21 @@ afterEach(async () => {
 const render = (shown: Campaign = campaign) => act(async () => root.render(<CampaignRelations campaign={shown} selectedId={null} onOpen={vi.fn()} tr={(_: string, en: string) => en} />));
 const button = (name: string) => [...container.querySelectorAll("button")].find((element) => element.textContent?.trim() === name || element.getAttribute("aria-label") === name)!;
 const click = (element: HTMLElement) => act(async () => element.click());
-const tieNodes = () => [...container.querySelectorAll<HTMLElement>('[data-type="campaignTie"]')];
-type Segment = { source: string; target: string; targetHandle: string; sourceHandle: string; edges: string[] };
+const tieNodes = () => [...container.querySelectorAll<HTMLElement>('[data-type="relationsTie"]')];
+type Segment = { source: string; target: string; edges: string[] };
 const segments = (): Segment[] => [...container.querySelectorAll<HTMLElement>("output")].map((element) => ({
-  source: element.dataset.source!, target: element.dataset.target!, sourceHandle: element.dataset.sourceHandle!, targetHandle: element.dataset.targetHandle!,
-  edges: (JSON.parse(element.dataset.edges!) as RawEdgeKey[]).map(([from, to]) => `${from}->${to}`),
+  source: element.dataset.source!, target: element.dataset.target!, edges: (JSON.parse(element.dataset.edges!) as RawEdgeKey[]).map(([from, to]) => `${from}->${to}`),
 }));
-/** Follows one original's drawn segments from its group through tie slots to the group it ends in. */
+/** Follows one original's drawn segments from its group through its ties to the group it ends in. */
 function pathOf(edge: string): string[] {
   const own = segments().filter((segment) => segment.edges.includes(edge));
   let segment = own.find((candidate) => candidate.source.startsWith("campaign-group:"));
   const hops = [segment?.source];
   for (let guard = 0; segment && guard < 10; guard++) {
-    hops.push(segment.targetHandle ? `${segment.target}[${segment.targetHandle}]` : segment.target);
-    if (!segment.targetHandle) return hops as string[];
+    hops.push(segment.target);
+    if (segment.target.startsWith("campaign-group:")) return hops as string[];
     const from = segment;
-    segment = own.find((candidate) => candidate.source === from.target && candidate.sourceHandle === from.targetHandle.replace("in-", "out-"));
+    segment = own.find((candidate) => candidate.source === from.target);
   }
   throw new Error(`${edge} does not reach a group: ${hops.join(" → ")}`);
 }
@@ -94,8 +92,8 @@ it("draws the group graph's saved ties as they were left, even with an old showO
   localStorage.setItem(key, JSON.stringify({ ...stored(), showOriginal: true })); // left by the removed "show original lines" switch
   const writes = vi.spyOn(localStorage, "setItem");
   await render();
-  expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-tie:t1[in-0]", "campaign-group:G2"]);
-  expect(tieNodes().map((element) => element.getAttribute("aria-label"))).toEqual(["Tie 1, 2 original lines"]);
+  expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-tie:t1", "campaign-group:G2"]);
+  expect(tieNodes().map((element) => element.getAttribute("aria-label"))).toEqual(["Cable tie, 2 lines"]);
   for (const name of ["Tie lines", "Show original lines", "Undo", "Clear all ties"]) expect(button(name)).toBeUndefined();
   expect([writes.mock.calls.length, fetchSpy.mock.calls.length]).toEqual([0, 0]);
   for (const write of [updateCampaignNode, setCampaignAutoQueue, createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand]) expect(vi.mocked(write)).not.toHaveBeenCalled();
