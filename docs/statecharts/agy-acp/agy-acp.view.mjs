@@ -41,6 +41,7 @@ const steps = {
   UserStop: "person sends !stop",
   SendCancel: "session/cancel",
   Clear: "person runs /clear",
+  SwitchOff: "operator turns agy_acp.enabled off (new inputs only)",
   CloseAfterTurn: "turn done; child closed",
   Settle: "bridge looks up the receipt, posts the turn's one terminal message and commits",
   StreamTick: "bridge stream tick reads the steered origin from the inflight row",

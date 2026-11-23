@@ -8,9 +8,11 @@
 # WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
 # Applies to: intake-consent/IntakeConsentBookkeeping.cfg, intake-consent/IntakeConsentCurrent.cfg, intake-consent/IntakeConsentD1Public.cfg, intake-consent/IntakeConsentForge.cfg, intake-consent/IntakeConsentOwnerOnly.cfg, intake-consent/IntakeConsentProposed.cfg, intake-consent/IntakeConsentReuse.cfg, intake-consent/IntakeConsentScopeOpen.cfg, intake-consent/IntakeConsentStale.cfg
 # Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
+agy-acp/AgyAcpCatchUpBlind.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
 agy-acp/AgyAcpClearKeeps.cfg	AgyAcpSession	NoPromptToClearedSession	-
 agy-acp/AgyAcpDesign.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpDesignLoad.cfg	AgyAcpSession	-	-
+agy-acp/AgyAcpDesignSwitchOff.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpLeaderOriginOff.cfg	AgyAcpSession	NoMissingOrigin	-
 agy-acp/AgyAcpLoadLeak.cfg	AgyAcpSession	AtMostOnePost	-
 agy-acp/AgyAcpMarkNoRetry.cfg	AgyAcpSession	-	EveryInputSettles
@@ -20,6 +22,8 @@ agy-acp/AgyAcpNoWatchdog.cfg	AgyAcpSession	-	EveryInputSettles
 agy-acp/AgyAcpPerTurn.cfg	AgyAcpSession	-	-
 agy-acp/AgyAcpReceiptFromMemory.cfg	AgyAcpSession	NoMissingOrigin	-
 agy-acp/AgyAcpRerunSent.cfg	AgyAcpSession	NoDuplicateExecution,NoReviveAfterClear	-
+agy-acp/AgyAcpSealBySwitch.cfg	AgyAcpSession	NoMissingOrigin	-
+agy-acp/AgyAcpSealNoNotice.cfg	AgyAcpSession	NoAnswerForRefusedSteer	-
 agy-acp/AgyAcpSealOff.cfg	AgyAcpSession	NoMissingOrigin	-
 agy-acp/AgyAcpSteerAfterClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
 agy-acp/AgyAcpSteerEarlyClose.cfg	AgyAcpSession	AnswerCoversWholeSteer,NoAnswerForRefusedSteer	-
