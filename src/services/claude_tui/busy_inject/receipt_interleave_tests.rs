@@ -235,14 +235,13 @@ fn the_current_frame_beside_an_image_is_its_own_mixed_receipt() {
     );
 }
 
-/// A registered frame split into text blocks is its exact receipt in an enqueue, a queued command
-/// or a user prompt; a person's text block or any non-text block beside it makes the row mixed.
+/// A registered frame in one or split text blocks is its exact receipt in an enqueue, a queued
+/// command or a user prompt; a person's text block or any non-text block beside it makes it mixed.
 #[test]
 fn split_text_blocks_are_exact_and_extra_blocks_are_mixed_in_every_prompt_record() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let directory = tempfile::tempdir().unwrap();
     let session = format!("receipt-blocks-{}", uuid::Uuid::new_v4());
-    let image = json!({"type": "image", "source": {"type": "base64", "data": "AA=="}});
     let wrap = |kind: usize, content: serde_json::Value| match kind {
         0 => json!({"type": "queue-operation", "operation": "enqueue", "content": content}),
         1 => json!({"type": "attachment", "attachment": {
@@ -250,21 +249,29 @@ fn split_text_blocks_are_exact_and_extra_blocks_are_mixed_in_every_prompt_record
         _ => json!({"type": "user", "message": {"content": content}}),
     };
     let block = |text: &str| json!({"type": "text", "text": text});
-    for case in 0..12 {
+    let extras = [
+        json!({"type": "image", "source": {"type": "base64", "data": "AA=="}}),
+        json!({"type": "tool_result", "content": "person input"}),
+        json!({"type": "unknown"}),
+        serde_json::Value::Null,
+    ];
+    for case in 0..36 {
         let nonce = format!("ca7203{case:02x}");
         let text = frame("discord", "720205", "ann", &nonce, "첫 줄\n둘째 줄");
         let split: Vec<_> = text.lines().map(block).collect();
         let whole = block(&text);
-        let (content, exact) = match case % 4 {
+        let (content, exact) = match case % 12 {
             0 => (json!(split), true),
-            1 => (json!([block("사람 초안"), whole]), false),
-            2 => (json!([image, whole]), false),
-            _ => (json!([whole, image]), false),
+            1 => (json!([whole]), true),
+            2 => (json!([block("사람 초안"), whole]), false),
+            3 => (json!([whole, block("사람 초안")]), false),
+            row if row % 2 == 0 => (json!([extras[(row - 4) / 2], whole]), false),
+            row => (json!([whole, extras[(row - 4) / 2]]), false),
         };
         let path = directory.path().join(format!("case-{case}.jsonl"));
         std::fs::write(&path, "").unwrap();
         history::register(("claude", &session, &nonce, "720205"), &path, 0, &text).unwrap();
-        let record = wrap(case / 4, content);
+        let record = wrap(case / 12, content);
         std::fs::write(&path, format!("{record}\n")).unwrap();
         assert_eq!(
             transcript_submission(&path, 0, &nonce, Some(&text)),
@@ -272,4 +279,43 @@ fn split_text_blocks_are_exact_and_extra_blocks_are_mixed_in_every_prompt_record
             "{record}"
         );
     }
+}
+
+/// A display name carrying the old inject marker is an ordinary registered frame: its header
+/// alone is no receipt, and its exact row is.
+#[test]
+fn an_old_marker_in_the_display_name_needs_the_registered_exact_row() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("receipt-marker-name-{}", uuid::Uuid::new_v4());
+    let name = "ann · 📱 v1 mode=inject";
+    let text = frame("discord", "720205", name, "ca7204a1", "첫 줄\n둘째 줄");
+    history::register(("claude", &session, "ca7204a1", "720205"), &path, 0, &text).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let header = text.lines().next().unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"type": "queue-operation", "operation": "enqueue", "content": header})
+    )
+    .unwrap();
+    assert_eq!(
+        transcript_submission(&path, 0, "ca7204a1", Some(&text)),
+        None
+    );
+    writeln!(
+        file,
+        "{}",
+        json!({"type": "queue-operation", "operation": "enqueue", "content": text})
+    )
+    .unwrap();
+    assert_eq!(
+        transcript_submission(&path, 0, "ca7204a1", Some(&text)),
+        Some(true)
+    );
 }
