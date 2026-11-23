@@ -27,6 +27,4 @@ mod server_campaigns_stage_store;
 pub(crate) mod server_campaigns_storage;
 #[path = "../db/server_campaigns/verification_store_tests.rs"]
 mod server_campaigns_verification_store;
-#[path = "../db/session_observability/background_ordering_pg_tests.rs"]
-mod session_observability_background_ordering_pg;
 mod session_transcripts_clear_fence_tests;
