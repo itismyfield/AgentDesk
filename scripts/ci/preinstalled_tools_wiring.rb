@@ -19,7 +19,7 @@ def check_errors(path)
       check = index.positive? ? steps[index - 1] : {}
       id = check["id"].to_s
       expected = {"name" => "Check preinstalled #{spec.split("@").first}", "id" => id, "if" => CHECK_IF, "shell" => "bash",
-                  "env" => {"BASH_ENV" => "/dev/null"}, "run" => "bash scripts/ci/preinstalled-tool.sh #{spec}"}
+                  "env" => {"BASH_ENV" => "/dev/null", "TOOL" => spec}, "run" => 'bash scripts/ci/preinstalled-tool.sh "$TOOL"'}
       label = "#{path}: job #{job_id} step #{step["name"].inspect}"
       errors << "#{label} must pin tool@version" unless spec.match?(/\A[\w-]+@[\w.-]+\z/)
       errors << "#{label} must follow the preinstalled check #{expected.inspect}" unless id.start_with?("preinstalled_") && check == expected

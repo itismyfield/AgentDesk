@@ -2191,7 +2191,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             )
             (root / "scripts/ci").mkdir()
             for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
-                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name):
+                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name,
+                           "preinstalled_tools_wiring.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:

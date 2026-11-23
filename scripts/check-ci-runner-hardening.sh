@@ -987,10 +987,10 @@ nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
 verify_helper_hash scripts/ci/generated_artifact_steps.rb 870d236cd7867ddb578830cb7e60ce864d3c68ec9a4c89d678cf14c0780e98fb || exit 1
 verify_helper_hash scripts/ci/main_script_check_shards.rb 52bd83f0cf608795ab5e9df277dad307dd92e252f83ae26912a1a3c9acdca32b || exit 1
-verify_helper_hash scripts/ci/pr_nextest_wiring.rb eeafbd1e2054bf3fddb3eaa18ffe6c8c135bf1e64d7156320070ffa5d627a1d9 || exit 1
+verify_helper_hash scripts/ci/pr_nextest_wiring.rb eb9578a485036af4bbe95c76ee59c4aab027504de54ac028f7c9e3791fb0c9f0 || exit 1
 verify_helper_hash .github/actions/pr-nextest-setup/action.yml eb2bed4b88d18e067175c1e4055471116da4b9fceb849a16e267dc5fe4686965 || exit 1
 verify_helper_hash scripts/ci/nextest-pr-worker.sh 888892db12a7fa0173b7f211571a255f84c619f6045fd15c8fe841fd2fd3f5a8 || exit 1
-verify_helper_hash scripts/ci/preinstalled_tools_wiring.rb a8e5753ae1d3ffc4ad75812f12ce9b9051e2f5b17e77f6ec952fe118ee72c903 || exit 1
+verify_helper_hash scripts/ci/preinstalled_tools_wiring.rb 277aaaa2a32c76dec58a97b9d89f4fa407dce4627d2bb588ed8ca9d01af26538 || exit 1
 ruby scripts/ci/preinstalled_tools_wiring.rb .github/workflows/ci-pr.yml .github/workflows/ci-main.yml || error "self-hosted install-action steps must sit behind a matching preinstalled-tool check"
 validate_runner_memory_wiring
 validate_main_script_check_shards() {

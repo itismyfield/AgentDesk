@@ -705,7 +705,8 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: bash scripts/ci/preinstalled-tool.sh cargo-nextest@0.9.149
+          TOOL: cargo-nextest@0.9.149
+        run: bash scripts/ci/preinstalled-tool.sh "$TOOL"
       - name: Install cargo-nextest
         if: steps.preinstalled_nextest.outputs.found != 'true'
         uses: taiki-e/install-action@v2
@@ -1141,7 +1142,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 4d5cb77a65b70dd01e12ffd44b89317640aad039daeaaa5c0fdc91d12d9fe44c
+          pin scripts/check-ci-runner-hardening.sh fc3780abc8a5ff44f79ebfd213b7b0aab33ce55713d2de69cd671ba398ad2a2b
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1353,7 +1354,8 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: bash scripts/ci/preinstalled-tool.sh just@1.51.0
+          TOOL: just@1.51.0
+        run: bash scripts/ci/preinstalled-tool.sh "$TOOL"
       - name: Install just
         if: steps.preinstalled_just.outputs.found != 'true'
         uses: taiki-e/install-action@v2

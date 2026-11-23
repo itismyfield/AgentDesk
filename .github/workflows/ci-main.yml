@@ -58,7 +58,8 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: bash scripts/ci/preinstalled-tool.sh cargo-nextest@0.9.149
+          TOOL: cargo-nextest@0.9.149
+        run: bash scripts/ci/preinstalled-tool.sh "$TOOL"
       - name: Install cargo-nextest
         if: steps.preinstalled_nextest.outputs.found != 'true'
         uses: taiki-e/install-action@v2
@@ -369,7 +370,8 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: bash scripts/ci/preinstalled-tool.sh just@1.51.0
+          TOOL: just@1.51.0
+        run: bash scripts/ci/preinstalled-tool.sh "$TOOL"
       - name: Install just
         if: steps.preinstalled_just.outputs.found != 'true'
         uses: taiki-e/install-action@v2
