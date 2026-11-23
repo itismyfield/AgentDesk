@@ -147,14 +147,6 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             .unwrap();
         let item = serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
         let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
-        if due_passed {
-            let due = mailbox.v2_request(|s| {
-                let owner = s.as_mut().ok_or("no owner")?;
-                let front = owner.front().ok_or("no front")?;
-                owner.hold_readiness(&front, "fixture", 0).map(drop)
-            });
-            due.await.unwrap();
-        }
         let (attempt, transcript, session_id) = cold_attempt(&root, channel.get());
         let meta = std::fs::metadata(&transcript).unwrap();
         let file = crate::services::tui_o::shadow::capture::file_identity(&meta);
@@ -376,6 +368,14 @@ async fn no_key_round(
     mailbox.v2_adopt(queue.clone(), namespace).await.unwrap();
     let item=serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
     let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
+    if due_passed {
+        let due = mailbox.v2_request(|s| {
+            let owner = s.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.hold_readiness(&front, "fixture", 0).map(drop)
+        });
+        due.await.unwrap();
+    }
     let producer = Producer::at(shared.clone(), key, Some(token.clone()));
     let intent = producer.intent.clone();
     let mut prepared = PreparedPayload {
