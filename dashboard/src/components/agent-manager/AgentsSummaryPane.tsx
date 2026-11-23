@@ -17,7 +17,9 @@ const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background
 
 /** Right pane while no agent is picked: counts per state, agents per department (a row filters the list), and the
  * sessions not linked to an agent, which open in a sheet to attach. */
-export function AgentsSummaryPane({ entries, agents, departments, locale, tr, deptTab, onSelectDept, unlinkedSessions, onAssign }: {
+export function AgentsSummaryPane({ counted, entries, agents, departments, locale, tr, deptTab, onSelectDept, unlinkedSessions, onAssign }: {
+  /** Home's counted set for the state counts; `entries` are the real agents. */
+  counted: HomeAgent[];
   entries: HomeAgent[];
   agents: Agent[];
   departments: Department[];
@@ -29,7 +31,7 @@ export function AgentsSummaryPane({ entries, agents, departments, locale, tr, de
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
 }) {
   const [sessionsOpen, setSessionsOpen] = useState(false);
-  const counts = AGENT_STATES.map((state) => [state, entries.filter((entry) => entry.state === state).length] as const)
+  const counts = AGENT_STATES.map((state) => [state, counted.filter((entry) => entry.state === state).length] as const)
     .filter(([state, count]) => count > 0 || state !== "unknown");
   const byDept = useMemo(() => {
     const rows = departments.map((department) => ({

@@ -22,7 +22,7 @@ import { AgentInfoCardContent } from "./AgentInfoCardContent";
 import AgentRow from "./AgentRow";
 import { AgentsAttentionCard, useAgentsAttention } from "./AgentsAttentionCard";
 import { AgentsSummaryPane } from "./AgentsSummaryPane";
-import { NO_DEPARTMENT, filterAgents, hasDepartment, isListedAgent, type AgentStatusFilter } from "./agent-list-controls";
+import { NO_DEPARTMENT, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
 import { AgentManagerStyles } from "./AgentManagerStyles";
@@ -31,7 +31,7 @@ interface AgentsTabProps {
   tr: Translator;
   locale: string;
   isKo: boolean;
-  /** Every agent with its home state. */
+  /** Every agent with its home state, plus home's department-only session stand-ins (counted, never listed). */
   entries: HomeAgent[];
   /** The entries the filters keep, in list order. */
   sortedEntries: HomeAgent[];
@@ -108,7 +108,10 @@ export default function AgentsTab({
   const isMobile = useIsMobile();
   const panelId = useId();
   const listRef = useRef<HTMLUListElement>(null);
-  const listed = useMemo(() => entries.filter((entry) => isListedAgent(entry.agent, includeTests)), [entries, includeTests]);
+  // Home's counted set; the rows and everything about real agents leave the stand-ins out.
+  const counted = useMemo(() => entries.filter((entry) => isListedAgent(entry.agent, includeTests)), [entries, includeTests]);
+  const listed = useMemo(() => counted.filter((entry) => !isStandIn(entry.agent)), [counted]);
+  const standIns = counted.length - listed.length;
   const listedAgents = useMemo(() => listed.map((entry) => entry.agent), [listed]);
   const testAgentCount = entries.filter((entry) => isTestAgent(entry.agent)).length;
   const attention = useAgentsAttention(listedAgents, tr, isKo);
@@ -125,8 +128,9 @@ export default function AgentsTab({
     for (const { state } of base) counts[state] = (counts[state] ?? 0) + 1;
     return counts;
   }, [entries, deptTab, includeTests, search, known]);
-  const statusKeys: AgentStatusFilter[] = ["all", ...AGENT_STATES.filter((state) => state !== "unknown" || statusCounts.unknown)];
   const legend = AGENT_STATES.filter((state) => state !== "unknown" || statusCounts.unknown);
+  // A picked tab stays while its count drops to zero, so the filter never hides behind a vanished tab.
+  const statusKeys: AgentStatusFilter[] = ["all", ...AGENT_STATES.filter((state) => legend.includes(state) || state === statusFilter)];
 
   const selectedEntry = entries.find((entry) => entry.agent.id === selectedAgentId);
   const selected = selectedEntry?.agent ?? null;
@@ -262,6 +266,11 @@ export default function AgentsTab({
             testId="agents-roster"
           >
             <div className="@container flex min-w-0 flex-col gap-2 border-t border-(--line-soft) px-3 py-3 sm:px-4">
+              {standIns > 0 ? (
+                <Cap data-testid="agents-stand-ins">
+                  {tr(`수에는 에이전트 없이 부서에만 붙은 세션 ${standIns}개도 들어 있어요(홈과 같은 기준).`, `Counts include ${standIns} sessions attached to a department only, as on home.`)}
+                </Cap>
+              ) : null}
               {attention.status === "empty" ? (
                 <Cap data-testid="agents-attention-empty">{tr("막히거나 실패한 에이전트가 없어요.", "No agent is stuck or failing.")}</Cap>
               ) : null}
@@ -373,6 +382,7 @@ export default function AgentsTab({
               />
             ) : (
               <AgentsSummaryPane
+                counted={counted}
                 entries={listed}
                 agents={listedAgents}
                 departments={departments}

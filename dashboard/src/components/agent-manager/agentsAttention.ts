@@ -22,11 +22,15 @@ const RECENT_FAILURE_MS = 86_400_000;
 const join = (...parts: Array<string | null | undefined>) => parts.filter(Boolean).join(" · ");
 
 /** Agents a person should look at, grouped per agent: a turn the server suspects is stuck, the agent's cards on
- * home's to-do list (decisions and failures), and failed dispatches from the last day whose card is not already there. */
-export function buildAttention({ agents, todo, failed, tr, isKo, now = Date.now() }: {
+ * home's to-do list (decisions and failures), and failed dispatches from the last day. A failed dispatch with a card
+ * counts only while the cards are unread: once read, the card is on the to-do list if it still needs a person, and the
+ * open-card list (done cards excluded) shows it moved on or closed otherwise. */
+export function buildAttention({ agents, todo, failed, cardsRead, tr, isKo, now = Date.now() }: {
   agents: Agent[];
   todo: TodoItem[];
   failed: TaskDispatch[];
+  /** The open-card list loaded (or is loading); false after it failed. */
+  cardsRead: boolean;
   tr: Tr;
   isKo: boolean;
   now?: number;
@@ -55,7 +59,7 @@ export function buildAttention({ agents, todo, failed, tr, isKo, now = Date.now(
   for (const dispatch of failed) {
     const at = coerceTimestampMs((dispatch as TaskDispatch & { updated_at?: string | number | null }).updated_at ?? dispatch.created_at);
     const card = dispatch.kanban_card_id ? `card:${dispatch.kanban_card_id}` : null;
-    if (at === null || now - at > RECENT_FAILURE_MS || (card && cards.has(card))) continue;
+    if (at === null || now - at > RECENT_FAILURE_MS || (card && (cardsRead || cards.has(card)))) continue;
     if (card) cards.add(card);
     add(dispatch.to_agent_id, {
       key: `dispatch:${dispatch.id}`,

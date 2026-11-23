@@ -4,9 +4,10 @@ import type { UiLanguage } from "../../i18n";
 import * as api from "../../api";
 import { BLANK } from "./constants";
 import type { FormData } from "./types";
-import { classifyAgents } from "../home/homeModel";
 import {
+  classifyRoster,
   filterAndSortAgents,
+  isStandIn,
   type AgentSortMode,
   type AgentStatusFilter,
 } from "./agent-list-controls";
@@ -24,7 +25,7 @@ interface UseAgentManagerControllerParams {
   /** Every workspace session; states come from them as on home. */
   sessions: DispatchedSession[];
   sessionsFailed: boolean;
-  activeTab?: AgentManagerTab;
+  /** Keeps the shell's tab in step; the page reads its tab from the URL. */
   onTabChange?: (tab: AgentManagerTab) => void;
 }
 
@@ -36,7 +37,6 @@ export function useAgentManagerController({
   onDepartmentsChange,
   sessions,
   sessionsFailed,
-  activeTab,
   onTabChange,
 }: UseAgentManagerControllerParams) {
   const locale = language;
@@ -46,7 +46,6 @@ export function useAgentManagerController({
     [isKo],
   );
 
-  const [internalTab, setInternalTab] = useState<AgentManagerTab>("agents");
   const [deptTab, setDeptTab] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
@@ -74,10 +73,6 @@ export function useAgentManagerController({
   const [dragOverDeptId, setDragOverDeptId] = useState<string | null>(null);
   const [dragOverPosition, setDragOverPosition] = useState<"before" | "after" | null>(null);
 
-  const tab = activeTab ?? internalTab;
-  // The old dispatch tab now lives in the agents tab's summary pane.
-  const resolvedTab = tab === "dispatch" ? "agents" : tab;
-
   useEffect(() => {
     if (deptOrderDirty) return;
     const currentIds = deptOrder.map((dept) => dept.id).join("|");
@@ -88,16 +83,15 @@ export function useAgentManagerController({
   }, [departments, deptOrder, deptOrderDirty]);
 
   const handleTabChange = useCallback((nextTab: AgentManagerTab) => {
-    if (activeTab === undefined) {
-      setInternalTab(nextTab);
-    }
     onTabChange?.(nextTab);
-  }, [activeTab, onTabChange]);
+  }, [onTabChange]);
 
-  const entries = useMemo(() => classifyAgents(agents, sessions, sessionsFailed), [agents, sessions, sessionsFailed]);
+  // Counts take home's stand-ins too; rows are real agents only.
+  const entries = useMemo(() => classifyRoster(agents, sessions, sessionsFailed), [agents, sessions, sessionsFailed]);
   const sortedEntries = useMemo(() => {
     const known = new Set(departments.map((department) => department.id));
-    return filterAndSortAgents(entries, { deptTab, statusFilter, search, includeTests, departments: known }, sortMode);
+    const rows = entries.filter((entry) => !isStandIn(entry.agent));
+    return filterAndSortAgents(rows, { deptTab, statusFilter, search, includeTests, departments: known }, sortMode);
   }, [entries, departments, deptTab, includeTests, search, sortMode, statusFilter]);
 
   const openCreateAgent = useCallback(() => {
@@ -304,7 +298,6 @@ export function useAgentManagerController({
     openEditDept,
     openDuplicateAgent,
     reorderSaving,
-    resolvedTab,
     saving,
     search,
     setAgentModal,

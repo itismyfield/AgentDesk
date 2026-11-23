@@ -259,6 +259,13 @@ test.describe("Agents tab", () => {
       await page.getByRole("button", { name: "상세 닫기" }).click();
       await expect(page).toHaveURL(/\/agents$/);
       await expect(pane.getByTestId("agents-summary")).toBeVisible();
+      // Switching tabs with a detail open and going back lands on the tab the address names.
+      await card.click();
+      await page.getByRole("tab", { name: /^부서/ }).click();
+      await expect(page).toHaveURL(/agent=agent-ada&tab=departments$/);
+      await page.goBack();
+      await expect(page).toHaveURL(/\/agents$/);
+      await expect(page.getByRole("tab", { name: /^에이전트/ })).toHaveAttribute("aria-selected", "true");
     } else {
       await card.click();
       const drawer = page.getByRole("dialog", { name: /ada — 에이전트 상세/ });
@@ -281,6 +288,16 @@ test.describe("Agents tab", () => {
       await page.keyboard.press("Escape");
       await expect(drawer).toHaveCount(0);
       await expect(page).toHaveURL(/\/agents$/);
+      // Two closes in one frame step back once: the list stays, not the page before it.
+      await page.goto("/home");
+      await page.goto("/agents");
+      await card.click();
+      await drawer.evaluate((node) => {
+        for (let i = 0; i < 2; i += 1) node.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await expect(drawer).toHaveCount(0);
+      await expect(page).toHaveURL(/\/agents$/);
+      await expect(card).toBeVisible();
     }
     await expectNoHorizontalOverflow(page);
   });

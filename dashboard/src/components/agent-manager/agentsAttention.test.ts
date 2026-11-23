@@ -25,6 +25,7 @@ describe("buildAttention", () => {
         failed("d4", "nova", "2026-11-21T11:00:00Z"),
         failed("d5", "ghost", "2026-11-23T11:00:00Z"),
       ],
+      cardsRead: false,
       tr,
       isKo: true,
     });
@@ -35,5 +36,14 @@ describe("buildAttention", () => {
     ]);
     expect(rows[0].reasons[0]).toMatchObject({ chip: "막힘 의심", to: null });
     expect(rows[2].reasons[0]).toMatchObject({ chip: "실패", detail: "run d2 · 1시간 전", to: "/campaigns?tab=queue&card=c3" });
+  });
+
+  it("drops a failed run whose card moved on once the open cards are read", () => {
+    vi.useFakeTimers({ now: NOW });
+    const input = { agents: [agent("nova")], todo: [], tr, isKo: true };
+    const failures = [failed("d2", "nova", "2026-11-23T11:00:00Z", "c3"), failed("d6", "nova", "2026-11-23T11:10:00Z")];
+    // c3 is neither on the to-do list nor (once read) among the open cards: it was retried or closed.
+    expect(buildAttention({ ...input, failed: failures, cardsRead: true })[0].reasons.map((reason) => reason.key)).toEqual(["dispatch:d6"]);
+    expect(buildAttention({ ...input, failed: failures.slice(0, 1), cardsRead: true })).toEqual([]);
   });
 });

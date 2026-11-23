@@ -1,6 +1,7 @@
-import type { Agent } from "../../types";
+import type { Agent, DispatchedSession } from "../../types";
+import { deriveDispatchedAsAgents } from "../../contexts/session-overlay";
 import { isTestAgent } from "../../lib/agentHelpers";
-import { AGENT_STATES, agentName, type HomeAgent, type HomeAgentState } from "../home/homeModel";
+import { AGENT_STATES, agentName, classifyAgents, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 
 export type AgentSortMode =
   | "status"
@@ -25,6 +26,14 @@ export interface AgentListFilter {
 
 export function hasDepartment(agent: Agent, departments?: ReadonlySet<string>): boolean {
   return Boolean(agent.department_id) && (!departments || departments.has(agent.department_id!));
+}
+
+/** Sessions attached to a department only, which home counts as agents (`dispatched:<id>`); they have no detail. */
+export const isStandIn = (agent: Pick<Agent, "id">) => agent.id.startsWith("dispatched:");
+
+/** Home's roster input: real agents plus the stand-ins, classified together so the state counts match home. */
+export function classifyRoster(agents: Agent[], sessions: DispatchedSession[], sessionsFailed: boolean): HomeAgent[] {
+  return classifyAgents([...agents, ...deriveDispatchedAsAgents(sessions)], sessions, sessionsFailed);
 }
 
 /** E2E harness agents stay hidden unless asked for or busy, as on home, so the state counts match. */

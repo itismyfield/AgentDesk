@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { NO_DEPARTMENT, filterAgents, filterAndSortAgents, sortAgents } from "./agent-list-controls";
-import type { Agent } from "../../types";
+import { NO_DEPARTMENT, classifyRoster, filterAgents, filterAndSortAgents, isStandIn, sortAgents } from "./agent-list-controls";
+import type { Agent, DispatchedSession } from "../../types";
 import type { HomeAgent } from "../home/homeModel";
 
 const entry = (state: HomeAgent["state"], overrides: Partial<Agent>): HomeAgent => ({
@@ -41,6 +41,17 @@ describe("filterAgents", () => {
   it("matches search against name, name_ko and alias", () => {
     expect(ids(filterAgents(entries, { ...all, search: "cc" }))).toEqual(["c"]);
     expect(ids(filterAgents(entries, { ...all, search: "베타" }))).toEqual(["b"]);
+  });
+});
+
+describe("classifyRoster", () => {
+  it("counts a department-only session as home does, as a stand-in without a row", () => {
+    const sessions = [{ id: "s9", session_key: "s9", name: "adk-cc", department_id: "dev", linked_agent_id: null, status: "idle" }] as DispatchedSession[];
+    const roster = classifyRoster([entries[2].agent], sessions, false);
+    expect(roster.map(({ agent, state }) => [agent.id, state, isStandIn(agent)])).toEqual([
+      ["dispatched:s9", "resting", true],
+      ["c", "noSession", false],
+    ]);
   });
 });
 

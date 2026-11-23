@@ -32,8 +32,8 @@ export function useAgentsAttention(agents: Agent[], tr: Tr, isKo: boolean): Agen
   }, []);
   const entries = useMemo(() => {
     const todo = buildTodoItems({ cards: kanbanCards, campaigns: null, tr, isKo });
-    return buildAttention({ agents, todo, failed: failed.rows, tr, isKo });
-  }, [agents, kanbanCards, failed.rows, tr, isKo]);
+    return buildAttention({ agents, todo, failed: failed.rows, cardsRead: kanbanCardsState !== "error", tr, isKo });
+  }, [agents, kanbanCards, kanbanCardsState, failed.rows, tr, isKo]);
   const cards: SourceState = kanbanCardsState === "error" ? "failed" : kanbanCardsState === "ready" ? "ok" : "loading";
   return { entries, cards, dispatches: failed.state, status: todoStatus(entries.length, [cards, failed.state]) };
 }

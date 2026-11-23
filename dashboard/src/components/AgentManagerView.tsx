@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 import type { Agent, Department, DispatchedSession } from "../types";
@@ -33,6 +33,7 @@ interface AgentManagerViewProps {
   /** Sessions not linked to an agent, offered for attaching. */
   sessions?: DispatchedSession[];
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  /** The shell's last tab; the page follows `?tab=` instead, so links and the back button agree with the screen. */
   activeTab?: AgentManagerTab;
   onTabChange?: (tab: AgentManagerTab) => void;
   autoOpenCreate?: boolean;
@@ -49,7 +50,6 @@ export default function AgentManagerView({
   onDepartmentsChange,
   sessions,
   onAssign,
-  activeTab,
   onTabChange,
   autoOpenCreate = false,
   onAutoOpenConsumed,
@@ -85,7 +85,6 @@ export default function AgentManagerView({
     openEditAgent,
     openEditDept,
     reorderSaving,
-    resolvedTab,
     saving,
     search,
     setAgentModal,
@@ -109,17 +108,22 @@ export default function AgentManagerView({
     onDepartmentsChange,
     sessions: workspaceSessions,
     sessionsFailed,
-    activeTab,
     onTabChange,
   });
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
+  // The URL alone picks the tab here, so going back never lands on a tab the address does not name.
   const urlTab = searchParams.get("tab") as AgentManagerTab | null;
-  const tab = urlTab && TAB_KEYS.includes(urlTab) ? urlTab : resolvedTab;
+  const tab = urlTab && TAB_KEYS.includes(urlTab) ? urlTab : "agents";
   const selectedAgentId = searchParams.get("agent");
   const openedHere = (location.state as { agentOpened?: boolean } | null)?.agentOpened === true;
+  // One step back per close: a second close before the location changes is dropped.
+  const closing = useRef(false);
+  useEffect(() => {
+    closing.current = false;
+  }, [location.key]);
 
   const changeTab = (next: AgentManagerTab) => {
     handleTabChange(next);
@@ -132,7 +136,8 @@ export default function AgentManagerView({
   // The first open adds a history entry, so back (or closing) returns to the list; switching agents replaces it.
   const selectAgent = useCallback((agentId: string | null) => {
     if (!agentId && openedHere) {
-      navigate(-1);
+      if (!closing.current) navigate(-1);
+      closing.current = true;
       return;
     }
     const params = new URLSearchParams(searchParams);
