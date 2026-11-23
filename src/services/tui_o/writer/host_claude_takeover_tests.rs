@@ -978,6 +978,7 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
 
 #[cfg(unix)]
 async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) {
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     use crate::services::claude::tui_session_launch::{ResumePane, reserve_thread_body_before_key};
     use crate::services::provider::ProviderKind;
     use crate::services::tui_o::cutover::{

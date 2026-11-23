@@ -1,5 +1,5 @@
-//! Shared fixtures for Legacy cleanup tests: a local Discord stand-in and
-//! durable-record fingerprints (bytes, existence, mtime).
+//! Shared test fixtures: a local Discord stand-in and durable-record fingerprints (bytes,
+//! existence, mtime) for Legacy cleanup tests, and the runtime port install every test entry calls.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -257,4 +257,12 @@ impl<T: Copy + 'static> Drop for TestOverrideGuard<T> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
     }
+}
+
+/// Test entry points install the runtime ports they reach: the Codex row reader, the custody
+/// reads and (unix) the strict journal append. Each keeps its first value, so repeats are harmless.
+pub(in crate::services::discord) fn install_runtime_ports_for_tests() {
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
+    #[cfg(unix)]
+    crate::services::discord::install_exact_append();
 }

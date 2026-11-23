@@ -18,6 +18,7 @@ const CHILD: &str = "ADK_O_DELIVERY_E2E_CHILD";
 
 fn isolated(name: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         return true;
     }
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/o-delivery-e2e");

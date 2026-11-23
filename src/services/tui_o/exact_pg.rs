@@ -55,9 +55,11 @@ pub(crate) fn install_append(append: AppendExact) {
 
 #[cfg(unix)]
 async fn append_exact(pool: sqlx::PgPool, metadata: &EpisodeMetadata) -> Result<(), String> {
-    #[cfg(test)]
-    crate::services::discord::install_exact_append();
-    let append = APPEND.get().ok_or("strict journal append not installed")?;
+    let append = APPEND.get();
+    // Test builds panic instead: a test reaching this port installs it at its own entry point.
+    #[cfg(any(test, feature = "test-support"))]
+    let append = Some(append.expect("strict journal append not installed"));
+    let append = append.ok_or("strict journal append not installed")?;
     append(pool, metadata).await
 }
 
