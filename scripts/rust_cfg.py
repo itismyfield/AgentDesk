@@ -252,6 +252,38 @@ def cfg_conditions_gate(conditions: Iterable[str]) -> str | None:
     return None
 
 
+def attribute_conditions(attributes: str) -> tuple[str, ...]:
+    """Raw cfg bodies an attribute run gates on, with ``cfg_attr(C, cfg(G))`` as ``any(not(C), all(G))``."""
+    text = _strip_comments(attributes)
+    blanked = _STRING_RE.sub(lambda m: " " * len(m.group()), text)
+    conditions = []
+    for start in CFG_ATTR_START_RE.finditer(blanked):
+        open_paren = blanked.find("(", start.start(), start.end())
+        close = _item_end(blanked, open_paren + 1)
+        body = text[open_paren + 1 : close]
+        condition = body if start.group(1) == "cfg" else _cfg_attr_condition(body)
+        if condition is not None:
+            conditions.append(condition)
+    return tuple(conditions)
+
+
+def _cfg_attr_condition(body: str) -> str | None:
+    """The cfg a ``cfg_attr`` body adds, ``None`` when it gates nothing; unreadable bodies stay unparsable."""
+    args = _split_top_level_args(body)
+    if args is None or len(args) < 2:
+        return f"cfg_attr({body})"
+    gates = []
+    for attribute in args[1:]:
+        for name in ("cfg", "cfg_attr"):
+            if attribute.startswith(name + "(") and attribute.endswith(")"):
+                inner = attribute[len(name) + 1 : -1]
+                gate = inner if name == "cfg" else _cfg_attr_condition(inner)
+                if gate is not None:
+                    gates.append(f"all({gate})")
+                break
+    return f"any(not({args[0]}), all({', '.join(gates)}))" if gates else None
+
+
 def _mentions_test(node: _CfgNode | None) -> bool:
     if node is None:
         return True

@@ -218,9 +218,13 @@ class DiscriminationTests(unittest.TestCase):
                                   f"#[cfg(any(test, {F}))]\nmod m {{\n    #[cfg(not(test))]\n    {call}}}\n"],
             "src/services/seam.rs": [f"#[cfg(not(test))]\n{call}"],
             "src/services/plain.rs": [f"#[cfg(any(test, {F}))]\n{call}"],
+            "src/services/attr.rs": [f"#[cfg(any(test, {F}))]\n{call}"],
+            "src/services/both.rs": [call],
         }
         mounts = {"src/services/seam.rs": f"#[cfg(any(test, {F}))]\nmod seam;\n",
-                  "src/services/plain.rs": "#[cfg(not(test))]\nmod plain;\n"}
+                  "src/services/plain.rs": "#[cfg(not(test))]\nmod plain;\n",
+                  "src/services/attr.rs": "#[cfg_attr(test, cfg(any()))]\nmod attr;\n",
+                  "src/services/both.rs": f"#[cfg(any(test, {F}))]\n#[cfg_attr(test, cfg(any()))]\nmod both;\n"}
         for predicate in comment_mounts:
             root = self.fixture()
             write(root, "src/lib.rs", f'#[cfg({predicate})]\n#[path = "helpers_tests.rs"]\npub mod helpers;\n')
@@ -232,7 +236,8 @@ class DiscriminationTests(unittest.TestCase):
                 root = self.fixture()
                 write(root, "src/services.rs", mounts.get(rel, "mod w;\n"))
                 write(root, rel, body)
-                expected = "only in feature-linked builds" if rel.endswith("plain.rs") else "mark_done: UNLISTED"
+                negated = rel.endswith(("plain.rs", "attr.rs"))
+                expected = "only in feature-linked builds" if negated else "mark_done: UNLISTED"
                 with self.subTest(rel=rel, body=body):
                     self.assertIn(expected, self.run_guard(root)[1])
         for body in (f"#[cfg(any(test, {F}))]\n{call}", f"#[cfg(all(any(test, {F}), unix))]\n{call}"):
@@ -240,6 +245,11 @@ class DiscriminationTests(unittest.TestCase):
             write(root, "src/services/w.rs", body)
             with self.subTest(control=body):
                 self.assertEqual(self.run_guard(root), (True, self.run_guard(root)[1]))
+        root = self.fixture()
+        write(root, "src/services.rs", f"#[cfg(any(test, {F}))]\n#[cfg_attr(test, allow(dead_code))]\nmod kept;\n")
+        write(root, "src/services/kept.rs", call)
+        ok, message = guard.check(root, None, pinned_test_only_files=frozenset({"src/services/kept.rs"}))
+        self.assertTrue(ok, message)
 
     def test_lifetime_does_not_hide_later_fully_qualified_writer(self):
         root = self.fixture()

@@ -15,12 +15,12 @@ from typing import Callable, Iterable
 from pathlib import Path
 
 try:
-    from rust_cfg import cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
     from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
 except ModuleNotFoundError:  # loaded by path from another cwd
     sys.path.append(str(Path(__file__).resolve().parent))
-    from rust_cfg import cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
     from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
 
@@ -695,7 +695,6 @@ _MOD_DECL_RE = re.compile(
     r"(?P<kind>[{;])",
     re.MULTILINE,
 )
-_CFG_ATTR_RE = re.compile(r"#\[\s*cfg\((?P<predicate>[^]]*?)\)\s*\]")
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
 
 
@@ -746,9 +745,7 @@ def _module_file_declarations(
         start = match.start()
         contexts = [context for context in contexts if start < context.end]
         attrs = match.group("attrs") or ""
-        conditions = (contexts[-1].conditions if contexts else ()) + tuple(
-            cfg.group("predicate") for cfg in _CFG_ATTR_RE.finditer(attrs)
-        )
+        conditions = (contexts[-1].conditions if contexts else ()) + attribute_conditions(attrs)
         gate = cfg_conditions_gate(conditions)
         requires_test = parent_requires_test or gate is not None
         name = match.group("name")
