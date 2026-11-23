@@ -203,8 +203,8 @@ impl HostedRecord {
 /// One row's record as read; the raw value is the CAS expectation for the next write.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostedObservation {
-    session_id: i64,
-    raw: Option<Value>,
+    pub(crate) session_id: i64,
+    pub(crate) raw: Option<Value>,
     pub(crate) record: HostedRecord,
 }
 

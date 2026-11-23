@@ -4008,6 +4008,10 @@ src/
 │   │   └── transport_tests.rs
 │   ├── kanban_cards/
 │   │   └── entry_transactions.rs
+│   ├── krx_db_tests/
+│   │   ├── dispatched_sessions_authority_tests.rs
+│   │   ├── dispatches_outbox_delivery_tests.rs
+│   │   └── session_transcripts_clear_fence_tests.rs
 │   ├── legacy_body_census/
 │   │   ├── cache.rs
 │   │   ├── collector.rs
@@ -5281,6 +5285,7 @@ src/
 │   ├── kanban_cards.rs
 │   ├── kanban_cards_snapshot_tests.rs
 │   ├── krx_claude_tests.rs
+│   ├── krx_db_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
@@ -5405,6 +5410,7 @@ src/
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
 ├── krx_claude_tests.rs
+├── krx_db_tests.rs
 ├── launch.rs
 ├── lib.rs
 ├── logging.rs
@@ -5462,6 +5468,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_db_tests.rs` | Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

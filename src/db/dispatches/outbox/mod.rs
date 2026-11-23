@@ -11,7 +11,7 @@
 //! - `model` owns shared row/data shapes.
 
 mod claim;
-mod delivery;
+pub(crate) mod delivery;
 mod diagnostics;
 mod followup;
 mod model;

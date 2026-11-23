@@ -533,7 +533,8 @@ async fn restore_keeps_a_deleted_cards_entry_skipped_pg() {
     let (status, body) = request(&app, Method::POST, "/queue/cancel?run_id=run-1", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        crate::db::kanban_cards::soft_delete_card_pg(&pool, "card-gone").await,
+        crate::services::kanban_cards::entry_transactions::soft_delete_card_pg(&pool, "card-gone")
+            .await,
         Ok(crate::db::kanban_cards::CardDeleteOutcome::Deleted)
     );
 

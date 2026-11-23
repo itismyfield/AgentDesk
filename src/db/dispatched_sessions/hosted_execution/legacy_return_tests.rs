@@ -1,9 +1,12 @@
-use super::super::tests::{owner, record, wire};
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::dispatched_sessions::hosted_execution::legacy_return::*;
+use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::*;
 use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg as delete_disconnected_sessions_pg;
 use crate::services::session_host::legacy_return::tests::{ended, provider_alive};
+use serde_json::Value;
 use serde_json::json;
+use sqlx::PgPool;
 
 async fn setup() -> (TestPostgresDb, PgPool, HostedObservation, HostedExecution) {
     let db = TestPostgresDb::create().await;
@@ -59,7 +62,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     ).fetch_one(&pool).await.unwrap();
     // Real deletion controls distinguish a surviving return from cleanup that does nothing.
     assert_eq!(
-        crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(&pool, |_| async {
+        crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(&pool, |_| async {
             crate::services::platform::tmux::SessionPresence::Missing
         })
         .await,
@@ -131,7 +134,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
         record: HostedRecord::Legacy,
         ..observed
     };
-    let next = super::super::tests::pending(&r.owner, "n-new");
+    let next = crate::db::dispatched_sessions::hosted_execution::tests::pending(&r.owner, "n-new");
     assert_eq!(
         install_pending_pg(&pool, &legacy, next).await.unwrap(),
         HostedCasOutcome::Written
@@ -239,7 +242,12 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE id = $1")
         .bind(observed.session_id)
-        .bind(wire(&super::super::tests::pending(&r.owner, "concurrent")))
+        .bind(wire(
+            &crate::db::dispatched_sessions::hosted_execution::tests::pending(
+                &r.owner,
+                "concurrent",
+            ),
+        ))
         .execute(&mut *tx)
         .await
         .unwrap();

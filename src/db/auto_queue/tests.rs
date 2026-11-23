@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 #[allow(unused_imports)]
-use super::entries::resume_session_id_from_context;
+use crate::db::auto_queue::entries::resume_session_id_from_context;
 #[allow(unused_imports)]
-use super::*;
+use crate::db::auto_queue::*;
 
 #[cfg(test)]
 mod resume_session_context_tests {
@@ -2305,8 +2305,9 @@ mod card_soft_delete_pg_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::kanban_cards::{
         CardDeleteOutcome, IssueCardUpsert, ListCardsFilter, card_status_pg, list_cards_pg,
-        load_card_json_pg, soft_delete_card_pg, upsert_card_from_issue_pg,
+        load_card_json_pg, upsert_card_from_issue_pg,
     };
+    use crate::services::kanban_cards::entry_transactions::soft_delete_card_pg;
     use sqlx::PgPool;
 
     async fn setup(pg_db: &TestPostgresDb) -> PgPool {
