@@ -46,13 +46,14 @@ export interface MetricDelta {
   tone: MetricDeltaTone;
 }
 
-/** Kit palette tokens for series without a provider color: agents and token kinds. */
-const KIT_SERIES = [
-  "var(--aui-accent)",
-  "var(--aui-info)",
-  "var(--aui-ok)",
-  "var(--aui-warn)",
-  "var(--aui-fg-muted)",
+/** Data series for agents and token kinds (light, dark). The kit has no series tokens; these keep clear of status and
+ * provider colors, and neighbours differ in hue and lightness in both themes (at least 3:1 on cards). */
+const DATA_SERIES = [
+  "light-dark(oklch(0.5 0.17 294), oklch(0.7 0.15 294))",
+  "light-dark(oklch(0.62 0.07 172), oklch(0.85 0.09 172))",
+  "light-dark(oklch(0.5 0.18 352), oklch(0.66 0.16 352))",
+  "light-dark(oklch(0.6 0.13 118), oklch(0.87 0.14 118))",
+  "light-dark(oklch(0.42 0.08 30), oklch(0.6 0.08 30))",
 ];
 
 export function msg(ko: string, en = ko, ja = ko, zh = ko) {
@@ -353,7 +354,7 @@ export function buildAgentItems(
           agent.cost_without_cache != null
             ? Math.max(0, agent.cost_without_cache - agent.cost)
             : null,
-        color: KIT_SERIES[index % KIT_SERIES.length],
+        color: DATA_SERIES[index % DATA_SERIES.length],
         composition: hasPromptDetail
           ? {
               input,
@@ -433,22 +434,22 @@ export function dailySeries(t: TFunction): DailySeriesDescriptor[] {
     {
       key: "cache_read_tokens",
       label: t(msg("cache R", "cache R")),
-      color: KIT_SERIES[1],
+      color: DATA_SERIES[0],
     },
     {
       key: "cache_creation_tokens",
       label: t(msg("cache W", "cache W")),
-      color: KIT_SERIES[0],
+      color: DATA_SERIES[1],
     },
     {
       key: "input_tokens",
       label: t(msg("input", "input")),
-      color: KIT_SERIES[2],
+      color: DATA_SERIES[2],
     },
     {
       key: "output_tokens",
       label: t(msg("output", "output")),
-      color: KIT_SERIES[3],
+      color: DATA_SERIES[3],
     },
   ];
 }

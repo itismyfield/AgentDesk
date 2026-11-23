@@ -19,12 +19,42 @@ export interface KpiChartProps {
   series: KpiSeries[];
   format?: (value: number) => string;
   footer?: string;
-  /** Short notice centred in an empty plot (no finite values, or all zero on a non-percentage axis). */
+  /** Short notice centred in an empty plot (no finite values, or all zero on a non-percentage axis). Defaults to `text.empty`. */
   emptyLabel?: string;
   /** Idle selection, rounded and clamped to the available points. Non-finite values mean no idle selection. */
   defaultIndex?: number;
+  /**
+   * Every other visible and spoken text. `labels` already holds the x-axis, so the texts live under `text`. Missing keys
+   * keep the Korean defaults.
+   */
+  text?: Partial<KpiChartText>;
   className?: string;
 }
+export interface KpiChartText {
+  /** Notice in an empty plot; `emptyLabel` wins. */
+  empty: string;
+  /** Hint in the reading box under a narrow plot (420px or less) until a date is chosen. */
+  guidance: string;
+  /** Spoken after a positive delta. */
+  increase: string;
+  /** Spoken after a negative delta. */
+  decrease: string;
+  /** Accessible name of the plot, from the title and the number of dates. */
+  plot: (title: string, count: number) => string;
+  /** Screen-reader help for the plot; `idle` is the idle date label, or null without an idle selection. */
+  help: (idle: string | null) => string;
+  /** Spoken in place of a missing value in the reading. */
+  noValue: string;
+}
+export const kpiChartDefaultText: KpiChartText = {
+  empty: '표시할 실행 지표가 아직 없습니다.',
+  guidance: '그래프를 탭하거나 방향키로 날짜를 고르면 모든 계열의 값을 확인할 수 있습니다.',
+  increase: '증가',
+  decrease: '감소',
+  plot: (title, count) => `${title}. 좌우 방향키로 ${count}개 날짜의 계열값을 읽습니다.`,
+  help: (idle) => `초점만으로 날짜를 선택하지 않습니다. 좌우 방향키로 날짜를 이동하고 Home과 End로 처음과 끝을 선택합니다. Escape, 초점 이탈, 포인터 이탈은 ${idle === null ? '상세를 숨깁니다' : `${idle} 대기 날짜로 돌아갑니다`}. 터치로 날짜를 고르면 손을 떼도 유지하며 같은 날짜를 다시 탭하면 대기 상태로 돌아갑니다.`,
+  noValue: '값 없음',
+};
 
 const styles = `
 .aui-kpi-chart {
@@ -157,8 +187,10 @@ function percentBase(format: (value: number) => string) {
   } catch { return null; }
 }
 
-export function KpiChart({ title, value, delta, labels, tooltipLabels, series, format = compactNumber, footer, emptyLabel = '표시할 실행 지표가 아직 없습니다.', defaultIndex, className = '' }: KpiChartProps) {
+export function KpiChart({ title, value, delta, labels, tooltipLabels, series, format = compactNumber, footer, emptyLabel: emptyLabelProp, defaultIndex, text, className = '' }: KpiChartProps) {
   const id = useId();
+  const copy: KpiChartText = { ...kpiChartDefaultText, ...text };
+  const emptyLabel = emptyLabelProp ?? copy.empty;
   const [userIndex, setUserIndex] = useState<number | null>(null);
   const press = useRef<{ id: number; x: number } | null>(null);
   const card = useRef<HTMLDivElement>(null);
@@ -201,7 +233,6 @@ export function KpiChart({ title, value, delta, labels, tooltipLabels, series, f
   const expandedReading = list.length > 6 || list.some((item) => item.label.length > 18) || (tooltipLabels ?? labels ?? []).some((label) => label.length > 38) || values.some((amount) => format(amount).length > 10);
   const axisIndices = count ? [...new Set([0, Math.round(count / 2 - .5), count - 1])] : [];
   const longestValue = Math.max(1, ...values.map((amount) => format(amount).length));
-  const guidance = '그래프를 탭하거나 방향키로 날짜를 고르면 모든 계열의 값을 확인할 수 있습니다.';
   const line = (item: KpiSeries) => {
     let drawing = false;
     return Array.from({ length: count }, (_, point) => {
@@ -246,16 +277,16 @@ export function KpiChart({ title, value, delta, labels, tooltipLabels, series, f
     <span className="aui-kpi-chart-tooltip-label" dir="auto" title={item.label}>{item.label}</span>
     <span className="aui-kpi-chart-tooltip-value" style={{ minWidth: `${longestValue + 2}ch` }}>{show(item.amount)}</span>
   </li>)}</ul>;
-  const readout = visible ? `${shown.label}. ${shown.rows.map((item) => `${item.label}: ${item.amount === null ? '값 없음' : format(item.amount)}`).join(', ')}` : '';
+  const readout = visible ? `${shown.label}. ${shown.rows.map((item) => `${item.label}: ${item.amount === null ? copy.noValue : format(item.amount)}`).join(', ')}` : '';
   return <section className={`aui-kpi-chart ${className}`} data-expanded-reading={expandedReading} aria-labelledby={`${id}-title`}>
     <style>{styles}</style>
     <div className="aui-kpi-chart-card" ref={card}>
       <h3 id={`${id}-title`} className="aui-kpi-chart-title" dir="auto" title={title}>{title}</h3>
-      <div className="aui-kpi-chart-summary"><span className="aui-kpi-chart-number">{value}</span>{delta !== undefined && finite(delta) && delta !== 0 && <span className="aui-kpi-chart-delta" data-negative={delta < 0}>{delta > 0 ? '+' : '−'}{format(Math.abs(delta))}<span className="aui-kpi-chart-sr">{delta > 0 ? '증가' : '감소'}</span></span>}</div>
+      <div className="aui-kpi-chart-summary"><span className="aui-kpi-chart-number">{value}</span>{delta !== undefined && finite(delta) && delta !== 0 && <span className="aui-kpi-chart-delta" data-negative={delta < 0}>{delta > 0 ? '+' : '−'}{format(Math.abs(delta))}<span className="aui-kpi-chart-sr">{delta > 0 ? copy.increase : copy.decrease}</span></span>}</div>
       <div className="aui-kpi-chart-graph" data-empty={!hasData || undefined}>
         <div className="aui-kpi-chart-yaxis" aria-hidden="true">{hasData ? [high, (high + low) / 2, low].map((tick, order) => <span key={order}>{format(tick)}</span>) : <span>{' '}</span>}</div>
         <div className="aui-kpi-chart-plot-wrap" ref={wrap}>
-          {hasData ? <div className="aui-kpi-chart-interactive" data-selected={visible} tabIndex={0} role="group" aria-label={`${title}. 좌우 방향키로 ${count}개 날짜의 계열값을 읽습니다.`} aria-describedby={`${id}-help`} onKeyDown={onKeyDown} onBlur={clear}
+          {hasData ? <div className="aui-kpi-chart-interactive" data-selected={visible} tabIndex={0} role="group" aria-label={copy.plot(title, count)} aria-describedby={`${id}-help`} onKeyDown={onKeyDown} onBlur={clear}
             onPointerDown={(event) => {
               if (event.button !== 0) return;
               const point = nearest(event);
@@ -287,16 +318,16 @@ export function KpiChart({ title, value, delta, labels, tooltipLabels, series, f
       </div>
       {hasData && <div className="aui-kpi-chart-reading" aria-hidden="true" data-visible={visible}>
         <div className="aui-kpi-chart-reading-content"><p className="aui-kpi-chart-tooltip-heading">{shown.label || ' '}</p>{rows}</div>
-        <p className="aui-kpi-chart-reading-hint">{guidance}</p>
+        <p className="aui-kpi-chart-reading-hint">{copy.guidance}</p>
       </div>}
-      {hasData && <p id={`${id}-help`} className="aui-kpi-chart-sr">초점만으로 날짜를 선택하지 않습니다. 좌우 방향키로 날짜를 이동하고 Home과 End로 처음과 끝을 선택합니다. Escape, 초점 이탈, 포인터 이탈은 {idle === null ? '상세를 숨깁니다' : `${labels[idle]} 대기 날짜로 돌아갑니다`}. 터치로 날짜를 고르면 손을 떼도 유지하며 같은 날짜를 다시 탭하면 대기 상태로 돌아갑니다.</p>}
+      {hasData && <p id={`${id}-help`} className="aui-kpi-chart-sr">{copy.help(idle === null ? null : labels[idle] ?? '')}</p>}
       <span className="aui-kpi-chart-sr" role="status" aria-live="polite" aria-atomic="true">{readout}</span>
       {footer && <p className="aui-kpi-chart-footer" dir="auto">{footer}</p>}
     </div>
   </section>;
 }
 
-export type KpiChartDemoState = 'default' | 'empty' | 'long' | 'pinned' | 'negative' | 'zero' | 'currency' | 'single' | 'all-zero' | 'narrow' | 'live' | 'invalid' | 'format-boundaries' | 'gaps' | 'percent-zero' | 'small-ratio' | 'duplicates' | 'negative-round';
+export type KpiChartDemoState = 'default' | 'empty' | 'long' | 'pinned' | 'negative' | 'zero' | 'currency' | 'single' | 'all-zero' | 'narrow' | 'live' | 'invalid' | 'format-boundaries' | 'gaps' | 'percent-zero' | 'small-ratio' | 'duplicates' | 'negative-round' | 'english';
 const demoColors = ['#8066ff', '#b1bdcf', '#20b5a8', '#ed68ab', '#6289ff', '#d8a245', '#87948b'];
 
 /** Host examples replace snapshots and idle settings without controlling the input selection. */
@@ -315,6 +346,7 @@ export function KpiChartDemo({ state = 'default' }: { state?: KpiChartDemoState 
   const numbers = [[4100, 4700, 3900, 4500, 5200, 4900, 5800], [3500, 3200, 4200, 4600, 3900, 4300, 4000], [1800, 2300, 2000, 1400, 2400, 2200, 2700], [1200, 1100, 1700, 2000, 1600, 1300, 1500], [600, 900, 700, 800, 1000, 1400, 1100], [500, 700, 800, 300, 500, 600, 700], [200, 400, 300, 500, 200, 100, 400]];
   if (state === 'gaps' || state === 'percent-zero' || state === 'small-ratio' || state === 'duplicates') return <KpiChartEdgeDemo state={state} />;
   if (state === 'negative-round') return <KpiChartRoundDemo />;
+  if (state === 'english') return <KpiChartEnglishDemo />;
   const lengths = state === 'single' ? 1 : state === 'zero' || state === 'all-zero' ? 4 : state === 'format-boundaries' ? 7 : state === 'negative' || state === 'currency' ? 6 : shortened ? 3 : 7;
   const empty = state === 'empty';
   const points = empty ? [] : labels.slice(0, lengths);
@@ -324,6 +356,27 @@ export function KpiChartDemo({ state = 'default' }: { state?: KpiChartDemoState 
     <KpiChart title={long ? 'AgentDesk 전체 에이전트의 일별 실행 크레딧 추이' : state === 'currency' ? '공급자별 실행 비용' : '일별 에이전트 실행량'} value={empty ? '수집 대기' : state === 'currency' ? '$8,130' : '82,400'} delta={empty ? undefined : state === 'negative' ? -1 : state === 'zero' || allZero ? 0 : state === 'format-boundaries' ? 0.004 : state === 'currency' ? 19 : 7900} labels={points} tooltipLabels={points.map((_, point) => `2026년 10월 ${12 + point}일${long ? ' · 정기 실행과 장기 연구 작업을 포함한 전체 기록' : ''}`)} series={series} format={state === 'currency' ? (amount) => `$${amount.toLocaleString('en-US')}` : undefined} defaultIndex={state === 'pinned' ? idle : state === 'invalid' ? 99 : long ? 3 : undefined} footer={long ? '집계 기준: agentdesk_long_running_research_and_release_verification_channel · 한국어와 영어 작업 기록을 함께 표시합니다.' : empty ? '연결된 에이전트의 첫 실행을 기다리고 있습니다.' : '최근 실행 기록을 비교합니다. 대표값은 전체 기간 집계입니다.'} />
     {state === 'pinned' && <div className="aui-kpi-chart-demo-controls"><button type="button" onClick={() => setIdle(undefined)}>대기 선택 없음</button><button type="button" onClick={() => setIdle(0)}>첫날 대기</button><button type="button" onClick={() => setIdle(6)}>마지막 날 대기</button></div>}
     {state === 'live' && <><div className="aui-kpi-chart-demo-controls" onPointerDown={(event) => event.preventDefault()}><button type="button" onClick={() => setRevision((current) => (current + 1) % 4)}>새 집계 반영</button><button type="button" onClick={() => setShortened((current) => !current)}>{shortened ? '7일 복원' : '3일로 축소'}</button></div><p className="aui-kpi-chart-demo-note">3.5초마다 집계가 갱신됩니다. 그래프를 선택한 채 날짜 수도 바꿔 보세요. 대표값은 유지되며 시스템의 동작 줄이기 설정을 따릅니다.</p></>}
+  </div>;
+}
+
+const englishKpiText: Partial<KpiChartText> = {
+  empty: 'No run metrics yet.',
+  guidance: 'Tap the chart or use the arrow keys to read every series for a date.',
+  increase: 'up', decrease: 'down',
+  plot: (title, count) => `${title}. Use the left and right arrow keys to read ${count} dates.`,
+  help: (idle) => `Focus alone does not pick a date. Arrow keys move between dates, Home and End jump to the ends. Escape, leaving focus or moving the pointer away ${idle === null ? 'hides the details' : `returns to ${idle}`}. A tapped date stays after lifting the finger; tap it again to go back.`,
+  noValue: 'no value',
+};
+
+/** An English host: every visible and spoken text comes from `text`, including the hint of the narrow reading box. */
+function KpiChartEnglishDemo() {
+  const labels = ['Nov 11', 'Nov 12', 'Nov 13', 'Nov 14', 'Nov 15', 'Nov 16', 'Nov 17'];
+  return <div className="aui-kpi-chart-demo">
+    <div style={{ width: 300, maxWidth: '100%' }}><KpiChart title="Daily agent turns" value="9,140" delta={420} labels={labels} series={[
+      { id: 'claude', label: 'Claude', color: demoColors[0], values: [820, 900, null, 980, 1010, 940, 1100] },
+      { id: 'codex', label: 'Codex', color: demoColors[2], values: [300, 420, 380, 360, 510, 470, 490] },
+    ]} text={englishKpiText} footer="A narrow card keeps the reading box under the chart." /></div>
+    <KpiChart title="Tool call errors" value="0" labels={labels} series={[]} text={englishKpiText} />
   </div>;
 }
 
