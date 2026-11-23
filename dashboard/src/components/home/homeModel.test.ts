@@ -47,8 +47,12 @@ describe("home agents", () => {
     const turn = { status: "working", started_at: "2026-11-18T00:00:00Z", updated_at: null, provider: "codex", current_tool_line: null };
     expect(monitorView(turn, ada, tr)).toEqual({ started: null, label: "PR 리뷰", kind: "think", role: "codex" });
     const live = { ...turn, updated_at: "2026-11-18T00:05:00Z", current_tool_line: "npm test", tool_events: [{ kind: "tool", tool_name: "Bash" }] };
-    expect(monitorView(live, ada, tr)).toMatchObject({ started: Date.parse(turn.started_at), label: "npm test", kind: "run" });
-    expect(monitorView({ ...turn, status: "idle" }, ada, tr)).toBeNull();
+    const now = Date.parse("2026-11-18T00:06:00Z");
+    expect(monitorView(live, ada, tr, now)).toMatchObject({ started: Date.parse(turn.started_at), label: "npm test", kind: "run" });
+    expect(monitorView({ ...turn, status: "idle" }, ada, tr, now)).toBeNull();
+    // A start well after the snapshot (another time zone) or 13 hours back (a leftover file) hides the clock.
+    expect(monitorView({ ...live, started_at: "2026-11-18T09:00:00Z" }, ada, tr, now)?.started).toBeNull();
+    expect(monitorView(live, ada, tr, now + 13 * 3_600_000)?.started).toBeNull();
   });
 
   it("tells an empty session list from one that failed to load", () => {
@@ -93,6 +97,7 @@ describe("home to-dos", () => {
   it("shows the empty state only once every source answered", () => {
     expect(todoStatus(0, ["ok", "loading"])).toBe("loading");
     expect(todoStatus(0, ["ok", "failed"])).toBe("partial");
+    expect(todoStatus(0, ["ok", "partial"])).toBe("partial");
     expect(todoStatus(0, ["ok", "ok"])).toBe("empty");
   });
 });

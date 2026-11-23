@@ -126,14 +126,21 @@ const TOOL_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
   [/^(Bash|exec_command)$/, "run"], [/^WebFetch$/, "web"],
 ];
 
+const CLOCK_AHEAD_MS = 60_000;
+const CLOCK_MAX_MS = 12 * 3_600_000;
+
 /** A working agent's live turn for the kit monitor, or null to keep the one-line cell. No steps are passed: the turn
  * reports no step times, and the monitor would show each as zero. */
-export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr): MonitorView | null {
+export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
   if (!turn || entry.state !== "working" || turn.status === "idle") return null;
   const tool = turn.current_tool_line ? turn.tool_events?.filter((event) => event.kind === "tool").at(-1)?.tool_name ?? "" : "";
+  // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
+  const updated = coerceTimestampMs(turn.updated_at);
+  const started = updated === null ? null : coerceTimestampMs(turn.started_at);
+  // In-flight times carry no offset, and a leftover in-flight file keeps an old start: an implausible start hides the clock.
+  const plausible = started !== null && updated !== null && started <= updated + CLOCK_AHEAD_MS && now - started <= CLOCK_MAX_MS;
   return {
-    // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
-    started: turn.updated_at ? coerceTimestampMs(turn.started_at) : null,
+    started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
     role: turn.provider,
@@ -245,11 +252,12 @@ export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
   return items.sort((left, right) => KIND_ORDER.indexOf(left.kind) - KIND_ORDER.indexOf(right.kind));
 }
 
-export type SourceState = "loading" | "ok" | "failed";
+/** `partial`: the source answered but left part of its to-dos unread. */
+export type SourceState = "loading" | "ok" | "partial" | "failed";
 
-/** The to-do list is empty only when every source answered; a failed source leaves it partial. */
+/** The to-do list is empty only when every source answered in full; a failed or partial source leaves it partial. */
 export function todoStatus(count: number, sources: SourceState[]): "loading" | "empty" | "partial" | "ready" {
-  if (sources.includes("failed")) return "partial";
+  if (sources.some((source) => source === "failed" || source === "partial")) return "partial";
   if (count > 0) return "ready";
   return sources.includes("loading") ? "loading" : "empty";
 }
