@@ -25,16 +25,16 @@ stateDiagram-v2
   s0 --> s0: a person sends a message
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new
-  s2 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
-  s3 --> s3: the input's origin is written ahead into the turn's inflight row
+  s2 --> s3: actor claims and accepts the next input (new turn, or steer while a prompt is open)
+  s3 --> s3: the input's origin is written ahead into the inflight row#59; its claim becomes an in-memory terminal
   s3 --> s4: session/prompt for the saved input (dropped as a failed steer if its turn is stopping)
-  s4 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
+  s4 --> s3: actor claims and accepts the next input (new turn, or steer while a prompt is open)
   s3 --> s5: session/prompt for the saved input (dropped as a failed steer if its turn is stopping)
   s5 --> s1: person runs /clear
   s5 --> s4: agy answers the prompt (stopReason)
   s1 --> s1: steer prompt fails#59; the input is put back in the queue
   s4 --> s6: steer prompt fails#59; the input is put back in the queue
-  s6 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
+  s6 --> s3: actor claims and accepts the next input (new turn, or steer while a prompt is open)
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath

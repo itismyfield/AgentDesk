@@ -4,7 +4,7 @@
 
 Code reference: `5021d25794` (origin/main). The ACP client does not exist yet, so this is a design model. Its counterexamples are checked against the design and against the T3 Code reference behaviour. They are not replayed against current Rust code. The output side (spool → writer → Discord receipt) stays the contract of [WriterAdoption AgySpec](../tui-o-writer/agy-adoption.report.md); in this model it is one receipt-guarded `Settle` step.
 
-Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `eeca535838d251a309f7c7c8b73ecfe52022a2fab27d80f23eedd1faf5c9cf1d`.
+Design: [`docs/design/i8339/agy-acp.design.md`](../../design/i8339/agy-acp.design.md). Model SHA256 `c50b8d28ec90478a5a8b2da5f8a181bec89f52bd3f6c4fe044f5bf31d81cdeae`.
 
 ## Scope
 
@@ -18,7 +18,11 @@ Every input, the turn's first one included, goes through three actor steps (desi
 
 The bridge's in-memory copy predates these writes, so the completion receipt merges the turn's latest durable origins under the same identity and nonce (§6.2-3b). On `!stop` the bridge leaves its loop at once and looks up the receipt before agy answers the cancel (`EarlyLookup`); otherwise `Settle` looks it up. Either lookup first seals the turn's steer acceptance and waits for an accepted input's save (§6.2-3a). A lookup that cannot read the row records nothing and keeps the row (`held`), marked or not (`marked`); the next admission marks it again and records it (`AdmitSettle`, §6.2-3c).
 
-The seal finds the turn by the nonce fixed at its start, not by the live switch: an operator may turn `agy_acp.enabled` off mid-turn (`SwitchOff`, in DesignSwitchOff and SealBySwitch), which only stops new steering. The seal waits until every accepted input is saved and written or dropped, and its answer carries the failure notices that never reached the stream (`knownFail`: failures known before the seal). After a stop the bridge has left its stream, so those notices reach the post only through the seal answer. Boot catch-up runs before the boot settlement and skips a message whose origin is written ahead (kept inflight row, then the injection ring); the blind mutant re-queues every message past its checkpoint, and one checkpoint write may fail (`ckptMissing`, `CkptFails`). After a restart, the boot settler reads the durable row itself. The stream tick (`StreamTick`) only matters without the merge, so only the memory mutant explores it.
+The seal finds the turn by the nonce fixed at its start, not by the live switch: an operator may turn `agy_acp.enabled` off mid-turn (`SwitchOff`, in DesignSwitchOff and SealBySwitch), which only stops new steering. The seal waits until every accepted input is saved and written or dropped.
+
+Steer failure notices are never sent on the stream. They are held per turn (`knownFail`: failures known before the seal) and joined once into the final post body, after any error or prompt-too-long rewrite (design §6.2-3a). The model does not track the body in Design: the held set is the post's notices. The stream mutants track it (`streamed`, `inBody`). In them, the bridge may read a streamed notice into its body (`BridgeReads`), may leave its loop first (on a stop, or after the drain), and a rewrite may replace the body (`ErrorRewrite`, `Rewrites = 1`).
+
+The actor claims an input's source before accepting it (`claimed`). Once the input is saved, it hands the claim to an in-memory terminal (`memTerm`). A restart forgets both. A periodic catch-up scan may take its evidence while a message is queued or only accepted (`CatchSnap`, `ScanRaces = 1`). Later the scan enqueues it (`CatchEnqueue`) unless the existing enqueue guard refuses it. The guard refuses a message still in the mailbox, one whose own turn is in progress, or one named by a live claim or an in-memory terminal. An enqueue that passes runs the message a second time (§6.2-3e). Boot catch-up runs before the boot settlement and skips a message whose origin is written ahead (kept inflight row, then the injection ring); the blind mutant re-queues every message past its checkpoint, and one checkpoint write may fail (`ckptMissing`, `CkptFails`). After a restart, the boot settler reads the durable row itself. The stream tick (`StreamTick`) only matters without the merge, so only the memory mutant explores it.
 
 agy is not fair. It may never answer a prompt or a cancel. It may answer the older prompt first (steer) or finish it normally before the newer one (queueing agy 1.4). Only AgentDesk's own steps are fair: spawn, attach, prompt, cancel, watchdog, boot and settle.
 
@@ -47,29 +51,34 @@ The child runs in its own process group, so on Unix an AgentDesk restart may lea
 
 ## Results
 
-All 21 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts come from the `statechart` command on the same model.
+All 26 configs ran with `scripts/ci/statecharts_tlc.py`. Each config's broken set matches its `expected.tsv` row. State counts come from the `statechart` command on the same model.
 
 | Config | What it fixes | Distinct states | Broken |
 |---|---|---:|---|
-| Design | Resident child in its own group, `session/resume`, steering, a failed steer stays in the turn with a notice, every origin written ahead, steer acceptance sealed by its start nonce before the receipt lookup with the unsent notices in its answer, receipt merges durable origins, unmarked kept row re-marked at admission, boot catch-up skips origins written ahead, orphan sweep, watchdog, incarnation fence | 219,839 | none |
-| DesignLoad | Fallback `session/load` with replay dropped until the load response | 223,090 | none |
-| PerTurn | Alternative: one `agy acp` child per turn | 286,552 | none |
-| LoadLeak | Mutant: load replay is forwarded to the channel | 80,788 | `AtMostOnePost` |
+| Design | Resident child in its own group, `session/resume`, steering, a failed steer stays in the turn with a notice, every origin written ahead, steer acceptance sealed by its start nonce before the receipt lookup, steer notices held until the final body, receipt merges durable origins, unmarked kept row re-marked at admission, boot catch-up skips origins written ahead, source claim handed to an in-memory terminal, orphan sweep, watchdog, incarnation fence | 219,699 | none |
+| DesignLoad | Fallback `session/load` with replay dropped until the load response | 222,950 | none |
+| PerTurn | Alternative: one `agy acp` child per turn | 286,362 | none |
+| LoadLeak | Mutant: load replay is forwarded to the channel | 80,648 | `AtMostOnePost` |
 | RerunSent | Mutant: boot re-queues the inputs of a turn whose prompts were written | first break | `NoDuplicateExecution`, `NoReviveAfterClear` |
-| ClearKeeps | Mutant: `/clear` forgets the id but the live child keeps the old session | 69,322 | `NoPromptToClearedSession` |
-| NoFence | Mutant: responses matched by JSON-RPC id alone across incarnations | 75,497 | `NoForeignResponse` |
-| NoWatchdog | Mutant: no inactivity or cancel deadline | 36,826 | `EveryInputSettles` |
-| SteerEarlyClose | Mutant: the steered first prompt's `end_turn` closes the turn | 68,387 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
-| SteerAfterClose | Mutant: an input is steered into a turn whose last prompt already answered | 58,492 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
+| ClearKeeps | Mutant: `/clear` forgets the id but the live child keeps the old session | 69,212 | `NoPromptToClearedSession` |
+| NoFence | Mutant: responses matched by JSON-RPC id alone across incarnations | 75,357 | `NoForeignResponse` |
+| NoWatchdog | Mutant: no inactivity or cancel deadline | 36,705 | `EveryInputSettles` |
+| SteerEarlyClose | Mutant: the steered first prompt's `end_turn` closes the turn | 68,247 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
+| SteerAfterClose | Mutant: an input is steered into a turn whose last prompt already answered | 58,352 | `AnswerCoversWholeSteer`, `NoAnswerForRefusedSteer` |
 | SteerErrorRequeue | Mutant: a failed steer is put back in the queue | first break | `NoDuplicateExecution`, `NoReviveAfterClear` |
 | SteerErrorSilent | Mutant: the turn post covers a failed steer without its notice | 66,919 | `NoAnswerForRefusedSteer` |
 | ReceiptFromMemory | Mutant: the completion receipt uses only the bridge's in-memory origins | first break | `NoMissingOrigin` |
-| SealOff | Mutant: the receipt is looked up without sealing steer acceptance | 71,259 | `NoMissingOrigin` |
-| LeaderOriginOff | Mutant: the first input's origin is never written ahead | 50,839 | `NoMissingOrigin` |
-| MarkNoRetry | Mutant: a kept row whose mark was not written is never re-marked | 219,839 | `EveryInputSettles` |
-| DesignSwitchOff | Design with the switch turned off mid-turn (no read failure) | 134,118 | none |
+| SealOff | Mutant: the receipt is looked up without sealing steer acceptance | 70,934 | `NoMissingOrigin` |
+| LeaderOriginOff | Mutant: the first input's origin is never written ahead | 59,583 | `NoMissingOrigin` |
+| MarkNoRetry | Mutant: a kept row whose mark was not written is never re-marked | 219,699 | `EveryInputSettles` |
+| DesignSwitchOff | Design with the switch turned off mid-turn (no read failure) | 133,838 | none |
 | SealBySwitch | Mutant: the seal reads the live switch and finds no turn once it is off | first break | `NoMissingOrigin` |
-| SealNoNotice | Mutant: the seal answer carries no notices; the post has only the stream's | 67,963 | `NoAnswerForRefusedSteer` |
+| SealNoNotice | Mutant: notices go on the stream and the bridge reads them; a failure after the bridge left has none | 71,202 | `NoAnswerForRefusedSteer` |
+| NoticeSentSkip | Mutant: notices go on the stream and the final body skips those already sent; one body rewrite | first break | `NoAnswerForRefusedSteer` |
+| NoticePreFormat | Mutant: held notices joined when the bridge leaves its loop, before an error rewrite; one body rewrite | first break | `NoAnswerForRefusedSteer` |
+| DesignScan | Design with a periodic catch-up scan racing a live steer (no read failure) | 214,902 | none |
+| CatchUpNoHandoff | Mutant: no source claim before acceptance | first break | `NoDuplicateExecution` |
+| CatchUpClaimOnly | Mutant: the claim is dropped once saved, with no in-memory terminal | first break | `NoDuplicateExecution` |
 | CatchUpBlind | Mutant: boot catch-up re-queues every message past its checkpoint; one checkpoint write may fail | first break | `NoDuplicateExecution`, `NoReviveAfterClear` |
 | Mutants | Session safety mutants together (source of `agy-acp.chart.mmd`) | first break | the four session safety rules and `NoReviveAfterClear` |
 
@@ -79,7 +88,7 @@ SteerEarlyClose and SteerAfterClose break `NoAnswerForRefusedSteer` too: the tur
 
 ### Reachability
 
-Steering is not vacuous in Design. Eight witness invariants were checked alone against the Design constants (the last against DesignSwitchOff), and each breaks (TLC exit 12):
+Steering is not vacuous in Design. Ten witness invariants were checked alone against the Design constants (`NoSealAfterSwitchOff` against DesignSwitchOff, `NoScanRefused` against DesignScan), and each breaks (TLC exit 12):
 
 - `NoSteeredAnswer`: a steered input is answered by its turn.
 - `NoUncertainCovered`: a failed steer is covered by its turn's post.
@@ -89,6 +98,8 @@ Steering is not vacuous in Design. Eight witness invariants were checked alone a
 - `NoUnsentSteer`: a steer accepted before `!stop` is saved, not written, and covered by the turn's post with its failure notice.
 - `NoRetrySettle`: a kept row without its mark waits on an admission, which marks it again.
 - `NoSealAfterSwitchOff`: after the switch went off, a stop still seals the running ACP turn with its steer written ahead.
+- `NoHeldNoticePosted`: a steer that was never written is covered with its notice by the cancelled turn's post.
+- `NoScanRefused`: a scan took its evidence before a steered input was saved, and the input's in-memory terminal is there when the scan enqueues.
 
 The witnesses are in the module and are not part of any committed config.
 
@@ -102,6 +113,8 @@ Charts:
 - [Receipt chart](agy-acp-receipt.chart.mmd) draws `AgyAcpReceiptFromMemory`.
 - [Seal chart](agy-acp-seal.chart.mmd) draws `AgyAcpSealOff`.
 - [Catch-up chart](agy-acp-catchup.chart.mmd) draws `AgyAcpCatchUpBlind`.
+- [Notice chart](agy-acp-notice.chart.mmd) draws `AgyAcpNoticePreFormat`.
+- [Scan chart](agy-acp-scan.chart.mmd) draws `AgyAcpCatchUpClaimOnly`.
 
 Shortest paths, in the charts' words:
 
@@ -125,7 +138,9 @@ Shortest paths, in the charts' words:
 - **SealOff (`NoMissingOrigin`, 14 steps):** the first prompt open → the second input accepted → `!stop` → the bridge looks up the receipt → the second input's origin is saved → agy answers → the post covers both, the receipt names only the first. This is the 1f review's order. In the design, the lookup waits for the accepted input's save, and an input after the seal waits for the next turn (§6.2-3a).
 - **LeaderOriginOff (`NoMissingOrigin`, 8 steps):** one input → prompt → answer → the receipt has no origin for it, because only its Discord source ids were kept (§6.2-3).
 - **SealBySwitch (`NoMissingOrigin`, 15 steps):** the first prompt open → the second input accepted → `!stop` → the switch turned off → the bridge looks up the receipt unsealed → the second input saved → the post covers both, the receipt names only the first. In the design, the seal finds the turn by its start nonce (§6.2-3a).
-- **SealNoNotice (`NoAnswerForRefusedSteer`, 14 steps):** the first prompt open → the second input accepted and saved → `!stop` → the actor drops its prompt → the bridge looks up the receipt → the cancel post has no notice for the dropped steer. In the design, the seal answer carries that notice into the bridge's body (§6.2-3a).
+- **SealNoNotice / NoticeSentSkip (`NoAnswerForRefusedSteer`, 13 steps):** two prompts open → agy answers the first → the steer prompt fails and its notice goes on the stream → the bridge has already left its loop and posts without it. The same loss happens at the three cancel exits of the stream loop. In the design, notices are held and joined into the final body (§6.2-3a).
+- **NoticePreFormat (`NoAnswerForRefusedSteer`, 15 steps):** two inputs saved → `!stop` → the actor drops the steer → the bridge leaves its loop and joins the held notice → an error or prompt-too-long rewrite replaces the body → the post has no notice. In the design, the join runs once after the last rewrite at each final assembly site (§6.2-3a).
+- **CatchUpNoHandoff / CatchUpClaimOnly (`NoDuplicateExecution`, 12 steps):** two messages queued → a periodic scan takes its evidence → the first runs → the second is claimed, accepted and saved, and its claim is released → the scan enqueues it → it runs again. In the design, the claim becomes an in-memory terminal before it is released, so the enqueue guard refuses (§6.2-3e).
 - **CatchUpBlind:** `NoDuplicateExecution` (14 steps): one input saved, its checkpoint write fails, its prompt goes out → agy exits → restart → catch-up re-queues it → a second `session/prompt`. `NoReviveAfterClear` (8 steps): one input saved → `/clear` → restart → catch-up re-queues it. In the design, catch-up skips origins written ahead in the kept row and the injection ring (§6.2-3e).
 - **MarkNoRetry (liveness):** the receipt lookup cannot read the row → the post goes out and the row stays without its mark → "Row kept for its receipt" forever, so the next input never starts. In the design, the next admission marks the row again and records it (§6.2-3c).
 - **NoWatchdog (liveness):** `!stop` → `session/cancel` → agy never answers → "Prompt open, cancel sent" forever. The design kills the child's own group after the cancel deadline (15 s) or the inactivity deadline (15 min).
@@ -139,6 +154,7 @@ Shortest paths, in the charts' words:
 - The row belonging to another turn in the receipt merge is a slice 2b test, not modelled.
 - The write-ahead save failing is a slice 2b test. In that case the prompt is not written: a steer goes to the queue unsent, a first input fails its turn.
 - A `!stop` between the first input's save and its prompt is a slice 2b test: `UserStop` needs an open prompt.
+- The write-ahead save failing after the claim (no terminal, guard dropped, input back on the normal queue) is a slice 2b test.
 - The automatic retry path and an abnormal bridge `Drop` (design §6.2-3c table) are slice 2b tests, not modelled.
 - The queue drop done by `/clear` is abstracted.
 - Unsolicited output after a turn is dropped by design and not modelled.
@@ -146,4 +162,4 @@ Shortest paths, in the charts' words:
 - Steering of HTTP iMessage inputs is out of scope: they stay queued.
 - Whether agy reflects a steer in its answer cannot be observed at the protocol level.
 
-Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1h/`. These are model results, not Rust test results.
+Raw TLC output is in the lane folder `hl-20260925/i8339/tlc1i/`. These are model results, not Rust test results.

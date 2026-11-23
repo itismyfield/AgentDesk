@@ -29,8 +29,8 @@ stateDiagram-v2
   s0 --> s0: a person sends a message or bridge looks up the receipt, posts the turn's one terminal message and commits
   s0 --> s1: AgentDesk starts agy acp
   s1 --> s2: session/new or agy refuses the stored id#59; session/new
-  s2 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
-  s3 --> s3: the input's origin is written ahead into the turn's inflight row or person runs /clear
+  s2 --> s3: actor claims and accepts the next input (new turn, or steer while a prompt is open)
+  s3 --> s3: the input's origin is written ahead into the inflight row#59; its claim becomes an in-memory terminal or person runs /clear
   s3 --> s4: session/prompt for the saved input (dropped as a failed steer if its turn is stopping)
   s3 --> s5: AgentDesk restarts
   s4 --> s5: AgentDesk restarts
@@ -38,7 +38,7 @@ stateDiagram-v2
   s4 --> s0: agy exits#59; stdout EOF fails open prompts or deadline passes#59; the child's own process group killed
   s6 --> s0: boot kills the old child's process group
   s1 --> s7: agy refuses the stored id#59; session/new
-  s7 --> s3: actor accepts the next input (new turn, or steer while a prompt is open)
+  s7 --> s3: actor claims and accepts the next input (new turn, or steer while a prompt is open)
   s1 --> s8: reattach the stored id (resume, or load)
   s8 --> s8: load replays an old answer
   s4 --> s7: late response from the killed child

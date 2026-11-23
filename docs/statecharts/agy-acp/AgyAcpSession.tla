@@ -16,8 +16,11 @@
 \* receipt it seals the turn's steer acceptance; an input after the seal waits for the next turn.
 \* A lookup that cannot read the row keeps the row; its mark is retried at the next admission.
 \* The seal finds the turn by the path and nonce fixed at its start, so turning the switch off
-\* only stops new steering. The seal answer carries the turn's steer-failure notices that never
-\* reached the stream, and boot catch-up skips an input whose origin was written ahead.
+\* only stops new steering. Boot catch-up skips an input whose origin was written ahead.
+\* Steer notices are held per turn until the final post body is assembled, never sent on the
+\* stream. The actor claims an input before accepting it and hands the claim to an in-memory
+\* terminal once saved, so a periodic catch-up scan that took its evidence earlier still refuses
+\* the enqueue.
 \* The platform kill calls (Unix group signals, Windows taskkill /T and the dcserver job
 \* object) are outside the model: Kill and Crash stand for both, and process tests check them.
 \* Output custody (spool -> writer -> Discord receipt) is abstracted to Settle; its
@@ -37,10 +40,15 @@ CONSTANTS Lifetime,    \* "resident" | "per_turn"
           MarkRetry,   \* "retry": an unmarked kept row is marked again at admission | "off"
           ReadFails,   \* how many receipt lookups may fail to read the row (0 | 1)
           SealScope,   \* "nonce": the seal finds the turn by its start nonce | "switch"
-          NoticeMode,  \* "seal": the seal answer carries unsent/failed notices | "stream"
+          NoticeMode,  \* "hold": notices held until the final body | "stream" | "sent_skip"
+                       \* | "pre_format"
           CatchUpMode, \* "skip": boot catch-up skips an origin written ahead | "blind"
           SwitchOffs,  \* how many times the switch may be turned off mid-turn (0 | 1)
-          CkptFails    \* how many catch-up checkpoint writes may fail (0 | 1)
+          CkptFails,   \* how many catch-up checkpoint writes may fail (0 | 1)
+          ClaimMode,   \* "handoff": claim before accept, in-memory terminal once saved
+                       \* | "claim_only" | "none"
+          Rewrites,    \* how many times the turn's body may be rewritten before its post (0 | 1)
+          ScanRaces    \* how many periodic scans may race a live steer (0 | 1)
 
 Inputs == 1..2
 NoGen == 0
@@ -83,13 +91,20 @@ VARIABLES running,     \* AgentDesk process is up
           ckptMissing, \* per input: written ahead, but the catch-up checkpoint not past it (only the
                        \* blind mutant reads it, so only it tracks it)
           ckptFailLeft,
+          streamed,    \* per input: its notice was sent on the stream (stream mutants)
+          inBody,      \* per input: its notice is in the bridge's body
+          rewriteLeft,
+          snap,        \* per input: a periodic scan took evidence that does not know it
+          claimed,     \* per input: the actor holds its injection claim
+          memTerm,     \* per input: its in-memory injection terminal is noted
+          scanLeft,
           crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft
 
 vars == <<running, proc, attached, stored, nextGen, clearedGen, loading, st, sentCount, turnOf,
           open, done, outcome, posts, refusedIn, cancelReq, cancelSent, zombie, wrongDone,
           badSend, served, steerFailed, noticed, orphan, clearedSent, settlerView, receiptHas,
           looked, held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
-          ckptFailLeft, crashLeft,
+          ckptFailLeft, streamed, inBody, rewriteLeft, snap, claimed, memTerm, scanLeft, crashLeft,
           dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft>>
 
 Queued == {i \in Inputs : st[i] = "queued"}
@@ -108,6 +123,11 @@ InTurn(i) == st[i] \in {"saved", "sent", "unsent"}
 \* The lookup seals the turn in the same step: the actor's seal answer comes first.
 \* The mutant's seal reads the live switch, so once it is off the seal finds no turn.
 SealOn == SealMode = "seal" /\ (SealScope = "nonce" \/ switchOn)
+Streams == NoticeMode \in {"stream", "sent_skip"}
+\* A failure becomes a notice; the stream mutants also send it while the bridge still reads.
+NoteFail(i, L) ==
+    /\ knownFail' = [knownFail EXCEPT ![i] = ~(looked[L] # "no" /\ posts[L] = 0)]
+    /\ streamed' = [streamed EXCEPT ![i] = Streams /\ looked[L] = "no"]
 SealedTurns == IF SealOn THEN {L \in Inputs : looked[L] # "no"} ELSE {}
 \* Its origin is in the turn's durable row: every member's, the first input's only when saved.
 Durable(i) ==
@@ -119,8 +139,10 @@ Closable(L) ==
 sessionVars == <<attached, stored, nextGen, clearedGen, loading>>
 budgetVars == <<crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft, steerFailLeft>>
 receiptVars == <<settlerView, receiptHas>>
+noticeVars == <<streamed, inBody, rewriteLeft>>
+scanVars == <<snap, claimed, memTerm, scanLeft>>
 settleVars == <<looked, held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
-                ckptFailLeft>>
+                ckptFailLeft, noticeVars, scanVars>>
 extraVars == <<steerFailed, noticed, orphan, clearedSent, receiptVars, settleVars>>
 
 Init ==
@@ -141,6 +163,10 @@ Init ==
     /\ held = None /\ marked = FALSE /\ readFailLeft = ReadFails
     /\ switchOn = TRUE /\ switchLeft = SwitchOffs /\ knownFail = [i \in Inputs |-> FALSE]
     /\ ckptMissing = [i \in Inputs |-> FALSE] /\ ckptFailLeft = CkptFails
+    /\ streamed = [i \in Inputs |-> FALSE] /\ inBody = [i \in Inputs |-> FALSE]
+    /\ rewriteLeft = Rewrites /\ snap = [i \in Inputs |-> FALSE]
+    /\ claimed = [i \in Inputs |-> FALSE] /\ memTerm = [i \in Inputs |-> FALSE]
+    /\ scanLeft = ScanRaces
 
 \* A person posts in Discord (or an authenticated iMessage arrives); the mailbox keeps it.
 Arrive(i) ==
@@ -213,10 +239,12 @@ Accept ==
                     /\ done' = [done EXCEPT ![i] = FALSE]
                     /\ looked' = [looked EXCEPT ![i] = "no"]
           /\ st' = [st EXCEPT ![i] = "accepted"]
+          /\ claimed' = [claimed EXCEPT ![i] = ClaimMode # "none"]
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, open, outcome, posts, refusedIn,
                    cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars,
                    steerFailed, noticed, orphan, clearedSent, receiptVars, held, marked,
-                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft,
+                   noticeVars, snap, memTerm, scanLeft>>
 
 \* The accepted input's origin is written ahead into the turn's durable row (the first input's
 \* too). A stop or seal that came meanwhile does not undo it.
@@ -224,10 +252,13 @@ Save ==
     /\ running
     /\ \E i \in Inputs : /\ st[i] = "accepted" /\ st' = [st EXCEPT ![i] = "saved"]
                          /\ ckptMissing' = [ckptMissing EXCEPT ![i] = CatchUpMode = "blind"]
+                         /\ memTerm' = [memTerm EXCEPT ![i] = ClaimMode = "handoff"]
+                         /\ claimed' = [claimed EXCEPT ![i] = FALSE]
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
-                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptFailLeft>>
+                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptFailLeft,
+                   noticeVars, snap, scanLeft>>
 
 \* The actor advances the catch-up checkpoint (the write may fail) and writes the saved input's
 \* session/prompt. A steer whose turn is stopping or sealed is not written: it stays in the turn
@@ -242,7 +273,7 @@ Wire ==
            /\ IF drop
              THEN /\ st' = [st EXCEPT ![i] = "unsent"]
                   /\ steerFailed' = [steerFailed EXCEPT ![i] = TRUE]
-                  /\ knownFail' = [knownFail EXCEPT ![i] = ~(looked[L] # "no" /\ posts[L] = 0)]
+                  /\ NoteFail(i, L)
                   /\ UNCHANGED <<sentCount, open, badSend, served>>
              ELSE /\ proc = "up" /\ attached # NoGen /\ ~loading
                   /\ st' = [st EXCEPT ![i] = "sent"]
@@ -250,10 +281,11 @@ Wire ==
                   /\ open' = open \cup {i}
                   /\ badSend' = (badSend \/ attached <= clearedGen)
                   /\ served' = TRUE
-                  /\ UNCHANGED <<steerFailed, knownFail>>
+                  /\ UNCHANGED <<steerFailed, knownFail, streamed>>
     /\ UNCHANGED <<running, proc, sessionVars, turnOf, done, outcome, posts, refusedIn, cancelReq,
                    cancelSent, zombie, wrongDone, budgetVars, noticed, orphan, clearedSent,
-                   receiptVars, looked, held, marked, readFailLeft, switchOn, switchLeft>>
+                   receiptVars, looked, held, marked, readFailLeft, switchOn, switchLeft, inBody,
+                   rewriteLeft, scanVars>>
 
 \* The bridge's stream tick reads the durable row and learns an origin written ahead. Not fair:
 \* a stop, /clear or restart may come before it. With the merge the tick cannot change a receipt,
@@ -304,15 +336,14 @@ SteerErrored ==
               /\ st' = IF requeue THEN [st EXCEPT ![i] = "queued"] ELSE st
               /\ refusedIn' = IF requeue THEN [refusedIn EXCEPT ![i] = L] ELSE refusedIn
               /\ steerFailed' = IF requeue THEN steerFailed ELSE [steerFailed EXCEPT ![i] = TRUE]
-              /\ knownFail' = IF requeue THEN knownFail
-                               ELSE [knownFail EXCEPT ![i] = ~(looked[L] # "no" /\ posts[L] = 0)]
+              /\ IF requeue THEN UNCHANGED <<knownFail, streamed>> ELSE NoteFail(i, L)
               /\ Finish(L, L \notin OpenTurns(rest, t2))
               /\ cancelReq' = EndCancel(rest) /\ cancelSent' = EndCancelSent(rest)
     /\ steerFailLeft' = steerFailLeft - 1
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, posts, zombie, wrongDone, badSend,
                    served, noticed, orphan, clearedSent, receiptVars, looked, held, marked,
-                   readFailLeft, switchOn, switchLeft, ckptMissing, ckptFailLeft, crashLeft,
-                   dieLeft, stopLeft, clearLeft, refuseLeft>>
+                   readFailLeft, switchOn, switchLeft, ckptMissing, ckptFailLeft, inBody,
+                   rewriteLeft, scanVars, crashLeft, dieLeft, stopLeft, clearLeft, refuseLeft>>
 
 \* Close every turn that still has an open prompt with the given outcome.
 FailOpenTurns(kind) ==
@@ -414,15 +445,20 @@ SealWaits(L) == SealOn => \A i \in Inputs : turnOf[i] = L => i \notin Saving
 EarlyLookup(L) ==
     /\ running /\ L \in Leaders /\ posts[L] = 0 /\ ~done[L] /\ cancelReq
     /\ L \in OpenTurns(open, turnOf) /\ looked[L] = "no" /\ LookupNow(L) /\ SealWaits(L)
+    /\ inBody' = IF NoticeMode = "pre_format"
+                   THEN [i \in Inputs |-> inBody[i] \/ (turnOf[i] = L /\ knownFail[i])]
+                   ELSE inBody
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, settlerView, held,
-                   marked, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   marked, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft, streamed,
+                   rewriteLeft, scanVars>>
 
 \* The writer posts the turn's recorded disposition once, after the seal and lookup when no stop
 \* already did them; that post covers every member, and carries one notice line for each member
-\* whose steer failed (the mutant leaves it out). After a stop the bridge has left its stream, so
-\* the notices come from the seal answer; the stream mutant only has errors of written prompts.
+\* whose steer failed (the mutant leaves it out). The notices are held per turn and joined once
+\* at the final body, after any error rewrite (design). The mutants use only what the bridge read
+\* from the stream, skip a notice once it was sent, or join before the final rewrite.
 \* A failed lookup keeps the row: its mark may or may not be written.
 Settle(L) ==
     /\ running /\ L \in Leaders /\ done[L] /\ posts[L] = 0
@@ -431,9 +467,10 @@ Settle(L) ==
     /\ noticed' = [i \in Inputs |->
                      IF turnOf[i] # L THEN noticed[i]
                      ELSE IF SteerMode = "error_silent" THEN FALSE
-                     ELSE IF looked[L] = "no" THEN steerFailed[i]
-                     ELSE IF NoticeMode = "seal" THEN knownFail[i]
-                     ELSE knownFail[i] /\ sentCount[i] > 0]
+                     ELSE CASE NoticeMode = "hold" -> knownFail[i]
+                            [] NoticeMode = "stream" -> inBody[i]
+                            [] NoticeMode = "sent_skip" -> inBody[i] \/ (knownFail[i] /\ ~streamed[i])
+                            [] OTHER -> IF looked[L] = "no" THEN knownFail[i] ELSE inBody[i]]
     /\ \/ /\ looked[L] = "no" /\ SealWaits(L) /\ LookupNow(L)
           /\ IF looked'[L] = "fail" THEN held' = L /\ marked' \in BOOLEAN
              ELSE UNCHANGED <<held, marked>>
@@ -442,7 +479,8 @@ Settle(L) ==
           /\ UNCHANGED <<looked, receiptHas, readFailLeft>>
     /\ UNCHANGED <<running, proc, sessionVars, sentCount, turnOf, open, done, outcome, refusedIn,
                    cancelReq, cancelSent, zombie, wrongDone, badSend, served, budgetVars,
-                   steerFailed, orphan, clearedSent, settlerView, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   steerFailed, orphan, clearedSent, settlerView, switchOn, switchLeft, knownFail,
+                   ckptMissing, ckptFailLeft, noticeVars, scanVars>>
 
 \* The next admission records a kept row from its durable origins and frees the channel. An
 \* unmarked row is marked again first (the mutant waits for a mark that never comes).
@@ -454,7 +492,8 @@ AdmitSettle ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, settlerView, looked,
-                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft,
+                   noticeVars, scanVars>>
 
 \* AgentDesk restart: memory is lost. The child has its own process group, so it may outlive
 \* AgentDesk as an orphan until boot sweeps it. An input written ahead but not yet on the wire
@@ -475,7 +514,11 @@ Crash ==
     /\ UNCHANGED <<stored, nextGen, clearedGen, sentCount, done, outcome, posts,
                    refusedIn, wrongDone, badSend, served, dieLeft, stopLeft, clearLeft, refuseLeft,
                    steerFailLeft, steerFailed, noticed, clearedSent, receiptHas, held, marked,
-                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   readFailLeft, switchOn, switchLeft, knownFail, ckptMissing, ckptFailLeft,
+                   rewriteLeft, scanLeft>>
+    /\ streamed' = [i \in Inputs |-> FALSE] /\ inBody' = [i \in Inputs |-> FALSE]
+    /\ snap' = [i \in Inputs |-> FALSE] /\ claimed' = [i \in Inputs |-> FALSE]
+    /\ memTerm' = [i \in Inputs |-> FALSE]
 
 \* Boot sweeps the recorded child group of the previous AgentDesk before any new spawn.
 SweepOrphan ==
@@ -512,7 +555,7 @@ Boot ==
     /\ UNCHANGED <<proc, sessionVars, sentCount, open, posts, refusedIn, cancelReq, cancelSent,
                    zombie, wrongDone, badSend, served, budgetVars, steerFailed, noticed, orphan,
                    clearedSent, looked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
-                   ckptFailLeft>>
+                   ckptFailLeft, noticeVars, scanVars>>
 
 \* An operator turns agy_acp.enabled off; turns already on the ACP path finish there.
 SwitchOff ==
@@ -521,14 +564,64 @@ SwitchOff ==
     /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
                    refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
                    budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
-                   held, marked, readFailLeft, knownFail, ckptMissing, ckptFailLeft>>
+                   held, marked, readFailLeft, knownFail, ckptMissing, ckptFailLeft, noticeVars,
+                   scanVars>>
+
+\* The bridge reads a notice the actor sent on the stream into its body (stream mutants).
+BridgeReads(i) ==
+    /\ Streams /\ running /\ streamed[i] /\ ~inBody[i] /\ turnOf[i] # None
+    /\ looked[turnOf[i]] = "no"
+    /\ inBody' = [inBody EXCEPT ![i] = TRUE]
+    /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
+                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
+                   ckptFailLeft, streamed, rewriteLeft, scanVars>>
+
+\* An error or prompt-too-long rewrite replaces the turn's body before its post (mutants only:
+\* the design joins its held notices after every rewrite).
+ErrorRewrite(L) ==
+    /\ NoticeMode \in {"sent_skip", "pre_format"} /\ running /\ rewriteLeft > 0
+    /\ L \in Leaders /\ posts[L] = 0
+    /\ rewriteLeft' = rewriteLeft - 1
+    /\ inBody' = [i \in Inputs |-> IF turnOf[i] = L THEN FALSE ELSE inBody[i]]
+    /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
+                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
+                   ckptFailLeft, streamed, scanVars>>
+
+\* A periodic catch-up scan takes its evidence while a message is still in intake or only
+\* accepted: neither the mailbox view it later checks nor the ring knows it yet.
+CatchSnap(i) ==
+    /\ running /\ scanLeft > 0 /\ st[i] \in {"queued", "accepted"} /\ ~snap[i]
+    /\ scanLeft' = scanLeft - 1 /\ snap' = [snap EXCEPT ![i] = TRUE]
+    /\ UNCHANGED <<running, proc, sessionVars, st, sentCount, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
+                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
+                   ckptFailLeft, noticeVars, claimed, memTerm>>
+
+\* The scan resumes and enqueues the message unless the final enqueue guard refuses it: still in
+\* the mailbox, its own turn is in progress, or a live claim or an in-memory terminal names it. An enqueue that passes runs
+\* the message again.
+CatchEnqueue(i) ==
+    /\ running /\ snap[i] /\ snap' = [snap EXCEPT ![i] = FALSE]
+    /\ LET refused == st[i] = "queued" \/ turnOf[i] = i \/ claimed[i] \/ memTerm[i]
+       IN sentCount' = IF refused THEN sentCount ELSE [sentCount EXCEPT ![i] = sentCount[i] + 1]
+    /\ UNCHANGED <<running, proc, sessionVars, st, turnOf, open, done, outcome, posts,
+                   refusedIn, cancelReq, cancelSent, zombie, wrongDone, badSend, served,
+                   budgetVars, steerFailed, noticed, orphan, clearedSent, receiptVars, looked,
+                   held, marked, readFailLeft, switchOn, switchLeft, knownFail, ckptMissing,
+                   ckptFailLeft, noticeVars, claimed, memTerm, scanLeft>>
 
 AllSettled == \A i \in Inputs : st[i] = "done"
 Rest == AllSettled /\ UNCHANGED vars
 
 Next ==
     \/ \E i \in Inputs : Arrive(i) \/ ReplayOld(i) \/ Settle(i) \/ StreamTick(i)
-                        \/ EarlyLookup(i)
+                        \/ EarlyLookup(i) \/ BridgeReads(i) \/ ErrorRewrite(i) \/ CatchSnap(i)
+                        \/ CatchEnqueue(i)
     \/ Spawn \/ NewSession \/ Reattach \/ ReattachRefused \/ LoadAnswered \/ AdmitSettle
     \/ Accept \/ Save \/ Wire \/ AgyResponds \/ SteerErrored \/ AgyDies \/ WatchdogKill \/ ZombieResponse
     \/ UserStop \/ SendCancel \/ Clear \/ SwitchOff \/ CloseAfterTurn \/ Crash \/ SweepOrphan \/ Boot \/ Rest
@@ -540,7 +633,7 @@ Fairness ==
     /\ WF_vars(Accept) /\ WF_vars(Save) /\ WF_vars(Wire) /\ WF_vars(SendCancel) /\ WF_vars(WatchdogKill)
     /\ WF_vars(ZombieResponse) /\ WF_vars(Boot) /\ WF_vars(CloseAfterTurn)
     /\ WF_vars(SweepOrphan) /\ WF_vars(AdmitSettle)
-    /\ \A i \in Inputs : WF_vars(Settle(i))
+    /\ \A i \in Inputs : WF_vars(Settle(i)) /\ WF_vars(CatchEnqueue(i))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -584,6 +677,13 @@ NoCrashAfterSave == ~\E i \in Inputs : ~running /\ st[i] = "unsent" /\ ~steerFai
 NoUnsentSteer == ~\E i \in Inputs : steerFailed[i] /\ sentCount[i] = 0 /\ posts[i] = 1
 NoRetrySettle == ~(held # None /\ ~marked /\ Queued # {})
 \* Witness: after the switch went off, a stop still seals the running ACP turn and its steer.
+\* Witnesses: a periodic scan's enqueue refused by the handed-off terminal, and a steer notice
+\* posted after the bridge left on a stop.
+NoScanRefused ==
+    ~\E i \in Inputs : snap[i] /\ memTerm[i] /\ st[i] # "queued" /\ turnOf[i] \notin {None, i}
+NoHeldNoticePosted ==
+    ~\E i \in Inputs : noticed[i] /\ steerFailed[i] /\ turnOf[i] # None
+                     /\ outcome[turnOf[i]] = "cancelled" /\ sentCount[i] = 0
 NoSealAfterSwitchOff ==
     ~\E L, i \in Inputs : ~switchOn /\ looked[L] # "no" /\ turnOf[i] = L /\ i # L /\ Durable(i)
 \* Liveness: every accepted input is eventually covered by one terminal post
