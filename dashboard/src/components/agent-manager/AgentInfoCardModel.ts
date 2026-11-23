@@ -1,4 +1,17 @@
 import type { CronJob, DiscordBinding } from "../../api/client";
+import type { DispatchedSession } from "../../types";
+
+// Same live set as home's `classifyAgents`; aborted and disconnected sessions are finished.
+const LIVE_SESSION_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
+const TURN_STATUSES = new Set(["turn_active", "working"]);
+
+export const isTurnSession = (session: DispatchedSession) => TURN_STATUSES.has(session.status);
+
+/** The agent's live sessions and how many finished ones were left out. */
+export function splitLinkedSessions(sessions: DispatchedSession[]): { live: DispatchedSession[]; closed: number } {
+  const live = sessions.filter((session) => LIVE_SESSION_STATUSES.has(session.status));
+  return { live, closed: sessions.length - live.length };
+}
 
 export function formatSchedule(schedule: CronJob["schedule"], isKo: boolean): string {
   if (schedule.kind === "every" && schedule.everyMs) {

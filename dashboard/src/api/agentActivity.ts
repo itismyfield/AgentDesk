@@ -254,10 +254,11 @@ export interface DiscordChannelInfo {
   type?: number | null;
 }
 
+/** Channels outside the role map answer 403; every caller falls back to the raw id, so no toast. */
 export async function getDiscordChannelInfo(
   channelId: string,
 ): Promise<DiscordChannelInfo> {
-  return request(`/api/discord/channels/${channelId}`);
+  return request(`/api/discord/channels/${channelId}`, { suppressErrorToast: true });
 }
 
 export interface GitHubRepoOption {

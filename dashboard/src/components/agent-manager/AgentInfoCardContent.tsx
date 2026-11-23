@@ -19,7 +19,7 @@ import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
 import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
-import { inferBindingSource } from "./AgentInfoCardModel";
+import { inferBindingSource, isTurnSession, splitLinkedSessions } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
 import { AgentStatusBadge, agentSecondaryLine } from "./AgentCard";
 
@@ -53,6 +53,7 @@ export function AgentInfoCardContent({
   const [loadingSkills, setLoadingSkills] = useState(true);
   const [loadingClaudeSessions, setLoadingClaudeSessions] = useState(true);
   const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
+  const [closedSessionCount, setClosedSessionCount] = useState(0);
   const [showSharedSkills, setShowSharedSkills] = useState(false);
   const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
   const [discordChannelInfoById, setDiscordChannelInfoById] = useState<Record<string, api.DiscordChannelInfo>>({});
@@ -201,7 +202,10 @@ export function AgentInfoCardContent({
     api
       .getAgentDispatchedSessions(agent.id)
       .then((rows) => {
-        setClaudeSessions(rows);
+        // Finished sessions run into the hundreds, so only live ones are listed (and looked up on Discord).
+        const { live, closed } = splitLinkedSessions(rows);
+        setClaudeSessions(live);
+        setClosedSessionCount(closed);
         setLoadingClaudeSessions(false);
       })
       .catch(() => setLoadingClaudeSessions(false));
@@ -294,7 +298,7 @@ export function AgentInfoCardContent({
   }, [claudeSessions, discordBindings]);
 
   const sourceLabel = agent.activity_source === "agentdesk" ? tr("AgentDesk 작업", "AgentDesk") : null;
-  const workingLinkedSessions = claudeSessions.filter((session) => session.status === "working");
+  const workingLinkedSessions = claudeSessions.filter(isTurnSession);
   const currentWorkSummary = getAgentWorkSummary(agent, { linkedSessions: workingLinkedSessions });
   const currentWorkElapsedMs = getAgentWorkElapsedMs(agent, workingLinkedSessions);
   const warnings = getAgentWarnings(agent, {
@@ -451,6 +455,7 @@ export function AgentInfoCardContent({
         discordBindings={discordBindings}
         roleMapBindings={roleMapBindings}
         claudeSessions={claudeSessions}
+        closedSessionCount={closedSessionCount}
         loadingClaudeSessions={loadingClaudeSessions}
         sourceOfTruthRows={sourceOfTruthRows}
         resolveDiscordChannelInfo={resolveDiscordChannelInfo}

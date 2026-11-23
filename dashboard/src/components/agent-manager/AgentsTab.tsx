@@ -50,13 +50,14 @@ interface AgentsTabProps {
 type AgentViewMode = "grid" | "list";
 const STATUS_KEYS = ["all", "working", "idle", "break", "offline"] as const;
 
+/** Top skills per agent by name; the description can be a long policy text. */
 function buildTopSkillMap(rows: Awaited<ReturnType<typeof getSkillRanking>>["byAgent"]) {
   const byAgent = new Map<string, string[]>();
   for (const row of rows) {
     const key = row.agent_role_id;
     const existing = byAgent.get(key) ?? [];
-    if (!existing.includes(row.skill_desc_ko)) {
-      existing.push(row.skill_desc_ko);
+    if (!existing.includes(row.skill_name)) {
+      existing.push(row.skill_name);
       byAgent.set(key, existing.slice(0, 3));
     }
   }

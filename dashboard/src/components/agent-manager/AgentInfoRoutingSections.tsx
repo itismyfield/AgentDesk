@@ -11,7 +11,7 @@ import {
   SectionEmpty,
   SectionLoading,
 } from "./AgentInfoCardSections";
-import { bindingSourceLabel, inferBindingSource } from "./AgentInfoCardModel";
+import { bindingSourceLabel, inferBindingSource, isTurnSession } from "./AgentInfoCardModel";
 import {
   describeDiscordBinding,
   describeDiscordTarget,
@@ -29,7 +29,9 @@ interface AgentInfoRoutingSectionsProps {
   tr: Translator;
   discordBindings: DiscordBinding[];
   roleMapBindings: DiscordBinding[];
+  /** Live sessions only; finished ones are counted in `closedSessionCount`. */
   claudeSessions: DispatchedSession[];
+  closedSessionCount: number;
   loadingClaudeSessions: boolean;
   sourceOfTruthRows: SourceOfTruthRow[];
   resolveDiscordChannelInfo: (channelId: string | null | undefined) => api.DiscordChannelInfo | null;
@@ -45,6 +47,7 @@ export function AgentInfoRoutingSections({
   discordBindings,
   roleMapBindings,
   claudeSessions,
+  closedSessionCount,
   loadingClaudeSessions,
   sourceOfTruthRows,
   resolveDiscordChannelInfo,
@@ -128,7 +131,7 @@ export function AgentInfoRoutingSections({
         {loadingClaudeSessions ? (
           <SectionLoading label={tr("불러오는 중...", "Loading...")} />
         ) : claudeSessions.length === 0 ? (
-          <SectionEmpty>{tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}</SectionEmpty>
+          <SectionEmpty>{tr("지금 열린 세션이 없어요", "No open sessions right now")}</SectionEmpty>
         ) : (
           <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
             {claudeSessions.map((session) => {
@@ -139,7 +142,7 @@ export function AgentInfoRoutingSections({
                 sessionChannelInfo,
                 resolveDiscordParentInfo(sessionChannelInfo),
               );
-              const working = session.status === "working";
+              const working = isTurnSession(session);
 
               return (
                 <li key={session.id} className={rowClass}>
@@ -163,6 +166,9 @@ export function AgentInfoRoutingSections({
             })}
           </ul>
         )}
+        {!loadingClaudeSessions && closedSessionCount > 0 ? (
+          <p className="m-0 text-xs leading-5 text-(--fg-muted)">{tr(`끝난 세션 ${closedSessionCount}개`, `${closedSessionCount} finished sessions`)}</p>
+        ) : null}
       </AgentDetailSection>
     </>
   );
