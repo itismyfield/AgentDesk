@@ -80,14 +80,7 @@ async fn prepare_before_reap(provider: &ProviderKind) -> BootPreparation {
     let Some(root) = crate::services::discord::runtime_store::runtime_root() else {
         return BootPreparation::Unconfigured;
     };
-    let owned = provider.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        super::boot_custody::preserve_native_before_boot_reap(&root, &owned)
-    })
-    .await
-    .map_err(|error| error.to_string())
-    .and_then(|prepared| prepared);
-    match prepared {
+    match super::boot_custody::preserve_native_before_boot_reap(&root, provider) {
         Ok(true) => BootPreparation::NativePrepared,
         Ok(false) => BootPreparation::Unconfigured,
         Err(error) => {
