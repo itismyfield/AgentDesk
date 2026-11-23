@@ -169,6 +169,7 @@ async fn run_replacement_case(case: ReplacementCase, name: &str) {
     if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
         return;
     }
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _live = crate::config_live_reload::test_live_guard(env_lock);
     let (root, _root_env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();

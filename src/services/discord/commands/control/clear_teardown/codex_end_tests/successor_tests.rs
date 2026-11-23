@@ -10,6 +10,7 @@ mod reader_retirement_tests;
 fn isolated(test: &str) -> bool {
     const CHILD: &str = "ADK_CODEX_SUCCESSOR_CHILD";
     if std::env::var_os(CHILD).is_some() {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         return true;
     }
     let _spawn_environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -972,7 +973,6 @@ fn actual_warm_kill_fallback_resumes_without_seal_and_preserves_managed_turn() {
     )) {
         return;
     }
-    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     let fixture = Fixture::new();
     let sessions = fixture.logs.path().join("sessions");
     std::fs::create_dir(&sessions).unwrap();
