@@ -194,9 +194,12 @@ fn a_tagged_busy_frame_reads_as_its_untagged_one() {
         assert_eq!(read, ("ann", "7", Mode::Inject, " same"), "{frame}");
         assert!(opens_inject(&frame) && !relayed(&frame), "{frame}");
     }
-    for (typed, new_turn) in [("", true), (" · deadbeef", true), (" · beef", false)] {
+    // Only the untagged header is the idle relay's; a tag nobody recorded is no relay evidence.
+    for (typed, new_turn) in [("", true), (" · deadbeef", false), (" · beef", false)] {
         let typed = format!("[User: bob (ID: 8){typed}] hi");
         assert!(parse(&typed).is_none() && !opens_inject(&typed), "{typed}");
         assert_eq!(relayed(&typed), new_turn, "{typed}");
     }
+    let quoted = "이 형식을 검토해줘: [User: bob (ID: 8) · deadbeef] hi";
+    assert!(!opens_inject(quoted) && !relayed(quoted), "{quoted}");
 }
