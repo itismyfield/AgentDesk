@@ -244,7 +244,18 @@ impl Registry {
         }
     }
     pub(crate) fn runtime() -> Result<Self, String> {
-        Ok(Self::at(path()?))
+        Ok(Self::shared(path()?))
+    }
+    /// The process's one handle for `path`: callers share its parse cache, unconfirmed publication
+    /// and in-process lock instead of reparsing and re-encoding the whole file on every call.
+    fn shared(path: PathBuf) -> Self {
+        static SHARED: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Registry>>> =
+            std::sync::LazyLock::new(Default::default);
+        let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        shared
+            .entry(path.clone())
+            .or_insert_with(|| Self::at(path))
+            .clone()
     }
     fn transaction<T>(
         &self,
@@ -910,7 +921,7 @@ pub(super) fn update_migrated<T>(
     path: &Path,
     apply: impl FnOnce(&mut Store) -> Result<T, String>,
 ) -> Result<T, String> {
-    Registry::at(path.to_path_buf()).transaction(|state| {
+    Registry::shared(path.to_path_buf()).transaction(|state| {
         let owned = owned(state);
         let before: Vec<String> = owned
             .iter()
