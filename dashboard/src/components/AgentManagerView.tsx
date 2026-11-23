@@ -14,12 +14,11 @@ import DepartmentsTab from "./agent-manager/DepartmentsTab";
 import AgentFormModal from "./agent-manager/AgentFormModal";
 import AgentSetupWizard from "./agent-manager/AgentSetupWizard";
 import DepartmentFormModal from "./agent-manager/DepartmentFormModal";
-import { isListedAgent } from "./agent-manager/agent-list-controls";
+import { isListedAgent, isStandIn } from "./agent-manager/agent-list-controls";
 import {
   type AgentManagerTab,
   useAgentManagerController,
 } from "./agent-manager/useAgentManagerController";
-import { SurfaceActionButton } from "./common/SurfacePrimitives";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 const TAB_KEYS: AgentManagerTab[] = ["agents", "departments", "skills"];
@@ -84,6 +83,7 @@ export default function AgentManagerView({
     openDuplicateAgent,
     openEditAgent,
     openEditDept,
+    reorderFailed,
     reorderSaving,
     saving,
     search,
@@ -156,7 +156,17 @@ export default function AgentManagerView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoOpenCreate]);
 
+  // A skill's agent opens over the agents tab; back (or closing it) returns to the skills tab.
+  const openAgentFromSkills = (agentId: string) => {
+    const params = new URLSearchParams(searchParams);
+    params.delete("tab");
+    params.set("agent", agentId);
+    setSearchParams(params, { state: { agentOpened: true } });
+  };
+
   const listedCount = entries.filter((entry) => isListedAgent(entry.agent, includeTests)).length;
+  const realEntries = entries.filter((entry) => !isStandIn(entry.agent));
+  const deptMembers = realEntries.filter((entry) => isListedAgent(entry.agent, includeTests));
   // Aborted sessions are finished work, not something to attach to an agent.
   const unlinkedSessions = sessions?.filter((session) => session.status !== "aborted");
   const header = (
@@ -230,24 +240,19 @@ export default function AgentManagerView({
       ) : tab === "skills" ? (
         <div id="agents-skills-tab-panel" role="tabpanel" aria-label={tr("스킬", "Skills")}>
           <Suspense fallback={null}>
-            <SkillCatalogView embedded />
+            <SkillCatalogView tr={tr} locale={locale} roster={realEntries} onOpenAgent={openAgentFromSkills} />
           </Suspense>
         </div>
       ) : (
-        <div id="agents-departments-tab-panel" role="tabpanel" aria-label={tr("부서", "Departments")} className="space-y-3">
-          <div className="flex justify-end">
-            <SurfaceActionButton tone="neutral" compact onClick={openCreateDept}>
-              + {tr("부서 추가", "Add department")}
-            </SurfaceActionButton>
-          </div>
+        <div id="agents-departments-tab-panel" role="tabpanel" aria-label={tr("부서", "Departments")}>
           <DepartmentsTab
             tr={tr}
             locale={locale}
-            agents={agents}
-            departments={departments}
+            members={deptMembers}
             deptOrder={deptOrder}
             deptOrderDirty={deptOrderDirty}
             reorderSaving={reorderSaving}
+            reorderFailed={reorderFailed}
             draggingDeptId={draggingDeptId}
             dragOverDeptId={dragOverDeptId}
             dragOverPosition={dragOverPosition}
@@ -255,6 +260,7 @@ export default function AgentManagerView({
             onCancelOrder={handleCancelOrder}
             onMoveDept={handleMoveDept}
             onEditDept={openEditDept}
+            onCreateDept={openCreateDept}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
             onDrop={handleDrop}
@@ -299,7 +305,7 @@ export default function AgentManagerView({
           locale={locale}
           tr={tr}
           department={deptModal.editDept}
-          departments={departments}
+          memberCount={deptModal.editDept ? agents.filter((agent) => agent.department_id === deptModal.editDept?.id).length : 0}
           onSave={() => {
             setDeptModal({ open: false, editDept: null });
             onDepartmentsChange();

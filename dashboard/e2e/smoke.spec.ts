@@ -2058,7 +2058,7 @@ test.describe("Dashboard smoke tests", () => {
 
     await sections.getByRole("tab", { name: /^(부서|Departments)/ }).click();
     await expect(page.getByTestId("agents-departments-tab")).toBeVisible();
-    await expect(page.getByTestId("agents-department-card-dept-platform")).toBeVisible();
+    await expect(page.getByTestId("agents-department-row-dept-platform")).toBeVisible();
     await expect(page).toHaveURL(/\/agents\?tab=departments$/);
     expect(await addButton.boundingBox()).toEqual(before);
 

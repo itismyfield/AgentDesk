@@ -67,11 +67,24 @@ const PROVIDERS = ["claude", "codex", "gemini", "opencode"].map((id) => ({
 
 const SKILL_RANKING = {
   window: "30d",
-  overall: [],
+  overall: [
+    { skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 6, last_used_at: NOW - 3_600_000 },
+    { skill_name: "relay-audit", skill_desc_ko: "Relay audit", calls: 2, last_used_at: NOW - 7_200_000 },
+  ],
   byAgent: [
     { agent_role_id: "adk-dashboard", agent_name: "Ada Dashboard", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 4, last_used_at: NOW - 3_600_000 },
+    { agent_role_id: "project-agentdesk", agent_name: "Luna Ops", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 2, last_used_at: NOW - 3_600_000 },
   ],
 };
+
+const SKILL_CATALOG = [
+  { name: "agents-hub", description: "Agents **hub** for the roster", description_ko: "에이전트 **허브**", total_calls: 40, last_used_at: NOW - 3_600_000 },
+  { name: "relay-audit", description: "Watch relay delivery and recover gaps", description_ko: "릴레이 전달을 지켜보고 빈 곳을 복구", total_calls: 9, last_used_at: NOW - 7_200_000 },
+  { name: "family-profile-probe", description: "Keep family profiles fresh", description_ko: "가족 프로필을 새로 유지", total_calls: 0, last_used_at: null },
+];
+
+/** Daily calls on the last UTC dates, as the server sends them (days without calls are left out). */
+const skillTrend = () => [5, 0, 7].flatMap((count, back) => (count ? [{ day: new Date(Date.now() - back * 86_400_000).toISOString().slice(0, 10), count }] : []));
 
 async function mockShell(page: Page, theme: "dark" | "light" = "dark") {
   // Fixture tests must never fall through to a real operator API.
@@ -120,6 +133,8 @@ async function mockShell(page: Page, theme: "dark" | "light" = "dark") {
   await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
   await page.route(/\/api\/kanban-repos$/, (route) => route.fulfill({ json: { repos: [] } }));
   await page.route(/\/api\/skills\/ranking\?/, (route) => route.fulfill({ json: SKILL_RANKING }));
+  await page.route(/\/api\/skills\/catalog$/, (route) => route.fulfill({ json: { catalog: SKILL_CATALOG } }));
+  await page.route(/\/api\/skills-trend\?days=30$/, (route) => route.fulfill({ json: { trend: skillTrend() } }));
   await page.route(/\/api\/agents\/[^/]+\/cron$/, (route) => route.fulfill({ json: { jobs: [] } }));
   await page.route(/\/api\/agents\/[^/]+\/skills$/, (route) => route.fulfill({ json: { skills: [{ name: "agents-hub", description: "Agents hub" }], sharedSkills: [], totalCount: 1 } }));
   await page.route(/\/api\/agents\/[^/]+\/dispatched-sessions$/, (route) => route.fulfill({ json: { sessions: [] } }));
@@ -364,6 +379,124 @@ test.describe("Shared agent detail overlay", () => {
   });
 });
 
+test.describe("Departments and skills tabs", () => {
+  /** Departments served from a list the reorder route rewrites, as the server does. */
+  async function mockDepartments(page: Page) {
+    let current = DEPARTMENTS;
+    const writes: Array<{ method: string; url: string; body: unknown }> = [];
+    await page.route(/\/api\/departments(?:\?.*)?$/, (route) => route.fulfill({ json: { departments: current } }));
+    await page.route(/\/api\/departments\/[^/?]+$/, (route) => {
+      const request = route.request();
+      writes.push({ method: request.method(), url: request.url().replace(/^.*\/api/, "/api"), body: request.postDataJSON() });
+      if (request.url().endsWith("/reorder")) {
+        const order = (request.postDataJSON() as { order: Array<{ id: string; sort_order: number }> }).order;
+        current = order.map(({ id, sort_order }) => ({ ...DEPARTMENTS.find((dept) => dept.id === id)!, sort_order }));
+      }
+      return route.fulfill({ json: { ok: true } });
+    });
+    return writes;
+  }
+
+  test("departments: one row each, arrows reorder and the order saves through the reorder route", async ({ page }, testInfo) => {
+    await mockShell(page);
+    const writes = await mockDepartments(page);
+    await page.goto("/agents?tab=departments");
+    const rows = page.getByTestId("agents-departments").locator("li");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.first()).toContainText("플랫폼");
+    await expect(rows.first()).toContainText("dept-platform · 순서 1");
+    await expect(page.getByTestId("agents-departments-order-bar")).toHaveCount(0);
+
+    if (testInfo.project.name === "desktop") {
+      // Dragging a row onto the top half of another drops it before that row; undo puts the server order back.
+      await rows.nth(1).dragTo(rows.first(), { targetPosition: { x: 40, y: 4 } });
+      await expect(rows.first()).toContainText("프로덕트");
+      await page.getByRole("button", { name: "되돌리기" }).click();
+      await expect(rows.first()).toContainText("플랫폼");
+    }
+    await page.getByRole("button", { name: "플랫폼 아래로" }).click();
+    await expect(rows.first()).toContainText("프로덕트");
+    // At the bottom the down arrow is off, so the focus moves to the same row's up arrow.
+    await expect(page.getByRole("button", { name: "플랫폼 위로" })).toBeFocused();
+    const bar = page.getByTestId("agents-departments-order-bar");
+    await bar.getByRole("button", { name: "순서 저장" }).click();
+    await expect(bar).toHaveCount(0);
+    await expect(rows.first()).toContainText("프로덕트");
+    expect(writes).toEqual([{
+      method: "PATCH",
+      url: "/api/departments/reorder",
+      body: { order: [{ id: "dept-product", sort_order: 0 }, { id: "dept-platform", sort_order: 1 }] },
+    }]);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("departments: the edit window saves the name, shows the rest read-only and deletes after a warning", async ({ page }) => {
+    await mockShell(page);
+    const writes = await mockDepartments(page);
+    await page.goto("/agents?tab=departments");
+    await page.getByRole("button", { name: /^플랫폼 편집/ }).click();
+    const form = page.getByRole("dialog", { name: "부서 편집" });
+    const name = form.getByLabel(/영문 이름/);
+    await expect(name).toHaveValue("Platform");
+    await expect(name).toBeFocused();
+    await expect(form.getByRole("button", { name: "이름 저장" })).toBeDisabled();
+    await expect(form.getByLabel("한글 이름")).toHaveValue("플랫폼");
+    await expect(form.getByLabel("한글 이름")).toBeDisabled();
+    await expect(form.getByRole("button", { name: /아이콘/ })).toBeDisabled();
+    await name.fill("Runtime");
+    await form.getByRole("button", { name: "이름 저장" }).click();
+    await expect(form).toHaveCount(0);
+    // The page stays put: the form submits through the app, not as a browser navigation.
+    await expect(page).toHaveURL(/\/agents\?tab=departments$/);
+    expect(writes).toEqual([{ method: "PATCH", url: "/api/departments/dept-platform", body: { name: "Runtime" } }]);
+
+    await page.getByRole("button", { name: /^플랫폼 편집/ }).click();
+    await form.getByRole("button", { name: "부서 삭제" }).click();
+    await expect(form).toContainText("소속 에이전트 4명은 미배정이 돼요");
+    await form.getByRole("button", { name: "삭제", exact: true }).click();
+    await expect(form).toHaveCount(0);
+    expect(writes.at(-1)).toMatchObject({ method: "DELETE", url: "/api/departments/dept-platform" });
+
+    await page.getByRole("button", { name: "부서 추가" }).click();
+    const create = page.getByRole("dialog", { name: "새 부서" });
+    await create.getByLabel(/영문 이름/).fill("Research");
+    await create.getByRole("button", { name: "부서 추가" }).click();
+    await expect(create).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("skills: 30-day chart, most used skills with their agents, and the catalog in the settings language", async ({ page }, testInfo) => {
+    await mockShell(page);
+    await page.goto("/agents?tab=skills");
+    const tab = page.getByTestId("skills-catalog");
+    // Settings say Korean while the browser is en-US.
+    await expect(tab.getByRole("searchbox", { name: "스킬 검색" })).toBeVisible();
+    await expect(page.getByText(/Search skills|Last Used/)).toHaveCount(0);
+    await expect(page.getByTestId("skills-trend")).toContainText("12회");
+    await expect(tab.getByTestId("skills-row-agents-hub")).toContainText("에이전트 허브");
+    await expect(tab.getByTestId("skills-row-agents-hub")).toContainText("누적 40회");
+    await expect(tab.getByTestId("skills-row-family-profile-probe")).toContainText("메모리");
+
+    await page.getByTestId("skills-top").getByRole("button", { name: /^agents-hub, 6회/ }).click();
+    const picked = page.getByTestId("skills-picked");
+    await expect(picked.getByRole("button")).toHaveCount(2);
+    await picked.getByRole("button", { name: /^ada 4회/ }).click();
+    await expect(page).toHaveURL(/\/agents\?agent=agent-ada$/);
+    await expect(testInfo.project.name === "desktop"
+      ? page.getByRole("region", { name: /ada — 에이전트 상세/ })
+      : page.getByRole("dialog", { name: /ada — 에이전트 상세/ })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/agents\?tab=skills$/);
+
+    await tab.getByRole("searchbox", { name: "스킬 검색" }).fill("relay");
+    await expect(page.getByTestId("skills-list").locator("li")).toHaveCount(1);
+    await tab.getByRole("searchbox", { name: "스킬 검색" }).fill("");
+    await tab.getByRole("tab", { name: /^메모리/ }).click();
+    await expect(page.getByTestId("skills-list").locator("li")).toHaveCount(1);
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
 test.describe("Agents tab on a touch phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -396,6 +529,37 @@ test.describe("Agents tab on a touch phone", () => {
     await expectNoHorizontalOverflow(page);
     expect(await smallTargets(wizard)).toEqual([]);
     expect(await smallInputFonts(wizard)).toEqual([]);
+  });
+});
+
+test.describe("Departments and skills on a touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("keeps 44px targets, 16px inputs and no horizontal overflow", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Phone-only check");
+    await mockShell(page);
+    await page.goto("/agents?tab=departments");
+    const departments = page.getByTestId("agents-departments-tab");
+    await expect(departments.locator("li")).toHaveCount(2);
+    await page.getByRole("button", { name: "플랫폼 아래로" }).tap();
+    await expect(page.getByTestId("agents-departments-order-bar")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(departments)).toEqual([]);
+
+    await page.getByRole("button", { name: /^플랫폼 편집/ }).tap();
+    const form = page.getByRole("dialog", { name: "부서 편집" });
+    await expect(form).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(form)).toEqual([]);
+    expect(await smallInputFonts(form)).toEqual([]);
+    await form.getByRole("button", { name: "취소" }).tap();
+
+    await page.goto("/agents?tab=skills");
+    const skills = page.getByTestId("skills-catalog");
+    await expect(skills.getByTestId("skills-row-agents-hub")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(skills)).toEqual([]);
+    expect(await smallInputFonts(skills)).toEqual([]);
   });
 });
 
