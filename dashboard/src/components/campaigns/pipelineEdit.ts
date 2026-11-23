@@ -112,6 +112,22 @@ export function patchTransition(draft: Draft, id: string, patch: Partial<Pipelin
   }) };
 }
 export const removeTransition = (draft: Draft, id: string): Draft => ({ ...draft, transitions: draft.transitions.filter((value) => value.id !== id) });
+
+/** The handle of a state's '+ 전환' pin; a retry's spent pin is its transition's id and `:then`. */
+export const NEW_PIN = "+";
+/** Points a pin of `from` at `to`: the '+ 전환' pin adds a way out, a transition's pin moves where it goes and a spent
+ * retry's pin where it goes after. Returns the transition it set. */
+export function connect(draft: Draft, from: string, pin: string, to: string): [Draft, string] {
+  if (pin === NEW_PIN) { const [next, id] = addTransition(draft, from); return [patchTransition(next, id, { to }), id]; }
+  const id = pin.replace(/:then$/, ""), retry = draft.transitions.find((value) => value.id === id)?.retry;
+  return [patchTransition(draft, id, pin !== id && retry ? { retry: { ...retry, then_to: to } } : { to }), id];
+}
+/** A new state of `kind`, named when a name was typed, and the pin pointed at it. */
+export function connectNew(draft: Draft, kind: string, title: string, from?: { state: string; pin: string }): [Draft, string] {
+  const [added, id] = addState(draft, kind);
+  const named = title.trim() ? patchState(added, id, { title: title.trim() }) : added;
+  return [from ? connect(named, from.state, from.pin, id)[0] : named, id];
+}
 /** A retry budget is one count however many transitions share it, so its max changes on all of them. */
 export const setRetryMax = (draft: Draft, budget: string, max: number): Draft =>
   ({ ...draft, transitions: draft.transitions.map((value) => value.retry?.budget_id === budget ? { ...value, retry: { ...value.retry, max } } : value) });

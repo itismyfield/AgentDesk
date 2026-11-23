@@ -64,9 +64,11 @@ const HELD = new Set(["blocked", "interrupted"]);
 /** The graph laid out as the relations view lays out groups: the main flow (states on a start-to-success path that
  * takes no failure or retry) left to right by depth, then the states off it in a row below, each under its sources.
  * `approvals` (a server campaign's workflow options) marks the gates the campaign leaves off. */
-export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, tasks: Record<string, PipelineTask> | null, approvals: Record<string, boolean> | null = null) {
+export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, tasks: Record<string, PipelineTask> | null, approvals: Record<string, boolean> | null = null, editing = false) {
   const states = new Map(pipeline.states.map((state) => [state.id, state]));
   const pins = new Map(pipeline.states.map((state) => [state.id, pinsOf(state.id, pipeline.transitions, tr)]));
+  // While editing, a state that can leave has one more row: its '+ 전환' pin.
+  const rows = new Map(pipeline.states.map((state) => [state.id, pins.get(state.id)!.length + Number(editing && !state.kind.startsWith("end_"))]));
   // Two pins with one label on a card also name where they go.
   for (const list of pins.values()) for (const pin of list) if (list.filter((other) => other.label === pin.label).length > 1) pin.hint = stateName(states.get(pin.target), pin.target, tr);
   const flow = pipeline.transitions.filter((value) => value.from !== value.to && !value.retry && states.has(value.to) && toneOf(value) !== "fail");
@@ -81,7 +83,7 @@ export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, tasks: 
   const mainSet = new Set(both.length ? both : forward);
   const main = [pipeline.start, ...pipeline.states.map((state) => state.id).filter((id) => id !== pipeline.start && mainSet.has(id))].filter((id) => states.has(id));
   const off = pipeline.states.map((state) => state.id).filter((id) => !mainSet.has(id));
-  const height = Math.max(0, ...pipeline.states.map((state) => cardHeight(pins.get(state.id)!.length)));
+  const height = Math.max(0, ...pipeline.states.map((state) => cardHeight(rows.get(state.id)!)));
   const links = flow.filter((value) => mainSet.has(value.from) && mainSet.has(value.to)).map((value) => [value.from, value.to] as const);
   const { placed, below } = layoutGroups(main, links, height);
   const positions = new Map<string, Point>(main.map((id) => [id, { x: placed.get(id)!.x / LAYER * PITCH, y: placed.get(id)!.y }]));
@@ -126,7 +128,7 @@ export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, tasks: 
   const xs = [...positions.values()].map((point) => point.x), ys = [...positions.values()].map((point) => point.y);
   // Room above for the start and gate badges and the skip lanes; below for the tallest card in the last row.
   const bounds = { x0: Math.min(0, ...xs), x1: Math.max(0, ...xs) + PIPE_WIDTH, y0: Math.min(0, ...ys) - 44 - LANE * above, y1: Math.max(0, ...ys) + height };
-  return { states, pins, main, off, events, positions, lines, gates, occupancy, approvals, bounds };
+  return { states, pins, rows, main, off, events, positions, lines, gates, occupancy, approvals, bounds };
 }
 export type PipelineGraph = ReturnType<typeof buildPipelineGraph>;
 

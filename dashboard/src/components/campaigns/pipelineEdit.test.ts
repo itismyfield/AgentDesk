@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import template from "../../../e2e/fixtures/pipeline-template-campaign-development-9-v1.json";
 import type { PipelineDefinition } from "../../api/serverCampaignPipeline";
-import { addState, addTransition, changesText, conditionOf, diagnosticPlace, diagnosticState, draftChanges, freshComparison, patchState, patchTransition, removal, removeState, setRetryMax } from "./pipelineEdit";
+import { addState, addTransition, changesText, conditionOf, connect, connectNew, diagnosticPlace, diagnosticState, draftChanges, freshComparison, patchState, patchTransition, removal, removeState, setRetryMax } from "./pipelineEdit";
 
 const tr = (ko: string) => ko;
 const base = template.pipeline as PipelineDefinition;
@@ -34,4 +34,15 @@ it("writes conditions back flat, with a fresh value of the field's type, and nam
   expect(conditionOf([freshComparison(count), verdict])).toEqual({ all: [{ field: "review.p0_count", op: "eq", value: 0 }, { field: "review.verdict", op: "eq", value: "clean" }] });
   expect(diagnosticPlace({ code: "TRANSITION_TARGET_MISSING", path: "/transitions/13/to", state_id: "", transition_id: "review-to-landing" }, [base], tr)).toBe("리뷰 · review-to-landing");
   expect(diagnosticState({ code: "INVALID_TIMEOUT_TRANSITION", path: "/states/3/timeout", state_id: "review", transition_id: "implementation-to-review" }, [base])).toBe("review");
+});
+
+it("points a pin: '+ 전환' adds a way out, a transition's pin moves its target, a spent retry's pin where it goes after, and a new state can be the target", () => {
+  const way = (draft: PipelineDefinition, id: string) => draft.transitions.find((value) => value.id === id);
+  const [added, id] = connect(base, "review", "+", "complete");
+  expect([id, way(added, id)]).toEqual(["review-out-1", expect.objectContaining({ from: "review", to: "complete", priority: 30 })]);
+  expect(way(connect(base, "review", "review-to-landing", "complete")[0], "review-to-landing")).toMatchObject({ to: "complete" });
+  const retried = way(base, "review-to-implementation")!;
+  expect(way(connect(base, "review", "review-to-implementation:then", "complete")[0], retried.id)).toMatchObject({ to: retried.to, retry: { ...retried.retry, then_to: "complete" } });
+  const [made, state] = connectNew(base, "auto_check", " 캡처 검사 ", { state: "review", pin: "+" });
+  expect([state, made.states.at(-1), way(made, "review-out-1")?.to]).toEqual(["auto_check-1", { id: "auto_check-1", kind: "auto_check", title: "캡처 검사" }, "auto_check-1"]);
 });
