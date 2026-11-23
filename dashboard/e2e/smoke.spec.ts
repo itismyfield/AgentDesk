@@ -1744,12 +1744,16 @@ test.describe("Dashboard smoke tests", () => {
       agent_id: "agent-ada", status: "working", started_at: new Date(Date.now() - 95_000).toISOString(), updated_at: new Date().toISOString(),
       provider: "codex", current_tool_line: "npm run build", tool_events: [{ kind: "tool", status: "running", tool_name: "Bash", summary: "", line: "" }], tool_count: 1,
     } }));
+    let turnReads = 0;
+    page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/turn")) turnReads++; });
     await page.goto("/home");
 
     const monitor = page.getByTestId("home-agent-monitor-agent-ada");
     if (testInfo.project.name === "mobile") {
       await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toBeVisible({ timeout: 15000 });
       await expect(monitor).toHaveCount(0);
+      // Phones draw no monitor, so they never capture a turn on the server.
+      expect(turnReads).toBe(0);
       return;
     }
     await expect(monitor).toContainText("npm run build", { timeout: 15000 });
@@ -1850,7 +1854,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-summary-api-spend")).toContainText("데이터 확인 불가");
   });
 
-  test("stats: mobile pairs summary cards without horizontal overflow", async ({ page }, testInfo) => {
+  test("stats: phones stack the summary charts without horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/stats");
 
@@ -1868,8 +1872,8 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
-    expect(Math.abs(secondBox!.y - firstBox!.y)).toBeLessThanOrEqual(1);
-    expect(secondBox!.x).toBeGreaterThan(firstBox!.x + firstBox!.width);
+    expect(secondBox!.y).toBeGreaterThanOrEqual(firstBox!.y + firstBox!.height);
+    expect(Math.abs(secondBox!.x - firstBox!.x)).toBeLessThanOrEqual(1);
     await expectNoHorizontalOverflow(page);
   });
 

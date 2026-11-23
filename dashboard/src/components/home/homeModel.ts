@@ -10,7 +10,7 @@ import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
 import { formatRateLimitWindowLabel, transformRLProviders, type RawRLProvider } from "../dashboard/MiniRateLimitBarModel";
-import { parseTime } from "../dashboard/routineModel";
+import { formatClock, parseTime } from "../dashboard/routineModel";
 
 export type Tr = (ko: string, en: string) => string;
 export type HomeTone = "ok" | "info" | "warn" | "err" | "neutral";
@@ -520,4 +520,14 @@ export function autoPauseRule(config: RuntimeConfigResponse | null): { enabled: 
   if (typeof enabled !== "boolean") return null;
   const pct = config?.current?.dispatchRateLimitGateDangerPct;
   return { enabled, pct: typeof pct === "number" ? pct : null };
+}
+
+/** The line under a usage row: why it has no value, how old the value is, and whether it reached the auto-run pause.
+ * The kit meter has no step past its warning color, so the pause threshold is spelled out. */
+export function usageDetail(row: UsageRow, rule: ReturnType<typeof autoPauseRule>, tr: Tr): string | undefined {
+  if (row.unmeasured) return tr("측정 안 됨", "Not measured");
+  if (row.pct === null) return row.note ?? tr("확인 불가", "Unknown");
+  const old = row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : null;
+  const paused = rule?.enabled && rule.pct !== null && row.pct >= rule.pct ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : null;
+  return join(old, paused) || undefined;
 }

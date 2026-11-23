@@ -1,9 +1,10 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Bot, ChartNoAxesCombined, ChevronRight, Cpu, SearchX } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { Bot, ChartNoAxesCombined, Cpu, SearchX } from "lucide-react";
 import { Badge } from "../../kit/free/badge-clean";
 import { Dialog } from "../../kit/free/dialog-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
-import { Skeleton } from "../../kit/free/skeleton-clean";
+import { CompactBreakdown } from "../../kit/pro/compact-breakdown";
+import { CardSkeleton, SectionCard, Well } from "../common/KitPrimitives";
 import type { TFunction } from "../dashboard/model";
 import { cx } from "../dashboard/ui";
 import {
@@ -16,10 +17,9 @@ import {
   type BreakdownCategory,
   type BreakdownItem,
   type DailySeriesDescriptor,
-  type ShareSegment,
   type TokenComposition,
 } from "./statsModel";
-import { NUMERIC_STYLE, StatsCard, StatsEmpty, StatsMeter, StatsSection, StatsSwatch } from "./StatsCardPrimitives";
+import { NUMERIC_STYLE, StatsEmpty, StatsSwatch } from "./StatsCardPrimitives";
 
 // Off the split layout, the kit dialog becomes a right-hand drawer from 521px up (the kit keeps its bottom sheet below).
 // `[&>div]` is the dialog's panel (its only element child besides the injected style).
@@ -65,76 +65,6 @@ const COMPOSITION_KEYS: Array<{ key: keyof TokenComposition; series: DailySeries
   { key: "input", series: "input_tokens" },
   { key: "output", series: "output_tokens" },
 ];
-
-function itemSubline(t: TFunction, item: BreakdownItem): string {
-  if (item.category === "models") return item.sublabel;
-  return item.cacheHitRate !== null
-    ? t(msg(`캐시 히트 ${formatPercent(item.cacheHitRate, 0)}`, `Cache hit ${formatPercent(item.cacheHitRate, 0)}`))
-    : "";
-}
-
-function BreakdownRow({
-  t,
-  item,
-  maxTokens,
-  current,
-  onSelect,
-}: {
-  t: TFunction;
-  item: BreakdownItem;
-  maxTokens: number;
-  current: boolean;
-  onSelect: (item: BreakdownItem) => void;
-}) {
-  const share = shareLabel(item.share);
-  const sub = itemSubline(t, item);
-  const shareText = t(msg(`점유율 ${share}%`, `${share}% share`));
-  return (
-    <li className="min-w-0">
-      <button
-        type="button"
-        data-testid={`stats-breakdown-row-${item.id}`}
-        data-item={item.id}
-        aria-current={current ? "true" : undefined}
-        aria-label={`${item.label}, ${formatTokens(item.tokens)} tokens, ${shareText}, ${formatCurrency(item.cost)}${sub ? `, ${sub}` : ""}`}
-        title={`${item.label} · ${formatTokens(item.tokens)}`}
-        onClick={() => onSelect(item)}
-        className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[var(--r-sm)] px-3 py-1.5 text-left text-[13px] text-[var(--fg)] transition-colors duration-150 hover:bg-[color-mix(in_oklch,var(--fg)_5%,transparent)] aria-[current=true]:bg-[color-mix(in_oklch,var(--fg)_8%,transparent)] motion-reduce:transition-none @max-[620px]:py-2"
-      >
-        <StatsSwatch color={item.color} />
-        <span className="flex min-w-0 shrink-0 basis-[150px] flex-col @max-[620px]:flex-1 @max-[620px]:basis-auto">
-          <span className="truncate font-medium @max-[620px]:whitespace-normal @max-[620px]:[overflow-wrap:anywhere]">{item.label}</span>
-          <small className={cx("truncate text-xs text-[var(--fg-muted)]", !sub && "hidden @max-[620px]:block")} style={NUMERIC_STYLE}>
-            <span className="hidden @max-[620px]:inline">{shareText}{sub ? " · " : ""}</span>
-            {sub}
-          </small>
-        </span>
-        <StatsMeter ratio={maxTokens > 0 ? item.tokens / maxTokens : 0} color={item.color} className="flex-1 @max-[620px]:hidden" />
-        <span className="w-10 shrink-0 text-right text-xs text-[var(--fg-faint)] @max-[620px]:hidden" style={NUMERIC_STYLE}>{share}%</span>
-        <span className="flex shrink-0 items-center gap-3 @max-[420px]:flex-col @max-[420px]:items-end @max-[420px]:gap-0" style={NUMERIC_STYLE}>
-          <span className="min-w-[56px] text-right">{formatTokens(item.tokens)}</span>
-          <span className="min-w-[52px] text-right text-xs text-[var(--fg-muted)]">{formatCurrency(item.cost)}</span>
-        </span>
-        <ChevronRight size={12} aria-hidden="true" className="shrink-0 text-[var(--fg-faint)]" />
-      </button>
-    </li>
-  );
-}
-
-function RowsSkeleton({ label }: { label: string }) {
-  return (
-    <div role="status" aria-label={label} className="flex flex-col gap-1 p-1.5">
-      {[96, 72, 84, 64].map((width) => (
-        <div key={width} aria-hidden="true" className="flex min-h-11 items-center gap-3 px-3">
-          <Skeleton width={8} height={8} radius={2} />
-          <Skeleton width={width} height={10} />
-          <span className="flex-1" />
-          <Skeleton width={48} height={10} />
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function CompositionBlock({ t, composition, series }: { t: TFunction; composition: TokenComposition; series: DailySeriesDescriptor[] }) {
   const total = COMPOSITION_KEYS.reduce((sum, part) => sum + Math.max(0, composition[part.key]), 0);
@@ -260,15 +190,14 @@ function BreakdownDetail({
   );
 }
 
-/** "Where tokens went": model/agent tabs, share rows and a row detail (split on wide screens, drawer below). */
+/** "Where tokens went": model/agent tabs over the kit share list, and a row's detail (split on wide screens, drawer
+ * below). */
 export function StatsBreakdown({
   t,
   loading,
   failed,
   models,
   agents,
-  modelSegments,
-  totalTokens,
   overallCacheHitRate,
   agentSkillRows,
   series,
@@ -278,8 +207,6 @@ export function StatsBreakdown({
   failed: boolean;
   models: BreakdownItem[];
   agents: BreakdownItem[];
-  modelSegments: ShareSegment[];
-  totalTokens: number;
   overallCacheHitRate: number;
   agentSkillRows: AgentSkillRow[];
   series: DailySeriesDescriptor[];
@@ -297,14 +224,17 @@ export function StatsBreakdown({
   }, [split]);
 
   const list = category === "models" ? models : agents;
-  const maxTokens = Math.max(0, ...list.map((item) => item.tokens));
   const selectedItem = selection
     ? (selection.category === "models" ? models : agents).find((item) => item.id === selection.id) ?? null
     : null;
   const missing = selection !== null && selectedItem === null && !loading;
   const selectedSkills = selectedItem?.category === "agents" ? skillsForAgent(agentSkillRows, selectedItem.id) : [];
 
-  const onSelect = (item: BreakdownItem) => {
+  // The kit rows carry their item id but take no handler, so a click (or Enter) on one opens that item's detail here.
+  const openRow = (event: MouseEvent<HTMLElement>) => {
+    const rowId = (event.target as Element).closest<HTMLElement>(".aui-compact-breakdown-row")?.dataset.itemId;
+    const item = list.find((entry) => entry.id === rowId);
+    if (!item) return;
     setSelection({ category: item.category, id: item.id });
     if (!split) setDrawerOpen(true);
   };
@@ -313,22 +243,25 @@ export function StatsBreakdown({
   let listBody: ReactNode;
   if (list.length > 0) {
     listBody = (
-      <ul className="flex flex-col gap-px p-1.5">
-        {list.map((item) => (
-          <BreakdownRow
-            key={item.id}
-            t={t}
-            item={item}
-            maxTokens={maxTokens}
-            current={selection?.category === item.category && selection.id === item.id}
-            onSelect={onSelect}
-          />
-        ))}
-      </ul>
+      <CompactBreakdown
+        key={category}
+        items={list.map((item) => ({ id: item.id, label: item.label, value: item.tokens, color: item.color }))}
+        title={category === "models"
+          ? t(msg("Claude / Codex 모델별 토큰 배분", "Token share by Claude / Codex models", "Claude / Codex モデル別トークン配分", "按 Claude / Codex 模型划分的 Token 占比"))
+          : t(msg("에이전트별 토큰 점유율", "Token share by agent"))}
+        format={formatTokens}
+        totalLabel={t(msg("이 기간 전체 토큰", "All tokens in this range"))}
+        footer={
+          <span className="min-w-0 [overflow-wrap:anywhere]">
+            {category === "agents" ? t(msg(`전체 캐시 히트 ${formatPercent(overallCacheHitRate)} · `, `${formatPercent(overallCacheHitRate)} overall cache hit · `)) : ""}
+            {t(msg("행을 누르면 비용과 토큰 구성을 봐요", "Pick a row for its cost and token mix"))}
+          </span>
+        }
+      />
     );
   } else if (loading) {
     listBody = (
-      <RowsSkeleton
+      <CardSkeleton
         label={category === "models"
           ? t(msg("모델 분포를 불러오는 중입니다.", "Loading model distribution."))
           : t(msg("에이전트 캐시 데이터를 불러오는 중입니다.", "Loading agent cache data."))}
@@ -355,12 +288,10 @@ export function StatsBreakdown({
   );
 
   return (
-    <StatsSection
-      id={`${id}-title`}
-      testId="stats-breakdown"
-      icon={<ChartNoAxesCombined />}
+    <SectionCard
       title={t(msg("어디에 썼나", "Where tokens went"))}
-      actions={
+      testId="stats-breakdown"
+      aside={
         <div className="w-64 max-w-full">
           <SegmentedControl<BreakdownCategory>
             kind="tabs"
@@ -380,51 +311,23 @@ export function StatsBreakdown({
       <div
         ref={splitRef}
         data-split={split || undefined}
-        className="grid min-w-0 items-start gap-3 data-[split]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]"
+        className="grid min-w-0 items-start gap-3 px-3 pb-3 sm:px-4 sm:pb-4 data-[split]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]"
       >
-        <StatsCard
+        {/* The kit caps its card at 360px; the list fills the column. */}
+        <div
           id={panelId}
           role="tabpanel"
           aria-label={categoryLabel}
           data-testid={category === "models" ? "stats-model-share" : "stats-agent-cache"}
-          className="@container"
+          className="min-w-0 [&_.aui-compact-breakdown]:max-w-none!"
+          onClick={openRow}
         >
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-[var(--line-soft)] px-4 py-3">
-            <p className="min-w-0 text-xs leading-5 text-[var(--fg-muted)] [word-break:keep-all]">
-              {category === "models"
-                ? t(msg("Claude / Codex 모델별 토큰 배분", "Token share by Claude / Codex models", "Claude / Codex モデル別トークン配分", "按 Claude / Codex 模型划分的 Token 占比"))
-                : t(msg("에이전트별 토큰 점유율과 캐시 히트율", "Token share and cache hit rate by agent"))}
-            </p>
-            {category === "models" ? (
-              <Badge style={NUMERIC_STYLE}>{formatTokens(totalTokens)} total</Badge>
-            ) : (
-              <Badge tone="success" style={NUMERIC_STYLE}>
-                {formatPercent(overallCacheHitRate)} {t(msg("전체", "overall", "全体", "整体"))}
-              </Badge>
-            )}
-            {category === "models" && modelSegments.length > 0 ? (
-              <div className="flex h-2 w-full overflow-hidden rounded-full" aria-hidden="true">
-                {modelSegments.map((segment) => (
-                  <span
-                    key={segment.id}
-                    title={`${segment.label} ${formatPercent(segment.percentage)}`}
-                    style={{ width: `${segment.percentage}%`, background: segment.color, minWidth: segment.percentage > 0 ? "6px" : 0 }}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
           {listBody}
-        </StatsCard>
+        </div>
         {split ? (
-          <StatsCard
-            role="region"
-            aria-label={t(msg("항목 상세", "Item detail"))}
-            data-testid="stats-detail"
-            className="sticky top-4 p-4"
-          >
+          <Well as="section" aria-label={t(msg("항목 상세", "Item detail"))} data-testid="stats-detail" className="sticky top-4 p-4">
             {detail}
-          </StatsCard>
+          </Well>
         ) : null}
       </div>
       {!split ? (
@@ -443,6 +346,6 @@ export function StatsBreakdown({
           {detail}
         </Dialog>
       ) : null}
-    </StatsSection>
+    </SectionCard>
   );
 }
