@@ -99,6 +99,10 @@ REGION_CASES = {
     "tokens inside stringify! are not code": (
         "pub fn production() -> &'static str {\n    stringify!(\n        #[test]\n        fn imagined() { h.join(); }\n    )\n}\n"
         "macro_rules! waits { ($h:expr) => { #[cfg(test)] fn t() { $h.join(); } }; }\n", (7,)),
+    "test-support gate is test-only": (
+        "#[cfg(all(any(test, feature = \"test-support\"), unix))]\nfn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }\n", (2,)),
+    "negated test-support gate is production": (
+        "#[cfg(not(any(test, feature = \"test-support\")))]\nfn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }\n", ()),
 }
 
 
@@ -143,6 +147,14 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                 (self.repo / "src/prod.rs").write_text(source, encoding="utf-8")
                 found = [line for line in wait_problems(self.repo) if "src/prod.rs" in line]
                 self.assertEqual([int(line.split(" ")[2].rsplit(":", 1)[1]) for line in found], list(lines), found)
+
+    def test_a_module_mounted_under_the_test_support_gate_is_test_code(self):
+        gate = 'any(test, feature = "test-support")'
+        (self.repo / "src/support.rs").write_text(PROD, encoding="utf-8")
+        for cfg, sites in ((gate, ["src/support.rs:2"]), (f"all({gate}, unix)", ["src/support.rs:2"]), (f"not({gate})", [])):
+            (self.repo / "src/lib.rs").write_text(f"#[cfg({cfg})]\nmod support;\n", encoding="utf-8")
+            found = [line for line in wait_problems(self.repo) if "src/support.rs" in line]
+            self.assertEqual([line.split(" ")[2] for line in found], sites, (cfg, found))
 
     def test_cfg_attr_test_declares_a_test(self):
         source = "#[cfg_attr(test, test)]\nfn t() {\n    let (_tx, rx) = std::sync::mpsc::channel::<u8>();\n    rx.recv();\n}\n"

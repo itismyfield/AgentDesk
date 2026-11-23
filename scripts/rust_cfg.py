@@ -3,8 +3,12 @@
 The CI ratchets that import this module do not run rustc and therefore cannot
 resolve target or feature predicates.  They classify an item as test-only only
 when its Boolean cfg gates cannot be true with ``test`` disabled, under any
-assignment of the other predicates.  Malformed, unsupported, or deliberately
-large expressions stay production-visible.
+assignment of the other predicates.  ``feature = "test-support"`` counts as
+``test``: only dev-dependencies enable it, so it is off in production builds.
+``strict=True`` asks the narrower question a crate cut needs, whether the item
+is missing from a dependency build, where that feature can be on.
+Malformed, unsupported, or deliberately large expressions stay
+production-visible.
 
 ``cfg_attr`` is handled by its actual gating semantics rather than by spotting
 the word ``test``.  Only nested ``cfg(...)``/``cfg_attr(...)`` payloads can
@@ -17,7 +21,8 @@ always-false cfg gate to non-test builds.
 
 Callers must blank comments and strings before using the attribute finder.  It
 preserves the conservative convention established by
-``check_durable_frontier_writer_call_sites.py``.
+``check_durable_frontier_writer_call_sites.py``.  Blanking also erases the
+feature name, so those callers pass the offset-aligned original as ``source``.
 """
 
 from __future__ import annotations
@@ -28,6 +33,25 @@ from collections.abc import Iterator
 
 CFG_ATTR_START_RE = re.compile(r"#\s*!?\s*\[\s*(cfg|cfg_attr)\s*\(")
 ATTR_OPEN_RE = re.compile(r"#\s*!?\s*\[")
+# The one feature predicate that is test-equivalent; any other feature stays unknown.
+TEST_SUPPORT_FEATURE_RE = re.compile(r'(?<![\w#])feature\s*=\s*"test-support"')
+TEST_SUPPORT = "test-support"  # atom name of that predicate; no identifier can spell it
+
+
+def is_test_atom(predicate: str) -> bool:
+    """Whether one leaf cfg predicate holds only in test builds."""
+    predicate = predicate.strip()
+    return predicate == "test" or TEST_SUPPORT_FEATURE_RE.fullmatch(predicate) is not None
+
+
+def _restore_test_support_feature(expression: str, source: str) -> str:
+    """Put the blanked ``"test-support"`` literal back where real code names that feature."""
+    for match in TEST_SUPPORT_FEATURE_RE.finditer(source):
+        start, end = match.span()
+        # A blanked literal leaves only `feature =`; a comment or outer string leaves nothing.
+        if re.fullmatch(r"feature\s*=\s*", expression[start:end]):
+            expression = expression[:start] + match.group() + expression[end:]
+    return expression
 
 
 class _CfgNode:
@@ -78,9 +102,9 @@ class CfgAttributeMatch:
 
 
 def _cfg_tokens(expression: str) -> list[str]:
-    """Tokenise cfg meta syntax after strings/comments were blanked."""
+    """Tokenise cfg meta syntax; a string literal, when still present, is one token."""
 
-    return re.findall(r"[A-Za-z_]\w*|[(),=]", expression)
+    return re.findall(r'"[^"]*"|[A-Za-z_]\w*|[(),=]', expression)
 
 
 def _parse_cfg_expression(expression: str) -> _CfgNode | None:
@@ -116,10 +140,13 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
             index += 1
             return _CfgNode(name, children=tuple(children))
 
-        # A key/value predicate's string was blanked by the caller.  Consume
-        # its punctuation and retain the key as an unknown Boolean atom.
+        # Consume a key/value predicate whole and retain the key as an unknown
+        # Boolean atom, unless it is the test-equivalent feature.
+        start = index - 1
         while index < len(tokens) and tokens[index] not in {",", ")"}:
             index += 1
+        if TEST_SUPPORT_FEATURE_RE.fullmatch("".join(tokens[start:index])):
+            name = TEST_SUPPORT
         return _CfgNode("atom", name=name)
 
     node = parse_expr()
@@ -130,9 +157,8 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
 
 def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bool:
     if node.kind == "atom":
-        if node.name == "test":
-            return test_enabled
-        return values[id(node)]
+        # Atoms without an assigned value are the test-equivalent ones.
+        return values.get(id(node), test_enabled)
     if node.kind == "all":
         return all(_cfg_eval(child, values, test_enabled) for child in node.children)
     if node.kind == "any":
@@ -142,12 +168,12 @@ def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bo
     return True
 
 
-def _can_be_true_without_test(node: _CfgNode) -> bool:
+def _can_be_true_without_test(node: _CfgNode, strict: bool = False) -> bool:
     unknowns: list[_CfgNode] = []
 
     def collect(current: _CfgNode) -> None:
         if current.kind == "atom":
-            if current.name != "test":
+            if current.name != "test" and (strict or current.name != TEST_SUPPORT):
                 unknowns.append(current)
             return
         for child in current.children:
@@ -165,11 +191,11 @@ def _can_be_true_without_test(node: _CfgNode) -> bool:
     return False
 
 
-def cfg_requires_test(expression: str) -> bool:
+def cfg_requires_test(expression: str, *, strict: bool = False) -> bool:
     """Return whether a cfg predicate cannot hold with ``test`` disabled."""
 
     parsed = _parse_cfg_expression(expression)
-    return parsed is not None and not _can_be_true_without_test(parsed)
+    return parsed is not None and not _can_be_true_without_test(parsed, strict)
 
 
 def _split_top_level_args(expression: str) -> list[str] | None:
@@ -232,7 +258,9 @@ def _cfg_attr_gate(expression: str) -> _CfgNode | None:
     )
 
 
-def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | None:
+def _attribute_match(
+    code: str, opening: re.Match[str], source: str | None = None
+) -> CfgAttributeMatch | None:
     """Parse one candidate at its opening token, if it is a test-only cfg."""
     cfg = CFG_ATTR_START_RE.match(code, opening.start())
     if cfg is None:
@@ -259,6 +287,10 @@ def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | N
     attribute_end += 1
 
     expression = code[open_paren + 1 : close_paren]
+    if source is not None:
+        expression = _restore_test_support_feature(
+            expression, source[open_paren + 1 : close_paren]
+        )
     kind = cfg.group(1)
     parsed = (
         _parse_cfg_expression(expression)
@@ -271,12 +303,15 @@ def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | N
     return None
 
 
-def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
+def find_test_only_cfg_attributes(
+    code: str, *, source: str | None = None
+) -> Iterator[CfgAttributeMatch]:
     """Yield test-only cfg attributes outside strings, attributes, and macro token trees.
 
     `code` must already have comments and strings blanked. Attribute-like tokens in
     a doc RHS or macro input are tokens, not active build gates. Delimiter state is
     kept across lines so multi-line invocations are treated the same way.
+    `source` is the original text at the same offsets, read only for the feature name.
     """
     stack: list[tuple[str, bool, bool]] = []  # opener, macro-token-tree, attribute
     index = 0
@@ -287,7 +322,7 @@ def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
             if opening:
                 nested = any(is_macro or is_attribute for _, is_macro, is_attribute in stack)
                 if not nested:
-                    match = _attribute_match(code, opening)
+                    match = _attribute_match(code, opening, source)
                     if match is not None:
                         yield match
                 bracket = code.find("[", index, opening.end())
@@ -334,13 +369,13 @@ def _macro_delimiter_precedes(code: str, index: int) -> bool:
 
 
 def find_test_only_cfg_attribute(
-    code: str, start: int = 0
+    code: str, start: int = 0, *, source: str | None = None
 ) -> CfgAttributeMatch | None:
     """Find the next active cfg/cfg_attr whose effective gate requires ``test``."""
     return next(
         (
             match
-            for match in find_test_only_cfg_attributes(code)
+            for match in find_test_only_cfg_attributes(code, source=source)
             if match.start() >= start
         ),
         None,

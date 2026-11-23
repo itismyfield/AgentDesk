@@ -14,6 +14,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterable
 from pathlib import Path
 
+try:
+    from rust_cfg import is_test_atom
+except ModuleNotFoundError:
+    from scripts.rust_cfg import is_test_atom
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 GENERATED_DOCS_DIR = REPO_ROOT / "docs" / "generated"
@@ -52,6 +57,7 @@ GIANT_FILE_ISSUE_RATCHET_WRITER = (
 # Predicates that do not
 # remove the module from production builds — `not(test)` (production-only) and
 # `any(test, …)` (compiles when the other option is set) — are rejected.
+# `feature = "test-support"` is the exception: `rust_cfg.is_test_atom` reads it as `test`.
 
 # `#[cfg(...)]` attribute immediately before a (optionally attributed, optionally
 # `pub`) `mod <name> {` declaration. The cfg body is captured for structural
@@ -92,7 +98,7 @@ def _split_top_level_cfg_args(body: str) -> list[str]:
 def cfg_requires_test(predicate: str) -> bool:
     """Return True when a `#[cfg(<predicate>)]` compiles only under `test`.
 
-    * ``test`` -> True.
+    * ``test`` or ``feature = "test-support"`` -> True.
     * ``all(a, b, …)`` -> True when any argument requires test (conjunction).
     * ``any(a, b, …)`` -> True only when *every* argument requires test (the
       module would otherwise also build without test).
@@ -102,7 +108,7 @@ def cfg_requires_test(predicate: str) -> bool:
     """
 
     predicate = predicate.strip()
-    if predicate == "test":
+    if is_test_atom(predicate):
         return True
     for keyword, combine in (("all", any), ("any", all)):
         prefix = keyword + "("

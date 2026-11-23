@@ -145,7 +145,7 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
     tokens = rust_tokens(raw, extended=True)
     state = StripState()
     code = "".join(strip_line(line, state).ljust(len(line)) for line in raw.splitlines(keepends=True))
-    matches = list(find_test_only_cfg_attributes(code))
+    matches = list(find_test_only_cfg_attributes(code, source=raw))
     gated = {match.start() for match in matches if not match.is_inner}
     inner = {match.start() for match in matches if match.is_inner}
     containers, braces = {}, []
@@ -329,11 +329,6 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
     if manifest_dir is None:
         manifest_dir = next((directory for directory in root.parents
                              if directory.is_relative_to(repo_root) and (directory / "Cargo.toml").is_file()), repo_root)
-    if production:
-        try:
-            from rust_cfg import cfg_requires_test
-        except ModuleNotFoundError:
-            from scripts.rust_cfg import cfg_requires_test
     # (file, module names, children directory, directory its own #[path] resolves against, cfg chain)
     queue = [(root, (), module_directory(root, crate_root=True), root.parent, ())]
     seen = set()
@@ -343,7 +338,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
         if identity in seen:
             continue
         seen.add(identity)
-        if production and any(cfg_requires_test("".join(cfg[1:-1])) for cfg in file_cfgs):
+        if production and any(_cfg_requires_test(cfg) for cfg in file_cfgs):
             continue
         if production and not source.resolve().is_relative_to(repo_root.resolve()):
             inv.errors.append(f"{source}: source is outside repository root")
@@ -790,25 +785,25 @@ def _ignored_on(conditions, target_os, features):
     return True if True in verdicts else (None if None in verdicts else False)
 
 
-def _cfg_requires_test_text(expression):
+def _cfg_requires_test_text(expression, strict=False):
     """`rust_cfg.cfg_requires_test` for a cfg predicate's source text; the script may run from any cwd."""
     try:
         from rust_cfg import cfg_requires_test
     except ModuleNotFoundError:
         sys.path.append(str(Path(__file__).resolve().parents[1]))
         from rust_cfg import cfg_requires_test
-    return cfg_requires_test(expression)
+    return cfg_requires_test(expression, strict=strict)
 
 
-def _cfg_requires_test(predicate):
+def _cfg_requires_test(predicate, strict=False):
     """Whether one cfg token tuple from `walk` can only hold under `test`."""
-    words = list(predicate[1:-1])
+    words = [word for word in predicate[1:-1] if word != ","]
     text = ""
     for n, word in enumerate(words):
         if n and words[n - 1] not in "(=" and word not in "()=":
             text += ","
         text += f'"{word}"' if n and words[n - 1] == "=" else word
-    return _cfg_requires_test_text(text)
+    return _cfg_requires_test_text(text, strict)
 
 
 def unbounded_waits(raw, tokens, whole_file):

@@ -17,15 +17,6 @@ export type DailySeriesKey =
   | "input_tokens"
   | "output_tokens";
 
-export interface ShareSegment {
-  id: string;
-  label: string;
-  tokens: number;
-  percentage: number;
-  color: string;
-  sublabel?: string;
-}
-
 export interface SkillUsageRow {
   id: string;
   name: string;
@@ -55,12 +46,13 @@ export interface MetricDelta {
   tone: MetricDeltaTone;
 }
 
-const AGENT_BAR_COLORS = [
-  "var(--claude)",
-  "var(--codex)",
-  "oklch(0.72 0.14 265)",
-  "oklch(0.78 0.1 235)",
-  "color-mix(in oklch, var(--accent) 70%, white 30%)",
+/** Kit palette tokens for series without a provider color: agents and token kinds. */
+const KIT_SERIES = [
+  "var(--aui-accent)",
+  "var(--aui-info)",
+  "var(--aui-ok)",
+  "var(--aui-warn)",
+  "var(--aui-fg-muted)",
 ];
 
 export function msg(ko: string, en = ko, ja = ko, zh = ko) {
@@ -96,6 +88,11 @@ export function formatTokens(value: number): string {
   if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return Math.round(value).toString();
+}
+
+/** Chart axis money: a plain "$0" at the baseline, `formatCurrency` above it. */
+export function formatAxisCurrency(value: number): string {
+  return value === 0 ? "$0" : formatCurrency(value);
 }
 
 export function formatCurrency(value: number): string {
@@ -189,48 +186,6 @@ export function buildSavingsDelta(
     value: `-${savingsRate.toFixed(savingsRate >= 10 ? 0 : 1)}%`,
     tone: "up",
   };
-}
-
-export function buildModelSegments(
-  data: TokenAnalyticsResponse | null,
-): ShareSegment[] {
-  const models = data?.receipt.models ?? [];
-  const totalTokens = models.reduce((sum, item) => sum + item.total_tokens, 0);
-  if (totalTokens <= 0) return [];
-
-  const sorted = [...models].sort(
-    (left, right) => right.total_tokens - left.total_tokens,
-  );
-  const visible = sorted.slice(0, 5);
-  const overflow = sorted.slice(5);
-
-  const segments = visible.map((model, index) => ({
-    id: `${model.provider}-${model.model}-${index}`,
-    label: model.display_name,
-    tokens: model.total_tokens,
-    percentage: (model.total_tokens / totalTokens) * 100,
-    color: getProviderSeries(model.provider)[
-      index % getProviderSeries(model.provider).length
-    ],
-    sublabel: getProviderMeta(model.provider).label,
-  }));
-
-  if (overflow.length > 0) {
-    const overflowTokens = overflow.reduce(
-      (sum, item) => sum + item.total_tokens,
-      0,
-    );
-    segments.push({
-      id: "other-models",
-      label: "Other",
-      tokens: overflowTokens,
-      percentage: (overflowTokens / totalTokens) * 100,
-      color: "var(--fg-muted)",
-      sublabel: `${overflow.length} models`,
-    });
-  }
-
-  return segments;
 }
 
 export function buildSkillRows(
@@ -398,7 +353,7 @@ export function buildAgentItems(
           agent.cost_without_cache != null
             ? Math.max(0, agent.cost_without_cache - agent.cost)
             : null,
-        color: AGENT_BAR_COLORS[index % AGENT_BAR_COLORS.length],
+        color: KIT_SERIES[index % KIT_SERIES.length],
         composition: hasPromptDetail
           ? {
               input,
@@ -478,22 +433,22 @@ export function dailySeries(t: TFunction): DailySeriesDescriptor[] {
     {
       key: "cache_read_tokens",
       label: t(msg("cache R", "cache R")),
-      color: "var(--codex)",
+      color: KIT_SERIES[1],
     },
     {
       key: "cache_creation_tokens",
       label: t(msg("cache W", "cache W")),
-      color: "oklch(0.72 0.14 265)",
+      color: KIT_SERIES[0],
     },
     {
       key: "input_tokens",
       label: t(msg("input", "input")),
-      color: "oklch(0.78 0.1 235)",
+      color: KIT_SERIES[2],
     },
     {
       key: "output_tokens",
       label: t(msg("output", "output")),
-      color: "var(--claude)",
+      color: KIT_SERIES[3],
     },
   ];
 }

@@ -157,7 +157,7 @@ class Layout:
             self.module_of[rel] = module
             self.file_of.setdefault(module, rel)
             chains = inv.file_cfgs.get(path, set())
-            if chains and all(any(rts._cfg_requires_test(p) for p in chain) for chain in chains):
+            if chains and all(any(rts._cfg_requires_test(p, strict=True) for p in chain) for chain in chains):
                 self.test_only.add(rel)
         self.file_of[()] = self.root_file
         self.module_of[self.root_file] = ()

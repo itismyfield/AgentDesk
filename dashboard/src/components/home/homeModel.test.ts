@@ -6,7 +6,7 @@ import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, systemNeedsAttention, todoStatus,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, systemNeedsAttention, todoStatus, usageDetail,
   type HomeHealth,
 } from "./homeModel";
 
@@ -196,5 +196,11 @@ describe("home routines and usage", () => {
     expect(rows[0].stale).toBe(true);
     expect(autoPauseRule({ current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {} })).toEqual({ enabled: true, pct: 90 });
     expect(autoPauseRule(null)).toBeNull();
+  });
+
+  it("names the auto-run pause on a row at or past its threshold only", () => {
+    const [high, low] = buildUsageRows([{ provider: "claude", buckets: [{ name: "7d", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "5h", limit: 100, used: 85, remaining: 15, reset: 0 }], stale: false }], true);
+    expect([usageDetail(high, { enabled: true, pct: 90 }, tr), usageDetail(low, { enabled: true, pct: 90 }, tr)]).toEqual(["자동 진행 멈춤 기준 이상", undefined]);
+    expect(usageDetail(high, { enabled: false, pct: 90 }, tr)).toBeUndefined();
   });
 });

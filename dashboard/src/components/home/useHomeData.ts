@@ -130,7 +130,26 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
   const key = ids.join("|");
   const [turns, setTurns] = useState<Map<string, HomeTurn>>(() => new Map());
   const wanted = useRef<string[]>([]);
+  // Latest read per agent: an answer merges only for the agents whose newest read it still is.
+  const generation = useRef(new Map<string, number>());
   const alive = useRef(true);
+  const read = useRef((targets: string[]) => {
+    if (targets.length === 0) return;
+    const sent = targets.map((id) => {
+      const next = (generation.current.get(id) ?? 0) + 1;
+      generation.current.set(id, next);
+      return next;
+    });
+    void loadAgentTurns(targets).then((answer) => {
+      const fresh = targets.filter((id, index) => generation.current.get(id) === sent[index]);
+      if (!alive.current || fresh.length === 0) return;
+      setTurns((previous) => {
+        const merged = new Map([...previous].filter(([id]) => !fresh.includes(id)));
+        for (const id of fresh) if (answer.has(id)) merged.set(id, answer.get(id)!);
+        return new Map([...merged].filter(([id]) => wanted.current.includes(id)));
+      });
+    });
+  });
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; };
@@ -141,20 +160,10 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
     wanted.current = next;
     // An agent that stopped working leaves the cache, so its next turn never opens with the last one's line.
     setTurns((previous) => new Map([...previous].filter(([id]) => next.includes(id))));
-    const read = (targets: string[]) => {
-      if (targets.length === 0) return;
-      void loadAgentTurns(targets).then((answer) => {
-        if (!alive.current) return;
-        setTurns((previous) => {
-          const merged = new Map([...previous].filter(([id]) => !targets.includes(id)));
-          for (const [id, turn] of answer) merged.set(id, turn);
-          return new Map([...merged].filter(([id]) => wanted.current.includes(id)));
-        });
-      });
-    };
-    read(started);
-    return pollWhileVisible(() => read(wanted.current), intervalMs);
-  }, [key, intervalMs]);
+    read.current(started);
+  }, [key]);
+  // The cycle runs apart from the key, so a working set that changes faster than it still rereads everyone.
+  useEffect(() => pollWhileVisible(() => read.current(wanted.current), intervalMs), [intervalMs]);
   return turns;
 }
 

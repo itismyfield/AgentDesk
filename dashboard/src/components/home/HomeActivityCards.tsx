@@ -6,7 +6,7 @@ import {
   Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
 } from "../common/KitPrimitives";
 import { describeRoutinePurpose, formatClock } from "../dashboard/routineModel";
-import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, type Tr, type UsageRow } from "./homeModel";
+import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, usageDetail, type Tr } from "./homeModel";
 import { loadHomeRoutines, loadHomeUsage, loadRuntimeConfig, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's lower row: campaigns, today's routines and account usage.
@@ -156,11 +156,6 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
   const rows = buildUsageRows(usage.data ?? [], isKo);
   const measured = rows.map((row) => row.measuredAt).filter((time): time is number => time !== null);
   const unknown = tr("확인 불가", "Unknown");
-  // The kit draws a window without a value as a dash; the line under a row says why, or how old its value is.
-  const usageDetail = (row: UsageRow) => row.unmeasured
-    ? tr("측정 안 됨", "Not measured")
-    : row.pct === null ? row.note ?? unknown
-      : row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : undefined;
   const rule = autoPauseRule(runtime.data);
   const hasRows = Boolean(usage.data && rows.length > 0);
   const ruleText = rule
@@ -210,7 +205,7 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
             layout="limits"
             title={tr("공급자별 한도", "Limits by provider")}
             locale={isKo ? "ko-KR" : "en-US"}
-            limits={rows.map((row) => ({ group: row.group ?? undefined, label: row.label, used: row.pct, total: 100, unit: "%", detail: usageDetail(row) }))}
+            limits={rows.map((row) => ({ group: row.group ?? undefined, label: row.label, used: row.pct, total: 100, unit: "%", detail: usageDetail(row, rule, tr) }))}
             labels={usageLabels(tr)}
           />
           {pauseFooter}
