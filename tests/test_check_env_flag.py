@@ -60,6 +60,11 @@ class EnvFlagGuardTests(unittest.TestCase):
         self.assertEqual(guard.sites(text), [])
         self.assertEqual(guard.collect([('src/a_tests.rs', 'fn f() { std::env::var("F") == Ok("1"); }')])[0], {})
 
+    def test_a_test_support_gated_read_is_skipped_and_its_negation_is_not(self):
+        gate = 'any(test, feature = "test-support")'
+        for cfg, count in ((gate, 0), (f'not({gate})', 1), ('all(unix /*, feature = "test-support" */)', 1)):
+            self.assertEqual(len(guard.sites(f'#[cfg({cfg})]\nfn f() {{ std::env::var("F") == Ok("1"); }}')), count, cfg)
+
     def test_cfg_boundary_errors_fail_the_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'src/fixture.rs'

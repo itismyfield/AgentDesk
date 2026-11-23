@@ -10,7 +10,7 @@ import re
 import subprocess
 
 from generate_inventory_docs import cfg_requires_test, is_test_file, scan_balanced
-from rust_lex import StripState, cfg_item_end, strip_line
+from rust_lex import COMMENT, StripState, blank_segments, cfg_item_end, strip_line
 
 ROOT = Path(__file__).resolve().parents[1]
 READ = re.compile(r'\b(?:std\s*::\s*)?env\s*::\s*var(?:_os)?\s*\(')
@@ -34,9 +34,10 @@ def production_code(text):
     marked = LITERAL.sub(mark, text)
     state = StripState()
     code = '\n'.join(strip_line(line, state).ljust(len(line)) for line in marked.split('\n'))
+    (view,) = blank_segments(text, {COMMENT})  # cfg predicates with their literals, which `code` blanks
     blanked = list(code)
     for match in CFG.finditer(code):
-        if match[1] is not None and not cfg_requires_test(match[1]):
+        if match[1] is not None and not cfg_requires_test(view[match.start(1):match.end(1)]):
             continue
         end = cfg_item_end(code, match.end(), scan_balanced)
         blanked[match.start():end] = ['\n' if c == '\n' else ' ' for c in code[match.start():end]]

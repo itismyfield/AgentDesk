@@ -39,6 +39,11 @@ class BlankTestModulesTests(unittest.TestCase):
         source = '#[cfg(not(test))]\nmod prod {\n    const X: &str = "AGENTDESK_PROD";\n}\n'
         self.assertIn("AGENTDESK_PROD", gen.blank_test_modules(source))
 
+    def test_test_support_gated_module_is_blanked_and_its_negation_is_kept(self) -> None:
+        for cfg, kept in (('any(test, feature = "test-support")', False), ('not(any(test, feature = "test-support"))', True)):
+            source = f'#[cfg({cfg})]\nmod m {{\n    const X: &str = "AGENTDESK_GATED";\n}}\n'
+            self.assertEqual("AGENTDESK_GATED" in gen.blank_test_modules(source), kept, cfg)
+
 
 class DescriptionTests(unittest.TestCase):
     def test_prefers_comment_that_names_the_variable(self) -> None:
