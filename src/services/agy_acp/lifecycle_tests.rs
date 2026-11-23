@@ -430,7 +430,7 @@ fn hard_stop_kills_only_that_destination_child_and_its_descendants() {
                 uuid_session: false,
                 events,
             };
-            assert!(handle.send(Event::Turn(request)));
+            assert!(handle.send(Event::Turn(Box::new(request))));
             finished
         })
         .collect();

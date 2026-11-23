@@ -16,7 +16,7 @@ use super::rpc::{self, Inbound, RpcError};
 use super::wire::{self, StopReason, Update};
 
 pub(super) enum Event {
-    Turn(TurnRequest),
+    Turn(Box<TurnRequest>),
     Cancel { turn: u64 },
     Terminate { turn: u64 },
     Line { incarnation: u64, inbound: Inbound },
@@ -173,7 +173,7 @@ impl Actor {
 
     fn handle(&mut self, event: Event) {
         match event {
-            Event::Turn(request) => self.start(request),
+            Event::Turn(request) => self.start(*request),
             Event::Cancel { turn } if self.owns(turn) => self.cancel(),
             Event::Terminate { turn } if self.owns(turn) => {
                 self.stop_child();

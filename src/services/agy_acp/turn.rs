@@ -31,7 +31,7 @@ pub(super) fn drive(
     let (events, rx) = channel();
     request.events = events;
     let turn = request.turn;
-    if !handle.send(Event::Turn(request)) {
+    if !handle.send(Event::Turn(Box::new(request))) {
         out.record_fail(SpoolFailure::Spawn);
         return Err("agy acp actor is not running".into());
     }
