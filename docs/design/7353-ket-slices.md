@@ -4,7 +4,7 @@
 
 ## (A) feature 전환 대상(정의 위치 → 조각)
 
-정의 위치는 바꿀 gate(`#[cfg(test)]`·`#[cfg(all(test, unix))]`) 줄이다. 시험 전용 파일이면 그 파일을 선언하는 `mod` 줄의 gate다. 같은 파일 안에서 따라 바꿔야 하는 gate(전이 닫힘)는 파일별 표에 따로 적었다.
+정의 위치는 위쪽 시험이 직접 닿는 root gate 줄이다. 시험 전용 파일이면 그 파일을 선언하는 `mod` 줄의 gate다. 조각이 실제로 바꿀 gate 전부(root + 닫힘)는 아래 `(A) gate 전수표`가 정본이다(수리 1).
 
 | 조각 | 정의 위치 | 사용 행 | 사용 파일 | 항목 | 비고 |
 |---|---|---:|---:|---|---|
@@ -13,7 +13,7 @@
 | KE-T1 | `src/kanban/transition_core.rs:29` | 1 | 1 | `with_preflight_review_enter_outbox_suppressed` |  |
 | KE-T1 | `src/reconcile.rs:238` | 1 | 1 | `reset_dispatch_delivery_event_mismatch_metrics_for_tests` |  |
 | KE-T1 | `src/reconcile.rs:254` | 1 | 1 | `lock_dispatch_delivery_metric_tests` |  |
-| KE-T4 | `src/services/auto_queue/runtime.rs:616` | 1 | 1 | `slot_reset_host_pg_tests` | B와 겹침: slot_reset_host_pg_tests RELOC. 위쪽 사용처 1(`turn_bridge/tmux_runtime/stop_host_tests.rs:1112`)은 helper 분리로 KE 경로; 섞인 시험 모듈(#[test] 5); gate 안 위쪽 참조 {"PROD": 5, "FIX": 13, "ALIAS": 1, "AMB": 1} |
+| KE-C/M | `src/services/auto_queue/runtime.rs:616` | 1 | 1 | `slot_reset_host_pg_tests` | 수리 1 P1-3: `runtime_clears` 묶음(helper·기록 경로 `runtime.rs:274-294`·static `:600,609`·의존 시험 2파일)째 KE-C/M으로 넘김. KE-T 범위 밖; 섞인 시험 모듈(#[test] 5); gate 안 위쪽 참조 {"PROD": 5, "FIX": 13, "ALIAS": 1, "AMB": 1} |
 | KE-T1 | `src/services/campaign_execution/control.rs:971` | 1 | 1 | `tests` | 섞인 시험 모듈(#[test] 16) |
 | KE-T1 | `src/services/discord/busy_followup_retry_store.rs:66` | 4 | 1 | `set_clock_for_tests` | B와 다른 hunk(KE-T5 인라인 RELOC 파일) |
 | KE-T1 | `src/services/discord/busy_followup_retry_store.rs:73` | 1 | 1 | `fail_release_steps_for_tests` | B와 다른 hunk(KE-T5 인라인 RELOC 파일) |
@@ -44,9 +44,9 @@
 | KE-T1 | `src/services/imsg_reply/mod.rs:118` | 2 | 1 | `parse_enabled` |  |
 | KE-T8 | `src/services/mod.rs:113` | 2 | 1 | `recovery_defer` | services/mod.rs는 KRX-T5·T5b host 줄과 같은 파일. 두 조각 착지 뒤; 섞인 시험 모듈(#[test] 9) |
 | KE-T8 | `src/services/mod.rs:186` | 4 | 2 | `claude_herdr_first_input` | KRX-T8 KE host `krx_claude_tests`(시험 50·16파일)를 DL 시험이 fixture로 씀. 섞인 host라 gate 전환 대신 KRX-T8b 처방과 함께 판정 [U]; 섞인 시험 모듈(#[test] 50); gate 안 위쪽 참조 {"TS": 5} |
-| KE-T1 | `src/services/queue.rs:24` | 1 | 1 | `force_purge_channel_mailbox` | B와 다른 hunk(KE-T4 인라인 RELOC 파일) |
-| KE-T1 | `src/services/queue.rs:27` | 1 | 1 | `set_pre_purge_hook_for_test` | B와 다른 hunk(KE-T4 인라인 RELOC 파일) |
-| KE-T1 | `src/services/queue.rs:29` | 6 | 4 | `set_pre_purge_probe_for_test` | B와 다른 hunk(KE-T4 인라인 RELOC 파일) |
+| KE-T2 | `src/services/queue.rs:24` | 1 | 1 | `force_purge_channel_mailbox` | 수리 1 P1-1: 큐 hook 묶음(`queue/cancel_effects.rs`, `replace_queue` 의존)째 T2 |
+| KE-T2 | `src/services/queue.rs:27` | 1 | 1 | `set_pre_purge_hook_for_test` | 수리 1 P1-1: 큐 hook 묶음째 T2 |
+| KE-T2 | `src/services/queue.rs:29` | 6 | 4 | `set_pre_purge_probe_for_test` | 수리 1 P1-1: 큐 hook 묶음째 T2 |
 | KE-T1 | `src/services/routines/session_control.rs:3` | 3 | 2 | `seed_started_control_session` |  |
 | KE-T1 | `src/services/routines/session_control.rs:5` | 2 | 1 | `CONTROL_TEST_PAUSE`, `ControlPause` |  |
 | KE-T1 | `src/services/routines/store.rs:11` | 1 | 1 | `incident_content` |  |
@@ -87,29 +87,88 @@
 | KE-T2 | `src/services/turn_orchestrator/registry_purge.rs:343` | 5 | 4 | `try_hydrate_pending_queue_from_disk` |  |
 | KE-T1 | `src/supervisor/orphan_recovery/mod.rs:9` | 1 | 1 | `recover_once` |  |
 
-### (A) 같은 파일 전이 닫힘(정의가 부르는 다른 gate 항목, `a_closure.py`)
+## (A) gate 전수표(수리 1, `gate_graph.py`) — KE-T1·T2·T8의 정본
 
-| 파일 | 정의 gate 수 | 따라 바꿀 gate | 그 파일 gate 전체 |
-|---|---:|---|---:|
-| `src/dispatch/mod.rs` | 1 | `:21` pub | 3 |
-| `src/kanban/transition_core.rs` | 1 | `:24` PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX | 3 |
-| `src/services/discord/busy_followup_retry_store.rs` | 6 | `:57` TEST_CLOCK_MS | 12 |
-| `src/services/discord/inject_disposition/dispatched.rs` | 1 | `:118` FAIL_WRITES, `:120` FailureGuard | 6 |
-| `src/services/engine_runtime/mod.rs` | 6 | `:92` AllocationLog, `:95` ALLOCATIONS, `:745` PAYLOAD_LOCK_ENTRIES, `:752` LeaseToken, `:769` PhantomData, `:771` NonZeroU64, `:775` ConsumedCoordinate, `:778` new, `:789` Acquired, `:791` Committed, `:793` Released, `:796` GuardState … | 39 |
-| `src/services/engine_runtime/relay_state.rs` | 4 | `:10` pub, `:750` DeliveryFencePermittedHook, `:753` DELIVERY_FENCE_PERMITTED_HOOK, `:769` DeliveryFencePermittedHookGuard, `:781` set_delivery_fence_permitted_hook_for_tests | 17 |
-| `src/services/health_diagnostics.rs` | 2 | `:166` pub | 5 |
-| `src/services/session_resume/catalog.rs` | 2 | `:31` TEST_HOME, `:42` PREVIEW_DELAYS, `:45` PreviewDelay | 9 |
-| `src/services/turn_cancel_queue_guard.rs` | 1 | `:229` PreRecordProbe, `:232` PRE_RECORD_PROBE_FOR_TESTS | 6 |
-| `src/services/turn_orchestrator.rs` | 13 | `:95` load_channel_pending_queue, `:881` take_soft_matching, `:1422` HardStop, `:1464` ReplaceQueue, `:1496` AgeActiveTurnForTest, `:1501` AgeInboundWaitsForTest | 50 |
-| `src/services/turn_orchestrator/clear_channel.rs` | 1 | `:362` Op, `:369` FAULTS | 8 |
-| `src/services/turn_orchestrator/dispatch_reservation.rs` | 1 | `:189` MARKER_REMOVAL_FAULTS | 5 |
-| `src/services/turn_orchestrator/intervention.rs` | 1 | `:48` SOURCE_CLOCK_SAMPLE_HOOK | 3 |
-| `src/services/turn_orchestrator/mailbox_observation.rs` | 1 | `:20` ENUMERATIONS | 3 |
-| `src/services/turn_orchestrator/pending_queue_persistence.rs` | 1 | `:421` refuse_metadata_loss | 6 |
-| `src/services/turn_orchestrator/policy_close.rs` | 1 | `:175` note | 7 |
-| `src/services/turn_orchestrator/queued_head.rs` | 1 | `:102` pub, `:465` pub, `:837` downgrade_channel_snapshot | 7 |
-| `src/services/turn_orchestrator/queued_head/v2.rs` | 2 | `:30` AdmitError, `:242` enqueue, `:375` unit, `:621` MemberView, `:630` render | 11 |
-| `src/services/turn_orchestrator/queued_head/v2/source_admission.rs` | 3 | `:763` v2_admit | 9 |
+첫 설계의 `(A) 같은 파일 전이 닫힘` 표를 대신한다. 필드·변형·필드 초기화·hook을 실행하는 문장·match 팔·재노출 대상 파일·`cfg(not(test))` 짝까지 이름 참조 그래프로 묶었다(규칙은 `gate_graph.py` 머리말). 줄은 base `f352ad6f96`의 gate 속성 줄이고, `안쪽`은 같은 범위 안에 있어 함께 바뀌는 gate 줄이다. `cfg(all(test, unix))`는 `cfg(all(any(test, feature = "test-support"), unix))`로 바꾼다.
+
+### KE-T1: gate 91곳 / 파일 22개 / 닫힘 단위 29개, `cfg(not(test))` 짝 2곳, 쪼갤 match 팔 0곳
+
+| 파일 | gate 줄(종류) | 안쪽 gate |
+|---|---|---|
+| `src/dispatch/mod.rs` | `:10`(mod) |  |
+| `src/engine/mod.rs` | `:1049`(fn) |  |
+| `src/kanban/transition_core.rs` | `:24`(문장·필드·팔), `:29`(fn), `:39`(fn) |  |
+| `src/reconcile.rs` | `:238`(fn), `:254`(fn) |  |
+| `src/services/campaign_execution/control.rs` | `:971`(mod) |  |
+| `src/services/discord/busy_followup_retry_store.rs` | `:57`(문장·필드·팔), `:66`(fn), `:73`(fn), `:79`(fn), `:84`(fn), `:95`(문장·필드·팔), `:228`(문장·필드·팔), `:387`(fn), `:392`(fn), `:457`(fn) |  |
+| `src/services/discord/inject_disposition.rs` | `:469`(mod) |  |
+| `src/services/discord/inject_disposition/dispatched.rs` | `:65`(문장·필드·팔), `:118`(static), `:120`(struct), `:122`(impl), `:131`(fn) |  |
+| `src/services/discord/recovery_known_ids.rs` | `:176`(fn) |  |
+| `src/services/dispatched_sessions/hosted_cleanup/thread_gc.rs` | `:38`(fn) |  |
+| `src/services/dispatches/discord_delivery/mod.rs` | `:9`(use) |  |
+| `src/services/dispatches/discord_delivery/orchestration.rs` | `:1204`(fn) |  |
+| `src/services/engine_runtime/mod.rs` | `:63`(문장·필드·팔), `:72`(fn), `:92`(type), `:95`(문장·필드·팔), `:100`(struct), `:105`(impl), `:112`(impl), `:241`(fn), `:283`(문장·필드·팔), `:293`(문장·필드·팔), `:382`(문장·필드·팔), `:569`(문장·필드·팔), `:595`(문장·필드·팔), `:609`(문장·필드·팔), `:639`(문장·필드·팔), `:648`(문장·필드·팔), `:653`(문장·필드·팔), `:686`(문장·필드·팔), `:708`(문장·필드·팔), `:738`(fn), `:745`(static), `:749`(use), `:752`(struct), `:756`(impl), `:769`(use), `:771`(use), `:775`(struct), `:778`(impl), `:789`(struct), `:796`(trait), `:800`(impl), `:804`(impl), `:808`(impl), `:813`(struct), `:823`(impl), `:906`(impl), `:918`(impl), `:944`(impl), `:953`(impl), `:1127`(fn), `:791`(struct, 손 추가), `:793`(struct, 손 추가) |  |
+| `src/services/engine_runtime/relay_state.rs` | `:105`(fn), `:579`(impl), `:806`(enum, unix), `:964`(fn, unix) |  |
+| `src/services/hang_forensics.rs` | `:525`(fn) |  |
+| `src/services/health_diagnostics.rs` | `:42`(mod), `:80`(문장·필드·팔), `:162`(use) |  |
+| `src/services/imsg_reply/mod.rs` | `:118`(fn) |  |
+| `src/services/routines/session_control.rs` | `:3`(use), `:5`(use, unix) |  |
+| `src/services/routines/session_control/persistent_target.rs` | `:7`(enum), `:14`(문장·필드·팔), `:19`(fn), `:72`(문장·필드·팔), `:155`(문장·필드·팔), `:373`(fn) |  |
+| `src/services/routines/store.rs` | `:11`(use), `:2102`(fn) |  |
+| `src/supervisor/orphan_recovery/mod.rs` | `:9`(use) |  |
+| `src/utils/mod.rs` | `:10`(fn(KRX), 손 추가) |  |
+
+`cfg(not(test))` 짝 → `cfg(not(any(test, feature = "test-support")))`:
+- `src/kanban/transition_core.rs:46` `suppress_review_enter_outbox_for_preflight_harness`
+- `src/services/discord/busy_followup_retry_store.rs:89` `injected_release_fault`
+
+손 추가 근거:
+- `src/services/engine_runtime/mod.rs:791` — 표지 타입 `Committed`(다른 파일 prod 이름과 같아 그래프가 못 이음). 파일 안 시험 gate 42곳 전부 전환
+- `src/services/engine_runtime/mod.rs:793` — 표지 타입 `Released`(같은 이유)
+- `src/utils/mod.rs:10` — KRX `parse_env_flag_for_test`. `imsg_reply/mod.rs:118` `parse_enabled`가 부른다. KRX-T1·T2 전환 목록 밖이라 KE-T1이 KRX 줄 1개를 함께 바꾼다
+
+### KE-T2: gate 100곳 / 파일 20개 / 닫힘 단위 28개, `cfg(not(test))` 짝 0곳, 쪼갤 match 팔 6곳
+
+| 파일 | gate 줄(종류) | 안쪽 gate |
+|---|---|---|
+| `src/services/queue.rs` | `:24`(use), `:27`(use), `:29`(use, unix) |  |
+| `src/services/queue/cancel_effects.rs` | `:17`(use), `:19`(use), `:25`(type), `:28`(static), `:31`(fn), `:43`(type), `:46`(static), `:51`(fn, unix), `:59`(fn), `:198`(문장·필드·팔), `:412`(문장·필드·팔) |  |
+| `src/services/scheduled_messages/turn_completion.rs` | `:156`(mod) |  |
+| `src/services/session_resume/catalog.rs` | `:31`(문장·필드·팔), `:34`(fn), `:42`(static), `:45`(struct), `:48`(impl), `:60`(fn), `:71`(문장·필드·팔), `:656`(문장·필드·팔) |  |
+| `src/services/turn_cancel_queue_guard.rs` | `:208`(문장·필드·팔), `:229`(type, unix), `:232`(static, unix), `:238`(fn, unix), `:246`(fn, unix) |  |
+| `src/services/turn_orchestrator.rs` | `:63`(use), `:95`(use), `:97`(use), `:121`(use), `:123`(use, unix), `:141`(문장·필드·팔), `:307`(fn), `:873`(fn), `:881`(fn), `:942`(fn), `:1000`(fn), `:1037`(fn), `:1061`(fn), `:1071`(fn), `:1422`(문장·필드·팔), `:1464`(문장·필드·팔), `:1496`(문장·필드·팔), `:1501`(문장·필드·팔), `:1901`(문장·필드·팔), `:2217`(문장·필드·팔), `:2467`(문장·필드·팔), `:2505`(문장·필드·팔), `:2615`(문장·필드·팔), `:2625`(문장·필드·팔), `:2635`(문장·필드·팔), `:2659`(mod) |  |
+| `src/services/turn_orchestrator/checked_purge.rs` | `:122`(fn, unix) |  |
+| `src/services/turn_orchestrator/clear_channel.rs` | `:303`(문장·필드·팔), `:313`(문장·필드·팔), `:326`(문장·필드·팔), `:362`(enum), `:369`(static), `:372`(fn), `:381`(impl) |  |
+| `src/services/turn_orchestrator/dispatch_reservation.rs` | `:165`(문장·필드·팔), `:189`(static), `:192`(fn), `:201`(impl) |  |
+| `src/services/turn_orchestrator/intervention.rs` | `:48`(문장·필드·팔), `:54`(fn), `:100`(문장·필드·팔) |  |
+| `src/services/turn_orchestrator/mailbox_observation.rs` | `:20`(문장·필드·팔, unix), `:27`(문장·필드·팔, unix), `:33`(fn, unix) |  |
+| `src/services/turn_orchestrator/pending_queue_persistence.rs` | `:421`(fn), `:436`(fn), `:477`(mod), `:824`(fn), `:867`(mod) |  |
+| `src/services/turn_orchestrator/pending_queue_persistence/snapshot_io.rs` | `:21`(문장·필드·팔), `:67`(문장·필드·팔) |  |
+| `src/services/turn_orchestrator/queued_head.rs` | `:775`(fn) |  |
+| `src/services/turn_orchestrator/queued_head/v2.rs` | `:30`(use), `:260`(fn), `:336`(fn) |  |
+| `src/services/turn_orchestrator/queued_head/v2/actor.rs` | `:17`(fn) |  |
+| `src/services/turn_orchestrator/queued_head/v2/control.rs` | `:61`(문장·필드·팔), `:64`(문장·필드·팔), `:129`(문장·필드·팔), `:278`(impl, unix) |  |
+| `src/services/turn_orchestrator/queued_head/v2/retained.rs` | `:7`(fn) |  |
+| `src/services/turn_orchestrator/queued_head/v2/source_admission.rs` | `:3`(use), `:763`(fn), `:781`(fn), `:844`(fn), `:850`(fn) |  |
+| `src/services/turn_orchestrator/registry_purge.rs` | `:48`(use), `:123`(문장·필드·팔), `:167`(문장·필드·팔), `:176`(문장·필드·팔), `:186`(문장·필드·팔), `:343`(fn) |  |
+
+쪼갤 match 팔(닫힘 변형과 닫힘 밖 시험 전용 변형이 한 팔에 묶임 → 닫힘 변형만 새 팔로 떼어 `any(test, feature)`, 나머지는 `cfg(test)` 그대로):
+- `src/services/turn_orchestrator.rs:1901` — 남길 변형: `CancelActiveTurnIfUserMessageWithReason` (`src/services/turn_orchestrator.rs:1299`)
+- `src/services/turn_orchestrator.rs:2635` — 남길 변형: `AgeValveClearedDispatchForTest` (`src/services/turn_orchestrator.rs:1506`)
+- `src/services/turn_orchestrator/queued_head/v2/control.rs:61` — 남길 변형: `CancelActiveTurnIfUserMessageWithReason` (`src/services/turn_orchestrator.rs:1299`)
+- `src/services/turn_orchestrator/queued_head/v2/control.rs:64` — 남길 변형: `AgeValveClearedDispatchForTest` (`src/services/turn_orchestrator.rs:1506`)
+- `src/services/turn_orchestrator/registry_purge.rs:123` — 남길 변형: `AgeValveClearedDispatchForTest` (`src/services/turn_orchestrator.rs:1506`)
+- `src/services/turn_orchestrator/registry_purge.rs:167` — 남길 변형: `CancelActiveTurnIfUserMessageWithReason` (`src/services/turn_orchestrator.rs:1299`)
+
+### KE-T8: gate 10곳 / 파일 3개 / 닫힘 단위 5개, `cfg(not(test))` 짝 0곳, 쪼갤 match 팔 0곳
+
+| 파일 | gate 줄(종류) | 안쪽 gate |
+|---|---|---|
+| `src/services/imsg_reply/agy_input.rs` | `:30`(impl), `:47`(문장·필드·팔), `:56`(문장·필드·팔) |  |
+| `src/services/mod.rs` | `:113`(mod), `:186`(mod) |  |
+| `src/services/turn_orchestrator/policy_close.rs` | `:20`(문장·필드·팔), `:175`(문장·필드·팔), `:184`(문장·필드·팔), `:277`(문장·필드·팔), `:486`(mod) |  |
+
+
 
 ## (B) 파일별 처리
 
@@ -150,8 +209,6 @@
 | KE-T3 | `src/services/onboarding/mod.rs` | inline | SINK | KRX | 1 | 7 | `src/services/onboarding/mod.rs` | {'FIX': 1} |
 | KE-T4 | `src/services/agent_channels.rs` | inline | RELOC | DL | 1 | 2(옮길 함수 1~2, 함수 밖 0) | `src/services/agent_channels.rs` | {'FIX': 1} |
 | KE-T4 | `src/services/auto_queue/cleanup_tasks_pg_tests.rs` | dedicated | RELOC | ROOT | 3 | 23 | `src/services/auto_queue/cleanup_tasks.rs` | {'PROD': 2, 'FIX': 1} |
-| KE-T4 | `src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs` | dedicated | RELOC | ROOT | 20 | 5 | `src/services/auto_queue/runtime.rs` | {'PROD': 5, 'FIX': 13, 'ALIAS': 1, 'AMB': 1} |
-| KE-T4 | `src/services/auto_queue/runtime/verified_reset_pg_tests.rs` | dedicated | RELOC | ROOT | 5 | 1 | `src/services/auto_queue/runtime.rs` | {'PROD': 4, 'FIX': 1} |
 | KE-T4 | `src/services/dispatched_sessions/listing_tests.rs` | dedicated | RELOC | ROOT | 5 | 3 | `src/services/dispatched_sessions.rs` | {'FIX': 1, 'ALIAS': 2, 'AMB': 1, 'PROD': 1} |
 | KE-T4 | `src/services/dispatched_sessions/raw_alias_pg_tests.rs` | dedicated | RELOC | ROOT | 2 | 4 | `src/services/dispatched_sessions.rs` | {'FIX': 1, 'PROD': 1} |
 | KE-T4 | `src/services/dispatches/discord_delivery/transport.rs` | inline | RELOC | DL | 2 | 12(옮길 함수 1~12, 함수 밖 0) | `src/services/dispatches/discord_delivery/transport.rs` | {'ALIAS': 1, 'PROD': 1} |
@@ -189,30 +246,36 @@
 | KE-T8 | `src/services/auto_queue/dispatched_entry_recovery_pg_tests.rs` | dedicated | ROOTED | ROOT | 6 | 6 | `src/high_risk_recovery.rs` | {'PROD': 2, 'FIX': 4} |
 | KE-T8 | `src/services/dispatches/http_outbound.rs` | inline | SEAM(port) | DL | 1 | 0 | `src/services/dispatches/http_outbound.rs` | {'PROD': 1} |
 | KE-T8 | `src/services/dispatches/thread_archive_defer.rs` | inline | SEAM(port) | DL | 1 | 0 | `src/services/dispatches/thread_archive_defer.rs` | {'PROD': 1} |
+| KE-C/M | `src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs` | dedicated | RELOC | ROOT | 20 | 5 | `src/services/auto_queue/runtime.rs` | {'PROD': 5, 'FIX': 13, 'ALIAS': 1, 'AMB': 1} |
+| KE-C/M | `src/services/auto_queue/runtime/verified_reset_pg_tests.rs` | dedicated | RELOC | ROOT | 5 | 1 | `src/services/auto_queue/runtime.rs` | {'PROD': 4, 'FIX': 1} |
 
 ## (B) 스캐너 밖에서 조각이 함께 져야 하는 행(공유 fixture 연쇄·seam)
 
 | 조각 | 파일 | 종류 | 방식 | 대상 | 근거 |
 |---|---|---|---|---|---|
-| KE-T4 | `src/services/routines/session_control.rs` | inline | RELOC(연쇄) | ROOT | `:757` `verified_reset_pg_tests::Fixture` 사용. Fixture가 위쪽을 부르므로 그 시험 함수도 함께 옮긴다 |
-| KE-T4 | `src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs` | dedicated | PATH(위쪽 사용처) | DL | `:1112` `slot_reset_host_pg_tests::runtime_clears_after_done` → KE에 남기는 helper 경로로 1줄 |
-| KE-T6 | `src/services/routines/agent_executor.rs` | inline | SEAM(시험 모듈) | KE | `:869` KE prod cfg(test)가 `owner_input_tests::LEGACY_TEARDOWNS`를 읽음 → hook을 KE에 남기는 분리 |
-| KE-T6 | `src/services/routines/agent_executor/launch.rs` | inline | SEAM(시험 모듈) | KE | `:12` `super::owner_input_tests::inject` 호출 → 같은 분리 |
-| KE-T6 | `src/services/routines/agent_executor/owner_input.rs` | inline | SEAM(시험 모듈) | KE | `:151` `owner_input_tests::OWNER` task_local → 같은 분리 |
-| KE-T6 | `src/services/scheduled_messages.rs` | inline | SEAM(시험 모듈) | KE | `:413` `postgres_tests::START_TARGET` task_local → KE에 남기는 분리 |
+| KE-C/M | `src/services/routines/session_control.rs` | inline | RELOC(연쇄) | ROOT | `:757` `verified_reset_pg_tests::Fixture` 사용. 수리 1 P1-3으로 verified_reset이 KE-C/M 묶음에 들어가 이 시험 함수도 같이 간다 |
+| KE-C/M | `src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs` | dedicated | PATH(위쪽 사용처) | DL | `:1112` `runtime_clears_after_done`(DL은 `Applied` 단언). helper가 `RUNTIME_CLEARS`도 읽고 ROOT `ManagedReset`을 돌려주므로 KE에 남길 수 없다(수리 1 P1-3). 묶음째 KE-C/M |
+| KE-T6 | `src/services/routines/agent_executor.rs` | inline | SEAM(시험 모듈) | KE | `:868-872` KE prod cfg(test)가 `owner_input_tests::LEGACY_TEARDOWNS`를 센다 → task_local 선언만 KE 시험 hook 파일로 떼어 `any(test, feature)`, 실행 문장도 같은 gate |
+| KE-T6 | `src/services/routines/agent_executor/launch.rs` | inline | SEAM(시험 모듈) | KE | `:11-14` `owner_input_tests::inject` 호출. `inject`(`owner_input_tests.rs:14-`)는 ROOT `discord::health::reserve_headless_agent_turn`(`:4,31`)을 부르므로 KE에 남길 수 없다(수리 1 P1-4). KE에는 주입 슬롯(`STARTS` 대체 task_local)과 좁은 결과 계약(예약 결과 `turn_id`·채널만 담는 값)만 두고, 예약은 ROOT fixture가 해서 그 값을 슬롯에 넣는다 |
+| KE-T6 | `src/services/routines/agent_executor/owner_input.rs` | inline | SEAM(시험 모듈) | KE | `:150-153` `owner_input_tests::OWNER` task_local → 선언만 KE 시험 hook 파일로 떼어 `any(test, feature)` |
+| KE-T6 | `src/services/scheduled_messages.rs` | inline | SEAM(시험 모듈) | KE | `:412-415` `postgres_tests::START_TARGET` task_local(`postgres_tests.rs:10`) → 선언만 KE에 남기는 분리 |
+| KE-T6 | `src/services/scheduled_messages/owner_input.rs` | inline | (A) 새 행(옮긴 시험이 쓰는 KE hook) | KE | scheduled owner 시험(`owner_input_tests.rs:43,188`, ROOT로 감)이 쓰는 `OWNER`(선언 `:177`, 실행 `:165`)·`REJECTION_TEST`(선언 `:390`, 실행 `:120,122,133`)와 짝 `cfg(not(test))` `:127`을 같은 조각에서 `any(test, feature)`/`not(any(…))`로 바꾼다(수리 1 P1-4) |
+| KE-T6 | `src/services/routines/agent_executor/owner_custody_tests.rs` | dedicated | RELOC(자식) | ROOT | `owner_input_tests.rs:307-308` `#[path] mod custody_tests` 2시험. 부모와 함께 옮긴다(수리 1 P2) |
+| KE-T6 | `src/services/routines/agent_executor/owner_review_tests.rs` | dedicated | RELOC(자식) | ROOT | `owner_input_tests.rs:312-313` `#[path] mod review_tests` 13시험. 부모와 함께 옮긴다(수리 1 P2) |
 | KE-T7 | `src/services/stale_turn_reconciler.rs` | inline | (A) 새 행 | KE | host_repair_tests(→DL)가 `stale_turn_reconciler::owner_boundary_tests`를 씀 → 옮기면 새 (A) 행. gate 전환은 KE-T5 파일이라 T5 뒤 |
-| KE-T8 | `src/services/auto_queue/runtime.rs` | inline | SEAM(static 타입) | ROOT | `:600` `RUNTIME_CLEARS`가 ROOT `admin_host_guard::ManagedReset`을 담음. KE prod `verdict.apply()`(:281)가 이미 ROOT 타입을 받는 prod 간선이라 KE-C 몫과 함께 판정 |
+| KE-C/M | `src/services/auto_queue/runtime.rs` | inline | SEAM(static 타입) | ROOT | `:600,609` `RUNTIME_CLEARS`·`_DONE`과 기록 경로 `:274-294`. KE prod `verdict.apply()`(`:281`)가 이미 ROOT `ManagedReset`을 받는 prod 간선이라 KE-T 범위 밖([U]4 확정). `Applied`/`Refused` 구분과 완료 신호 `RUNTIME_CLEARS_DONE`을 유지하는 계약으로 KE-C/M이 한 번에 옮긴다 |
 | KE-T8 | `src/engine/ops/exec_ops.rs` | inline | SEAM(port) | DL | `:36` `install_engine_probes()` 즉석 설치(구현은 DL inflight) |
 
 ## 조각별 합계
 
-| 조각 | (A) 정의 / 사용 행 / gate 파일 / 닫힘 gate | (B) 파일(전용+인라인) / 사이트 / 시험 | 방식 | 덧붙인 행 |
+| 조각 | (A) root 정의 / 사용 행 / 바꿀 gate·파일(전수표) | (B) 파일(전용+인라인) / 사이트 / 시험 | 방식 | 덧붙인 행 |
 |---|---|---|---|---:|
-| KE-T1 | 39 / 273 / 20 / 28 | 0(0+0) / 0 / 0 | {} | 0 |
-| KE-T2 | 33 / 629 / 17 / 26 | 0(0+0) / 0 / 0 | {} | 0 |
-| KE-T3 | 0 / 0 / 0 / 0 | 33(15+18) / 68 / 413 | {'PATH': 27, 'SEAM': 4, 'SINK': 2} | 0 |
-| KE-T4 | 1 / 1 / 1 / 0 | 12(7+5) / 44 / 105 | {'RELOC': 12} | 2 |
-| KE-T5 | 0 / 0 / 0 / 0 | 9(5+4) / 57 / 112 | {'RELOC': 9} | 0 |
-| KE-T6 | 0 / 0 / 0 / 0 | 10(8+2) / 15 / 69 | {'RELOC': 10} | 4 |
-| KE-T7 | 0 / 0 / 0 / 0 | 6(4+2) / 21 / 43 | {'RELOC': 6} | 1 |
-| KE-T8 | 5 / 36 / 3 / 1 | 4(2+2) / 14 / 13 | {'ROOTED': 2, 'SEAM(port)': 2} | 2 |
+| KE-T1 | 36 / 265 / 91곳·22파일 | 0(0+0) / 0 / 0 | {} | 0 |
+| KE-T2 | 36 / 637 / 100곳·20파일 | 0(0+0) / 0 / 0 | {} | 0 |
+| KE-T3 | 0 / 0 / — | 33(15+18) / 68 / 413 | {'PATH': 27, 'SEAM': 4, 'SINK': 2} | 0 |
+| KE-T4 | 0 / 0 / — | 10(5+5) / 19 / 99 | {'RELOC': 10} | 0 |
+| KE-T5 | 0 / 0 / — | 9(5+4) / 57 / 112 | {'RELOC': 9} | 0 |
+| KE-T6 | 0 / 0 / — | 10(8+2) / 15 / 69 | {'RELOC': 10} | 7 |
+| KE-T7 | 0 / 0 / — | 6(4+2) / 21 / 43 | {'RELOC': 6} | 1 |
+| KE-T8 | 5 / 36 / 10곳·3파일 | 4(2+2) / 14 / 13 | {'ROOTED': 2, 'SEAM(port)': 2} | 1 |
+| KE-C/M | 1 / 1 / — | 2(2+0) / 25 / 6 | {'RELOC': 2} | 3 |
