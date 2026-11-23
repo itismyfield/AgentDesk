@@ -1035,15 +1035,25 @@ test("pipeline edit: a new way out is checked as it changes, a lost save resends
   await page.getByRole("dialog").getByRole("button", { name: "계속 편집" }).click();
   await panel.getByRole("listitem", { name: "전환 review-out-1" }).getByRole("combobox").first().selectOption("landing");
   await expect(checks).toContainText("검사를 모두 통과했어요.");
+  // A poll with the run unchanged checks nothing again, so nothing flickers and the save stays open.
+  const quiet = checked.length;
+  release.view.as_of = "2026-11-18T08:05:00.000Z";
+  await Promise.all([page.waitForResponse((response) => response.request().method() === "GET" && response.url().endsWith("/release/pipeline")), page.clock.fastForward(15_000)]);
+  await page.waitForTimeout(600);
+  expect(checked.length).toBe(quiet);
+  await expect(tools.getByRole("button", { name: "저장" })).toBeEnabled();
   await tools.getByRole("button", { name: "저장" }).click();
   await expect(view.getByRole("alert")).toContainText("응답을 받지 못했어요.");
   await tools.getByRole("button", { name: "저장" }).click();
   await expect(view.getByRole("alert")).toContainText("실행 중인 작업이 아직 이 상태에 있어요: 리뷰");
   await expect(checks).toContainText("작업이 남아 있는 상태라 지울 수 없어요");
   await expect(tools.getByRole("button", { name: "저장" })).toBeDisabled();
-  // The next poll finds the run moved: the same draft is checked again and may be saved, under a new key.
+  // The next poll finds the run moved: the same draft is checked again, quietly with the last result kept until the answer, and may be saved, under a new key.
   release.view.as_of = "2026-11-18T08:10:00.000Z";
-  await page.clock.fastForward(15_000);
+  detail.execution.state_ids.C = "main_verification";
+  let free = (): void => {}; const held = new Promise<void>((done) => { free = () => done(); }); await page.route(/\/validate$/, (route) => held.then(() => route.fallback()), { times: 1 });
+  await Promise.all([page.waitForRequest(/\/validate$/), page.clock.fastForward(15_000)]);
+  await expect(checks.getByRole("status")).toHaveCount(0); await expect(checks).toContainText("작업이 남아 있는 상태라 지울 수 없어요"); free();
   await expect(checks).toContainText("검사를 모두 통과했어요.");
   await tools.getByRole("button", { name: "저장" }).click();
   await view.getByRole("button", { name: "rev 8 위에 저장" }).click();
@@ -1057,28 +1067,52 @@ test("pipeline edit: a new way out is checked as it changes, a lost save resends
   expect(calls.filter((call) => !call.startsWith("GET") && !call.startsWith("POST /api/auth/ws-ticket") && !call.endsWith("/pipeline/validate")).map((call) => call.split(" ")[0])).toEqual(["PUT", "PUT", "PUT", "PUT"]);
 });
 
-test("pipeline edit: a new state comes into view, deleting one says what goes with it, and a draft left for another page waits, saying the server moved on", async ({ page }, testInfo) => {
+test("pipeline edit: a new state comes into view, deleting one says what goes with it, a draft left for another page waits (saying the server moved on, or why it cannot be edited), and one saved while away does not", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "Editing is for wide screens");
   await page.setViewportSize({ width: 1440, height: 980 });
   const { view, detail } = await openPipeline(page, "server", "dark", true);
   await json(page, /\/api\/server-campaigns\/release\/pipeline\/validate$/, { errors: [], warnings: [] });
   await view.getByRole("button", { name: "편집" }).click();
   const tools = view.getByRole("toolbar", { name: "편집 도구" });
+  // Pan the off-flow row out of sight first, so only the editor's reveal brings the new card back.
+  const pane = (await view.locator(".react-flow__pane").boundingBox())!;
+  await page.mouse.move(pane.x + 200, pane.y + 100).then(() => page.mouse.down());
+  await page.mouse.move(pane.x + 200, pane.y + 600, { steps: 8 }).then(() => page.mouse.up());
+  await expect(view.locator('.react-flow__node[data-id="failed"]')).not.toBeInViewport();
   await tools.getByRole("combobox", { name: "상태 추가" }).selectOption("agent_task");
   await expect(view.locator('.react-flow__node[data-id="agent_task-1"]')).toBeInViewport();
   await view.locator('.react-flow__node[data-id="review"]').click();
   await view.getByRole("complementary", { name: "파이프라인 편집" }).getByRole("button", { name: "지우기", exact: true }).click();
   await expect(page.getByRole("alertdialog")).toContainText("함께 지워져요: 전환 4개 · 이벤트 1개 · 다른 상태의 시간 초과 0개.");
   await page.getByRole("alertdialog").getByRole("button", { name: "그대로 두기" }).click();
-  // Another page asks nothing; coming back, the draft waits to be picked up.
-  await page.getByRole("link", { name: "홈", exact: true }).click();
-  await expect(view).toHaveCount(0);
-  detail.definition_revision = 8;
-  await page.goBack();
-  await page.getByRole("tab", { name: "파이프라인" }).click();
+  // Another page asks nothing; coming back, the draft waits, unless the campaign cannot be edited now, which it says.
+  const away = async () => { await page.getByRole("link", { name: "홈", exact: true }).click(); await expect(view).toHaveCount(0); };
+  const back = async () => { await page.goBack(); await page.getByRole("tab", { name: "파이프라인" }).click(); };
+  await away();
+  Object.assign(detail, { definition_revision: 8, editable: false });
+  await back();
+  await expect(view.getByText("준비됨이나 중지됨일 때만 고칠 수 있어요.")).toBeVisible();
+  await expect(view.getByRole("button", { name: "이어서 편집" })).toHaveCount(0);
+  await away().then(() => { detail.editable = true; }).then(back);
   await expect(view.getByRole("status").filter({ hasText: "저장하지 않은 초안이 있어요." })).toContainText("초안 기준 rev 7 · 지금 서버 rev 8.");
   await view.getByRole("button", { name: "이어서 편집" }).click();
   await expect(tools).toContainText("저장 안 됨 · 상태 +1");
+  // A draft left after a save got no answer resends its key; leaving while the save is out, once it lands nothing waits.
+  const keys: string[] = [];
+  await page.route(/\/api\/server-campaigns\/release\/pipeline$/, async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    if (keys.push(route.request().postDataJSON().idempotency_key) === 1) return route.fulfill({ status: 503, json: { error: "down" } });
+    await new Promise((done) => setTimeout(done, 1000));
+    return route.fulfill({ json: { result: { definition_revision: 9, run_id: null, control_version: null, event_sequence: 3, control: "prepared" } } });
+  });
+  const answered = () => page.waitForResponse((response) => response.request().method() === "PUT");
+  await Promise.all([answered(), tools.getByRole("button", { name: "저장" }).click()]);
+  await away().then(back).then(() => view.getByRole("button", { name: "이어서 편집" }).click());
+  const landed = answered(); await tools.getByRole("button", { name: "저장" }).click();
+  await away().then(() => landed).then(back);
+  await expect(view.getByRole("button", { name: "편집" })).toBeVisible();
+  expect(keys[1]).toBe(keys[0]);
+  await expect(view.getByText("저장하지 않은 초안이 있어요.")).toHaveCount(0);
 });
 
 test.describe("pipeline at 390px touch", () => {

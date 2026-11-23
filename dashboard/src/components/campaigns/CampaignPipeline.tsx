@@ -47,7 +47,9 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
     return () => abort.abort();
   }, [serverId, stamp, reads, tr]);
   const detail = loaded?.detail ?? null;
-  const editor = usePipelineEditor({ id: serverId, stamp, detail, reload: () => setReads((value) => value + 1), leave, tr });
+  // What the server's occupancy checks read: rechecking on this, not on every poll's timestamp, keeps a quiet run quiet.
+  const runtime = JSON.stringify([detail?.execution ?? null, dispositions ?? null]);
+  const editor = usePipelineEditor({ id: serverId, runtime, detail, reload: () => setReads((value) => value + 1), leave, tr });
   const { edit, changes, checks, notice } = editor;
   const shown = edit?.draft ?? loaded?.pipeline;
   useEffect(() => { if (!onEditing) return; onEditing(!!edit); return () => onEditing(false); }, [!!edit, onEditing]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -90,7 +92,9 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
   const errors = checks?.errors.length ?? 0;
   const blocked = editor.saving || !checks || checks.pending || errors > 0 || !editor.dirty || detail?.editable === false;
   const choose = (id: string | null) => { setChosen(id); if (id) setReveal((value) => ({ id, n: (value?.n ?? 0) + 1 })); };
+  const locked = <Cap className="ml-auto">{tr("준비됨이나 중지됨일 때만 고칠 수 있어요.", "Only a prepared or stopped campaign can be edited.")}</Cap>;
   const tools = edit ? !phone && <div role="toolbar" aria-label={tr("편집 도구", "Edit tools")} className="ml-auto flex flex-wrap items-center gap-2">
+    {detail?.editable === false && locked}
     {errors > 0 && <Chip tone="err"><Num>{tr(`검사 오류 ${errors}`, `${errors} check errors`)}</Num></Chip>}
     {editor.dirty && <Chip tone="warn"><Num>{tr(`저장 안 됨 · ${changesText(changes!, tr)}`, `Unsaved · ${changesText(changes!, tr)}`)}</Num></Chip>}
     <Select aria-label={tr("상태 추가", "Add a state")} wrapperClassName="w-36" className="!min-h-8 !py-1 text-[13px]" value="" disabled={editor.saving}
@@ -101,10 +105,9 @@ export default function CampaignPipeline({ source, dispositions, approvals = nul
     <Button variant="secondary" size="sm" disabled={editor.saving} onClick={editor.close}>{tr("편집 닫기", "Close editor")}</Button>
     <Button variant="primary" size="sm" loading={editor.saving} disabled={blocked} onClick={() => void editor.save()}>{tr("저장", "Save")}</Button>
   </div> : detail && !phone && (editor.waiting ? <span className="ml-auto flex flex-wrap items-center gap-2">
-    <Button variant="secondary" size="sm" icon={<PencilLine aria-hidden />} onClick={editor.resume}>{tr("이어서 편집", "Continue editing")}</Button>
+    {detail.editable ? <Button variant="secondary" size="sm" icon={<PencilLine aria-hidden />} onClick={editor.resume}>{tr("이어서 편집", "Continue editing")}</Button> : locked}
     <Button variant="ghost" size="sm" onClick={editor.forget}>{tr("초안 버리기", "Discard the draft")}</Button>
-  </span> : detail.editable ? <Button variant="secondary" size="sm" className="ml-auto" icon={<PencilLine aria-hidden />} onClick={() => editor.begin(detail)}>{tr("편집", "Edit")}</Button>
-    : <Cap className="ml-auto">{tr("준비됨이나 중지됨일 때만 고칠 수 있어요.", "Only a prepared or stopped campaign can be edited.")}</Cap>);
+  </span> : detail.editable ? <Button variant="secondary" size="sm" className="ml-auto" icon={<PencilLine aria-hidden />} onClick={() => editor.begin(detail)}>{tr("편집", "Edit")}</Button> : locked);
   const latest = notice?.kind === "conflict" ? notice.latest : null;
   const status = notice && <div role={notice.kind === "saved" ? "status" : "alert"} className="grid gap-2 border-b border-[var(--line-soft)] px-4 py-2.5 text-[13px] text-[var(--fg)]">
     {notice.kind === "saved" && tr(`정의 rev ${notice.revision}에 저장했어요.`, `Saved as definition rev ${notice.revision}.`)}

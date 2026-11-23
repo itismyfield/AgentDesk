@@ -9,19 +9,20 @@ import { warnBeforeUnload } from "./relationsEditorModel";
 import { newIdempotencyKey, rejectionText } from "./serverCampaignModel";
 
 type Edit = { base: PipelineDefinition; revision: number; draft: PipelineDefinition };
+type Sent = { body: string; key: string };
 export type Checks = { errors: PipelineDiagnostic[]; warnings: PipelineDiagnostic[]; pending: boolean; failed: string | null };
 export type Notice = { kind: "saved"; revision: number } | { kind: "lost" } | { kind: "error"; text: string } | { kind: "conflict"; latest: Detail };
 
 /** Drafts left without a decision (another page, the back button) for this tab's session, by campaign. They live only
  * in memory, so while any is kept a reload or close asks first; its own listener keeps the editor's removal from dropping it. */
-const kept = new Map<string, Edit>();
+const kept = new Map<string, Edit & { sent: { current: Sent | null } }>();
 const keptGuard = (event: BeforeUnloadEvent) => warnBeforeUnload(event);
 const guardKept = () => kept.size ? window.addEventListener("beforeunload", keptGuard) : window.removeEventListener("beforeunload", keptGuard);
 
 /** A draft of a server campaign's pipeline over the revision it was read at: the server checks it shortly after each
- * change and again whenever the run moves (`stamp`), and a save replaces the pipeline only if the definition has not moved since. */
-export function usePipelineEditor({ id, stamp, detail, reload, leave, tr }: {
-  id: string | null; stamp: string | null; detail: Detail | null; reload: () => void; leave?: RefObject<((proceed: () => void) => void) | null>; tr: Tr;
+ * change and again, quietly, whenever the run moves (`runtime`), and a save replaces the pipeline only if the definition has not moved since. */
+export function usePipelineEditor({ id, runtime, detail, reload, leave, tr }: {
+  id: string | null; runtime: string; detail: Detail | null; reload: () => void; leave?: RefObject<((proceed: () => void) => void) | null>; tr: Tr;
 }) {
   const [edit, setEdit] = useState<Edit | null>(null);
   const [waiting, setWaiting] = useState(() => id ? kept.get(id) ?? null : null);
@@ -30,20 +31,22 @@ export function usePipelineEditor({ id, stamp, detail, reload, leave, tr }: {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
   // A key belongs to the exact request it was made for; one that got no answer is resent under it.
-  const sent = useRef<{ body: string; key: string } | null>(null);
+  const sent = useRef<Sent | null>(null);
   const changes = useMemo(() => edit && draftChanges(edit.base, edit.draft), [edit]);
   const dirty = !!changes?.count;
   const draft = edit?.draft;
 
+  // A recheck of a draft already checked (only the run moved) keeps the last result on screen and the save open meanwhile.
+  const checked = useRef<PipelineDefinition | null>(null);
   useEffect(() => {
     if (!draft || !id) return;
-    const abort = new AbortController();
-    setChecks((current) => ({ errors: current?.errors ?? [], warnings: current?.warnings ?? [], pending: true, failed: null }));
+    const abort = new AbortController(), quiet = checked.current === draft;
+    if (!quiet) setChecks((current) => ({ errors: current?.errors ?? [], warnings: current?.warnings ?? [], pending: true, failed: null }));
     const timer = window.setTimeout(() => validateServerCampaignPipeline(id, draft, abort.signal).then(
-      ({ errors, warnings }) => setChecks({ errors, warnings, pending: false, failed: null }),
-      (cause: unknown) => { if (!abort.signal.aborted) setChecks((current) => ({ errors: [], warnings: [], ...current, pending: false, failed: cause instanceof Error ? cause.message : String(cause) })); }), 400);
+      ({ errors, warnings }) => { checked.current = draft; setChecks({ errors, warnings, pending: false, failed: null }); },
+      (cause: unknown) => { if (!abort.signal.aborted) setChecks((current) => quiet ? current && { ...current, pending: false } : { errors: [], warnings: [], ...current, pending: false, failed: cause instanceof Error ? cause.message : String(cause) }); }), quiet ? 0 : 400);
     return () => { window.clearTimeout(timer); abort.abort(); };
-  }, [id, draft, stamp]);
+  }, [id, draft, runtime]);
 
   // Leaving with unsaved changes: the page asks through `leave` (tabs, another campaign), a reload or close through beforeunload.
   const ask = useCallback((proceed: () => void) => setLeaving(() => proceed), []);
@@ -61,10 +64,10 @@ export function usePipelineEditor({ id, stamp, detail, reload, leave, tr }: {
   // Leaving any other way keeps the draft to pick up later; a decision (save, discard, close) clears `keep` first.
   const keep = useRef<Edit | null>(null);
   keep.current = dirty ? edit : null;
-  useEffect(() => () => { if (id && keep.current) { kept.set(id, keep.current); guardKept(); } }, [id]);
+  useEffect(() => () => { if (id && keep.current) { kept.set(id, { ...keep.current, sent }); guardKept(); } }, [id]);
   const forget = () => { if (id && kept.delete(id)) guardKept(); setWaiting(null); };
 
-  const stop = () => { keep.current = null; setEdit(null); setChecks(null); sent.current = null; };
+  const stop = () => { keep.current = null; checked.current = null; setEdit(null); setChecks(null); sent.current = null; };
   const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); };
   const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline });
   const save = async (over?: Detail) => {
@@ -78,6 +81,8 @@ export function usePipelineEditor({ id, stamp, detail, reload, leave, tr }: {
     setNotice(null);
     try {
       const result = await saveServerCampaignPipeline(id, revision, edit.draft, key);
+      // The page may have gone while waiting and kept this draft; it is saved now.
+      if (kept.delete(id)) guardKept();
       stop();
       setNotice({ kind: "saved", revision: result.definition_revision });
       reload();
@@ -104,7 +109,8 @@ export function usePipelineEditor({ id, stamp, detail, reload, leave, tr }: {
     edit, changes, dirty, checks, saving, notice, leaving, waiting,
     begin, save, forget,
     /** Picks up the kept draft over the revision it was made against; a save then reports any newer one as a conflict. */
-    resume: () => { if (waiting) open(waiting); },
+    // The key travels with a kept draft (by reference, so an answer that came after leaving still counts).
+    resume: () => { if (waiting) { const { sent: last, ...next } = waiting; open(next); sent.current = last.current; } },
     update: (change: (draft: PipelineDefinition) => PipelineDefinition) => setEdit((current) => current && { ...current, draft: change(current.draft) }),
     revert: () => setEdit((current) => current && { ...current, draft: current.base }),
     close: () => dirty ? setLeaving(() => stop) : stop(),
