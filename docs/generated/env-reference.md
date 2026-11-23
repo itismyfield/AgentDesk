@@ -103,7 +103,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_STALE_REPLAY_CHANNELS` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STALE_REPLAY_V1` | `src/services/discord/replay_policy/activation.rs` |  |
-| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/bot_runtime.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_AGY_LOGIN` | `src/config/test_instance/agy_cell.rs` |  |
 | `AGENTDESK_TEST_LEASE` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_MANIFEST` | `src/config/test_instance.rs` |  |
