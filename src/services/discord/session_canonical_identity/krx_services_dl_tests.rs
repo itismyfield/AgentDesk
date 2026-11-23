@@ -7,5 +7,3 @@ pub(crate) mod intake_worker_executor_tests;
 #[path = "../../message_outbox/plain_tests.rs"]
 mod message_outbox_plain;
 mod message_outbox_source_contract_tests;
-#[cfg(unix)]
-mod tui_prompt_dedupe_binding_context_tests;
