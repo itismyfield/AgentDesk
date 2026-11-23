@@ -1,6 +1,10 @@
-use super::super::{LedgerEntry, LedgerState, LocalRetryMark};
-use super::*;
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
+use crate::services::tui_o::store::ledger::input_notices::*;
+use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, LocalRetryMark};
+use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 fn evidence(uuid: &str, prompt: &str, start: u64) -> NoticeEvidence {
     let raw_record = serde_json::to_vec(&serde_json::json!({
@@ -91,10 +95,10 @@ fn materialized_unresolved_input_replays_raw_evidence_without_a_receipt() {
             entry: Box::new(entry),
         };
         let at = Utc::now();
-        super::super::append(&path, at, &entry).unwrap();
+        crate::services::tui_o::store::ledger::append(&path, at, &entry).unwrap();
         expected.apply(at, entry);
     }
-    let replay = super::super::recover(&path, 100).unwrap();
+    let replay = crate::services::tui_o::store::ledger::recover(&path, 100).unwrap();
     assert_eq!(replay, expected);
     assert!(replay.violation().is_none());
     assert_eq!(
@@ -115,7 +119,7 @@ fn replay_materialized(inputs: &[NoticeEvidence]) -> LedgerState {
     let path = dir.path().join("ledger.jsonl");
     std::fs::File::create(&path).unwrap();
     for input in inputs {
-        super::super::append(
+        crate::services::tui_o::store::ledger::append(
             &path,
             Utc::now(),
             &LedgerEntry::InputNotice {
@@ -126,7 +130,7 @@ fn replay_materialized(inputs: &[NoticeEvidence]) -> LedgerState {
         )
         .unwrap();
     }
-    super::super::recover(&path, 10).unwrap()
+    crate::services::tui_o::store::ledger::recover(&path, 10).unwrap()
 }
 
 #[test]
@@ -785,7 +789,7 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
                     ),
                 },
             ] {
-                super::super::append(
+                crate::services::tui_o::store::ledger::append(
                     &path,
                     Utc::now(),
                     &LedgerEntry::InputNotice {
@@ -795,7 +799,7 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
                 .unwrap();
             }
             let bytes = std::fs::read(&path).unwrap();
-            let replay = super::super::recover(&path, 0).unwrap();
+            let replay = crate::services::tui_o::store::ledger::recover(&path, 0).unwrap();
             assert_eq!(replay.input_notices(), state.input_notices());
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
@@ -808,7 +812,7 @@ fn unknown_complete_notice_entry_is_rejected_without_cutting_ledger_bytes() {
     let path = dir.path().join("ledger.jsonl");
     std::fs::File::create(&path).unwrap();
     let input = evidence("old", "retained", 0);
-    super::super::append(
+    crate::services::tui_o::store::ledger::append(
         &path,
         Utc::now(),
         &LedgerEntry::InputNotice {
@@ -824,7 +828,7 @@ fn unknown_complete_notice_entry_is_rejected_without_cutting_ledger_bytes() {
     let mut unsupported = serde_json::to_vec(&line).unwrap();
     unsupported.push(b'\n');
     std::fs::write(&path, &unsupported).unwrap();
-    assert!(super::super::recover(&path, 0).is_err());
+    assert!(crate::services::tui_o::store::ledger::recover(&path, 0).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), unsupported);
 }
 

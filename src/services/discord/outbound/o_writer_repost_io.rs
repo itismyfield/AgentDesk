@@ -34,7 +34,7 @@ pub(crate) enum Unsupported {
 pub(crate) struct RepostHttp {
     http: Arc<serenity::Http>,
     client: reqwest::Client,
-    base: Option<String>,
+    pub(crate) base: Option<String>,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 }
 
@@ -434,5 +434,4 @@ impl ProbeRead for RepostHttp {
 }
 
 #[cfg(test)]
-#[path = "o_writer_repost_io_tests.rs"]
-pub(crate) mod tests;
+pub(crate) use crate::services::discord::krx_tui_o_test_host::repost_io as tests;

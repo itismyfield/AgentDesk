@@ -1,7 +1,5 @@
 //! Verified owed delivery through the real writer and actor: exact permits, FIFO holds, kept
 //! debt and per-source GC protection, with the readiness gate opened only by the test.
-#[path = "progress_drain_verified_tests.rs"]
-mod progress_drain;
 #[path = "tool_card_provenance_tests.rs"]
 mod tool_card_provenance;
 #[path = "tool_card_codex_tests.rs"]
@@ -18,9 +16,9 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::{
 };
 use std::sync::atomic::Ordering;
 /// Opens the readiness gate for one channel on this thread and forgets its records on drop.
-struct Gate(u64);
+pub(crate) struct Gate(u64);
 impl Gate {
-    fn open(channel: u64, ready: bool) -> Self {
+    pub(crate) fn open(channel: u64, ready: bool) -> Self {
         set_ready_for_tests(channel, ready);
         Self(channel)
     }
@@ -53,7 +51,7 @@ fn episode_span(
 }
 
 /// Appends one closed native turn, stores its span, and issues its permit when `permit`.
-fn turn(
+pub(crate) fn turn(
     store: &mut ChannelStore,
     source: &SourceId,
     message: u64,

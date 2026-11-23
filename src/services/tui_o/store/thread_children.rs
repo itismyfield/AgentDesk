@@ -17,7 +17,7 @@ const FLOOR: &str = "thread_children.floor";
 const CONTENT: &[u8] = b"1\n";
 
 impl OStore {
-    pub(super) fn init_channel_checked(
+    pub(crate) fn init_channel_checked(
         &self,
         init: &Initialized,
         origin: InitOrigin,
