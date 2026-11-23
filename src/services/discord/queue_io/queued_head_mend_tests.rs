@@ -7,7 +7,6 @@ use crate::services::claude_tui::busy_inject::frame;
 const SESSION: &str = InjectPane::SESSION;
 /// A Claude session other than the one the pane's transcript file is named for.
 const OTHER: &str = "7d3e9a10-2c4b-4f6e-8a1d-5b9c0e2f4a6d";
-const NONCE: &str = "0a1b2c3d";
 /// Older than every queue clock here, as the fake pane stamps its own records.
 const OLD_STAMP: &str = "2026-10-06T00:00:00.000Z";
 
@@ -80,14 +79,6 @@ impl Fixture {
             .to_string()
     }
 
-    /// The record an older binary left: the same Unknown head without its attempt.
-    fn forget_attempt(&self) {
-        let mut disk = self.disk();
-        let head = disk["head_injection"].as_object_mut().unwrap();
-        assert!(head.remove("attempt").is_some());
-        std::fs::write(self.path(), serde_json::to_string_pretty(&disk).unwrap()).unwrap();
-    }
-
     fn reconciled_rows(&self) -> usize {
         let rows = self.rows();
         let reconciled = rows.iter().filter(|row| row.outcome == "reconciled");
@@ -125,88 +116,6 @@ impl Fixture {
         let context = crate::services::discord::queue_persistence_context;
         let persistence = context(&self.shared, &CLAUDE, self.channel);
         let _ = self.shared.mailbox(self.channel).clear(persistence).await;
-    }
-}
-
-/// An Unknown head an older binary recorded, whose absorbed paste the transcript shows past any
-/// 32 MiB tail, is consumed after a restart untyped, busy or idle; the tail follows once.
-#[tokio::test(flavor = "current_thread")]
-async fn s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_pg() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    for (channel, busy) in [(6_813_441, true), (6_813_442, false)] {
-        let mut fixture = Fixture::new(channel, "all").await;
-        let _gate = router::busy_inject_support::open_gate(channel);
-        let queue = fixture.queue().await;
-        let (h, b) = (queue[0].message_id, queue[1].message_id);
-        fixture.unknown_head().await;
-        fixture.forget_attempt();
-        let legacy = crate::services::tui_input::human_frame::inject(
-            &format!("discord:{}:{h}", fixture.channel),
-            "200",
-            AUTHOR_NAME,
-            NONCE,
-            "status?",
-        );
-        fixture.append(&absorbed(
-            &paste_block("b0ac", &legacy, "b0ac"),
-            &now_stamp(),
-        ));
-        if !busy {
-            let pad = "x".repeat(33 << 20);
-            fixture.append(&format!("{{\"type\":\"progress\",\"pad\":\"{pad}\"}}"));
-            fixture.append("{\"type\":\"result\"}");
-            fixture.pane.idle();
-        }
-        fixture.restart(busy).await;
-        let calls = fixture.pane.tmux_calls();
-        if busy {
-            queue_io::spawn_turn_completion_idle_queue_listener(fixture.shared.clone(), CLAUDE);
-        } else {
-            let reason = "idle_queue_backstop";
-            let shared = &fixture.shared;
-            queue_io::kick_queued_only_channel_if_context_available(
-                shared,
-                &CLAUDE,
-                fixture.channel,
-                reason,
-            )
-            .await;
-        }
-        until("the proven head is consumed", || {
-            fixture.terminal() == [h.get()]
-        })
-        .await;
-        assert_eq!(
-            fixture.pane.tmux_calls(),
-            calls,
-            "busy={busy}: H was not typed"
-        );
-        assert!(fixture.disk()["head_injection"].is_null());
-        until("the reconciliation attempt is reported", || {
-            fixture.reconciled_rows() == 1
-        })
-        .await;
-        assert_eq!(fixture.reconciled_rows(), 1, "busy={busy}");
-        if busy {
-            fixture.slow_check().await;
-            until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
-            assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-            let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-            let nonce = fixture.pane.nonce().unwrap();
-            assert_eq!(
-                buffer,
-                format!("[User: {AUTHOR_NAME} (ID: 200) · {nonce}] distinct tail B")
-            );
-            fixture.assert_still_busy().await;
-        } else {
-            // The idle dequeue that follows takes B, and nothing was typed.
-            let restarted = ChannelMailboxRegistry::default().handle(fixture.channel);
-            let context = crate::services::discord::queue_persistence_context;
-            let persistence = context(&fixture.shared, &CLAUDE, fixture.channel);
-            let take = restarted.take_next_soft(persistence).await;
-            assert_eq!(take.intervention.map(|item| item.message_id), Some(b));
-            assert!(fixture.pane.keys().is_empty());
-        }
     }
 }
 

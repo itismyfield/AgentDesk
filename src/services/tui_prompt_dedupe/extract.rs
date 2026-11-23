@@ -227,16 +227,13 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
 /// (`tmux_watcher/prompt_observe.rs`) submits `join("")` / `join(" ")` /
 /// `join("\n")` variants of one block, so a line-anchored check would miss the
 /// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
-/// following `(ID: <digits>)]` (author may itself contain parens). A v1 header counts only as a
-/// new turn's; input pasted into a running turn is settled by the injected-input ledger.
+/// following `(ID: <digits>)]` (author may itself contain parens). Input pasted into a running
+/// turn is settled by the injected-input ledger.
 pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
     };
     let header = &prompt[user_at..];
-    if let Some((header, _)) = human_frame::parse(header) {
-        return header.mode == human_frame::Mode::New;
-    }
     if human_frame::opens_inject(header) {
         return false;
     }

@@ -247,6 +247,11 @@ fn the_nonce_is_confirmed_only_by_a_later_user_record() {
     assert_eq!(rollout::submitted(&path, 0, "feedf00d"), None);
 }
 
+/// A v1 frame, as rollouts and composers written before the plain frame still show one.
+fn v1(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
+    format!("[User: {name} (ID: {author}) · 📱 v1 mode=inject source={source} · {nonce}]\n{body}")
+}
+
 fn frame_text() -> String {
     frame(SOURCE, AUTHOR, NAME, NONCE, BODY)
 }
@@ -266,11 +271,9 @@ fn captured_screens_read_as_shown() {
     let shown = screen::read(&fixture("busy_frame_v1.ansi"));
     assert_eq!(
         shown.composer,
-        screen::Composer::Text(crate::services::tui_input::human_frame::inject(
-            SOURCE, AUTHOR, NAME, NONCE, BODY
-        ))
+        screen::Composer::Text(v1(SOURCE, AUTHOR, NAME, NONCE, BODY))
     );
-    let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
+    let legacy = format!("[📱 {SOURCE} · {NAME} · {NONCE}]\n{BODY}");
     let shown = screen::read(&fixture("busy_frame.ansi"));
     assert_eq!(shown.composer, screen::Composer::Text(legacy));
     assert!(screen::read(&fixture("busy_queued.ansi")).queued);
@@ -409,9 +412,7 @@ impl Fake {
             .map(|name| {
                 let shown = fixture(name);
                 if *name == "busy_frame_v1.ansi" {
-                    let old = crate::services::tui_input::human_frame::inject(
-                        SOURCE, AUTHOR, NAME, NONCE, "",
-                    );
+                    let old = v1(SOURCE, AUTHOR, NAME, NONCE, "");
                     let new = crate::services::tui_input::human_frame::plain_inject(
                         SOURCE, AUTHOR, NAME, NONCE, "",
                     );
@@ -775,15 +776,7 @@ fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
     register(("codex", &session, "ca720106", "720103"), &path, 0, &framed).unwrap();
     let response = |id: &str| serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"user", "id":id, "content":[{"type":"input_text", "text":framed}], "internal_chat_message_metadata_passthrough":{"turn_id":"target"}}});
     let completed = |id: &str| serde_json::json!({"type":"event_msg", "payload":{"type":"item_completed", "turn_id":"target", "item":{"type":"UserMessage", "id":id, "content":[{"type":"text", "text":framed}]}}});
-    let legacy_frame = |nonce| {
-        crate::services::tui_input::human_frame::inject(
-            "discord",
-            "720103",
-            "ann",
-            nonce,
-            "same words",
-        )
-    };
+    let legacy_frame = |nonce| v1("discord", "720103", "ann", nonce, "same words");
     let mut legacy = response("legacy-row");
     legacy["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720106"));
     fs::write(&path, format!("{legacy}\n")).unwrap();

@@ -29,13 +29,12 @@ fn text() -> String {
 }
 
 fn v1_text() -> String {
-    crate::services::tui_input::human_frame::inject(
-        "iMessage",
-        "200",
-        "ann",
-        NONCE,
-        "are you there?",
-    )
+    v1("iMessage", "200", "ann", NONCE, "are you there?")
+}
+
+/// A v1 frame, as transcripts and composers written before the plain frame still show one.
+fn v1(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
+    format!("[User: {name} (ID: {author}) · 📱 v1 mode=inject source={source} · {nonce}]\n{body}")
 }
 
 // Claude draws continuation rows two columns in.
@@ -235,7 +234,7 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": marker_text}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": marker_text}),
         serde_json::json!({"type": "queue-operation", "operation": "dequeue"}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "x")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": v1("iMessage", "200", "ann", "ffff0000", "x")}),
     ];
     for record in ignored {
         writeln!(file, "{}", real(record)).unwrap();
@@ -379,7 +378,7 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
         serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "are you there?")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": v1("iMessage", "200", "ann", "ffff0000", "are you there?")}),
     ] {
         writeln!(file, "{}", real(record.clone())).unwrap();
         assert_eq!(
@@ -413,16 +412,6 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
     );
 }
 
-#[test]
-fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let framed = crate::services::tui_input::human_frame::inject(
-        "iMessage", "200", "a]b\nc", NONCE, "/clear",
-    );
-    let header = "[User: a)b c (ID: 200) · 📱 v1 mode=inject source=iMessage · abcd1234]";
-    assert_eq!(framed, format!("{header}\n/clear"));
-}
-
 /// A running turn's input left in the composer, flat, wrapped or after a person's keys, is
 /// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
 #[test]
@@ -430,13 +419,7 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
-    let framed = crate::services::tui_input::human_frame::inject(
-        source,
-        "343742347365974026",
-        "0hbujang",
-        NONCE,
-        "status?",
-    );
+    let framed = v1(source, "343742347365974026", "0hbujang", NONCE, "status?");
     let header = framed.lines().next().unwrap();
     let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
     let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());

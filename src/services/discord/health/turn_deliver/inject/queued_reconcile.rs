@@ -48,7 +48,7 @@ impl crate::services::turn_orchestrator::ChannelMailboxHandle {
         .await
     }
 }
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -57,7 +57,7 @@ use super::queued_provider::QueuedProvider;
 use super::queued_support::RECONCILED;
 use super::{HumanInputRequest, InjectAttempt, SharedData, channel_name, live_tui_session};
 use crate::services::claude_tui::busy_inject;
-use crate::services::tui_input::human_frame::{self, Mode};
+use crate::services::tui_input::human_frame;
 use crate::services::turn_orchestrator::{
     PendingQueueItem, QueueIdentity, SourceMessageQueuedGeneration,
 };
@@ -105,7 +105,7 @@ pub(super) async fn mend(
     let (identity, original, transcript) =
         (head.identity.clone(), head.original.clone(), bound.clone());
     let proof = tokio::task::spawn_blocking(move || {
-        provider.proof(channel, &identity, &original, recorded, &transcript)
+        provider.proof(&identity, &original, recorded, &transcript)
     })
     .await
     .ok()??;
@@ -205,19 +205,14 @@ pub(super) struct Recorded {
 type ScanKey = (PathBuf, FileId, u64, u64);
 static RESUME: Mutex<Option<HashMap<ScanKey, u64>>> = Mutex::new(None);
 
-/// What proves this head: its frame under one nonce, the recorded one when the head names its
-/// paste, else the only one enqueued after the source's own enqueue.
+/// What proves this head: its frame under the nonce of the paste it recorded.
 struct Want {
     key: ScanKey,
     from: u64,
-    /// The pre-v1 frame up to its nonce.
-    lead: String,
-    source: String,
     author: String,
     text: String,
-    nonce: Option<String>,
+    nonce: String,
     session_id: String,
-    after_us: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,7 +230,6 @@ struct Seen {
     body: String,
     session: String,
     offset: u64,
-    stamp_us: Option<i64>,
 }
 
 pub(super) struct Proof {
@@ -246,35 +240,13 @@ pub(super) struct Proof {
 
 impl Want {
     fn of(
-        channel: ChannelId,
         identity: &QueueIdentity,
         original: &PendingQueueItem,
         recorded: Option<Recorded>,
         bound: &Bound,
     ) -> Option<Self> {
-        let (nonce, from, after_us) = match recorded {
-            // Only the paste's own transcript file and session can hold its record.
-            Some(recorded) => {
-                if !recorded.matches(bound) {
-                    return None;
-                }
-                (Some(recorded.nonce), recorded.offset, None)
-            }
-            // A head recorded before attempts were: one source, pasted after its enqueue clock.
-            None => {
-                let [source] = identity.sources.as_slice() else {
-                    return None;
-                };
-                let clock = (original.source_message_queued_generations.iter())
-                    .filter(|clock| clock.message_id == source.message_id)
-                    .find(|clock| clock.queued_generation == source.queued_generation)?;
-                let after = i64::try_from(clock.enqueued_at_epoch_us?).ok()?;
-                (None, 0, Some(after))
-            }
-        };
-        let source = format!("discord:{channel}:{}", original.message_id);
-        let author = original.author_id.to_string();
-        let lead = human_frame::legacy_inject(&source, &author, "", "");
+        // Only the paste's own transcript file and session can hold its record.
+        let recorded = recorded.filter(|recorded| recorded.matches(bound))?;
         let key = (
             bound.path.clone(),
             bound.file,
@@ -283,14 +255,11 @@ impl Want {
         );
         Some(Self {
             key,
-            from,
-            lead: lead.strip_suffix("]\n")?.to_string(),
-            source,
-            author,
+            from: recorded.offset,
+            author: original.author_id.to_string(),
             text: original.text.clone(),
-            nonce,
+            nonce: recorded.nonce,
             session_id: bound.session_id.clone(),
-            after_us,
         })
     }
 
@@ -312,10 +281,8 @@ impl Want {
         // A line without its newline may still be mid-write, so the search stops before it.
         while reader.read_until(b'\n', &mut line).ok()? > 0 && line.ends_with(b"\n") {
             let text = std::str::from_utf8(&line).unwrap_or_default();
-            if self.nonce.is_some() || text.contains(&self.source) {
-                first.get_or_insert(offset);
-                seen.extend(self.record(text, offset));
-            }
+            first.get_or_insert(offset);
+            seen.extend(self.record(text, offset));
             offset += line.len() as u64;
             line.clear();
         }
@@ -354,74 +321,32 @@ impl Want {
             }
             _ => return None,
         };
-        let stamp = text(&record, "timestamp");
-        let stamp = stamp.and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok());
         Some(Seen {
             nonce: self.nonce_in(&body)?,
             kind,
             body,
             session: text(&record, "sessionId").filter(|id| !id.is_empty())?,
             offset,
-            stamp_us: stamp.map(|at| at.timestamp_micros()),
         })
     }
 
-    /// The nonce of the frame `body` is exactly, bare or in one paste block: the plain or v1 frame
-    /// this head's source and author rebuild under the name it shows, or the frame pasted before v1.
+    /// The recorded nonce when `body` is exactly, bare or in one paste block, the tagged frame this
+    /// head's author and text rebuild under the name it shows, registered as that attempt's.
     fn nonce_in(&self, body: &str) -> Option<String> {
-        let header = body
-            .find("[User: ")
-            .and_then(|at| human_frame::parse(&body[at..]));
-        if let Some((header, _)) = header.filter(|(header, _)| header.mode == Mode::Inject) {
-            let (name, nonce) = (header.name, header.nonce);
-            if header.source.is_empty() {
-                // A plain frame carries this attempt's tag, or none when written before tags.
-                let id = self.nonce.as_deref()?;
-                let frame = if nonce.is_empty() {
-                    human_frame::idle(name, &self.author, &self.text)
-                } else {
-                    human_frame::plain_inject(&self.source, &self.author, name, id, &self.text)
-                };
-                if human_frame::history::registered(id, &self.key.0, &frame)
-                    && human_frame::history::unique_attempt(id, &self.key.0, &frame)
-                    && busy_inject::exact_receipt(body, &frame)
-                {
-                    return Some(id.to_string());
-                }
-                return None;
-            }
-            let frame = human_frame::inject(&self.source, &self.author, name, nonce, &self.text);
-            if header.author == self.author && busy_inject::exact_receipt(body, &frame) {
-                return Some(nonce.to_string());
-            }
-        }
-        let at = body.find(&self.lead)? + self.lead.len();
-        let nonce = body.get(at..at + 8)?;
-        let hex = nonce
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        let frame = human_frame::legacy_inject(&self.source, &self.author, nonce, &self.text);
-        (hex && busy_inject::exact_receipt(body, &frame)).then(|| nonce.to_string())
+        let at = body.find("[User: ")?;
+        let (header, _) = human_frame::parse(&body[at..])?;
+        let (id, name) = (self.nonce.as_str(), header.name);
+        let frame = human_frame::plain_inject("", &self.author, name, id, &self.text);
+        (human_frame::history::registered(id, &self.key.0, &frame)
+            && human_frame::history::unique_attempt(id, &self.key.0, &frame)
+            && busy_inject::exact_receipt(body, &frame))
+        .then(|| id.to_string())
     }
 
     /// One enqueue under the nonce in the bound session, then an absorbed removal and, after it, a
     /// human command naming the same ids, each with the enqueue's body and session.
     fn decide(&self, seen: &[Seen]) -> Option<Proof> {
-        let paste = |seen: &Seen| {
-            let after = |after: i64| seen.stamp_us.is_some_and(|at| at >= after);
-            seen.kind == Kind::Enqueue && self.after_us.is_none_or(after)
-        };
-        let nonce = match &self.nonce {
-            Some(nonce) => nonce.clone(),
-            None => {
-                let pasted = seen.iter().filter(|seen| paste(seen));
-                let nonces: BTreeSet<&str> = pasted.map(|seen| seen.nonce.as_str()).collect();
-                let [only] = nonces.into_iter().collect::<Vec<_>>()[..] else {
-                    return None;
-                };
-                only.to_string()
-            }
-        };
+        let nonce = self.nonce.clone();
         let mine: Vec<&Seen> = seen.iter().filter(|seen| seen.nonce == nonce).collect();
         let enqueues: Vec<&Seen> = (mine.iter().copied())
             .filter(|seen| seen.kind == Kind::Enqueue)
@@ -445,7 +370,7 @@ impl Want {
             Kind::Command(command, delivery) => removed.contains(&(command, delivery)),
             Kind::Enqueue => false,
         });
-        (paste(enqueue) && bound_session && linked).then(|| Proof {
+        (bound_session && linked).then(|| Proof {
             nonce,
             session: enqueue.session.clone(),
             offset: enqueue.offset,
@@ -462,13 +387,12 @@ impl Recorded {
 }
 
 pub(super) fn claude_proof(
-    channel: ChannelId,
     identity: &QueueIdentity,
     original: &PendingQueueItem,
     recorded: Option<Recorded>,
     bound: &Bound,
 ) -> Option<Proof> {
-    Want::of(channel, identity, original, recorded, bound)?.search()
+    Want::of(identity, original, recorded, bound)?.search()
 }
 
 #[cfg(test)]
@@ -480,12 +404,12 @@ mod tests;
 fn mismatched_file_identity_refuses_transcript_proof() {
     use serde_json::json;
 
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("transcript.jsonl");
-    let source = "discord:6813460:9100094081725135881";
     let session = "47d7dbe8-0c1a-4b2e-9f3d-6a5b4c3d2e1f";
     let nonce = "d286a43b";
-    let body = human_frame::inject(source, "200", "ann", nonce, "status?");
+    let body = human_frame::plain_inject("", "200", "ann", nonce, "status?");
     let records = [
         json!({"type": "queue-operation", "operation": "enqueue",
             "sessionId": session, "content": body}),
@@ -498,6 +422,9 @@ fn mismatched_file_identity_refuses_transcript_proof() {
                 "origin": {"kind": "human"}, "humanTurn": true}}),
     ];
     let transcript = records.map(|record| format!("{record}\n")).concat();
+    std::fs::write(&path, "").unwrap();
+    let who = ("claude", "AgentDesk-claude-test", nonce, "200");
+    human_frame::history::register(who, &path, 0, &body).unwrap();
     std::fs::write(&path, &transcript).unwrap();
     let actual = file_id(&std::fs::metadata(&path).unwrap());
     let different = actual
@@ -507,13 +434,10 @@ fn mismatched_file_identity_refuses_transcript_proof() {
     let want = Want {
         key: (path.clone(), different, 1, 1),
         from: 0,
-        lead: String::new(),
-        source: source.into(),
         author: "200".into(),
         text: "status?".into(),
-        nonce: Some(nonce.into()),
+        nonce: nonce.into(),
         session_id: session.into(),
-        after_us: None,
     };
     let mut offset = 0;
     let seen: Vec<_> = transcript

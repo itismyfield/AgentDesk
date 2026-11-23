@@ -71,19 +71,8 @@ fn pending_plain_composer_protects_only_its_session_and_frame_until_receipt() {
 #[test]
 fn injected_nonce_residue_is_never_classified_as_a_persons_draft() {
     for frame in [
-        crate::services::tui_input::human_frame::inject(
-            "discord:1:2",
-            "7",
-            "ann",
-            "1234abcd",
-            "pending body",
-        ),
-        crate::services::tui_input::human_frame::legacy_inject(
-            "discord:1:2",
-            "7",
-            "1234abcd",
-            "pending body",
-        ),
+        "[User: ann (ID: 7) · 📱 v1 mode=inject source=discord:1:2 · 1234abcd]\npending body",
+        "[📱 discord:1:2 · 7 · 1234abcd]\npending body",
     ] {
         let shown = capture(&frame);
         assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{frame}");
