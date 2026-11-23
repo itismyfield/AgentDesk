@@ -1842,7 +1842,7 @@ fn started_turn_is_dm(result_json: &Value) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use chrono::Utc;
 

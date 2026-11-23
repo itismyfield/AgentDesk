@@ -1068,7 +1068,7 @@ pub(crate) struct SharedData {
     pub(in crate::services::discord) http: RuntimeHttpCache,
     /// SHA-256 hash of the bot token — used to namespace the pending-queue directory
     /// so that multiple bots sharing the same runtime root cannot steal each other's queues.
-    pub(super) token_hash: String,
+    pub(crate) token_hash: String,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
     pub(super) health_registry: std::sync::Weak<health::HealthRegistry>,
