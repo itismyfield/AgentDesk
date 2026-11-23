@@ -190,8 +190,10 @@ describe("home routines and usage", () => {
       { provider: "gemini", buckets: [{ name: "rpm", limit: 15, used: 0, remaining: 15, reset: 0 }], stale: false, fetched_at: 1_795_033_600 },
       { provider: "github", buckets: [{ name: "core", limit: 5000, used: 3, remaining: 4997, reset: 0 }], stale: false },
     ], true);
-    expect(rows.map((row) => [row.pct, row.unmeasured, row.measuredAt])).toEqual([[83, false, 1_795_033_577_000], [0, false, 1_795_033_577_000], [null, true, null]]);
-    expect(rows[0]).toMatchObject({ label: "Claude 7일", level: "warning", stale: true });
+    expect(rows.map((row) => [row.group, row.label, row.pct, row.unmeasured, row.measuredAt])).toEqual([
+      ["Claude", "7일", 83, false, 1_795_033_577_000], ["Claude", "5시간", 0, false, 1_795_033_577_000], ["Gemini", "rpm", null, true, null],
+    ]);
+    expect(rows[0].stale).toBe(true);
     expect(autoPauseRule({ current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {} })).toEqual({ enabled: true, pct: 90 });
     expect(autoPauseRule(null)).toBeNull();
   });

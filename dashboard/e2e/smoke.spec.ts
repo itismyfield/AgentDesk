@@ -1596,13 +1596,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     const home = page.getByTestId("home-page");
-    await expect(page.getByTestId("home-usage")).toContainText("83%", { timeout: 15000 });
+    // The kit's limit list: one heading per provider and a meter per window. Its visible percent counts up only once the
+    // card scrolls into view, so the meter value is read instead.
+    await expect(page.getByTestId("home-usage").getByRole("meter", { name: "Claude 7일" })).toHaveAttribute("aria-valuenow", "83", { timeout: 15000 });
     expect(await home.locator("section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")))).toEqual(HOME_SECTIONS);
     // Only what the server leaves to a person: the blocked failed card, not the review in progress or new requests.
     await expect(page.getByTestId("home-todo")).toContainText("판단 필요");
     await expect(page.getByTestId("home-todo")).not.toContainText(/검토 대기|수락 대기/);
     await expect(page.getByTestId("home-system-memento")).toContainText("확인 불가");
-    await expect(page.getByTestId("home-usage")).toContainText("Claude 7일");
     await expect(page.getByTestId("home-usage")).toContainText("90% 이상이면 자동 진행을 멈춰요");
     await expect(page.getByTestId("home-usage").getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
 
@@ -1759,6 +1760,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByRole("dialog", { name: /에이전트 상세/ })).toBeVisible();
     await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
+    // The kit texts follow the English UI.
+    await page.route(/\/api\/settings$/, (route) => route.fulfill({ json: { language: "en", theme: "dark" } }));
+    await page.reload();
+    await expect(monitor.getByRole("button", { name: "Log" })).toBeVisible({ timeout: 15000 });
+    await expect(monitor).toContainText("Running");
+    await expect(page.getByTestId("home-usage").getByRole("group", { name: "Limits by provider" })).toBeVisible();
   });
 
   test("home: on a phone a failed session list reads unknown where an empty one reads resting", async ({ page }, testInfo) => {

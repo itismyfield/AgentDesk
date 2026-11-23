@@ -9,12 +9,7 @@ import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager
 import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
-import {
-  formatRateLimitWindowLabel,
-  transformRLProviders,
-  type RateLimitLevel,
-  type RawRLProvider,
-} from "../dashboard/MiniRateLimitBarModel";
+import { formatRateLimitWindowLabel, transformRLProviders, type RawRLProvider } from "../dashboard/MiniRateLimitBarModel";
 import { parseTime } from "../dashboard/routineModel";
 
 export type Tr = (ko: string, en: string) => string;
@@ -486,13 +481,13 @@ export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: T
 export type RawUsageProvider = RawRLProvider & { fetched_at?: number | null };
 
 export interface UsageRow {
-  key: string;
+  /** Provider heading, with the profile when it is not the default one; null on a provider without windows. */
+  group: string | null;
   label: string;
   /** Null when the tracker has no measurement for this window. */
   pct: number | null;
   /** The provider reports a limit but no usage, so there is nothing to measure. */
   unmeasured: boolean;
-  level: RateLimitLevel;
   stale: boolean;
   measuredAt: number | null;
   note: string | null;
@@ -501,28 +496,20 @@ export interface UsageRow {
 // The server reads Gemini's quota limits but no usage and fills `used: 0` (`build_gemini_rate_limit_buckets`).
 const unmeasuredBucket = (provider: string | undefined, bucket: string) => provider === "gemini" && (bucket === "rpm" || bucket === "rpd");
 
-/** Limit tracker windows as bars; GitHub and hidden buckets stay out, as on the old usage widget. Only measured
- * rows carry a measurement time. */
+/** Limit tracker windows grouped by provider; GitHub and hidden buckets stay out, as on the old usage widget. Only
+ * measured rows carry a measurement time. */
 export function buildUsageRows(raw: RawUsageProvider[], isKo: boolean): UsageRow[] {
   return raw.flatMap((source) => transformRLProviders([source]).flatMap((provider): UsageRow[] => {
     const fetchedAt = coerceTimestampMs(source.fetched_at ?? null);
-    const common = { stale: provider.stale, level: "normal" as RateLimitLevel, unmeasured: false };
+    const name = provider.profileId === "default" ? provider.provider : `${provider.provider} ${provider.profileId}`;
     if (provider.unsupported || provider.buckets.length === 0) {
-      return [{ ...common, key: `${provider.provider}:${provider.profileId}`, label: provider.provider, pct: null, measuredAt: null, note: provider.reason }];
+      return [{ group: null, label: name, pct: null, unmeasured: false, stale: provider.stale, measuredAt: null, note: provider.reason }];
     }
     return provider.buckets.map((bucket) => {
       const unmeasured = unmeasuredBucket(source.provider, bucket.id);
       const pct = unmeasured ? null : bucket.utilization;
-      return {
-        ...common,
-        key: `${provider.provider}:${provider.profileId}:${bucket.id}`,
-        label: `${provider.provider} ${formatRateLimitWindowLabel(bucket.label, isKo)}`,
-        pct,
-        unmeasured,
-        measuredAt: pct === null ? null : fetchedAt,
-        level: unmeasured ? "normal" : bucket.level,
-        note: null,
-      };
+      const label = formatRateLimitWindowLabel(bucket.label, isKo);
+      return { group: name, label, pct, unmeasured, stale: provider.stale, measuredAt: pct === null ? null : fetchedAt, note: null };
     });
   }));
 }

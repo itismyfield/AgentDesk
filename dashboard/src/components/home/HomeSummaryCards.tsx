@@ -2,7 +2,7 @@ import { ChevronRight } from "lucide-react";
 import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
-import { AgentMonitor } from "../../kit/pro/agent-monitor";
+import { AgentMonitor, type AgentMonitorLabels } from "../../kit/pro/agent-monitor";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import {
@@ -204,10 +204,23 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
   );
 }
 
+/** Monitor texts home can show or speak: a running monitor without steps, with fold and log buttons. */
+const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
+  agent: tr("에이전트", "Agent"),
+  statusRunning: tr("실행 중", "Running"),
+  log: tr("로그", "Log"),
+  elapsed: tr("경과 시간", "Elapsed"),
+  expand: (label) => tr(`${label}, 펼치기`, `${label}, expand`),
+  fold: (name) => tr(`${name} 모니터 접기`, `Collapse ${name} monitor`),
+  timeline: (steps) => tr(`실행한 단계: ${steps}`, `Steps run: ${steps}`),
+  recent: tr("완료한 단계", "Finished steps"),
+});
+
 /** Working agents with a live turn as kit monitors: what runs now and for how long. The host clock ticks once a
  * second instead of the monitor's own 100ms clock; the log button opens the agent detail with its activity log. */
-function AgentMonitors({ items, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; isKo: boolean; onOpen: (agent: Agent) => void }) {
+function AgentMonitors({ items, tr, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; tr: Tr; isKo: boolean; onOpen: (agent: Agent) => void }) {
   const [now, setNow] = useState(() => Date.now());
+  const labels = useMemo(() => monitorLabels(tr), [tr]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
@@ -223,6 +236,7 @@ function AgentMonitors({ items, isKo, onOpen }: { items: Array<{ entry: HomeAgen
             started={view.started ?? undefined}
             now={now}
             onOpenLog={() => onOpen(entry.agent)}
+            labels={labels}
             style={{ width: "100%" }}
           />
         </li>
@@ -278,7 +292,7 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
 
   return (
     <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : everyone.length} aside={legend} testId="home-agents">
-      {monitors.length > 0 ? <AgentMonitors items={monitors} isKo={isKo} onOpen={onOpenAgent} /> : null}
+      {monitors.length > 0 ? <AgentMonitors items={monitors} tr={tr} isKo={isKo} onOpen={onOpenAgent} /> : null}
       {everyone.length === 0 ? (
         <CardNote>{tr("등록된 에이전트가 없어요.", "No agents yet.")}</CardNote>
       ) : entries.length === 0 ? null : isMobile ? (
