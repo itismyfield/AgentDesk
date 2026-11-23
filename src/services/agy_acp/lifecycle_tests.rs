@@ -29,6 +29,7 @@ while IFS= read -r line; do
   *'"method":"session/prompt"'*) case "$mode" in
     eof) exit 0 ;;
     hang|cancel) held=$id ;;
+    deaf) exec sleep 1000 ;;
     group) sleep 1000 & echo $! > "$log.grandchild"; held=$id ;;
     perm) held=$id; send '{"jsonrpc":"2.0","id":"p","method":"session/request_permission","params":{"options":[{"optionId":"always","kind":"allow_always"},{"optionId":"once","kind":"allow_once"}]}}' ;;
     empty) stop $id end_turn ;;
@@ -331,7 +332,7 @@ fn a_person_stop_asks_agy_to_cancel_and_teardown_or_silence_ends_the_child() {
         assert_eq!(
             turn,
             (Ok(()), vec![]),
-            "{source}: a stopped turn emits nothing"
+            "{source}: §4.1(a) a token-cancelled turn adds no terminal message"
         );
         join_within(canceller, WAIT_CAP);
         assert_eq!(log(&dir, mode).contains("session/cancel"), asks, "{source}");
@@ -498,19 +499,28 @@ fn hard_stop_kills_only_that_destination_child_and_its_descendants() {
 #[test]
 fn an_earlier_child_exit_never_removes_the_next_child_record() {
     let dir = tempfile::tempdir().unwrap();
-    let dir = dir.path();
-    let handle = actor::spawn(Some(dir.into()), QUICK);
-    // The first child ends mid-turn and the next turn spawns while its exit is still being reaped.
+    let dir = dir.path().to_path_buf();
+    let handle = actor::spawn(Some(dir.clone()), QUICK);
+    let token = std::sync::Arc::new(CancelToken::new());
+    let (stopper, at) = (token.clone(), dir.clone());
+    let canceller = std::thread::spawn(move || {
+        assert!(eventually(WAIT_CAP, || log(&at, "deaf").contains("session/prompt")));
+        stopper.publish_cancel("session_teardown");
+    });
     assert_eq!(
-        run(&handle, fake_launch(dir, "eof"), None, None, None).0,
+        run(&handle, fake_launch(&dir, "deaf"), None, None, Some(&token)).0,
         Ok(())
     );
-    assert_eq!(
-        run(&handle, fake_launch(dir, "short"), None, None, None).0,
-        Ok(())
-    );
-    let (first, next) = (pid_file(dir, "eof.log.pid"), pid_file(dir, "short.log.pid"));
+    join_within(canceller, WAIT_CAP);
+    // A child deaf to stdin EOF is reaped by the forced stop; the next child spawns before
+    // that waiter reports.
+    let first = pid_file(&dir, "deaf.log.pid");
     assert!(eventually(WAIT_CAP, || !alive(first)));
+    assert_eq!(
+        run(&handle, fake_launch(&dir, "short"), None, None, None).0,
+        Ok(())
+    );
+    let next = pid_file(&dir, "short.log.pid");
     let recorded = || {
         let record = std::fs::read_to_string(dir.join(child::RECORD)).unwrap_or_default();
         record.contains(&format!("\"pid\":{next},"))

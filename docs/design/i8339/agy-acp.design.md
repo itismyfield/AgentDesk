@@ -112,7 +112,8 @@ ACP 어댑터(`agy_acp::turn`)는 기존 runner와 같은 두 출구로만 내�
 | `fs/*`·`terminal/*` 요청 | 없음 | 없음 | capability를 false로 알리고, 요청이 오면 -32601로 답한다 |
 | 턴의 **마지막** 열린 prompt 응답 `end_turn` | `Done{누적 글}` | `done` | 누적 글이 비면 실패다(`codec.rs:429`와 같은 규칙) |
 | steering된 앞 prompt의 `end_turn` | 없음(턴 계속) | 없음 | 6.2절 |
-| `cancelled` | `Error{"cancelled"}` | `fail(Cancelled)` | `runner.rs:80-82`와 같다 |
+| 턴 토큰이 취소된 턴의 종료(`cancelled` 응답, 강제 종료, 취소 기한 포함) | 없음(추가 terminal 메시지 0) | `fail(Cancelled)` | `-p` runner와 같다: 취소를 보면 메시지 없이 끝나고(`runner.rs:172-176,240-241`) 스풀만 `Cancelled`로 닫는다(`runner.rs:80-82`). 취소 표시와 정산은 turn_bridge의 기존 취소 경로가 맡는다(`stream_loop.rs:222-225`) |
+| 토큰 취소 없이 agy가 스스로 낸 `cancelled` | `Error` | `fail(Cancelled)` | 그대로 |
 | `max_tokens`·`max_turn_requests` | 글이 있으면 `Done`과 잘림 안내, 없으면 `Error` | `done`/`fail` | [U3] |
 | `refusal` | `Error` | `fail` | T3 `AntigravityTurnOutcome.ts:143-158`(쿼터) |
 | JSON-RPC 오류(-32000 등) | `Error` | `fail(Spawn)` | 인증 안내만 게시하고 로그인 URL은 중계하지 않는다 |
