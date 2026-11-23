@@ -616,6 +616,8 @@ src/
 │   ├── terminal_cleanup.rs
 │   ├── transition_cleanup.rs
 │   └── transition_core.rs
+├── ke_routines_tests/
+│   └── cold_retry_leaf_tests.rs
 ├── krx_claude_tests/
 │   └── tui_session_launch_tests.rs
 ├── logging/
@@ -4256,9 +4258,11 @@ src/
 │   │   │   ├── owned_session/
 │   │   │   │   └── tests.rs
 │   │   │   ├── execution.rs
+│   │   │   ├── execution_pg_tests.rs
 │   │   │   ├── launch.rs
 │   │   │   ├── owned_session.rs
 │   │   │   ├── owner_custody_tests.rs
+│   │   │   ├── owner_hook_tests.rs
 │   │   │   ├── owner_input.rs
 │   │   │   ├── owner_input_tests.rs
 │   │   │   ├── owner_launch_tests.rs
@@ -4324,6 +4328,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
+│   │   ├── start_target_hook_tests.rs
 │   │   ├── timing.rs
 │   │   ├── turn_completion.rs
 │   │   └── turn_completion_tests.rs
@@ -5424,6 +5429,7 @@ src/
 ├── eventbus.rs
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
+├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
 ├── launch.rs
 ├── lib.rs
@@ -5460,6 +5466,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
+| `src/ke_routines_tests/` | Root-crate fixtures shared by the KE routine and scheduled-message tests moved here. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
@@ -5481,6 +5488,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
+| `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
