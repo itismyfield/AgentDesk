@@ -56,6 +56,13 @@ impl Owner {
         self.flush_source_intent()
     }
 
+    /// The tickets whose pre-key pins still wait for their history ACK.
+    pub(crate) fn source_binding_tickets(&self) -> Vec<NativeTicket> {
+        (self.snapshot.source_bindings.iter())
+            .map(|intent| intent.ticket.clone())
+            .collect()
+    }
+
     pub(crate) fn source_binding(
         &self,
         ticket: &NativeTicket,
