@@ -36,3 +36,24 @@ to operator credentials, runtime files, or privilege escalation.
 
 See [GitHub's fork approval documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/approve-runs-from-forks)
 and [guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners).
+
+## Preinstalled tools and the CI cargo slot
+
+Self-hosted jobs skip `taiki-e/install-action` when `scripts/ci/preinstalled-tool.sh`
+finds the pinned version on the runner PATH. A missing tool or another version
+falls back to install-action, as on hosted runners.
+
+| Tool | Version | Host path | Installed by |
+| --- | --- | --- | --- |
+| cargo-nextest | 0.9.149 | `/home/adk-ci/.cargo/bin/cargo-nextest` | runner `install.sh prepare` (digest pinned) |
+| just | 1.51.0 | `/usr/local/bin/just` (root, 0755) | release tarball, checked against its `SHA256SUMS` |
+
+Check on the host: `sudo -u adk-ci /home/adk-ci/.cargo/bin/cargo-nextest nextest --version`
+and `/usr/local/bin/just --version`. To bump a version, change the install step
+and its `Check preinstalled` step together (`scripts/ci/preinstalled_tools_wiring.rb`
+rejects a mismatch). Then install the new prebuilt binary on the host. Until the
+host has it, jobs download it through install-action.
+
+The host cargo shim keeps the last N machine slots for CI jobs when
+`/etc/adk/cargo_ci_reserve` holds N; the WSL host sets 1. CI cargo (runner
+environment with `ADK_CARGO_PRIORITY`) may take any slot, and lane builds use the rest.
