@@ -1,0 +1,774 @@
+---
+title: "Frame ledger file: V2 owner, out-of-scope writer and the 5b ops procedure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDebtAcrossReplace
+    lg1: Path to the NoDebtAcrossReplace or ObligationsSettled bug
+    lg2: Repeats forever, so ObligationsSettled breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: [old] file none #183; owner input owner #183; out-of-scope input queued
+  s1: [old] (keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s2: [old] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s3: [closing] file none #183; owner input owner #183; out-of-scope input queued
+  s4: [old] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s5: [old] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s6: [closing] (keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s7: [old] (retry debt, keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s8: [closing] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s9: [stopped] file none #183; owner input owner #183; out-of-scope input queued
+  s10: [old] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s11: [old] (retry debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s12: [old] file v1 #183; owner input owner #183; out-of-scope input done
+  s13: [closing] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s14: [old] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s15: [old] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s16: [old] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s17: [old] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s18: [old] file v2 #183; owner input done #183; out-of-scope input queued
+  s19: [closing] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s20: [old] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s21: [stopped] (keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s22: [closing] (retry debt, keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s23: [stopped] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s24: [new, new sessions] file none #183; owner input owner #183; out-of-scope input queued
+  s25: [old] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s26: [closing] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s27: [old] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s28: [old] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s29: [old] (retry debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s30: [closing] (retry debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s31: [old] (retry debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s32: [closing] file v1 #183; owner input owner #183; out-of-scope input done
+  s33: [closing] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s34: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s35: [old] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s36: [old] (keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s37: [closing] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s38: [old] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s39: [old] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s40: [old] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s41: [old] (retry debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s42: [closing] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s43: [old] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s44: [old] file v2 #183; owner input done #183; out-of-scope input owner
+  s45: [closing] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s46: [closing] file v2 #183; owner input done #183; out-of-scope input queued
+  s47: [stopped] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s48: [old] file v2 #183; owner input pasted #183; out-of-scope input done
+  s49: [old] file v2 #183; owner input done #183; out-of-scope input pasted
+  s50: [closing] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s51: [old] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s52: [stopped] (retry debt, keyless debt) file none #183; owner input owner #183; out-of-scope input queued
+  s53: RED: sessions replaced while a retry debt or keyless obligation still needs them
+  s54: [closing] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s55: [closing] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s56: [stopped] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s57: [old] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s58: [closing] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s59: [old] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s60: [closing] (retry debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s61: [closing] (retry debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s62: [stopped] (retry debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s63: [stopped] file v1 #183; owner input owner #183; out-of-scope input done
+  s64: [old] (keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s65: [closing] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s66: [closing] (keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s67: [stopped] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s68: [old] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s69: [old] (keyless debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s70: [closing] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s71: [old] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s72: [old] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s73: [old] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s74: [closing] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s75: [old] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s76: [old] (retry debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s77: [closing] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s78: [closing] (retry debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s79: [stopped] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s80: [old] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s81: [old] (retry debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s82: [closing] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s83: [old] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s84: [closing] file v2 #183; owner input done #183; out-of-scope input owner
+  s85: [stopped] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s86: [stopped] file v2 #183; owner input done #183; out-of-scope input queued
+  s87: [old] file v2 #183; owner input done #183; out-of-scope input done
+  s88: [closing] file v2 #183; owner input pasted #183; out-of-scope input done
+  s89: [closing] file v2 #183; owner input done #183; out-of-scope input pasted
+  s90: [old] file v2 #183; owner input done #183; out-of-scope input unknown
+  s91: [closing] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s92: [stopped] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s93: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s94: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input pasted
+  s95: [stopped] (keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s96: [closing] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s97: [closing] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s98: [stopped] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s99: [stopped] (retry debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s100: [closing] (keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s101: [stopped] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s102: [stopped] (keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s103: [old] (keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  s104: [closing] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s105: [closing] (keyless debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s106: [old] (keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s107: [closing] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s108: [stopped] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s109: [old] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s110: [closing] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s111: [closing] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s112: [stopped] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input queued
+  s113: [old] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s114: [old] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s115: [closing] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s116: [old] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s117: [closing] (retry debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s118: [stopped] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s119: [stopped] (retry debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s120: [old] (retry debt) file v2 #183; owner input done #183; out-of-scope input done
+  s121: [closing] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s122: [closing] (retry debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s123: [old] (retry debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s124: [closing] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s125: [stopped] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s126: [stopped] file v2 #183; owner input done #183; out-of-scope input owner
+  s127: [closing] file v2 #183; owner input done #183; out-of-scope input done
+  s128: [stopped] file v2 #183; owner input pasted #183; out-of-scope input done
+  s129: [closing] file v2 #183; owner input done #183; out-of-scope input unknown
+  s130: [stopped] file v2 #183; owner input done #183; out-of-scope input unknown
+  s131: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input queued
+  s132: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s133: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input done
+  s134: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input unknown
+  s135: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s136: [stopped] (retry debt, keyless debt) file v1 #183; owner input owner #183; out-of-scope input done
+  s137: [stopped] (keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s138: [closing] (keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  s139: [stopped] (keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s140: [closing] (keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s141: [stopped] (keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s142: [closing] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s143: [stopped] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input owner
+  s144: [stopped] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input queued
+  s145: [old] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  s146: [closing] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s147: [closing] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input pasted
+  s148: [old] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s149: [closing] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s150: [stopped] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s151: [stopped] (retry debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s152: [closing] (retry debt) file v2 #183; owner input done #183; out-of-scope input done
+  s153: [stopped] (retry debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s154: [closing] (retry debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s155: [stopped] (retry debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s156: [stopped] file v2 #183; owner input done #183; out-of-scope input done
+  s157: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input owner
+  s158: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input done
+  s159: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input pasted
+  s160: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s161: [stopped] (keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  s162: [stopped] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input owner
+  s163: [closing] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  s164: [stopped] (retry debt, keyless debt) file v2 #183; owner input pasted #183; out-of-scope input done
+  s165: [closing] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s166: [stopped] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input unknown
+  s167: [stopped] (retry debt) file v2 #183; owner input done #183; out-of-scope input done
+  s168: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input done
+  s169: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input unknown
+  s170: [stopped] (retry debt, keyless debt) file v2 #183; owner input done #183; out-of-scope input done
+  [*] --> s0
+  s0 --> s1: Appear
+  s0 --> s2: Appear
+  s0 --> s3: Close
+  s0 --> s4: XRegister
+  s0 --> s5: OwnerPrepare
+  s1 --> s0: SettleObl
+  s1 --> s6: Close
+  s1 --> s7: Appear
+  s1 --> s10: XRegister
+  s1 --> s15: OwnerPrepare
+  s2 --> s7: Appear
+  s2 --> s8: Close
+  s2 --> s0: SettleObl
+  s2 --> s11: XRegister
+  s2 --> s16: OwnerPrepare
+  s3 --> s6: Appear
+  s3 --> s8: Appear
+  s3 --> s9: Stop
+  s3 --> s19: OwnerPrepare
+  s4 --> s10: Appear
+  s4 --> s11: Appear
+  s4 --> s12: Settle
+  s4 --> s13: Close
+  s4 --> s14: Crash
+  s4 --> s20: OwnerPrepare
+  s5 --> s15: Appear
+  s5 --> s16: Appear
+  s5 --> s17: XRegister
+  s5 --> s18: Settle
+  s5 --> s19: Close
+  s6 --> s3: SettleObl
+  s6 --> s21: Stop
+  s6 --> s22: Appear
+  s6 --> s37: OwnerPrepare
+  s7 --> s2: SettleObl
+  s7 --> s22: Close
+  s7 --> s1: SettleObl
+  s7 --> s28: XRegister
+  s7 --> s39: OwnerPrepare
+  s8 --> s22: Appear
+  s8 --> s3: SettleObl
+  s8 --> s23: Stop
+  s8 --> s42: OwnerPrepare
+  s9 --> s24: FinalCheck
+  s10 --> s4: SettleObl
+  s10 --> s25: Settle
+  s10 --> s26: Close
+  s10 --> s27: Crash
+  s10 --> s28: Appear
+  s10 --> s38: OwnerPrepare
+  s11 --> s28: Appear
+  s11 --> s29: Settle
+  s11 --> s30: Close
+  s11 --> s4: SettleObl
+  s11 --> s31: Crash
+  s11 --> s43: OwnerPrepare
+  s12 --> s25: Appear
+  s12 --> s29: Appear
+  s12 --> s32: Close
+  s12 --> s48: OwnerPrepare
+  s13 --> s26: Appear
+  s13 --> s30: Appear
+  s13 --> s32: Settle
+  s13 --> s33: Crash
+  s13 --> s34: Stop
+  s13 --> s50: OwnerPrepare
+  s14 --> s12: Mend
+  s14 --> s27: Appear
+  s14 --> s31: Appear
+  s14 --> s33: Close
+  s14 --> s51: OwnerPrepare
+  s15 --> s5: SettleObl
+  s15 --> s35: XRegister
+  s15 --> s36: Settle
+  s15 --> s37: Close
+  s15 --> s39: Appear
+  s16 --> s39: Appear
+  s16 --> s40: XRegister
+  s16 --> s41: Settle
+  s16 --> s42: Close
+  s16 --> s5: SettleObl
+  s17 --> s20: OwnerPrepare
+  s17 --> s35: Appear
+  s17 --> s40: Appear
+  s17 --> s44: Settle
+  s17 --> s45: Close
+  s18 --> s36: Appear
+  s18 --> s41: Appear
+  s18 --> s44: XRegister
+  s18 --> s46: Close
+  s19 --> s37: Appear
+  s19 --> s42: Appear
+  s19 --> s46: Settle
+  s19 --> s47: Stop
+  s20 --> s38: Appear
+  s20 --> s43: Appear
+  s20 --> s48: Settle
+  s20 --> s49: Settle
+  s20 --> s50: Close
+  s20 --> s51: Crash
+  s21 --> s53: FinalCheck
+  s22 --> s8: SettleObl
+  s22 --> s6: SettleObl
+  s22 --> s52: Stop
+  s22 --> s74: OwnerPrepare
+  s23 --> s2: FinalCheck
+  s24 --> s93: OwnerPrepare
+  s24 --> s94: XRegister
+  s25 --> s12: SettleObl
+  s25 --> s54: Close
+  s25 --> s57: Appear
+  s25 --> s68: OwnerPrepare
+  s26 --> s13: SettleObl
+  s26 --> s54: Settle
+  s26 --> s55: Crash
+  s26 --> s56: Stop
+  s26 --> s58: Appear
+  s26 --> s70: OwnerPrepare
+  s27 --> s25: Mend
+  s27 --> s14: SettleObl
+  s27 --> s55: Close
+  s27 --> s59: Appear
+  s27 --> s71: OwnerPrepare
+  s28 --> s11: SettleObl
+  s28 --> s57: Settle
+  s28 --> s58: Close
+  s28 --> s10: SettleObl
+  s28 --> s59: Crash
+  s28 --> s75: OwnerPrepare
+  s29 --> s57: Appear
+  s29 --> s60: Close
+  s29 --> s12: SettleObl
+  s29 --> s80: OwnerPrepare
+  s30 --> s58: Appear
+  s30 --> s60: Settle
+  s30 --> s13: SettleObl
+  s30 --> s61: Crash
+  s30 --> s62: Stop
+  s30 --> s82: OwnerPrepare
+  s31 --> s29: Mend
+  s31 --> s59: Appear
+  s31 --> s61: Close
+  s31 --> s14: SettleObl
+  s31 --> s83: OwnerPrepare
+  s32 --> s54: Appear
+  s32 --> s60: Appear
+  s32 --> s63: Stop
+  s32 --> s88: OwnerPrepare
+  s33 --> s32: Mend
+  s33 --> s34: Stop
+  s33 --> s55: Appear
+  s33 --> s61: Appear
+  s33 --> s91: OwnerPrepare
+  s34 --> s14: FinalCheck
+  s35 --> s38: OwnerPrepare
+  s35 --> s17: SettleObl
+  s35 --> s64: Settle
+  s35 --> s65: Close
+  s35 --> s72: Appear
+  s36 --> s18: SettleObl
+  s36 --> s64: XRegister
+  s36 --> s66: Close
+  s36 --> s73: Appear
+  s37 --> s19: SettleObl
+  s37 --> s66: Settle
+  s37 --> s67: Stop
+  s37 --> s74: Appear
+  s38 --> s20: SettleObl
+  s38 --> s68: Settle
+  s38 --> s69: Settle
+  s38 --> s70: Close
+  s38 --> s71: Crash
+  s38 --> s75: Appear
+  s39 --> s16: SettleObl
+  s39 --> s72: XRegister
+  s39 --> s73: Settle
+  s39 --> s74: Close
+  s39 --> s15: SettleObl
+  s40 --> s43: OwnerPrepare
+  s40 --> s72: Appear
+  s40 --> s76: Settle
+  s40 --> s77: Close
+  s40 --> s17: SettleObl
+  s41 --> s73: Appear
+  s41 --> s76: XRegister
+  s41 --> s78: Close
+  s41 --> s18: SettleObl
+  s42 --> s74: Appear
+  s42 --> s78: Settle
+  s42 --> s19: SettleObl
+  s42 --> s79: Stop
+  s43 --> s75: Appear
+  s43 --> s80: Settle
+  s43 --> s81: Settle
+  s43 --> s82: Close
+  s43 --> s20: SettleObl
+  s43 --> s83: Crash
+  s44 --> s49: OwnerPrepare
+  s44 --> s64: Appear
+  s44 --> s76: Appear
+  s44 --> s84: Close
+  s45 --> s50: OwnerPrepare
+  s45 --> s65: Appear
+  s45 --> s77: Appear
+  s45 --> s84: Settle
+  s45 --> s85: Stop
+  s46 --> s66: Appear
+  s46 --> s78: Appear
+  s46 --> s86: Stop
+  s47 --> s93: FinalCheck
+  s48 --> s68: Appear
+  s48 --> s80: Appear
+  s48 --> s87: Settle
+  s48 --> s88: Close
+  s49 --> s69: Appear
+  s49 --> s81: Appear
+  s49 --> s87: Settle
+  s49 --> s89: Close
+  s49 --> s90: Crash
+  s50 --> s70: Appear
+  s50 --> s82: Appear
+  s50 --> s88: Settle
+  s50 --> s89: Settle
+  s50 --> s91: Crash
+  s50 --> s92: Stop
+  s51 --> s48: Mend
+  s51 --> s71: Appear
+  s51 --> s83: Appear
+  s51 --> s90: Settle
+  s51 --> s91: Close
+  s52 --> s7: FinalCheck
+  s54 --> s32: SettleObl
+  s54 --> s95: Stop
+  s54 --> s96: Appear
+  s54 --> s104: OwnerPrepare
+  s55 --> s54: Mend
+  s55 --> s56: Stop
+  s55 --> s33: SettleObl
+  s55 --> s97: Appear
+  s55 --> s107: OwnerPrepare
+  s56 --> s27: FinalCheck
+  s57 --> s29: SettleObl
+  s57 --> s96: Close
+  s57 --> s25: SettleObl
+  s57 --> s113: OwnerPrepare
+  s58 --> s30: SettleObl
+  s58 --> s96: Settle
+  s58 --> s26: SettleObl
+  s58 --> s97: Crash
+  s58 --> s98: Stop
+  s58 --> s115: OwnerPrepare
+  s59 --> s57: Mend
+  s59 --> s31: SettleObl
+  s59 --> s97: Close
+  s59 --> s27: SettleObl
+  s59 --> s116: OwnerPrepare
+  s60 --> s96: Appear
+  s60 --> s32: SettleObl
+  s60 --> s99: Stop
+  s60 --> s121: OwnerPrepare
+  s61 --> s60: Mend
+  s61 --> s62: Stop
+  s61 --> s97: Appear
+  s61 --> s33: SettleObl
+  s61 --> s124: OwnerPrepare
+  s62 --> s31: FinalCheck
+  s63 --> s12: FinalCheck
+  s64 --> s69: OwnerPrepare
+  s64 --> s44: SettleObl
+  s64 --> s100: Close
+  s64 --> s109: Appear
+  s65 --> s70: OwnerPrepare
+  s65 --> s45: SettleObl
+  s65 --> s100: Settle
+  s65 --> s101: Stop
+  s65 --> s110: Appear
+  s66 --> s46: SettleObl
+  s66 --> s102: Stop
+  s66 --> s111: Appear
+  s67 --> s53: FinalCheck
+  s68 --> s48: SettleObl
+  s68 --> s103: Settle
+  s68 --> s104: Close
+  s68 --> s113: Appear
+  s69 --> s49: SettleObl
+  s69 --> s103: Settle
+  s69 --> s105: Close
+  s69 --> s106: Crash
+  s69 --> s114: Appear
+  s70 --> s50: SettleObl
+  s70 --> s104: Settle
+  s70 --> s105: Settle
+  s70 --> s107: Crash
+  s70 --> s108: Stop
+  s70 --> s115: Appear
+  s71 --> s68: Mend
+  s71 --> s51: SettleObl
+  s71 --> s106: Settle
+  s71 --> s107: Close
+  s71 --> s116: Appear
+  s72 --> s75: OwnerPrepare
+  s72 --> s40: SettleObl
+  s72 --> s109: Settle
+  s72 --> s110: Close
+  s72 --> s35: SettleObl
+  s73 --> s41: SettleObl
+  s73 --> s109: XRegister
+  s73 --> s111: Close
+  s73 --> s36: SettleObl
+  s74 --> s42: SettleObl
+  s74 --> s111: Settle
+  s74 --> s37: SettleObl
+  s74 --> s112: Stop
+  s75 --> s43: SettleObl
+  s75 --> s113: Settle
+  s75 --> s114: Settle
+  s75 --> s115: Close
+  s75 --> s38: SettleObl
+  s75 --> s116: Crash
+  s76 --> s81: OwnerPrepare
+  s76 --> s109: Appear
+  s76 --> s117: Close
+  s76 --> s44: SettleObl
+  s77 --> s82: OwnerPrepare
+  s77 --> s110: Appear
+  s77 --> s117: Settle
+  s77 --> s45: SettleObl
+  s77 --> s118: Stop
+  s78 --> s111: Appear
+  s78 --> s46: SettleObl
+  s78 --> s119: Stop
+  s79 --> s16: FinalCheck
+  s80 --> s113: Appear
+  s80 --> s120: Settle
+  s80 --> s121: Close
+  s80 --> s48: SettleObl
+  s81 --> s114: Appear
+  s81 --> s120: Settle
+  s81 --> s122: Close
+  s81 --> s49: SettleObl
+  s81 --> s123: Crash
+  s82 --> s115: Appear
+  s82 --> s121: Settle
+  s82 --> s122: Settle
+  s82 --> s50: SettleObl
+  s82 --> s124: Crash
+  s82 --> s125: Stop
+  s83 --> s80: Mend
+  s83 --> s116: Appear
+  s83 --> s123: Settle
+  s83 --> s124: Close
+  s83 --> s51: SettleObl
+  s84 --> s89: OwnerPrepare
+  s84 --> s100: Appear
+  s84 --> s117: Appear
+  s84 --> s126: Stop
+  s85 --> s132: FinalCheck
+  s86 --> s131: FinalCheck
+  s87 --> s103: Appear
+  s87 --> s120: Appear
+  s87 --> s127: Close
+  s88 --> s104: Appear
+  s88 --> s121: Appear
+  s88 --> s127: Settle
+  s88 --> s128: Stop
+  s89 --> s105: Appear
+  s89 --> s122: Appear
+  s89 --> s127: Settle
+  s89 --> s129: Crash
+  s89 --> s130: Stop
+  s90 --> s87: Mend
+  s90 --> s106: Appear
+  s90 --> s123: Appear
+  s90 --> s129: Close
+  s91 --> s88: Mend
+  s91 --> s92: Stop
+  s91 --> s107: Appear
+  s91 --> s124: Appear
+  s91 --> s129: Settle
+  s92 --> s51: FinalCheck
+  s93 --> s131: Settle
+  s93 --> s135: XRegister
+  s94 --> s133: Settle
+  s94 --> s134: Crash
+  s94 --> s135: OwnerPrepare
+  s95 --> s25: FinalCheck
+  s96 --> s60: SettleObl
+  s96 --> s54: SettleObl
+  s96 --> s136: Stop
+  s96 --> s146: OwnerPrepare
+  s97 --> s96: Mend
+  s97 --> s98: Stop
+  s97 --> s61: SettleObl
+  s97 --> s55: SettleObl
+  s97 --> s149: OwnerPrepare
+  s98 --> s59: FinalCheck
+  s99 --> s29: FinalCheck
+  s100 --> s105: OwnerPrepare
+  s100 --> s84: SettleObl
+  s100 --> s137: Stop
+  s100 --> s142: Appear
+  s101 --> s53: FinalCheck
+  s102 --> s53: FinalCheck
+  s103 --> s87: SettleObl
+  s103 --> s138: Close
+  s103 --> s145: Appear
+  s104 --> s88: SettleObl
+  s104 --> s138: Settle
+  s104 --> s139: Stop
+  s104 --> s146: Appear
+  s105 --> s89: SettleObl
+  s105 --> s138: Settle
+  s105 --> s140: Crash
+  s105 --> s141: Stop
+  s105 --> s147: Appear
+  s106 --> s103: Mend
+  s106 --> s90: SettleObl
+  s106 --> s140: Close
+  s106 --> s148: Appear
+  s107 --> s104: Mend
+  s107 --> s108: Stop
+  s107 --> s91: SettleObl
+  s107 --> s140: Settle
+  s107 --> s149: Appear
+  s108 --> s71: FinalCheck
+  s109 --> s114: OwnerPrepare
+  s109 --> s76: SettleObl
+  s109 --> s142: Close
+  s109 --> s64: SettleObl
+  s110 --> s115: OwnerPrepare
+  s110 --> s77: SettleObl
+  s110 --> s142: Settle
+  s110 --> s65: SettleObl
+  s110 --> s143: Stop
+  s111 --> s78: SettleObl
+  s111 --> s66: SettleObl
+  s111 --> s144: Stop
+  s112 --> s39: FinalCheck
+  s113 --> s80: SettleObl
+  s113 --> s145: Settle
+  s113 --> s146: Close
+  s113 --> s68: SettleObl
+  s114 --> s81: SettleObl
+  s114 --> s145: Settle
+  s114 --> s147: Close
+  s114 --> s69: SettleObl
+  s114 --> s148: Crash
+  s115 --> s82: SettleObl
+  s115 --> s146: Settle
+  s115 --> s147: Settle
+  s115 --> s70: SettleObl
+  s115 --> s149: Crash
+  s115 --> s150: Stop
+  s116 --> s113: Mend
+  s116 --> s83: SettleObl
+  s116 --> s148: Settle
+  s116 --> s149: Close
+  s116 --> s71: SettleObl
+  s117 --> s122: OwnerPrepare
+  s117 --> s142: Appear
+  s117 --> s84: SettleObl
+  s117 --> s151: Stop
+  s118 --> s40: FinalCheck
+  s119 --> s41: FinalCheck
+  s120 --> s145: Appear
+  s120 --> s152: Close
+  s120 --> s87: SettleObl
+  s121 --> s146: Appear
+  s121 --> s152: Settle
+  s121 --> s88: SettleObl
+  s121 --> s153: Stop
+  s122 --> s147: Appear
+  s122 --> s152: Settle
+  s122 --> s89: SettleObl
+  s122 --> s154: Crash
+  s122 --> s155: Stop
+  s123 --> s120: Mend
+  s123 --> s148: Appear
+  s123 --> s154: Close
+  s123 --> s90: SettleObl
+  s124 --> s121: Mend
+  s124 --> s125: Stop
+  s124 --> s149: Appear
+  s124 --> s154: Settle
+  s124 --> s91: SettleObl
+  s125 --> s83: FinalCheck
+  s126 --> s157: FinalCheck
+  s127 --> s138: Appear
+  s127 --> s152: Appear
+  s127 --> s156: Stop
+  s128 --> s158: FinalCheck
+  s129 --> s127: Mend
+  s129 --> s130: Stop
+  s129 --> s140: Appear
+  s129 --> s154: Appear
+  s130 --> s90: FinalCheck
+  s131 --> s159: XRegister
+  s132 --> s135: OwnerPrepare
+  s132 --> s157: Settle
+  s133 --> s158: OwnerPrepare
+  s134 --> s133: Mend
+  s134 --> s160: OwnerPrepare
+  s135 --> s158: Settle
+  s135 --> s159: Settle
+  s135 --> s160: Crash
+  s136 --> s57: FinalCheck
+  s137 --> s53: FinalCheck
+  s138 --> s127: SettleObl
+  s138 --> s161: Stop
+  s138 --> s163: Appear
+  s139 --> s53: FinalCheck
+  s140 --> s138: Mend
+  s140 --> s141: Stop
+  s140 --> s129: SettleObl
+  s140 --> s165: Appear
+  s141 --> s106: FinalCheck
+  s142 --> s147: OwnerPrepare
+  s142 --> s117: SettleObl
+  s142 --> s100: SettleObl
+  s142 --> s162: Stop
+  s143 --> s72: FinalCheck
+  s144 --> s73: FinalCheck
+  s145 --> s120: SettleObl
+  s145 --> s163: Close
+  s145 --> s103: SettleObl
+  s146 --> s121: SettleObl
+  s146 --> s163: Settle
+  s146 --> s104: SettleObl
+  s146 --> s164: Stop
+  s147 --> s122: SettleObl
+  s147 --> s163: Settle
+  s147 --> s105: SettleObl
+  s147 --> s165: Crash
+  s147 --> s166: Stop
+  s148 --> s145: Mend
+  s148 --> s123: SettleObl
+  s148 --> s165: Close
+  s148 --> s106: SettleObl
+  s149 --> s146: Mend
+  s149 --> s150: Stop
+  s149 --> s124: SettleObl
+  s149 --> s165: Settle
+  s149 --> s107: SettleObl
+  s150 --> s116: FinalCheck
+  s151 --> s76: FinalCheck
+  s152 --> s163: Appear
+  s152 --> s127: SettleObl
+  s152 --> s167: Stop
+  s153 --> s80: FinalCheck
+  s154 --> s152: Mend
+  s154 --> s155: Stop
+  s154 --> s165: Appear
+  s154 --> s129: SettleObl
+  s155 --> s123: FinalCheck
+  s156 --> s168: FinalCheck
+  s157 --> s159: OwnerPrepare
+  s158 --> s168: Settle
+  s159 --> s168: Settle
+  s159 --> s169: Crash
+  s160 --> s158: Mend
+  s160 --> s169: Settle
+  s161 --> s53: FinalCheck
+  s162 --> s109: FinalCheck
+  s163 --> s152: SettleObl
+  s163 --> s138: SettleObl
+  s163 --> s170: Stop
+  s164 --> s113: FinalCheck
+  s165 --> s163: Mend
+  s165 --> s166: Stop
+  s165 --> s154: SettleObl
+  s165 --> s140: SettleObl
+  s166 --> s148: FinalCheck
+  s167 --> s120: FinalCheck
+  s169 --> s168: Mend
+  s170 --> s145: FinalCheck
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 bugPath
+  class s6 bugPath
+  class s10 bugPath
+  class s21 bugPath
+  class s38 bugPath
+  class s53 breaks
+  class s53 bugPath
+  class s53 repeats
+  class s70 bugPath
+  class s105 bugPath
+  class s138 bugPath
+  class s161 bugPath

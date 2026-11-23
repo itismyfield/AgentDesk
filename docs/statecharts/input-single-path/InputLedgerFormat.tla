@@ -33,7 +33,7 @@
 \*                                    proven later by `queued_reconcile::mend` (`:81`, `nonce_in :335`)
 \*                                    against the session's current transcript binding
 \*                                    (`queued_reconcile.rs:166-183,242-249,382-386`)
-\*   Deploy   none | precheck | guarded | replaceonv2
+\*   Deploy   none | precheck | guarded | replaceonv2 | skipretry | skipkeyless | skipe3 | keylessall
 \*            none: one binary, Writer/Migrate/View as given.
 \*            Otherwise the old binary (V1 writer, restore, View) runs and is replaced by the 5b
 \*            binary (V2 writer, no restore, V2 view):
@@ -42,6 +42,15 @@
 \*                         the stopped ledger is V2/V3/missing and no Unknown head remains,
 \*                         replace the session and start; otherwise hold (old binary, same binding)
 \*            replaceonv2  mutant: the final check replaces the session whenever the format is V2
+\*            skipretry    mutant: the final check ignores tui_o retry debt
+\*            skipkeyless  mutant: the final check ignores an unsettled keyless attempt
+\*            skipe3       mutant: the final check does not require a start binary with repair 1
+\*            keylessall   mutant: every keyless record, settled history included, counts as debt
+\*            The guarded check reads only persisted state after the stop (rev 3 E2): Unknown heads,
+\*            retry debt (Body and InputNotice), unsettled keyless attempts, and E3 (View = "v2").
+\*            retryDebt and keylessObl can appear while the old producer still runs, also after the
+\*            live pre-check; they settle only on the original binding. A settled historical keyless
+\*            record (KeylessHist) exists in every procedure config and is not debt.
 \*   Rollback none | binary | ledger  after the 5b binary has written: back to the old binary with
 \*                                    the current ledger (binary) or with the pre-deploy copy (ledger)
 \* A 5b binary booted on a V1 file stops its Claude runtime before intake
@@ -52,9 +61,11 @@ CONSTANTS Writer, Migrate, View, Boot, Locked, Restart, Deploy, Rollback
 
 Inputs == {"o", "x"}
 
-VARIABLES fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap
+VARIABLES fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap,
+          retryDebt, keylessObl, made
 
-vars == <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap>>
+Obl == <<retryDebt, keylessObl, made>>
+vars == <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap, retryDebt, keylessObl, made>>
 
 States == {"queued", "owner", "pasted", "unknown", "done"}
 Bins == {"run", "old", "checked", "closing", "stopped", "new", "rolled"}
@@ -72,6 +83,9 @@ TypeOK ==
     /\ binding \in {"original", "replaced"}
     /\ xbind \in {"original", "replaced"}
     /\ snap \in [f : Formats, r : [Inputs -> 0..3]]
+    /\ retryDebt \in BOOLEAN
+    /\ keylessObl \in BOOLEAN
+    /\ made \subseteq {"retry", "keyless"}
 
 Init ==
     /\ fmt = Boot
@@ -85,8 +99,13 @@ Init ==
     /\ binding = "original"
     /\ xbind = "original"
     /\ snap = [f |-> Boot, r |-> [i \in Inputs |-> 0]]
+    /\ retryDebt = FALSE
+    /\ keylessObl = FALSE
+    /\ made = {}
 
 New == bin = "new"
+\* A settled keyless record from earlier history; it is never an obligation.
+KeylessHist == Deploy # "none"
 EffWriter == IF Deploy = "none" THEN Writer ELSE IF New THEN "v2" ELSE "v1"
 EffMigrate == IF Deploy = "none" THEN Migrate ELSE ~New
 EffView == IF New THEN "v2" ELSE View
@@ -103,7 +122,7 @@ V2Opens(f) == f \in {"none", "v2"} \/ (f = "v1" /\ EffMigrate)
 XAccepts(f) == IF EffWriter = "v1" THEN f \in {"none", "v1"} ELSE V2Opens(f)
 XFormat(f) == IF EffWriter = "v1" THEN "v1" ELSE "v2"
 
-Frozen == UNCHANGED <<bin, plan, bootfmt, binding, snap>>
+Frozen == UNCHANGED <<bin, plan, bootfmt, binding, snap>> /\ UNCHANGED Obl
 
 \* --- out-of-scope writer, one atomic step under the shared lock -------------------------------
 XRegister ==
@@ -200,13 +219,35 @@ PreCheck ==
     /\ bin' = "checked"
     /\ plan' = IF fmt = "v1" THEN "hold" ELSE "go"
     /\ UNCHANGED <<fmt, rec, st, held, copy, bootfmt, binding, xbind, snap>>
+    /\ UNCHANGED Obl
+
+Guards == {"guarded", "replaceonv2", "skipretry", "skipkeyless", "skipe3", "keylessall"}
+
+\* While the old producer runs (also after the live check), tui_o can record a retry debt and a
+\* keyless paste can still await its receipt; each settles only on the original binding.
+Appear(k) ==
+    /\ Deploy # "none"
+    /\ bin \in {"old", "checked", "closing"}
+    /\ k \notin made
+    /\ made' = made \cup {k}
+    /\ IF k = "retry" THEN retryDebt' = TRUE /\ UNCHANGED keylessObl
+                       ELSE keylessObl' = TRUE /\ UNCHANGED retryDebt
+    /\ UNCHANGED <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap>>
+
+SettleObl(k) ==
+    /\ Running
+    /\ binding = "original"
+    /\ IF k = "retry" THEN retryDebt /\ retryDebt' = FALSE /\ UNCHANGED keylessObl
+                       ELSE keylessObl /\ keylessObl' = FALSE /\ UNCHANGED retryDebt
+    /\ UNCHANGED <<fmt, rec, st, held, copy, bin, plan, bootfmt, binding, xbind, snap, made>>
 
 \* Rev 2 step 1: close new intake; queued inputs keep settling on the original binding.
 Close ==
-    /\ Deploy \in {"guarded", "replaceonv2"}
+    /\ Deploy \in Guards
     /\ bin = "old"
     /\ bin' = "closing"
     /\ UNCHANGED <<fmt, rec, st, held, copy, plan, bootfmt, binding, xbind, snap>>
+    /\ UNCHANGED Obl
 
 \* Stopping dcserver: a paste the old binary had not settled stays an Unknown queued head.
 Stop ==
@@ -214,6 +255,7 @@ Stop ==
     /\ bin' = "stopped"
     /\ st' = [i \in Inputs |-> IF i = "x" /\ st[i] = "pasted" THEN "unknown" ELSE st[i]]
     /\ UNCHANGED <<fmt, rec, held, copy, plan, bootfmt, binding, xbind, snap>>
+    /\ UNCHANGED Obl
 
 \* Replace the sessions (new transcript binding) and start the 5b binary on the stopped ledger.
 Deployed ==
@@ -227,20 +269,28 @@ StartAsPlanned ==
     /\ bin = "stopped"
     /\ IF plan = "go" THEN Deployed ELSE /\ bin' = "old" /\ UNCHANGED <<binding, bootfmt, snap>>
     /\ UNCHANGED <<fmt, rec, st, held, copy, plan, xbind>>
+    /\ UNCHANGED Obl
 
-\* Rev 2 step 4: the stopped ledger's format and the obligations decide; nothing is moved.
+\* Rev 3 step 4: the stopped persisted state decides (E1, E2, E3); nothing is moved.
 Ready ==
     /\ fmt # "v1"
     /\ (Deploy = "replaceonv2" \/ st["x"] # "unknown")
+    /\ (Deploy = "skipretry" \/ ~retryDebt)
+    /\ (Deploy = "skipkeyless" \/ ~keylessObl)
+    /\ (Deploy = "skipe3" \/ View = "v2")
+    /\ (Deploy # "keylessall" \/ ~KeylessHist)
 
 FinalCheck ==
-    /\ Deploy \in {"guarded", "replaceonv2"}
+    /\ Deploy \in Guards
     /\ bin = "stopped"
     /\ IF Ready
           THEN Deployed
-          ELSE /\ bin' = "closing"      \* hold: old binary back up on the same sessions
+          \* hold: the old binary comes back on the same sessions with intake open again; the
+          \* operator settles and the procedure starts over from step 1
+          ELSE /\ bin' = "old"
                /\ UNCHANGED <<binding, bootfmt, snap>>
     /\ UNCHANGED <<fmt, rec, st, held, copy, plan, xbind>>
+    /\ UNCHANGED Obl
 
 \* After the 5b binary has written, the binary goes back; the sessions stay.
 RollbackStep ==
@@ -252,6 +302,7 @@ RollbackStep ==
           THEN /\ fmt' = snap.f /\ rec' = snap.r
           ELSE UNCHANGED <<fmt, rec>>
     /\ UNCHANGED <<st, held, copy, plan, bootfmt, binding, xbind, snap>>
+    /\ UNCHANGED Obl
 
 Idle == UNCHANGED vars
 
@@ -259,6 +310,7 @@ Next ==
     \/ XRegister \/ XRead \/ XWrite
     \/ \E i \in Inputs : OwnerPrepare(i) \/ Settle(i)
     \/ Crash \/ Mend
+    \/ \E k \in {"retry", "keyless"} : Appear(k) \/ SettleObl(k)
     \/ PreCheck \/ Close \/ Stop \/ StartAsPlanned \/ FinalCheck \/ RollbackStep
     \/ Idle
 
@@ -268,6 +320,7 @@ Spec ==
     /\ SF_vars(XRegister) /\ SF_vars(XRead) /\ SF_vars(XWrite)
     /\ \A i \in Inputs : SF_vars(OwnerPrepare(i)) /\ SF_vars(Settle(i))
     /\ SF_vars(Mend)
+    /\ \A k \in {"retry", "keyless"} : SF_vars(SettleObl(k))
     /\ WF_vars(PreCheck) /\ WF_vars(Close) /\ WF_vars(Stop) /\ WF_vars(StartAsPlanned)
     /\ WF_vars(FinalCheck) /\ WF_vars(RollbackStep)
 
@@ -286,6 +339,15 @@ BindingKept == st["x"] = "unknown" => xbind = binding
 
 \* INVARIANT: the slice 5b binary never boots on a V1 ledger.
 NewBootSupported == New => bootfmt # "v1"
+
+\* INVARIANT: the sessions are never replaced while a debt that needs them remains (E2).
+NoDebtAcrossReplace == binding = "replaced" => ~retryDebt /\ ~keylessObl
+
+\* INVARIANT: the 5b binary starts only after a start binary with repair 1 (E3), in every run.
+E3Enforced == bin \in {"new", "rolled"} => View = "v2"
+
+\* PROPERTY (liveness): every retry debt and keyless obligation eventually settles.
+ObligationsSettled == <>[](~retryDebt /\ ~keylessObl)
 
 \* PROPERTY (liveness): every input is eventually done.
 OwnerProgress == <>(\A i \in Inputs : st[i] = "done")

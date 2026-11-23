@@ -669,10 +669,14 @@ input-single-path/InputLedgerFormatAfterUnlocked.cfg	InputLedgerFormat	RecordedE
 input-single-path/InputLedgerFormatDeployGuarded.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatDeployGuardedBootV1.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatDeployGuardedPreRepair.cfg	InputLedgerFormat	-	DeployReached,OwnerProgress
-input-single-path/InputLedgerFormatDeployPrecheck.cfg	InputLedgerFormat	BindingKept,NewBootSupported	OwnerProgress
+input-single-path/InputLedgerFormatDeployKeylessAll.cfg	InputLedgerFormat	-	DeployReached
+input-single-path/InputLedgerFormatDeployPrecheck.cfg	InputLedgerFormat	BindingKept,NewBootSupported,NoDebtAcrossReplace	ObligationsSettled,OwnerProgress
 input-single-path/InputLedgerFormatDeployReplaceOnV2.cfg	InputLedgerFormat	BindingKept	OwnerProgress
 input-single-path/InputLedgerFormatDeployRollbackBinary.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatDeployRollbackLedger.cfg	InputLedgerFormat	ProofKept,RecordedExactlyOnce	OwnerProgress
+input-single-path/InputLedgerFormatDeploySkipE3.cfg	InputLedgerFormat	E3Enforced	DeployReached,OwnerProgress
+input-single-path/InputLedgerFormatDeploySkipKeyless.cfg	InputLedgerFormat	NoDebtAcrossReplace	ObligationsSettled
+input-single-path/InputLedgerFormatDeploySkipRetry.cfg	InputLedgerFormat	NoDebtAcrossReplace	ObligationsSettled
 input-single-path/InputLedgerFormatDropMigrationOnly.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatNow.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatNowBeforeRepair.cfg	InputLedgerFormat	-	OwnerProgress

@@ -3,189 +3,51 @@ title: "Frame ledger file: V2 owner, out-of-scope writer and the 5b ops procedur
 ---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Breaks BindingKept or NewBootSupported
-    lg1: Path to the BindingKept or NewBootSupported or OwnerProgress bug
-    lg2: Repeats forever, so OwnerProgress breaks
+    lg0: Breaks NoDebtAcrossReplace
+    lg1: Breaks BindingKept or NewBootSupported in some cases
+    lg2: Path to the BindingKept or NewBootSupported or NoDebtAcrossReplace or ObligationsSettled or OwnerProgress bug
+    lg3: Repeats forever, so ObligationsSettled or OwnerProgress breaks
   }
   class lg0 breaks
-  class lg1 bugPath
-  class lg2 repeats
+  class lg1 mayBreak
+  class lg2 bugPath
+  class lg3 repeats
   s0: [old] file none #183; owner input owner #183; out-of-scope input queued
-  s1: [checked] file none #183; owner input owner #183; out-of-scope input queued
-  s2: [old] file v1 #183; owner input owner #183; out-of-scope input pasted
-  s3: [old] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s4: [stopped] file none #183; owner input owner #183; out-of-scope input queued
-  s5: [old] file v1 #183; owner input owner #183; out-of-scope input done
-  s6: [checked] file v1 #183; owner input owner #183; out-of-scope input pasted
-  s7: [old] file v1 #183; owner input owner #183; out-of-scope input unknown
-  s8: [old] file v2 #183; owner input pasted #183; out-of-scope input owner
-  s9: [old] file v2 #183; owner input done #183; out-of-scope input queued
-  s10: [checked] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s11: [old] file v2 #183; owner input pasted #183; out-of-scope input pasted
-  s12: [new, new sessions] file none #183; owner input owner #183; out-of-scope input queued
-  s13: [checked] file v1 #183; owner input owner #183; out-of-scope input done
-  s14: [checked] file v1 #183; owner input owner #183; out-of-scope input unknown
-  s15: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
-  s16: [old] file v2 #183; owner input done #183; out-of-scope input owner
-  s17: [checked] file v2 #183; owner input pasted #183; out-of-scope input owner
-  s18: [checked] file v2 #183; owner input done #183; out-of-scope input queued
-  s19: [stopped] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s20: [old] file v2 #183; owner input pasted #183; out-of-scope input done
-  s21: [old] file v2 #183; owner input done #183; out-of-scope input pasted
-  s22: [checked] file v2 #183; owner input pasted #183; out-of-scope input pasted
-  s23: [old] file v2 #183; owner input pasted #183; out-of-scope input unknown
-  s24: [stopped] file v1 #183; owner input owner #183; out-of-scope input done
-  s25: RED: Unknown head's transcript binding replaced#59; its proof cannot be used
-  s26: [checked] file v2 #183; owner input done #183; out-of-scope input owner
-  s27: [stopped] file v2 #183; owner input pasted #183; out-of-scope input owner
-  s28: [stopped] file v2 #183; owner input done #183; out-of-scope input queued
-  s29: [old] file v2 #183; owner input done #183; out-of-scope input done
-  s30: [checked] file v2 #183; owner input pasted #183; out-of-scope input done
-  s31: [checked] file v2 #183; owner input done #183; out-of-scope input pasted
-  s32: [old] file v2 #183; owner input done #183; out-of-scope input unknown
-  s33: [checked] file v2 #183; owner input pasted #183; out-of-scope input unknown
-  s34: [stopped] file v2 #183; owner input pasted #183; out-of-scope input unknown
-  s35: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input queued
-  s36: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input pasted
-  s37: RED: 5b binary booted on a V1 ledger#59; Claude runtime stops before intake
-  s38: [stopped] file v2 #183; owner input done #183; out-of-scope input owner
-  s39: [checked] file v2 #183; owner input done #183; out-of-scope input done
-  s40: [stopped] file v2 #183; owner input pasted #183; out-of-scope input done
-  s41: [checked] file v2 #183; owner input done #183; out-of-scope input unknown
-  s42: [stopped] file v2 #183; owner input done #183; out-of-scope input unknown
-  s43: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input queued
-  s44: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input owner
-  s45: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input done
-  s46: [new, new sessions] file v2 #183; owner input owner #183; out-of-scope input unknown
-  s47: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input pasted
-  s48: [stopped] file v2 #183; owner input done #183; out-of-scope input done
-  s49: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input owner
-  s50: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input done
-  s51: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input pasted
-  s52: [new, new sessions] file v2 #183; owner input pasted #183; out-of-scope input unknown
-  s53: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input done
-  s54: [new, new sessions] file v2 #183; owner input done #183; out-of-scope input unknown
+  s1: [old] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s2: [checked] file none #183; owner input owner #183; out-of-scope input queued
+  s3: [checked] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s4: [checked] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s5: [stopped] (retry debt) file none #183; owner input owner #183; out-of-scope input queued
+  s6: [checked] (retry debt) file v1 #183; owner input owner #183; out-of-scope input pasted
+  s7: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s8: RED: sessions replaced while a retry debt or keyless obligation still needs them
+  s9: [stopped] (retry debt) file v1 #183; owner input owner #183; out-of-scope input unknown
+  s10: RED: Unknown head's transcript binding replaced#59; its proof cannot be used
   [*] --> s0
-  s0 --> s1: PreCheck
-  s0 --> s2: XRegister
-  s0 --> s3: OwnerPrepare
-  s1 --> s4: Stop
-  s1 --> s6: XRegister
-  s1 --> s10: OwnerPrepare
-  s2 --> s5: Settle
-  s2 --> s6: PreCheck
-  s2 --> s7: Crash
-  s2 --> s11: OwnerPrepare
-  s3 --> s8: XRegister
-  s3 --> s9: Settle
-  s3 --> s10: PreCheck
-  s4 --> s12: StartAsPlanned
-  s5 --> s13: PreCheck
-  s5 --> s20: OwnerPrepare
-  s6 --> s13: Settle
-  s6 --> s14: Crash
-  s6 --> s15: Stop
-  s6 --> s22: OwnerPrepare
-  s7 --> s5: Mend
-  s7 --> s14: PreCheck
-  s7 --> s23: OwnerPrepare
-  s8 --> s11: OwnerPrepare
-  s8 --> s16: Settle
-  s8 --> s17: PreCheck
-  s9 --> s16: XRegister
-  s9 --> s18: PreCheck
-  s10 --> s17: XRegister
-  s10 --> s18: Settle
-  s10 --> s19: Stop
-  s11 --> s20: Settle
-  s11 --> s21: Settle
-  s11 --> s22: PreCheck
-  s11 --> s23: Crash
-  s12 --> s35: OwnerPrepare
-  s12 --> s36: XRegister
-  s13 --> s24: Stop
-  s13 --> s30: OwnerPrepare
-  s14 --> s13: Mend
-  s14 --> s15: Stop
-  s14 --> s33: OwnerPrepare
-  s15 --> s25: StartAsPlanned
-  s15 --> s7: StartAsPlanned
-  s16 --> s21: OwnerPrepare
-  s16 --> s26: PreCheck
-  s17 --> s22: OwnerPrepare
-  s17 --> s26: Settle
-  s17 --> s27: Stop
-  s18 --> s26: XRegister
-  s18 --> s28: Stop
-  s19 --> s35: StartAsPlanned
-  s20 --> s29: Settle
-  s20 --> s30: PreCheck
-  s21 --> s29: Settle
-  s21 --> s31: PreCheck
-  s21 --> s32: Crash
-  s22 --> s30: Settle
-  s22 --> s31: Settle
-  s22 --> s33: Crash
-  s22 --> s34: Stop
-  s23 --> s20: Mend
-  s23 --> s32: Settle
-  s23 --> s33: PreCheck
-  s24 --> s37: StartAsPlanned
-  s24 --> s5: StartAsPlanned
-  s26 --> s31: OwnerPrepare
-  s26 --> s38: Stop
-  s27 --> s44: StartAsPlanned
-  s28 --> s43: StartAsPlanned
-  s29 --> s39: PreCheck
-  s30 --> s39: Settle
-  s30 --> s40: Stop
-  s31 --> s39: Settle
-  s31 --> s41: Crash
-  s31 --> s42: Stop
-  s32 --> s29: Mend
-  s32 --> s41: PreCheck
-  s33 --> s30: Mend
-  s33 --> s34: Stop
-  s33 --> s41: Settle
-  s34 --> s25: StartAsPlanned
-  s34 --> s23: StartAsPlanned
-  s35 --> s43: Settle
-  s35 --> s47: XRegister
-  s36 --> s45: Settle
-  s36 --> s46: Crash
-  s36 --> s47: OwnerPrepare
-  s38 --> s49: StartAsPlanned
-  s39 --> s48: Stop
-  s40 --> s50: StartAsPlanned
-  s40 --> s20: StartAsPlanned
-  s41 --> s39: Mend
-  s41 --> s42: Stop
-  s42 --> s25: StartAsPlanned
-  s42 --> s32: StartAsPlanned
-  s43 --> s51: XRegister
-  s44 --> s47: OwnerPrepare
-  s44 --> s49: Settle
-  s45 --> s50: OwnerPrepare
-  s46 --> s45: Mend
-  s46 --> s52: OwnerPrepare
-  s47 --> s50: Settle
-  s47 --> s51: Settle
-  s47 --> s52: Crash
-  s48 --> s53: StartAsPlanned
-  s48 --> s29: StartAsPlanned
-  s49 --> s51: OwnerPrepare
-  s50 --> s53: Settle
-  s51 --> s53: Settle
-  s51 --> s54: Crash
-  s52 --> s50: Mend
-  s52 --> s54: Settle
-  s54 --> s53: Mend
+  s0 --> s1: Appear
+  s0 --> s2: PreCheck
+  s1 --> s3: PreCheck
+  s2 --> s4: XRegister
+  s3 --> s5: Stop
+  s3 --> s6: XRegister
+  s4 --> s7: Stop
+  s5 --> s8: StartAsPlanned
+  s6 --> s9: Stop
+  s7 --> s10: StartAsPlanned
+  s9 --> s10: StartAsPlanned
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 bugPath
   class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
   class s6 bugPath
-  class s15 bugPath
-  class s25 breaks
-  class s25 bugPath
-  class s25 repeats
-  class s37 breaks
+  class s7 bugPath
+  class s8 breaks
+  class s8 bugPath
+  class s9 bugPath
+  class s10 mayBreak
+  class s10 bugPath
+  class s10 repeats
