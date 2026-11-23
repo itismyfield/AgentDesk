@@ -8,7 +8,7 @@ use crate::services::scheduling::next_due_after_anchor;
 /// A fire slot is retried this many times after interruptions before the
 /// definition is failed outright. The delivery retry_count counts re-arms of
 /// the same fire slot.
-pub(super) const MAX_FIRE_RETRIES: i32 = 3;
+pub(crate) const MAX_FIRE_RETRIES: i32 = 3;
 const FIRE_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 900];
 
 /// A live future slot (manual trigger-now case) resumes as-is. Otherwise the

@@ -7,7 +7,7 @@ use crate::db::scheduled_messages as db;
 use crate::db::session_transcripts::SessionTranscriptEvent;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum TurnEvidence {
+pub(crate) enum TurnEvidence {
     Delivered,
     TerminalFailure(String),
 }
@@ -53,7 +53,7 @@ fn outcome_evidence(outcome: ScheduledTurnOutcome) -> TurnEvidence {
 /// `empty_response` terminal quality event proves the turn died without output.
 /// The launch-commit lower bound includes evidence emitted before the later
 /// runtime acknowledgement while excluding unrelated stale evidence.
-pub(super) async fn find_turn_delivery_evidence(
+pub(crate) async fn find_turn_delivery_evidence(
     pool: &PgPool,
     delivery_id: &str,
     turn_id: &str,

@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 
 mod execution;
 mod launch;
-mod owner_input;
+pub(crate) mod owner_input;
 use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
@@ -865,8 +865,8 @@ impl RoutineAgentExecutor {
         if result_json.is_some_and(|result| result.get("owner_input").is_some()) {
             return;
         }
-        #[cfg(test)]
-        if owner_input_tests::LEGACY_TEARDOWNS
+        #[cfg(any(test, feature = "test-support"))]
+        if owner_hook_tests::LEGACY_TEARDOWNS
             .try_with(|count| count.set(count.get() + 1))
             .is_ok()
         {
@@ -1618,7 +1618,7 @@ fn current_attempt_kind_from_result(result_json: Option<&Value>) -> Option<&str>
         .filter(|value| !value.is_empty())
 }
 
-fn attempts_include_fallback(attempts: &Value) -> bool {
+pub(crate) fn attempts_include_fallback(attempts: &Value) -> bool {
     attempts
         .as_array()
         .map(|items| {
@@ -2406,7 +2406,5 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod owner_input_tests;
-#[cfg(test)]
-mod provider_choice_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod owner_hook_tests;

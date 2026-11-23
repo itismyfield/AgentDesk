@@ -138,7 +138,7 @@ impl RoutineAgentExecutor {
     }
 }
 
-pub(super) mod custody {
+pub(crate) mod custody {
     use super::*;
     use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
@@ -147,8 +147,8 @@ pub(super) mod custody {
         provider: &str,
         channel: u64,
     ) -> Result<ChannelMailboxHandle> {
-        #[cfg(test)]
-        if let Ok(handle) = super::super::owner_input_tests::OWNER.try_with(Clone::clone) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Ok(handle) = super::super::owner_hook_tests::OWNER.try_with(Clone::clone) {
             return Ok(handle);
         }
         let registry = executor
@@ -368,7 +368,7 @@ pub(super) mod custody {
         input.may_retry(&handle).await.map_err(anyhow::Error::msg)
     }
 
-    pub(in crate::services::routines::agent_executor) async fn bind_observer(
+    pub(crate) async fn bind_observer(
         store: &RoutineStore,
         run: &RunningAgentRoutineRun,
         handle: &ChannelMailboxHandle,
