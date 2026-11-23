@@ -1134,7 +1134,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 11d342e4500e3d7404ce7d4ec555e998aebda2d4862856899c44ce0f6a4dcc6c
+          pin scripts/check-ci-runner-hardening.sh 2a1d9eb5c783635d729fb18c262141c3a86411668972b1394bd9fe05570af3a1
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
