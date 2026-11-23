@@ -336,7 +336,7 @@ pub(super) async fn handle_stream_content_message(
                                     inflight_state,
                                 );
                             }
-                            if !preserve_progress && done_result_requires_full_terminal_replay(
+                            if !preserve_progress && !rollover_parts_stay_posted(&provider) && done_result_requires_full_terminal_replay(
                                 &full_response,
                                 &result,
                                 response_sent_offset,

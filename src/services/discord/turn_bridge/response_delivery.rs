@@ -113,6 +113,14 @@ pub(super) fn no_answer(full_response: &str, response_sent_offset: usize, delive
             .is_empty()
 }
 
+/// Stream-json CLIs post rollover parts as final text, so Done never re-sends them from offset 0.
+pub(super) fn rollover_parts_stay_posted(provider: &ProviderKind) -> bool {
+    matches!(
+        provider.execution_adapter(),
+        Some(crate::services::provider::ProviderExecutionAdapter::StreamJsonCli(_))
+    )
+}
+
 pub(super) fn done_result_requires_full_terminal_replay(
     full_response: &str,
     result: &str,
