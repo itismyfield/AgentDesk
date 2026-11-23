@@ -102,8 +102,6 @@ fn a_person_draft_never_takes_the_finishing_enter() {
 fn a_late_or_lost_record_takes_no_second_enter() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let observed = (Outcome::Injected, Some(Receipt::Observed));
-    let record = serde_json::json!({"type": "queue-operation", "operation": "enqueue",
-        "content": frame("iMessage", "200", "ann", "", LONG)});
     for (case, fault, expected) in [
         ("late", "late", observed),
         ("lost", "mute", MISSING),
@@ -114,6 +112,8 @@ fn a_late_or_lost_record_takes_no_second_enter() {
         // The fake lands `late.rec` at the next capture, the one read before a second Enter.
         let land = || {
             if case == "shown" {
+                let record = serde_json::json!({"type": "queue-operation",
+                    "operation": "enqueue", "content": tui.get("buffer").unwrap()});
                 tui.put("late.rec", &format!("{record}\n"));
             }
         };
