@@ -18,7 +18,9 @@ fn campaign_router() -> ApiRouter {
         .route("/campaigns", get(campaigns::list).post(campaigns::create))
         .route(
             "/campaigns/{id}",
-            get(campaigns::get).put(campaigns::replace),
+            get(campaigns::get)
+                .put(campaigns::replace)
+                .delete(campaigns::delete),
         )
         .route("/campaigns/{id}/history", get(campaigns::history))
         .route(

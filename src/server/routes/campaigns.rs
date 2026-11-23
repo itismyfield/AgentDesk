@@ -220,6 +220,24 @@ pub async fn replace(
     replace_with_handoff(&state, &id, body.expected_revision, body.campaign).await
 }
 
+/// Responds with JSON like every other campaign route, so clients parse one body shape.
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let revisions = campaigns::delete(pool(&state)?, &id)
+        .await
+        .map_err(|e| match e {
+            CampaignError::Conflict => {
+                AppError::conflict("active campaign cannot be deleted; pause or cancel it first")
+            }
+            other => error(other),
+        })?;
+    Ok(Json(
+        json!({ "deleted": id, "deleted_revisions": revisions }),
+    ))
+}
+
 pub async fn patch_node(
     State(state): State<AppState>,
     Path((id, node_id)): Path<(String, String)>,
@@ -454,6 +472,68 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+        drop(app);
+        pool.close().await;
+        fixture.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_campaign_delete_refuses_active_and_removes_history_pg() {
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let app = app(pool.clone());
+        for seed in [
+            "INSERT INTO kanban_cards (id, title, status, repo_id, github_issue_number) \
+             VALUES ('card-7', 'Seven', 'in_progress', 'owner/repo', 7)",
+            "INSERT INTO issue_specs (issue_id, card_id, repo_id, issue_number) \
+             VALUES ('owner/repo#7', 'card-7', 'owner/repo', 7)",
+        ] {
+            sqlx::query(seed).execute(&pool).await.unwrap();
+        }
+        let node = json!({"id": "n1", "title": "Linked", "status": "pending", "stage": "implement",
+                          "round": 1, "issue_url": "https://github.com/owner/repo/issues/7"});
+        for (id, status) in [("gone", "paused"), ("kept", "paused"), ("live", "active")] {
+            let body =
+                json!({"id": id, "title": id, "status": status, "round": 1, "nodes": [node]});
+            let (status, _) = request(&app, Method::POST, "/campaigns", Some(body), true).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let update = json!({"expected_revision": 1, "title": "gone v2", "status": "paused",
+                            "round": 1, "nodes": [node]});
+        let (status, _) = request(&app, Method::PUT, "/campaigns/gone", Some(update), true).await;
+        assert_eq!(status, StatusCode::OK);
+        let linked = || {
+            sqlx::query_scalar::<_, String>(
+                "SELECT concat_ws('|', (SELECT string_agg(id, ',' ORDER BY id) FROM kanban_cards), \
+                 (SELECT string_agg(issue_id || ':' || card_id, ',' ORDER BY issue_id) \
+                  FROM issue_specs))",
+            )
+            .fetch_one(&pool)
+        };
+        let before = linked().await.unwrap();
+        assert_eq!(before, "card-7|owner/repo#7:card-7");
+        let rows = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT (SELECT COUNT(*) FROM campaigns WHERE id = $1) \
+                     + (SELECT COUNT(*) FROM campaign_revisions WHERE campaign_id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (status, body) = request(&app, Method::DELETE, "/campaigns/gone", None, true).await;
+        let deleted = json!({"deleted": "gone", "deleted_revisions": 2});
+        assert_eq!((status, body), (StatusCode::OK, deleted));
+        assert_eq!((rows("gone").await, rows("kept").await), (0, 2));
+        assert_eq!(linked().await.unwrap(), before);
+        let (status, _) = request(&app, Method::DELETE, "/campaigns/live", None, true).await;
+        assert_eq!((status, rows("live").await), (StatusCode::CONFLICT, 2));
+        let (status, _) = request(&app, Method::DELETE, "/campaigns/gone", None, true).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         drop(app);
         pool.close().await;
         fixture.drop().await;
