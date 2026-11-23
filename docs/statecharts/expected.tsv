@@ -285,6 +285,11 @@ execution-authority/ExecutionChildViewAlias.cfg	ExecutionChildView	ChildOwnPermi
 execution-authority/ExecutionChildViewBefore.cfg	ExecutionChildView	-	ChildRecordRead
 execution-authority/ExecutionChildViewFixed.cfg	ExecutionChildView	-	-
 execution-authority/ExecutionChildViewRest.cfg	ExecutionChildView	ChildRecordedNoRest	-
+gateway-lease/GatewayBootShutdownAfter.cfg	GatewayBootShutdown	-	-
+gateway-lease/GatewayBootShutdownBefore.cfg	GatewayBootShutdown	NoStartAfterTerm	BarrierEnds
+gateway-lease/GatewayBootShutdownFreshStream.cfg	GatewayBootShutdown	-	BarrierEnds
+gateway-lease/GatewayBootShutdownNoLast.cfg	GatewayBootShutdown	-	BarrierEnds
+gateway-lease/GatewayBootShutdownNoReadyCheck.cfg	GatewayBootShutdown	NoStartAfterTerm	-
 gateway-lease/GatewayLeaseAfter.cfg	GatewayLease	-	-
 gateway-lease/GatewayLeaseAfterRefused.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
 gateway-lease/GatewayLeaseBefore.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred

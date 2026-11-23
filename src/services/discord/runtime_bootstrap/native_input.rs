@@ -13,8 +13,8 @@ const NATIVE_RESTORE_WARN_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 pub(super) enum NativeBoot {
     Ready,
-    /// Restore did not finish; rows and custody are untouched, so the next attempt
-    /// re-reads the same records (e.g. "native control history busy").
+    /// Restore did not finish (e.g. "native control history busy"); part of it may be done,
+    /// and the next attempt re-reads history, custody and ledger to settle the rest.
     RestoreHeld(String),
     /// Preparation or the boot reaper refused; retried only by a new process.
     Refused(String),
@@ -29,6 +29,8 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
         && super::super::super::turn_finalizer::native_prepare::enabled()
     {
         use super::super::super::turn_finalizer::native_prepare::BootInputs;
+        // Armed before the first attempt: no runtime handler can hear SIGTERM yet.
+        let sigterm = super::super::boot_sigterm::subscribe();
         let attempt = || async move {
             let prepared = crate::services::discord::runtime_store::runtime_root()
                 .ok_or_else(|| "native boot root unavailable".to_string())
@@ -57,9 +59,8 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
         };
         return await_native_boot(
             provider,
-            &shared.restart.shutting_down,
-            &shared.restart.shutdown_counted,
-            &shared.restart.shutdown_remaining,
+            shared,
+            sigterm,
             NATIVE_RESTORE_RETRY_INTERVAL,
             attempt,
         )
@@ -78,9 +79,8 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
 #[cfg(unix)]
 pub(super) async fn await_native_boot<F, Fut>(
     provider: &ProviderKind,
-    shutting_down: &std::sync::atomic::AtomicBool,
-    shutdown_counted: &std::sync::atomic::AtomicBool,
-    shutdown_remaining: &std::sync::atomic::AtomicUsize,
+    shared: &Arc<SharedData>,
+    mut sigterm: tokio::sync::watch::Receiver<bool>,
     interval: Duration,
     mut attempt: F,
 ) -> bool
@@ -88,11 +88,21 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = NativeBoot>,
 {
+    use super::super::boot_sigterm;
     use crate::services::discord::health::boot_hold;
+    let stop_requested = |sigterm: &tokio::sync::watch::Receiver<bool>| {
+        *sigterm.borrow() || shared.restart.shutting_down.load(Ordering::SeqCst)
+    };
     let mut held = 0u64;
     let mut next_warning = tokio::time::Instant::now();
     loop {
-        let error = match attempt().await {
+        let outcome = attempt().await;
+        // An attempt that finished after the shutdown request starts nothing, even when ready.
+        if stop_requested(&sigterm) {
+            boot_sigterm::stop_before_start(shared);
+            return false;
+        }
+        let error = match outcome {
             NativeBoot::Ready => {
                 boot_hold::release(provider.as_str());
                 if held > 0 {
@@ -106,6 +116,7 @@ where
             }
             NativeBoot::Refused(error) => {
                 boot_hold::hold(provider.as_str(), "native_boot_refused", &error);
+                boot_sigterm::release_slot_on_sigterm(shared.clone(), sigterm);
                 return false;
             }
             NativeBoot::RestoreHeld(error) => error,
@@ -123,15 +134,12 @@ where
                 "native boot restore held before intake; retrying (runtime and gateway lease wait)"
             );
         }
-        tokio::time::sleep(interval).await;
-        if shutting_down.load(Ordering::SeqCst) {
-            // Same once-only slot protocol as the SIGTERM handler and deferred restart.
-            if shutdown_counted
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-            }
+        tokio::select! {
+            () = tokio::time::sleep(interval) => {}
+            () = boot_sigterm::signalled(&mut sigterm) => {}
+        }
+        if stop_requested(&sigterm) {
+            boot_sigterm::stop_before_start(shared);
             return false;
         }
     }

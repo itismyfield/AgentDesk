@@ -90,10 +90,9 @@ impl SigtermSource {
     async fn wait(self) -> Option<(Boundary, Boundary)> {
         let none = || -> (Boundary, Boundary) { (Box::new(|| {}), Box::new(|| {})) };
         match self {
+            // The latch keeps a signal that arrived before this handler, e.g. during the boot gate.
             Self::Os => {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm = signal(SignalKind::terminate()).ok()?;
-                sigterm.recv().await;
+                super::boot_sigterm::signalled(&mut super::boot_sigterm::subscribe()).await;
                 Some(none())
             }
             #[cfg(all(test, unix))]

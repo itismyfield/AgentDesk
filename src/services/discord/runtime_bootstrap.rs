@@ -1,6 +1,7 @@
 use super::{health, *};
 use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
+mod boot_sigterm;
 mod deferred_restart;
 mod framework_setup;
 mod gateway_handback_breaker;
