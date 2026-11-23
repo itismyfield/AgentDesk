@@ -4,6 +4,8 @@
 pub(crate) mod history;
 
 const USER: &str = "[User: ";
+/// The schema marker with whitespace removed, as wrapped composer rows still show it.
+const SCHEMA_FOLDED: &str = "·📱v1mode=inject";
 
 /// The fields of one durable-owned user header, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,8 +156,43 @@ pub(crate) fn opens_inject(text: &str) -> bool {
     text.starts_with(USER) && history::known(text)
 }
 
-/// A row AgentDesk opened as a Discord prompt (`[User:` …).
+/// Whether screen rows, however Claude wrapped them, open with an inject header; whitespace is
+/// ignored so a header split across rows still counts.
+pub(crate) fn shows_inject<S: AsRef<str>>(rows: &[S]) -> bool {
+    let Some(first) = rows.first().map(|row| row.as_ref().trim_start()) else {
+        return false;
+    };
+    if !first
+        .get(..6)
+        .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
+    {
+        return false;
+    }
+    let folded: String = rows
+        .iter()
+        .flat_map(|row| row.as_ref().chars())
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    folded
+        .split(']')
+        .next()
+        .is_some_and(|header| header.contains(SCHEMA_FOLDED))
+}
+
+/// Whether an inject header shows anywhere in the rows, as the older `[📱 ` check looked for
+/// it anywhere; a person's keys before it or a wrap inside it still count.
+pub(crate) fn holds_inject<S: AsRef<str>>(rows: &[S]) -> bool {
+    let folded: String = rows
+        .iter()
+        .flat_map(|row| row.as_ref().chars())
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    folded.contains(SCHEMA_FOLDED)
+}
+
+/// A row AgentDesk opened as a Discord prompt (`[User:` …), excluding a running turn's input.
 pub(crate) fn opens_discord_prompt(row: &str) -> bool {
     row.get(..6)
         .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
+        && !shows_inject(&[row])
 }

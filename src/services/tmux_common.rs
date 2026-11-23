@@ -234,7 +234,7 @@ fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
     let rest = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     // AgentDesk injects submitted Discord turns as lines like
     // `❯ [User: name (ID: ...)] ...`. Those are pane history, not an active
-    // composer draft.
+    // composer draft (a running turn's `· 📱` input still is one).
     let discord_submitted_prompt = human_frame::opens_discord_prompt(rest);
     !rest.is_empty() && !discord_submitted_prompt
 }

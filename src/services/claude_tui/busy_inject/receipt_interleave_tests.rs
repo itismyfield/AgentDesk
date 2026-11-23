@@ -234,3 +234,42 @@ fn the_current_frame_beside_an_image_is_its_own_mixed_receipt() {
         Some(false)
     );
 }
+
+/// A registered frame split into text blocks is its exact receipt in an enqueue, a queued command
+/// or a user prompt; a person's text block or any non-text block beside it makes the row mixed.
+#[test]
+fn split_text_blocks_are_exact_and_extra_blocks_are_mixed_in_every_prompt_record() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let session = format!("receipt-blocks-{}", uuid::Uuid::new_v4());
+    let image = json!({"type": "image", "source": {"type": "base64", "data": "AA=="}});
+    let wrap = |kind: usize, content: serde_json::Value| match kind {
+        0 => json!({"type": "queue-operation", "operation": "enqueue", "content": content}),
+        1 => json!({"type": "attachment", "attachment": {
+            "type": "queued_command", "commandMode": "prompt", "prompt": content}}),
+        _ => json!({"type": "user", "message": {"content": content}}),
+    };
+    let block = |text: &str| json!({"type": "text", "text": text});
+    for case in 0..12 {
+        let nonce = format!("ca7203{case:02x}");
+        let text = frame("discord", "720205", "ann", &nonce, "첫 줄\n둘째 줄");
+        let split: Vec<_> = text.lines().map(block).collect();
+        let whole = block(&text);
+        let (content, exact) = match case % 4 {
+            0 => (json!(split), true),
+            1 => (json!([block("사람 초안"), whole]), false),
+            2 => (json!([image, whole]), false),
+            _ => (json!([whole, image]), false),
+        };
+        let path = directory.path().join(format!("case-{case}.jsonl"));
+        std::fs::write(&path, "").unwrap();
+        history::register(("claude", &session, &nonce, "720205"), &path, 0, &text).unwrap();
+        let record = wrap(case / 4, content);
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        assert_eq!(
+            transcript_submission(&path, 0, &nonce, Some(&text)),
+            Some(exact),
+            "{record}"
+        );
+    }
+}
