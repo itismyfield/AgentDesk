@@ -294,7 +294,7 @@ pub fn run_from_args() -> Result<()> {
 #[cfg(test)]
 mod krx_claude_tests;
 #[cfg(test)]
-pub(crate) mod krx_tui_o_tests;
+mod krx_tui_o_tests;
 #[cfg(all(test, unix))]
 mod krx_tui_o_unix_tests;
 #[cfg(test)]
