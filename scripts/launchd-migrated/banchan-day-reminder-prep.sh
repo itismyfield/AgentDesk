@@ -24,7 +24,7 @@ target channel: 1473922824350601297
 current time: $NOW_KST
 
 Rules:
-- Use family calendar via gog CLI exactly as the skill requires.
+- Read the family calendar with the google-api skill (Google official API): ~/.local/share/google-api/venv/bin/python $AGENTDESK_OBSIDIAN_SKILL_ROOT/google-api/scripts/gapi.py calendar-events family03910667166220074979@group.calendar.google.com --from <date> --to <date> --plain. Do not use gog.
 - If there is no relevant event, return exactly NO_REPLY.
 - If there is a relevant event, return the final Korean reminder message only.
 - Keep the reminder practical and aligned with the template constraints.
