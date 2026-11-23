@@ -1,23 +1,25 @@
-import { Bot, CircleX, Flag, Hourglass, Lock, MessageCircleQuestion, Play, RotateCw, ShieldCheck, Zap, type LucideIcon } from "lucide-react";
-import { useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { Bot, Box, CircleX, Flag, Hourglass, Lock, MessageCircleQuestion, Play, RotateCw, ShieldCheck, Zap, type LucideIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { Background, BaseEdge, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { PipelineState } from "../../api/serverCampaignPipeline";
 import type { Tr } from "./campaignPresentation";
 import { PIPE_WIDTH, cardHeight, type Line, type Pin, type PipelineGraph } from "./pipelineModel";
 import { FLOAT, ZoomTools, useLegible } from "./RelationsCanvasChrome";
 
-export const KIND_ICONS: Record<PipelineState["kind"], LucideIcon> = {
+const KIND_ICONS: Record<string, LucideIcon> = {
   agent_task: Bot, auto_check: ShieldCheck, auto_action: Zap, human_decision: MessageCircleQuestion, wait: Hourglass, end_success: Flag, end_failure: CircleX,
 };
+export const kindIcon = (kind: string) => KIND_ICONS[kind] ?? Box;
 export const TONE_COLORS: Record<Line["tone"], string> = { pass: "var(--ok)", fail: "var(--err)", retry: "var(--warn)", other: "var(--fg-muted)", event: "var(--warn)" };
 const CANVAS_HEIGHT = "max(560px, calc(100dvh - 25rem))";
 const FIT = { padding: { x: "32px", top: "72px", bottom: "72px" }, minZoom: 0.1, maxZoom: 1 } as const;
 
 /** Text the parent has already put into words, so the card only lays it out. */
 export type StateNodeData = {
-  kind: PipelineState["kind"]; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: string | null;
-  badges: { text: string; start?: boolean }[]; foot: [string, string] | null;
+  kind: string; title: string; kindLabel: string; pins: Pin[]; entry: string; main: boolean; occupancy: { text: string; held: boolean }[];
+  badges: { text: string; start?: boolean; off?: boolean }[]; foot: [string, string] | null;
+  /** While editing: a check error on this state, and whether the draft added or changed it. */
+  flagged?: boolean; mark?: string | null;
 };
 /** Inline because React Flow's unlayered stylesheet outranks Tailwind's layered utilities. */
 const dot = (color: string): CSSProperties => ({ position: "absolute", width: 10, height: 10, minWidth: 0, minHeight: 0, borderRadius: 999, border: `2px solid ${color}`, background: "var(--th-card-bg)" });
@@ -26,17 +28,17 @@ const dot = (color: string): CSSProperties => ({ position: "absolute", width: 10
  * coloured pin per result at its right; a retry pin carries ↻n. Start and approval gates ride above it. */
 function StateNode({ data, selected }: NodeProps) {
   const node = data as StateNodeData;
-  const Icon = KIND_ICONS[node.kind];
-  return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${selected ? "border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-soft)]" : "border-[var(--line)]"}`}
+  const Icon = kindIcon(node.kind);
+  return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${node.flagged ? "border-[var(--err)]" : selected ? "border-[var(--accent)]" : "border-[var(--line)]"} ${selected ? "shadow-[0_0_0_3px_var(--accent-soft)]" : node.flagged ? "shadow-[0_0_0_3px_var(--err-soft)]" : ""}`}
     style={{ width: PIPE_WIDTH }}>
     {node.badges.length > 0 && <div className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 gap-1.5">{node.badges.map((badge) => <span key={badge.text}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
+      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : badge.off ? "border-dashed border-[var(--line)] bg-[var(--bg-2)] text-[var(--fg-muted)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
       {badge.start ? <Play aria-hidden className="size-3" /> : <Lock aria-hidden className="size-3" />}{badge.text}</span>)}</div>}
     {!node.main && <Handle type="target" position={Position.Top} isConnectable={false} style={{ ...dot("var(--fg-dim)"), zIndex: 1 }} />}
     <div className="flex min-w-0 items-center gap-2 border-b border-[var(--line-soft)] px-3 pt-2.5 pb-2">
       <span className={`grid size-6 shrink-0 place-items-center rounded-[7px] bg-[var(--bg-3)] ${node.kind === "end_success" ? "text-[var(--ok)]" : node.kind === "end_failure" ? "text-[var(--err)]" : ""}`}><Icon aria-hidden className="size-3.5" /></span>
-      <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}</span></span>
-      {node.occupancy && <span className="shrink-0 rounded-full bg-[var(--info-soft)] px-1.5 leading-5 font-medium text-[var(--info)]">{node.occupancy}</span>}
+      <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}{node.mark && <b className="font-semibold text-[var(--warn)]"> · {node.mark}</b>}</span></span>
+      {node.occupancy.map(({ text, held }) => <span key={text} className={`shrink-0 rounded-full px-1.5 leading-5 font-medium ${held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]"}`}>{text}</span>)}
     </div>
     <div className="grid content-start gap-1.5 px-3 py-2">{Array.from({ length: Math.max(1, node.pins.length) }, (_, row) => {
       const pin = node.pins[row];
@@ -89,11 +91,14 @@ const EDGE_TYPES = { pipelineLine: PipelineLine };
 const swatch = (color: string, dashed = false) => <i aria-hidden className={`w-5 border-t-2 ${dashed ? "border-dashed" : ""}`} style={{ borderColor: color }} />;
 
 /** The read-only pipeline canvas: cards in tab order along the drawn flow, coloured lines, the key, zoom tools and a minimap. */
-export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, inspector, children, tr }: {
+export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, reveal = null, wide = false, inspector, children, tr }: {
   label: string; graph: PipelineGraph; nodeData: Map<string, StateNodeData & { aria: string }>; eventData: Map<string, { title: string; target: string }>;
   chosen: string | null; onChoose: (id: string | null) => void; inspector: ReactNode; children: ReactNode; tr: Tr;
+  /** A state to bring into view (a check pointed at it); `wide` gives the editor's form a wider column. */
+  reveal?: { id: string; n: number } | null; wide?: boolean;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
+  useEffect(() => { if (reveal) void flow.current?.fitView({ nodes: [{ id: reveal.id }], minZoom: 0.8, maxZoom: 1, duration: 200 }); }, [reveal]);
   // A card handed over as a new object keeps its last size, or React Flow hides it until it measures it again.
   const sizes = useRef(new Map<string, NonNullable<Node["measured"]>>());
   const nodes = useMemo(() => [...graph.main, ...graph.off].map((id): Node => ({ id, type: "pipelineState", position: graph.positions.get(id)!, data: nodeData.get(id)!,
@@ -111,7 +116,7 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
     void instance.setViewport({ zoom, x: (zoom === fit ? (width - (x1 - x0) * zoom) / 2 : 32) - x0 * zoom, y: 24 + Math.max(0, (height - 120 - (y1 - y0) * zoom) / 2) - y0 * zoom });
   };
   return <section aria-label={label} style={{ "--pipeline-height": CANVAS_HEIGHT } as CSSProperties}
-    className="grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]">
+    className={`grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-rows-[minmax(0,1fr)] ${wide ? "min-[1280px]:grid-cols-[minmax(0,1fr)_21rem]" : "min-[1280px]:grid-cols-[minmax(0,1fr)_18rem]"}`}>
     <div ref={canvas} data-pipeline-canvas className="relative h-[var(--pipeline-height)] min-w-0 bg-[var(--bg)] [&_.react-flow\_\_node:focus-visible>div]:outline-2 [&_.react-flow\_\_node:focus-visible>div]:outline-offset-2 [&_.react-flow\_\_node:focus-visible>div]:outline-[var(--accent)]">
       <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
         onInit={(instance) => { flow.current = instance; open(instance); }}

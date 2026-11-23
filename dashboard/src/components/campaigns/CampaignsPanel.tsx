@@ -1,7 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
-  isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
+  DEFAULT_WORKFLOW_OPTIONS, isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { PageFrame } from "../../app/PageFrame";
@@ -89,7 +89,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
   // The ledger relations editor's scope while it is open, tied to the campaign it opened on, so picking another campaign
-  // never opens that one on this scope; `leave` is set by the editor while it has unsaved changes.
+  // never opens that one on this scope; `leave` is set by that editor or the pipeline editor while it has unsaved changes.
   const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(linked?.mode === "legacy" && linked.edit ? { campaign: linked.campaign, scope: linked.edit } : null);
   const editing = mode === "legacy" && edit?.campaign === selectedId ? edit.scope : null;
   const setEditing = (scope: EditScope | null) => setEdit(scope && selectedId ? { campaign: selectedId, scope } : null);
@@ -274,6 +274,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const phone = useIsMobile();
   const [picking, setPicking] = useState(false);
+  const [pipelineEditing, setPipelineEditing] = useState(false);
   const autoRuns = useAutoQueueRequests();
   const campaign = mode === "legacy" ? campaigns.find((value) => value.id === selectedId) : undefined;
   const entries: CampaignEntry[] = [
@@ -284,11 +285,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
   if (serverDoc && !summaries.some((summary) => summary.view.campaign_id === serverDoc.view.campaign_id)) entries.push(serverEntry({ definition: serverDoc.definition, view: serverDoc.view }, serverDoc, tr));
   const selectedKey = mode === "server" ? serverSelected && entryKey("server", serverSelected) : campaign ? entryKey("legacy", campaign.id) : null;
   const selectedEntry = entries.find((entry) => entry.key === selectedKey);
-  const select = (entry: CampaignEntry) => {
+  const select = (entry: CampaignEntry) => leaveEditor(() => {
     setPicking(false);
     if (entry.kind === "server") selectServer(entry.id);
     else { setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null); }
-  };
+  });
   const createNew = () => { setPicking(false); openDraft(NEW_DRAFT, () => createDraft(null)); };
   const list = <CampaignList entries={entries} selectedKey={selectedKey} onSelect={select} onCreate={createNew} createDisabled={serverDown}
     onRefresh={refreshAll} refreshing={loading} tr={tr} />;
@@ -350,7 +351,9 @@ export default function CampaignsPanel({ language }: { language: string }) {
         selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
       board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
-      pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of }} tr={tr} />}
+      pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of }} dispositions={Object.fromEntries(view.nodes.map((value) => [value.id, value.runtime.disposition]))}
+        approvals={definition.workflow_options ?? DEFAULT_WORKFLOW_OPTIONS} leave={leave} onEditing={setPipelineEditing} tr={tr} />}
+      leave={leaveEditor}
       task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
         gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
       onCloseTask={() => setNode(null)} />;
@@ -369,9 +372,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
 
   // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
   const folded = !phone && !!openNode;
+  const wideEditor = !phone && pipelineEditing;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
   return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={<div className="w-full sm:w-56">
-    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => editing ? leaveEditor(() => { setEditing(null); setTab(next); }) : setTab(next)}
+    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => leaveEditor(() => { if (editing) setEditing(null); setTab(next); })}
       options={[{ value: "campaigns", label: tr("캠페인", "Campaigns"), controls: "campaign-panel-campaigns" }, { value: "queue", label: tr("대기열", "Queue"), controls: "campaign-panel-queue" }]} />
   </div>}>
   <section className={`${CAMPAIGN_SCOPE} min-w-0 text-sm`}>
@@ -385,8 +389,9 @@ export default function CampaignsPanel({ language }: { language: string }) {
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
       {legacyError}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
-        {(phone || folded) && <KitCard pad="none" className={folded ? "min-[1280px]:!hidden" : undefined}>
+      {/* The pipeline editor takes the list's width too; it comes back once editing ends. */}
+      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${wideEditor ? "" : folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+        {(phone || folded) && !wideEditor && <KitCard pad="none" className={folded ? "min-[1280px]:!hidden" : undefined}>
           <button type="button" className={cn("campaign-picker m-0 flex min-h-14 w-full min-w-0 cursor-pointer items-center gap-2.5 border-0 bg-transparent px-3 py-2.5 text-left font-inherit text-inherit", ROW_HOVER_CLASS, folded && "min-[1280px]:!hidden")} aria-haspopup="dialog" onClick={() => setPicking(true)}>
             <span className="grid min-w-0 flex-1 gap-0.5">
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
@@ -398,7 +403,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
           </button>
         </KitCard>}
         {phone ? <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
-          : <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
+          : !wideEditor && <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
         {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
         <div className="grid min-w-0 content-start gap-4">
           {/* Nothing is called empty until both lists have answered without an error. */}
