@@ -35,22 +35,20 @@ pub(super) fn drive(
         out.record_fail(SpoolFailure::Spawn);
         return Err("agy acp actor is not running".into());
     }
-    let mut cancel_sent = false;
+    // `Some(true)` once Terminate went out; a sent Cancel still yields to a later forced stop.
+    let mut sent: Option<bool> = None;
     let mut body = String::new();
     loop {
-        if !cancel_sent && cancel_requested(out.cancel) {
-            // Teardown and watchdog stops end the child at once; a person's stop asks agy to cancel.
-            let kind = out.cancel.and_then(CancelToken::cancel_source_kind);
-            let hard = matches!(
-                kind,
-                Some(CancelSource::SessionTeardown | CancelSource::WatchdogTimeout)
-            );
+        if cancel_requested(out.cancel) {
+            let hard = out.cancel.is_some_and(forced);
             let stop = if hard {
                 Event::Terminate { turn }
             } else {
                 Event::Cancel { turn }
             };
-            cancel_sent = handle.send(stop);
+            if sent < Some(hard) && handle.send(stop) {
+                sent = Some(hard);
+            }
         }
         match rx.recv_timeout(EXIT_POLL) {
             Ok(TurnEvent::Attached { session }) => out.attached(&session),
@@ -60,6 +58,16 @@ pub(super) fn drive(
             Err(RecvTimeoutError::Disconnected) => return out.finish(Err(Failure::Exited), body),
         }
     }
+}
+
+/// A forced stop (session cleanup or PID escalation), teardown or watchdog ends the child at
+/// once; any other stop asks agy to cancel.
+fn forced(token: &CancelToken) -> bool {
+    token.termination_requested()
+        || matches!(
+            token.cancel_source_kind(),
+            Some(CancelSource::SessionTeardown | CancelSource::WatchdogTimeout)
+        )
 }
 
 impl Outputs<'_> {
@@ -133,7 +141,7 @@ impl Outputs<'_> {
 
     fn finish(&mut self, result: Result<StopReason, Failure>, body: String) -> Result<(), String> {
         if cancel_requested(self.cancel) {
-            // Same as the `-p` runner: a cancelled turn records the cancel and emits nothing.
+            // As the `-p` runner: no added terminal message; turn_bridge's cancel path settles it.
             self.record_fail(SpoolFailure::Cancelled);
             return Ok(());
         }

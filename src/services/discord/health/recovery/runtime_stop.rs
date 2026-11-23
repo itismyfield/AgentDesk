@@ -5,6 +5,8 @@ use super::*;
 use crate::services::discord::mailbox_probe::wait_for_turn_end;
 
 #[cfg(all(test, unix))]
+mod agy_acp_stop_tests;
+#[cfg(all(test, unix))]
 mod wake_tests;
 
 pub(super) fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(

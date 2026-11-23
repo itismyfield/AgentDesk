@@ -48,7 +48,8 @@ struct Record {
     macos_lstart_hash: Option<u128>,
 }
 
-/// Lines and exit are reported as `incarnation` events so a later child never reads them.
+/// Lines and exit are reported as `incarnation` events so a later child never reads them; the
+/// actor removes the record on its own child's exit.
 pub(super) fn spawn(
     launch: &Launch,
     record: Option<&Path>,
@@ -96,12 +97,8 @@ pub(super) fn spawn(
         });
         let _ = lines.send(Event::Eof { incarnation });
     });
-    let record = record.map(Path::to_path_buf);
     std::thread::spawn(move || {
         let _ = lifecycle.wait(&mut child);
-        if let Some(path) = record {
-            let _ = std::fs::remove_file(path);
-        }
         let _ = events.send(Event::Exited { incarnation });
     });
     Ok(Owned { stdin, kill })
@@ -122,7 +119,7 @@ fn write_record(path: &Path, pid: u32) -> Result<(), String> {
         .map_err(|error| format!("{error:?}"))
 }
 
-fn forget(path: &Path) -> Result<(), String> {
+pub(super) fn forget(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             Err(format!("could not remove {}: {error}", path.display()))

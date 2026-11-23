@@ -67,6 +67,11 @@ impl CleanupOutcome {
 }
 
 impl CancelToken {
+    /// Whether a forced stop was admitted; a cancel cause alone never sets it.
+    pub(crate) fn termination_requested(&self) -> bool {
+        self.termination_requested.load(Ordering::Acquire)
+    }
+
     /// Execute all token-owned destructive cleanup behind one generation fence.
     pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
         self.request_cleanup_inner(request, None)
@@ -175,6 +180,9 @@ impl CancelToken {
                 termination_recorded: false,
                 host_refused: true,
             };
+        }
+        if destructive {
+            self.termination_requested.store(true, Ordering::Release);
         }
         let mut pid_killed = false;
         let mut retry_pid_cleanup = false;

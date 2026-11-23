@@ -88,6 +88,7 @@ pub(super) fn spawn(record_dir: Option<PathBuf>, deadlines: Deadlines) -> Handle
         deadlines,
         tx: tx.clone(),
         incarnation: 0,
+        recorded: 0,
         resident: None,
         pending: HashMap::new(),
         turn: None,
@@ -122,6 +123,8 @@ struct Actor {
     deadlines: Deadlines,
     tx: Sender<Event>,
     incarnation: u64,
+    /// The incarnation whose `child.json` this actor wrote; only its exit removes the file.
+    recorded: u64,
     resident: Option<Resident>,
     pending: HashMap<(u64, u64), Step>,
     turn: Option<Open>,
@@ -172,6 +175,14 @@ impl Actor {
     }
 
     fn handle(&mut self, event: Event) {
+        if let Event::Exited { incarnation } = &event
+            && *incarnation == self.recorded
+        {
+            self.recorded = 0;
+            if let Some(Err(error)) = self.record.as_deref().map(child::forget) {
+                tracing::warn!(%error, "agy acp child record kept");
+            }
+        }
         match event {
             Event::Turn(request) => self.start(*request),
             Event::Cancel { turn } if self.owns(turn) => self.cancel(),
@@ -243,6 +254,7 @@ impl Actor {
             self.tx.clone(),
         ) {
             Ok(child) => {
+                self.recorded = self.incarnation;
                 let (next_id, session, system_hash) = (0, None, None);
                 self.resident = Some(Resident {
                     child,

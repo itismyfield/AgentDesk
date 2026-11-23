@@ -64,11 +64,11 @@ pub(crate) fn fake_launch(dir: &Path, mode: &str) -> Launch {
     }
 }
 
-fn log(dir: &Path, mode: &str) -> String {
+pub(crate) fn log(dir: &Path, mode: &str) -> String {
     std::fs::read_to_string(dir.join(format!("{mode}.log"))).unwrap_or_default()
 }
 
-fn pid_file(dir: &Path, name: &str) -> u32 {
+pub(crate) fn pid_file(dir: &Path, name: &str) -> u32 {
     let path = dir.join(name);
     let written = || std::fs::read_to_string(&path).is_ok_and(|pid| pid.ends_with('\n'));
     assert!(eventually(WAIT_CAP, written));
@@ -79,7 +79,7 @@ fn pid_file(dir: &Path, name: &str) -> u32 {
         .unwrap()
 }
 
-fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool {
+pub(crate) fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + cap;
     while !done() {
         if Instant::now() >= deadline {
@@ -90,8 +90,51 @@ fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool {
     true
 }
 
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     crate::services::process::unix_process_presence(pid) == ProcessGroupProbe::Live
+}
+
+/// A turn on `destination`'s production actor, run as `run_turn` runs it, cancelled by `cancel`.
+pub(crate) fn acp_turn(
+    destination: u64,
+    dir: &Path,
+    mode: &str,
+    cancel: std::sync::Arc<CancelToken>,
+) -> std::thread::JoinHandle<(Result<(), String>, Vec<String>)> {
+    use crate::services::provider_auth_profile::ProviderAuthOverlay;
+    let request = ProviderTurnRequest {
+        provider: crate::services::provider::ProviderKind::Antigravity,
+        prompt: "hi".into(),
+        system_prompt: None,
+        tool_policy: Default::default(),
+        model: None,
+        reasoning_effort: None,
+        working_directory: dir.into(),
+        session: None,
+        timeout: Duration::ZERO,
+        cancel: Some(cancel),
+        auth_overlay: ProviderAuthOverlay::default_for(
+            crate::services::provider::ProviderKind::Antigravity,
+        ),
+    };
+    let launch = Some(fake_launch(dir, mode));
+    std::thread::spawn(move || {
+        let (sender, rx) = channel();
+        let turn = AcpTurn {
+            destination,
+            request,
+            shared_session: None,
+            launch,
+            spool: None,
+        };
+        let result = run_turn(turn, sender);
+        (
+            result,
+            rx.try_iter()
+                .map(|message| format!("{message:?}"))
+                .collect(),
+        )
+    })
 }
 
 fn run(
@@ -450,6 +493,30 @@ fn hard_stop_kills_only_that_destination_child_and_its_descendants() {
     assert!(alive(kept.0) && alive(kept.1) && alive(std::process::id()));
     drop(handles);
     assert!(eventually(WAIT_CAP, || !alive(kept.0) && !alive(kept.1)));
+}
+
+#[test]
+fn an_earlier_child_exit_never_removes_the_next_child_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let handle = actor::spawn(Some(dir.into()), QUICK);
+    // The first child ends mid-turn and the next turn spawns while its exit is still being reaped.
+    assert_eq!(
+        run(&handle, fake_launch(dir, "eof"), None, None, None).0,
+        Ok(())
+    );
+    assert_eq!(
+        run(&handle, fake_launch(dir, "short"), None, None, None).0,
+        Ok(())
+    );
+    let (first, next) = (pid_file(dir, "eof.log.pid"), pid_file(dir, "short.log.pid"));
+    assert!(eventually(WAIT_CAP, || !alive(first)));
+    let recorded = || {
+        let record = std::fs::read_to_string(dir.join(child::RECORD)).unwrap_or_default();
+        record.contains(&format!("\"pid\":{next},"))
+    };
+    let lost = eventually(Duration::from_millis(500), || !recorded());
+    assert!(!lost, "the live child keeps its record");
 }
 
 struct Orphan(std::process::Child);
