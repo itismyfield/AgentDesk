@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 
 // Clean-room implementation from clean-specs/compact-breakdown (11/17 sync).
@@ -14,6 +14,7 @@ export interface CompactBreakdownItem {
 
 export interface CompactBreakdownProps {
   items: CompactBreakdownItem[];
+  /** Defaults to `labels.title`. */
   title?: string;
   periods?: { id: string; label: string }[];
   period?: string;
@@ -21,12 +22,53 @@ export interface CompactBreakdownProps {
   onPeriodChange?: (id: string) => void;
   delta?: number;
   format?: (value: number) => string;
+  /** Defaults to `labels.total`. */
   totalLabel?: string;
   /** undefined: automatic leader; null: hide; other React nodes replace the automatic content. */
   footer?: ReactNode | null;
   hideFooter?: boolean;
+  /**
+   * Draws each row as a button that hands the item's `id` (its label without one) to the host, for example to open its
+   * details. Without it rows are not buttons: hover, keyboard focus and a touch tap only change the reading.
+   */
+  onSelect?: (id: string) => void;
+  /** Marks the row with this id as the chosen one (`aria-current`), with or without `onSelect`. Repeats of an id are all marked. */
+  selectedId?: string | null;
+  /** Every other visible and spoken text. Missing keys keep the Korean defaults. */
+  labels?: Partial<CompactBreakdownLabels>;
   className?: string;
 }
+export interface CompactBreakdownLabels {
+  /** Heading when `title` is not given. */
+  title: string;
+  /** Total name when `totalLabel` is not given. */
+  total: string;
+  /** Accessible name of the period switch. */
+  periods: string;
+  /** Accessible name of the ranked list. */
+  list: string;
+  /** Name of a row and its spoken reading, from the label, the formatted value and the share text. */
+  row: (label: string, value: string, share: string) => string;
+  /** Spoken summary; `change` is null without a finite delta. */
+  summary: (total: string, amount: string, change: { percent: string; decrease: boolean } | null) => string;
+  /** Shown without items. */
+  empty: string;
+  /** Automatic footer text before the leading item's name. */
+  leader: string;
+  /** Description of a row button with `onSelect`, e.g. what it opens. An empty string leaves it out. */
+  selectHint: string;
+}
+export const compactBreakdownDefaultLabels: CompactBreakdownLabels = {
+  title: '에이전트별 사용량',
+  total: '전체 실행 크레딧',
+  periods: '사용량 집계 기간',
+  list: '사용량의 순위와 비중',
+  row: (label, value, share) => `${label}, ${value}, 전체의 ${share}`,
+  summary: (total, amount, change) => `${total}: ${amount}.${change ? ` 이전 기간과 비교해 ${change.percent} ${change.decrease ? '감소' : '증가'}.` : ''}`,
+  empty: '첫 에이전트 실행이 도착하면 구성별 사용량을 표시합니다.',
+  leader: '가장 많은 사용량:',
+  selectHint: '누르면 자세히 볼 수 있어요.',
+};
 
 const styles = `
 .aui-compact-breakdown {
@@ -113,6 +155,10 @@ const styles = `
 .aui-compact-breakdown-list-item[data-exiting="true"] { max-height: 0; overflow: hidden; opacity: 0; pointer-events: none; }
 .aui-compact-breakdown-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto minmax(34px, auto); align-items: center; gap: 9px; width: 100%; height: var(--aui-compact-breakdown-row-height); padding: 0 8px; border: 0; border-radius: calc(var(--aui-compact-breakdown-t) + 1px); color: var(--aui-compact-breakdown-dim); text-align: left; background: transparent; transition: opacity 200ms ease, background 160ms ease; }
 .aui-compact-breakdown-row[data-active="true"] { background: var(--aui-compact-breakdown-selected); }
+.aui-compact-breakdown-row[data-selected="true"] { background: var(--aui-compact-breakdown-selected); color: var(--aui-compact-breakdown-fg); box-shadow: inset 3px 0 0 var(--aui-compact-breakdown-accent); }
+.aui-compact-breakdown-row[data-selected="true"] .aui-compact-breakdown-label { font-weight: 600; }
+.aui-compact-breakdown-list-item, div.aui-compact-breakdown-row { touch-action: pan-y; -webkit-tap-highlight-color: transparent; }
+.aui-compact-breakdown-list-item:focus-visible { outline: 2px solid var(--aui-compact-breakdown-focus); outline-offset: 2px; border-radius: calc(var(--aui-compact-breakdown-t) + 1px); }
 .aui-compact-breakdown-dot { flex: none; width: 8px; height: 8px; border-radius: 2.5px; }
 .aui-compact-breakdown-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aui-compact-breakdown-value { color: var(--aui-compact-breakdown-fg); font-weight: 500; text-align: right; white-space: nowrap; }
@@ -161,7 +207,7 @@ const shareOf = (value: number, total: number) => value / Math.max(total, .0001)
 /** Rounded shares, except open intervals near the ends: (0,1) → <1% and (99,100) → >99%. */
 const shareText = (share: number) => share > 0 && share < 1 ? '<1%' : share > 99 && share < 100 ? '>99%' : `${Math.round(share)}%`;
 const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-type RememberedItem = { id: string; label: string; value: number; color: string; order: number; present: boolean };
+type RememberedItem = { id: string; source: string; label: string; value: number; color: string; order: number; present: boolean };
 type AmountFrame = { values: Record<string, number>; total: number; headline: number };
 
 /** One quartic clock drives the headline, total, row values and the bar's ratios. */
@@ -206,8 +252,11 @@ function useAmounts(items: RememberedItem[], activeId: string | undefined) {
   return frame;
 }
 
-export function CompactBreakdown({ items, title = '에이전트별 사용량', periods = [], period, defaultPeriod, onPeriodChange, delta, format = defaultFormat, totalLabel = '전체 실행 크레딧', footer, hideFooter = false, className = '' }: CompactBreakdownProps) {
+export function CompactBreakdown({ items, title: titleProp, periods = [], period, defaultPeriod, onPeriodChange, delta, format = defaultFormat, totalLabel: totalProp, footer, hideFooter = false, onSelect, selectedId, labels, className = '' }: CompactBreakdownProps) {
   const id = useId();
+  const text: CompactBreakdownLabels = { ...compactBreakdownDefaultLabels, ...labels };
+  const title = titleProp ?? text.title;
+  const totalLabel = totalProp ?? text.total;
   const rootRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLOListElement>(null);
   const periodRef = useRef<HTMLDivElement>(null);
@@ -236,7 +285,7 @@ export function CompactBreakdown({ items, title = '에이전트별 사용량', p
   for (const { item, key } of keyed) {
     const old = history.current.get(key);
     const order = old?.order ?? history.current.size;
-    history.current.set(key, { id: key, label: item.label, value: safeValue(item.value), color: item.color ?? old?.color ?? colors[Math.min(order, 4)], order, present: true });
+    history.current.set(key, { id: key, source: item.id ?? item.label, label: item.label, value: safeValue(item.value), color: item.color ?? old?.color ?? colors[Math.min(order, 4)], order, present: true });
   }
   const remembered = Array.from(history.current.values());
   const activeMemory = hovered ?? focused ?? pinned;
@@ -361,7 +410,8 @@ export function CompactBreakdown({ items, title = '에이전트별 사용량', p
   };
   const hasDelta = delta !== undefined && Number.isFinite(delta);
   const deltaText = hasDelta ? `${Math.abs(delta).toLocaleString('en-US', { maximumFractionDigits: 1 })}%` : '';
-  const summary = `${totalLabel}: ${format(total)}.${hasDelta ? ` 이전 기간과 비교해 ${deltaText} ${delta < 0 ? '감소' : '증가'}.` : ''}`;
+  const summary = text.summary(totalLabel, format(total), hasDelta ? { percent: deltaText, decrease: delta < 0 } : null);
+  const readingName = (item: RememberedItem) => text.row(item.label, format(item.value), shareText(shareOf(item.value, total)));
   const activeShare = active ? shareText(shareOf(amounts.values[active.id] ?? 0, amounts.total)) : '0%';
 
   return <section ref={rootRef} className={`aui-compact-breakdown ${className}`} role="group" aria-labelledby={`${id}-title`} onKeyDown={(event) => { if (event.key === 'Escape') { setPinned(null); setHovered(null); setFocused(null); } }}>
@@ -370,7 +420,7 @@ export function CompactBreakdown({ items, title = '에이전트별 사용량', p
       <div className="aui-compact-breakdown-card">
         <header className="aui-compact-breakdown-header">
           <h3 id={`${id}-title`} className="aui-compact-breakdown-title" title={title} dir="auto">{title}</h3>
-          {periods.length > 1 && <div className="aui-compact-breakdown-period-scroll"><div ref={periodRef} className="aui-compact-breakdown-periods" role="radiogroup" aria-label="사용량 집계 기간">
+          {periods.length > 1 && <div className="aui-compact-breakdown-period-scroll"><div ref={periodRef} className="aui-compact-breakdown-periods" role="radiogroup" aria-label={text.periods}>
             <span ref={pillRef} className="aui-compact-breakdown-pill" aria-hidden="true" />
             {periods.map((item, index) => <button key={item.id} type="button" className="aui-compact-breakdown-period" role="radio" aria-checked={activePeriod === index} tabIndex={activePeriod === index ? 0 : -1} onClick={() => changePeriod(index)} onKeyDown={(event) => periodKey(event, index)} title={item.label}>{item.label}</button>)}
           </div></div>}
@@ -380,31 +430,85 @@ export function CompactBreakdown({ items, title = '에이전트별 사용량', p
           <div className="aui-compact-breakdown-description"><span key={active?.id ?? 'total'} className="aui-compact-breakdown-description-content">{active ? <><span className="aui-compact-breakdown-dot" style={{ background: active.color }} /><span className="aui-compact-breakdown-description-name" dir="auto">{active.label}</span><span className="aui-compact-breakdown-description-share">{activeShare}</span></> : <span className="aui-compact-breakdown-description-name">{totalLabel}</span>}</span></div>
         </div>
         <div className="aui-compact-breakdown-bar-scroll" aria-hidden="true"><div className="aui-compact-breakdown-track" style={{ minWidth: segments.length ? segments.length * 4 - 2 : 0 }} onPointerLeave={leaveItems}>{segments.map((item) => <span key={item.id} className="aui-compact-breakdown-segment" data-item-id={item.id} data-active={active?.id === item.id} style={{ flex: `${amounts.values[item.id] ?? 0} 1 0px`, background: item.color, opacity: active && active.id !== item.id ? .25 : 1 }} onPointerEnter={(event) => enterItem(event, item)} onPointerMove={(event) => moveItem(event, item)} />)}</div></div>
-        <ol ref={listRef} className="aui-compact-breakdown-list" aria-label="사용량의 순위와 비중" onPointerLeave={leaveItems}>{sorted.map((item) => {
+        <ol ref={listRef} className="aui-compact-breakdown-list" aria-label={text.list} onPointerLeave={leaveItems}>{sorted.map((item) => {
           const value = amounts.values[item.id] ?? 0;
-          return <li key={item.id} className="aui-compact-breakdown-list-item" data-item-id={item.id} data-exiting={!item.present} aria-hidden={!item.present || undefined}>
-            <button type="button" className="aui-compact-breakdown-row" data-item-id={item.id} tabIndex={item.present ? 0 : -1} disabled={!item.present} aria-pressed={pinned === item.id} aria-label={`${item.label}, ${format(item.value)}, 전체의 ${shareText(shareOf(item.value, total))}`} data-active={active?.id === item.id} style={{ opacity: active && active.id !== item.id ? .45 : 1 }} onPointerEnter={(event) => enterItem(event, item)} onPointerMove={(event) => moveItem(event, item)} onPointerDown={(event) => setPointerKind(event.pointerType)} onFocus={(event) => { if (event.currentTarget.matches(':focus-visible')) { focusRow(item.id); } }} onBlur={() => setFocused(null)} onClick={(event) => { if (event.detail > 0 && (pointerKind === 'touch' || pointerKind === 'pen' || window.matchMedia('(pointer: coarse)').matches)) { setPinned((old) => old === item.id ? null : item.id); setFocused(null); setHovered(null); } }}>
-              <span className="aui-compact-breakdown-dot" style={{ background: item.color }} aria-hidden="true" /><span className="aui-compact-breakdown-label" title={item.label} dir="auto">{item.label}</span><span className="aui-compact-breakdown-value">{format(value)}</span><span className="aui-compact-breakdown-share">{shareText(shareOf(value, amounts.total))}</span>
-            </button>
+          const chosen = selectedId != null && item.source === selectedId;
+          // The keyboard reaches the row button with onSelect; without it the list item itself takes focus, so a row is never
+          // a button (or a toggle) that does nothing for the host.
+          const reading = {
+            tabIndex: item.present ? 0 : -1, 'aria-label': readingName(item), 'aria-current': chosen || undefined,
+            onFocus: (event: FocusEvent<HTMLElement>) => { if (event.currentTarget.matches(':focus-visible')) focusRow(item.id); },
+            onBlur: () => setFocused(null),
+          };
+          const row = {
+            className: 'aui-compact-breakdown-row', 'data-item-id': item.id, 'data-active': active?.id === item.id, 'data-selected': chosen || undefined,
+            style: { opacity: active && active.id !== item.id ? .45 : 1 },
+            onPointerEnter: (event: ReactPointerEvent<HTMLElement>) => enterItem(event, item), onPointerMove: (event: ReactPointerEvent<HTMLElement>) => moveItem(event, item),
+            onPointerDown: (event: ReactPointerEvent<HTMLElement>) => setPointerKind(event.pointerType),
+          };
+          const cells = <><span className="aui-compact-breakdown-dot" style={{ background: item.color }} aria-hidden="true" /><span className="aui-compact-breakdown-label" title={item.label} dir="auto">{item.label}</span><span className="aui-compact-breakdown-value">{format(value)}</span><span className="aui-compact-breakdown-share">{shareText(shareOf(value, amounts.total))}</span></>;
+          return <li key={item.id} className="aui-compact-breakdown-list-item" data-item-id={item.id} data-exiting={!item.present} aria-hidden={!item.present || undefined} {...(onSelect ? {} : reading)}>
+            {onSelect ? <button type="button" {...row} {...reading} disabled={!item.present} aria-describedby={text.selectHint ? `${id}-select-hint` : undefined} onClick={() => { if (item.present) onSelect(item.source); }}>{cells}</button>
+              : <div {...row} onClick={(event) => { if (event.detail > 0 && (pointerKind === 'touch' || pointerKind === 'pen' || window.matchMedia('(pointer: coarse)').matches)) { setPinned((old) => old === item.id ? null : item.id); setFocused(null); setHovered(null); } }}>{cells}</div>}
           </li>;
         })}</ol>
+        {onSelect && text.selectHint && <span id={`${id}-select-hint`} className="aui-compact-breakdown-sr">{text.selectHint}</span>}
         {active && <p className="aui-compact-breakdown-full-readout" data-long={active.label.length > 24} aria-hidden="true">{active.label} · {format(active.value)} · {shareText(shareOf(active.value, total))}</p>}
-        {!items.length && <p className="aui-compact-breakdown-empty">첫 에이전트 실행이 도착하면 구성별 사용량을 표시합니다.</p>}
+        {!items.length && <p className="aui-compact-breakdown-empty">{text.empty}</p>}
       </div>
-      {!hideFooter && footer !== null && <div className="aui-compact-breakdown-footer">{footer !== undefined ? footer : leader ? <span key={leader.id} className="aui-compact-breakdown-footer-auto" title={`가장 많은 사용량: ${leader.label}`}>가장 많은 사용량: <strong dir="auto">{leader.label}</strong></span> : null}</div>}
+      {!hideFooter && footer !== null && <div className="aui-compact-breakdown-footer">{footer !== undefined ? footer : leader ? <span key={leader.id} className="aui-compact-breakdown-footer-auto" title={`${text.leader} ${leader.label}`}>{text.leader} <strong dir="auto">{leader.label}</strong></span> : null}</div>}
       <span className="aui-compact-breakdown-sr" aria-live="polite" aria-atomic="true">{summary}</span>
-      <span className="aui-compact-breakdown-sr" aria-live="polite" aria-atomic="true">{active ? `${active.label}, ${format(active.value)}, 전체의 ${shareText(shareOf(active.value, total))}` : ''}</span>
+      <span className="aui-compact-breakdown-sr" aria-live="polite" aria-atomic="true">{active ? readingName(active) : ''}</span>
     </div>
   </section>;
 }
 
-export type CompactBreakdownDemoState = 'default' | 'empty' | 'long' | 'transitions' | 'zero' | 'tiny' | 'many' | 'custom-footer' | 'hidden-footer' | 'rapid' | 'duplicates';
+export type CompactBreakdownDemoState = 'default' | 'empty' | 'long' | 'transitions' | 'zero' | 'tiny' | 'many' | 'custom-footer' | 'hidden-footer' | 'rapid' | 'duplicates' | 'selectable' | 'english';
 
 const demoPeriods = [{ id: 'week', label: '7일' }, { id: 'month', label: '30일' }, { id: 'quarter', label: '90일' }];
 const money = (value: number) => `$${value.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
 
+const demoModels: CompactBreakdownItem[] = [
+  { id: 'claude', label: 'Claude · 구현', value: 620 }, { id: 'codex', label: 'Codex · 도구 호출', value: 548 },
+  { id: 'research', label: '연구 모델', value: 252 }, { id: 'review', label: '검수 모델', value: 168 }, { id: 'ops', label: '운영 모델', value: 92 },
+];
+
+/** The host opens a row: onSelect hands the id over and selectedId marks the open row; choosing it again closes it here. */
+function CompactBreakdownSelectDemo() {
+  const [selected, setSelected] = useState<string | null>('codex');
+  const open = demoModels.find((item) => item.id === selected);
+  return <div className="aui-compact-breakdown-demo">
+    <CompactBreakdown items={demoModels} title="모델별 실행 비용" format={money} totalLabel="전체 에이전트 실행 비용" onSelect={(id) => setSelected((current) => current === id ? null : id)} selectedId={selected} />
+    <div className="aui-compact-breakdown-demo-controls"><span role="status">{open ? `${open.label} 상세를 열었어요. 같은 줄을 다시 누르면 닫혀요.` : '줄을 누르면 호스트가 상세를 열어요.'}</span></div>
+  </div>;
+}
+
+const englishBreakdownLabels: Partial<CompactBreakdownLabels> = {
+  title: 'Usage by agent', total: 'All run credits', periods: 'Usage period', list: 'Usage rank and share',
+  row: (label, value, share) => `${label}, ${value}, ${share} of the total`,
+  summary: (total, amount, change) => `${total}: ${amount}.${change ? ` ${change.decrease ? 'Down' : 'Up'} ${change.percent} from the previous period.` : ''}`,
+  empty: 'Usage by part shows up after the first agent run.', leader: 'Top usage:', selectHint: 'Opens the details.',
+};
+
+/** An English host passes every label; the second card is the empty state. */
+function CompactBreakdownEnglishDemo() {
+  const [period, setPeriod] = useState('month');
+  const values = period === 'week' ? [126, 218, 84] : [620, 548, 252];
+  const items = ['Claude · build', 'Codex · tool calls', 'Research'].map((label, index) => ({ id: `en-${index}`, label, value: values[index] }));
+  return <div className="aui-compact-breakdown-demo" style={{ display: 'grid', gap: 12 }}>
+    <CompactBreakdown items={items} periods={[{ id: 'week', label: '7 days' }, { id: 'month', label: '30 days' }]} period={period} onPeriodChange={setPeriod} delta={period === 'week' ? -2.4 : 6.1} format={money} labels={englishBreakdownLabels} />
+    <CompactBreakdown items={[]} labels={englishBreakdownLabels} />
+  </div>;
+}
+
 /** The host owns period snapshots; the control only announces a period selection. */
 export function CompactBreakdownDemo({ state = 'default' }: { state?: CompactBreakdownDemoState }) {
+  if (state === 'selectable') return <CompactBreakdownSelectDemo />;
+  if (state === 'english') return <CompactBreakdownEnglishDemo />;
+  return <CompactBreakdownStateDemo state={state} />;
+}
+
+function CompactBreakdownStateDemo({ state }: { state: Exclude<CompactBreakdownDemoState, 'selectable' | 'english'> }) {
   const [period, setPeriod] = useState('month');
   const [notifications, setNotifications] = useState(0);
   const [refresh, setRefresh] = useState(0);

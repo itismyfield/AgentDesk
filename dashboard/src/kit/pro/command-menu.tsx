@@ -13,7 +13,10 @@ export interface CommandMenuCommand {
   shortcut?: string[];
   /** Kit extension: unavailable commands remain visible but cannot run. */
   disabled?: boolean;
-  /** Runs this command instead of `onRun`. A command with neither stays visible as text and cannot be chosen. */
+  /**
+   * Runs this command instead of `onRun`: `onRun` is not called for it, so shared host work (recent history, closing)
+   * belongs inside onSelect, or use onRun alone. A command with neither stays visible as text and cannot be chosen.
+   */
   onSelect?: () => void;
 }
 export interface CommandMenuGroup { id: string; label: string; commands: CommandMenuCommand[]; recommended?: boolean }
