@@ -4,9 +4,11 @@ import type { UiLanguage } from "../../i18n";
 import * as api from "../../api";
 import { BLANK } from "./constants";
 import type { FormData } from "./types";
+import { classifyAgents } from "../home/homeModel";
 import {
   filterAndSortAgents,
   type AgentSortMode,
+  type AgentStatusFilter,
 } from "./agent-list-controls";
 
 export type { AgentSortMode };
@@ -19,8 +21,9 @@ interface UseAgentManagerControllerParams {
   language: UiLanguage;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
-  sessions?: DispatchedSession[];
-  onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  /** Every workspace session; states come from them as on home. */
+  sessions: DispatchedSession[];
+  sessionsFailed: boolean;
   activeTab?: AgentManagerTab;
   onTabChange?: (tab: AgentManagerTab) => void;
 }
@@ -32,7 +35,7 @@ export function useAgentManagerController({
   onAgentsChange,
   onDepartmentsChange,
   sessions,
-  onAssign,
+  sessionsFailed,
   activeTab,
   onTabChange,
 }: UseAgentManagerControllerParams) {
@@ -45,12 +48,11 @@ export function useAgentManagerController({
 
   const [internalTab, setInternalTab] = useState<AgentManagerTab>("agents");
   const [deptTab, setDeptTab] = useState("all");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [search, setSearch] = useState("");
   const [includeTests, setIncludeTests] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [dispatchOpen, setDispatchOpen] = useState(activeTab === "dispatch");
   const [agentModal, setAgentModal] = useState<{
     open: boolean;
     editAgent: Agent | null;
@@ -73,14 +75,8 @@ export function useAgentManagerController({
   const [dragOverPosition, setDragOverPosition] = useState<"before" | "after" | null>(null);
 
   const tab = activeTab ?? internalTab;
-  const canShowDispatch = Boolean(sessions && onAssign);
+  // The old dispatch tab now lives in the agents tab's summary pane.
   const resolvedTab = tab === "dispatch" ? "agents" : tab;
-
-  useEffect(() => {
-    if (tab === "dispatch" && canShowDispatch) {
-      setDispatchOpen(true);
-    }
-  }, [canShowDispatch, tab]);
 
   useEffect(() => {
     if (deptOrderDirty) return;
@@ -98,11 +94,11 @@ export function useAgentManagerController({
     onTabChange?.(nextTab);
   }, [activeTab, onTabChange]);
 
-  const sortedAgents = useMemo(
-    () =>
-      filterAndSortAgents(agents, { deptTab, statusFilter, search, includeTests }, sortMode),
-    [agents, deptTab, includeTests, search, sortMode, statusFilter],
-  );
+  const entries = useMemo(() => classifyAgents(agents, sessions, sessionsFailed), [agents, sessions, sessionsFailed]);
+  const sortedEntries = useMemo(() => {
+    const known = new Set(departments.map((department) => department.id));
+    return filterAndSortAgents(entries, { deptTab, statusFilter, search, includeTests, departments: known }, sortMode);
+  }, [entries, departments, deptTab, includeTests, search, sortMode, statusFilter]);
 
   const openCreateAgent = useCallback(() => {
     setSetupWizard({ open: true, mode: "create", sourceAgent: null });
@@ -279,7 +275,6 @@ export function useAgentManagerController({
   }, []);
 
   return {
-    canShowDispatch,
     deptModal,
     deptOrder,
     deptOrderDirty,
@@ -301,7 +296,7 @@ export function useAgentManagerController({
     handleTabChange,
     isKo,
     locale,
-    dispatchOpen,
+    entries,
     includeTests,
     openCreateAgent,
     openCreateDept,
@@ -316,7 +311,6 @@ export function useAgentManagerController({
     setDeptModal,
     setDeptTab,
     setForm,
-    setDispatchOpen,
     setIncludeTests,
     setSearch,
     setSortMode,
@@ -324,7 +318,7 @@ export function useAgentManagerController({
     setupWizard,
     setSetupWizard,
     sortMode,
-    sortedAgents,
+    sortedEntries,
     statusFilter,
     tr,
   };

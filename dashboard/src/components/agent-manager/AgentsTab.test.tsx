@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Agent } from "../../types";
+import type { Agent, DispatchedSession } from "../../types";
+import { classifyAgents } from "../home/homeModel";
 import AgentsTab from "./AgentsTab";
-import { agentSecondaryLine } from "./AgentCard";
-import { filterAndSortAgents, type AgentSortMode } from "./agent-list-controls";
+import { agentSecondaryLine } from "./AgentRow";
+import { filterAndSortAgents, type AgentSortMode, type AgentStatusFilter } from "./agent-list-controls";
 
 vi.mock("../../api", () => ({
   getSkillRanking: vi.fn(async () => ({ byAgent: [] })),
@@ -16,8 +18,11 @@ vi.mock("../../api", () => ({
   getAgentTimeline: vi.fn(async () => []),
   getAuditLogs: vi.fn(async () => []),
   getDiscordChannelInfo: vi.fn(async () => null),
+  getTaskDispatches: vi.fn(async () => []),
   updateAgent: vi.fn(async () => ({})),
 }));
+vi.mock("../../contexts/KanbanContext", () => ({ useKanban: () => ({ kanbanCards: [], kanbanCardsState: "ready" }) }));
+vi.mock("../home/useHomeData", () => ({ useAgentTurns: () => new Map() }));
 vi.mock("../../api/providers", () => ({
   catalogLabel: (_entries: unknown, id: string) => id,
   getProviderAuthProfiles: vi.fn(async () => ({ providers: [] })),
@@ -36,23 +41,26 @@ const base = {
 const AGENTS: Agent[] = [
   { ...base, id: "agent-ada", name: "Ada Dashboard", alias: "ada", name_ko: "아다", status: "working", cli_provider: "codex" },
   { ...base, id: "agent-luna", name: "Luna Ops", name_ko: "루나", status: "idle", cli_provider: "claude" },
-  { ...base, id: "agent-nova", name: "Nova Watch", name_ko: "노바", status: "break", cli_provider: "claude" },
+  { ...base, id: "agent-nova", name: "Nova Watch", name_ko: "노바", status: "idle", cli_provider: "claude", visual_status_code: "stuck-suspect" } as Agent,
 ];
+const SESSIONS = [{ id: "s1", linked_agent_id: "agent-luna", status: "idle", last_seen_at: 0 }] as DispatchedSession[];
+const ENTRIES = classifyAgents(AGENTS, SESSIONS, false);
 const tr = (_ko: string, en: string) => en;
 
 function Harness() {
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>("all");
   const [deptTab, setDeptTab] = useState("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [includeTests, setIncludeTests] = useState(false);
-  const sortedAgents = filterAndSortAgents(AGENTS, { deptTab, statusFilter, search, includeTests }, sortMode);
+  const [selected, setSelected] = useState<string | null>(null);
+  const sortedEntries = filterAndSortAgents(ENTRIES, { deptTab, statusFilter, search, includeTests }, sortMode);
   return (
     <AgentsTab
-      tr={tr} locale="en" isKo={false} agents={AGENTS} departments={[]}
+      tr={tr} locale="en" isKo={false} entries={ENTRIES} sortedEntries={sortedEntries} departments={[]}
       deptTab={deptTab} setDeptTab={setDeptTab} search={search} setSearch={setSearch}
       statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortMode={sortMode} setSortMode={setSortMode}
-      sortedAgents={sortedAgents} includeTests={includeTests} setIncludeTests={setIncludeTests}
+      includeTests={includeTests} setIncludeTests={setIncludeTests} selectedAgentId={selected} onSelectAgent={setSelected}
       onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
       onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
     />
@@ -102,46 +110,47 @@ const tab = (name: RegExp) =>
   Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]')).find((node) => name.test(node.textContent ?? ""))!;
 
 describe("AgentsTab", () => {
-  it("counts each status tab under the other filters and filters on press", async () => {
+  it("counts home's states per tab, filters on press and lists a stuck agent to look at", async () => {
     setViewport(false);
-    act(() => root.render(<Harness />));
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
     await flush();
     expect(tab(/^All/).textContent).toContain("3");
     expect(tab(/^Working/).textContent).toContain("1");
-    expect(tab(/^Break/).getAttribute("aria-selected")).toBe("false");
+    expect(tab(/^Resting/).textContent).toContain("1");
+    expect(tab(/^No session/).getAttribute("aria-selected")).toBe("false");
+    expect(document.querySelector('[data-testid="agents-attention"]')!.textContent).toContain("Maybe stuck");
 
-    act(() => tab(/^Break/).click());
-    expect(tab(/^Break/).getAttribute("aria-selected")).toBe("true");
-    expect(document.querySelectorAll("[data-agent-item]")).toHaveLength(1);
-    expect(document.body.textContent).toContain("1 agents shown");
+    act(() => tab(/^No session/).click());
+    expect(tab(/^No session/).getAttribute("aria-selected")).toBe("true");
+    expect(Array.from(document.querySelectorAll("[data-agent-item]"), (node) => node.getAttribute("data-agent-item"))).toEqual(["agent-nova"]);
   });
 
   it("shows the detail beside the list on wide screens and closes it", async () => {
     setViewport(false);
-    act(() => root.render(<Harness />));
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
     await flush();
     const pane = document.querySelector<HTMLElement>('[data-testid="agents-detail-pane"]')!;
-    expect(pane.textContent).toContain("No agent selected");
+    expect(pane.querySelector('[data-testid="agents-summary"]')).not.toBeNull();
 
-    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-grid-card-agent-ada"]')!.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-row-agent-ada"]')!.click());
     await flush();
     expect(pane.getAttribute("aria-label")).toBe("ada — Agent details");
     expect(pane.querySelector("h2")?.textContent).toBe("ada");
-    expect(document.querySelector('[data-testid="agents-grid-card-agent-ada"]')!.getAttribute("aria-current")).toBe("true");
+    expect(document.querySelector('[data-testid="agents-row-agent-ada"]')!.getAttribute("aria-current")).toBe("true");
     expect(document.querySelector('[role="dialog"]')).toBeNull();
 
     act(() => pane.querySelector<HTMLButtonElement>('button[aria-label="Close details"]')!.click());
-    expect(pane.textContent).toContain("No agent selected");
+    expect(pane.querySelector('[data-testid="agents-summary"]')).not.toBeNull();
   });
 
   it("opens the detail as a full-screen dialog with a back button on phones", async () => {
     setViewport(true);
-    act(() => root.render(<Harness />));
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
     await flush();
-    expect(document.querySelector('[data-testid="agents-view-list"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="agents-list"]')).not.toBeNull();
     expect(document.querySelector('[data-testid="agents-detail-pane"]')).toBeNull();
 
-    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-card-agent-luna"]')!.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-row-agent-luna"]')!.click());
     await flush();
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
     expect(dialog.getAttribute("aria-label")).toBe("Luna Ops — Agent details");

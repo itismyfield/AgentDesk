@@ -14,6 +14,7 @@ import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../..
 import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
+import type { HomeAgentState } from "../home/homeModel";
 import type { Translator } from "./types";
 import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
 import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
@@ -21,10 +22,12 @@ import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
 import { inferBindingSource, isTurnSession, splitLinkedSessions } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
-import { AgentStatusBadge, agentSecondaryLine } from "./AgentCard";
+import { AgentStatusBadge, agentSecondaryLine } from "./AgentRow";
 
 interface AgentInfoCardContentProps {
   agent: Agent;
+  /** Home's state for the agent, when the caller knows the sessions. */
+  state?: HomeAgentState;
   isKo: boolean;
   locale: string;
   tr: Translator;
@@ -38,6 +41,7 @@ interface AgentInfoCardContentProps {
 /** Agent detail body: identity, status, run settings, routing and operations, with its own data loading. */
 export function AgentInfoCardContent({
   agent,
+  state,
   isKo,
   locale,
   tr,
@@ -347,7 +351,7 @@ export function AgentInfoCardContent({
         <div className="flex min-h-7 items-center gap-3">
           <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("상태", "Status")}</dt>
           <dd className="m-0 flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-            <AgentStatusBadge status={agent.status} tr={tr} />
+            <AgentStatusBadge status={agent.status} state={state} tr={tr} />
             {agent.status === "working" && sourceLabel ? <span className="text-xs text-(--fg-muted)">{sourceLabel}</span> : null}
           </dd>
         </div>

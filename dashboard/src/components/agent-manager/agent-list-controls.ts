@@ -1,5 +1,6 @@
 import type { Agent } from "../../types";
 import { isTestAgent } from "../../lib/agentHelpers";
+import { AGENT_STATES, agentName, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 
 export type AgentSortMode =
   | "status"
@@ -8,91 +9,72 @@ export type AgentSortMode =
   | "department"
   | "created";
 
+export type AgentStatusFilter = HomeAgentState | "all";
+
+/** Department filter value for agents without a department. */
+export const NO_DEPARTMENT = "__none";
+
 export interface AgentListFilter {
   deptTab: string;
-  statusFilter: string;
+  statusFilter: AgentStatusFilter;
   search: string;
-  /** E2E harness agents stay hidden unless asked for. */
   includeTests?: boolean;
+  /** Existing department ids; an agent pointing elsewhere counts as unassigned. */
+  departments?: ReadonlySet<string>;
 }
 
-const STATUS_ORDER: Record<string, number> = {
-  working: 0,
-  idle: 1,
-  break: 2,
-  offline: 3,
-};
+export function hasDepartment(agent: Agent, departments?: ReadonlySet<string>): boolean {
+  return Boolean(agent.department_id) && (!departments || departments.has(agent.department_id!));
+}
+
+/** E2E harness agents stay hidden unless asked for or busy, as on home, so the state counts match. */
+export function isListedAgent(agent: Agent, includeTests = false): boolean {
+  return includeTests || !isTestAgent(agent) || agent.status === "working";
+}
 
 export function filterAgents(
-  agents: Agent[],
-  { deptTab, statusFilter, search, includeTests = false }: AgentListFilter,
-): Agent[] {
-  let filtered = includeTests ? agents : agents.filter((agent) => !isTestAgent(agent));
-  if (deptTab !== "all") {
-    filtered = filtered.filter((agent) => agent.department_id === deptTab);
-  }
-  if (statusFilter !== "all") {
-    filtered = filtered.filter((agent) => agent.status === statusFilter);
-  }
-  const trimmed = search.trim();
-  if (trimmed) {
-    const q = trimmed.toLowerCase();
-    filtered = filtered.filter(
-      (agent) =>
-        agent.name.toLowerCase().includes(q) ||
-        agent.name_ko.toLowerCase().includes(q) ||
-        (agent.alias && agent.alias.toLowerCase().includes(q)) ||
-        agent.avatar_emoji.includes(q),
-    );
-  }
-  return filtered;
+  entries: HomeAgent[],
+  { deptTab, statusFilter, search, includeTests = false, departments }: AgentListFilter,
+): HomeAgent[] {
+  const query = search.trim().toLowerCase();
+  return entries.filter(({ agent, state }) =>
+    isListedAgent(agent, includeTests)
+    && (deptTab === "all" || (deptTab === NO_DEPARTMENT ? !hasDepartment(agent, departments) : agent.department_id === deptTab))
+    && (statusFilter === "all" || state === statusFilter)
+    && (!query || [agent.name, agent.name_ko, agent.alias ?? "", agent.avatar_emoji].some((text) => text.toLowerCase().includes(query))),
+  );
 }
+
+const byName = (left: Agent, right: Agent) => left.name.localeCompare(right.name);
 
 export function compareAgents(
   sortMode: AgentSortMode,
-): (a: Agent, b: Agent) => number {
-  return (left, right) => {
-    if (sortMode === "name") {
-      return left.name.localeCompare(right.name);
-    }
+): (a: HomeAgent, b: HomeAgent) => number {
+  return ({ agent: left, state: leftState }, { agent: right, state: rightState }) => {
+    if (sortMode === "name") return byName(left, right);
     if (sortMode === "activity") {
-      const leftActivity =
-        (left.agentdesk_working_count ?? 0) + (left.stats_tasks_done ?? 0);
-      const rightActivity =
-        (right.agentdesk_working_count ?? 0) + (right.stats_tasks_done ?? 0);
-      if (leftActivity !== rightActivity) return rightActivity - leftActivity;
-      return left.name.localeCompare(right.name);
+      const activity = (agent: Agent) => (agent.agentdesk_working_count ?? 0) + (agent.stats_tasks_done ?? 0);
+      return activity(right) - activity(left) || byName(left, right);
     }
     if (sortMode === "department") {
-      const leftDept =
-        left.department_name_ko || left.department_name || left.department_id || "";
-      const rightDept =
-        right.department_name_ko ||
-        right.department_name ||
-        right.department_id ||
-        "";
-      const cmp = leftDept.localeCompare(rightDept);
-      if (cmp !== 0) return cmp;
-      return left.name.localeCompare(right.name);
+      const dept = (agent: Agent) => agent.department_name_ko || agent.department_name || agent.department_id || "";
+      return dept(left).localeCompare(dept(right)) || byName(left, right);
     }
-    if (sortMode === "created") {
-      return (right.created_at ?? 0) - (left.created_at ?? 0);
-    }
-    const leftStatus = STATUS_ORDER[left.status] ?? 5;
-    const rightStatus = STATUS_ORDER[right.status] ?? 5;
-    if (leftStatus !== rightStatus) return leftStatus - rightStatus;
-    return left.name.localeCompare(right.name);
+    if (sortMode === "created") return (right.created_at ?? 0) - (left.created_at ?? 0);
+    // Home's order: state, then the Korean name.
+    return AGENT_STATES.indexOf(leftState) - AGENT_STATES.indexOf(rightState)
+      || agentName(left, true).localeCompare(agentName(right, true));
   };
 }
 
-export function sortAgents(agents: Agent[], sortMode: AgentSortMode): Agent[] {
-  return [...agents].sort(compareAgents(sortMode));
+export function sortAgents(entries: HomeAgent[], sortMode: AgentSortMode): HomeAgent[] {
+  return [...entries].sort(compareAgents(sortMode));
 }
 
 export function filterAndSortAgents(
-  agents: Agent[],
+  entries: HomeAgent[],
   filter: AgentListFilter,
   sortMode: AgentSortMode,
-): Agent[] {
-  return sortAgents(filterAgents(agents, filter), sortMode);
+): HomeAgent[] {
+  return sortAgents(filterAgents(entries, filter), sortMode);
 }
