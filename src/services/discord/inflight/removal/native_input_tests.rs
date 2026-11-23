@@ -1141,3 +1141,6 @@ async fn native_8148_review_saved_control_proof_boot_and_custody_only() {
         next_head(shared.mailbox(ChannelId::new(channel)), channel, root).await;
     }
 }
+
+#[path = "native_custody_wait_tests.rs"]
+mod custody_wait_tests;

@@ -146,7 +146,8 @@ pub(in crate::services::discord) use removal::{
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use removal::{
-    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+    native_boot_records, persist_native_boot_record, persist_native_boot_record_off_worker,
+    preserve_native_before_discard,
 };
 mod restart_mark;
 #[cfg(test)]

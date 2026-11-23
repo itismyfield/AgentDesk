@@ -258,10 +258,7 @@ impl RestoredInput {
             .ok_or("native boot root unavailable")?;
         let record = history
             .try_native_boot_record(&self.record.namespace, &self.record.settlement.ticket)?;
-        // The boot custody notice holds this flock across PG awaits; block for it off the worker.
-        tokio::task::spawn_blocking(move || inflight::persist_native_boot_record(&root, &record))
-            .await
-            .map_err(|error| error.to_string())?
+        inflight::persist_native_boot_record_off_worker(root, record).await
     }
 
     async fn drive(&mut self, shared: &Arc<SharedData>, history: &Registry) -> Result<(), String> {
@@ -364,6 +361,16 @@ impl RestoredInput {
 }
 
 impl BootInputs {
+    /// `prepare` for an async caller: the custody flock is awaited on the blocking pool.
+    pub(in crate::services::discord) async fn prepare_off_worker(
+        root: std::path::PathBuf,
+        generation: u64,
+    ) -> Result<Self, String> {
+        tokio::task::spawn_blocking(move || Self::prepare(&root, generation))
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
     pub(in crate::services::discord) fn prepare(
         root: &std::path::Path,
         generation: u64,

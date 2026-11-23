@@ -208,7 +208,8 @@ impl NativePrepared {
         let record = history.native_boot_record(&self.namespace, &ticket)?;
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native control root unavailable")?;
-        crate::services::discord::inflight::persist_native_boot_record(&root, &record)?;
+        crate::services::discord::inflight::persist_native_boot_record_off_worker(root, record)
+            .await?;
         Ok(Some(wake))
     }
 }

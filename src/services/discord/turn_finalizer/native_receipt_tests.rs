@@ -109,7 +109,10 @@ async fn native_receipt_debt_survives_restart_without_holding_boot_pg() {
             .unwrap()
             .restart
             .current_generation = generation;
-        let plan = super::super::native_prepare::BootInputs::prepare(&root, generation).unwrap();
+        let plan =
+            super::super::native_prepare::BootInputs::prepare_off_worker(root.clone(), generation)
+                .await
+                .unwrap();
         let reaped = inflight::reap_inflight_rows_at_boot_blocking(
             &ProviderKind::Claude,
             Some(pool.clone()),
@@ -202,7 +205,9 @@ async fn native_result_after_restart_mark_settles_at_next_boot_pg() {
             .unwrap()
             .restart
             .current_generation = 2;
-        let plan = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
+        let plan = super::super::native_prepare::BootInputs::prepare_off_worker(root.clone(), 2)
+            .await
+            .unwrap();
         let reaped = inflight::reap_inflight_rows_at_boot_blocking(
             &ProviderKind::Claude,
             Some(pool.clone()),
