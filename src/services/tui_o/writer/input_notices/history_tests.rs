@@ -166,3 +166,43 @@ fn an_unreadable_history_holds_a_recorded_tagged_frame_on_both_readers() {
     );
     assert_ne!(seen, PromptObservation::PublishedSshDirect);
 }
+
+/// Only the first `[User:` header, up to its first `]`, can make an input a relay echo: a typed
+/// old or tagged header that quotes an idle one keeps its notice and evidence, bare or pasted, and
+/// opens a direct-input turn; the same quote in a recorded tagged frame stays its attempt's.
+#[test]
+fn a_quoted_idle_header_after_another_header_keeps_the_notice() {
+    use crate::services::tui_prompt_dedupe::{PromptObservation, observe_codex_prompt_in_turn_at};
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let quote = "이 형식 봐줘: [User: bob (ID: 5)] hi";
+    let v1 =
+        format!("[User: ann (ID: 7) · 📱 v1 mode=inject source=discord:7:9 · abcdef12]\n{quote}");
+    let pasted = |outer: &str| {
+        format!("{outer}<pasted_content id=\"a733\">\n{v1}\n</pasted_content id=\"a733\">{outer}")
+    };
+    let tagged = format!("[User: ann (ID: 7) · deadbeef] {quote}");
+    for typed in [v1.clone(), pasted(""), pasted("\n\n"), tagged] {
+        let row = record("typed-native", &typed);
+        let mut projection = Projection::for_tests();
+        let source = &origin(&row).record.source;
+        let projected =
+            projection.project_record(7332, ShadowProvider::Claude, source, &row, Ok(origin(&row)));
+        assert!(projected.unwrap().is_some(), "{typed}");
+        assert_eq!(projection.take_evidence().len(), 1, "{typed}");
+    }
+    let seen =
+        observe_codex_prompt_in_turn_at("quoting-pane", &v1, None, Some("t1"), chrono::Utc::now());
+    assert_eq!(seen, PromptObservation::PublishedSshDirect);
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    let recorded = human_frame::plain_inject("d", "7", "ann", "abcdef12", quote);
+    let owner = ("claude", "notice-test-pane", "abcdef12", "7");
+    history::register(owner, transcript.path(), 0, &recorded).unwrap();
+    let held = project(
+        &mut Projection::for_tests(),
+        &record("recorded-native", &recorded),
+    );
+    assert_eq!(
+        held.unwrap_err(),
+        "input notice injection ownership pending"
+    );
+}

@@ -339,7 +339,8 @@ pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
     let Ok(meta) = std::fs::metadata(transcript) else {
         return false;
     };
-    let Some(store) = path().ok().and_then(|path| read(&path).ok()) else {
+    // A V2 history's owned entries keep the attempt it recorded while V1.
+    let Some(store) = path().ok().and_then(|path| readable(&path).ok()) else {
         return false;
     };
     store.entries.iter().any(|entry| {
@@ -891,7 +892,7 @@ pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
 }
 
 pub(crate) fn unique_attempt(id: &str, transcript: &Path, frame: &str) -> bool {
-    let Some(store) = path().ok().and_then(|path| read(&path).ok()) else {
+    let Some(store) = path().ok().and_then(|path| readable(&path).ok()) else {
         return false;
     };
     let matching: Vec<_> = store
