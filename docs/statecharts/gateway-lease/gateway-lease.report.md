@@ -70,13 +70,13 @@ Before counterexample: SIGTERM arrives while C sleeps between held restores. O's
 | Model step | Code (round-3 head) |
 |---|---|
 | per-runtime flag, shared barrier | `runtime_bootstrap/shared_data.rs:163-180` (`shutting_down` per SharedData, `shutdown_remaining` injected); `shared_state.rs:617-621` invariant; flag writers `shared_state.rs:728-774` |
-| gate entry (C's latch armed) | `runtime_bootstrap.rs:300-302` → `runtime_bootstrap/native_input.rs:33` `boot_sigterm::subscribe()` before the first attempt |
-| Term (process latch) | `runtime_bootstrap/boot_sigterm.rs:10-29` (one tokio SIGTERM listener per process, `send_replace(true)`) |
+| gate entry (C's latch armed) | `runtime_bootstrap.rs:301-303` → `runtime_bootstrap/native_input.rs:33` `boot_sigterm::subscribe()` before the first attempt |
+| Term (process latch) | `runtime_bootstrap/boot_sigterm.rs:10-28` (one tokio SIGTERM listener per process, `send_replace(true)`) |
 | CAttempt → stopped | `native_input.rs:99-104` (checked after every attempt, so a Ready result cannot override the request) |
 | CWaitEnd | `native_input.rs:137-144` (`select!` of the 5 s sleep and the latch, then the same check) |
-| Take (slot once, last exits) | `boot_sigterm.rs:40-55` `stop_before_start`, same CAS + `fetch_sub == 1 → exit(0)` contract as `shutdown.rs:34-54` |
-| CRefusedSlot | `native_input.rs:119` → `boot_sigterm.rs:58-63` `release_slot_on_sigterm` |
-| CStart / CHandle | handler install `runtime_bootstrap.rs:333` (worker), `:409` (gateway), `:454` (standby); `shutdown.rs:94-97`: the handler waits on the latch, so a signal that arrived during the gate is not lost |
+| Take (slot once, last exits) | `boot_sigterm.rs:39-54` `stop_before_start`, same CAS + `fetch_sub == 1 → exit(0)` contract as `shutdown.rs:34-54` |
+| CRefusedSlot | `native_input.rs:119` → `boot_sigterm.rs:57-62` `release_slot_on_sigterm` |
+| CStart / CHandle | handler install `runtime_bootstrap.rs:334` (worker), `:410` (gateway), `:455` (standby); `shutdown.rs:94-97`: the handler waits on the latch, so a signal that arrived during the gate is not lost |
 | OHandle | `shutdown.rs:14-54` |
 
 Not modeled: the gateway lease wait after a Ready gate (`gateway_lease.rs:229-319`). A SIGTERM there stays in the latch until that runtime installs its handler. The lease wait does not read the latch, so the stop waits for the lease outcome.
