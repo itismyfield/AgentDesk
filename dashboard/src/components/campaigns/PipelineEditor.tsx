@@ -1,4 +1,4 @@
-import { CircleCheck, CircleX, Plus, Trash2, TriangleAlert, X } from "lucide-react";
+import { CircleCheck, CircleX, Plus, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { PIPELINE_KINDS, getPipelineConditionFields, type PipelineComparison, type PipelineDefinition, type PipelineDiagnostic, type PipelineFieldSpec, type PipelineState, type PipelineTransition } from "../../api/serverCampaignPipeline";
 import { Button } from "../../kit/free/button-clean";
@@ -20,6 +20,8 @@ const FIELD = "min-h-11 w-full min-w-0 rounded-lg border border-th-input-border 
 const GRID = "grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-2 gap-y-2";
 const whole = (text: string, least = 0) => Math.max(least, Math.trunc(Number(text)) || 0);
 type Update = (change: (draft: PipelineDefinition) => PipelineDefinition) => void;
+/** Opens 상태 찾기·만들기 for a way out, from the button pressed: the keyboard's way to what dragging its pin does. */
+type Find = (transition: PipelineTransition, button: HTMLElement) => void;
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="contents"><span className="text-[13px] text-[var(--fg-muted)]">{label}</span>{children}</label>;
@@ -69,8 +71,8 @@ function ConditionRow({ value, fields, busy, onChange, onRemove, tr }: {
 }
 
 /** One way out of the chosen state: where it goes, its priority, its conditions (all must hold), a retry budget and an approval gate. */
-function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark, busy, update, tr }: {
-  transition: PipelineTransition; draft: PipelineDefinition; graph: PipelineGraph; fields: PipelineFieldSpec[]; flagged: boolean; fresh: boolean; mark: string | null; busy: boolean; update: Update; tr: Tr;
+function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark, busy, update, onFind, tr }: {
+  transition: PipelineTransition; draft: PipelineDefinition; graph: PipelineGraph; fields: PipelineFieldSpec[]; flagged: boolean; fresh: boolean; mark: string | null; busy: boolean; update: Update; onFind: Find; tr: Tr;
 }) {
   const pin = graph.pins.get(transition.from)?.find((value) => value.id === transition.id);
   const list = comparisons(transition.condition);
@@ -88,7 +90,10 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
       <IconButton icon={<Trash2 aria-hidden />} className="ml-auto" label={tr("이 전환 지우기", "Delete this transition")} disabled={busy} onClick={() => update((current) => removeTransition(current, transition.id))} />
     </div>
     <div className={GRID}>
-      <Field label={tr("도착", "Goes to")}><Select autoFocus={fresh} disabled={busy} value={transition.to} onChange={(event) => patch({ to: event.target.value })}><option value="">{tr("골라 주세요", "Choose one")}</option>{options}</Select></Field>
+      <Field label={tr("도착", "Goes to")}><span className="flex min-w-0 items-center gap-1">
+        <Select autoFocus={fresh} wrapperClassName="min-w-0 flex-1" disabled={busy} value={transition.to} onChange={(event) => patch({ to: event.target.value })}><option value="">{tr("골라 주세요", "Choose one")}</option>{options}</Select>
+        <IconButton icon={<Search aria-hidden />} label={tr("상태 찾기·만들기", "Find or make a state")} disabled={busy} onClick={(event) => onFind(transition, event.currentTarget)} />
+      </span></Field>
       <Field label={tr("우선순위", "Priority")}><input type="number" min={0} step={1} className={FIELD} disabled={busy} value={transition.priority} onChange={(event) => patch({ priority: whole(event.target.value) })} /></Field>
     </div>
     <fieldset className="m-0 grid gap-2 border-0 p-0">
@@ -111,8 +116,8 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
 }
 
 /** The chosen state's fields and its ways out, all editable; deleting it takes the transitions from and to it. */
-function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoose, tr }: {
-  state: PipelineState; draft: PipelineDefinition; graph: PipelineGraph; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update; onChoose: (id: string | null) => void; tr: Tr;
+function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoose, onFind, tr }: {
+  state: PipelineState; draft: PipelineDefinition; graph: PipelineGraph; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update; onChoose: (id: string | null) => void; onFind: Find; tr: Tr;
 }) {
   const [confirming, setConfirming] = useState(false);
   // A way out just added takes the focus, which also scrolls it into view.
@@ -155,7 +160,7 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
       {vocab?.fields === null && <Desc className="text-[var(--err)]">{tr("조건 어휘를 불러오지 못했어요. 지금 조건만 고칠 수 있어요.", "Could not load the condition vocabulary. Only the current fields are offered.")}</Desc>}
       {outgoing.length > 0 && <ul aria-label={tr("나가는 전환", "Transitions out")} className="m-0 grid list-none gap-2.5 p-0">{outgoing.map((transition) =>
         <TransitionForm key={transition.id} transition={transition} draft={draft} graph={graph} fields={vocab?.fields ?? []} flagged={flagged.has(transition.id)} fresh={transition.id === added} busy={busy}
-          mark={changes?.transitions.added.includes(transition.id) ? tr("새로", "New") : changes?.transitions.changed.includes(transition.id) ? tr("바뀜", "Changed") : null} update={update} tr={tr} />)}</ul>}
+          mark={changes?.transitions.added.includes(transition.id) ? tr("새로", "New") : changes?.transitions.changed.includes(transition.id) ? tr("바뀜", "Changed") : null} update={update} onFind={onFind} tr={tr} />)}</ul>}
       {!state.kind.startsWith("end_") && <div><Button variant="secondary" size="sm" icon={<Plus aria-hidden />} disabled={busy}
         onClick={() => { const [next, id] = addTransition(draft, state.id); update(() => next); setAdded(id); }}>{tr("나가는 전환 추가", "Add a way out")}</Button></div>}
     </InspSection>
@@ -176,6 +181,7 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
 
 /** 저장 전 검사: the server's diagnostics on the draft, each pointing at its state, which a press chooses and shows. */
 export function PipelineChecks({ checks, graphs, onPick, tr }: { checks: Checks | null; graphs: PipelineDefinition[]; onPick: (diagnostic: PipelineDiagnostic) => void; tr: Tr }) {
+  // Under the canvas: a short strip that scrolls, its results side by side.
   const errors = checks?.errors ?? [], warnings = checks?.warnings ?? [];
   const row = (value: PipelineDiagnostic, index: number, error: boolean) => <li key={`${error}-${index}`}>
     <button type="button" onClick={() => onPick(value)} className="!m-0 flex min-h-11 w-full min-w-0 items-start gap-2 !rounded-lg !border-0 !bg-transparent px-2 py-1.5 text-left hover:!bg-[color-mix(in_oklch,var(--fg)_5%,transparent)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]">
@@ -183,40 +189,39 @@ export function PipelineChecks({ checks, graphs, onPick, tr }: { checks: Checks 
       <span className="grid min-w-0"><span className="text-[13px] text-[var(--fg)]">{diagnosticText(value.code, tr)}</span><Cap className="truncate">{diagnosticPlace(value, graphs, tr) || value.path}</Cap></span>
     </button>
   </li>;
-  return <section aria-label={tr("저장 전 검사", "Checks before saving")} className="grid max-h-[45%] min-h-0 content-start gap-2 overflow-y-auto border-t border-[var(--line-soft)] bg-[var(--bg-1)] px-4 py-3 max-[1279px]:max-h-none">
+  return <section aria-label={tr("저장 전 검사", "Checks before saving")} className="grid max-h-44 min-h-0 shrink-0 content-start gap-2 overflow-y-auto border-t border-[var(--line-soft)] bg-[var(--bg-1)] px-4 py-3">
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
       <Eyebrow>{tr("저장 전 검사", "Checks before saving")}</Eyebrow>
       <Cap className={errors.length ? "text-[var(--err)]" : undefined}><Num>{tr(`오류 ${errors.length}`, `${errors.length} errors`)}</Num></Cap>
       <Cap><Num>{tr(`경고 ${warnings.length}`, `${warnings.length} warnings`)}</Num></Cap>
-      {checks?.pending && <Cap role="status" className="ml-auto">{tr("검사하는 중", "Checking")}</Cap>}
+      {checks?.pending && <Cap role="status">{tr("검사하는 중", "Checking")}</Cap>}
+      <Cap className="ml-auto">{tr("고칠 때마다 다시 검사해요. 저장하면 서버가 한 번 더 검사해요.", "Each change is checked again. Saving checks once more on the server.")}</Cap>
     </div>
     {checks?.failed && <Desc className="text-[var(--warn)]">{tr(`검사를 하지 못했어요: ${checks.failed}`, `Could not check: ${checks.failed}`)}</Desc>}
-    {errors.length + warnings.length > 0 ? <ul aria-label={tr("검사 결과", "Check results")} className="m-0 grid list-none gap-0.5 p-0">{errors.map((value, index) => row(value, index, true))}{warnings.map((value, index) => row(value, index, false))}</ul>
+    {errors.length + warnings.length > 0 ? <ul aria-label={tr("검사 결과", "Check results")} className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(18rem,1fr))] gap-0.5 p-0">{errors.map((value, index) => row(value, index, true))}{warnings.map((value, index) => row(value, index, false))}</ul>
       : checks && !checks.pending && !checks.failed && <p className="m-0 flex items-center gap-1.5 text-[13px] text-[var(--fg-dim)]"><CircleCheck aria-hidden className="size-4 text-[var(--ok)]" />{tr("검사를 모두 통과했어요.", "Every check passes.")}</p>}
-    <Cap>{tr("고칠 때마다 다시 검사해요. 저장하면 서버가 한 번 더 검사해요.", "Each change is checked again. Saving checks once more on the server.")}</Cap>
   </section>;
 }
 
-/** The inspector column while editing: the chosen state's form (or what a save does), then the checks. */
-export default function PipelineEditPanel({ graph, draft, revision, chosen, flagged, changes, busy, update, onChoose, checks, base, onPick, tr }: {
+/** The inspector column while editing: the chosen state's form, or what a save does. */
+export default function PipelineEditPanel({ graph, draft, revision, chosen, flagged, changes, busy, update, onChoose, onFind, tr }: {
   graph: PipelineGraph; draft: PipelineDefinition; revision: number; chosen: string | null; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update;
-  onChoose: (id: string | null) => void; checks: Checks | null; base: PipelineDefinition; onPick: (diagnostic: PipelineDiagnostic) => void; tr: Tr;
+  onChoose: (id: string | null) => void; onFind: Find; tr: Tr;
 }) {
   const state = draft.states.find((value) => value.id === chosen);
-  return <aside aria-label={tr("파이프라인 편집", "Pipeline editor")} className="flex min-h-0 flex-col border-[var(--line-soft)] bg-[var(--bg-1)] max-[1279px]:border-t min-[1280px]:border-l">
+  return <aside aria-label={tr("파이프라인 편집", "Pipeline editor")} className="flex min-h-0 flex-col border-l border-[var(--line-soft)] bg-[var(--bg-1)]">
     <div className="min-h-0 flex-1 overflow-y-auto">
-      {state ? <StateForm key={state.id} state={state} draft={draft} graph={graph} flagged={flagged} changes={changes} busy={busy} update={update} onChoose={onChoose} tr={tr} /> : <>
+      {state ? <StateForm key={state.id} state={state} draft={draft} graph={graph} flagged={flagged} changes={changes} busy={busy} update={update} onChoose={onChoose} onFind={onFind} tr={tr} /> : <>
         <InspSection className="border-t-0 gap-1">
           <Cap>{tr("편집 중", "Editing")}</Cap>
           <Num className="text-sm text-[var(--fg)]">{tr(`상태 ${draft.states.length} · 전환 ${draft.transitions.length}`, `${draft.states.length} states · ${draft.transitions.length} transitions`)}</Num>
           <Cap><Num>{tr(`저장하면 정의 rev ${revision} → ${revision + 1}`, `Saving makes definition rev ${revision} → ${revision + 1}`)}</Num></Cap>
         </InspSection>
         <p className="m-0 grid gap-1 px-4 py-3 text-xs text-[var(--fg-muted)]">
-          <span>{tr("상태를 고르면 여기서 고쳐요. 새 상태는 위의 '상태 추가'로 더해요.", "Choose a state to edit it here. Add new ones with 'Add a state' above.")}</span>
+          <span>{tr("상태를 고르면 여기서 고쳐요. 핀을 상태로 끌면 전환이 생기고 빈 곳에 놓으면 상태를 찾거나 만들어요.", "Choose a state to edit it here. Drag a pin onto a state to connect it, or onto empty canvas to find or make one.")}</span>
           <span>{tr("준비됨이나 중지됨일 때만 저장돼요. 작업이 남은 상태는 지울 수 없어요.", "Only a prepared or stopped campaign saves. A state with tasks in it cannot go.")}</span>
         </p>
       </>}
     </div>
-    <PipelineChecks checks={checks} graphs={[draft, base]} onPick={onPick} tr={tr} />
   </aside>;
 }

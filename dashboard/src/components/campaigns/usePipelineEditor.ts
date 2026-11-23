@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import {
   getServerCampaignPipeline, pipelineRefusal, saveServerCampaignPipeline, validateServerCampaignPipeline,
   type CampaignPipeline as Detail, type PipelineDefinition, type PipelineDiagnostic,
@@ -17,15 +17,27 @@ export type Notice = { kind: "saved"; revision: number } | { kind: "lost" } | { 
  * in memory, so while any is kept a reload or close asks first; its own listener keeps the editor's removal from dropping it. */
 const kept = new Map<string, Edit & { sent: { current: Sent | null } }>();
 const keptGuard = (event: BeforeUnloadEvent) => warnBeforeUnload(event);
-const guardKept = () => kept.size ? window.addEventListener("beforeunload", keptGuard) : window.removeEventListener("beforeunload", keptGuard);
+const watchers = new Set<() => void>();
+/** Keeps or drops a campaign's draft and tells every editor on screen, so one that came back meanwhile stops offering it. */
+const store = (id: string, value: Edit & { sent: { current: Sent | null } } | null) => {
+  if (value) kept.set(id, value); else if (!kept.delete(id)) return;
+  if (kept.size) window.addEventListener("beforeunload", keptGuard); else window.removeEventListener("beforeunload", keptGuard);
+  for (const watcher of watchers) watcher();
+};
+const watch = (watcher: () => void) => { watchers.add(watcher); return () => { watchers.delete(watcher); }; };
+/** The history entry a full-window editor adds, so the browser's back button leaves the editor first. */
+const ENTRY = "adkPipelineEditor";
+const onEntry = () => !!window.history.state?.[ENTRY];
 
 /** A draft of a server campaign's pipeline over the revision it was read at: the server checks it shortly after each
  * change and again, quietly, whenever the run moves (`runtime`), and a save replaces the pipeline only if the definition has not moved since. */
-export function usePipelineEditor({ id, runtime, detail, reload, leave, tr }: {
-  id: string | null; runtime: string; detail: Detail | null; reload: () => void; leave?: RefObject<((proceed: () => void) => void) | null>; tr: Tr;
+export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, tr }: {
+  id: string | null; runtime: string; detail: Detail | null; reload: () => void; leave?: RefObject<((proceed: () => void) => void) | null>;
+  /** Opens with its own history entry (the full-window editor). */
+  entry: boolean; tr: Tr;
 }) {
   const [edit, setEdit] = useState<Edit | null>(null);
-  const [waiting, setWaiting] = useState(() => id ? kept.get(id) ?? null : null);
+  const waiting = useSyncExternalStore(watch, () => id ? kept.get(id) ?? null : null);
   const [checks, setChecks] = useState<Checks | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -64,11 +76,28 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, tr }: {
   // Leaving any other way keeps the draft to pick up later; a decision (save, discard, close) clears `keep` first.
   const keep = useRef<Edit | null>(null);
   keep.current = dirty ? edit : null;
-  useEffect(() => () => { if (id && keep.current) { kept.set(id, { ...keep.current, sent }); guardKept(); } }, [id]);
-  const forget = () => { if (id && kept.delete(id)) guardKept(); setWaiting(null); };
+  useEffect(() => () => { if (id && keep.current) store(id, { ...keep.current, sent }); }, [id]);
+  const forget = () => { if (id) store(id, null); };
 
-  const stop = () => { keep.current = null; checked.current = null; setEdit(null); setChecks(null); sent.current = null; };
-  const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); };
+  // Closing takes the editor's history entry off once, unless the page has gone (a save that landed after leaving).
+  const live = useRef(true), shown = useRef(false);
+  useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+  const stop = () => {
+    keep.current = null; checked.current = null; setEdit(null); setChecks(null); sent.current = null;
+    if (shown.current && live.current && onEntry()) window.history.back();
+    shown.current = false;
+  };
+  const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); shown.current = true; if (entry && !onEntry()) window.history.pushState({ ...window.history.state, [ENTRY]: true }, ""); };
+  // The back button closes the editor; with unsaved changes its entry goes back on and the editor asks.
+  const close = useRef(() => {});
+  close.current = () => { if (!keep.current) return stop(); window.history.pushState({ ...window.history.state, [ENTRY]: true }, ""); setLeaving(() => stop); };
+  const opened = !!edit;
+  useEffect(() => {
+    if (!opened || !entry) return;
+    const back = () => { if (!onEntry()) close.current(); };
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, [opened, entry]);
   const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline });
   const save = async (over?: Detail) => {
     if (!edit || !id || saving) return;
@@ -82,7 +111,7 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, tr }: {
     try {
       const result = await saveServerCampaignPipeline(id, revision, edit.draft, key);
       // The page may have gone while waiting and kept this draft; it is saved now.
-      if (kept.delete(id)) guardKept();
+      store(id, null);
       stop();
       setNotice({ kind: "saved", revision: result.definition_revision });
       reload();
