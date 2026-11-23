@@ -662,6 +662,14 @@ input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
 input-single-path/InputCancelSelectionNoRevoke.cfg	InputCancelSelection	FrontGrantRevoked	-
+input-single-path/InputLedgerFormatAfter.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatAfterBootV1.cfg	InputLedgerFormat	-	OwnerProgress
+input-single-path/InputLedgerFormatAfterBootV2.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatAfterUnlocked.cfg	InputLedgerFormat	RecordedExactlyOnce	-
+input-single-path/InputLedgerFormatDropMigrationOnly.cfg	InputLedgerFormat	-	OwnerProgress
+input-single-path/InputLedgerFormatNow.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatNowBeforeRepair.cfg	InputLedgerFormat	-	OwnerProgress
+input-single-path/InputLedgerFormatNowOpsV2.cfg	InputLedgerFormat	-	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
