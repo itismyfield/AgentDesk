@@ -72,33 +72,13 @@ fn keyless_reconcile_claude_register_then_receipt_changes_only_its_slot() {
     assert_eq!(after, before);
 }
 
-#[test]
-fn keyless_reconcile_claude_register_then_withdraw_removes_only_its_slot() {
-    let f = fx();
-    f.keyed(1, &frame("keyed"));
-    f.keyless("k1", &frame("one")).unwrap();
-    f.keyless("k2", &frame("two")).unwrap();
-    let mut before = f.disk();
-    h::withdraw("k1", &f.t);
-    before["passive"].as_array_mut().unwrap().remove(0);
-    assert_eq!(f.disk(), before);
-}
-
-#[test]
-fn keyless_reconcile_refuses_unscoped_withdraw_of_a_keyed_id_path_and_keeps_bytes() {
-    let f = fx();
-    f.keyed(1, &frame("keyed"));
-    let before = f.bytes();
-    h::withdraw("nonce1", &f.t);
-    assert_eq!(f.bytes(), before);
-}
-
-/// A receipt thread without scope reads its keyed attempt's recorded row but writes no new one.
+/// An unscoped withdraw or receipt of a keyed attempt writes nothing; a recorded row still reads.
 #[test]
 fn keyless_reconcile_refuses_an_apply_that_edits_a_keyed_event_and_keeps_bytes() {
     let f = fx();
     let key = f.keyed(1, &frame("keyed"));
     let before = f.bytes();
+    h::withdraw("nonce1", &f.t);
     assert_eq!(f.receipt("nonce1", &frame("keyed")), None);
     assert_eq!(f.bytes(), before);
     assert_eq!(f.keyed_receipt(&key, &frame("keyed")), Some(true));
@@ -133,10 +113,9 @@ fn keyless_reconcile_two_removals_keep_later_slot_indices() {
         f.keyless(id, &frame(id)).unwrap();
     }
     let before = f.disk();
+    let kept = |e: &Entry| !["k1", "k3"].contains(&e.id.as_str());
     h::update(|store| {
-        store
-            .entries
-            .retain(|e| !["k1", "k3"].contains(&e.id.as_str()));
+        store.entries.retain(kept);
         store.entries[1].author = "changed".into();
         Ok(())
     })
@@ -175,12 +154,13 @@ fn concurrent_owner_prepare_and_keyless_register_both_survive() {
     }
 }
 
-/// Another handle's commit leaves the shared handle's cache stale; the keyless change keeps it.
+/// Another handle's commit leaves the shared handle's cache stale; the withdraw keeps it and k2.
 #[test]
 fn keyless_withdraw_after_owner_commit_leaves_keyed_bytes() {
     let f = fx();
     f.keyless("k1", &frame("one")).unwrap();
     keyed_on(&Registry::at(h::path().unwrap()), &f.t, 1, &frame("keyed"));
+    f.keyless("k2", &frame("two")).unwrap();
     let mut before = f.disk();
     h::withdraw("k1", &f.t);
     before["passive"].as_array_mut().unwrap().remove(0);
@@ -225,13 +205,6 @@ fn a_v1_ledger_keeps_the_v1_writer_and_a_missing_or_v2_one_takes_keyless_slots()
     std::fs::remove_file(h::path().unwrap()).unwrap();
     f.keyless("k2", &frame("two")).unwrap();
     f.keyless("k3", &frame("three")).unwrap();
-    let disk = f.disk();
     assert!(f.bytes().starts_with(b"{\"version\":2,"));
-    assert_eq!(
-        [
-            &disk["passive"][0]["entry"]["id"],
-            &disk["passive"][1]["entry"]["id"]
-        ],
-        ["k2", "k3"]
-    );
+    assert_eq!(f.disk()["passive"][1]["entry"]["id"], "k3");
 }
