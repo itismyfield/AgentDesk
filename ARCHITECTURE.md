@@ -616,8 +616,6 @@ src/
 │   ├── terminal_cleanup.rs
 │   ├── transition_cleanup.rs
 │   └── transition_core.rs
-├── ke_routines_tests/
-│   └── cold_retry_leaf_tests.rs
 ├── krx_claude_tests/
 │   └── tui_session_launch_tests.rs
 ├── logging/
@@ -5466,7 +5464,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
-| `src/ke_routines_tests/` | Root-crate fixtures shared by the KE routine and scheduled-message tests moved here. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |

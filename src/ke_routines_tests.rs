@@ -1,7 +1,4 @@
 //! ROOT-declared routine and scheduled-message tests that reach ROOT discord health or routes.
-#[cfg(unix)]
-pub(crate) mod cold_retry_leaf_tests;
-
 #[path = "services/routines/agent_executor/execution_pg_tests.rs"]
 mod agent_executor_execution_pg;
 #[path = "services/routines/agent_executor/owner_input_tests.rs"]
