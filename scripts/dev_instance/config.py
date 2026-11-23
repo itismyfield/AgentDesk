@@ -86,6 +86,8 @@ class BlockedAgyLogin(InstanceError):
 
 
 AGY_CLI_CANDIDATES = ('/opt/homebrew/bin/agy', '/usr/local/bin/agy')
+# Cheapest model with effort in the id; agy honours it as `--model`, not as a settings.json key.
+AGY_MODEL = 'gemini-3.8-flash-low'
 
 
 def validate_agy_login(value, root):
@@ -124,7 +126,8 @@ def check_agy_login_home(value):
         path = safe_absolute(home / '.gemini/config/mcp_config.json')
         if not os.path.lexists(path):
             return
-        servers = json.loads(read_regular_text(path)).get('mcpServers', {})
+        text = read_regular_text(path)  # agy itself creates this file empty on its first run
+        servers = json.loads(text).get('mcpServers', {}) if text else {}
         if type(servers) is not dict or servers:
             raise ValueError()
     except (OSError, ValueError, AttributeError, InstanceError):
@@ -209,6 +212,7 @@ def build_config(root: Path, profile: dict, api_port: int, pg_port: int,
                 "runtime": runtime_mode(provider),
                 "peer_agents": False,
                 "workspace": str(root / "workspaces" / provider),
+                **({"model": AGY_MODEL} if provider == "antigravity" else {}),
                 "prompt_file": str(root / "config" / "agents" / f"{provider}.md"),
             }},
         })

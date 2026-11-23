@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 
-from scripts.dev_instance.files import AGY_CREDENTIAL_NAMES, InstanceError, safe_absolute
+from scripts.dev_instance.files import AGY_CREDENTIAL_NAMES, AGY_PROVIDER_CREDENTIAL_NAMES, InstanceError, safe_absolute
 from scripts.e2e.continuous import companion, inbox
 from scripts.e2e.continuous.release_host import deploying
 from scripts.e2e.continuous.store import read_json, write_json
@@ -33,9 +33,9 @@ def load_config(path):
     for key in ("state_dir", "worktree", "profile", "admission", "resources"):
         config[key] = safe_absolute(config[key])
     credentials = config["credentials"]
-    if (not isinstance(credentials, dict) or set(credentials) != AGY_CREDENTIAL_NAMES
+    if (not isinstance(credentials, dict) or set(credentials) - AGY_PROVIDER_CREDENTIAL_NAMES != AGY_CREDENTIAL_NAMES
             or any(not isinstance(ref, str) or not ref.startswith("op://") for ref in credentials.values())):
-        raise InstanceError("credentials must map the three agy names to op references")
+        raise InstanceError("credentials must map the three agy names, plus an optional Gemini key, to op references")
     if not isinstance(config["deploy_lock"], str) or not os.path.isabs(config["deploy_lock"]):
         raise InstanceError("deploy_lock must be an absolute path")
     return config
@@ -115,8 +115,10 @@ def ensure(config, head, *, execute=_execute, pipe=_pipe):
         raise InstanceError("ensure needs a full lowercase head")
     worktree, state = config["worktree"], config["state_dir"]
     script, env = worktree / "scripts/dev-instance.sh", instance_env(config)
+    # References only, never values: a changed reference set needs a freshly written instance.
+    references = hashlib.sha256(json.dumps(config["credentials"], sort_keys=True).encode()).hexdigest()
     current = read_json(state / "instance.json", {})
-    if current.get("head") == head:
+    if current.get("head") == head and current.get("credentials") == references:
         return current["instance_id"]
     execute(["git", "-C", worktree, "fetch", "origin"], 120)
     execute(["git", "-C", worktree, "checkout", "--detach", head], 60)
@@ -131,7 +133,7 @@ def ensure(config, head, *, execute=_execute, pipe=_pipe):
              [script, "credential", "--instance", instance_id, "--name", name], env)
     if json.loads(execute([script, "validate", "--instance", instance_id], 60, env=env))["status"] != "DECLARATION_VALID":
         raise InstanceError("prepared agy instance did not validate")
-    write_json(state / "instance.json", {"head": head, "instance_id": instance_id})
+    write_json(state / "instance.json", {"head": head, "instance_id": instance_id, "credentials": references})
     previous = current.get("instance_id")
     if previous and previous != instance_id:
         try:

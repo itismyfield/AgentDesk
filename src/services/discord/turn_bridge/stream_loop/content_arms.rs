@@ -314,7 +314,15 @@ pub(super) async fn handle_stream_content_message(
                                 full_response.clone_from(&inflight_state.full_response);
                                 response_sent_offset = inflight_state.response_sent_offset;
                             }
-                            if (!preserve_progress || result.starts_with(&full_response))
+                            let posted = full_response.get(..response_sent_offset).map(str::to_owned);
+                            // A tool boundary trims trailing spaces from the body, so only text-only turns compare exactly.
+                            let replaces_posted = !preserve_progress && !any_tool_used
+                                && done_replaces_posted_parts(&provider, posted.as_deref(), response_sent_offset, &result);
+                            if replaces_posted {
+                                // The provider's Done supersedes posted parts even where the resolver keeps the stream.
+                                full_response.clone_from(&result);
+                                sync_response_delivery_state(&full_response, &mut response_sent_offset, inflight_state);
+                            } else if (!preserve_progress || result.starts_with(&full_response))
                                 && let Some(resolved) = resolve_done_response(
                                 &full_response,
                                 &result,
@@ -336,7 +344,7 @@ pub(super) async fn handle_stream_content_message(
                                     inflight_state,
                                 );
                             }
-                            if !preserve_progress && done_result_requires_full_terminal_replay(
+                            if replaces_posted || !preserve_progress && !rollover_parts_stay_posted(&provider, posted.as_deref(), &result) && done_result_requires_full_terminal_replay(
                                 &full_response,
                                 &result,
                                 response_sent_offset,

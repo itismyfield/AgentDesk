@@ -395,3 +395,174 @@ async fn a_scheduled_bridge_completion_settles_on_the_next_poll_pg() {
 
 #[path = "routine_presentation_tests.rs"]
 mod routine_presentation_tests;
+
+/// After two agy rollover parts, a Done starting with them (newlines aside) sends only the rest and
+/// ends the turn; one that changed them is replayed whole. Grok's last-message Done keeps the stream.
+#[tokio::test]
+async fn stream_json_long_done_keeps_frozen_parts_only_when_it_starts_with_them() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let cases: [(ProviderKind, fn(&str) -> String, bool); 6] = [
+        (ProviderKind::Antigravity, |b| b.to_owned(), false),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("\n01 ", "\n\n01 ", 1),
+            false,
+        ),
+        (ProviderKind::Antigravity, |b| format!("INTRO\n{b}"), true),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("START-r1", "START-r2", 1),
+            true,
+        ),
+        (
+            ProviderKind::Antigravity,
+            |b| b.replacen("\n05 ", "\n    05 ", 1),
+            true,
+        ),
+        (ProviderKind::Grok, |_| "SHORT".into(), false),
+    ];
+    for (provider, done, replay) in cases {
+        with_isolated_runtime_root(|| long_done_after_frozen_parts(provider, done, replay)).await;
+    }
+}
+
+async fn long_done_after_frozen_parts(
+    provider: ProviderKind,
+    done: fn(&str) -> String,
+    replay: bool,
+) {
+    const USER_MESSAGE: u64 = 9_100_000_000_000_008_160;
+    const PLACEHOLDER: u64 = 9_100_000_000_000_008_161;
+    let lines: Vec<String> = std::iter::once("START-r1".to_string())
+        .chain((1..=55).map(|n| format!("{n:02} {}", "0123456789".repeat(8))))
+        .chain(std::iter::once("END-r1".to_string()))
+        .collect();
+    let body = lines.join("\n");
+    let frozen = format!("{}\n", lines[..45].join("\n"));
+    let result = done(&body);
+    // Process-routine capture admits only Claude and Codex, so claim an ordinary episode.
+    let mut shared = make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
+    shared.settings.write().await.provider = provider.clone();
+    let channel = ChannelId::new(NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed));
+    let token = Arc::new(CancelToken::new());
+    let mailbox = shared.mailbox(channel);
+    assert!(
+        mailbox
+            .try_start_turn(token.clone(), UserId::new(7), MessageId::new(USER_MESSAGE))
+            .await
+    );
+    let mut row = inflight::InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        None,
+        7,
+        USER_MESSAGE,
+        PLACEHOLDER,
+        "long answer".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    row.turn_nonce = token.turn_nonce().map(str::to_owned);
+    row.full_response = frozen.clone();
+    row.response_sent_offset = frozen.len();
+    inflight::save_inflight_state(&row).unwrap();
+    crate::services::discord::increment_global_active(&shared, "test_8160_bridge");
+    let shown = Arc::new(RecordingDirectGateway::default());
+    let context = TurnBridgeContext {
+        provider: provider.clone(),
+        gateway: shown.clone(),
+        channel_id: channel,
+        user_msg_id: Some(MessageId::new(USER_MESSAGE)),
+        user_text_owned: "long answer".into(),
+        request_owner_name: "stream-json answer".into(),
+        role_binding: None,
+        adk_session_key: None,
+        adk_session_name: None,
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        memory_recall_usage: TokenUsage::default(),
+        context_window_tokens: 0,
+        context_compact_percent: 0,
+        current_msg_id: Some(MessageId::new(PLACEHOLDER)),
+        response_sent_offset: frozen.len(),
+        full_response: frozen.clone(),
+        tmux_last_offset: None,
+        new_session_id: None,
+        defer_watcher_resume: false,
+        reuse_status_panel_message: false,
+        completion_tx: None,
+        is_external_input_tui_direct: false,
+        inflight_state: row,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_turn_bridge(shared.clone(), token.clone(), rx, context);
+    tx.send(StreamMessage::Text {
+        content: body[frozen.len()..].to_string(),
+    })
+    .unwrap();
+    tx.send(StreamMessage::Done {
+        result: result.clone(),
+        session_id: None,
+    })
+    .unwrap();
+    drop(tx);
+    let stripped = |text: &str| {
+        text.lines()
+            .filter(|l| !l.starts_with("-# "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if replay {
+        let replayed = [format!("done-body={result:?}/0"), "replay".into()];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !replayed.iter().all(|want| {
+                crate::services::discord::turn_bridge::STREAM_TEST_EVENTS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(ch, event)| *ch == channel.get() && event == want)
+            }) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a Done that changed the posted parts takes the full replay");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mixed = result[frozen.len()..].trim_end();
+        let delivered = shown.0.lock().unwrap();
+        assert!(
+            delivered
+                .iter()
+                .all(|(_, text)| stripped(text).trim_end() != mixed),
+            "{provider:?}: the new tail was joined to the old parts: {delivered:?}"
+        );
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while mailbox.snapshot().await.cancel_token.is_some()
+            || inflight::load_inflight_state_read_only(&shared.provider, channel.get()).is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn ends and releases its lease");
+    let delivered = shown.0.lock().unwrap();
+    assert!(
+        delivered.iter().all(|(_, text)| !text.contains("START-r1")),
+        "frozen parts are not posted again: {delivered:?}"
+    );
+    let tail = delivered
+        .iter()
+        .rev()
+        .find(|(_, text)| text.contains("END-r1"))
+        .map(|(_, text)| stripped(text))
+        .expect("the tail reaches the current message");
+    assert_eq!(format!("{frozen}{}", tail.trim_end()), body);
+}

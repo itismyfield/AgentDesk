@@ -111,8 +111,9 @@ class InstanceDeclarationTests(unittest.TestCase):
         manifest = self.prepare(agy_profile(), agy_login=login)
         root = self.base / self.instance_id
         config, org = read_json(root / "config/agentdesk.yaml"), read_json(root / "config/org.yaml")
-        self.assertEqual((list(config["discord"]["bots"]), config["agents"][0]["channels"]["antigravity"]["runtime"]),
-                         (["antigravity"], "pipe"))
+        channel = config["agents"][0]["channels"]["antigravity"]
+        self.assertEqual((list(config["discord"]["bots"]), channel["runtime"], channel["model"]),
+                         (["antigravity"], "pipe", "gemini-3.8-flash-low"))
         self.assertEqual(org["provider_auth_profiles"],
                          {"test-antigravity": {"provider": "antigravity", "home": login["login_home"], "env": {}}})
         environment = child_environment(manifest, {})
@@ -132,6 +133,8 @@ class InstanceDeclarationTests(unittest.TestCase):
                 self.assertFalse((self.base / self.instance_id).exists())
         manifest = self.prepare(agy_profile(), agy_login=login)
         (Path(login["login_home"]) / ".gemini/config").mkdir(parents=True)
+        (Path(login["login_home"]) / ".gemini/config/mcp_config.json").write_text("")  # agy's own first-run file
+        child_environment(manifest, {})
         (Path(login["login_home"]) / ".gemini/config/mcp_config.json").write_text('{"mcpServers":{"memento":{}}}')
         with self.assertRaises(BlockedAgyLogin):
             child_environment(manifest, {})
