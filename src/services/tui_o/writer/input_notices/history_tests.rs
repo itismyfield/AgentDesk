@@ -1,4 +1,4 @@
-use super::{Projection, origin, project, record};
+use super::{Projection, ShadowProvider, origin, project, record};
 use crate::services::tui_input::human_frame::{self, history};
 
 #[test]
@@ -119,4 +119,50 @@ fn an_unrecorded_tagged_header_in_typed_input_keeps_its_notice() {
             .unwrap()
             .is_none()
     );
+}
+
+/// While the history cannot be read, a recorded attempt-tagged frame is held by both readers: the
+/// notice projection refuses yet keeps the raw row, and the observer opens no direct-input turn.
+#[test]
+fn an_unreadable_history_holds_a_recorded_tagged_frame_on_both_readers() {
+    use crate::services::tui_prompt_dedupe::{PromptObservation, observe_codex_prompt_in_turn_at};
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    let frame = human_frame::plain_inject("d", "733201", "ann", "abcdef12", "continue");
+    let owner = ("claude", "notice-test-pane", "abcdef12", "733201");
+    history::register(owner, transcript.path(), 0, &frame).unwrap();
+    let file = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    std::fs::write(&file, b"{broken").unwrap();
+    let row = record("tagged-native", &frame);
+    let mut projection = Projection::for_tests();
+    let projected = projection.project_record(
+        7332,
+        ShadowProvider::Claude,
+        &origin(&row).record.source,
+        &row,
+        Ok(origin(&row)),
+    );
+    assert!(
+        projected.is_err(),
+        "unreadable evidence cannot announce a recorded frame"
+    );
+    let kept = projection.take_evidence();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        (&kept[0].raw_record, kept[0].prompt.as_deref()),
+        (&row.line, Some(frame.as_str()))
+    );
+    let prompts = std::slice::from_ref(&frame);
+    let observed = history::observed_attempt("codex", "unreadable-pane", prompts, None);
+    assert!(matches!(observed, history::ObservedAttempt::Pending));
+    let seen = observe_codex_prompt_in_turn_at(
+        "unreadable-pane",
+        &frame,
+        None,
+        Some("t1"),
+        chrono::Utc::now(),
+    );
+    assert_ne!(seen, PromptObservation::PublishedSshDirect);
 }
