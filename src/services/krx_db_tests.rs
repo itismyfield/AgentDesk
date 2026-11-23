@@ -27,4 +27,3 @@ mod server_campaigns_stage_store;
 pub(crate) mod server_campaigns_storage;
 #[path = "../db/server_campaigns/verification_store_tests.rs"]
 mod server_campaigns_verification_store;
-mod session_transcripts_clear_fence_tests;

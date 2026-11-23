@@ -4010,8 +4010,7 @@ src/
 │   │   └── entry_transactions.rs
 │   ├── krx_db_tests/
 │   │   ├── dispatched_sessions_authority_tests.rs
-│   │   ├── dispatches_outbox_delivery_tests.rs
-│   │   └── session_transcripts_clear_fence_tests.rs
+│   │   └── dispatches_outbox_delivery_tests.rs
 │   ├── legacy_body_census/
 │   │   ├── cache.rs
 │   │   ├── collector.rs
