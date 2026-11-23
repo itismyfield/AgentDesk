@@ -26,7 +26,7 @@ pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> b
     intake_dispatch::replay_admission::dormant_start(channel).is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::replay_admission::test_activation as replay_test_activation;
 pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition, admit_queued_intake,

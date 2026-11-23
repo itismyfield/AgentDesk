@@ -250,3 +250,8 @@ mod tests {
         remove_provider_auth_profile_at(&path, "work", "codex").unwrap();
     }
 }
+
+#[cfg(test)]
+mod krx_discord_root_tests;
+#[cfg(all(test, unix))]
+mod krx_discord_root_unix_tests;

@@ -1,12 +1,14 @@
 #![cfg(unix)]
 
-use super::*;
 use crate::config::{Config, ProviderConfig, TestEnvVarGuard};
+use crate::services::discord::codex_absence::*;
 use crate::services::discord::save_actual_episode_for_tests;
+use crate::services::provider::CancelToken;
 use crate::services::provider_hosting::{TEST_CONFIG_LOCK, install_provider_hosting_config};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 const CHANNEL: u64 = 7_163_201;
@@ -19,7 +21,7 @@ async fn observe_turn(channel: u64, tmux: &str, token: &Arc<CancelToken>) -> Opt
             .await
             .map(|snapshot| snapshot.episode().clone())
     };
-    super::observe_turn(channel, tmux, token, episode).await
+    crate::services::discord::codex_absence::observe_turn(channel, tmux, token, episode).await
 }
 
 fn with_scope(run: impl FnOnce(&std::path::Path)) {
