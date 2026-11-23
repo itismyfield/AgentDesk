@@ -146,7 +146,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
 | `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/campaign_execution/landing_prepare.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
 | `PNPM_HOME` | `src/services/platform/binary_resolver.rs` |  |
-| `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
+| `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/qwen.rs` |  |
