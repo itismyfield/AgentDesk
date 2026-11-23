@@ -70,7 +70,7 @@ pub(super) fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(super) fn coordinator() -> &'static Coordinator {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(scoped) = test_store::SCOPED.try_with(|scoped| *scoped) {
         return scoped;
     }

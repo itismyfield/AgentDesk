@@ -776,7 +776,7 @@ pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
 
 /// Moves the pane's channel mapping `by` into the past while its runtime binding stays fresh.

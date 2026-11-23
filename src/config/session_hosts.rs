@@ -332,7 +332,7 @@ pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
 
 /// The boot section, or `None` before install, which configures nothing.
 pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return read(Some(&forced));
     }
@@ -340,7 +340,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
 }
 
 pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FORCED.with(|forced| forced.borrow().is_some()) {
         return FORCED_MIGRATION.with(|forced| read(forced.borrow().as_ref()));
     }
@@ -457,7 +457,7 @@ pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ForcedSessionHosts {
     pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
         FORCED.with(|forced| {
@@ -471,7 +471,7 @@ impl ForcedSessionHosts {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedSessionHosts {
     fn drop(&mut self) {
         FORCED.with(|forced| *forced.borrow_mut() = self.0.take());

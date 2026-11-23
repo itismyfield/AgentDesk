@@ -82,7 +82,8 @@ test module:
   * CFG. The lexical cfg classifier excludes `#[cfg(test)]` and cfg expressions
     that require `test` (including nested `all(test, ...)`) from production,
     while `cfg(any(test, X))` and `cfg(not(test))` remain production because
-    they have a non-test configuration. Other target/feature predicates are
+    they have a non-test configuration. `X = feature = "test-support"` counts
+    as `test`: only test builds enable that feature. Other target/feature predicates are
     not compiler-evaluated, so a target-gated call counts on every target.
   * PROSE. Comments (`//`, `/* */`) and string literals (including raw strings)
     are BLANKED before matching, so the symbol written in a doc comment or a
@@ -124,7 +125,7 @@ The skipped census equals basename count plus resolver pin count. Symlink checks
 are lexical rather than atomic against post-enumeration replacements; CI assumes
 a static checkout. In remaining files, only cfg expressions proven by the lexical
 boolean classifier to require `test` are stripped; `cfg(any(test, X))` is
-intentionally scanned as production.
+intentionally scanned as production unless X is `feature = "test-support"`.
 
 RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
 does not guarantee at least seven measured forms: `#[path]` separated from
@@ -699,8 +700,8 @@ LIMITS = (
     "calls through values are not resolved, but the bare-reference subgate rejects "
     "a named capture; name-constructing macros, type-alias receiver UFCS, and "
     "associated-projection receiver calls remain unseen; the cfg "
-    "classifier treats cfg(test)/test-required all(...) as test-only and "
-    "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
+    "classifier treats cfg(test)/test-required all(...)/any(test, test-support feature) as "
+    "test-only and other cfg(any(test, X))/cfg(not(test)) as production without compiler target "
     "evaluation; non-.rs regular files fail closed before classification; whole-file "
     "skips use the basename rule plus resolver pin, reject production basename module mounts and src symlinks, and check "
     "the skipped census; symlink rejection is non-atomic outside a static CI "

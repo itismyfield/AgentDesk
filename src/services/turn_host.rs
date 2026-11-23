@@ -318,7 +318,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static FORCED_CODEX_SWITCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -329,7 +329,7 @@ pub(crate) fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
     match provider {
         ProviderKind::Claude => herdr_turn_switched_on(),
         ProviderKind::Codex => {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(forced) = FORCED_CODEX_SWITCH.with(std::cell::Cell::get) {
                 return forced;
             }
@@ -344,7 +344,7 @@ pub(crate) fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
 
 /// Whether a configured channel's Claude turn runs on Herdr; unset or false keeps it refused.
 pub(crate) fn herdr_turn_switched_on() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_SWITCH.with(std::cell::Cell::get) {
         return forced;
     }
@@ -355,15 +355,15 @@ pub(crate) fn herdr_turn_switched_on() -> bool {
 }
 
 /// Stands in for the live switch on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedSwitch(Option<bool>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
     ForcedSwitch(FORCED_SWITCH.with(|cell| cell.replace(on)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedSwitch {
     fn drop(&mut self) {
         FORCED_SWITCH.with(|cell| cell.set(self.0));
@@ -371,15 +371,15 @@ impl Drop for ForcedSwitch {
 }
 
 /// Stands in for the live Codex switch on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedCodexSwitch(Option<bool>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
     ForcedCodexSwitch(FORCED_CODEX_SWITCH.with(|cell| cell.replace(on)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedCodexSwitch {
     fn drop(&mut self) {
         FORCED_CODEX_SWITCH.with(|cell| cell.set(self.0));

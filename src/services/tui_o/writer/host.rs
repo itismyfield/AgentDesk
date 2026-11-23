@@ -933,7 +933,7 @@ async fn publish(
 
 /// A gateway stand-in for tests that drive the real host: every POST is recorded with its
 /// channel, and each channel binds the one source it was given.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "host_io_tests.rs"]
 pub(crate) mod test_io;
 
