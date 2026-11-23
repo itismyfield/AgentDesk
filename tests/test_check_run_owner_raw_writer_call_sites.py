@@ -94,6 +94,15 @@ class DetectionTests(FixtureTree):
         hits = self.hits(files, pinned=frozenset({"src/db/fixture.rs"}))
         self.assertEqual(guard.violations(hits, {}), [])
 
+    def test_test_support_gate_split_from_not_test_still_scans_the_writer(self):
+        F = 'any(test, feature = "test-support")'
+        writer = rust_sql("INSERT INTO task_dispatches (id) VALUES ($1)")
+        for body in (f"#[cfg({F})]\n#[cfg(not(test))]\n{writer}", f"#[cfg(not(test))]\n#[cfg({F})]\n{writer}",
+                     f"#[cfg({F})]\nmod m {{\n#[cfg(not(test))]\n{writer}}}\n"):
+            with self.subTest(body=body):
+                self.assertEqual(list(self.hits({PROD: body})), [(PROD, guard.INSERT_DISPATCH)])
+        self.assertEqual(self.hits({PROD: f"#[cfg({F})]\n{writer}"}), {})
+
     def test_exception_count_mismatch_is_red(self):
         """T9e: one more entry link than pinned fails even inside a pinned file."""
         sql = "UPDATE auto_queue_entries SET dispatch_id = $1 WHERE id = $2"

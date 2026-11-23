@@ -453,7 +453,7 @@ impl CodexSourceMode {
 
 /// Validated once at startup; no active nonce or new launch reparses mutable env.
 pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(mode) = SOURCE_MODE_TEST.with(|mode| mode.get()) {
         return mode;
     }

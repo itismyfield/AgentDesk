@@ -32,6 +32,10 @@ use crate::services::tui_prompt_dedupe::{
     reset_state_for_tests, runtime_binding_for_tmux_session,
 };
 
+/// How long a wait for something that must happen polls before failing: a hang detector, not a
+/// bound of the contract, so a slow runner only makes a broken build fail later.
+const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One receiver over a scratch binding log, with the dedupe state held for the test.
 pub(crate) struct Ingress {
     _root: tempfile::TempDir,
@@ -561,9 +565,7 @@ fn a_poll_over_a_front_that_cannot_be_logged_returns() {
         retry_deferred_claude_adoptions();
         let _ = done_tx.send(());
     });
-    done_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .expect("poll returned");
+    done_rx.recv_timeout(LIVENESS).expect("poll returned");
     assert_eq!(
         deferred_adoption_count(),
         1,

@@ -10,9 +10,12 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
         && super::super::super::turn_finalizer::native_prepare::enabled()
     {
         use super::super::super::turn_finalizer::native_prepare::BootInputs;
-        let prepared = crate::services::discord::runtime_store::runtime_root()
-            .ok_or_else(|| "native boot root unavailable".to_string())
-            .and_then(|root| BootInputs::prepare(&root, shared.restart.current_generation));
+        let prepared = match crate::services::discord::runtime_store::runtime_root() {
+            Some(root) => {
+                BootInputs::prepare_off_worker(root, shared.restart.current_generation).await
+            }
+            None => Err("native boot root unavailable".to_string()),
+        };
         let plan = match prepared {
             Ok(plan) => plan,
             Err(error) => {

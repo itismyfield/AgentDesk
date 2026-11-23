@@ -19,6 +19,8 @@ use crate::services::claude_tui::memento_feedback;
 mod ordered_queue;
 #[cfg(all(test, target_os = "linux"))]
 mod reaping_tests;
+#[cfg(test)]
+mod relay_probe_tests;
 mod response_window;
 mod too_early;
 mod transport_retry;
@@ -483,6 +485,22 @@ pub fn relay_hook_event(
     .map(|_| ())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test worker thread whose transport budget is not under test relays with this one.
+    static WORKER_RELAY_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The queue worker's transport budget for an observation it relays.
+fn worker_relay_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = WORKER_RELAY_TIMEOUT_FOR_TESTS.with(std::cell::Cell::get) {
+        return timeout;
+    }
+    RELAY_TIMEOUT
+}
+
 #[allow(clippy::too_many_arguments)]
 fn relay_hook_event_with_request(
     endpoint: &str,
@@ -502,7 +520,7 @@ fn relay_hook_event_with_request(
         event,
         session_id,
         payload,
-        RELAY_TIMEOUT,
+        worker_relay_timeout(),
         Some((
             request_id,
             published_at,
@@ -873,6 +891,10 @@ mod tests {
     #[cfg(unix)]
     use std::time::Instant;
 
+    /// How long a wait for something that must happen polls before failing: a hang detector, not a
+    /// bound of the contract, so a slow runner only makes a broken build fail later.
+    const LIVENESS: Duration = Duration::from_secs(10);
+
     #[derive(Debug, Default)]
     struct ObservableOutputState {
         bytes: Vec<u8>,
@@ -928,22 +950,11 @@ mod tests {
         );
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let receiver = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept hook relay request");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .expect("set hook receiver read timeout");
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let read = socket.read(&mut buffer).expect("read hook relay request");
-                assert!(read > 0, "hook relay request ended before its body");
-                request.extend_from_slice(&buffer[..read]);
-                if let Some((body_start, body_len)) = http_request_body_bounds(&request)
-                    && request.len() >= body_start + body_len
-                {
-                    break;
-                }
-            }
+            let (mut socket, request) = relay_probe_tests::accept_relay_request(
+                &listener,
+                LIVENESS,
+                "hook relay request ended before its body",
+            );
             request_tx
                 .send(request)
                 .expect("publish captured hook relay request");
@@ -976,24 +987,11 @@ mod tests {
         );
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let receiver = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept non-wait relay request");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .expect("set non-wait receiver read timeout");
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let read = socket
-                    .read(&mut buffer)
-                    .expect("read non-wait relay request");
-                assert!(read > 0, "non-wait relay ended before its body");
-                request.extend_from_slice(&buffer[..read]);
-                if let Some((body_start, body_len)) = http_request_body_bounds(&request)
-                    && request.len() >= body_start + body_len
-                {
-                    break;
-                }
-            }
+            let (_socket, request) = relay_probe_tests::accept_relay_request(
+                &listener,
+                LIVENESS,
+                "non-wait relay ended before its body",
+            );
             request_tx.send(request).expect("publish non-wait request");
             let hanging_since = Instant::now();
             std::thread::sleep(RELAY_TIMEOUT + Duration::from_millis(250));
@@ -1023,30 +1021,17 @@ mod tests {
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let receiver = std::thread::spawn(move || {
             for index in 0..expected {
-                let (mut socket, _) = listener.accept().expect("accept ordered relay request");
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .expect("set ordered receiver read timeout");
-                let mut request = Vec::new();
-                let mut buffer = [0u8; 4096];
-                loop {
-                    let read = socket
-                        .read(&mut buffer)
-                        .expect("read ordered relay request");
-                    assert!(read > 0, "ordered relay ended before its body");
-                    request.extend_from_slice(&buffer[..read]);
-                    if let Some((body_start, body_len)) = http_request_body_bounds(&request)
-                        && request.len() >= body_start + body_len
-                    {
-                        break;
-                    }
-                }
+                let (mut socket, request) = relay_probe_tests::accept_relay_request(
+                    &listener,
+                    LIVENESS,
+                    "ordered relay ended before its body",
+                );
                 request_tx
                     .send(request)
                     .expect("publish ordered relay request");
                 if index == 0 {
                     release_rx
-                        .recv_timeout(Duration::from_secs(2))
+                        .recv_timeout(LIVENESS)
                         .expect("release first ordered relay response");
                 }
                 let body = "{}";
@@ -1403,7 +1388,7 @@ mod tests {
         .unwrap();
 
         let request = request_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(LIVENESS)
             .expect("capture UserPromptSubmit request");
         receiver.join().expect("hook receiver exits cleanly");
         let request_head = std::str::from_utf8(&request).unwrap();
@@ -1626,7 +1611,7 @@ mod tests {
         )
         .unwrap();
         let first = request_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(LIVENESS)
             .expect("search request reaches the ordered helper first");
         let (first_event, first_payload) = request_event_and_payload(&first);
         assert_eq!(first_event, "PostToolUse");
@@ -1648,7 +1633,7 @@ mod tests {
         .unwrap();
         let stop_endpoint = endpoint.clone();
         // Stop 응답 창에는 시험이 일부러 붙잡는 search 보류가 들어가므로 운영 상한(750ms) 대신
-        // 아래 단계별 대기 합(ingress 500ms + 보류 100ms + drain 2s×2)보다 긴 창을 준다.
+        // 아래 단계별 대기 합(ingress·drain×2 각 LIVENESS + 보류 100ms)보다 긴 창을 준다.
         let stop_relay = std::thread::spawn(move || {
             handoff_ordered_hook_event_response_with_timeout(
                 &stop_endpoint,
@@ -1656,7 +1641,7 @@ mod tests {
                 "Stop",
                 session_id,
                 serde_json::json!({}),
-                Duration::from_secs(5),
+                LIVENESS * 4,
             )
         });
         let ingress_dir = relay_queue_dir("claude", session_id)
@@ -1676,7 +1661,7 @@ mod tests {
                 })
                 .count()
         };
-        let ingress_deadline = Instant::now() + Duration::from_millis(500);
+        let ingress_deadline = Instant::now() + LIVENESS;
         while ingress_count() != 2 && Instant::now() < ingress_deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -1695,7 +1680,7 @@ mod tests {
         for _ in 0..2 {
             observed.push(request_event_and_payload(
                 &request_rx
-                    .recv_timeout(Duration::from_secs(2))
+                    .recv_timeout(LIVENESS)
                     .expect("ordered helper drains the next producer"),
             ));
         }
@@ -1710,7 +1695,7 @@ mod tests {
         .unwrap();
         observed.push(request_event_and_payload(
             &request_rx
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(LIVENESS)
                 .expect("SessionStart follows the completed Stop producer"),
         ));
         receiver.join().unwrap();
@@ -1766,7 +1751,7 @@ mod tests {
         assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PostToolUse");
 
         let request = request_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(LIVENESS)
             .expect("surviving worker delivers non-wait event");
         assert!(
             std::str::from_utf8(&request)

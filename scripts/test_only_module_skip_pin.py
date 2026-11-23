@@ -102,10 +102,11 @@ def validate_basename_mounts(
 ) -> None:
     """Reject lexical production module declarations targeting basename skips."""
     targets = {path.resolve() for path in basename_skips}
+    declarations = _composed_declarations(all_files, read_text_fn)
     for parent in all_files:
         if parent in basename_skips or parent in resolver_skips:
             continue
-        for declaration in _INVENTORY._module_file_declarations(parent, read_text_fn(parent)):
+        for declaration in declarations[parent.resolve()]:
             if declaration.requires_test:
                 continue
             for child in declaration.child_paths:
@@ -115,6 +116,28 @@ def validate_basename_mounts(
                         f"{parent.as_posix()} -> {child.as_posix()}. "
                         "Require a test-only cfg on the module or use a production basename."
                     )
+
+
+def _composed_declarations(all_files: Iterable[Path], read_text_fn: Callable[[Path], str]) -> dict:
+    by_parent = {
+        path.resolve(): _INVENTORY._module_file_declarations(path, read_text_fn(path)) for path in all_files
+    }
+    return _INVENTORY.demote_uncomposed_feature_mounts(by_parent, read_text_fn)
+
+
+def reject_feature_gates_under_negated_mounts(
+    all_files: Iterable[Path], read_text_fn: Callable[[Path], str]
+) -> None:
+    """A test-support gate inside a file mounted under e.g. not(test) compiles only in feature builds."""
+    found = _INVENTORY.rust_cfg_feature_gates_under_negated_mounts(
+        _composed_declarations(all_files, read_text_fn), read_text_fn
+    )
+    if found:
+        raise RuntimeError(
+            "FAIL: test-support gate inside a file whose mount cfg leaves it only in "
+            "feature-linked builds: " + "; ".join(found) + ". Gate the item on cfg(test) "
+            "or drop the negated mount cfg."
+        )
 
 
 def skip_pin_drift(
@@ -251,6 +274,7 @@ def validated_scan_files(
     validate_basename_mounts(
         all_files, basename_skips, resolver_skips, read_text_fn=read_text
     )
+    reject_feature_gates_under_negated_mounts(all_files, read_text)
     whole_skips = frozenset(basename_skips | resolver_skips)
     lexical_skips = {
         path.relative_to(root).as_posix() for path in whole_skips

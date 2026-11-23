@@ -209,9 +209,16 @@ impl NativePrepared {
                 if slot.cancel_token.is_some() {
                     return Err("native control row authority changed".into());
                 }
+                if super::record_native_terminal(shared, &row, &outcome.disposition)
+                    .await
+                    .is_none()
+                {
+                    return Ok(None);
+                }
                 let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                     &ProviderKind::Claude,
                     &row,
+                    false,
                 );
                 if !matches!(
                     (clear, detail.reason),
@@ -227,7 +234,8 @@ impl NativePrepared {
         let record = history.native_boot_record(&self.namespace, &ticket)?;
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native control root unavailable")?;
-        crate::services::discord::inflight::persist_native_boot_record(&root, &record)?;
+        crate::services::discord::inflight::persist_native_boot_record_off_worker(root, record)
+            .await?;
         Ok(Some(wake))
     }
 }
