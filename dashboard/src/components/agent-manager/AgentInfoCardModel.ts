@@ -1,3 +1,4 @@
+import type { SkillRankingByAgentRow } from "../../api";
 import type { CronJob, DiscordBinding } from "../../api/client";
 import type { DispatchedSession } from "../../types";
 
@@ -7,10 +8,19 @@ const TURN_STATUSES = new Set(["turn_active", "working"]);
 
 export const isTurnSession = (session: DispatchedSession) => TURN_STATUSES.has(session.status);
 
-/** The agent's live sessions and how many finished ones were left out. */
-export function splitLinkedSessions(sessions: DispatchedSession[]): { live: DispatchedSession[]; closed: number } {
+/** The agent's live sessions, and the finished ones (listed only on request) with their count. */
+export function splitLinkedSessions(sessions: DispatchedSession[]): { live: DispatchedSession[]; finished: DispatchedSession[]; closed: number } {
   const live = sessions.filter((session) => LIVE_SESSION_STATUSES.has(session.status));
-  return { live, closed: sessions.length - live.length };
+  const finished = sessions.filter((session) => !LIVE_SESSION_STATUSES.has(session.status));
+  return { live, finished, closed: finished.length };
+}
+
+/** The agent's 30-day skill calls, most first. The server keys rows by agent id (`agents.id`), despite the field name. */
+export function agentSkillCalls(rows: SkillRankingByAgentRow[], agentId: string) {
+  return rows
+    .filter((row) => row.agent_role_id === agentId)
+    .sort((left, right) => right.calls - left.calls)
+    .map((row) => ({ id: row.skill_name, label: row.skill_name, value: row.calls }));
 }
 
 export function formatSchedule(schedule: CronJob["schedule"], isKo: boolean): string {

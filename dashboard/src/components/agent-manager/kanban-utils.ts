@@ -232,7 +232,7 @@ export function priorityLabel(priority: KanbanCardPriority, tr: (ko: string, en:
   }
 }
 
-const PG_TIMESTAMP = /^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)(\.\d{1,3})?\d*([+-]\d\d)(?::?(\d\d))?$/;
+const PG_TIMESTAMP = /^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)(?:(\.\d{1,3})\d*)?([+-]\d\d)(?::?(\d\d))?$/;
 
 /** Postgres `timestamptz::text` ("2026-11-23 10:00:00.123456+00") in the ISO form every engine parses: Safari
  * rejects the space, the bare-hour offset and more than three fraction digits. Other strings pass unchanged. */

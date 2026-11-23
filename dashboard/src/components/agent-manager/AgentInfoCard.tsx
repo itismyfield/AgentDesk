@@ -7,8 +7,10 @@ import { IconButton } from "../../kit/free/icon-button-clean";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import type { HomeAgentState } from "../home/homeModel";
 import type { Translator } from "./types";
+import type { AttentionReason } from "./agentsAttention";
 import { AgentOverlay } from "./AgentOverlay";
 import { AgentInfoCardContent } from "./AgentInfoCardContent";
+import type { AgentDetailShared } from "./useAgentDetailData";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -22,6 +24,9 @@ interface AgentInfoCardProps {
   /** Label of the phone back button; the agents page says "back to list". */
   backLabel?: string;
   actions?: ReactNode;
+  /** The page's shared reads and the agent's attention reasons, when the agents page opens it. */
+  shared?: AgentDetailShared;
+  reasons?: AttentionReason[];
 }
 
 /** Agent detail as an overlay: a centred card from 900px, a full-screen page with a back button below it. */
@@ -36,6 +41,8 @@ export default function AgentInfoCard({
   onAgentUpdated,
   backLabel,
   actions,
+  shared,
+  reasons,
 }: AgentInfoCardProps) {
   const isMobile = useIsMobile();
   const titleId = useId();
@@ -66,6 +73,7 @@ export default function AgentInfoCard({
       }
     >
       <AgentInfoCardContent
+        key={agent.id}
         agent={agent}
         state={state}
         isKo={isKo}
@@ -75,6 +83,8 @@ export default function AgentInfoCard({
         onAgentUpdated={onAgentUpdated}
         actions={actions}
         titleId={titleId}
+        shared={shared}
+        reasons={reasons}
       />
     </AgentOverlay>
   );

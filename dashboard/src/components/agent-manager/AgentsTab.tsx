@@ -1,7 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useId, useMemo, useRef, type KeyboardEvent } from "react";
 import { Pencil, Plus, Search, UsersRound, X } from "lucide-react";
 import { formatElapsedCompact } from "../../agent-insights";
-import { getDiscordBindings } from "../../api";
 import type { Agent, Department, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { isTestAgent } from "../../lib/agentHelpers";
@@ -25,6 +24,7 @@ import { AgentsSummaryPane } from "./AgentsSummaryPane";
 import { NO_DEPARTMENT, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
+import { useAgentDetailShared } from "./useAgentDetailData";
 import { AgentManagerStyles } from "./AgentManagerStyles";
 
 interface AgentsTabProps {
@@ -60,19 +60,6 @@ interface AgentsTabProps {
 }
 
 const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
-
-/** Agents with a Discord route, read once for the settings dot; null until read (and after a failed read). */
-function useBoundAgentIds(): Set<string> | null {
-  const [bound, setBound] = useState<Set<string> | null>(null);
-  useEffect(() => {
-    let active = true;
-    getDiscordBindings({ suppressErrorToast: true })
-      .then((bindings) => { if (active) setBound(new Set(bindings.map((binding) => binding.agentId))); })
-      .catch(() => {});
-    return () => { active = false; };
-  }, []);
-  return bound;
-}
 
 /** The agents tab: what needs a look, then every agent with home's states, and on desktop the detail (or a summary
  * while none is picked) beside the list. Phones open the detail full screen. */
@@ -115,7 +102,12 @@ export default function AgentsTab({
   const listedAgents = useMemo(() => listed.map((entry) => entry.agent), [listed]);
   const testAgentCount = entries.filter((entry) => isTestAgent(entry.agent)).length;
   const attention = useAgentsAttention(listedAgents, tr, isKo);
-  const bound = useBoundAgentIds();
+  // Routes, accounts and skill calls are read once here and handed to every detail. A new, removed or re-routed agent
+  // reads the routes again, so a fresh agent never shows "no route".
+  const routesKey = useMemo(() => entries.filter((entry) => !isStandIn(entry.agent)).map(({ agent }) =>
+    [agent.id, agent.discord_channel_id, agent.discord_channel_alt, agent.discord_channel_cc, agent.discord_channel_cdx].join(":")).sort().join("|"), [entries]);
+  const shared = useAgentDetailShared(true, selectedAgentId !== null, routesKey);
+  const bound = useMemo(() => (shared.bindings ? new Set(shared.bindings.map((binding) => binding.agentId)) : null), [shared.bindings]);
   // Phones show no tool line, so they read no turns either (as home).
   const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
   const departmentById = useMemo(() => new Map(departments.map((department) => [department.id, department])), [departments]);
@@ -134,6 +126,7 @@ export default function AgentsTab({
 
   const selectedEntry = entries.find((entry) => entry.agent.id === selectedAgentId);
   const selected = selectedEntry?.agent ?? null;
+  const reasons = attention.entries.find((entry) => entry.agent.id === selectedAgentId)?.reasons ?? [];
   const selectedDept = deptTab !== "all" ? departmentById.get(deptTab) : undefined;
   const filtersActive = search.trim() !== "" || statusFilter !== "all" || deptTab !== "all";
   const unassigned = listed.filter((entry) => !hasDepartment(entry.agent, known)).length;
@@ -379,6 +372,9 @@ export default function AgentsTab({
                 departments={departments}
                 onAgentUpdated={onAgentUpdated}
                 actions={detailActions(selected, true)}
+                shared={shared}
+                turns={turns}
+                reasons={reasons}
               />
             ) : (
               <AgentsSummaryPane
@@ -410,6 +406,8 @@ export default function AgentsTab({
           onAgentUpdated={onAgentUpdated}
           backLabel={tr("목록으로", "Back to list")}
           actions={detailActions(selected, false)}
+          shared={shared}
+          reasons={reasons}
         />
       ) : null}
     </div>

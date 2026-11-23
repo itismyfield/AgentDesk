@@ -32,8 +32,7 @@ interface AgentManagerViewProps {
   /** Sessions not linked to an agent, offered for attaching. */
   sessions?: DispatchedSession[];
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
-  /** The shell's last tab; the page follows `?tab=` instead, so links and the back button agree with the screen. */
-  activeTab?: AgentManagerTab;
+  /** Keeps the shell's tab in step; the page itself follows `?tab=`, so links and the back button agree with it. */
   onTabChange?: (tab: AgentManagerTab) => void;
   autoOpenCreate?: boolean;
   onAutoOpenConsumed?: () => void;

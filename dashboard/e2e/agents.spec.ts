@@ -72,8 +72,8 @@ const SKILL_RANKING = {
     { skill_name: "relay-audit", skill_desc_ko: "Relay audit", calls: 2, last_used_at: NOW - 7_200_000 },
   ],
   byAgent: [
-    { agent_role_id: "adk-dashboard", agent_name: "Ada Dashboard", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 4, last_used_at: NOW - 3_600_000 },
-    { agent_role_id: "project-agentdesk", agent_name: "Luna Ops", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 2, last_used_at: NOW - 3_600_000 },
+    { agent_role_id: "agent-ada", agent_name: "Ada Dashboard", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 4, last_used_at: NOW - 3_600_000 },
+    { agent_role_id: "agent-luna", agent_name: "Luna Ops", skill_name: "agents-hub", skill_desc_ko: "Agents Hub", calls: 2, last_used_at: NOW - 3_600_000 },
   ],
 };
 
@@ -139,6 +139,7 @@ async function mockShell(page: Page, theme: "dark" | "light" = "dark") {
   await page.route(/\/api\/agents\/[^/]+\/skills$/, (route) => route.fulfill({ json: { skills: [{ name: "agents-hub", description: "Agents hub" }], sharedSkills: [], totalCount: 1 } }));
   await page.route(/\/api\/agents\/[^/]+\/dispatched-sessions$/, (route) => route.fulfill({ json: { sessions: [] } }));
   await page.route(/\/api\/agents\/[^/]+\/timeline\?limit=\d+$/, (route) => route.fulfill({ json: { events: [] } }));
+  await page.route(/\/api\/agents\/[^/]+\/transcripts\?limit=\d+$/, (route) => route.fulfill({ json: { transcripts: [] } }));
   await page.route(/\/api\/agents\/[^/]+\/execution-node$/, (route) => route.fulfill({ json: { default_node_id: null, routing_enforced: true } }));
   await page.route(/\/api\/discord\/bindings$/, (route) => route.fulfill({ json: { bindings: [] } }));
   await page.route(/\/api\/provider-auth-profiles$/, (route) => route.fulfill({ json: { providers: [], agent_profile_overrides: [] } }));
@@ -183,8 +184,9 @@ async function smallInputFonts(scope: Locator) {
   );
 }
 
-async function openAgents(page: Page, theme: "dark" | "light" = "dark") {
+async function openAgents(page: Page, theme: "dark" | "light" = "dark", extra?: (page: Page) => Promise<void>) {
   await mockShell(page, theme);
+  await extra?.(page);
   await page.goto("/agents");
   await expect(page.getByTestId("agents-tab")).toBeVisible({ timeout: 15000 });
   await expect(page.getByTestId("agents-row-agent-ada")).toBeVisible();
@@ -317,6 +319,28 @@ test.describe("Agents tab", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("detail sections keep their order, fold on phones and read folded ones only when opened", async ({ page }, testInfo) => {
+    const isMobile = testInfo.project.name === "mobile";
+    await openAgents(page);
+    const reads: string[] = [];
+    page.on("request", (request) => reads.push(new URL(request.url()).pathname));
+    const lazy = () => reads.filter((path) => /\/(cron|timeline|transcripts)$|\/audit-logs$/.test(path)).sort();
+    await page.getByTestId("agents-row-agent-ada").click();
+    const detail = isMobile ? page.getByRole("dialog", { name: /ada — 에이전트 상세/ }) : page.getByRole("region", { name: /ada — 에이전트 상세/ });
+    await expect(detail.getByTestId("agent-detail-now")).toBeVisible();
+    expect(await detail.locator('section[data-testid^="agent-detail-"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid")?.slice(13))))
+      .toEqual(["now", "run", "connections", "turns", "skills", "activity", "cron", "source"]);
+    const folds = detail.locator("section h3 > button[aria-expanded]");
+    await expect(folds).toHaveCount(isMobile ? 7 : 3);
+    if (isMobile) expect(Math.min(...await folds.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height)))).toBeGreaterThanOrEqual(48);
+    expect(lazy()).toEqual([]);
+    await detail.getByRole("button", { name: /^최근 턴/ }).click();
+    await expect(detail.getByTestId("turn-transcript-panel")).toBeVisible();
+    await detail.getByRole("button", { name: /^크론/ }).click();
+    await detail.getByRole("button", { name: /^활동/ }).click();
+    await expect.poll(lazy).toEqual(["/api/agents/agent-ada/cron", "/api/agents/agent-ada/timeline", "/api/agents/agent-ada/transcripts", "/api/audit-logs"]);
+  });
+
   test("create window and edit form open as sheets on phones", async ({ page }, testInfo) => {
     await openAgents(page);
     const isMobile = testInfo.project.name === "mobile";
@@ -364,6 +388,8 @@ test.describe("Shared agent detail overlay", () => {
     const overlay = page.getByRole("dialog", { name: /ada — 에이전트 상세/ });
     await expect(overlay).toBeVisible();
     await expect(overlay.getByRole("heading", { name: "ada" })).toBeVisible();
+    // Phones fold every section but "now".
+    if (isMobile) await overlay.getByRole("button", { name: /^실행 설정/ }).click();
     await expect(overlay.getByLabel(/우선 실행 장비/)).toBeVisible();
     const box = (await overlay.boundingBox())!;
     if (isMobile) {
@@ -502,7 +528,13 @@ test.describe("Agents tab on a touch phone", () => {
 
   test("keeps 44px targets, 16px inputs and no horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Phone-only check");
-    await openAgents(page);
+    // Ada has a route, a live thread with app links and more finished sessions than one page.
+    await openAgents(page, "dark", async (page) => {
+      const thread = (id: string, status: string) => ({ id, session_key: `codex/x/adk-cdx-t${id}`, status, provider: "codex", thread_channel_id: id, thread_deeplink_url: `discord://discord.com/channels/1400000000000000000/${id}` });
+      await page.route(/\/api\/agents\/agent-ada\/dispatched-sessions$/, (route) => route.fulfill({ json: { sessions: [thread("1490145076658307001", "turn_active"), ...Array.from({ length: 21 }, (_, index) => thread(`14901450766583072${String(index).padStart(2, "0")}`, "aborted"))] } }));
+      await page.route(/\/api\/discord\/bindings$/, (route) => route.fulfill({ json: { bindings: [{ agentId: "agent-ada", channelId: "1490145076658307100", source: "primary" }] } }));
+      await page.route(/\/api\/discord\/channels\/\d+$/, (route) => route.fulfill({ json: { id: route.request().url().split("/").pop(), name: "adk-cc", guild_id: "1400000000000000000", parent_id: null } }));
+    });
     await expectNoHorizontalOverflow(page);
     const tab = page.getByTestId("agents-tab");
     expect(await smallTargets(tab)).toEqual([]);
@@ -514,10 +546,21 @@ test.describe("Agents tab on a touch phone", () => {
     await expectNoHorizontalOverflow(page);
     expect(await smallTargets(drawer)).toEqual([]);
     expect(await smallInputFonts(drawer)).toEqual([]);
+    // Every section open, finished sessions included: links, app chips and buttons stay 44px.
+    const folded = drawer.locator('section h3 > button[aria-expanded="false"]');
+    while (await folded.count()) await folded.first().tap();
+    await drawer.getByRole("button", { name: "끝난 세션 21개" }).tap();
+    await expect(drawer.getByTestId("agent-detail-finished").locator("li")).toHaveCount(20);
+    await expect(drawer.getByRole("link", { name: "앱" }).first()).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(drawer)).toEqual([]);
+    expect(await smallInputFonts(drawer)).toEqual([]);
 
     await drawer.getByRole("button", { name: "편집" }).tap();
     const form = page.getByRole("dialog", { name: "에이전트 수정" });
     await expect(form).toBeVisible();
+    // Measure once the sheet and its fields stop moving.
+    await form.evaluate((node) => Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished)));
     expect(await smallTargets(form)).toEqual([]);
     expect(await smallInputFonts(form)).toEqual([]);
 

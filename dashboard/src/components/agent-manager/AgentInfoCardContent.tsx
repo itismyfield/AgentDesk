@@ -1,28 +1,37 @@
-import { useEffect, useState, type ReactNode } from "react";
-import {
-  getAgentWarnings,
-  getAgentWorkElapsedMs,
-  getAgentWorkSummary,
-} from "../../agent-insights";
-import type { Agent, Department, DispatchedSession } from "../../types";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { getAgentWarnings, getAgentWorkSummary } from "../../agent-insights";
+import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import AgentPersona from "../AgentPersona";
 import * as api from "../../api";
-import type { CronJob, AgentSkill, DiscordBinding } from "../../api/client";
-import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
-import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
+import { catalogLabel, useProviderCatalog } from "../../api/providers";
+import { useKanban } from "../../contexts/KanbanContext";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
-import type { HomeAgentState } from "../home/homeModel";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
+import { buildTodoItems, monitorView, type HomeAgentState, type HomeTurn } from "../home/homeModel";
+import { useAgentTurns } from "../home/useHomeData";
 import type { Translator } from "./types";
-import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
-import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
-import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
+import { buildAttention, type AttentionReason } from "./agentsAttention";
+import { AgentNowSection, AgentRunSettingsSection } from "./AgentInfoProfileSections";
+import { AgentConnectionSection, AgentSourceSection } from "./AgentInfoRoutingSections";
+import { AgentActivitySection, AgentCronSection, AgentSkillsSection } from "./AgentInfoOperationsSections";
+import { AgentInfoTurnsSection } from "./AgentInfoTurnsSection";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
-import { inferBindingSource, isTurnSession, splitLinkedSessions } from "./AgentInfoCardModel";
+import type { DetailFold } from "./AgentInfoCardSections";
+import { agentSkillCalls, inferBindingSource, isTurnSession } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
-import { AgentStatusBadge, agentSecondaryLine } from "./AgentRow";
+import { agentSecondaryLine } from "./AgentRow";
+import { useAgentDetailData, useAgentDetailShared, useDiscordChannels, useReadWhenOpen, type AgentDetailShared } from "./useAgentDetailData";
+
+type FoldKey = "run" | "connections" | "turns" | "skills" | "activity" | "cron" | "source";
+// These fold on every screen, so their reads wait until someone opens them; phones fold everything but "now".
+const ALWAYS_FOLDED = new Set<FoldKey>(["turns", "activity", "cron"]);
+
+const readCron = (agentId: string) => api.getAgentCron(agentId);
+const readTimeline = (agentId: string) => api.getAgentTimeline(agentId, 30);
+const readAudit = (agentId: string) => api.getAuditLogs(20, { agentId });
 
 interface AgentInfoCardContentProps {
   agent: Agent;
@@ -36,9 +45,16 @@ interface AgentInfoCardContentProps {
   /** Buttons on the right of the title row (edit, menu, close). */
   actions?: ReactNode;
   titleId?: string;
+  /** Reads shared by every detail on the page; without them (home, ⌘K) the detail reads its own. */
+  shared?: AgentDetailShared;
+  /** Live turns the caller already polls; without them a desktop detail polls this agent while it works. */
+  turns?: Map<string, HomeTurn>;
+  /** What waits on the agent; without it the detail takes the agent's cards from the shared card list. */
+  reasons?: AttentionReason[];
 }
 
-/** Agent detail body: identity, status, run settings, routing and operations, with its own data loading. */
+/** Agent detail body, shared by the agents page, home and ⌘K: now, run settings, connections, recent turns, skills,
+ * activity, cron and source of truth, in that order. */
 export function AgentInfoCardContent({
   agent,
   state,
@@ -49,22 +65,28 @@ export function AgentInfoCardContent({
   onAgentUpdated,
   actions,
   titleId,
+  shared: pageShared,
+  turns,
+  reasons: pageReasons,
 }: AgentInfoCardContentProps) {
-  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
-  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  const [sharedSkills, setSharedSkills] = useState<AgentSkill[]>([]);
-  const [loadingCron, setLoadingCron] = useState(true);
-  const [loadingSkills, setLoadingSkills] = useState(true);
-  const [loadingClaudeSessions, setLoadingClaudeSessions] = useState(true);
-  const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
-  const [closedSessionCount, setClosedSessionCount] = useState(0);
-  const [showSharedSkills, setShowSharedSkills] = useState(false);
-  const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
-  const [discordChannelInfoById, setDiscordChannelInfoById] = useState<Record<string, api.DiscordChannelInfo>>({});
-  const [loadingBindings, setLoadingBindings] = useState(true);
-  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
-  const [loadingAudit, setLoadingAudit] = useState(true);
-  const [auditError, setAuditError] = useState(false);
+  const isMobile = useIsMobile();
+  const ownShared = useAgentDetailShared(!pageShared);
+  const shared = pageShared ?? ownShared;
+  const { sessions, skills } = useAgentDetailData(agent.id);
+  const root = useRef<HTMLDivElement>(null);
+  const [opened, setOpened] = useState<Set<FoldKey>>(() => new Set());
+  const fold = (key: FoldKey): DetailFold => {
+    const foldable = isMobile || ALWAYS_FOLDED.has(key);
+    return {
+      foldable,
+      open: !foldable || opened.has(key),
+      onToggle: () => setOpened((previous) => {
+        const next = new Set(previous);
+        if (!next.delete(key)) next.add(key);
+        return next;
+      }),
+    };
+  };
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
@@ -73,16 +95,26 @@ export function AgentInfoCardContent({
   const [selectedProvider, setSelectedProvider] = useState<string>(agent.cli_provider ?? "claude");
   const providerCatalog = useProviderCatalog(selectedProvider);
   const [savingProvider, setSavingProvider] = useState(false);
-  const [providerAuthProfiles, setProviderAuthProfiles] = useState<ProviderAuthProvider[]>([]);
   const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
   const [savingAuthProfile, setSavingAuthProfile] = useState(false);
-  const [timeline, setTimeline] = useState<api.TimelineEvent[]>([]);
-  const [loadingTimeline, setLoadingTimeline] = useState(true);
-  const [timelineOpen, setTimelineOpen] = useState(false);
+  const profiles = shared.authProfiles;
+
+  useEffect(() => {
+    setAliasValue(agent.alias ?? "");
+    setEditingAlias(false);
+    setSelectedDeptId(agent.department_id ?? "");
+    setSelectedProvider(agent.cli_provider ?? "claude");
+  }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
+
+  // An override belongs to one Provider, so another Provider (switched here or in the edit form) shows the primary account.
+  useEffect(() => {
+    if (!profiles) return;
+    const override = profiles.agent_profile_overrides?.find((entry) => entry.agent_id === agent.id && entry.provider === selectedProvider);
+    setSelectedAuthProfile(override?.profile_id ?? "__primary__");
+  }, [profiles, agent.id, selectedProvider]);
 
   const saveAlias = async () => {
-    const trimmed = aliasValue.trim();
-    const newAlias = trimmed || null;
+    const newAlias = aliasValue.trim() || null;
     if (newAlias === (agent.alias ?? null)) {
       setEditingAlias(false);
       return;
@@ -98,32 +130,6 @@ export function AgentInfoCardContent({
       setSavingAlias(false);
     }
   };
-
-  useEffect(() => {
-    setAliasValue(agent.alias ?? "");
-    setEditingAlias(false);
-    setSelectedDeptId(agent.department_id ?? "");
-    setSelectedProvider(agent.cli_provider ?? "claude");
-    setSelectedAuthProfile("__primary__");
-  }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getProviderAuthProfiles()
-      .then((response) => {
-        if (cancelled) return;
-        const providers = Array.isArray(response.providers) ? response.providers : [];
-        setProviderAuthProfiles(providers);
-        const override = response.agent_profile_overrides?.find((entry) => entry.agent_id === agent.id);
-        setSelectedAuthProfile(override?.profile_id ?? "__primary__");
-      })
-      .catch(() => {
-        if (!cancelled) setProviderAuthProfiles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [agent.id]);
 
   const saveDepartment = async (nextDeptId: string) => {
     const previousDeptId = selectedDeptId;
@@ -147,11 +153,9 @@ export function AgentInfoCardContent({
     setSelectedProvider(nextProvider);
     setSavingProvider(true);
     try {
-      await api.updateAgent(agent.id, {
-        cli_provider: nextProvider as Agent["cli_provider"],
-        auth_profile: null,
-      });
+      await api.updateAgent(agent.id, { cli_provider: nextProvider as Agent["cli_provider"], auth_profile: null });
       setSelectedAuthProfile("__primary__");
+      shared.rememberProfile(agent.id, nextProvider, null);
       onAgentUpdated?.();
     } catch (e) {
       setSelectedProvider(previousProvider);
@@ -164,10 +168,12 @@ export function AgentInfoCardContent({
   const saveAuthProfile = async (nextProfile: string) => {
     if (nextProfile === selectedAuthProfile) return;
     const previousProfile = selectedAuthProfile;
+    const profileId = nextProfile === "__primary__" ? null : nextProfile;
     setSelectedAuthProfile(nextProfile);
     setSavingAuthProfile(true);
     try {
-      await api.updateAgent(agent.id, { auth_profile: nextProfile === "__primary__" ? null : nextProfile });
+      await api.updateAgent(agent.id, { auth_profile: profileId });
+      shared.rememberProfile(agent.id, selectedProvider, profileId);
       onAgentUpdated?.();
     } catch (error) {
       setSelectedAuthProfile(previousProfile);
@@ -178,190 +184,66 @@ export function AgentInfoCardContent({
   };
 
   const authProfileOptions = [
-    { id: "__primary__", home: "" },
-    ...(providerAuthProfiles.find((provider) => provider.id === selectedProvider)?.accounts ?? [{ id: "default", home: "" }]),
+    "__primary__",
+    ...(profiles?.providers?.find((provider) => provider.id === selectedProvider)?.accounts ?? [{ id: "default" }]).map((account) => account.id),
   ];
 
-  useEffect(() => {
-    setLoadingCron(true);
-    api
-      .getAgentCron(agent.id)
-      .then((jobs) => {
-        setCronJobs(jobs);
-        setLoadingCron(false);
-      })
-      .catch(() => setLoadingCron(false));
+  const bindings = useMemo(() => (shared.bindings ?? []).filter((binding) => binding.agentId === agent.id), [shared.bindings, agent.id]);
+  const live = sessions?.live ?? [];
+  const workingSessions = live.filter(isTurnSession);
+  const connections = fold("connections");
+  // Routes and live session threads only, once both are read, and only while the section shows.
+  const channelInfo = useDiscordChannels(
+    connections.open && shared.bindings !== undefined && sessions !== undefined
+      ? [...bindings.flatMap((binding) => [binding.channelId, binding.counterModelChannelId]), ...live.map((session) => session.thread_channel_id)]
+      : null,
+  );
+  const resolveChannel = (channelId: string | null | undefined) => (isDiscordSnowflake(channelId) ? channelInfo[channelId] ?? null : null);
+  const resolveParent = (info: api.DiscordChannelInfo | null | undefined) => (isDiscordSnowflake(info?.parent_id) ? channelInfo[info.parent_id] ?? null : null);
 
-    setLoadingSkills(true);
-    api
-      .getAgentSkills(agent.id)
-      .then((data) => {
-        setAgentSkills(data.skills);
-        setSharedSkills(data.sharedSkills);
-        setLoadingSkills(false);
-      })
-      .catch(() => setLoadingSkills(false));
+  const cronFold = fold("cron");
+  const activityFold = fold("activity");
+  const cron = useReadWhenOpen(cronFold.open, agent.id, readCron);
+  const timeline = useReadWhenOpen(activityFold.open, agent.id, readTimeline);
+  const audit = useReadWhenOpen(activityFold.open, agent.id, readAudit);
+  const calls = useMemo(() => (shared.skillCalls ? agentSkillCalls(shared.skillCalls, agent.id) : shared.skillCalls), [shared.skillCalls, agent.id]);
 
-    setLoadingClaudeSessions(true);
-    api
-      .getAgentDispatchedSessions(agent.id)
-      .then((rows) => {
-        // Finished sessions run into the hundreds, so only live ones are listed (and looked up on Discord).
-        const { live, closed } = splitLinkedSessions(rows);
-        setClaudeSessions(live);
-        setClosedSessionCount(closed);
-        setLoadingClaudeSessions(false);
-      })
-      .catch(() => setLoadingClaudeSessions(false));
+  const { kanbanCards } = useKanban();
+  const ownReasons = useMemo(
+    () => (pageReasons ? [] : buildAttention({ agents: [agent], todo: buildTodoItems({ cards: kanbanCards, campaigns: null, tr, isKo }), failed: [], cardsRead: true, tr, isKo })[0]?.reasons ?? []),
+    [pageReasons, agent, kanbanCards, tr, isKo],
+  );
 
-    setLoadingBindings(true);
-    api
-      .getDiscordBindings()
-      .then((bindings) => {
-        setDiscordBindings(bindings.filter((b) => b.agentId === agent.id));
-        setLoadingBindings(false);
-      })
-      .catch(() => {
-        setDiscordBindings([]);
-        setLoadingBindings(false);
-      });
+  // Phones read no turns (as home); a caller that already polls the list's working agents hands its map over.
+  const working = state ? state === "working" : agent.status === "working";
+  const ownTurns = useAgentTurns(turns || isMobile || !working ? [] : [agent.id]);
+  const summary = getAgentWorkSummary(agent, { linkedSessions: workingSessions });
+  const monitor = isMobile ? null : monitorView((turns ?? ownTurns).get(agent.id), { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
+  const openTurns = () => {
+    setOpened((previous) => new Set(previous).add("turns"));
+    requestAnimationFrame(() => root.current?.querySelector('[data-testid="agent-detail-turns"]')?.scrollIntoView({ block: "nearest" }));
+  };
 
-    setLoadingTimeline(true);
-    api
-      .getAgentTimeline(agent.id, 30)
-      .then((events) => {
-        setTimeline(events);
-        setLoadingTimeline(false);
-      })
-      .catch(() => {
-        setTimeline([]);
-        setLoadingTimeline(false);
-      });
-
-    setLoadingAudit(true);
-    setAuditError(false);
-    api
-      .getAuditLogs(20, { agentId: agent.id })
-      .then((logs) => setAuditLogs(logs.map((log) => ({ ...log, ts: log.created_at }))))
-      .catch(() => {
-        setAuditLogs([]);
-        setAuditError(true);
-      })
-      .finally(() => setLoadingAudit(false));
-  }, [agent.id]);
-
-  useEffect(() => {
-    const seedIds = Array.from(
-      new Set(
-        [
-          ...discordBindings.flatMap((binding) => [binding.channelId, binding.counterModelChannelId ?? null]),
-          ...claudeSessions.map((session) => session.thread_channel_id ?? null),
-        ].filter((value): value is string => isDiscordSnowflake(value)),
-      ),
-    );
-
-    if (seedIds.length === 0) {
-      setDiscordChannelInfoById({});
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadChannelInfo = async (ids: string[]) => {
-      const entries = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            const info = await api.getDiscordChannelInfo(id);
-            return info?.id ? ([id, info] as const) : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
-      return Object.fromEntries(
-        entries.filter((entry): entry is readonly [string, api.DiscordChannelInfo] => entry !== null),
-      );
-    };
-
-    void (async () => {
-      const initialInfo = await loadChannelInfo(seedIds);
-      const parentIds = Array.from(
-        new Set(
-          Object.values(initialInfo)
-            .map((info) => info.parent_id ?? null)
-            .filter((value): value is string => isDiscordSnowflake(value) && !(value in initialInfo)),
-        ),
-      );
-      const parentInfo = parentIds.length > 0 ? await loadChannelInfo(parentIds) : {};
-      if (!cancelled) setDiscordChannelInfoById({ ...initialInfo, ...parentInfo });
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [claudeSessions, discordBindings]);
-
-  const sourceLabel = agent.activity_source === "agentdesk" ? tr("AgentDesk 작업", "AgentDesk") : null;
-  const workingLinkedSessions = claudeSessions.filter(isTurnSession);
-  const currentWorkSummary = getAgentWorkSummary(agent, { linkedSessions: workingLinkedSessions });
-  const currentWorkElapsedMs = getAgentWorkElapsedMs(agent, workingLinkedSessions);
-  const warnings = getAgentWarnings(agent, {
-    hasDiscordBindings: loadingBindings ? undefined : discordBindings.length > 0,
-    linkedSessions: workingLinkedSessions,
-  });
-  const currentWorkDetails = Array.from(
-    new Set(
-      [
-        agent.session_info,
-        ...workingLinkedSessions.flatMap((session) => [session.session_info, session.name]),
-      ].filter((value): value is string => Boolean(value && value.trim())),
-    ),
-  ).slice(0, 3);
-  const roleMapBindings = discordBindings.filter((binding) => inferBindingSource(binding) === "role-map");
-  const resolveDiscordChannelInfo = (channelId: string | null | undefined): api.DiscordChannelInfo | null =>
-    channelId && isDiscordSnowflake(channelId) ? discordChannelInfoById[channelId] ?? null : null;
-  const resolveDiscordParentInfo = (channelInfo: api.DiscordChannelInfo | null | undefined): api.DiscordChannelInfo | null =>
-    channelInfo?.parent_id && isDiscordSnowflake(channelInfo.parent_id)
-      ? discordChannelInfoById[channelInfo.parent_id] ?? null
-      : null;
-  const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
-    { label: tr("에이전트 ID", "Agent ID"), value: agent.id },
-    { label: tr("이름", "Name"), value: agent.name },
-  ];
+  const department = departments.find((entry) => entry.id === selectedDeptId);
+  // Counts show once read, so an unread list never reads as zero.
+  const routeCount = shared.bindings === undefined ? null : bindings.length;
+  const liveCount = sessions ? live.length : null;
+  const connectionSummary = isMobile
+    ? [routeCount === null ? null : tr(`경로 ${routeCount}`, `${routeCount} routes`), liveCount === null ? null : tr(`세션 ${liveCount}`, `${liveCount} sessions`)]
+    : [routeCount === null ? null : tr(`Discord 경로 ${routeCount}`, `${routeCount} Discord routes`), liveCount === null ? null : tr(`살아 있는 세션 ${liveCount}`, `${liveCount} live sessions`)];
   const primaryName = localeName(locale, agent);
   const secondaryName = agentSecondaryLine(agent, locale);
-  const providerMeta = getProviderMeta(selectedProvider);
 
   return (
-    <div className="flex min-w-0 flex-col gap-7 [overflow-wrap:anywhere] [word-break:keep-all]">
-      <div className="flex min-w-0 items-start gap-3">
+    <div ref={root} className="flex min-w-0 flex-col [overflow-wrap:anywhere] [word-break:keep-all]">
+      <div className="flex min-w-0 items-start gap-3 pb-4">
         <AgentPersona agent={agent} size={44} animated />
         <div className="min-w-0 flex-1">
           <h2 id={titleId} tabIndex={-1} className="m-0 text-base font-semibold leading-6 text-(--fg) outline-none">
             {primaryName}
           </h2>
-          {secondaryName ? (
-            <p className="m-0 text-xs leading-5 text-(--fg-muted)">{secondaryName}</p>
-          ) : null}
-        </div>
-        {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
-      </div>
-
-      <dl className="m-0 -mt-2 flex min-w-0 flex-col gap-1 text-[13px]">
-        <div className="flex min-h-7 items-center gap-3">
-          <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("상태", "Status")}</dt>
-          <dd className="m-0 flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-            <AgentStatusBadge status={agent.status} state={state} tr={tr} />
-            {agent.status === "working" && sourceLabel ? <span className="text-xs text-(--fg-muted)">{sourceLabel}</span> : null}
-          </dd>
-        </div>
-        <div className="flex min-h-7 items-center gap-3">
-          <dt className="w-24 shrink-0 text-(--fg-muted)">Provider</dt>
-          <dd className="m-0 min-w-0 flex-1 text-(--fg)">{providerMeta.label}</dd>
-        </div>
-        <div className="flex min-h-7 items-center gap-3">
-          <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("별명", "Alias")}</dt>
-          <dd className="m-0 min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs leading-5 text-(--fg-muted)">
+            {secondaryName ? <span className="min-w-0">{secondaryName}</span> : null}
             {editingAlias ? (
               <TextField
                 size="sm"
@@ -389,7 +271,6 @@ export function AgentInfoCardContent({
               <Button
                 variant="ghost"
                 size="sm"
-                className="-ml-2"
                 title={tr("별명 편집", "Edit alias")}
                 onClick={() => {
                   setAliasValue(agent.alias ?? "");
@@ -399,38 +280,35 @@ export function AgentInfoCardContent({
                 {agent.alias ? `aka ${agent.alias}` : `+ ${tr("별명", "alias")}`}
               </Button>
             )}
-          </dd>
-        </div>
-        <div className="flex min-h-7 items-center gap-3">
-          <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("완료", "Done")}</dt>
-          <dd className="m-0 min-w-0 flex-1 tabular-nums text-(--fg)">{`${agent.stats_tasks_done.toLocaleString()} ${tr("건", "tasks")}`}</dd>
-        </div>
-        <div className="flex min-h-7 items-center gap-3">
-          <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("작업 중 세션", "Working sessions")}</dt>
-          <dd className="m-0 min-w-0 flex-1 tabular-nums text-(--fg)">{`${workingLinkedSessions.length}/${claudeSessions.length}`}</dd>
-        </div>
-        {agent.role_id ? (
-          <div className="flex min-h-7 items-center gap-3">
-            <dt className="w-24 shrink-0 text-(--fg-muted)">{tr("역할 ID", "Role ID")}</dt>
-            <dd className="m-0 min-w-0 flex-1 break-all font-mono text-xs text-(--fg-dim)">{agent.role_id}</dd>
           </div>
-        ) : null}
-      </dl>
+        </div>
+        {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
+      </div>
 
-      <AgentInfoProfileSections
+      <AgentNowSection
         agent={agent}
-        departments={departments}
-        locale={locale}
-        isKo={isKo}
+        state={state}
         tr={tr}
+        isKo={isKo}
+        summary={summary}
+        monitor={monitor}
+        onOpenLog={openTurns}
+        reasons={pageReasons ?? ownReasons}
+        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions })}
+      />
+
+      <AgentRunSettingsSection
+        tr={tr}
+        locale={locale}
+        fold={fold("run")}
+        summary={[department ? localeName(locale, department) : tr("미배정", "Unassigned"), getProviderMeta(selectedProvider).label].join(" · ")}
+        departments={departments}
         selectedDeptId={selectedDeptId}
         savingDept={savingDept}
         onSaveDepartment={(nextDeptId) => void saveDepartment(nextDeptId)}
         selectedProvider={selectedProvider}
         providerOptions={providerCatalog.selectableIds}
-        providerLabels={Object.fromEntries(
-          providerCatalog.selectableIds.map((id) => [id, catalogLabel(providerCatalog.entries, id)]),
-        )}
+        providerLabels={Object.fromEntries(providerCatalog.selectableIds.map((id) => [id, catalogLabel(providerCatalog.entries, id)]))}
         providerSelectDisabled={providerCatalog.loading}
         providerNotice={
           providerCatalog.loading
@@ -442,48 +320,27 @@ export function AgentInfoCardContent({
         savingProvider={savingProvider}
         onSaveProvider={(nextProvider) => void saveProvider(nextProvider)}
         selectedAuthProfile={selectedAuthProfile}
-        authProfileOptions={authProfileOptions.map((account) => account.id)}
+        authProfileOptions={authProfileOptions}
         savingAuthProfile={savingAuthProfile}
         onSaveAuthProfile={(profileId) => void saveAuthProfile(profileId)}
-        currentWorkSummary={currentWorkSummary}
-        currentWorkElapsedMs={currentWorkElapsedMs}
-        currentWorkDetails={currentWorkDetails}
-        discordBindings={discordBindings}
-        warnings={warnings}
-      />
+      >
+        <AgentExecutionNodeSelect key={agent.id} agentId={agent.id} provider={selectedProvider} tr={tr} onSaved={onAgentUpdated} />
+      </AgentRunSettingsSection>
 
-      <AgentExecutionNodeSelect key={agent.id} agentId={agent.id} provider={selectedProvider} tr={tr} onSaved={onAgentUpdated} />
-
-      <AgentInfoRoutingSections
+      <AgentConnectionSection
         tr={tr}
-        discordBindings={discordBindings}
-        roleMapBindings={roleMapBindings}
-        claudeSessions={claudeSessions}
-        closedSessionCount={closedSessionCount}
-        loadingClaudeSessions={loadingClaudeSessions}
-        sourceOfTruthRows={sourceOfTruthRows}
-        resolveDiscordChannelInfo={resolveDiscordChannelInfo}
-        resolveDiscordParentInfo={resolveDiscordParentInfo}
+        fold={connections}
+        summary={connectionSummary.filter(Boolean).join(" · ")}
+        bindings={bindings}
+        sessions={sessions}
+        resolveChannel={resolveChannel}
+        resolveParent={resolveParent}
       />
-
-      <AgentInfoOperationsSections
-        isKo={isKo}
-        tr={tr}
-        cronJobs={cronJobs}
-        loadingCron={loadingCron}
-        auditLogs={auditLogs}
-        loadingAudit={loadingAudit}
-        auditError={auditError}
-        agentSkills={agentSkills}
-        sharedSkills={sharedSkills}
-        loadingSkills={loadingSkills}
-        showSharedSkills={showSharedSkills}
-        onToggleSharedSkills={() => setShowSharedSkills((value) => !value)}
-        timeline={timeline}
-        loadingTimeline={loadingTimeline}
-        timelineOpen={timelineOpen}
-        onToggleTimeline={() => setTimelineOpen((value) => !value)}
-      />
+      <AgentInfoTurnsSection agentId={agent.id} tr={tr} isKo={isKo} fold={fold("turns")} />
+      <AgentSkillsSection tr={tr} fold={fold("skills")} calls={calls} skills={skills} />
+      <AgentActivitySection tr={tr} isKo={isKo} fold={activityFold} timeline={timeline} audit={audit} />
+      <AgentCronSection tr={tr} isKo={isKo} fold={cronFold} jobs={cron} />
+      <AgentSourceSection agent={agent} tr={tr} fold={fold("source")} roleMap={bindings.some((binding) => inferBindingSource(binding) === "role-map")} />
     </div>
   );
 }

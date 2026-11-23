@@ -46,4 +46,11 @@ describe("buildAttention", () => {
     expect(buildAttention({ ...input, failed: failures, cardsRead: true })[0].reasons.map((reason) => reason.key)).toEqual(["dispatch:d6"]);
     expect(buildAttention({ ...input, failed: failures.slice(0, 1), cardsRead: true })).toEqual([]);
   });
+
+  it("puts a failing card without an owner under the agent its latest failed run went to", () => {
+    vi.useFakeTimers({ now: NOW });
+    const failures = [failed("d2", "nova", "2026-11-23T11:00:00Z", "c3"), failed("d1", "nova", "2026-11-23T10:00:00Z", "c3")];
+    const rows = buildAttention({ agents: [agent("nova")], todo: [todo("card:c3", null)], failed: failures, cardsRead: true, tr, isKo: true });
+    expect(rows.map(({ agent: { id }, reasons }) => [id, reasons.map((reason) => reason.chip)])).toEqual([["nova", ["판단 필요"]]]);
+  });
 });
