@@ -906,7 +906,7 @@ impl FrontierResetState {
         reset
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(in crate::services) fn publish_confirmed_for_tests(
         &mut self,
         end: u64,
