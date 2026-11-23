@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { act, useState } from "react";
 import * as api from "../../api";
+import type { DiscordBinding } from "../../api/client";
+import { ApiRequestError } from "../../api/httpClient";
 import * as providers from "../../api/providers";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
@@ -275,6 +277,47 @@ describe("AgentsTab detail and filters", () => {
     act(() => connections().click());
     await flush();
     expect(vi.mocked(api.getDiscordChannelInfo)).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the newest routes when an older read lands late, and the last good list when a re-read fails", async () => {
+    setViewport(false);
+    const resolvers: Array<(value: DiscordBinding[]) => void> = [];
+    const later = () => new Promise<DiscordBinding[]>((resolve) => resolvers.push(resolve));
+    vi.mocked(api.getDiscordBindings).mockClear().mockReturnValueOnce(later()).mockReturnValueOnce(later()).mockRejectedValueOnce(new Error("down"));
+    const render = (agents: Agent[]) => act(() => root.render(<MemoryRouter><Harness agents={agents} /></MemoryRouter>));
+    render(AGENTS);
+    await flush();
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-row-agent-ada"]')!.click());
+    render([...AGENTS, { ...AGENTS[1], id: "agent-new", name: "New" }]);
+    await flush();
+    await act(async () => resolvers[1]([{ agentId: "agent-ada", channelId: "100000000000000005", source: "primary" }]));
+    await act(async () => resolvers[0]([]));
+    const connections = () => document.querySelector('[data-testid="agent-detail-connections"]')!.textContent;
+    expect(connections()).toContain("1 Discord routes");
+    render([...AGENTS, { ...AGENTS[1], id: "agent-new", name: "New" }, { ...AGENTS[1], id: "agent-newer", name: "Newer" }]);
+    await flush();
+    expect(vi.mocked(api.getDiscordBindings)).toHaveBeenCalledTimes(3);
+    expect(connections()).toContain("1 Discord routes");
+  });
+
+  it("asks again for a channel whose read failed, not for one the server refused", async () => {
+    setViewport(true);
+    vi.mocked(api.getDiscordChannelInfo).mockClear()
+      .mockRejectedValueOnce(new Error("timeout"))
+      .mockRejectedValueOnce(new ApiRequestError("channel not in role-map", { status: 403 }));
+    const thread = (id: string) => ({ id, status: "turn_active", thread_channel_id: id, provider: "claude" });
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([thread("100000000000000004"), thread("100000000000000006")] as DispatchedSession[]);
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
+    await flush();
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="agents-row-agent-ada"]')!.click());
+    await flush();
+    const connections = () => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button[aria-expanded]')).find((node) => node.textContent?.startsWith("Connections"))!;
+    for (let open = 0; open < 3; open += 1) {
+      if (open) act(() => connections().click());
+      act(() => connections().click());
+      await flush();
+    }
+    expect(vi.mocked(api.getDiscordChannelInfo).mock.calls.map(([id]) => id)).toEqual(["100000000000000004", "100000000000000006", "100000000000000004"]);
   });
 
   it("keeps a picked status tab after its count drops to zero", async () => {

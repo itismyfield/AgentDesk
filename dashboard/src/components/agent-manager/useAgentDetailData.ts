@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../../api";
 import type { AgentSkill, DiscordBinding } from "../../api/client";
+import { ApiRequestError } from "../../api/httpClient";
 import { getProviderAuthProfiles } from "../../api/providers";
 import type { ProviderAuthProfilesResponse } from "../settings/SettingsProvidersModel";
 import { splitLinkedSessions } from "./AgentInfoCardModel";
@@ -30,10 +31,11 @@ export function useAgentDetailShared(active: boolean, detailOpen = active, route
   useEffect(() => {
     if (!active || started.current.routes === routesKey) return;
     started.current.routes = routesKey;
-    // The last list stays on screen while it is read again; an answer lands unless a newer one already did.
+    // The last list stays on screen while it is read again; an answer lands unless a newer one already did, and a
+    // failed re-read keeps the list it would replace.
     const read = ++started.current.reads;
     void settle(api.getDiscordBindings({ suppressErrorToast: true }), (value) => {
-      if (read < started.current.shown) return;
+      if (read < started.current.shown || (value === null && read > 1)) return;
       started.current.shown = read;
       setBindings(value);
     });
@@ -82,23 +84,32 @@ export function useReadWhenOpen<T>(open: boolean, agentId: string, read: (agentI
   return state?.id === agentId ? state.value : undefined;
 }
 
-/** Discord names of the given channels and their parents; an id that fails keeps showing as the id. A set already read
- * is not read again, so folding a section and opening it again sends nothing. */
+/** A definite no from the server (not found, outside the role map), as opposed to a timeout or a server error. */
+const refused = (error: unknown) => error instanceof ApiRequestError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
+
+/** Discord names of the given channels and their parents; an id that fails keeps showing as the id. An id with an
+ * answer (a name, or a refusal such as 403 outside the role map) is not read again, so folding a section and opening it
+ * again sends nothing; an id that failed for another reason is read again on the next open. */
 export function useDiscordChannels(ids: Array<string | null | undefined> | null): Record<string, api.DiscordChannelInfo> {
   const key = ids ? Array.from(new Set(ids.filter(isDiscordSnowflake))).sort().join(",") : "";
   const [byId, setById] = useState<Record<string, api.DiscordChannelInfo>>({});
-  const asked = useRef("");
+  // Ids asked and not failed in passing; the state keeps every name found, whichever read found it.
+  const asked = useRef(new Set<string>());
   useEffect(() => {
-    if (!key || key === asked.current) return;
-    asked.current = key;
-    const load = async (list: string[]) => Object.fromEntries((await Promise.all(list.map((id) =>
-      api.getDiscordChannelInfo(id).then((info) => (info?.id ? [[id, info] as const] : []), () => []),
-    ))).flat());
+    const load = async (list: string[]) => Object.fromEntries((await Promise.all(list.map((id) => {
+      asked.current.add(id);
+      return api.getDiscordChannelInfo(id).then((info) => (info?.id ? [[id, info] as const] : []), (error) => {
+        if (!refused(error)) asked.current.delete(id);
+        return [];
+      });
+    }))).flat());
+    const wanted = key ? key.split(",").filter((id) => !asked.current.has(id)) : [];
+    if (!wanted.length) return;
     void (async () => {
-      const found = await load(key.split(","));
-      const parents = Array.from(new Set(Object.values(found).map((info) => info.parent_id).filter((id): id is string => isDiscordSnowflake(id) && !(id in found))));
+      const found = await load(wanted);
+      const parents = Array.from(new Set(Object.values(found).map((info) => info.parent_id).filter((id): id is string => isDiscordSnowflake(id) && !asked.current.has(id))));
       const more = parents.length > 0 ? await load(parents) : {};
-      if (asked.current === key) setById({ ...found, ...more });
+      setById((current) => ({ ...current, ...found, ...more }));
     })();
   }, [key]);
   return byId;

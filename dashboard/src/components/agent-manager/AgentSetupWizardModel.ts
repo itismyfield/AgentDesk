@@ -58,7 +58,7 @@ export function labelForStep(step: (typeof steps)[number], tr: Translator): stri
     case "prompt":
       return tr("프롬프트", "Prompt");
     case "workspace":
-      return tr("작업공간", "Workspace");
+      return tr("작업 폴더", "Workspace");
     case "cron":
       return tr("Cron", "Cron");
     case "preview":
