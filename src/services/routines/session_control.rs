@@ -1,8 +1,8 @@
 mod persistent_target;
 use anyhow::{Result, anyhow};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use persistent_target::seed_started_control_session;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use persistent_target::{CONTROL_TEST_PAUSE, ControlPause};
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
