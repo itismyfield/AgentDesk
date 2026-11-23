@@ -147,6 +147,14 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             .unwrap();
         let item = serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
         let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
+        if due_passed {
+            let due = mailbox.v2_request(|s| {
+                let owner = s.as_mut().ok_or("no owner")?;
+                let front = owner.front().ok_or("no front")?;
+                owner.hold_readiness(&front, "fixture", 0).map(drop)
+            });
+            due.await.unwrap();
+        }
         let (attempt, transcript, session_id) = cold_attempt(&root, channel.get());
         let meta = std::fs::metadata(&transcript).unwrap();
         let file = crate::services::tui_o::shadow::capture::file_identity(&meta);
@@ -286,7 +294,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
-    let result = no_key_round(8148963, "herdr", None).await;
+    let result = no_key_round(8148963, "herdr", None, false).await;
     assert_eq!(result, Completion::NotSent("fixture refusal".into()));
 }
 
@@ -294,16 +302,21 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_no_key_record_outlasts_a_brief_registry_contention() {
     let hold = std::time::Duration::from_millis(200);
-    let result = no_key_round(8148964, "herdr", Some(hold)).await;
+    let result = no_key_round(8148964, "herdr", Some(hold), false).await;
     assert_eq!(result, Completion::NotSent("fixture refusal".into()));
 }
 
 /// A no-key turn whose record stays busy past the retries frees its channel on either host, and a
-/// restart before the deferred record lands settles it at boot from the owner's retained proof.
+/// restart before the deferred record lands settles it at boot from the owner's proof, retained or
+/// refused past its readiness due, then ACKs its source pin though its notice already went.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
-    for (channel, host) in [(8148965, "herdr"), (8148966, "tmux")] {
-        let result = no_key_round(channel, host, Some(WAIT_CAP)).await;
+    for (channel, host, due) in [
+        (8148965, "herdr", false),
+        (8148966, "tmux", false),
+        (8148967, "tmux", true),
+    ] {
+        let result = no_key_round(channel, host, Some(WAIT_CAP), due).await;
         assert!(
             matches!(&result, Completion::NotSent(r) if r.contains("busy")),
             "{result:?}"
@@ -312,8 +325,14 @@ async fn native_no_key_turn_frees_the_channel_when_its_record_stays_busy() {
 }
 
 /// Runs one unkeyed native turn on `host` with the registry lock held from the leaf's end for
-/// `hold` (`WAIT_CAP`: until released here), and checks the next turn starts under that lock.
-async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration>) -> Completion {
+/// `hold` (`WAIT_CAP`: until released here), and checks the next turn starts under that lock;
+/// `due_passed` gives the original a readiness due the leaf outlives, so the owner refuses it.
+async fn no_key_round(
+    channel: u64,
+    host: &str,
+    hold: Option<std::time::Duration>,
+    due_passed: bool,
+) -> Completion {
     let guard = crate::config::TestRuntimeRootGuard::new();
     let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
     let root = guard.path().join("runtime");
@@ -416,11 +435,28 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
         .v2_request(|s| s.as_ref().unwrap().json())
         .await
         .unwrap();
-    assert!(snapshot.to_string().contains("our input"));
+    assert_eq!(snapshot.to_string().contains("our input"), !due_passed);
+    let refused = snapshot["refused_inputs"].as_array().map_or(0, Vec::len);
+    assert_eq!(refused, usize::from(due_passed));
     let next = std::sync::Arc::new(CancelToken::new());
     let user = poise::serenity_prelude::UserId::new(7);
     assert!(mailbox.try_start_turn(next, user, (id + 1).into()).await);
     let frames = root.join("injected_frames.json");
+    if hold == Some(WAIT_CAP) {
+        // The drive's notice drain has told the person, so no input is owed any more.
+        let entry = &snapshot[if due_passed {
+            "refused_inputs"
+        } else {
+            "retained_inputs"
+        }][0];
+        let key =
+            json!({"identity": entry["input"]["identity"], "attempt": entry["input"]["attempt"]});
+        let told = mailbox.v2_request(move |s| {
+            let key = serde_json::from_value(key).map_err(|e| e.to_string())?;
+            s.as_mut().ok_or("no owner")?.notice_enqueued(&key)
+        });
+        told.await.unwrap();
+    }
     let crashed = (hold == Some(WAIT_CAP)).then(|| {
         (
             std::fs::read(&frames).unwrap(),
@@ -489,6 +525,18 @@ async fn no_key_round(channel: u64, host: &str, hold: Option<std::time::Duration
             queue_at_crash,
             "the retained original and its notice stay"
         );
+        let census = crate::services::turn_orchestrator::v2_channels(
+            &ProviderKind::Claude,
+            &next.token_hash,
+        );
+        assert!(
+            census.contains(&channel),
+            "a told channel still owes its source ACK"
+        );
+        super::recover(&next, channel).await;
+        let recovered = std::fs::read_to_string(&queue).unwrap();
+        assert!(!recovered.contains("\"pin\""), "{recovered}");
+        assert!(recovered.contains("\"enqueued\":true"), "{recovered}");
     }
     result
 }

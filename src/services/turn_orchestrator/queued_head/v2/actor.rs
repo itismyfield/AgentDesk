@@ -91,8 +91,8 @@ pub(crate) fn v2_queue(
     Ok((path.ok_or("pending queue root unavailable")?, namespace))
 }
 
-/// Whether the queue file at `path` still holds the owner's retained proof that the exact attempt
-/// `key` sent no key; an unreadable file proves nothing.
+/// Whether the queue file at `path` still holds the owner's proof that the exact attempt `key` sent
+/// no key, retained to resend or refused for good; an unreadable file proves nothing.
 #[cfg(unix)]
 pub(crate) fn proves_not_sent(
     path: &std::path::Path,
@@ -110,6 +110,9 @@ pub(crate) fn proves_not_sent(
             matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
                 && entry.input.phase == HeadPhase::Reserved
                 && key.matches(&entry.input)
-        })
+        }) || snapshot
+            .refused_inputs
+            .iter()
+            .any(|entry| entry.input == key)
     })
 }
