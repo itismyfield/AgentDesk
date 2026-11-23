@@ -14,8 +14,9 @@ import { cycleComponents, findCycles, scopeKey, taskLabel, taskName } from "./re
 import { nodeMarker } from "./StatusMarker";
 
 const tailId = (id: string) => `tail:${id}`;
-/** Tails stacked in one edge column keep this pitch, a tail card plus a gap. */
-const TAIL_PITCH = 76;
+/** A tail card's height; tails stacked in one edge column keep `TAIL_PITCH`, a card plus a gap. */
+export const TAIL_HEIGHT = 60;
+const TAIL_PITCH = TAIL_HEIGHT + 16;
 
 /** One group's tasks laid out like the group graph, with tails for the outside tasks they depend on (left edge) or hand
  * on to (right edge); lines go through the ties saved for the group's editor scope, loops are looped parts with a member. */
@@ -32,7 +33,8 @@ export function buildGroupTasks(nodes: CampaignNode[], key: string, settings: Gr
     .map((line) => ({ ...line, faint: line.source.startsWith("tail:") || line.target.startsWith("tail:") }));
   const { placed, below } = layoutGroups([...members.map((node) => node.id), ...outside.map(tailId)], lines.map((line) => [line.source, line.target]), TASK_HEIGHT);
   // Tails move to their own column at each edge of the linked tasks, stacked without overlapping.
-  const linked = members.filter((node) => lines.some((line) => line.source === node.id || line.target === node.id)).map((node) => placed.get(node.id)!.x);
+  const ends = new Set(lines.flatMap((line) => [line.source, line.target]));
+  const linked = members.filter((node) => ends.has(node.id)).map((node) => placed.get(node.id)!.x);
   const edge = { in: (linked.length ? Math.min(...linked) : 0) - LAYER, out: (linked.length ? Math.max(...linked) : 0) + LAYER };
   const tails = outside.map((id) => ({ id: tailId(id), node: byId.get(id)!, side: before.has(id) ? "in" as const : "out" as const }));
   for (const side of ["in", "out"] as const) {
@@ -43,7 +45,10 @@ export function buildGroupTasks(nodes: CampaignNode[], key: string, settings: Gr
       next = y + TAIL_PITCH;
     }
   }
-  const { connections, ties } = placeLines(lines, routed.settings.ties, placed, below);
+  // Tails stacked past the linked cards push the shelf and the loop lanes down by as much.
+  const bottom = Math.max(below, ...tails.map((tail) => placed.get(tail.id)!.y + TAIL_HEIGHT));
+  for (const node of members) if (!ends.has(node.id)) { const at = placed.get(node.id)!; placed.set(node.id, { x: at.x, y: at.y + bottom - below }); }
+  const { connections, ties } = placeLines(lines, routed.settings.ties, placed, bottom);
   // Each looped part (SCC) a member is in, in display ids, with its shortest loop; tasks the view does not show keep their own id.
   const paths = findCycles(nodes), display = (id: string) => displayOf.get(id) ?? id;
   const looped = cycleComponents(nodes).flatMap((part, index) => members.some((node) => part.has(node.id)) ? [{ part, path: paths[index] }] : []);
@@ -86,7 +91,8 @@ export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, 
     return { id: node.id, type: "relationsTask", position: graph.positions.get(node.id)!, data, draggable: false, selected: node.id === chosen,
       domAttributes: { "data-task-id": node.id } as HTMLAttributes<HTMLDivElement>, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}` };
   }), ...graph.tails.map((tail): Node => {
-    const data: TailNodeData = { title: taskName(tail.node), cover: taskLabel(tail.node), group: label(campaignGroup(tail.node)), side: tail.side };
+    const ends = { enters: graph.connections.some((line) => line.target === tail.id), leaves: graph.connections.some((line) => line.source === tail.id) };
+    const data: TailNodeData = { title: taskName(tail.node), cover: taskLabel(tail.node), group: label(campaignGroup(tail.node)), side: tail.side, ends };
     return { id: tail.id, type: "relationsTail", position: graph.positions.get(tail.id)!, data, draggable: false, selected: false,
       ariaLabel: tr(`그룹 밖 작업 ${data.title}, ${data.group}`, `Task outside the group ${data.title}, ${data.group}`) };
   })], [graph, byId, group, chosen, label, tr]);

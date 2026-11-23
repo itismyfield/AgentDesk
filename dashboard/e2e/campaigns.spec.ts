@@ -548,7 +548,7 @@ test.describe("board at 390px touch", () => {
 async function openRelations(page: Page, theme: "dark" | "light" = "dark") {
   const value = campaign("relations-dag", "관계도 시험", [
     node("g1", "#7401 게이트웨이 재연결", { status: "completed" }), node("g2", "#7402 헬스 체크 간격", { status: "running", dependencies: ["g1"] }),
-    node("r1", "#7340 재전송 큐 지표", { group: "Relay", dependencies: ["g1"] }), node("r2", "#7403 세션 매핑 유지", { group: "Relay", status: "blocked", dependencies: ["r1"], blocker: "릴리스 승인을 기다려요" }),
+    node("r1", "#7340 재전송 큐 지표", { group: "Relay", dependencies: ["g1", "r3"] }), node("r2", "#7403 세션 매핑 유지", { group: "Relay", status: "blocked", dependencies: ["r1"], blocker: "릴리스 승인을 기다려요" }),
     node("c1", "#7336 채널 이어받기", { group: "Cluster", dependencies: ["r1"] }), node("r3", "#7404 로그 압축", { group: "Relay", dependencies: ["c1"] }),
     node("rel1", "#7500 릴리스 노트", { group: "Release", dependencies: ["r2", "c1"] }), node("i1", "#7510 배포 경로", { group: "Infra", dependencies: ["g2"] }),
     node("d1", "#7520 문서 정리", { group: "Docs", status: "completed" }), node("a1", "#7530 감사 후속", { group: "Audit", status: "completed" }), node("q1", "#7540 대기열 표시", { group: "Queue" }),
@@ -630,6 +630,9 @@ test("relations view: group cards by dependency depth, a dashed loop, the saved 
   await expect(view.locator(".react-flow__node[data-task-id]")).toHaveCount(3);
   expect(await view.locator('.react-flow__node[data-id^="tail:"]').evaluateAll((tails) => tails.map((tail) => tail.getAttribute("data-id")).sort())).toEqual(["tail:c1", "tail:g1", "tail:rel1"]);
   expect([(await task("tail:g1").boundingBox())!.x < (await task("r1").boundingBox())!.x, (await task("tail:rel1").boundingBox())!.x > (await task("r2").boundingBox())!.x]).toEqual([true, true]);
+  // c1 comes before and after Relay, so r1 → c1 → r3 → r1 loops through its tail: every line is drawn and the loop labelled once.
+  await expect(view.locator(".react-flow__edge")).toHaveCount(6);
+  await expect(view.locator("[data-relations-canvas]").getByText(/^순환 · /)).toHaveCount(1);
   expect(await walk(6)).toEqual(["tail:g1", "tail:c1", "r1", "r2", "r3", "tail:rel1"].map((id) => [id, "solid"]));
   await task("r2").focus();
   await page.keyboard.press("Enter");

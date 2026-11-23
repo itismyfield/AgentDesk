@@ -7,7 +7,8 @@ import { campaignNodeSchema, setCampaignAutoQueue, updateCampaignNode } from "..
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGroupOverview";
-import { buildGroupTasks } from "./CampaignGroupTasks";
+import { TAIL_HEIGHT, buildGroupTasks } from "./CampaignGroupTasks";
+import { GROUP_WIDTH, TASK_HEIGHT } from "./campaignGroupLayout";
 import type { LineData } from "./RelationsCanvasChrome";
 import { RelationsGroupNode, type GroupNodeData } from "./RelationsTaskNode";
 
@@ -163,4 +164,12 @@ it("lays an opened group's tasks out between the tasks outside it, with each loo
   expect(graph.tails.map((tail) => `${tail.id}:${tail.side}`).sort()).toEqual(["tail:c1:in", "tail:g1:in", "tail:rel1:out"]);
   expect([Math.max(...x("tail:g1", "tail:c1")) < Math.min(...x("r1", "r2", "r3")), x("tail:rel1")[0] > Math.max(...x("r1", "r2", "r3"))]).toEqual([true, true]);
   expect([graph.components.map((part) => [...part].sort()), graph.cycles.map((path) => path.includes("tail:c1"))]).toEqual([[["r1", "r3", "tail:c1"]], [true]]);
+});
+
+it("keeps every card clear of the others when tails stack past the linked tasks over a long shelf", () => {
+  const chain = [0, 1, 2].flatMap((step) => [node(`m${step}`, "M", step ? [`m${step - 1}`] : []), ...[0, 1, 2, 3].map((index) => node(`om${step}${index}`, "O", [`m${step}`]))]);
+  const graph = buildGroupTasks([...chain, ...Array.from({ length: 30 }, (_, index) => node(`s${index}`, "M"))], "M");
+  const box = ([id, { x, y }]: [string, { x: number; y: number }]) => ({ id, x, y, bottom: y + (id.startsWith("tail:") ? TAIL_HEIGHT : TASK_HEIGHT) });
+  const boxes = [...graph.positions].map(box);
+  expect(boxes.flatMap((a, index) => boxes.slice(index + 1).filter((b) => Math.abs(a.x - b.x) < GROUP_WIDTH && a.y < b.bottom && b.y < a.bottom).map((b) => `${a.id}/${b.id}`))).toEqual([]);
 });
