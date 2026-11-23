@@ -1,0 +1,208 @@
+---
+title: "Frame ledger file: V2 owner, out-of-scope writer and the 5b ops procedure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ProofKept
+    lg1: Path to the OwnerProgress or ProofKept bug
+    lg2: Repeats forever, so OwnerProgress breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: [old] file none #183; owner input owner #183; out-of-scope input queued
+  s1: [checked] file none #183; owner input owner #183; out-of-scope input queued
+  s2: [old] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s3: [old] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s4: [stopped] file none #183; owner input owner #183; out-of-scope input queued
+  s5: [old] file v1 #183; owner input owner #183; out-of-scope input done
+  s6: [checked] file v1 #183; owner input owner #183; out-of-scope input pasted
+  s7: [old] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s8: [old] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s9: [old] file v2 #183; owner input done #183; out-of-scope input queued
+  s10: [checked] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s11: [old] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s12: [final] file none #183; owner input owner #183; out-of-scope input queued
+  s13: [checked] file v1 #183; owner input owner #183; out-of-scope input done
+  s14: [checked] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s15: [stopped] file v1 #183; owner input owner #183; out-of-scope input unknown
+  s16: [old] file v2 #183; owner input done #183; out-of-scope input owner
+  s17: [checked] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s18: [checked] file v2 #183; owner input done #183; out-of-scope input queued
+  s19: [stopped] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s20: [old] file v2 #183; owner input pasted #183; out-of-scope input done
+  s21: [old] file v2 #183; owner input done #183; out-of-scope input pasted
+  s22: [checked] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s23: [old] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s24: [new] file none #183; owner input owner #183; out-of-scope input queued
+  s25: RED: Unknown head's proof archived (file none)
+  s26: [stopped] file v1 #183; owner input owner #183; out-of-scope input done
+  s27: [checked] file v2 #183; owner input done #183; out-of-scope input owner
+  s28: [stopped] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s29: [stopped] file v2 #183; owner input done #183; out-of-scope input queued
+  s30: [final] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s31: [old] file v2 #183; owner input done #183; out-of-scope input done
+  s32: [checked] file v2 #183; owner input pasted #183; out-of-scope input done
+  s33: [checked] file v2 #183; owner input done #183; out-of-scope input pasted
+  s34: [old] file v2 #183; owner input done #183; out-of-scope input unknown
+  s35: [checked] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s36: [stopped] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s37: [final] file none #183; owner input owner #183; out-of-scope input done
+  s38: [stopped] file v2 #183; owner input done #183; out-of-scope input owner
+  s39: [final] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s40: [final] file v2 #183; owner input done #183; out-of-scope input queued
+  s41: [new] file v2 #183; owner input pasted #183; out-of-scope input queued
+  s42: [new] file v2 #183; owner input owner #183; out-of-scope input pasted
+  s43: [checked] file v2 #183; owner input done #183; out-of-scope input done
+  s44: [stopped] file v2 #183; owner input pasted #183; out-of-scope input done
+  s45: [checked] file v2 #183; owner input done #183; out-of-scope input unknown
+  s46: [stopped] file v2 #183; owner input done #183; out-of-scope input unknown
+  s47: [final] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s48: [new] file none #183; owner input owner #183; out-of-scope input done
+  s49: [final] file v2 #183; owner input done #183; out-of-scope input owner
+  s50: [new] file v2 #183; owner input pasted #183; out-of-scope input owner
+  s51: [new] file v2 #183; owner input done #183; out-of-scope input queued
+  s52: [new] file v2 #183; owner input owner #183; out-of-scope input done
+  s53: [new] file v2 #183; owner input owner #183; out-of-scope input unknown
+  s54: [stopped] file v2 #183; owner input done #183; out-of-scope input done
+  s55: [final] file v2 #183; owner input pasted #183; out-of-scope input done
+  s56: [new] file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s57: [final] file v2 #183; owner input done #183; out-of-scope input unknown
+  s58: [new] file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s59: RED: Unknown head's proof archived (file v2)
+  s60: [new] file v2 #183; owner input done #183; out-of-scope input owner
+  s61: [final] file v2 #183; owner input done #183; out-of-scope input done
+  s62: [new] file v2 #183; owner input pasted #183; out-of-scope input done
+  s63: [new] file v2 #183; owner input done #183; out-of-scope input pasted
+  s64: [new] file v2 #183; owner input done #183; out-of-scope input unknown
+  s65: [new] file v2 #183; owner input done #183; out-of-scope input done
+  [*] --> s0
+  s0 --> s1: PreCheck
+  s0 --> s2: XRegister
+  s0 --> s3: OwnerPrepare
+  s1 --> s4: Stop
+  s1 --> s6: XRegister
+  s1 --> s10: OwnerPrepare
+  s2 --> s5: Settle
+  s2 --> s6: PreCheck
+  s2 --> s7: Crash
+  s2 --> s11: OwnerPrepare
+  s3 --> s8: XRegister
+  s3 --> s9: Settle
+  s3 --> s10: PreCheck
+  s4 --> s12: FinalCheck
+  s5 --> s13: PreCheck
+  s5 --> s20: OwnerPrepare
+  s6 --> s13: Settle
+  s6 --> s14: Crash
+  s6 --> s15: Stop
+  s6 --> s22: OwnerPrepare
+  s7 --> s5: Mend
+  s7 --> s14: PreCheck
+  s7 --> s23: OwnerPrepare
+  s8 --> s11: OwnerPrepare
+  s8 --> s16: Settle
+  s8 --> s17: PreCheck
+  s9 --> s16: XRegister
+  s9 --> s18: PreCheck
+  s10 --> s17: XRegister
+  s10 --> s18: Settle
+  s10 --> s19: Stop
+  s11 --> s20: Settle
+  s11 --> s21: Settle
+  s11 --> s22: PreCheck
+  s11 --> s23: Crash
+  s12 --> s24: Start
+  s13 --> s26: Stop
+  s13 --> s32: OwnerPrepare
+  s14 --> s13: Mend
+  s14 --> s15: Stop
+  s14 --> s35: OwnerPrepare
+  s15 --> s25: FinalCheck
+  s16 --> s21: OwnerPrepare
+  s16 --> s27: PreCheck
+  s17 --> s22: OwnerPrepare
+  s17 --> s27: Settle
+  s17 --> s28: Stop
+  s18 --> s27: XRegister
+  s18 --> s29: Stop
+  s19 --> s30: FinalCheck
+  s20 --> s31: Settle
+  s20 --> s32: PreCheck
+  s21 --> s31: Settle
+  s21 --> s33: PreCheck
+  s21 --> s34: Crash
+  s22 --> s32: Settle
+  s22 --> s33: Settle
+  s22 --> s35: Crash
+  s22 --> s36: Stop
+  s23 --> s34: Settle
+  s23 --> s35: PreCheck
+  s24 --> s41: OwnerPrepare
+  s24 --> s42: XRegister
+  s25 --> s25: Start
+  s26 --> s37: FinalCheck
+  s27 --> s33: OwnerPrepare
+  s27 --> s38: Stop
+  s28 --> s39: FinalCheck
+  s29 --> s40: FinalCheck
+  s30 --> s41: Start
+  s31 --> s43: PreCheck
+  s32 --> s43: Settle
+  s32 --> s44: Stop
+  s33 --> s43: Settle
+  s33 --> s45: Crash
+  s33 --> s46: Stop
+  s34 --> s45: PreCheck
+  s35 --> s36: Stop
+  s35 --> s45: Settle
+  s36 --> s47: FinalCheck
+  s37 --> s48: Start
+  s25 --> s59: OwnerPrepare
+  s38 --> s49: FinalCheck
+  s39 --> s50: Start
+  s40 --> s51: Start
+  s41 --> s51: Settle
+  s41 --> s56: XRegister
+  s42 --> s52: Settle
+  s42 --> s53: Crash
+  s42 --> s56: OwnerPrepare
+  s43 --> s54: Stop
+  s44 --> s55: FinalCheck
+  s45 --> s46: Stop
+  s46 --> s57: FinalCheck
+  s47 --> s58: Start
+  s48 --> s62: OwnerPrepare
+  s49 --> s60: Start
+  s50 --> s56: OwnerPrepare
+  s50 --> s60: Settle
+  s51 --> s63: XRegister
+  s52 --> s62: OwnerPrepare
+  s53 --> s52: Mend
+  s53 --> s58: OwnerPrepare
+  s54 --> s61: FinalCheck
+  s55 --> s62: Start
+  s56 --> s62: Settle
+  s56 --> s63: Settle
+  s56 --> s58: Crash
+  s57 --> s64: Start
+  s58 --> s62: Mend
+  s58 --> s64: Settle
+  s59 --> s59: Settle
+  s60 --> s63: OwnerPrepare
+  s61 --> s65: Start
+  s62 --> s65: Settle
+  s63 --> s65: Settle
+  s63 --> s64: Crash
+  s64 --> s65: Mend
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s6 bugPath
+  class s15 bugPath
+  class s25 breaks
+  class s25 bugPath
+  class s59 breaks
+  class s59 bugPath
+  class s59 repeats

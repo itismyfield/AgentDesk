@@ -666,6 +666,10 @@ input-single-path/InputLedgerFormatAfter.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatAfterBootV1.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatAfterBootV2.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatAfterUnlocked.cfg	InputLedgerFormat	RecordedExactlyOnce	-
+input-single-path/InputLedgerFormatDeployBakUnchecked.cfg	InputLedgerFormat	ProofKept	OwnerProgress
+input-single-path/InputLedgerFormatDeployPrecheck.cfg	InputLedgerFormat	NewBootSupported,ProofKept	OwnerProgress
+input-single-path/InputLedgerFormatDeployStopcheck.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatDeployStopcheckBootV1.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatDropMigrationOnly.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatNow.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatNowBeforeRepair.cfg	InputLedgerFormat	-	OwnerProgress
