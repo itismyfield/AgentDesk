@@ -70,10 +70,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/campaigns/{id}",
             "campaigns",
-            "Delete a campaign and all its retained revision history in one transaction. An active campaign is refused with 409; pause or cancel it first. A missing ID returns 404. Deletion is permanent; linked issues, kanban cards and server campaigns are not touched.",
+            "Delete a campaign and all its retained revision history in one transaction; `deleted_revisions` counts the history rows removed. An active campaign is refused with 409; pause or cancel it first. A missing ID returns 404. Deletion is permanent; linked issues, kanban cards and server campaigns are not touched.",
         )
         .with_params([("id", path_param("Campaign ID."))])
-        .with_example(json!({"path": {"id": "release-a"}}), json!({"deleted": "release-a"}))
+        .with_example(json!({"path": {"id": "release-a"}}), json!({"deleted": "release-a", "deleted_revisions": 3}))
         .with_error_example(404, json!({"path": {"id": "absent"}}), json!({"error": "campaign not found", "code": "not_found", "context": {}}))
         .with_error_example(409, json!({"path": {"id": "release-a"}}), json!({"error": "active campaign cannot be deleted; pause or cancel it first", "code": "conflict", "context": {}}))
         .with_curl("curl -X DELETE -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns/release-a\""),

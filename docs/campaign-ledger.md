@@ -29,7 +29,7 @@ All routes are under `/api` and use the same protected admin middleware as
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
 | GET | `/campaigns/{id}` | `{campaign, live, issue_drift}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
-| DELETE | `/campaigns/{id}` | `{deleted: id}`; removes the campaign and its revision history; active campaign returns 409, missing ID returns 404 |
+| DELETE | `/campaigns/{id}` | `{deleted: id, deleted_revisions: n}`; removes the campaign and its revision history; active campaign returns 409, missing ID returns 404 |
 | PATCH | `/campaigns/{id}/nodes/{node_id}` | `{campaign}`; requires `expected_revision`, updates only supplied fields of an existing node |
 | GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
