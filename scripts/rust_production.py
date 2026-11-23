@@ -65,7 +65,7 @@ def production_lines(path: Path, *, parameter_gates: set[int] | None = None, gat
         line_starts.append(offset)
         offset += len(code) + 1
     full_code = "\n".join(code_lines)
-    all_matches = list(_cfg_test_only_matches(full_code))
+    all_matches = list(_cfg_test_only_matches(full_code, source="\n".join(raw_lines)))
     file_test_only = any(
         match.is_inner and _only_inner_attributes_before(full_code, match.start())
         for match in all_matches
@@ -255,7 +255,8 @@ def _production_text(path: Path, *, handled_gates: set[int] | None = None) -> st
         line_starts.append(offset)
         offset += len(line) + 1
     full_code = "\n".join(code for _line, code, _countable in classified)
-    for match in _cfg_test_only_matches(full_code):
+    source = "\n".join(path.read_text(encoding="utf-8").splitlines())
+    for match in _cfg_test_only_matches(full_code, source=source):
         if handled_gates and match.start() in handled_gates:
             continue
         start_line = bisect_right(line_starts, match.start()) - 1

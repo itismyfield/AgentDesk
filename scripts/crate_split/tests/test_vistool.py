@@ -574,7 +574,7 @@ class TestCfgList(unittest.TestCase):
 
     def test_gated_declarations_by_scan(self):
         src = ["pub(crate) fn plain() {}", "#[cfg(all(test, unix))]", "mod tests {", "    pub(crate) fn h() {}", "}",
-               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"x\"))]",
+               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"test-support\"))]",
                "pub(crate) fn either() {}", "#[cfg(test)]", "pub(crate) fn h() {}"]
         layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set(), module_at=lambda rel, line: ("a",))
         defs = vistool_testcfg.gated_defs(layout, lambda rel: src)
