@@ -17,20 +17,23 @@ from pathlib import Path
 import shutil
 import subprocess
 
-# Jobs whose success is N: one archive build, the comparison-base diff, every planned worker, and the result audit.
-N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
+# A build also requires evidence, even when execution was waived.
+RUST_BUILD_JOBS = ("rust_build", "test_evidence")
+RUST_TEST_JOBS = ("base_compare", "rust_tests")
+RUST_PHASES = ((RUST_BUILD_JOBS, ("rust_build",)), (RUST_TEST_JOBS, ("rust_tests",)))
 # A gate is the changes outputs that make a job expected to run; "!x" reads x == "false", () always runs.
 CONTEXTS = {
-    "Lint": ((N_JOBS, ("rust_tests",)), (("lint",), ("rust_or_policy", "relay_contract"))),
-    "Script checks": ((N_JOBS, ("rust_tests",)), (("scripts", "scripts_guards", "scripts_census", "scripts_contracts"), ())),
-    "Fast check (ubuntu-latest)": ((N_JOBS, ("rust_tests",)), (("lint",), ("rust_or_policy", "relay_contract"))),
-    "High-risk recovery": ((N_JOBS, ("rust_tests", "high_risk_recovery")),),
-    "Dashboard (Node 22)": ((N_JOBS, ("rust_tests",)), (("dashboard",), ("dashboard",))),
-    "Fast targeted tests (ubuntu-latest)": ((N_JOBS, ("rust_tests",)), (("pg15_owner_proof",), ("rust_tests",))),
-    "relay-authority-contract": ((N_JOBS, ("rust_tests",)), (("relay_authority_mutations",), ("!rust_tests_skip",))),
-    "Library test sweep (ubuntu-latest)": ((N_JOBS, ("rust_tests",)),),
+    "Lint": (*RUST_PHASES, (("lint",), ("rust_or_policy", "relay_contract"))),
+    "Script checks": (*RUST_PHASES, (("scripts", "scripts_guards", "scripts_census", "scripts_contracts"), ())),
+    "Fast check (ubuntu-latest)": (*RUST_PHASES, (("lint",), ("rust_or_policy", "relay_contract"))),
+    "High-risk recovery": ((RUST_BUILD_JOBS, ("rust_build", "high_risk_recovery")),
+                           (RUST_TEST_JOBS, ("rust_tests", "high_risk_recovery"))),
+    "Dashboard (Node 22)": (*RUST_PHASES, (("dashboard",), ("dashboard",))),
+    "Fast targeted tests (ubuntu-latest)": (*RUST_PHASES, (("pg15_owner_proof",), ("rust_tests",))),
+    "relay-authority-contract": (*RUST_PHASES, (("relay_authority_mutations",), ("!rust_tests_skip",))),
+    "Library test sweep (ubuntu-latest)": RUST_PHASES,
     "Fast check cross OS required context (ubuntu-latest)": (
-        (N_JOBS, ("rust_tests",)), (("check_fast_cross_os", "check_fast_cross_os_targets"), ("cross_os_rust",))),
+        *RUST_PHASES, (("check_fast_cross_os", "check_fast_cross_os_targets"), ("cross_os_rust",))),
 }
 MAX_ATTEMPTS = 2  # the first attempt plus one infra retry
 # The one branch-protection check; it judges every context above on one runner.

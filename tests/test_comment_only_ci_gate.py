@@ -277,6 +277,7 @@ class GateProcessTests(unittest.TestCase):
             "scripts/check_comment_only_change.py",
             "scripts/rust_lex.py",
             "scripts/ci/comment_only_gate.py",
+            "scripts/ci/rust_test_workflow_gate.py",
             "scripts/ci/rust_include_reads.py",
             "scripts/ci/rust_runtime_reads.py",
         ):
@@ -541,8 +542,9 @@ TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'((?:[^']|'')*)'|([A-Za-z_][\
 FORCE_FULL = "needs.pg_shards.outputs.force_full == 'true'"
 UPSTREAM_RESULT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.result\s*==\s*'success'")
 
-PR_SCOPE_BASE = "!github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success'"
+PR_SCOPE_BASE = "!github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success'"
 PR_SCOPE_CONDITIONS = {
+    PR_SCOPE_BASE,
     PR_SCOPE_BASE + " && needs.rust_build.outputs.scope_workers != '[]'",
     PR_SCOPE_BASE + " && (needs.rust_scope.result == 'success' || "
     "(needs.rust_scope.result == 'skipped' && needs.rust_build.outputs.scope_workers == '[]'))",
@@ -696,11 +698,13 @@ class WorkflowSimulation:
         gate_outcome: str = "success",
         run_cancelled: bool = False,
         scope_workers: str = "[]",
+        ci_metadata_only: str | None = None,
     ):
         self.run_cancelled = run_cancelled
         self.scope_workers = scope_workers
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip, "rust_lint_skip": rust_lint_skip}
+        gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip,
+                        "rust_lint_skip": rust_lint_skip, "ci_metadata_only": ci_metadata_only}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
         outcomes = {"filter": "success", "comment_only": gate_outcome}
 
@@ -768,7 +772,8 @@ HEAVY_RAW = outputs(
     dashboard=[], high_risk_recovery=[RS], rust_or_policy=[RS], rust_compile=[RS],
     relay_contract=[], cross_os_rust=[RS], win32_build_token=[], script_check_files=[RS],
 )
-OVERRIDDEN = {"high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
+OVERRIDDEN = {"high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust",
+              "rust_build": "rust_or_policy", "rust_tests": "rust_or_policy"}
 N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # The contexts each upstream job decides, written here independently of the judge's table.
 CONTEXTS_OF = {
