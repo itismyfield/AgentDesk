@@ -39,7 +39,7 @@ const steps = {
   ZombieResponse: "late response from the killed child",
   UserStop: "person sends !stop",
   SendCancel: "session/cancel",
-  Clear: "person runs /clear",
+  Clear: "person runs /clear (a steer being returned is discarded too)",
   CloseAfterTurn: "turn done; child closed",
   Settle: "writer posts the turn's one terminal message (covers steered inputs)",
   Crash: "AgentDesk restarts",
