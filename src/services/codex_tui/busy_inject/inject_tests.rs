@@ -412,7 +412,9 @@ impl Fake {
                     let old = crate::services::tui_input::human_frame::inject(
                         SOURCE, AUTHOR, NAME, NONCE, "",
                     );
-                    let new = crate::services::tui_input::human_frame::idle(NAME, AUTHOR, "");
+                    let new = crate::services::tui_input::human_frame::plain_inject(
+                        SOURCE, AUTHOR, NAME, NONCE, "",
+                    );
                     shown.replace(old.lines().next().unwrap(), &new)
                 } else {
                     shown
