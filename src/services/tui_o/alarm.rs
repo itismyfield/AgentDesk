@@ -846,7 +846,7 @@ mod postgres_tests {
 
         const CHANNEL: u64 = 632_501;
         let _runtime_root = crate::config::TestRuntimeRootGuard::new();
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_o_alarm_writer_retry",
             "O writer autonomous alarm retry",
         )
@@ -951,7 +951,7 @@ mod postgres_tests {
 
     #[tokio::test]
     async fn distinct_channels_and_kinds_enqueue_once_pg() {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_o_alarm_identity",
             "O alarm outbox identity",
         )
@@ -1032,7 +1032,7 @@ mod postgres_tests {
 
     #[tokio::test]
     async fn waiting_incidents_repeat_once_recur_and_replay_independently_pg() {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_o_alarm_waiting",
             "O waiting alarm incident identity",
         )
@@ -1115,7 +1115,7 @@ mod postgres_tests {
 
     #[tokio::test]
     async fn suppression_settles_existing_rows_and_errors_retry_pg() {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_o_alarm_retry",
             "O alarm outbox retry",
         )

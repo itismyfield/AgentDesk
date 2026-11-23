@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::dispatch::test_support::DispatchPostgresTestDb;
+use crate::db::dispatch_test_db::DispatchPostgresTestDb;
 use crate::services::agent_recovery::tests::{CHANNEL, enabled_runtime};
 
 fn runtime(pool: &PgPool) -> Arc<Coordinator> {
