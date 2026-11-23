@@ -77,7 +77,7 @@ export default function CampaignGroupInspector({ overview, nodes, chosen, cycleT
       <MeterBar ratio={percent / 100} tone="ok" className="mt-1" />
       <div className="pt-2"><Button variant="primary" onClick={() => onOpenGroup(group.key)}>{tr("그룹 열기", "Open group")}</Button></div>
     </InspSection>
-    {loops(overview.cycles.filter((path) => path.includes(group.id)))}
+    {loops(overview.cycles.filter((_, index) => overview.components[index].has(group.id)))}
     <InspSection><Counts tr={tr} values={[["작업", "Tasks", total], ["완료", "Done", counts.completed], ["진행", "Running", counts.running], ["막힘", "Blocked", counts.blocked]]} /></InspSection>
     <RowList title={tr("막힌 작업", "Blocked tasks")} empty={tr("막힌 작업이 없어요.", "No blocked tasks.")}
       rows={group.nodes.filter((node) => node.status === "blocked").map((node) => ({ key: node.id, task: node.id, name: node.title, open: () => onOpenTask(node.id) }))} />

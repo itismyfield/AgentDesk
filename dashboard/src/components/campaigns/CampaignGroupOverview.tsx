@@ -10,7 +10,7 @@ import type { Tr } from "./campaignPresentation";
 import { groupViewScope, loadCampaignView, readStoredRaw, subscribeCampaignView } from "./campaignViewStorage";
 import { RelationsLegend, RelationsLine, ZoomTools, useLegible, type LineData } from "./RelationsCanvasChrome";
 import { RelationsGroupNode, RelationsTieNode, type GroupNodeData, type TieNodeData } from "./RelationsTaskNode";
-import { findCycles } from "./relationsEditorModel";
+import { cycleComponents, findCycles } from "./relationsEditorModel";
 
 /** The group key, not its sort position, names a group, so adding a group renames nothing. */
 const groupNodeId = (key: string) => `campaign-group:${encodeURIComponent(key)}`;
@@ -63,8 +63,9 @@ export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: Grap
     const y = spans.reduce((sum, span) => sum + span.y0 + (span.y1 - span.y0) * Math.min(1, Math.max(0, (x - span.x0) / (span.x1 - span.x0 || 1))), 0) / spans.length;
     return [{ ...tie, position: { x: x - TIE_HALF, y: y - TIE_HALF } }];
   });
-  const cycles = findCycles(groups.map((group) => ({ id: group.id, dependencies: connections.filter((line) => line.target === group.id).map((line) => line.source) })));
-  return { groups, connections, internalDependencies: routed.internal.length, ties, cycles };
+  const projection = groups.map((group) => ({ id: group.id, dependencies: connections.filter((line) => line.target === group.id).map((line) => line.source) }));
+  // One loop per looped part names it; every line inside a part lies on some loop, so all of them are drawn as one.
+  return { groups, connections, internalDependencies: routed.internal.length, ties, cycles: findCycles(projection), components: cycleComponents(projection) };
 }
 
 /** One group loop as words: 순환 · A → B → A. */
@@ -89,7 +90,10 @@ export default function CampaignGroupOverview({ campaignId, nodes, chosen, onCho
   const flow = useRef<ReactFlowInstance | null>(null);
   const label = (key: string) => key || tr("미분류", "Ungrouped");
 
-  const graphNodes: Node[] = overview.groups.map((group) => {
+  // Cards go in screen order, so Tab walks the graph the way it is drawn: linked columns left to right, then the shelf row by row.
+  const linked = new Set(overview.connections.flatMap((line) => [line.source, line.target]));
+  const order = (group: GroupOverview["groups"][number]) => linked.has(group.id) ? [0, group.position.x, group.position.y] : [1, group.position.y, group.position.x];
+  const graphNodes: Node[] = [...overview.groups].sort((a, b) => order(a).reduce((sum, value, index) => sum || value - order(b)[index], 0)).map((group) => {
     const { counts, percent, total } = group.progress;
     const finished = total > 0 && counts.completed + counts.skipped === total;
     const data: GroupNodeData = {
@@ -118,12 +122,13 @@ export default function CampaignGroupOverview({ campaignId, nodes, chosen, onCho
   const edges: Edge[] = overview.connections.flatMap((line) => {
     const pair = `${line.source}->${line.target}`, path = looped.get(pair);
     const named = path && labelled.delete(pair) ? groupCycleText(overview, path, tr) : undefined;
+    const error = overview.components.some((part) => part.has(line.source) && part.has(line.target));
     const chain = [line.source, ...line.via.map(tieNodeId), line.target];
     return chain.slice(1).map((target, index) => {
       const last = index === chain.length - 2;
-      const data: LineData & { edges: RawEdgeKey[] } = { error: !!path, edges: line.edges, loopY: line.loopY, ...last ? { count: line.count, cycle: named } : {} };
+      const data: LineData & { edges: RawEdgeKey[] } = { error, edges: line.edges, loopY: line.loopY, ...last ? { count: line.count, cycle: named } : {} };
       return { id: chain.length > 2 ? `${line.id}#${index}` : line.id, source: chain[index], target, type: "relationsLine", data, selectable: false, focusable: false,
-        ...last ? { ariaLabel: tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), markerEnd: { type: MarkerType.ArrowClosed, color: path ? "var(--err)" : "var(--fg-faint)", width: 12, height: 12 } } : {} };
+        ...last ? { ariaLabel: tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), markerEnd: { type: MarkerType.ArrowClosed, color: error ? "var(--err)" : "var(--fg-faint)", width: 12, height: 12 } } : {} };
     });
   });
 

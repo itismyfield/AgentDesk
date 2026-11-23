@@ -585,6 +585,22 @@ test("relations view: group cards by dependency depth, a dashed loop, the saved 
   const left = async (key: string) => (await card(key).boundingBox())!.x;
   expect([await left("Gateway") < await left("Relay"), await left("Relay") < await left("Release")]).toEqual([true, true]);
   await expect(view.getByRole("complementary", { name: "캠페인 요약" })).toContainText("그룹 8개 · 작업 11개");
+  // Fitted past 75% the cards wear covers; zooming in drops them, and Tab walks the drawn columns then the shelf, outlined near and far.
+  const covers = view.locator("[data-far]"), tools = view.getByRole("toolbar", { name: "보기 도구" });
+  const walk = async () => {
+    await view.locator('.react-flow__node[data-id^="campaign-group:"]').first().focus();
+    await page.keyboard.press("Shift+Tab");
+    const seen = [];
+    for (let step = 0; step < 8; step += 1) { await page.keyboard.press("Tab"); seen.push(await page.evaluate(() => [document.activeElement?.getAttribute("data-id"), getComputedStyle(document.activeElement!.firstElementChild!).outlineStyle])); }
+    return seen;
+  };
+  await expect(covers).toHaveCount(8);
+  for (const zoom of ["확대", "확대"]) await tools.getByRole("button", { name: zoom }).click();
+  await expect(covers).toHaveCount(0);
+  expect(await walk()).toEqual(["Cluster", "Gateway", "Relay", "Infra", "Release", "Audit", "Docs", "Queue"].map((key) => [`campaign-group:${key}`, "solid"]));
+  for (const zoom of ["축소", "축소", "축소"]) await tools.getByRole("button", { name: zoom }).click();
+  await expect(covers).toHaveCount(8);
+  expect((await walk()).map(([, outline]) => outline)).toEqual(Array(8).fill("solid"));
   await card("Relay").focus();
   await page.keyboard.press("Enter");
   const aside = view.getByRole("complementary", { name: "선택 그룹" });
