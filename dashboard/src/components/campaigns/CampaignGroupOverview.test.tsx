@@ -1,13 +1,15 @@
 // @vitest-environment happy-dom
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Edge, Node, NodeChange } from "@xyflow/react";
+import type { Edge, Node, NodeChange, NodeProps } from "@xyflow/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { campaignNodeSchema, setCampaignAutoQueue, updateCampaignNode } from "../../api/campaigns";
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGroupOverview";
+import { buildGroupTasks } from "./CampaignGroupTasks";
 import type { LineData } from "./RelationsCanvasChrome";
+import { RelationsGroupNode, type GroupNodeData } from "./RelationsTaskNode";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
@@ -17,7 +19,10 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   createServerCampaign: vi.fn(), editServerCampaignDefinition: vi.fn(), sendServerCampaignCommand: vi.fn(),
 }));
 
+const view = vi.hoisted(() => ({ zoom: 1 }));
 vi.mock("@xyflow/react", () => ({
+  useStore: (select: (state: { transform: number[] }) => unknown) => select({ transform: [0, 0, view.zoom] }),
+  Handle: () => null, Position: { Left: "left", Right: "right" },
   ReactFlow: ({ nodes, edges, onNodesChange, children }: { nodes: Node[]; edges: Edge[]; onNodesChange: (changes: NodeChange[]) => void; children: ReactNode }) => <div data-testid="group-graph">
     {nodes.map((node) => <button key={node.id} aria-label={node.ariaLabel} onClick={() => onNodesChange([{ type: "select", id: node.id, selected: true }])} />)}
     {edges.map((edge) => { const line = edge.data as LineData; return <output key={edge.id} data-error={line.error}>{line.count}{line.cycle}</output>; })}
@@ -103,9 +108,23 @@ it("sums up the chosen group with its blocked tasks and neighbours, and opens it
   expect([calls.open.mock.calls, calls.task.mock.calls, calls.choose.mock.calls]).toEqual([[["B"]], [["b1"]], [["C"]]]);
 });
 
-it("draws a loop between groups red and dashed, labelled once", async () => {
-  await render([node("a1", "A"), node("b1", "B", ["a1"]), node("a2", "A", ["b1"])], null);
-  expect([...container.querySelectorAll("output")].map((line) => [line.dataset.error, line.textContent])).toEqual([["true", "1"], ["true", "1Cycle · A → B → A"]]);
+it("draws every line inside a looped part of the groups red, labels the part once and warns on each of its groups", async () => {
+  // A → B, B → A, B → C and C → A: the shortest loop is A → B → A, yet C → A closes a loop too.
+  await render([node("a1", "A"), node("b1", "B", ["a1"]), node("a2", "A", ["b1"]), node("c1", "C", ["b1"]), node("a3", "A", ["c1"])], "C");
+  const lines = [...container.querySelectorAll("output")];
+  expect([lines.map((line) => line.dataset.error), lines.filter((line) => line.textContent?.includes("Cycle")).length]).toEqual([["true", "true", "true", "true"], 1]);
+  expect(container.querySelector('[aria-label="Selected group"]')?.textContent).toContain("Cycle · A → B → A");
+});
+
+it("covers a group card with its name and pins past 75% out, keeping the red edge inside the blue band when it is chosen and blocked", async () => {
+  const data: GroupNodeData = { title: "Relay", meta: "", tone: "warn", ratio: 0.5, pins: ["Needs", "Next"], summary: "", blocked: "1 blocked tasks", far: "50% · 1 blocked" };
+  const draw = async (zoom: number) => { view.zoom = zoom; await act(async () => root.render(<RelationsGroupNode {...{ id: "g", data, selected: true } as unknown as NodeProps} />)); };
+  await draw(0.8);
+  expect(container.querySelector("[data-far]")).toBeNull();
+  await draw(0.7);
+  expect(container.querySelector("[data-far]")?.textContent).toBe("RelayNeedsNext50% · 1 blocked");
+  await draw(0.5);
+  expect((container.firstElementChild as HTMLElement).style.boxShadow).toMatch(/^0 0 0 2px var\(--err\), 0 0 0 6px var\(--info\)/);
 });
 
 it("names a group by its key, so adding another group does not rename it", () => {
@@ -135,4 +154,13 @@ it("splits an aggregate line by its ties without touching the task graph, the ne
     expect(vi.mocked(write)).not.toHaveBeenCalled();
   }
   vi.unstubAllGlobals();
+});
+
+it("lays an opened group's tasks out between the tasks outside it, with each looped part through them in display ids", () => {
+  // r1 → c1 → r3 → r1 loops through Cluster's c1, a tail at the left edge since r3 depends on it.
+  const graph = buildGroupTasks([node("g1", "Gateway"), node("r1", "Relay", ["g1", "r3"]), node("r2", "Relay", ["r1"]), node("c1", "Cluster", ["r1"]), node("r3", "Relay", ["c1"]), node("rel1", "Release", ["r2"])], "Relay");
+  const x = (...ids: string[]) => ids.map((id) => graph.positions.get(id)!.x);
+  expect(graph.tails.map((tail) => `${tail.id}:${tail.side}`).sort()).toEqual(["tail:c1:in", "tail:g1:in", "tail:rel1:out"]);
+  expect([Math.max(...x("tail:g1", "tail:c1")) < Math.min(...x("r1", "r2", "r3")), x("tail:rel1")[0] > Math.max(...x("r1", "r2", "r3"))]).toEqual([true, true]);
+  expect([graph.components.map((part) => [...part].sort()), graph.cycles.map((path) => path.includes("tail:c1"))]).toEqual([[["r1", "r3", "tail:c1"]], [true]]);
 });

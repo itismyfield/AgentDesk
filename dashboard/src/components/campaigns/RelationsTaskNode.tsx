@@ -1,7 +1,8 @@
 import { Lock } from "lucide-react";
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Handle, NodeToolbar, Position, type NodeProps } from "@xyflow/react";
 import { MeterBar } from "../common/KitPrimitives";
+import { GROUP_PIN_Y } from "./campaignGroupLayout";
 import { FAR, useLegible } from "./RelationsCanvasChrome";
 import { StatusMarker, type MarkerTone } from "./StatusMarker";
 
@@ -51,13 +52,35 @@ export type GroupNodeData = {
   summary: string; blocked: string | null; far: string;
 };
 
-/** One group on the relations view, built like a task node. Zoomed out, its name and state cover it at a legible size. */
+/** Zoomed out, a card's name, its 선행/다음 words and one state line cover it at a legible size; the words and the state
+ * line go first once the card is too short on screen for them, and a meter or the ring still shows the state. */
+function FarCover({ scale, title, line, ratio, error, pins, className }: {
+  scale: number; title: string; line: string; ratio?: number; error?: boolean; pins?: [string, string]; className: string;
+}) {
+  const roomy = scale < 1.9;
+  return <div data-far aria-hidden className={`absolute inset-0 grid content-center gap-[0.35em] overflow-hidden rounded-[inherit] px-[0.6em] ${className}`} style={{ fontSize: 12 * scale }}>
+    <strong className="line-clamp-2 text-[1.05em] leading-tight font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:anywhere]">{title}</strong>
+    {roomy && pins && <span className="flex justify-between text-[0.85em] text-[var(--fg-muted)]"><span>{pins[0]}</span><span>{pins[1]}</span></span>}
+    {ratio !== undefined && <MeterBar ratio={ratio} tone="ok" className="h-[0.3em]" />}
+    {roomy && <span className={`truncate tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
+  </div>;
+}
+/** The 선행 and 다음 pins at their own size on screen over the shrunken handles, so a far card still reads as a node. */
+function FarPins({ scale }: { scale: number }) {
+  const dot = (side: "left" | "right") => <i aria-hidden className="absolute z-[1] rounded-full border-solid border-[var(--fg-muted)] bg-[var(--th-card-bg)]"
+    style={{ [side]: 0, top: GROUP_PIN_Y, width: 10 * scale, height: 10 * scale, borderWidth: 1.5 * scale, transform: `translate(${side === "left" ? "-50%" : "50%"}, -50%)` }} />;
+  return <>{dot("left")}{dot("right")}</>;
+}
+/** Zoomed out, a card keeps a 1px edge on screen (red when it fails); the chosen one adds a blue band outside it. */
+const farRing = (scale: number, selected: boolean, error: boolean) =>
+  ({ boxShadow: [`0 0 0 ${scale}px ${error ? "var(--err)" : "var(--line)"}`, selected && `0 0 0 ${3 * scale}px var(--info)`].filter(Boolean).join(", ") });
+
+/** One group on the relations view, built like a task node. `--legible` lets a keyboard focus ring keep 2px on screen. */
 export function RelationsGroupNode({ data, selected }: NodeProps) {
   const group = data as GroupNodeData;
-  const scale = useLegible();
-  const far = scale > FAR;
-  const ring = [selected && `0 0 0 ${2 * scale}px var(--info)`, group.blocked && `0 0 0 ${scale}px var(--err)`].filter(Boolean).join(", ");
-  return <div className={`${CARD} ${group.blocked ? "border-[var(--err)]" : "border-[var(--line)]"} ${selected && !far ? CHOSEN : ""}`} style={far && ring ? { boxShadow: ring } : undefined}>
+  const scale = useLegible(), far = scale > FAR;
+  return <div className={`${CARD} ${group.blocked ? "border-[var(--err)]" : "border-[var(--line)]"} ${selected && !far ? CHOSEN : ""}`}
+    style={{ "--legible": scale, ...far ? farRing(scale, selected, !!group.blocked) : {} } as CSSProperties}>
     <NodeHead {...group} />
     <div className={PINS}>
       <Handle type="target" position={Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
@@ -66,12 +89,37 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
     </div>
     <div className="grid gap-1.5 px-3 pt-2 pb-2.5"><MeterBar ratio={group.ratio} tone="ok" /><span className="truncate tabular-nums">{group.summary}</span></div>
     {group.blocked && <p className={`${FOOT} text-[var(--err)]`}>{group.blocked}</p>}
-    {/* The state line goes first once the card is too short on screen for it; the meter and the ring still show it. */}
-    {far && <div aria-hidden className="absolute inset-0 grid content-center gap-[0.35em] overflow-hidden rounded-[inherit] bg-[var(--th-card-bg)] px-[0.6em]" style={{ fontSize: 12 * scale }}>
-      <strong className="line-clamp-2 text-[1.05em] leading-tight font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:anywhere]">{group.title}</strong>
-      <MeterBar ratio={group.ratio} tone="ok" className="h-[0.3em]" />
-      {scale < 1.9 && <span className={`truncate tabular-nums ${group.blocked ? "text-[var(--err)]" : ""}`}>{group.far}</span>}
-    </div>}
+    {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} pins={group.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
+  </div>;
+}
+
+/** Zoomed out, `cover` (number and title) heads the card and `far` is its state line. */
+export type ViewTaskData = TaskNodeData & { cover: string; far: string };
+
+/** A task on the read-only view: the editor's card, covered by its title, pins and state once zoomed out. */
+export function ViewTaskNode(props: NodeProps) {
+  const task = props.data as ViewTaskData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative rounded-xl" style={{ "--legible": scale, ...far ? farRing(scale, props.selected, task.error) : {} } as CSSProperties}>
+    <RelationsTaskNode {...props} selected={props.selected && !far} />
+    {far && <><FarCover scale={scale} title={task.cover} line={task.far} error={task.error} pins={task.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
+  </div>;
+}
+
+/** `in` tails are dependencies outside the group, at its left; `out` tails depend on it, at its right. `cover` is the
+ * task's number, all a tail's short card has room for once zoomed out. */
+export type TailNodeData = { title: string; cover: string; group: string; side: "in" | "out" };
+
+/** A task outside the group, faint at the canvas's edge with its group's name; its one pin faces the group. Zoomed out,
+ * its dashed edge keeps 1px on screen. Choosing one leaves this view, so it draws no chosen ring. */
+export function RelationsTailNode({ data }: NodeProps) {
+  const tail = data as TailNodeData;
+  const scale = useLegible(), far = scale > FAR;
+  return <div className="relative grid w-60 gap-0.5 rounded-xl border border-dashed border-[var(--line)] px-3 py-2.5 text-left text-xs text-[var(--fg-muted)]"
+    style={{ "--legible": scale, ...far ? { borderWidth: scale } : {} } as CSSProperties}>
+    <strong className="truncate text-[13px] font-medium text-[var(--fg-dim)]">{tail.title}</strong><span className="truncate">{tail.group}</span>
+    <Handle type={tail.side === "in" ? "source" : "target"} position={tail.side === "in" ? Position.Right : Position.Left} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
+    {far && <FarCover scale={scale} title={tail.cover} line={tail.group} className="bg-[var(--bg)] text-[var(--fg-muted)]" />}
   </div>;
 }
 
