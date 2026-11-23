@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { Campaign } from "../../api/campaigns";
 import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary } from "../../api/serverCampaigns";
+import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, systemNeedsAttention, todoStatus,
+  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, systemNeedsAttention, todoStatus,
   type HomeHealth,
 } from "./homeModel";
 
@@ -41,6 +42,15 @@ describe("home agents", () => {
     expect(classifyAgents(mergeAgentStatus(listed, agent("child")), [{ ...waiting, status: "idle" }], false)[0].state).toBe("resting");
   });
 
+  it("monitors a working agent's live turn and times it only from an in-flight snapshot", () => {
+    const [ada] = classifyAgents([agent("ada", { status: "working", session_info: "PR 리뷰" })], [], false);
+    const turn = { status: "working", started_at: "2026-11-18T00:00:00Z", updated_at: null, provider: "codex", current_tool_line: null };
+    expect(monitorView(turn, ada, tr)).toEqual({ started: null, label: "PR 리뷰", kind: "think", role: "codex" });
+    const live = { ...turn, updated_at: "2026-11-18T00:05:00Z", current_tool_line: "npm test", tool_events: [{ kind: "tool", tool_name: "Bash" }] };
+    expect(monitorView(live, ada, tr)).toMatchObject({ started: Date.parse(turn.started_at), label: "npm test", kind: "run" });
+    expect(monitorView({ ...turn, status: "idle" }, ada, tr)).toBeNull();
+  });
+
   it("tells an empty session list from one that failed to load", () => {
     expect(classifyAgents([agent("a")], [], false)[0].state).toBe("noSession");
     const [unknown] = classifyAgents([agent("a")], [], true);
@@ -67,6 +77,17 @@ describe("home to-dos", () => {
     expect(items.map((item) => [item.key, item.chip])).toEqual([["card:d", "판단 필요"], ["card:b", "판단 필요"], ["card:f", "실패"], ["campaign:relay", "상태 확인 필요"]]);
     expect(items[1]).toMatchObject({ title: "#7 card b", detail: "dependency cycle", to: "/campaigns?tab=queue&card=b", agentId: "ada" });
     expect(items[3].agentId).toBeNull();
+  });
+
+  it("lists server nodes waiting for approval, a decision or a deploy first, and leaves work the scheduler assigns", () => {
+    const document = structuredClone(serverCampaignFixtures.prepared);
+    const statuses = ["awaiting_deploy", "awaiting_start", "awaiting_approval"];
+    document.view.nodes.forEach((node, index) => { node.runtime = { ...node.runtime, human_status: statuses[index], wait_started_at: null }; });
+    const items = buildTodoItems({ cards: [card("d", "review", { review_status: "dilemma_pending" })], campaigns: [], documents: [document], tr, isKo: true });
+    expect(items.map((item) => [item.key, item.kind, item.chip])).toEqual([
+      ["node:release:C", "approve", "승인 대기"], ["card:d", "decide", "판단 필요"], ["node:release:A", "deploy", "배포 대기"],
+    ]);
+    expect(items[0]).toMatchObject({ title: "#7440 Independent work", detail: "Release", to: "/campaigns?mode=server&campaign=release&node=C" });
   });
 
   it("shows the empty state only once every source answered", () => {

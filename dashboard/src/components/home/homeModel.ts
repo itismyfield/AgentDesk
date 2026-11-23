@@ -3,6 +3,7 @@ import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView } from "../../api/serverCampaigns";
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { formatRelativeTime } from "../../app/shellFormatting";
+import type { AgentMonitorStepKind } from "../../kit/pro/agent-monitor";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
@@ -103,10 +104,50 @@ export function agentLine({ state, info, seenAt }: HomeAgent, tr: Tr, isKo: bool
   return join(agentStateLabel(state, tr), info ?? when);
 }
 
+/** The part of `GET /api/agents/{id}/turn` the home monitor reads. */
+export interface HomeTurn {
+  status: string;
+  started_at: string | null;
+  updated_at: string | null;
+  provider: string | null;
+  current_tool_line: string | null;
+  tool_events?: { kind: string; tool_name?: string | null }[];
+}
+
+export interface MonitorView {
+  started: number | null;
+  label: string;
+  kind: AgentMonitorStepKind;
+  role: string | null;
+}
+
+const TOOL_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
+  [/^(Read|NotebookRead)$/, "read"], [/^(Grep|Glob|LS|WebSearch)$/, "search"], [/^(Edit|MultiEdit|Write|NotebookEdit)$/, "edit"],
+  [/^(Bash|exec_command)$/, "run"], [/^WebFetch$/, "web"],
+];
+
+/** A working agent's live turn for the kit monitor, or null to keep the one-line cell. No steps are passed: the turn
+ * reports no step times, and the monitor would show each as zero. */
+export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr): MonitorView | null {
+  if (!turn || entry.state !== "working" || turn.status === "idle") return null;
+  const tool = turn.current_tool_line ? turn.tool_events?.filter((event) => event.kind === "tool").at(-1)?.tool_name ?? "" : "";
+  return {
+    // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
+    started: turn.updated_at ? coerceTimestampMs(turn.started_at) : null,
+    label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
+    kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
+    role: turn.provider,
+  };
+}
+
 // ── To do ──
+
+/** What the row's button does: approve (disabled for now), open the decision or deploy, or no button. */
+export type TodoKind = "approve" | "decide" | "deploy" | "other";
 
 export interface TodoItem {
   key: string;
+  kind: TodoKind;
   tone: HomeTone;
   chip: string;
   title: string;
@@ -129,12 +170,23 @@ function repoName(repo: string | null): string | null {
   return repo ? repo.split("/").pop() || repo : null;
 }
 
-/** Things the server leaves to a person: manual intervention as `src/manual_intervention.rs` defines it (a dilemma
- * or a non-benign blocked reason), failed cards, and server campaigns that need inspection. Reviews, new requests
- * and stalled work stay out: policies move them, and the timeout policy turns stalled work into manual intervention. */
-export function buildTodoItems({ cards, campaigns, tr, isKo }: {
+// `human_status` of server campaign nodes (docs/dashboard-campaign-decisions-api.md). `awaiting_start` stays out:
+// the scheduler assigns that work.
+const HUMAN_TODO = new Map<string, Pick<TodoItem, "kind" | "tone"> & { chip: [string, string] }>([
+  ["awaiting_approval", { kind: "approve", tone: "warn", chip: ["승인 대기", "Approval"] }],
+  ["decision_required", { kind: "decide", tone: "err", chip: ["판단 필요", "Decide"] }],
+  ["awaiting_deploy", { kind: "deploy", tone: "info", chip: ["배포 대기", "Deploy"] }],
+]);
+const KIND_ORDER: TodoKind[] = ["approve", "decide", "deploy", "other"];
+
+/** Things the server leaves to a person: server campaign nodes waiting for an approval, a decision or a deploy,
+ * manual intervention as `src/manual_intervention.rs` defines it (a dilemma or a non-benign blocked reason), failed
+ * cards, and server campaigns that need inspection. Reviews, new requests and stalled work stay out: policies move
+ * them, and the timeout policy turns stalled work into manual intervention. */
+export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
   cards: KanbanCard[];
   campaigns: ServerCampaignSummary[] | null;
+  documents?: ServerCampaignDocument[];
   tr: Tr;
   isKo: boolean;
 }): TodoItem[] {
@@ -151,9 +203,29 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
       agentId: card.assignee_agent_id ?? card.owner_agent_id ?? null,
     };
     if (needsPerson(card)) {
-      items.push({ ...base, tone: "err", chip: tr("판단 필요", "Decide"), detail: card.blocked_reason?.trim() || tr("사람 판단을 기다려요", "Waiting for a decision") });
+      items.push({ ...base, kind: "decide", tone: "err", chip: tr("판단 필요", "Decide"), detail: card.blocked_reason?.trim() || tr("사람 판단을 기다려요", "Waiting for a decision") });
     } else if (FAILED_STATUS.test(card.status)) {
-      items.push({ ...base, tone: "err", chip: tr("실패", "Failed"), detail: join(repoName(card.github_repo), card.latest_dispatch_result_summary ?? ago(card.updated_at)) });
+      items.push({ ...base, kind: "other", tone: "err", chip: tr("실패", "Failed"), detail: join(repoName(card.github_repo), card.latest_dispatch_result_summary ?? ago(card.updated_at)) });
+    }
+  }
+  for (const { definition, view } of documents) {
+    for (const node of view.nodes) {
+      const status = node.runtime.human_status;
+      const human = typeof status === "string" ? HUMAN_TODO.get(status) : undefined;
+      if (!human) continue;
+      const spec = definition.nodes.find((entry) => entry.id === node.id);
+      const issue = spec?.issue_url.match(/\/issues\/(\d+)/)?.[1];
+      const waitedAt = node.runtime.wait_started_at;
+      items.push({
+        key: `node:${view.campaign_id}:${node.id}`,
+        kind: human.kind,
+        tone: human.tone,
+        chip: tr(...human.chip),
+        title: `${issue ? `#${issue} ` : ""}${spec?.title ?? node.id}`,
+        detail: join(definition.title, typeof waitedAt === "string" && ago(waitedAt)),
+        to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: view.campaign_id, node: node.id })}`,
+        agentId: null,
+      });
     }
   }
   for (const summary of campaigns ?? []) {
@@ -161,6 +233,7 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
     if (display !== "needs_inspection" && display !== "unable_to_progress") continue;
     items.push({
       key: `campaign:${campaign_id}`,
+      kind: "other",
       tone: "err",
       chip: tr(...DISPLAY_LABELS[display]),
       title: summary.definition.title,
@@ -169,7 +242,7 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
       agentId: null,
     });
   }
-  return items;
+  return items.sort((left, right) => KIND_ORDER.indexOf(left.kind) - KIND_ORDER.indexOf(right.kind));
 }
 
 export type SourceState = "loading" | "ok" | "failed";

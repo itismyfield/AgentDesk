@@ -2,6 +2,7 @@
 
 <!-- doc-path-refs: external src/kit/ -->
 
-- Source: `agentdesk-ui-kit` at `42af99b` (`src/kit/<free|pro>/*`); `free/` files are adapted from affectUI (MIT, see `free/LICENSE.affectui` and the root `NOTICE`).
+- Source commits per folder in `agentdesk-ui-kit`: `free/` at `42af99b`, `pro/` at `a63a301` (`src/kit/<free|pro>/*`).
+- `free/` files are adapted from affectUI (MIT, see `free/LICENSE.affectui` and the root `NOTICE`). `pro/` files are the kit's clean-room implementations written from public preview specs; they hold no affectUI Pro source.
 - Files are copied verbatim — only relative import paths may change. Keep each file's attribution header; do not restyle them here (Tailwind rules do not apply to this folder).
-- To update: re-copy the file from the kit's `origin/main` with `git show origin/main:src/kit/<path>`, bump the commit above, and re-run `npm run build`, `npx vitest run` and the affected e2e specs.
+- To update: re-copy the file with `git show <commit>:src/kit/<path>` from the kit commit you move to, bump that folder's commit above, and re-run `npm run build`, `npx vitest run` and the affected e2e specs.
