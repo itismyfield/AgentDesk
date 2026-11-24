@@ -300,7 +300,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 
 ## 상태 모델
 
-[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 38개(정상 7, 의도한 반례 31)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
+[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 54개(정상 8, 의도한 반례 46)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
 
 ## 미확인
 

@@ -172,3 +172,34 @@ Fixed는 `LiveHolderKeeps`·`NoDecisionNotice`·`OthersKept`와 liveness `Closed
 모델과 코드가 다른 곳: 모델의 PeerRecover는 holder가 죽은 뒤에만 켜지지만, 코드는 holder 노드가 `worker_nodes`에서
 online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 offline으로 바꾼다). 클러스터를 끈 단일 노드는 instance id가
 하나라서 같은 노드 규칙만 쓴다. Closing 행의 마무리(Finalize)는 holder를 확인하지 않는다 — 원본 제거가 빠져도 Sweep이 다시 찾는다.
+
+## 조각 3 — 게시·회수·비활성 버튼·intake 차단, 2c 리뷰 P2 ①②⑤ 대조 (모델 먼저)
+
+조각 3의 코드는 아직 없다. 아래 행동은 설계 진입점 전수표의 N행(신규 예정 지점)에 대응하고, P2 대조는 2c head의 코드 좌표에 대응한다.
+
+| 모델 전이·변수 | 대응 | 메모 |
+|---|---|---|
+| PostBegin → PostFinish(`posts`) | 설계 N01(ask)·N08(provider 최초 글) | intent를 먼저 저장하고 starter를 한 번 게시한다. 응답을 들으면 `disabled`, 못 들으면 `posting`에 남는다 |
+| Reconcile | 설계 N08(reconcile) | 응답 유실 뒤에는 request marker로 같은 글을 찾는다. 새 POST를 하지 않는다 |
+| PostRejected | 설계 §5의 확정 4xx | 게시 확정 거절은 `post_failed`, 자동 재POST 없음 |
+| `disabled` phase · Activate | 설계 §13 P2-3 표의 조각 3·4 행 | 조각 3은 비활성 버튼과 "아직 선택을 받지 않음"만 노출한다. Activate는 조각 4의 배선이다 |
+| ThreadMessage(대조, `leaked`) | 설계 E49·N22 | decision 글의 메시지는 일반 agent intake로 가지 않는다. guard는 포럼을 기준으로 해야 thread id 저장 전(`posting`)에도 성립한다 |
+| Bootstrap · `tempHeld` (P2 ①) | `src/services/discord/queue_io/decision_drain.rs` `run`(:54)·`node`(:63), `src/db/decisions.rs` `HOLDER`(:155) | 2c head는 cluster 등록 전에 물으면 임시 이름(hostname-pid)을 holder로 고정한다 = `TempHolderId` |
+| MarkOffline · OfflineSettle · `gone` (P2 ②) | `decision_drain.rs` `recover_before`(:429), `src/services/cluster/node_registry.rs` `mark_stale_worker_nodes_offline`(:490) | 2c head에는 offline 전환에서 정산을 다시 부르는 배선이 없다 = `NoOfflineSettle` |
+| RefuseKept · `bound` (P2 ⑤) | `src/services/turn_orchestrator/queued_head/v2/decision.rs` `decision_tickets`(:56), `v2/refused.rs` `refuse_not_sent`(:12) | 2c head의 sweep은 bind에서만 후보를 모은다 = `BindOnlySweep` |
+
+수정 전 RED / 후 GREEN(TLC 1.7.4, `PASS: 34/34 configs`):
+
+| cfg | Mode | 수정 전(RED) | Fixed(GREEN) |
+|---|---|---|---|
+| RePost | 응답 유실 뒤 새 글 POST | `OnePost` 반례 | PASS |
+| EarlyButtons | 비활성 단계에서 선택 수신 | `NoEarlyChoice` 반례 | PASS |
+| NoIntakeGuard | intake 차단 없음 | `NoIntakeLeak` 반례 | PASS |
+| GuardByThread | 저장된 thread id로만 차단 | `NoIntakeLeak` 반례(게시 응답 유실 구간) | PASS |
+| TempHolderId | P2 ①: 등록 전 임시 이름으로 시도를 옮김 | `LiveHolderKeeps` 반례 | PASS |
+| NoOfflineSettle | P2 ②: offline 전환 뒤 재정산 없음 | liveness `AbandonedEnds` 반례 | PASS(`Gone.cfg`) |
+| BindOnlySweep | P2 ⑤: bind에서만 후보 수집 | `NoDecisionNotice` 반례 | PASS |
+
+**P2 ①②⑤는 2c head 코드가 대조 Mode 쪽이다.** Fixed·Gone의 PASS는 조각 4 착수 조건으로 넘긴 목표 계약이고, 현재 코드의 증명이 아니다(producer가 없어 지금은 도달하지 않는다).
+
+모델의 한계: 돌아오지 않는 노드는 `Gone.cfg`에서만 본다(Fixed의 crash는 항상 재부팅한다). 그 노드의 큐 파일·화면은 그 노드만 고칠 수 있어서 `ClosedLeavesNothing`·`OthersTold`·`EventuallySettled`는 `gone`이면 면제한다. 상태 수를 2c 수준으로 묶으려고 `disabled` 단계의 자동 archive, `unknown`이 아닌 동안의 offline 표시, Fixed에서의 RefuseKept는 뺐다.
