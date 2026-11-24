@@ -1,6 +1,6 @@
 # Decision 포럼 설계 (#8211)
 
-<!-- doc-path-refs: proposed src/cli/args/decision.rs src/cli/decision.rs src/cli/decision/owner_cache.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/server/routes/decisions.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/ingress.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/requester.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs -->
+<!-- doc-path-refs: proposed src/cli/args/decision.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs -->
 
 설계 기준 코드는 `1161162a18`이다. 이 문서는 #8211 설계 개정 3(독립 리뷰 P0 0·P1 0·P2 3)의 요지이며, 리뷰 P2 3건을 다음 조각의 수용 조건으로 넣었다. 상태 모델은 [decision-request 모델](statecharts/decision-request/decision-request.report.md)에 있다. 줄 번호는 설계 기준 코드의 좌표이며 이후 편집으로 밀릴 수 있다.
 
@@ -175,6 +175,7 @@ agent_handoff의 source=decision 거절과 owner 경로 안의 claude_handoff �
 - 아직 caller가 없는 DAO·renderer·enum variant를 미리 넣지 않는다. 테이블·DAO는 실제 caller가 들어오는 조각에서 만든다.
 - 1,000줄 넘는 기존 파일에는 module/re-export/호출 줄만 넣고 본체는 새 child에 둔다.
 - 조각 3은 단독으로 기능 완료를 주장하지 않는다. 조각 4 뒤에 활성 버튼, 조각 5 뒤에 자유 의견 안내를 노출한다(§13 P2-3).
+- 조각 3은 3a(요청 저장·API·CLI·requester cap·intake 차단, 게시 없이 202 `publication: pending`)와 3b(게시·회수·비활성 버튼)로 나눈다. intake 차단은 저장된 thread id가 아니라 부모가 Decision 포럼인 thread를 기준으로 한다. 게시 응답을 잃어 thread id가 아직 없는 구간에도 막기 위해서다.
 
 수정 전 RED→GREEN 계획:
 

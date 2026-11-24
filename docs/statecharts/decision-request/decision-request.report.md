@@ -203,3 +203,16 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 **P2 ①②⑤는 2c head 코드가 대조 Mode 쪽이다.** Fixed·Gone의 PASS는 조각 4 착수 조건으로 넘긴 목표 계약이고, 현재 코드의 증명이 아니다(producer가 없어 지금은 도달하지 않는다).
 
 모델의 한계: 돌아오지 않는 노드는 `Gone.cfg`에서만 본다(Fixed의 crash는 항상 재부팅한다). 그 노드의 큐 파일·화면은 그 노드만 고칠 수 있어서 `ClosedLeavesNothing`·`OthersTold`·`EventuallySettled`는 `gone`이면 면제한다. 상태 수를 2c 수준으로 묶으려고 `disabled` 단계의 자동 archive, `unknown`이 아닌 동안의 offline 표시, Fixed에서의 RefuseKept는 뺐다.
+
+### 조각 3a 코드 좌표 (요청 저장·API·CLI·cap·intake 차단, 게시 없음)
+
+좌표는 조각 3a head 기준이다. 3a는 게시하지 않으므로 모델에서는 `new` → `posting`(PostBegin, intent 저장)까지만 코드가 있다. PostFinish·Reconcile·`disabled`는 3b다.
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| PostBegin(intent 저장) | `src/server/routes/decisions.rs` `ask`(:24) → `src/services/discord/decisions/mod.rs` `store`(:105) → `src/db/decisions/requests.rs` `create_once`(:40) | 질문·선택지·cap hash를 한 transaction으로 저장한다. idempotency key 하나가 요청 하나다. 응답은 202 `publication: pending` |
+| (읽기, 전이 없음) | `src/server/routes/decisions.rs` `show`(:65) → `requests.rs` `load`(:123) | cap과 cap hash는 읽기에 없다 |
+| requester cap | CLI `src/cli/decision.rs` `ask`(:61) → `src/cli/decision/owner_cache.rs` `prepare`(:51), 서버 `src/services/discord/decisions/requester.rs` `hash`(:18) | cap은 요청을 보내기 전에 사설 cache에 쓰이고, 서버는 hash만 저장한다 |
+| ThreadMessage 대조(`NoIntakeGuard`·`GuardByThread`) | `src/services/discord/router/intake_gate.rs:233` → `src/services/discord/decisions/ingress.rs` `consumes`(:89) → `contains`(:46) → `load_forums`(:24) | 부모가 Decision 포럼(ready 행 + 설정 덮어쓰기)인 thread의 메시지는 dedup 전에 intake에서 빠진다. thread id를 보지 않으므로 게시 응답 유실 구간(`posting` ∧ `posts`=1)에도 성립한다 |
+
+모델과 코드가 다른 곳(3a): 차단은 포럼 집합을 30초마다 다시 읽는다(`ingress.rs` `REFRESH`:14). 방금 기록된 포럼은 다음 판독까지 최대 30초 동안 모른다. 모델의 `GuardByForum`은 포럼을 항상 아는 것으로 둔다. 3b가 게시 전에 그 포럼을 이 process의 집합에 넣어 이 창을 닫아야 한다. thread의 부모는 intake가 이미 읽은 값과 gateway cache에서만 얻는다. 둘 다 없으면(채널 조회 실패 + cache 없음) 판정하지 못하고 기존 intake로 간다.

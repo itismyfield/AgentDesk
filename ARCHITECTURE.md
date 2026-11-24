@@ -35,6 +35,8 @@ src/
 │   │   ├── replay_root_issuer.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
+│   ├── decision/
+│   │   └── owner_cache.rs
 │   ├── dev_instance/
 │   │   └── tests.rs
 │   ├── direct/
@@ -101,6 +103,8 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
+│   ├── decision.rs
+│   ├── decision_tests.rs
 │   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
@@ -243,6 +247,8 @@ src/
 │   │   └── tests.rs
 │   ├── channel_home_preferences/
 │   │   └── pg_tests.rs
+│   ├── decisions/
+│   │   └── requests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
@@ -695,6 +701,7 @@ src/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints/
 │   │   │   │       ├── cluster_execution.rs
+│   │   │   │       ├── decisions.rs
 │   │   │   │       ├── kakao_calendar.rs
 │   │   │   │       ├── mod.rs
 │   │   │   │       ├── part_01.rs
@@ -834,6 +841,8 @@ src/
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs
 │   │   ├── cron_api.rs
+│   │   ├── decisions.rs
+│   │   ├── decisions_tests.rs
 │   │   ├── departments.rs
 │   │   ├── discord.rs
 │   │   ├── dispatched_sessions.rs
@@ -1789,6 +1798,12 @@ src/
 │   │   │   ├── tool_call_tests.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── decisions/
+│   │   │   ├── ask_tests.rs
+│   │   │   ├── ingress.rs
+│   │   │   ├── ingress_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   └── requester.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   └── tests.rs
