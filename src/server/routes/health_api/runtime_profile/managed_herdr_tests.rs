@@ -8,11 +8,9 @@ use serde_json::json;
 use crate::config::session_hosts::{
     BootSessionHosts, EndpointConfig, EndpointMode, force_for_test, with_boot,
 };
+use crate::krx_session_host_tests::managed_config_maintenance::{PEER_SETTLE, past_no_peer};
 use crate::services::session_host::herdr_socket_rig_tests::{
     NativeHerdrRig, native_registry_on_this_thread, native_server_child,
-};
-use crate::services::session_host::managed_config::maintenance::tests::{
-    PEER_SETTLE, past_no_peer,
 };
 use crate::services::session_host::managed_config::{maintenance, path::PersonalPaths};
 
