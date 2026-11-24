@@ -1,4 +1,4 @@
-//! A Claude launch that cannot continue its requested session tells the channel once.
+//! A Claude turn that cannot continue its requested session tells the channel once.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -29,18 +29,13 @@ pub(super) fn announce(
     let Some(channel) = channel else {
         return;
     };
-    let claimed = (ANNOUNCED.lock().unwrap_or_else(PoisonError::into_inner))
-        .insert((channel, requested.to_string()));
-    if !claimed {
+    let Some(short) = claim(channel, requested) else {
         return;
-    }
+    };
     // A session notice shows only its first line, so the whole notice is that line.
-    let short: String = requested.chars().take(8).collect();
     let content = format!(
         "♻️ 이전 세션 {short} 기록을 찾지 못해 새 세션으로 시작했습니다. 이전 대화 맥락은 이어지지 않습니다."
     );
-    #[cfg(test)]
-    (POSTED.lock().unwrap_or_else(PoisonError::into_inner)).push(requested.to_string());
     let session_key = format!("claude_resume_lost:{requested}");
     crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         pool,
@@ -49,6 +44,51 @@ pub(super) fn announce(
         REASON,
         &content,
     );
+}
+
+/// Logs that the thread's stored session `requested` has no hook-verified binding to resume under,
+/// and posts the channel one notice that the turn starts fresh with the thread's recent messages.
+pub(crate) async fn announce_unverified(
+    pool: Option<&sqlx::PgPool>,
+    channel: u64,
+    requested: &str,
+) {
+    tracing::warn!(
+        channel_id = channel,
+        requested_session_id = requested,
+        resumed = false,
+        reason = %"thread_unverified_provider_session",
+        "Claude thread session has no verified binding; launching a fresh session instead"
+    );
+    let (Some(short), Some(pool)) = (claim(channel, requested), pool) else {
+        return;
+    };
+    let content = format!(
+        "♻️ 이전 세션({short})은 이 스레드에서 이어받을 수 없어 새 세션으로 시작했습니다. 스레드의 최근 대화만 전달됩니다."
+    );
+    let session_key = format!("claude_resume_unverified:{requested}");
+    let queued = crate::services::message_outbox::enqueue_lifecycle_notification_pg(
+        pool,
+        &format!("channel:{channel}"),
+        Some(&session_key),
+        REASON,
+        &content,
+    );
+    if let Err(error) = queued.await {
+        tracing::warn!(channel_id = channel, %error, "unverified thread resume notice was not queued");
+    }
+}
+
+/// Claims the one notice of `requested` in this channel; its short id when this call won it.
+fn claim(channel: u64, requested: &str) -> Option<String> {
+    let claimed = (ANNOUNCED.lock().unwrap_or_else(PoisonError::into_inner))
+        .insert((channel, requested.to_string()));
+    if !claimed {
+        return None;
+    }
+    #[cfg(test)]
+    (POSTED.lock().unwrap_or_else(PoisonError::into_inner)).push(requested.to_string());
+    Some(requested.chars().take(8).collect())
 }
 
 #[cfg(test)]
