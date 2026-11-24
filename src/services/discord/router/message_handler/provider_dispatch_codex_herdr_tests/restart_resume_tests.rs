@@ -73,7 +73,8 @@ fn resumed_pending_after_boot_reads_only_seed_reply_pg() {
     .unwrap();
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     crate::services::tui_prompt_dedupe::install_herdr_execution(fx.logical(), &nonce);
-    crate::services::discord::stamp_spawn_markers(fx.logical(), Some(&prepared)).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(fx.logical(), Some(&prepared))
+        .unwrap();
     fx.rig.run_provider(&prepared.path, false);
     o.restart();
     let restored = execution_context("codex", &nonce).unwrap();

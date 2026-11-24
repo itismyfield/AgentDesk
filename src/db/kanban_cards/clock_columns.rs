@@ -22,7 +22,8 @@ pub(crate) fn validate_set(state: &str, field: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::pipeline::{ClockConfig, PipelineConfig, parse_override_strict};
+    use crate::pipeline::{ClockConfig, PipelineConfig};
+    use crate::services::pipeline_override::parse_override_strict;
 
     fn default_pipeline() -> PipelineConfig {
         serde_yaml::from_str(include_str!("../../../policies/default-pipeline.yaml")).unwrap()

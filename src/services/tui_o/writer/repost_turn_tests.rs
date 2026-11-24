@@ -8,7 +8,20 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 
-use super::*;
+use crate::services::tui_o::shadow::binding_reader::source_id_for;
+use crate::services::tui_o::shadow::{UnitKey, UnitKind};
+use crate::services::tui_o::store::InitSource;
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
+use crate::services::tui_o::writer::tests::actor::*;
+use crate::services::tui_o::writer::tests::{
+    BOT, CHANNEL, FakePort, Harness, Reply, Writer, ledger_path, outcome, piece, unit,
+};
+use crate::services::tui_o::writer::{
+    DiscordPort, PostOutcome, SeenMessage, WriterAlarm, deliver, pieces,
+};
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 
 #[path = "bo_post_tests.rs"]
 mod bo_post;
@@ -18,6 +31,7 @@ mod local_retry;
 mod scoped;
 #[path = "tool_result_repost_tests.rs"]
 mod tool_result;
+use super::repost_probe::absent_evidence;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::repost::admission::{Admitter, OriginalAttempt, OriginalGate};
 use crate::services::tui_o::repost::dispatch::{self, Admission, RepostWriter};
@@ -25,7 +39,6 @@ use crate::services::tui_o::repost::identity::PieceKey;
 use crate::services::tui_o::repost::io::probe::ProbeRead;
 use crate::services::tui_o::repost::io::probe::evidence::{EvidenceScope, RunScope};
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
-use crate::services::tui_o::repost::io::probe::tests::absent_evidence;
 use crate::services::tui_o::repost::o_piece_attempts::{AttemptResult, attempts};
 use crate::services::tui_o::repost::o_piece_delivery::{
     Receipt, ReceiptMethod, ReceiptOutcome, load, record_receipt,

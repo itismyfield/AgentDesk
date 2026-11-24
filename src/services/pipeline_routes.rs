@@ -1037,7 +1037,7 @@ mod tests {
     /// invalid->BadRequest through the same write path.
     #[tokio::test]
     async fn replace_stages_persists_backoff_round_trip_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_pipeline_backoff",
             "pipeline stage backoff persistence",
         )
@@ -1118,7 +1118,7 @@ mod tests {
     /// strand it or reroute it past stages it has not run.
     #[tokio::test]
     async fn stage_saves_refuse_to_strand_open_cards_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_pipeline_stage_cards",
             "pipeline stage card guard",
         )
@@ -1247,7 +1247,7 @@ mod tests {
     /// move never follows an order the save is changing.
     #[tokio::test]
     async fn card_stage_moves_take_turns_with_stage_saves_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_pipeline_stage_moves",
             "pipeline stage moves",
         )
@@ -1365,7 +1365,7 @@ mod tests {
     /// an empty repo, so each reads what the one before it wrote.
     #[tokio::test]
     async fn stage_saves_take_turns_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_pipeline_stage_saves",
             "pipeline stage saves",
         )

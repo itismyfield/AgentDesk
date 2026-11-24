@@ -34,7 +34,7 @@ fn start_of(pid: u32) -> ProcessStart {
 }
 
 /// Every process is a bootstrapped server; the scripted socket carries the rest.
-struct Bootstrapped;
+pub(crate) struct Bootstrapped;
 
 impl ServerProvenance for Bootstrapped {
     fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
@@ -83,12 +83,12 @@ type Reply = Box<dyn Fn(&Value, &AtomicU32) -> Value + Send + Sync>;
 /// One accepted connection: the request it carried, if any, and every byte it sent.
 type Conn = (Option<Value>, usize);
 
-struct Server {
+pub(crate) struct Server {
     path: PathBuf,
     /// The pid of the process accepting connections, as the peer reader reports it.
     serving: Arc<AtomicU32>,
     /// Every connection in accept order: the method it carried, if any, and its bytes.
-    conns: Arc<Mutex<Vec<Conn>>>,
+    pub(crate) conns: Arc<Mutex<Vec<Conn>>>,
     /// The result every ping gets.
     pong: Arc<Mutex<Value>>,
     stop: Arc<AtomicBool>,
@@ -96,7 +96,7 @@ struct Server {
 }
 
 /// Answers the one request on each connection with `reply`'s result, then closes it.
-fn serve(reply: Reply) -> Server {
+pub(crate) fn serve(reply: Reply) -> Server {
     let name = format!("adk-lh-{}-{}.sock", std::process::id(), socket_number());
     let path = std::env::temp_dir().join(&name);
     let path = if path.as_os_str().len() > 90 {
@@ -182,7 +182,7 @@ fn answer(
 }
 
 impl Server {
-    fn methods(&self) -> Vec<String> {
+    pub(crate) fn methods(&self) -> Vec<String> {
         let conns = self.conns.lock().unwrap();
         let method = |request: &Value| request["method"].as_str().unwrap_or("?").to_string();
         conns
@@ -211,7 +211,7 @@ impl Drop for Server {
     }
 }
 
-fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
+pub(crate) fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
     HerdrLaunchEndpoint {
         execution_node: "mac-mini".into(),
         config_key: "pilot".into(),
@@ -221,7 +221,7 @@ fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
 }
 
 /// A host whose connections name the server's current serving pid as their peer.
-fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
+pub(crate) fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     let endpoint = HerdrEndpoint::new("mac-mini", "pilot", &server.path, "adk")
         .unwrap()
         .with_herdr_home(Path::new(HOME))
@@ -245,7 +245,7 @@ fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     host
 }
 
-fn workdir() -> (tempfile::TempDir, PathBuf) {
+pub(crate) fn workdir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let real = std::fs::canonicalize(dir.path()).unwrap();
     (dir, real)
@@ -649,9 +649,6 @@ impl SocketHerdrLaunchHost {
         host
     }
 }
-
-#[path = "unplaced_rig_tests.rs"]
-mod unplaced_rig;
 
 struct InstanceBootstrapped;
 

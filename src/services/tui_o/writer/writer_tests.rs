@@ -17,11 +17,11 @@ use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, Un
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 
-const BOT: u64 = 42;
-const CHANNEL: u64 = 7;
+pub(crate) const BOT: u64 = 42;
+pub(crate) const CHANNEL: u64 = 7;
 
 thread_local! {
-    static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
+    pub(crate) static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -37,7 +37,7 @@ pub(crate) fn restart_policy_call(channel: u64) {
 }
 
 #[derive(Clone, Copy)]
-enum Reply {
+pub(crate) enum Reply {
     Created,
     /// Discord created the message but the response was lost.
     CreatedUnseen,
@@ -57,29 +57,29 @@ enum Reply {
 type PostHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
 #[derive(Default)]
-struct FakePort {
+pub(crate) struct FakePort {
     usage_footer_pool: std::sync::OnceLock<sqlx::PgPool>,
-    history: Mutex<Vec<SeenMessage>>,
-    replies: Mutex<VecDeque<Reply>>,
+    pub(crate) history: Mutex<Vec<SeenMessage>>,
+    pub(crate) replies: Mutex<VecDeque<Reply>>,
     posts: Mutex<Vec<String>>,
     prepared_before_post: Mutex<Vec<bool>>,
-    ledger: Mutex<Option<PathBuf>>,
-    unreadable: AtomicBool,
+    pub(crate) ledger: Mutex<Option<PathBuf>>,
+    pub(crate) unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
-    lazy: AtomicBool,
+    pub(crate) lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
-    started: Arc<Mutex<Vec<&'static str>>>,
+    pub(crate) started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
-    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    on_post: PostHook,
-    history_reads: AtomicUsize,
-    on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub(crate) hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) on_post: PostHook,
+    pub(crate) history_reads: AtomicUsize,
+    pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
-    delay: Mutex<Option<std::time::Duration>>,
+    pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {
-    fn say(&self, author_id: u64, content: &str) -> SeenMessage {
+    pub(crate) fn say(&self, author_id: u64, content: &str) -> SeenMessage {
         let mut history = self.history.lock().unwrap();
         let id = 1000 + history.len() as u64;
         let content = content.to_string();
@@ -92,7 +92,7 @@ impl FakePort {
         message
     }
 
-    fn posts(&self) -> Vec<String> {
+    pub(crate) fn posts(&self) -> Vec<String> {
         self.posts.lock().unwrap().clone()
     }
 }
@@ -216,15 +216,15 @@ impl DiscordPort for FakePort {
 }
 
 #[derive(Default)]
-struct FakeLease {
-    busy: AtomicBool,
-    released: Arc<AtomicUsize>,
-    on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
+pub(crate) struct FakeLease {
+    pub(crate) busy: AtomicBool,
+    pub(crate) released: Arc<AtomicUsize>,
+    pub(crate) on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
-    unavailable: Mutex<Vec<u64>>,
+    pub(crate) unavailable: Mutex<Vec<u64>>,
 }
 
-struct Held(Arc<AtomicUsize>);
+pub(crate) struct Held(Arc<AtomicUsize>);
 
 impl Drop for Held {
     fn drop(&mut self) {
@@ -249,10 +249,10 @@ impl DeliveryLease for Arc<FakeLease> {
 
 /// The alarms of one harness channel; an alarm for any other channel fails the test.
 #[derive(Clone)]
-struct Alarms {
+pub(crate) struct Alarms {
     channel: u64,
-    raised: Arc<Mutex<Vec<WriterAlarm>>>,
-    cleared: Arc<AtomicUsize>,
+    pub(crate) raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    pub(crate) cleared: Arc<AtomicUsize>,
     /// The reader count the writer last reported.
     readers: Arc<Mutex<Option<usize>>>,
 }
@@ -275,7 +275,7 @@ impl AlarmSink for Alarms {
 }
 
 impl Alarms {
-    fn taken(&self) -> Vec<WriterAlarm> {
+    pub(crate) fn taken(&self) -> Vec<WriterAlarm> {
         std::mem::take(&mut self.raised.lock().unwrap())
     }
 
@@ -284,29 +284,29 @@ impl Alarms {
     }
 }
 
-type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
+pub(crate) type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
 
-struct Harness {
-    channel_id: u64,
-    _runtime: tempfile::TempDir,
-    store: OStore,
-    gate: Arc<OwnershipGate>,
-    port: Arc<FakePort>,
-    lease: Arc<FakeLease>,
-    alarms: Alarms,
+pub(crate) struct Harness {
+    pub(crate) channel_id: u64,
+    pub(crate) _runtime: tempfile::TempDir,
+    pub(crate) store: OStore,
+    pub(crate) gate: Arc<OwnershipGate>,
+    pub(crate) port: Arc<FakePort>,
+    pub(crate) lease: Arc<FakeLease>,
+    pub(crate) alarms: Alarms,
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::build(|_| Vec::new())
     }
 
     /// `sources` may create transcripts under the runtime root before the era begins.
-    fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
+    pub(crate) fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
         Self::build_channel(CHANNEL, sources)
     }
 
-    fn build_channel(
+    pub(crate) fn build_channel(
         channel_id: u64,
         sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>,
     ) -> Self {
@@ -356,7 +356,7 @@ impl Harness {
         }
     }
 
-    fn channel(&self) -> ChannelStore {
+    pub(crate) fn channel(&self) -> ChannelStore {
         let era = self.store.read_era().unwrap().unwrap();
         self.store
             .open_channel(&era, self.channel_id)
@@ -364,7 +364,7 @@ impl Harness {
             .unwrap()
     }
 
-    fn writer(&self) -> Writer {
+    pub(crate) fn writer(&self) -> Writer {
         let (gate, port) = (Arc::clone(&self.gate), Arc::clone(&self.port));
         ChannelWriter::new(
             self.channel(),
@@ -376,7 +376,7 @@ impl Harness {
     }
 }
 
-fn unit(native_key: &str) -> UnitKey {
+pub(crate) fn unit(native_key: &str) -> UnitKey {
     let (provider, kind) = (ShadowProvider::Claude, UnitKind::Body);
     UnitKey {
         channel_id: CHANNEL,
@@ -421,7 +421,7 @@ pub(crate) async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec
     (harness.port.posts(), ledger)
 }
 
-fn piece(native_key: &str, payload: &str) -> Derived {
+pub(crate) fn piece(native_key: &str, payload: &str) -> Derived {
     Derived::Piece(PieceWork {
         output_origin: None,
         unit_key: unit(native_key),
@@ -431,7 +431,7 @@ fn piece(native_key: &str, payload: &str) -> Derived {
     })
 }
 
-fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
+pub(crate) fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
     let ledger = writer.store().ledger();
     ledger
         .latest_piece(&unit(native_key), 0)
@@ -753,7 +753,7 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
     let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     let long = "word ".repeat(900);
     let pieces = deriver.derive(&row("msg_1", &long));
-    let expected = crate::services::discord::formatting::split_for_shadow(long.trim());
+    let expected = crate::domain::message_split::split_for_shadow(long.trim());
     assert!(expected.len() >= 2);
     let payloads: Vec<String> = pieces
         .iter()
@@ -975,7 +975,7 @@ async fn a_post_whose_id_trails_the_previous_one_keeps_the_writer_running() {
 }
 
 /// The ledger file a channel store appends to.
-fn ledger_path(harness: &Harness) -> PathBuf {
+pub(crate) fn ledger_path(harness: &Harness) -> PathBuf {
     let dir = harness
         ._runtime
         .path()
@@ -1026,10 +1026,6 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
-#[path = "input_notice_transport_tests.rs"]
-mod input_notice_transport_tests;
-#[path = "local_retry_tests.rs"]
-mod local_retry_tests;
 #[path = "notice_retry_tests.rs"]
 mod notice_retry_tests;
 #[path = "tool_card_replay_tests.rs"]

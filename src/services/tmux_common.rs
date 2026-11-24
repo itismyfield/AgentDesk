@@ -3,6 +3,8 @@ pub(crate) mod host_marker;
 pub(crate) mod runtime_activity;
 pub(crate) mod runtime_hint_fence;
 mod session_markers;
+#[cfg(unix)]
+pub(crate) mod spawn_markers;
 pub mod unified_thread;
 #[cfg(test)]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
@@ -31,16 +33,16 @@ use crate::services::tui_input::human_frame;
 static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SOURCE_AUTHORITY_CONTENTION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static SOURCE_AUTHORITY_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct SourceAuthorityContention(String);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn source_authority_contention_key_for_tests(
     operation: impl FnOnce(),
 ) -> Option<String> {
@@ -96,7 +98,7 @@ fn source_authority_lock_for_key(key: &str) -> Arc<Mutex<()>> {
     lock
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::MutexGuard<'a, ()> {
     match lock.try_lock() {
         Ok(guard) => return guard,
@@ -117,9 +119,9 @@ fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::Mutex
 
 fn with_source_authority_key<R>(key: &str, operation: impl FnOnce() -> R) -> R {
     let lock = source_authority_lock_for_key(key);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let _guard = lock_source_authority(&lock, key);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
     operation()
 }

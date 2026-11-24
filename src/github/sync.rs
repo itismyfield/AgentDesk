@@ -1,6 +1,7 @@
 //! GitHub issue state sync: keep kanban cards consistent with GitHub issue state.
 
 use crate::services::auto_queue::transactions;
+use crate::services::pipeline_override::PipelineOverride;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
@@ -212,8 +213,7 @@ async fn sync_cards_for_repo_pg(
     crate::pipeline::ensure_loaded();
 
     let repo_override = load_pg_repo_override(pool, repo).await?;
-    let mut agent_overrides: HashMap<String, Option<crate::pipeline::PipelineOverride>> =
-        HashMap::new();
+    let mut agent_overrides: HashMap<String, Option<PipelineOverride>> = HashMap::new();
     let mut result = SyncResult::default();
     let fetched_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
     let mut issues = issues.to_vec();
@@ -279,8 +279,8 @@ async fn sync_loaded_github_issues_for_repo_pg(
     pool: &PgPool,
     repo: &str,
     issues: &[GhIssue],
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
-    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+    repo_override: Option<&PipelineOverride>,
+    agent_overrides: &mut HashMap<String, Option<PipelineOverride>>,
     mut result: SyncResult,
 ) -> Result<SyncResult, String> {
     for issue in issues {
@@ -563,8 +563,8 @@ async fn stale_card_issue_numbers_for_reconcile(
     pool: &PgPool,
     repo: &str,
     fetched_issue_numbers: &HashSet<i64>,
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
-    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+    repo_override: Option<&PipelineOverride>,
+    agent_overrides: &mut HashMap<String, Option<PipelineOverride>>,
 ) -> Result<StaleIssueSelection, String> {
     crate::pipeline::ensure_loaded();
 
@@ -1017,7 +1017,7 @@ fn parse_issue_number_batch_graphql_response(
 async fn load_pg_repo_override(
     pool: &PgPool,
     repo: &str,
-) -> Result<Option<crate::pipeline::PipelineOverride>, String> {
+) -> Result<Option<PipelineOverride>, String> {
     load_pg_pipeline_override(
         pool,
         "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
@@ -1030,7 +1030,7 @@ async fn load_pg_repo_override(
 async fn load_pg_agent_override(
     pool: &PgPool,
     agent_id: &str,
-) -> Result<Option<crate::pipeline::PipelineOverride>, String> {
+) -> Result<Option<PipelineOverride>, String> {
     load_pg_pipeline_override(
         pool,
         "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
@@ -1045,7 +1045,7 @@ async fn load_pg_pipeline_override(
     sql: &'static str,
     id: &str,
     label: &str,
-) -> Result<Option<crate::pipeline::PipelineOverride>, String> {
+) -> Result<Option<PipelineOverride>, String> {
     let row = sqlx::query(sql)
         .bind(id)
         .fetch_optional(pool)
@@ -1061,7 +1061,7 @@ async fn load_pg_pipeline_override(
         .flatten();
 
     match raw {
-        Some(raw) => crate::pipeline::parse_override(&raw)
+        Some(raw) => crate::services::pipeline_override::parse_override(&raw)
             .map_err(|error| format!("parse {label} pipeline override for {id}: {error}")),
         None => Ok(None),
     }
@@ -1070,9 +1070,9 @@ async fn load_pg_pipeline_override(
 async fn resolve_pg_pipeline(
     pool: &PgPool,
     repo: &str,
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
+    repo_override: Option<&PipelineOverride>,
     assigned_agent_id: Option<&str>,
-    agent_overrides: &mut HashMap<String, Option<crate::pipeline::PipelineOverride>>,
+    agent_overrides: &mut HashMap<String, Option<PipelineOverride>>,
 ) -> Result<crate::pipeline::PipelineConfig, String> {
     let agent_override = match assigned_agent_id {
         Some(agent_id) => {

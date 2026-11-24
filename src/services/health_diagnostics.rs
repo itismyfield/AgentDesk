@@ -39,7 +39,7 @@ pub struct AutoQueueCleanupBacklog {
 /// Test-only injection point for [`load_auto_queue_cleanup_backlog`], so router
 /// tests can assert on the real health body without a database. The guard from
 /// `inject` holds a process-wide lock and clears the value on drop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod backlog_probe {
     use super::AutoQueueCleanupBacklog;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -77,7 +77,7 @@ pub(crate) mod backlog_probe {
 pub async fn load_auto_queue_cleanup_backlog(
     pg_pool: Option<&PgPool>,
 ) -> Option<AutoQueueCleanupBacklog> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(injected) = backlog_probe::injected() {
         return Some(injected);
     }
@@ -159,9 +159,8 @@ pub async fn is_recent_cluster_worker(
         == Some("worker")
 }
 
-#[cfg(test)]
-#[path = "health_diagnostics/pg_wire_proxy_tests.rs"]
-pub(crate) mod pg_wire_proxy;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use crate::db::pg_wire_proxy;
 mod request_batch;
 mod session_state;
 #[cfg(test)]

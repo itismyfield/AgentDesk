@@ -3,9 +3,9 @@ import { NODE_WIDTH } from "./relationsEditorModel";
 
 /** A group or task card on the relations view in graph units; its pins sit `GROUP_PIN_Y` below its top edge. */
 export const GROUP_WIDTH = NODE_WIDTH;
-export const GROUP_HEIGHT = 164;
-export const TASK_HEIGHT = 140;
-export const GROUP_PIN_Y = 71;
+export const GROUP_HEIGHT = 172;
+export const TASK_HEIGHT = 148;
+export const GROUP_PIN_Y = 74;
 /** A column per dependency depth, with room between columns for a curve and its count. */
 export const LAYER = GROUP_WIDTH + 64;
 const ROW_GAP = 16;

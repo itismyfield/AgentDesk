@@ -7,9 +7,9 @@ use crate::services::cluster::intake_router_hook::*;
 
 /// Lets a test change shared state between the first observation and planning.
 #[cfg(test)]
-pub(super) static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub(crate) static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 #[cfg(test)]
-pub(super) static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// `None` keeps the existing placement path: fallback off, out of scope, or an unadopted session.
 pub(super) async fn route(
@@ -227,7 +227,3 @@ fn forwarded(target: String, pending: i64) -> IntakeRouterDecision {
         basis: IntakeRoutingBasis::NodeOverride,
     }
 }
-
-#[cfg(test)]
-#[path = "fallback_route_tests.rs"]
-mod tests;

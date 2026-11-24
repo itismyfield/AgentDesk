@@ -507,18 +507,6 @@ pub(in crate::services::discord) fn load_review_tuning_guidance() -> Option<Stri
     }
 }
 
-pub(in crate::services::discord) fn is_known_agent(role_id: &str) -> bool {
-    if let Some(known) = agentdesk_config::is_known_agent(role_id) {
-        return known;
-    }
-    if org_schema::org_schema_exists()
-        && let Some(known) = org_schema::is_known_agent(role_id)
-    {
-        return known;
-    }
-    false
-}
-
 /// Cache peer guidance by role and the installed config snapshot.
 fn peer_guidance_cache() -> &'static std::sync::Mutex<PeerGuidanceCacheState> {
     static CELL: std::sync::OnceLock<std::sync::Mutex<PeerGuidanceCacheState>> =

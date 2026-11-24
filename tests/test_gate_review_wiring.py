@@ -149,7 +149,7 @@ class HarnessCli(unittest.TestCase):
         for relative in (".githooks/pre-push", "scripts/resolve-python-runner.sh",
                          "scripts/check_generated_doc_drift.py", "scripts/generate_inventory_docs.py",
                          "scripts/generate_env_reference.py", "scripts/generate_cli_reference.py",
-                         "scripts/rust_lex.py"):
+                         "scripts/rust_lex.py", "scripts/rust_cfg.py"):
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)

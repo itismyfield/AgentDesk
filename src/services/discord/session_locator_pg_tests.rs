@@ -200,10 +200,12 @@ with os.fdopen(fd) as stream:
         crate::services::tmux_common::write_tmux_owner_marker(&rig.name).unwrap();
         crate::services::tmux_common::host_marker::record_tmux_host_marker(&rig.name);
         prepared
-            .finish_spawn(crate::services::discord::stamp_spawn_markers(
-                &rig.name,
-                Some(&prepared),
-            ))
+            .finish_spawn(
+                crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                    &rig.name,
+                    Some(&prepared),
+                ),
+            )
             .unwrap();
         drop(scope);
         let stored: (String, Option<String>) =
@@ -496,7 +498,7 @@ async fn key_promotion_current_primary_thread_gc_keeps_live_thread_pg() {
     let observed = calls.clone();
     let name = rig.name.clone();
     let current = rig.key.clone();
-    let deleted = crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(
+    let deleted = crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(
         &rig.pool,
         move |key| {
             assert_eq!(key, current);
@@ -741,7 +743,7 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
         );
         crate::services::tmux_common::write_tmux_owner_marker(&name).unwrap();
         crate::services::tmux_common::host_marker::record_tmux_host_marker(&name);
-        crate::services::discord::stamp_spawn_markers(&name, Some(prepared))
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(&name, Some(prepared))
     };
     let a = prepare();
     let stamped_a = launch("a", &a);

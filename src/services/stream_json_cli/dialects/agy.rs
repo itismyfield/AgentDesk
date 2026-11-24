@@ -121,7 +121,7 @@ pub(crate) fn prepare(request: &ProviderTurnRequest) -> Result<PreparedCommand, 
     })
 }
 
-fn compose_envelope(system: &str, user: &str) -> String {
+pub(crate) fn compose_envelope(system: &str, user: &str) -> String {
     let system_len = system.len();
     format!("SYSTEM_LEN={system_len}\nSYSTEM:\n{system}\nEND_SYSTEM\nUSER:\n{user}\nEND_USER\n")
 }

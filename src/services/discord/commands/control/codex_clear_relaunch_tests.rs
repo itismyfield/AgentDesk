@@ -158,6 +158,7 @@ impl CanaryFixture {
         process_mode: CodexSourceMode,
         host: Option<&str>,
     ) -> Self {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
         let host_env = Some(
@@ -266,7 +267,11 @@ impl CanaryFixture {
             fs::write(directory.join(format!("{CANARY_CHANNEL}.log")), history).unwrap();
         }
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
-        crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            CANARY_TMUX,
+            Some(&prepared),
+        )
+        .unwrap();
         dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
         let native = context
             .provider_root

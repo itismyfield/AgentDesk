@@ -13,6 +13,8 @@ interface SettingsPhoneCatalogProps {
   categories: Array<{ id: SettingsCategory; label: string; count: number }>;
   category: CategoryFilter;
   onCategory: (id: CategoryFilter) => void;
+  /** Core operational rows surfaced first on the phone home view. */
+  essential?: CatalogItem[];
   /** Rows that differ from their default, for the home view. */
   differing: CatalogItem[];
   /** Rows of the open category or the search result. */
@@ -59,6 +61,7 @@ export function SettingsPhoneCatalog({
   categories,
   category,
   onCategory,
+  essential = [],
   differing,
   rows,
   selectedKey,
@@ -76,6 +79,19 @@ export function SettingsPhoneCatalog({
         {loading ? (
           <KitCard>
             <CardSkeleton label={tr("설정을 불러오는 중…", "Loading settings…")} />
+          </KitCard>
+        ) : null}
+        {essential.length > 0 ? (
+          <KitCard as="section" aria-label={tr("필수 운영 설정", "Essential settings")} data-testid="settings-tier-essential">
+            <Row className="min-h-[52px]">
+              <h2 className="m-0 flex-1 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("필수 운영 설정", "Essential settings")}</h2>
+              <CountBadge count={essential.length} />
+            </Row>
+            {essential.map((item) => (
+              <div key={item.key} className="border-t border-[var(--line-soft)]">
+                <PhoneRow item={item} selected={selectedKey === item.key} onOpen={onOpen} tr={tr} />
+              </div>
+            ))}
           </KitCard>
         ) : null}
         {differing.length > 0 ? (
@@ -104,6 +120,7 @@ export function SettingsPhoneCatalog({
             ))}
           </KitCard>
         </nav>
+        {blocks}
       </div>
     );
   }

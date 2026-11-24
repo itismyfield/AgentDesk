@@ -1,9 +1,9 @@
 //! Immutable request context crosses formatting; each HTTP future owns its own PG guard.
-use crate::services::cluster::intake_router_hook::owner_record::output::{self, Artifact, Scope};
-use crate::services::legacy_body_census::transport;
+use crate::services::cluster::intake_router_hook::owner_record::output;
+use crate::services::legacy_body_census::{request_context, transport};
 use poise::serenity_prelude::{self as serenity, ChannelId};
 use serde_json::{Value, json};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin};
 use tokio::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -12,55 +12,6 @@ pub(in crate::services::discord) enum Operation {
     Post,
     Edit,
     Delete,
-}
-
-#[derive(Clone, Default)]
-struct Context {
-    scope: Option<Scope>,
-    artifact: Option<Artifact>,
-    body: Arc<str>,
-    census: Option<Value>,
-}
-
-tokio::task_local! {
-    static CONTEXT: Context;
-}
-
-pub(crate) fn current_census() -> Option<Value> {
-    CONTEXT
-        .try_with(|context| context.census.clone())
-        .ok()
-        .flatten()
-}
-
-/// Observation metadata cannot install or replace PG authority.
-pub(crate) fn census_scope<T>(
-    tag: Option<Value>,
-    operation: impl Future<Output = T>,
-) -> Pin<Box<impl Future<Output = T>>> {
-    Box::pin(async move {
-        let mut context = CONTEXT.try_with(Clone::clone).unwrap_or_default();
-        context.census = tag;
-        CONTEXT.scope(context, operation).await
-    })
-}
-
-/// Contains provenance only, never an open transaction or a composite request deadline.
-pub(in crate::services::discord) fn scope<T>(
-    scope: Option<Scope>,
-    artifact: Option<&Artifact>,
-    body: &str,
-    operation: impl Future<Output = T>,
-) -> Pin<Box<impl Future<Output = T>>> {
-    let artifact = artifact.cloned();
-    let body: Arc<str> = body.into();
-    Box::pin(async move {
-        let mut context = CONTEXT.try_with(Clone::clone).unwrap_or_default();
-        context.scope = scope;
-        context.artifact = artifact;
-        context.body = body;
-        CONTEXT.scope(context, operation).await
-    })
 }
 
 struct Observation {
@@ -141,7 +92,7 @@ pub(in crate::services::discord) async fn request_for_channel<T, E: RequestError
     if let Ok(id) = channel.parse::<std::num::NonZeroU64>() {
         request(ChannelId::new(id.get()), op, raw).await
     } else {
-        if current_census().is_some_and(|tag| tag["output_class"] != "NonBody") {
+        if request_context::current_census().is_some_and(|tag| tag["output_class"] != "NonBody") {
             crate::services::legacy_body_census::observation_unknown(
                 "OUTBOUND_DESTINATION_UNKNOWN",
             );
@@ -156,7 +107,7 @@ pub(in crate::services::discord) fn request<T, E: RequestError>(
     raw: impl Future<Output = Result<T, E>>,
 ) -> Pin<Box<impl Future<Output = Result<T, E>>>> {
     Box::pin(async move {
-        let Some(context) = CONTEXT.try_with(Clone::clone).ok() else {
+        let Some(context) = request_context::current() else {
             return raw.await;
         };
         let mut observation = context

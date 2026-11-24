@@ -621,7 +621,7 @@ pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
 /// and break the deferred-restart / shutdown barrier arithmetic.
 pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) replay_restart:
-        std::sync::OnceLock<crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
+        std::sync::OnceLock<crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot>,
     /// Per-channel restart-resume marker: Instant when recovery started, for
     /// stale-recovery timeout.
     pub(in crate::services) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,

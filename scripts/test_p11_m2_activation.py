@@ -42,7 +42,7 @@ TESTS = {
         "ok",
     ),
     "x2": (
-        "services::session_host::herdr_terminate_real_tests",
+        "krx_session_host_tests::herdr_terminate_real_tests",
         "a_p11_m2_confirmation_required_has_no_escalation",
         "confirmation_required",
         "error:confirmation_required",

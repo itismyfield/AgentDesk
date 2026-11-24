@@ -660,7 +660,7 @@ async fn resume_companion_history_log_releases_actual_host_and_allows_legacy_bod
         "O leaves the body to Legacy"
     );
     let (reason, idle) =
-        crate::services::discord::e2e_control::companion_activity_for_log_for_tests(
+        crate::services::discord::turn_presence::activity::tests::companion_activity_for_log_for_tests(
             CODEX,
             &resume.context.tmux_session,
             &resume.source.path,

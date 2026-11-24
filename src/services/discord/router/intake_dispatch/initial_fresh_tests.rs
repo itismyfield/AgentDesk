@@ -502,7 +502,7 @@ async fn admission_case(case: Case) {
                 context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
                 context.created_at = Utc::now() + chrono::Duration::seconds(2);
                 let prepared = PreparedIncarnation::create(context).unwrap();
-                crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+                crate::services::tmux_common::spawn_markers::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
                 assert!(dedupe::clear_relaunch::successor_unproved_for_channel(CANARY_CHANNEL));
                 assert_eq!(crate::services::platform::tmux::session_presence(CANARY_TMUX),
                     crate::services::platform::tmux::SessionPresence::Missing);
@@ -842,7 +842,7 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
             "codex",
             "b1b-claim",
             &cancelled,
-            crate::services::cluster::intake_worker::test_executor::PORT,
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
         )
         .await;
         let _ = finished.send(());
@@ -861,8 +861,11 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
                 context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
                 context.created_at = Utc::now() + chrono::Duration::seconds(2);
                 let prepared = crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context).unwrap();
-                crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared))
-                    .unwrap();
+                crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                    CANARY_TMUX,
+                    Some(&prepared),
+                )
+                .unwrap();
                 assert!(dedupe::clear_relaunch::successor_unproved_for_channel(
                     CANARY_CHANNEL
                 ));

@@ -22,9 +22,9 @@ const PINS = "relative flex items-center justify-between border-t border-[var(--
 const FOOT = "m-0 flex items-center gap-1.5 border-t border-[var(--line)] px-3 py-1.5";
 
 function NodeHead({ tone, ratio, title, meta }: { tone: MarkerTone; ratio: number; title: string; meta: string }) {
-  return <div className="flex min-w-0 items-start gap-2 px-3 pt-3 pb-2">
+  return <div className="flex min-w-0 items-start gap-2 px-3 pt-3 pb-2.5">
     <StatusMarker tone={tone} ratio={ratio} className="mt-0.5" />
-    <span className="grid min-w-0"><strong title={title} className="truncate text-sm font-semibold text-[var(--fg)]">{title}</strong><span className="truncate tabular-nums">{meta}</span></span>
+    <span className="grid min-w-0 gap-0.5"><strong title={title} className="line-clamp-2 text-sm leading-[1.35] font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:break-word]">{title}</strong><span className="truncate tabular-nums">{meta}</span></span>
   </div>;
 }
 
@@ -32,14 +32,14 @@ function NodeHead({ tone, ratio, title, meta }: { tone: MarkerTone; ratio: numbe
 export function RelationsTaskNode({ data, selected }: NodeProps) {
   const task = data as TaskNodeData;
   const ring = task.error ? "border-[var(--err)]" : task.picked ? "border-[var(--info)]" : "border-[var(--line)]";
-  return <div className={`${CARD} ${ring} ${selected ? CHOSEN : ""}`}>
+  return <div className={`${CARD} min-h-[148px] ${ring} ${selected ? CHOSEN : ""}`}>
     <NodeHead {...task} />
     <div className={PINS}>
       <Handle type="target" position={Position.Left} isConnectable={!task.locked} style={pin(task.locked)} />
       <span>{task.pins[0]}</span><span>{task.pins[1]}</span>
       <Handle type="source" position={Position.Right} style={pin(false)} />
     </div>
-    <p className="m-0 px-3 pb-2 tabular-nums">{task.summary}</p>
+    <p className="m-0 px-3 pb-2.5 tabular-nums">{task.summary}</p>
     {task.note && <p className={`${FOOT} ${task.note.tone === "err" ? "text-[var(--err)]" : ""}`}>
       {task.note.tone === "lock" && <Lock aria-hidden className="size-3" />}{task.note.text}
     </p>}
@@ -52,17 +52,33 @@ export type GroupNodeData = {
   summary: string; blocked: string | null; far: string;
 };
 
-/** Zoomed out, a card's name, its 선행/다음 words and one state line cover it at a legible size; the words and the state
- * line go first once the card is too short on screen for them, and a meter or the ring still shows the state. */
+/** Longest unbroken word width in `em` units so `dashboard`, `statechart`, or `클라우드감사` scales to one line cleanly. */
+function longestWordEm(text: string): number {
+  let max = 0;
+  for (const part of text.split(/[\s·/|-]+/)) {
+    let width = 0;
+    for (const ch of part) width += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 1.04 : 0.61;
+    if (width > max) max = width;
+  }
+  return max;
+}
+
+/** Zoomed out, a card's name, its 선행/다음 words and one state line cover it at a legible size; generous line-height & padding
+ * prevent descenders (`y`, `g`, `p`, `_`) from clipping, and word-aware sizing prevents mid-word breaks (`dashboa/rd`). */
 function FarCover({ scale, title, line, ratio, error, pins, className }: {
   scale: number; title: string; line: string; ratio?: number; error?: boolean; pins?: [string, string]; className: string;
 }) {
   const roomy = scale < 1.9;
-  return <div data-far aria-hidden className={`absolute inset-0 grid content-center gap-[0.35em] overflow-hidden rounded-[inherit] px-[0.6em] ${className}`} style={{ fontSize: 12 * scale }}>
-    <strong className="line-clamp-2 text-[1.05em] leading-tight font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:anywhere]">{title}</strong>
-    {roomy && pins && <span className="flex justify-between text-[0.85em] text-[var(--fg-muted)]"><span>{pins[0]}</span><span>{pins[1]}</span></span>}
-    {ratio !== undefined && <MeterBar ratio={ratio} tone="ok" className="h-[0.3em]" />}
-    {roomy && <span className={`truncate tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
+  const sidePad = Math.max(14, Math.round(6.5 * scale));
+  const innerWidth = Math.max(120, 240 - sidePad * 2 - 4);
+  const maxEm = longestWordEm(title);
+  const wordCap = maxEm > 0 ? Math.floor(innerWidth / maxEm) : 38;
+  const baseFont = Math.min(12 * scale, wordCap, roomy ? 24 : 38);
+  return <div data-far aria-hidden className={`absolute inset-0 flex flex-col justify-center gap-1.5 overflow-hidden rounded-[inherit] py-2.5 ${className}`} style={{ fontSize: baseFont, paddingInline: sidePad }}>
+    <strong className="line-clamp-2 pb-[0.12em] text-[1.02em] leading-[1.42] font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:break-word]">{title}</strong>
+    {roomy && pins && <span className="flex justify-between text-[0.85em] leading-snug text-[var(--fg-muted)]"><span>{pins[0]}</span><span>{pins[1]}</span></span>}
+    {ratio !== undefined && <MeterBar ratio={ratio} tone="ok" className="h-[0.28em] shrink-0" />}
+    {roomy && <span className={`truncate pb-[0.08em] leading-snug tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
   </div>;
 }
 /** The 선행 and 다음 pins at their own size on screen over the shrunken handles, so a far card still reads as a node. */
@@ -79,7 +95,7 @@ const farRing = (scale: number, selected: boolean, error: boolean) =>
 export function RelationsGroupNode({ data, selected }: NodeProps) {
   const group = data as GroupNodeData;
   const scale = useLegible(), far = scale > FAR;
-  return <div className={`${CARD} ${group.blocked ? "border-[var(--err)]" : "border-[var(--line)]"} ${selected && !far ? CHOSEN : ""}`}
+  return <div className={`${CARD} min-h-[172px] ${group.blocked ? "border-[var(--err)]" : "border-[var(--line)]"} ${selected && !far ? CHOSEN : ""}`}
     style={{ "--legible": scale, ...far ? farRing(scale, selected, !!group.blocked) : {} } as CSSProperties}>
     <NodeHead {...group} />
     <div className={PINS}>
@@ -87,7 +103,7 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
       <span>{group.pins[0]}</span><span>{group.pins[1]}</span>
       <Handle type="source" position={Position.Right} isConnectable={false} style={{ ...pin(false), zIndex: 1 }} />
     </div>
-    <div className="grid gap-1.5 px-3 pt-2 pb-2.5"><MeterBar ratio={group.ratio} tone="ok" /><span className="truncate tabular-nums">{group.summary}</span></div>
+    <div className="grid gap-1.5 px-3 pt-2 pb-3"><MeterBar ratio={group.ratio} tone="ok" /><span className="truncate leading-snug tabular-nums">{group.summary}</span></div>
     {group.blocked && <p className={`${FOOT} text-[var(--err)]`}>{group.blocked}</p>}
     {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} pins={group.pins} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} /></>}
   </div>;

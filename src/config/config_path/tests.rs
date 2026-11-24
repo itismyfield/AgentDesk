@@ -482,7 +482,7 @@ fn source_files(root: &Path) -> Vec<(PathBuf, String)> {
 
 #[test]
 fn config_file_paths_are_built_only_by_the_resolver() {
-    let files = source_files(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let files = source_files(Path::new(crate::runtime_layout::REPO_ROOT));
     let test_only = test_only_paths(&files);
     let mut bypasses = Vec::new();
     let mut used = BTreeSet::new();

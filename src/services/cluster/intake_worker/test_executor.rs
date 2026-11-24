@@ -1,10 +1,10 @@
 //! Test builds may stand in for the external TUI turn; every outbox transition around it stays real.
-use crate::services::discord::IntakeRequest;
+//! The stand-in executor and its port live with the discord-layer tests; these hooks stay beside the worker.
 use std::cell::RefCell;
 
 thread_local! {
-    static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-    static FAIL: RefCell<bool> = const { RefCell::new(false) };
+    pub(crate) static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
+    pub(crate) static FAIL: RefCell<bool> = const { RefCell::new(false) };
     static CHECKPOINT: RefCell<Option<CheckpointHook>> = const { RefCell::new(None) };
 }
 
@@ -42,7 +42,7 @@ pub(super) async fn checkpoint(point: Checkpoint) {
 pub(crate) async fn claim_selected() {
     checkpoint(Checkpoint::ClaimSelected).await;
 }
-pub(super) fn fail_execution() {
+pub(crate) fn fail_execution() {
     FAIL.with(|fail| *fail.borrow_mut() = true);
 }
 
@@ -70,41 +70,3 @@ impl Drop for Recorder {
 /// The production admission check; only the executor is stood in.
 pub(crate) const CHECKPOINT_WAITS: super::CheckpointWaits =
     crate::services::discord::checkpoint_waits_for_admission;
-pub(crate) const PORT: super::IntakeTurnPort = super::IntakeTurnPort {
-    checkpoint_waits: CHECKPOINT_WAITS,
-    execute: boxed_execute,
-};
-
-fn boxed_execute<'a>(
-    http: &'a std::sync::Arc<serenity::http::Http>,
-    shared: &'a std::sync::Arc<crate::services::discord::SharedData>,
-    token: &'a str,
-    request: IntakeRequest,
-    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-) -> super::IntakeTurnFuture<'a> {
-    Box::pin(execute_intake_turn_core(
-        http, shared, token, request, uploads,
-    ))
-}
-
-/// Stands in for the executor while a `Recorder` lives, otherwise runs the real one.
-pub(crate) async fn execute_intake_turn_core(
-    http: &std::sync::Arc<serenity::http::Http>,
-    shared: &std::sync::Arc<crate::services::discord::SharedData>,
-    token: &str,
-    request: IntakeRequest,
-    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-) -> Result<crate::services::discord::IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
-    let recorded = RUNS.with(|runs| {
-        let mut runs = runs.borrow_mut();
-        runs.as_mut()
-            .map(|runs| runs.push(request.channel_id.get()))
-    });
-    if recorded.is_some() {
-        if FAIL.with(|fail| *fail.borrow()) {
-            return Err(std::io::Error::other("C1 executor fixture failure").into());
-        }
-        return Ok(crate::services::discord::IntakeExecution::Executed);
-    }
-    crate::services::discord::execute_intake_turn_core(http, shared, token, request, uploads).await
-}

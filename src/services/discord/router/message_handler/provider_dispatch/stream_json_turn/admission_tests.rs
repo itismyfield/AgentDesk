@@ -38,15 +38,27 @@ fn only_the_exact_saved_discord_mailbox_claim_can_supply_the_input() {
     let state = inflight(&cancel);
     let source = Some(MessageId::new(MESSAGE));
     assert!(
-        AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, &cancel).is_some()
+        AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, &cancel, true)
+            .is_some()
     );
-    assert!(AgyForeground::from_claim(None, TurnKind::Foreground, true, &state, &cancel).is_none());
     assert!(
-        AgyForeground::from_claim(source, TurnKind::BackgroundTrigger, true, &state, &cancel)
+        AgyForeground::from_claim(None, TurnKind::Foreground, true, &state, &cancel, true)
             .is_none()
     );
     assert!(
-        AgyForeground::from_claim(source, TurnKind::Foreground, false, &state, &cancel).is_none()
+        AgyForeground::from_claim(
+            source,
+            TurnKind::BackgroundTrigger,
+            true,
+            &state,
+            &cancel,
+            true
+        )
+        .is_none()
+    );
+    assert!(
+        AgyForeground::from_claim(source, TurnKind::Foreground, false, &state, &cancel, true)
+            .is_none()
     );
     assert!(
         AgyForeground::from_claim(
@@ -55,6 +67,7 @@ fn only_the_exact_saved_discord_mailbox_claim_can_supply_the_input() {
             true,
             &state,
             &CancelToken::new(),
+            true,
         )
         .is_none()
     );
@@ -123,49 +136,10 @@ fn writer_selection_reserves_once_and_preparation_failure_settles_it() {
     let state = inflight(&cancel);
     let source = Some(MessageId::new(MESSAGE));
     let mut input =
-        AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, &cancel).unwrap();
-    let request = ProviderTurnRequest {
-        provider: ProviderKind::Antigravity,
-        prompt: "hello".into(),
-        system_prompt: None,
-        tool_policy: ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly),
-        model: None,
-        reasoning_effort: None,
-        working_directory: root.path().into(),
-        session: None,
-        timeout: Duration::ZERO,
-        cancel: Some(cancel.clone()),
-        auth_overlay: ProviderAuthOverlay::default_for(ProviderKind::Antigravity),
-    };
-    let mut turn = StreamingTurn {
-        pool: None,
-        registration_origin: None,
-        agy_foreground: None,
-        shared: None,
-        provider: &ProviderKind::Antigravity,
-        prompt: "hello",
-        session_id: None,
-        working_dir: "",
-        system_prompt: None,
-        allowed_tools: &[],
-        cancel,
-        codex_observation: None,
-        tmux_session_name: None,
-        teardown: None,
-        host: &TurnHost::Tmux,
-        channel_id: DESTINATION,
-        model: None,
-        native_fast_mode: None,
-        effort: None,
-        codex_goals: None,
-        compact_percent: None,
-        compact_lower_bound_tokens: 0,
-        compact_token_limit: None,
-        cache_ttl_minutes: None,
-        dispatch_type: None,
-        force_fresh: false,
-        submission: None,
-    };
+        AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, &cancel, true)
+            .unwrap();
+    let request = read_only_request(root.path(), &cancel);
+    let mut turn = streaming_turn(cancel.clone());
     assert!(input.reserve(&turn, &request).unwrap().is_none());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     input.ready = Some(ReadyWriter {
@@ -194,4 +168,106 @@ fn writer_selection_reserves_once_and_preparation_failure_settles_it() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["kind"], "open");
     assert_eq!(records[1]["data"]["reason"], "preparation");
+}
+
+#[cfg(unix)]
+fn read_only_request(dir: &std::path::Path, cancel: &Arc<CancelToken>) -> ProviderTurnRequest {
+    ProviderTurnRequest {
+        provider: ProviderKind::Antigravity,
+        prompt: "hello".into(),
+        system_prompt: None,
+        tool_policy: ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly),
+        model: None,
+        reasoning_effort: None,
+        working_directory: dir.into(),
+        session: None,
+        timeout: Duration::ZERO,
+        cancel: Some(cancel.clone()),
+        auth_overlay: ProviderAuthOverlay::default_for(ProviderKind::Antigravity),
+    }
+}
+
+#[cfg(unix)]
+fn streaming_turn(cancel: Arc<CancelToken>) -> StreamingTurn<'static> {
+    StreamingTurn {
+        pool: None,
+        registration_origin: Some(false),
+        agy_foreground: None,
+        shared: None,
+        provider: &ProviderKind::Antigravity,
+        prompt: "hello",
+        session_id: None,
+        working_dir: "",
+        system_prompt: None,
+        allowed_tools: &[],
+        cancel,
+        codex_observation: None,
+        tmux_session_name: None,
+        teardown: None,
+        host: &TurnHost::Tmux,
+        channel_id: DESTINATION,
+        model: None,
+        native_fast_mode: None,
+        effort: None,
+        codex_goals: None,
+        compact_percent: None,
+        compact_lower_bound_tokens: 0,
+        compact_token_limit: None,
+        cache_ttl_minutes: None,
+        dispatch_type: None,
+        force_fresh: false,
+        submission: None,
+    }
+}
+
+/// Only a human-authored, non-dispatch Antigravity turn with the switch on reaches `agy acp`;
+/// every other turn takes the `-p` path and starts no ACP child.
+#[cfg(unix)]
+#[test]
+fn only_human_turns_with_the_switch_on_take_the_acp_path() {
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(CancelToken::new());
+    let state = inflight(&cancel);
+    let source = Some(MessageId::new(MESSAGE));
+    for (case, enabled, human, dispatch, claimed, acp) in [
+        ("human", true, true, false, true, true),
+        ("bot", true, false, false, true, false),
+        ("dispatch", true, true, true, true, false),
+        ("claimless", true, true, false, false, false),
+        ("off", false, true, false, true, false),
+    ] {
+        // Each row is a new boot; the reload after it must not move the running session.
+        let mut config = crate::config::Config::default();
+        config.agy_acp.enabled = enabled;
+        crate::services::agy_acp::install(&config);
+        config.agy_acp.enabled = !enabled;
+        crate::config_live_reload::install(config);
+        let dir = root.path().join(case);
+        std::fs::create_dir(&dir).unwrap();
+        let mut input =
+            AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, &cancel, human)
+                .unwrap();
+        input.acp_launch = Some(crate::services::agy_acp::lifecycle_tests::fake_launch(
+            &dir, "short",
+        ));
+        let mut turn = streaming_turn(cancel.clone());
+        turn.agy_foreground = claimed.then_some(input);
+        turn.registration_origin = Some(dispatch);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = execute_request(
+            StreamJsonDialectId::Agy,
+            &turn,
+            read_only_request(&dir, &cancel),
+            tx,
+        );
+        let spawned = dir.join("short.log").exists();
+        let done = rx
+            .try_iter()
+            .any(|message| matches!(message, StreamMessage::Done { .. }));
+        assert_eq!((spawned, done), (acp, acp), "{case}");
+        assert_eq!(result.is_ok(), acp, "{case}: {result:?}");
+    }
 }

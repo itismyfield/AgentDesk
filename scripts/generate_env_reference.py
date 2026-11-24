@@ -45,7 +45,7 @@ from generate_inventory_docs import (  # noqa: E402
     is_test_file,
     scan_balanced,
 )
-from rust_lex import StripState, cfg_item_end, strip_line  # noqa: E402
+from rust_lex import COMMENT, StripState, blank_segments, cfg_item_end, strip_line  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -157,12 +157,13 @@ def blank_test_modules(text: str) -> str:
     """Blank test-only items while preserving source offsets and line numbers."""
     state = StripState()
     code = "\n".join(strip_line(line, state).ljust(len(line)) for line in text.split("\n"))
+    (view,) = blank_segments(text, {COMMENT})  # cfg predicates with their literals, which `code` blanks
     result = list(text)
     cursor = 0
     for match in _CFG_ITEM_RE.finditer(code):
         if match.start() < cursor:
             continue
-        if not cfg_requires_test(match.group("predicate")):
+        if not cfg_requires_test(view[match.start("predicate") : match.end("predicate")]):
             continue
         try:
             index = cfg_item_end(code, match.end(), scan_balanced)

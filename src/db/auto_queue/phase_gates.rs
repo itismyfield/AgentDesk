@@ -595,7 +595,9 @@ pub(crate) struct ParsedPhaseGateContext {
     pub final_phase: bool,
 }
 
-fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
+pub(crate) fn parse_phase_gate_context(
+    context_json: Option<&str>,
+) -> Option<ParsedPhaseGateContext> {
     let raw = context_json?.trim();
     if raw.is_empty() {
         return None;
@@ -969,6 +971,3 @@ async fn resume_run_if_paused_on_pg_tx(
 
 #[cfg(test)]
 mod current_batch_phase_pg_tests;
-
-#[cfg(test)]
-mod reconcile_phase_gate_pg_tests;

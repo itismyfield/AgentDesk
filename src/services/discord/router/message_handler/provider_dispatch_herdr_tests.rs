@@ -567,6 +567,7 @@ impl Fixture {
         cancel: Arc<CancelToken>,
         claude: impl FnOnce(),
     ) -> (Result<(), String>, Vec<StreamMessage>) {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         // The receiver stays on this thread; the executor takes only what it shares.
         let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
         let (owner, endpoint, cwd) = (self.owner.clone(), self.endpoint(), self.cwd.path());

@@ -1,12 +1,17 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::flush_probe::{Gate, Plan, Step, Watch};
-use super::*;
-use crate::services::discord::runtime_store::rename_fault;
+use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+    Gate, Plan, Step, Watch,
+};
+use crate::services::discord::runtime_store::durable_publish::*;
+use crate::services::discord::runtime_store::{
+    AtomicWriteContext, PARENT_DIR_FSYNC_FLUSHES, rename_fault,
+};
 use crate::services::discord::{tui_direct_abort_marker as abort, tui_direct_pending_start};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -79,7 +84,7 @@ fn intervention(id: u64) -> Intervention {
         author_id: UserId::new(1),
         author_is_bot: false,
         message_id: MessageId::new(id),
-        queued_generation: super::super::process_generation(),
+        queued_generation: crate::services::discord::runtime_store::process_generation(),
         source_message_ids: vec![MessageId::new(id)],
         source_message_queued_generations: Vec::new(),
         source_text_segments: Vec::new(),
@@ -515,7 +520,7 @@ fn checkpoint_publication_flushes_and_stays_best_effort() {
     }
     let env = RootEnv::new();
     let watch = Watch::new(env.root(), Plan::default());
-    super::super::save_last_message_id("codex", 7_190_006, 41);
+    crate::services::discord::runtime_store::save_last_message_id("codex", 7_190_006, 41);
     let path = env.runtime().join("last_message/codex/7190006.txt");
     assert_eq!(
         flushes_of(&watch, &path, Step::ParentSync),
@@ -530,7 +535,7 @@ fn checkpoint_publication_flushes_and_stays_best_effort() {
         ..Plan::default()
     };
     let _failing = Watch::new(env.root(), plan);
-    super::super::save_last_message_id("codex", 7_190_006, 42);
+    crate::services::discord::runtime_store::save_last_message_id("codex", 7_190_006, 42);
     assert_eq!(fs::read_to_string(&path).unwrap(), "42");
 }
 

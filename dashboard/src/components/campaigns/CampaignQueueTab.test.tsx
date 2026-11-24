@@ -124,11 +124,10 @@ it("groups the queue by repository, collapses a group from its heading and flags
   expect(container.querySelector('[role="status"]')?.textContent).toBe("3 cards outside campaigns");
 });
 
-it("moves between group and card buttons with the arrow keys and opens a card into the docked pane", async () => {
+it("moves between group and card buttons with the arrow keys and hides the empty detail pane until a card is selected", async () => {
   const onSelectCard = vi.fn();
   await renderQueue([card("one", { github_issue_number: 21 }), card("two", { github_issue_number: 22 })], onSelectCard);
-  const pane = document.querySelector('aside[aria-label="Card details"]');
-  expect(pane?.textContent).toContain("No card selected");
+  expect(document.querySelector('aside[aria-label="Card details"]')).toBeNull();
   const nav = [...container.querySelectorAll<HTMLButtonElement>("[data-list-nav]")];
   expect(nav).toHaveLength(3);
   nav[0].focus();
@@ -138,7 +137,6 @@ it("moves between group and card buttons with the arrow keys and opens a card in
   expect(document.activeElement).toBe(nav[2]);
   await act(async () => nav[2].dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
   expect(document.activeElement).toBe(nav[0]);
-  expect(nav[1].getAttribute("aria-controls")).toBe(pane?.id);
   await act(async () => nav[2].click());
   expect(onSelectCard).toHaveBeenCalledWith("two");
 });

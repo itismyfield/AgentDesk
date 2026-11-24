@@ -1,6 +1,6 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
-pub(super) mod admission;
+pub(crate) mod admission;
 pub(super) mod evidence;
 
 use std::collections::HashMap;
@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::pieces::PieceWork;
+use crate::services::discord::session_notice::input_notice;
 use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
 use crate::services::tui_o::shadow::{
     CapturedRecord, ShadowProvider, SourceRange, UnitKey, UnitKind,
 };
-use crate::services::{discord, tui_prompt_dedupe};
+use crate::services::tui_prompt_dedupe;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoticeOrigin {
@@ -84,9 +85,9 @@ impl NativeInput {
     /// The notice of an input of the class the writer owns, headed by where it came from.
     pub(crate) fn notice(&self) -> Option<String> {
         if self.scheduled {
-            discord::scheduled_input_notice_content(&self.prompt)
+            input_notice::scheduled_input_notice_content(&self.prompt)
         } else {
-            discord::input_notice_content(&self.prompt)
+            input_notice::input_notice_content(&self.prompt)
         }
     }
 
@@ -95,7 +96,7 @@ impl NativeInput {
     pub(crate) fn legacy_typed_notice(&self) -> Option<String> {
         (self
             .scheduled
-            .then(|| discord::input_notice_content(&self.prompt)))
+            .then(|| input_notice::input_notice_content(&self.prompt)))
         .flatten()
     }
 }

@@ -12,26 +12,26 @@ mod negative;
 #[path = "fresh_obligation_tests.rs"]
 mod obligations;
 
-pub(super) struct DedupeGuard {
+pub(crate) struct DedupeGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl DedupeGuard {
-    pub(super) fn acquire() -> Self {
+    pub(crate) fn acquire() -> Self {
         Self {
             _guard: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
         }
     }
 }
 
-struct ScopeFixture {
+pub(crate) struct ScopeFixture {
     previous: crate::config::Config,
     _hosting: std::sync::MutexGuard<'static, ()>,
     _instance: crate::config::TestEnvVarGuard,
 }
 
 impl ScopeFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let instance = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
             std::ffi::OsStr::new("b1b-scoped-writer-test"),

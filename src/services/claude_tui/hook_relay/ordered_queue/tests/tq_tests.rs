@@ -214,7 +214,7 @@ impl Tq {
     }
 
     fn non_wait(&self, event: &str, payload: Value) {
-        handoff_non_wait_hook_event(&self.endpoint, "claude", event, &self.a, payload).unwrap();
+        enqueue_non_wait(&self.endpoint, "claude", event, &self.a, payload);
     }
 
     /// Runs the waiting CLI handoff on its own thread, as the provider's hook process would.
@@ -309,6 +309,20 @@ impl Tq {
             }
         }
         hits
+    }
+
+    /// Waits until the worker removed every request, then holds for 100ms: a completed request
+    /// that is sent again shows as a request the proxy saw after the queue drained.
+    async fn drained_and_not_resent(&self) {
+        self.until("queue drained", |tq| {
+            queue_ingress_paths(&tq.queue_dir).unwrap().is_empty()
+                && queue_request_paths(&tq.queue_dir).unwrap().is_empty()
+        })
+        .await;
+        let sent = self.seen.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let seen = self.seen.lock().unwrap();
+        assert_eq!(seen.len(), sent, "sent again after drain: {seen:?}");
     }
 
     fn refused(&self, event: &str) -> usize {
@@ -428,9 +442,22 @@ async fn proxy_every_request(listener: tokio::net::TcpListener, app: Router, see
     }
 }
 
-/// The production worker, kept alive for the test so no worker subprocess is needed.
+/// Publishes a non-wait hook for the queue's in-process worker alone: a worker subprocess would
+/// relay on the 2s production budget the harness's worker does not run under.
+fn enqueue_non_wait(endpoint: &str, provider: &str, event: &str, session: &str, payload: Value) {
+    let binding = Some(HookBindingEnvelope::capture(provider));
+    enqueue_ordered_hook_relay_request_with_binding(
+        endpoint, provider, event, session, payload, None, binding,
+    )
+    .unwrap();
+}
+
+/// The production worker, kept alive for the test so no worker subprocess is needed. Its
+/// transport budget is not under test, so a slow runner gets `LIVENESS` instead of the 2s one.
 fn spawn_worker_loop(queue_dir: PathBuf, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        crate::services::claude_tui::hook_relay::WORKER_RELAY_TIMEOUT_FOR_TESTS
+            .with(|timeout| timeout.set(Some(LIVENESS)));
         while !stop.load(Ordering::Acquire) {
             let request = OrderedHookRelayWorkerRequest {
                 queue_dir: queue_dir.clone(),
@@ -487,7 +514,12 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
     );
     tq.until("Pending B", |tq| tq.pending_b_seq().is_some())
         .await;
-    // SessionStart clears A's feedback, so it is seeded after the clear.
+    // SessionStart clears A's feedback after it logs Pending B, so the seed waits for the
+    // receiver's answer, which the proxy records once the handler returned.
+    tq.until("SessionStart accepted", |tq| {
+        !tq.accepted("SessionStart").is_empty()
+    })
+    .await;
     tq.seed_feedback().await;
     std::fs::write(tq.b_path(), format!("{{\"sessionId\":\"{}\"}}\n", tq.b)).unwrap();
     let (registry_before, mut rx) = ((buffered(&tq.a), buffered(&tq.b)), tq.state.subscribe());
@@ -507,7 +539,7 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
         join(producers).await;
     }
     tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tq.drained_and_not_resent().await;
 
     let (elapsed, deadlines, result) =
         cli.expect("the CLI waits for the refused Stop past its own wait");
@@ -617,7 +649,7 @@ fn a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepte
         let (elapsed, _, result) = join(stop).await;
         tq.fault(None);
         tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tq.drained_and_not_resent().await;
 
         assert!(elapsed >= REPLY_WAIT, "CLI waited {elapsed:?}");
         assert!(

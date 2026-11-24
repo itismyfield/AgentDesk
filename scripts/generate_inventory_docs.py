@@ -11,8 +11,20 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 from pathlib import Path
+
+try:
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
+    from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+    from rust_lex import COMMENT, LITERAL, blank_segments
+except ModuleNotFoundError:  # loaded by path from another cwd
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
+    from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+    from rust_lex import COMMENT, LITERAL, blank_segments
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -47,9 +59,8 @@ GIANT_FILE_ISSUE_RATCHET_WRITER = (
 #
 # A module's `#[cfg(...)]` attribute gates it to test-only builds when the
 # predicate *requires* the `test` flag. `cfg_requires_test` evaluates this
-# structurally (with balanced-paren awareness) so it handles nested forms that
-# combine `test`, `all(...)`, `any(...)`, `not(...)`, and feature checks.
-# Predicates that do not
+# with the shared `rust_cfg` evaluator, which also reads
+# `any(test, feature = "test-support")` as `test`. Predicates that do not
 # remove the module from production builds — `not(test)` (production-only) and
 # `any(test, …)` (compiles when the other option is set) — are rejected.
 
@@ -59,7 +70,8 @@ GIANT_FILE_ISSUE_RATCHET_WRITER = (
 # The predicate stays inside a single attribute (`[^]]`), and only further
 # attributes or whitespace may sit between the cfg and the `mod` keyword — so an
 # inline `#[cfg(test)]` guarding a function does not spuriously bind to a later
-# `mod`.
+# `mod`. Callers match on comment- and literal-blanked code (`_active_views`),
+# so a comment there counts as whitespace and a commented-out cfg as nothing.
 _CFG_MOD_RE = re.compile(
     r"#\[cfg\((?P<predicate>[^]]*?)\)\]"
     r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
@@ -67,54 +79,10 @@ _CFG_MOD_RE = re.compile(
 )
 
 
-def _split_top_level_cfg_args(body: str) -> list[str]:
-    args: list[str] = []
-    depth = 0
-    start = 0
-    in_string = False
-    for index, ch in enumerate(body):
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            args.append(body[start:index])
-            start = index + 1
-    args.append(body[start:])
-    return [arg.strip() for arg in args if arg.strip()]
-
-
 def cfg_requires_test(predicate: str) -> bool:
-    """Return True when a `#[cfg(<predicate>)]` compiles only under `test`.
+    """Return True when a `#[cfg(<predicate>)]` compiles only under `test` (see `rust_cfg`)."""
 
-    * ``test`` -> True.
-    * ``all(a, b, …)`` -> True when any argument requires test (conjunction).
-    * ``any(a, b, …)`` -> True only when *every* argument requires test (the
-      module would otherwise also build without test).
-    * ``not(…)`` -> never test-gating for our purposes (``not(test)`` is
-      production-only; ``not(other)`` does not require test).
-    * anything else (e.g. ``feature = "x"``) -> False.
-    """
-
-    predicate = predicate.strip()
-    if predicate == "test":
-        return True
-    for keyword, combine in (("all", any), ("any", all)):
-        prefix = keyword + "("
-        if predicate.startswith(prefix) and predicate.endswith(")"):
-            inner = predicate[len(prefix):-1]
-            args = _split_top_level_cfg_args(inner)
-            if not args:
-                return False
-            return combine(cfg_requires_test(arg) for arg in args)
-    if predicate.startswith("not(") and predicate.endswith(")"):
-        return False
-    return False
+    return _shared_cfg_requires_test(predicate)
 
 TOP_LEVEL_MODULE_PURPOSES = {
     "adk_base_lib.rs": "Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths.",
@@ -136,8 +104,18 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
+    "ke_routines_tests.rs": "Test-only host that declares KE routine and scheduled-message tests calling root-crate items.",
     "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
+    "krx_config_tests.rs": "Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate.",
+    "krx_config_tests/": "Test functions moved out of KRX config/services inline test modules because they call root-crate items.",
+    "krx_config_unix_tests.rs": "Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items.",
+    "krx_db_b_tests.rs": "Test-only host that declares the second slice of KRX db tests calling root-crate items.",
+    "krx_db_tests.rs": "Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate.",
+    "krx_services_tests.rs": "Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate.",
+    "krx_session_host_tests.rs": "Test-only host that declares KRX session_host tests calling root-crate items, so they leave the KRX crate.",
+    "krx_tui_o_tests.rs": "Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate.",
+    "krx_tui_o_unix_tests.rs": "Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
     "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
     "test_support/": "Test runtime that holds fixture serialization for the whole async body.",
@@ -226,6 +204,9 @@ class ModuleFileDeclaration:
     name: str
     child_paths: tuple[Path, ...]
     requires_test: bool
+    # Raw cfg bodies on the declaration and its enclosing inline modules.
+    conditions: tuple[str, ...] = ()
+    feature_dependent: bool = False
 
 
 class ParseError(RuntimeError):
@@ -257,10 +238,13 @@ def test_line_numbers(text: str) -> set[int]:
 
     total = line_count(text)
     test_lines: set[int] = set()
-    for match in _CFG_MOD_RE.finditer(text):
-        if not cfg_requires_test(match.group("predicate")):
+    if "#[cfg(" not in text or "mod" not in text:
+        return test_lines  # `_CFG_MOD_RE` cannot match the blanked view either
+    code, view = _active_views(text)
+    for match in _CFG_MOD_RE.finditer(code):
+        if not cfg_requires_test(view[match.start("predicate") : match.end("predicate")]):
             continue
-        brace = text.rindex("{", match.start(), match.end())
+        brace = code.rindex("{", match.start(), match.end())
         try:
             _body, end = scan_balanced(text, brace, "{", "}")
         except ParseError:
@@ -722,14 +706,14 @@ def resolve_function_source(
 # attributes in any order. The test-only module graph uses this for `#[cfg]`,
 # `#[path]`, and inline test-module context; the older `_MOD_DECL_RE` name is
 # kept as an alias for callers/tests that intentionally inspect this parser.
+# Attributes start at `#`, so a whitespace run (blanked prose) is not rescanned at every offset.
 _MOD_DECL_RE = re.compile(
-    r"(?P<attrs>(?:\s*#\[[^\]]*\]\s*)*)"
+    r"(?P<attrs>(?:#\[[^\]]*\]\s*)*)"
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
     r"(?P<kind>[{;])",
     re.MULTILINE,
 )
-_CFG_ATTR_RE = re.compile(r"#\[\s*cfg\((?P<predicate>[^]]*?)\)\s*\]")
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
 
 
@@ -738,17 +722,25 @@ class _InlineModuleContext:
     end: int
     module_dir: Path
     requires_test: bool
+    conditions: tuple[str, ...] = ()
 
 
-def _attrs_require_test(attrs: str) -> bool:
-    return any(
-        cfg_requires_test(match.group("predicate"))
-        for match in _CFG_ATTR_RE.finditer(attrs)
-    )
+def _active_views(text: str) -> tuple[str, str]:
+    """(comments and literals blanked, comments blanked) at ``text``'s offsets.
+
+    Matching on the first keeps commented-out or quoted attributes inactive;
+    reading the same span from the second keeps the real literals.
+    """
+    return blank_segments(text, {COMMENT, LITERAL}, {COMMENT})
 
 
-def _path_attr(attrs: str) -> str | None:
-    match = _PATH_ATTR_RE.search(attrs)
+def _active_attrs(pattern: re.Pattern[str], code: str, view: str) -> Iterator[re.Match[str]]:
+    """Matches of ``pattern`` in ``view`` that start at real code in ``code``."""
+    return (match for match in pattern.finditer(view) if code[match.start()] == "#")
+
+
+def _path_attr(code: str, view: str) -> str | None:
+    match = next(_active_attrs(_PATH_ATTR_RE, code, view), None)
     return match.group("path") if match else None
 
 
@@ -782,14 +774,17 @@ def _module_file_declarations(
 ) -> list[ModuleFileDeclaration]:
     declarations: list[ModuleFileDeclaration] = []
     contexts: list[_InlineModuleContext] = []
-    for match in _MOD_DECL_RE.finditer(text):
+    if "mod" not in text:
+        return declarations
+    code, view = _active_views(text)
+    for match in _MOD_DECL_RE.finditer(code):
         start = match.start()
         contexts = [context for context in contexts if start < context.end]
-        inherited_test = parent_requires_test or any(
-            context.requires_test for context in contexts
-        )
-        attrs = match.group("attrs") or ""
-        requires_test = inherited_test or _attrs_require_test(attrs)
+        attrs_code = match.group("attrs") or ""
+        attrs = view[match.start("attrs") : match.end("attrs")] if attrs_code else ""
+        conditions = (contexts[-1].conditions if contexts else ()) + attribute_conditions(attrs)
+        gate = cfg_conditions_gate(conditions)
+        requires_test = parent_requires_test or gate is not None
         name = match.group("name")
 
         if match.group("kind") == "{":
@@ -803,6 +798,7 @@ def _module_file_declarations(
                     end=end,
                     module_dir=base / name,
                     requires_test=requires_test,
+                    conditions=conditions,
                 )
             )
             continue
@@ -816,9 +812,11 @@ def _module_file_declarations(
                     parent,
                     name,
                     base=base,
-                    path_attr=_path_attr(attrs),
+                    path_attr=_path_attr(attrs_code, attrs),
                 ),
                 requires_test=requires_test,
+                conditions=conditions,
+                feature_dependent=gate == "feature" and not parent_requires_test,
             )
         )
     return declarations
@@ -856,6 +854,7 @@ def test_only_module_files(
             text,
             parent_requires_test=is_test_file(path),
         )
+    declarations_by_parent = demote_uncomposed_feature_mounts(declarations_by_parent, read_text_fn)
 
     result: set[Path] = set()
     while True:

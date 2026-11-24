@@ -118,7 +118,7 @@ struct Fake {
 
 impl Fake {
     fn new() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+        let root = Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
         let transcript = dir.path().join("transcript.jsonl");

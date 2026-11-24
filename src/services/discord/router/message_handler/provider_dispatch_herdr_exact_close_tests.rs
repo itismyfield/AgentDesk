@@ -151,7 +151,11 @@ sys.exit(child.wait())
                 false,
             )
             .unwrap();
-            crate::services::discord::stamp_spawn_markers(&self.logical, Some(&prepared)).unwrap();
+            crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                &self.logical,
+                Some(&prepared),
+            )
+            .unwrap();
         }
         let primary = self.checked(&[
             "new-session",

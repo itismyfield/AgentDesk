@@ -21,7 +21,7 @@ use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const WAIT_LIMIT: Duration = Duration::from_secs(300);
+pub(crate) const WAIT_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs the channel's actor only when the channel's boot ownership enabled `config`.
 pub fn spawn_if_enabled<P, L, A, B>(
@@ -140,28 +140,28 @@ impl Default for Owing {
 pub use native_input::spawn_projecting;
 pub mod native_input;
 
-struct Actor<P, L, A, B> {
-    replay_deferred: bool,
-    writer: ChannelWriter<P, L, A>,
-    deriver: UnitDeriver,
-    owed: VecDeque<Derived>,
+pub(crate) struct Actor<P, L, A, B> {
+    pub(crate) replay_deferred: bool,
+    pub(crate) writer: ChannelWriter<P, L, A>,
+    pub(crate) deriver: UnitDeriver,
+    pub(crate) owed: VecDeque<Derived>,
     /// Set only where verified owed delivery is ready; every piece then needs its exact permit.
-    verified: Option<super::owed::OwedLog>,
-    sources: Sources<B>,
-    bindings: Arc<B>,
-    transitions: transition::Transitions,
+    pub(crate) verified: Option<super::owed::OwedLog>,
+    pub(crate) sources: Sources<B>,
+    pub(crate) bindings: Arc<B>,
+    pub(crate) transitions: transition::Transitions,
     /// The binding log's latest seq, watched once the channel first publishes what it owes.
-    notice: Option<watch::Receiver<u64>>,
-    waiting: Waiting,
-    clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
-    scope_hold: Option<&'static str>,
-    boot_previous_nonce: Option<String>,
+    pub(crate) notice: Option<watch::Receiver<u64>>,
+    pub(crate) waiting: Waiting,
+    pub(crate) clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
+    pub(crate) scope_hold: Option<&'static str>,
+    pub(crate) boot_previous_nonce: Option<String>,
 }
 
 #[derive(Default)]
-struct Waiting {
-    ready: HashMap<(UnitKey, u32), tokio::time::Instant>,
-    incident: Option<String>,
+pub(crate) struct Waiting {
+    pub(crate) ready: HashMap<(UnitKey, u32), tokio::time::Instant>,
+    pub(crate) incident: Option<String>,
 }
 
 /// Runs until stopped; `resumed` means every non-suspended source was restored.
@@ -510,14 +510,14 @@ where
 
 mod fresh_resume;
 mod notice_settlement;
-mod notice_work;
+pub(crate) mod notice_work;
 #[cfg(test)]
 pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
 pub(crate) mod codex_retention;
-mod transition;
+pub(crate) mod transition;
 mod transition_snapshot;
 
 pub(crate) mod codex_submission;
@@ -579,7 +579,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
     }
 
-    fn observe_waiting(&mut self, restored: bool) {
+    pub(crate) fn observe_waiting(&mut self, restored: bool) {
         let scope_waiting = self.scope_hold == Some("new_root_waiting");
         if self.writer.is_stopped() || scope_waiting {
             return;
@@ -697,7 +697,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Delivers in order and publishes the position after each piece, so a long drain shows its
     /// progress to health while it runs.
-    async fn deliver_owed(&mut self, progress: &super::progress::Publisher) {
+    pub(crate) async fn deliver_owed(&mut self, progress: &super::progress::Publisher) {
         if let Some(log) = &mut self.verified {
             let (legacy, unsealed) = (self.owed.len(), self.deriver.has_unsealed());
             let delivered = |writer: &mut ChannelWriter<P, L, A>, log: &super::owed::OwedLog| {
@@ -748,7 +748,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
     /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
-    fn collect_settled(&mut self) {
+    pub(crate) fn collect_settled(&mut self) {
         if !self.delivery_allowed() {
             return;
         }
@@ -804,7 +804,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// What this poll left owed, whether a unit waits on its seal, and the ledger position.
-    fn progress(&mut self) -> super::progress::ChannelProgress {
+    pub(crate) fn progress(&mut self) -> super::progress::ChannelProgress {
         let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
         let (retry, unsealed) = (self.writer.has_local_retry(), self.deriver.has_unsealed());
         let owed = self.owed.len() + verified + self.notice_debt_open();
@@ -814,7 +814,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end, binds not
     /// applied, verified work, POSTs in flight and each source's capture, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
-    fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
+    pub(crate) fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
         UNDELIVERED_READS.with(|reads| reads.set(reads.get() + 1));
         let channel = self.writer.channel();
@@ -868,7 +868,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
-    fn read_sources(&mut self) -> Vec<UnitKey> {
+    pub(crate) fn read_sources(&mut self) -> Vec<UnitKey> {
         if !super::restart_end::capture_current(
             &mut self.deriver,
             self.writer.channel(),

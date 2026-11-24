@@ -476,10 +476,8 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    const FIXTURE: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_o_shadow/capture_growth.jsonl"
-    ));
+    const FIXTURE: &[u8] =
+        include_bytes!("../../../../tests/fixtures/tui_o_shadow/capture_growth.jsonl");
 
     fn open_fixture(start: u64) -> (tempfile::TempDir, PathBuf, SourceCapture) {
         let dir = tempfile::tempdir().unwrap();

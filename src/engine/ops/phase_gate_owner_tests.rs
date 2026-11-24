@@ -282,7 +282,7 @@ async fn policy_phase_gate_owner_boundary_matrix_pg() {
         .await
         .unwrap();
         let mut tx = pool.begin().await.unwrap();
-        let outcome = auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+        let outcome = crate::services::auto_queue::transactions::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
             &mut tx,
             &dispatch_id,
             "completed",

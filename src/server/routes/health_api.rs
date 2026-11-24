@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use crate::db::session_status::is_active_status;
 use crate::error::{AppError, ErrorCode};
 use crate::services::discord::{health, outbound};
+use crate::services::message_outbox::source_registry::SendCallerClass;
 use crate::services::provider::ProviderKind;
 use crate::services::{disk_monitor, health_diagnostics};
 
@@ -172,23 +173,20 @@ fn discord_control_endpoints_allowed(
     bearer_token_matches(config, headers)
 }
 
-fn discord_send_caller_class(
-    peer_addr: SocketAddr,
-    headers: &HeaderMap,
-) -> health::SendCallerClass {
+fn discord_send_caller_class(peer_addr: SocketAddr, headers: &HeaderMap) -> SendCallerClass {
     let source_header = headers.get(X_AGENTDESK_SOURCE);
     let header_class = source_header
         .and_then(|value| value.to_str().ok())
-        .and_then(health::SendCallerClass::from_header);
+        .and_then(SendCallerClass::from_header);
     match header_class {
-        Some(health::SendCallerClass::LoopbackInternal) if peer_addr.ip().is_loopback() => {
-            health::SendCallerClass::LoopbackInternal
+        Some(SendCallerClass::LoopbackInternal) if peer_addr.ip().is_loopback() => {
+            SendCallerClass::LoopbackInternal
         }
-        Some(health::SendCallerClass::LoopbackInternal) => health::SendCallerClass::Unknown,
+        Some(SendCallerClass::LoopbackInternal) => SendCallerClass::Unknown,
         Some(class) => class,
-        None if source_header.is_some() => health::SendCallerClass::Unknown,
-        None if peer_addr.ip().is_loopback() => health::SendCallerClass::LoopbackInternal,
-        None => health::SendCallerClass::Unknown,
+        None if source_header.is_some() => SendCallerClass::Unknown,
+        None if peer_addr.ip().is_loopback() => SendCallerClass::LoopbackInternal,
+        None => SendCallerClass::Unknown,
     }
 }
 
@@ -999,7 +997,7 @@ pub async fn send_handler(
 
     let body_str = String::from_utf8_lossy(&body);
     let caller_class = discord_send_caller_class(peer_addr, &headers);
-    let (status_str, response_body) = if caller_class == health::SendCallerClass::LoopbackInternal {
+    let (status_str, response_body) = if caller_class == SendCallerClass::LoopbackInternal {
         health::handle_send(registry, state.pg_pool_ref(), &body_str).await
     } else {
         crate::services::discord::outbound::send_api::handle_send_with_caller(

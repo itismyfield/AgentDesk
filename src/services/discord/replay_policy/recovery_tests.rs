@@ -1,10 +1,10 @@
-use super::*;
 use crate::db::replay_disposition::{
     hold_notice::NoticeRouting,
     write::{self, BeginFrom, CanonicalInput, EffectProjection},
 };
+use crate::services::discord::replay_policy::recovery::*;
 use crate::services::{
-    discord::{inflight, recovery_engine::o_cut_recorder},
+    discord::{inflight, recovery_engine::o_cut_recorder, runtime_store},
     provider::ProviderKind,
 };
 use sqlx::PgPool;
@@ -138,22 +138,43 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
         let (url, root, target): (String, std::path::PathBuf, String) =
             serde_json::from_str(&raw).unwrap();
         let _env = crate::config::set_agentdesk_root_for_test(&root);
-        let _lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+        let _lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
         runtime().block_on(async {
             let pool = PgPool::connect(&url).await.unwrap();
             let mut saved = state(0);
-            begin(&pool, &mut saved, &target, super::super::incarnation()).await;
+            begin(
+                &pool,
+                &mut saved,
+                &target,
+                crate::services::discord::replay_policy::incarnation(),
+            )
+            .await;
             native_probe(&root);
             inflight::save_inflight_state_create_new(&saved).unwrap();
             let mut gap = state(1);
-            begin(&pool, &mut gap, &target, super::super::incarnation()).await;
+            begin(
+                &pool,
+                &mut gap,
+                &target,
+                crate::services::discord::replay_policy::incarnation(),
+            )
+            .await;
             let mut no_effect = state(2);
-            let attempt = begin(&pool, &mut no_effect, &target, super::super::incarnation()).await;
-            let mut seen = super::super::live::RawObservation::for_attempt(&attempt);
+            let attempt = begin(
+                &pool,
+                &mut no_effect,
+                &target,
+                crate::services::discord::replay_policy::incarnation(),
+            )
+            .await;
+            let mut seen =
+                crate::services::discord::replay_policy::live::RawObservation::for_attempt(
+                    &attempt,
+                );
             for fact in [
-                super::super::live::Seen::StdoutEof,
-                super::super::live::Seen::Exited { waited: true },
-                super::super::live::Seen::StderrDrained,
+                crate::services::discord::replay_policy::live::Seen::StdoutEof,
+                crate::services::discord::replay_policy::live::Seen::Exited { waited: true },
+                crate::services::discord::replay_policy::live::Seen::StderrDrained,
             ] {
                 seen.record(fact);
             }
@@ -189,7 +210,7 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
             let after:Vec<StoredAttempt>=sqlx::query_as("SELECT id,replay_disposition,replay_episode_nonce,replay_owner_incarnation,replay_preserved FROM intake_outbox ORDER BY id").fetch_all(&pool).await.unwrap();
             assert_eq!(after,before);assert!(sink.calls().is_empty());
         }
-        let lock=crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+        let lock=crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
         let shared=crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         shared.restart.replay_restart.set(lock).unwrap();
         let sink=o_cut_recorder::start(state(0).channel_id).await;
@@ -212,7 +233,7 @@ async fn p5_db_locked_recovery_rejects_each_unproved_local_identity_pg() {
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -232,7 +253,7 @@ async fn p5_db_locked_recovery_rejects_each_unproved_local_identity_pg() {
     {
         let mut s = state(10 + n as u64);
         let owner = if case == "current" {
-            super::super::incarnation()
+            crate::services::discord::replay_policy::incarnation()
         } else {
             "previous-process"
         };
@@ -271,7 +292,7 @@ async fn p5_db_locked_recovery_rejects_each_unproved_local_identity_pg() {
             let other = tempfile::tempdir().unwrap();
             std::fs::create_dir(other.path().join("runtime")).unwrap();
             let other_lock =
-                crate::cli::dcserver::replay_recovery::acquire_for_tests(other.path()).unwrap();
+                crate::services::dcserver_singleton::acquire_for_tests(other.path()).unwrap();
             assert!(LocalSnapshot::load(Some(&other_lock), &s).is_none());
             write::recover_hold_notice(
                 &pool,
@@ -419,19 +440,19 @@ fn p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg() {
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     runtime().block_on(async {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
         let mut s = state(30);
-        let attempt = begin(&pool, &mut s, &target, super::super::incarnation()).await;
+        let attempt = begin(&pool, &mut s, &target, crate::services::discord::replay_policy::incarnation()).await;
         inflight::save_inflight_state_create_new(&s).unwrap();
-        let mut observation = super::super::live::RawObservation::for_attempt(&attempt);
-        for seen in [super::super::live::Seen::StdoutEof, super::super::live::Seen::Exited { waited: true }, super::super::live::Seen::StderrDrained] {
+        let mut observation = crate::services::discord::replay_policy::live::RawObservation::for_attempt(&attempt);
+        for seen in [crate::services::discord::replay_policy::live::Seen::StdoutEof, crate::services::discord::replay_policy::live::Seen::Exited { waited: true }, crate::services::discord::replay_policy::live::Seen::StderrDrained] {
             observation.record(seen);
         }
-        let super::super::ReplayDecision::AllowStartupRetry(retry) = super::super::decide_stale(&pool, Some(attempt), &observation, None).await else { panic!("no-effect commit must issue one exact continuation"); };
+        let crate::services::discord::replay_policy::ReplayDecision::AllowStartupRetry(retry) = crate::services::discord::replay_policy::decide_stale(&pool, Some(attempt), &observation, None).await else { panic!("no-effect commit must issue one exact continuation"); };
         let before: (String, String, String, serde_json::Value) = sqlx::query_as("SELECT replay_disposition,replay_episode_nonce,replay_owner_incarnation,replay_preserved FROM intake_outbox WHERE id=$1").bind(s.replay_receipt_id).fetch_one(&pool).await.unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         shared.restart.replay_restart.set(lock).unwrap();
@@ -448,9 +469,9 @@ fn p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg() {
         let binding = serde_json::json!({"turn_nonce":s.turn_nonce,"user_msg_id":s.user_msg_id});
         let from = || BeginFrom::NoEffect { previous: retry.previous_nonce(), next: retry.next_nonce(), session_key: "p5-no-effect" };
         let effect = EffectProjection { effect_target: "provider_start", input_hash: "prepared", binding: &binding };
-        write::begin(&pool, s.replay_receipt_id.unwrap(), from(), &effect, super::super::incarnation()).await.unwrap();
+        write::begin(&pool, s.replay_receipt_id.unwrap(), from(), &effect, crate::services::discord::replay_policy::incarnation()).await.unwrap();
         native_probe(&root);
-        assert!(write::begin(&pool, s.replay_receipt_id.unwrap(), from(), &effect, super::super::incarnation()).await.is_err());
+        assert!(write::begin(&pool, s.replay_receipt_id.unwrap(), from(), &effect, crate::services::discord::replay_policy::incarnation()).await.is_err());
         assert_eq!(std::fs::read_to_string(root.join("native-starts")).unwrap().lines().count(), 1);
         let notices: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox").fetch_one(&pool).await.unwrap();
         assert_eq!(notices, 0);
@@ -463,7 +484,7 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let loader = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let loader = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -479,7 +500,7 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     );
     drop(loader);
     assert!(
-        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err(),
+        crate::services::dcserver_singleton::acquire_for_tests(&root).is_err(),
         "the sealed snapshot retains the original singleton lock"
     );
     let other = tempfile::tempdir().unwrap();
@@ -506,10 +527,10 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     assert_eq!(held.1, attempt.nonce());
     assert_eq!(held.2, "previous-process");
     assert_eq!(held.3["recovery_snapshot"], capture);
-    assert!(crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err());
+    assert!(crate::services::dcserver_singleton::acquire_for_tests(&root).is_err());
     drop(snapshot);
     assert!(
-        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_ok(),
+        crate::services::dcserver_singleton::acquire_for_tests(&root).is_ok(),
         "dropping the last sealed snapshot releases its original root"
     );
     pool.close().await;

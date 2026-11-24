@@ -15,6 +15,34 @@ pub mod tmux;
 #[cfg(windows)]
 pub(crate) mod windows_job;
 
+/// Test builds mark the thread inside the watcher registry's owner publication, so tmux
+/// namespace I/O can assert it never runs under that fence.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod owner_publication_fence {
+    thread_local! {
+        static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Holds the fence until dropped, then restores the outer state.
+    pub(crate) struct Scope(bool);
+
+    impl Scope {
+        pub(crate) fn enter() -> Self {
+            Self(HELD.replace(true))
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            HELD.set(self.0);
+        }
+    }
+
+    pub(crate) fn held() -> bool {
+        HELD.get()
+    }
+}
+
 pub(crate) use binary_resolver::active_provider_context;
 pub use binary_resolver::{
     BinaryResolution, apply_binary_resolution, augment_exec_path, merged_runtime_path,

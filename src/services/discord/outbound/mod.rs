@@ -16,6 +16,8 @@ pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) mod notification_policy;
+#[cfg(all(test, unix))]
+mod notification_policy_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) mod o_delivery_evidence;
 #[cfg(unix)]
@@ -29,7 +31,6 @@ pub(in crate::services::discord) mod reaction_control;
 // Read-only projection over `delivery_record`'s evidence, without verdict authority.
 // Unix-gated because its reader, `health::reachability::composite`, is unix-only.
 pub(in crate::services::discord) mod raw_output;
-pub(crate) use raw_output::{census_scope, current_census};
 #[cfg(unix)]
 pub(in crate::services::discord) mod receipt_index;
 pub(crate) mod result;
@@ -39,7 +40,6 @@ pub(crate) mod send_target;
 pub(crate) mod send_to_agent;
 pub(in crate::services::discord) mod serenity_reference;
 pub(crate) use serenity_reference::recovery_notice;
-pub(crate) mod source_registry;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 

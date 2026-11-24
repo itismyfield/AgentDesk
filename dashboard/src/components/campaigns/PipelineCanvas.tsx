@@ -136,14 +136,27 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
     const start = flow.current.flowToScreenPosition(state.from);
     if (under?.closest(".react-flow__pane")) edit.onDrop(from, pin, { x: point.clientX - box.left, y: point.clientY - box.top, fx: start.x - box.left, fy: start.y - box.top });
   };
-  // The first view fits the graph when that keeps it at 80% or more; past that it opens at 80% on the start, top first.
+  // In view mode, automatically fit the entire pipeline graph so wide 9-stage templates never clip under the right inspector;
+  // in full-window edit mode, keep at least 80% zoom on the start so pins remain easy to drag.
   const open = (instance: ReactFlowInstance) => {
+    if (!full) {
+      void instance.fitView(FIT);
+      requestAnimationFrame(() => void instance.fitView(FIT));
+      return;
+    }
     const { x0, x1, y0, y1 } = graph.bounds, width = canvas.current?.clientWidth ?? 0, height = canvas.current?.clientHeight ?? 0;
     const fit = Math.min((width - 64) / (x1 - x0), (height - 120) / (y1 - y0)), zoom = Math.min(1, Math.max(0.8, fit));
     void instance.setViewport({ zoom, x: (zoom === fit ? (width - (x1 - x0) * zoom) / 2 : 32) - x0 * zoom, y: 24 + Math.max(0, (height - 120 - (y1 - y0) * zoom) / 2) - y0 * zoom });
   };
-  // The editor opens the view anew at the window's size, and closing it at the page's.
-  useEffect(() => { if (flow.current) open(flow.current); }, [full]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Re-fit only when entering/leaving the full-window editor or when the viewed graph's structure actually changes (never on 15s polls or draft edits).
+  const shapeKey = `${[...graph.states.keys()].join("|")}#${graph.lines.length}`;
+  const prevView = useRef({ full, shapeKey });
+  useEffect(() => {
+    const fullChanged = prevView.current.full !== full;
+    const shapeChanged = prevView.current.shapeKey !== shapeKey;
+    prevView.current = { full, shapeKey };
+    if (flow.current && (fullChanged || (!full && shapeChanged))) open(flow.current);
+  }, [full, shapeKey]); // eslint-disable-line react-hooks/exhaustive-deps
   return <section aria-label={label} style={{ "--pipeline-height": CANVAS_HEIGHT } as CSSProperties}
     className={full ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_18rem] grid-rows-[minmax(0,1fr)] min-[1280px]:grid-cols-[minmax(0,1fr)_21rem]"
       : "grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]"}>

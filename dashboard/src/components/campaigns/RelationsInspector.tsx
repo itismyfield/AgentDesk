@@ -2,7 +2,7 @@ import { Lock, TriangleAlert, X } from "lucide-react";
 import type { CampaignNode } from "../../api/campaigns";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
-import { Cap, Chip, Desc, Eyebrow, InspSection, Num, RowButton, RuleItem } from "../common/KitPrimitives";
+import { Cap, Desc, Eyebrow, InspSection, Num, RowButton, RuleItem } from "../common/KitPrimitives";
 import { Select } from "../common/Select";
 import type { Tr } from "./campaignPresentation";
 import { taskLabel, taskName } from "./relationsEditorModel";
@@ -90,11 +90,11 @@ export default function RelationsInspector({ node, edge, lock, busy, nodes, cycl
       <Eyebrow>{tr("선행 작업", "Dependencies")}</Eyebrow>
       {node.dependencies.length ? <ul aria-label={tr("선행 작업", "Dependencies")} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
         {node.dependencies.map((id) => <li key={id} className="min-w-0 max-w-full">
-          <Chip className="max-w-full pr-1">
+          <span className="inline-flex min-h-7 max-[899px]:min-h-11 [@media(pointer:coarse)]:min-h-11 max-w-full items-center gap-1 rounded-full border border-[var(--line)] bg-[var(--bg-2)] py-0.5 pl-2.5 pr-1 text-xs font-medium text-[var(--fg)]">
             <span className="min-w-0 truncate">{name(id)}</span>
             {!locked && <button type="button" disabled={busy} aria-label={tr(`선행 ${name(id)} 빼기`, `Remove dependency ${name(id)}`)} onClick={() => act.remove(id)}
-              className="!m-0 grid size-5 shrink-0 cursor-pointer place-items-center !rounded-full !border-0 !bg-transparent !p-0 text-[var(--fg-muted)] hover:!bg-[color-mix(in_oklch,var(--fg)_10%,transparent)]"><X aria-hidden className="size-3" /></button>}
-          </Chip>
+              className="!m-0 grid size-6 max-[899px]:!size-11 [@media(pointer:coarse)]:!size-11 shrink-0 cursor-pointer place-items-center !rounded-full !border-0 !bg-transparent !p-0 text-[var(--fg-muted)] hover:!bg-[color-mix(in_oklch,var(--fg)_10%,transparent)]"><X aria-hidden className="size-3.5" /></button>}
+          </span>
         </li>)}
       </ul> : <Desc>{tr("선행 작업이 없어요.", "No dependencies.")}</Desc>}
       {!locked && <Select aria-label={tr("선행 추가", "Add a dependency")} disabled={busy} value="" onChange={(event) => event.target.value && act.add(event.target.value)}>

@@ -786,6 +786,10 @@ pub(crate) mod tests {
     use axum::http::{Method, Request};
     use tower::ServiceExt;
 
+    /// How long a wait for something that must happen polls before failing: a hang detector, not a
+    /// bound of the contract, so a slow runner only makes a broken build fail later.
+    const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
+
     pub(crate) static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
 
@@ -947,7 +951,7 @@ pub(crate) mod tests {
     async fn stop_event_wakes_prompt_ready_waiter() {
         let notify = prompt_ready_notify();
         let waiter = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+            tokio::time::timeout(LIVENESS, notify.notified())
                 .await
                 .map_err(|_| "timeout")
         });
@@ -980,7 +984,7 @@ pub(crate) mod tests {
     async fn codex_stop_event_wakes_prompt_ready_waiter() {
         let notify = prompt_ready_notify();
         let waiter = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+            tokio::time::timeout(LIVENESS, notify.notified())
                 .await
                 .map_err(|_| "timeout")
         });

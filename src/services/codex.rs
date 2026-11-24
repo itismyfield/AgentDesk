@@ -67,7 +67,7 @@ use crate::services::provider::{
     tmux_followup_fallback_after_read_error,
 };
 use crate::services::provider_teardown::TeardownClearance;
-use crate::services::remote::RemoteProfile;
+use crate::services::remote_stub::RemoteProfile;
 use crate::services::session_backend::{
     insert_process_session, process_session_is_alive, process_session_probe,
     read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,
@@ -1649,8 +1649,11 @@ fn execute_streaming_local_tmux(
 
     fence.validate_tmux_publisher(tmux_session_name)?;
     // A wrapper publication failure stays held; completion receives only published evidence.
-    let stamped = crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
-        .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
+    let stamped = crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+        tmux_session_name,
+        Some(&prepared),
+    )
+    .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
     prepared.finish_spawn(Ok(stamped))?;
 
     drop(fence);
@@ -2502,7 +2505,7 @@ mod remote_dispatch_gate_tests {
     //! `execute_command_streaming` refuses every remote profile synchronously, before any SSH
     //! attempt, even with the removed `remote_ssh_enabled: true` key still in the yaml.
 
-    use crate::services::remote::{RemoteAuth, RemoteProfile};
+    use crate::services::remote_stub::{RemoteAuth, RemoteProfile};
     use std::sync::Mutex;
 
     static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());

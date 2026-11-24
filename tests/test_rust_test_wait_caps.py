@@ -99,6 +99,10 @@ REGION_CASES = {
     "tokens inside stringify! are not code": (
         "pub fn production() -> &'static str {\n    stringify!(\n        #[test]\n        fn imagined() { h.join(); }\n    )\n}\n"
         "macro_rules! waits { ($h:expr) => { #[cfg(test)] fn t() { $h.join(); } }; }\n", (7,)),
+    "test-support gate is test-only": (
+        "#[cfg(all(any(test, feature = \"test-support\"), unix))]\nfn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }\n", (2,)),
+    "negated test-support gate is production": (
+        "#[cfg(not(any(test, feature = \"test-support\")))]\nfn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }\n", ()),
 }
 
 
@@ -143,6 +147,20 @@ class UnboundedWaitCheckTest(unittest.TestCase):
                 (self.repo / "src/prod.rs").write_text(source, encoding="utf-8")
                 found = [line for line in wait_problems(self.repo) if "src/prod.rs" in line]
                 self.assertEqual([int(line.split(" ")[2].rsplit(":", 1)[1]) for line in found], list(lines), found)
+
+    def test_a_module_mounted_under_the_test_support_gate_is_test_code(self):
+        gate, join = 'any(test, feature = "test-support")', "fn t(h: std::thread::JoinHandle<()>) { h.join().unwrap(); }"
+        (self.repo / "src/support.rs").write_text(join, encoding="utf-8")
+        raw = 'any(test, feature = r#"test-support"#)'  # not the feature spelling the gate rule reads
+        for cfg, test_only in ((gate, True), (f"all({gate}, unix)", True), (f"not({gate})", False), (raw, False),
+                               ('all(unix /*, feature = "test-support" */)', False)):
+            for lib, rel in ((f"#[cfg({cfg})]\nmod support;\n", "src/support.rs:1"),
+                             (f"#[cfg({cfg})]\nmod inline {{ {join} }}\n", "src/lib.rs:2")):
+                (self.repo / "src/lib.rs").write_text(lib, encoding="utf-8")
+                found = [line.split(" ")[2] for line in wait_problems(self.repo) if "support.rs" in line or "lib.rs" in line]
+                prod = rts.walk(self.repo / "src/lib.rs", self.repo, production=True)
+                joins = [t for tokens in prod.source_tokens.values() if tokens for t in tokens if t.value == "join"]
+                self.assertEqual((found, len(joins)), (([rel], 0) if test_only else ([], 1)), (cfg, rel))
 
     def test_cfg_attr_test_declares_a_test(self):
         source = "#[cfg_attr(test, test)]\nfn t() {\n    let (_tx, rx) = std::sync::mpsc::channel::<u8>();\n    rx.recv();\n}\n"

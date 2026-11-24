@@ -1,7 +1,10 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
+  <style data-precedence="layer-order">@layer theme, base, kit, components, utilities;</style>
   <meta charset="UTF-8" />
+  <!-- React inserts hoisted kit <style precedence> after existing [data-precedence] nodes, so this layer order stays first. -->
+  <style data-precedence="layer-order">@layer properties, theme, base, kit, components, utilities;</style>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />

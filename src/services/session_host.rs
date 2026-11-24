@@ -2,7 +2,7 @@
 //! create, terminate and restart-read effects on it. Admission, identity and cancel routing stay
 //! with owners.
 
-mod herdr {
+pub(crate) mod herdr {
     #[cfg(unix)]
     pub(crate) mod autostart;
     pub(crate) mod contract;
@@ -25,9 +25,9 @@ mod create;
 pub(crate) use create::HostCreate;
 #[cfg(test)]
 pub(crate) use create::create_in_effect;
-mod herdr_gate;
-mod herdr_host;
-mod herdr_registry;
+pub(crate) mod herdr_gate;
+pub(crate) mod herdr_host;
+pub(crate) mod herdr_registry;
 pub(crate) mod host_decision;
 pub(crate) mod surface_policy;
 pub(crate) mod thread_host;
@@ -35,11 +35,8 @@ pub(crate) mod thread_host;
 pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
-// The operator terminate path against real Herdr servers its runner starts; ignored otherwise.
-#[cfg(test)]
-pub(crate) mod herdr_terminate_real_tests;
 pub(crate) mod legacy_collapse;
-mod model;
+pub(crate) mod model;
 pub(crate) mod operation_policy;
 mod process_host;
 // Only unix keeps a Herdr execution to read again after a restart.
@@ -61,14 +58,11 @@ mod submit;
 pub(crate) use submit::SubmitSpy;
 #[cfg(unix)]
 pub(crate) use submit::WrapperFrame;
+mod termination;
 #[cfg(test)]
 pub(crate) mod test_support;
-// The termination service's Herdr fixture, for the discord relay test that drives it end to end.
-#[cfg(all(test, unix))]
-pub(crate) use herdr_gate::tests::p11 as herdr_termination_rig;
-mod termination;
 mod tmux_host;
-mod traits;
+pub(crate) mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.

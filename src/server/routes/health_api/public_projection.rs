@@ -240,23 +240,25 @@ pub(super) fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(witness) = project_test_instance(
         &json,
-        crate::config::test_instance::lifecycle::has_admitted_run(),
+        crate::config::test_instance::lifecycle::admitted_identity_count(),
     ) {
         public["test_instance"] = witness;
     }
     public
 }
 
-fn project_test_instance(json: &serde_json::Value, admitted: bool) -> Option<serde_json::Value> {
-    if !admitted {
-        return None;
-    }
+/// `expected` is the admitted profile's identity count; without an admitted run nothing is projected.
+fn project_test_instance(
+    json: &serde_json::Value,
+    expected: Option<usize>,
+) -> Option<serde_json::Value> {
+    let expected = expected?;
     let witness = json.get("test_instance")?;
     if witness["schema"] != 1 || witness["live_ready"] != false {
         return None;
     }
     let identities = witness["identities"].as_array()?;
-    if identities.len() != 4 {
+    if identities.len() != expected {
         return None;
     }
     let identities: Option<Vec<_>> = identities.iter().map(|identity| Some(serde_json::json!({

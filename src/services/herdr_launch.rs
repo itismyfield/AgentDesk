@@ -46,7 +46,7 @@ pub(crate) use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
-const HOST_KIND_TEMP_EXT: &str = "host_kind";
+pub(crate) const HOST_KIND_TEMP_EXT: &str = "host_kind";
 /// What Herdr gives every pane process (same set through 0.9.5); a provider that sees them may
 /// report to Herdr.
 pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
@@ -83,8 +83,12 @@ pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
 
 /// O owns the channel's output, its writer accepts work, and its store holds a binding
 /// checkpoint, which only a found baseline or an applied binding writes; the store is not opened.
-fn o_ready_at(runtime_root: Option<&Path>, channel: u64, kind: RuntimeHandoffKind) -> bool {
-    #[cfg(test)]
+pub(crate) fn o_ready_at(
+    runtime_root: Option<&Path>,
+    channel: u64,
+    kind: RuntimeHandoffKind,
+) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
     READINESS_READS.with(|reads| reads.set(reads.get() + 1));
     o_owns_seeded(runtime_root, channel, kind, || writer_accepts(channel))
 }
@@ -110,7 +114,7 @@ fn o_owns_seeded(
 }
 
 fn writer_accepts(channel: u64) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(answer) = WRITER_ACCEPTS.with(std::cell::Cell::get) {
         return answer;
     }
@@ -296,7 +300,7 @@ pub(crate) fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAccept
     WriterAcceptsGuard(WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for WriterAcceptsGuard {
     fn drop(&mut self) {
         WRITER_ACCEPTS.with(|cell| cell.set(self.0));
@@ -342,7 +346,7 @@ pub(crate) fn admissions_on_this_thread() -> usize {
 
 /// First step of every Herdr launch; it reads nothing and refuses an incomplete endpoint.
 fn admit(endpoint: Option<&HerdrLaunchEndpoint>) -> Result<&HerdrLaunchEndpoint, HerdrLaunchError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSIONS.with(|count| count.set(count.get() + 1));
     let filled = |values: [&str; 3]| values.iter().all(|value| !value.trim().is_empty());
     endpoint
@@ -538,8 +542,11 @@ pub(crate) async fn launch_herdr_session(
     // Hooks and binding events name an execution by its spawn nonce marker, as on tmux.
     #[cfg(unix)]
     let markers = markers.and_then(|()| {
-        crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
-            .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            &owner.logical_key,
+            Some(&incarnation),
+        )
+        .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
     });
     let markers = match markers {
         Ok(_) => {
@@ -639,7 +646,7 @@ pub(crate) async fn launch_herdr_session(
 
 /// Retires this launch's own Pending once no create left for it; a row that moved on or names a
 /// pane is kept. Returns `error`, the failure that proved nothing was sent.
-async fn retire_unsent(
+pub(crate) async fn retire_unsent(
     pool: &PgPool,
     owner: &HostedOwner,
     nonce: &str,
@@ -833,5 +840,6 @@ fn record_herdr_host_marker(logical_key: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "herdr_launch_tests.rs"]
-pub(crate) mod tests;
+#[cfg(unix)]
+#[path = "herdr_launch/retired_hold/tests.rs"]
+pub(crate) mod retired_durability_tests;

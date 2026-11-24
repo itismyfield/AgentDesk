@@ -1,12 +1,65 @@
 import type { SkillRankingByAgentRow } from "../../api";
 import type { CronJob, DiscordBinding } from "../../api/client";
+import { ApiRequestError, request } from "../../api/httpClient";
+import type { AgentMonitorStep, AgentMonitorStepKind, AgentMonitorStepStatus } from "../../kit/pro/agent-monitor";
 import type { DispatchedSession } from "../../types";
+import type { HomeTurn } from "../home/homeModel";
+import type { Translator } from "./types";
 
 // Same live set as home's `classifyAgents`; aborted and disconnected sessions are finished.
-const LIVE_SESSION_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
+export const LIVE_SESSION_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
 const TURN_STATUSES = new Set(["turn_active", "working"]);
 
+const STEP_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
+  [/^(Read|NotebookRead|read_file)$/i, "read"],
+  [/^(Grep|Glob|LS|WebSearch|search_web|rg|find)$/i, "search"],
+  [/^(Edit|MultiEdit|Write|NotebookEdit|edit_file|write_file)$/i, "edit"],
+  [/^(Bash|exec_command|run_command)$/i, "run"],
+  [/^(WebFetch|curl)$/i, "web"],
+];
+
 export const isTurnSession = (session: DispatchedSession) => TURN_STATUSES.has(session.status);
+
+/** Maps `GET /api/agents/{id}/turn` tool events to kit `AgentMonitorStep` items. */
+export function turnMonitorSteps(turn: HomeTurn | undefined, tr: Translator): AgentMonitorStep[] {
+  const raw = turn?.tool_events;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  return raw.map((entry, index) => {
+    const ev = entry as { kind?: string; status?: string; tool_name?: string | null; summary?: string; line?: string };
+    const tool = ev.tool_name?.trim() || undefined;
+    const label = ev.summary?.trim() || ev.line?.trim() || tool || tr("도구 실행", "Tool step");
+    const kind: AgentMonitorStepKind = tool ? (STEP_KINDS.find(([re]) => re.test(tool))?.[1] ?? "think") : "think";
+    const isLast = index === raw.length - 1 && turn?.status !== "idle";
+    const status: AgentMonitorStepStatus =
+      ev.status === "failed" || ev.status === "error"
+        ? "failed"
+        : ev.status === "running" || (isLast && ev.status !== "done" && ev.status !== "completed")
+          ? "running"
+          : "done";
+    return {
+      id: `${index}-${tool ?? ev.kind ?? "step"}`,
+      label,
+      kind,
+      status,
+      tool,
+      output: ev.line && ev.line.trim() !== label ? ev.line.trim() : undefined,
+    };
+  });
+}
+
+export async function stopAgentTurn(agentId: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    await request<unknown>(`/api/agents/${encodeURIComponent(agentId)}/turn/stop`, {
+      method: "POST",
+      suppressErrorToast: true,
+      maxRetries: 0,
+    });
+    return { ok: true, message: "" };
+  } catch (error) {
+    const detail = error instanceof ApiRequestError ? error.message : "stop failed";
+    return { ok: false, message: detail };
+  }
+}
 
 /** The agent's live sessions, and the finished ones (listed only on request) with their count. */
 export function splitLinkedSessions(sessions: DispatchedSession[]): { live: DispatchedSession[]; finished: DispatchedSession[]; closed: number } {

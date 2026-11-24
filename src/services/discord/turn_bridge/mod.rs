@@ -32,10 +32,7 @@ mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;
 mod skill_usage;
-mod stale_resume;
-pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr: &str) -> bool {
-    stale_resume::stream_error_has_stale_resume_error(message, stderr)
-}
+pub(in crate::services::discord) mod stale_resume;
 
 pub(in crate::services::discord) mod native_input;
 mod status_panel;
@@ -86,8 +83,9 @@ use panel_lifecycle::{
     refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
-    done_result_requires_full_terminal_replay, no_answer, push_transcript_event,
-    response_portion_after_offset, terminal_delivery_response_after_offset,
+    done_replaces_posted_parts, done_result_requires_full_terminal_replay, no_answer,
+    push_transcript_event, response_portion_after_offset, rollover_parts_stay_posted,
+    terminal_delivery_response_after_offset,
 };
 use std::collections::VecDeque;
 // Re-exports for pub(super) items used by sibling modules in the discord package

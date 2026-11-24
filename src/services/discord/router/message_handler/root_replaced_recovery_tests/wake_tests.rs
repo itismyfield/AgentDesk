@@ -2,7 +2,7 @@ use super::*;
 use crate::services::discord::queue_io::cancel_backstop_test_support::{
     KickoffCompletion, set_owner_wake_for_tests,
 };
-use crate::services::herdr_launch::tests::retired_durability_tests::SyncFault;
+use crate::services::herdr_launch::retired_durability_tests::SyncFault;
 
 struct WakeTrace {
     channel: ChannelId,

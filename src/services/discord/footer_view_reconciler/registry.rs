@@ -1,4 +1,4 @@
-use crate::services::discord::outbound::current_census;
+use crate::services::legacy_body_census::request_context::current_census;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

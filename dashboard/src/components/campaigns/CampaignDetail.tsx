@@ -12,8 +12,8 @@ type View = "overview" | "relations" | "board" | "pipeline";
 
 /** The open campaign: title, chips and one status sentence, then 현황 (with 관계도, 단계 보드 and 파이프라인 when given), and the task
  * opened from it in the pinned pane on wide screens or its own screen on phones. */
-export default function CampaignDetail({ title, showTitle, chips, sentence, actions, notes, description, overview, relations, board, pipeline, task, onCloseTask, leave, focus = false, tr }: {
-  title: string; showTitle: boolean; chips?: ReactNode; sentence: string; actions?: ReactNode; notes?: ReactNode;
+export default function CampaignDetail({ title, showTitle, chips, sentence, tracker, actions, notes, description, overview, relations, board, pipeline, task, onCloseTask, leave, focus = false, tr }: {
+  title: string; showTitle: boolean; chips?: ReactNode; sentence: string; tracker?: ReactNode; actions?: ReactNode; notes?: ReactNode;
   /** In the header on wide screens; below everything on phones, which lead with status and tasks. */
   description?: ReactNode;
   overview: (controls: string | undefined) => ReactNode; relations?: ReactNode; board?: (controls: string | undefined) => ReactNode; pipeline?: ReactNode;
@@ -40,6 +40,7 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, acti
         {actions && <div className="campaign-actions ml-auto">{actions}</div>}
       </div>}
       <p className="campaign-detail-status !text-sm text-[var(--fg)] [word-break:keep-all]">{sentence}</p>
+      {tracker}
       {showTitle && description}
       {notes}
     </header>}

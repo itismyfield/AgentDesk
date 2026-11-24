@@ -21,12 +21,12 @@ fn state_enters_review(pipeline: &crate::pipeline::PipelineConfig, status: &str)
         .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX: bool;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn with_preflight_review_enter_outbox_suppressed<F>(future: F) -> F::Output
 where
     F: std::future::Future,
@@ -36,14 +36,14 @@ where
         .await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn suppress_review_enter_outbox_for_preflight_harness() -> bool {
     PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX
         .try_with(|value| *value)
         .unwrap_or(false)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn suppress_review_enter_outbox_for_preflight_harness() -> bool {
     false
 }

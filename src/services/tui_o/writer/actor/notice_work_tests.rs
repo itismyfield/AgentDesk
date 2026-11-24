@@ -1,19 +1,27 @@
-use super::*;
+use crate::services::discord::krx_tui_o_test_host::admission::bind;
 use crate::services::tui_input::human_frame::history;
 use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{
     LedgerEntry,
     input_notices::{MigrationHistory, MigrationSnapshot, MigrationSource, NoticeEntry},
 };
 use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
+use crate::services::tui_o::writer::actor::*;
+use crate::services::tui_o::writer::binding::BindingEvents;
+use crate::services::tui_o::writer::deliver::ChannelWriter;
+use crate::services::tui_o::writer::pieces::{Derived, UnitDeriver};
+use crate::services::tui_o::writer::rotation::Sources;
+use crate::services::tui_o::writer::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
 use crate::services::tui_o::writer::{
-    PostOutcome, SeenMessage,
-    binding::ChannelBindingLog,
-    input_notices::{Projection, admission::tests::bind},
+    PostOutcome, SeenMessage, binding::ChannelBindingLog, input_notices::Projection,
     pieces::PieceWork,
 };
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::{future::Future, io::Write, sync::Mutex};
+use tokio::sync::watch;
 const CHANNEL: u64 = 7332099;
 type Holder = (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>);
 #[derive(Default)]
@@ -627,9 +635,8 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
         native_key: id.into(),
         kind,
     };
-    actor
-        .owed
-        .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+    actor.owed.push_back(Derived::Piece(
+        crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: key(
                 "held",
@@ -638,12 +645,12 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
             index: 0,
             payload: "-# ⌨️ held".into(),
             notice_origin: None,
-        }));
+        },
+    ));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     for pass in 0..2 {
-        actor
-            .owed
-            .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+        actor.owed.push_back(Derived::Piece(
+            crate::services::tui_o::writer::pieces::PieceWork {
                 output_origin: None,
                 unit_key: key(
                     &format!("body-{pass}"),
@@ -652,7 +659,8 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
                 index: 0,
                 payload: format!("answer-{pass}"),
                 notice_origin: None,
-            }));
+            },
+        ));
         VISITS.with(|visits| visits.set((0, Some(2))));
         actor.deliver_owed(&progress).await;
         assert_eq!(
@@ -844,18 +852,17 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             notice_origin: None,
         })
         .unwrap();
-    actor
-        .owed
-        .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+    actor.owed.push_back(Derived::Piece(
+        crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: key,
             index: 0,
             payload: "-# ⌨️ open".into(),
             notice_origin: None,
-        }));
-    actor
-        .owed
-        .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+        },
+    ));
+    actor.owed.push_back(Derived::Piece(
+        crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: UnitKey {
                 channel_id: CHANNEL,
@@ -866,7 +873,8 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             index: 0,
             payload: "later answer".into(),
             notice_origin: None,
-        }));
+        },
+    ));
     actor.replay_deferred = true;
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     VISITS.with(|visits| visits.set((0, Some(0))));

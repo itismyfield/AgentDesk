@@ -156,3 +156,154 @@ async fn rowless_watcher_death_wakes_the_v2_owner_waiting_input_once() {
     })
     .await;
 }
+
+/// A watcher death that ends a pipe turn commits its failure with the origin the turn consumed.
+#[tokio::test(flavor = "current_thread")]
+async fn watcher_death_commits_the_dead_turn_origin_as_failed_pg() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    with_isolated_runtime_root(|| async move {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let (channel, provider) = (9_828_901, ProviderKind::Claude);
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel,
+            None,
+            1,
+            10,
+            0,
+            "pipe turn".into(),
+            None,
+            Some("AgentDesk-claude-pipe-dead".into()),
+            None,
+            None,
+            0,
+        );
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        state.input_origin_ids = vec!["dlg:8289:pipe".into()];
+        crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+        let state =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel).unwrap();
+        let recorder = start(channel).await;
+        let channel_id = ChannelId::new(channel);
+        assert!(
+            super::start_restart_handoff_from_state(
+                channel_id,
+                &recorder.http,
+                &shared,
+                &provider,
+                state,
+                ""
+            )
+            .await
+        );
+        let receipt: (Vec<String>, Option<String>) = sqlx::query_as(
+            "SELECT consumed_origin_ids, terminal_outcome FROM turns WHERE turn_id = $1",
+        )
+        .bind(format!("discord:{channel}:10"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            receipt,
+            (vec!["dlg:8289:pipe".into()], Some("failed".into()))
+        );
+        pool.close().await;
+        db.drop().await;
+    })
+    .await;
+}
+
+/// Watcher-death cleanup leaves a carried execution's terminal to its same-id retry: a retry that
+/// runs records completed, and one refused while the dead turn still holds the slot fails it once.
+#[tokio::test(flavor = "current_thread")]
+async fn watcher_death_leaves_a_carried_retry_its_own_terminal_pg() {
+    use crate::services::discord::{inflight, receipt_settle};
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    with_isolated_runtime_root(|| async move {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let provider = ProviderKind::Claude;
+        for (channel, refused) in [(9_828_902_u64, false), (9_828_903, true)] {
+            let (channel_id, message) = (ChannelId::new(channel), MessageId::new(10));
+            let dead = Arc::new(CancelToken::new());
+            assert!(
+                crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    channel_id,
+                    dead.clone(),
+                    UserId::new(1),
+                    message,
+                )
+                .await
+            );
+            let mut state = InflightTurnState::new(
+                provider.clone(),
+                channel,
+                None,
+                1,
+                10,
+                0,
+                "pipe turn".into(),
+                None,
+                Some(format!("AgentDesk-claude-retry-{channel}")),
+                None,
+                None,
+                0,
+            );
+            state.turn_nonce = dead.turn_nonce().map(str::to_owned);
+            state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+            state.input_origin_ids = vec![format!("dlg:8289:{channel}")];
+            inflight::save_inflight_state(&state).unwrap();
+            let state = inflight::load_inflight_state(&provider, channel).unwrap();
+            receipt_settle::carry_retry_origins(Some(&pool), &state).await;
+            let recorder = start(channel).await;
+            if refused {
+                crate::services::discord::turn_bridge::auto_retry_with_history(
+                    &recorder.http,
+                    &shared,
+                    &provider,
+                    channel_id,
+                    message,
+                    "pipe turn",
+                )
+                .await;
+            }
+            let (http, row) = (&recorder.http, state.clone());
+            assert!(
+                super::start_restart_handoff_from_state(
+                    channel_id, http, &shared, &provider, row, ""
+                )
+                .await
+            );
+            if !refused {
+                let mut retry = state.clone();
+                retry.input_origin_ids.clear();
+                let completed = crate::db::turns::TerminalOutcome::Completed;
+                assert!(
+                    receipt_settle::record(Some(&pool), &retry, completed, chrono::Utc::now())
+                        .await
+                );
+            }
+            let receipt: (Vec<String>, Option<String>) = sqlx::query_as(
+                "SELECT consumed_origin_ids, terminal_outcome FROM turns WHERE turn_id = $1",
+            )
+            .bind(format!("discord:{channel}:10"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let ended = if refused { "failed" } else { "completed" };
+            assert_eq!(
+                receipt,
+                (state.input_origin_ids.clone(), Some(ended.into()))
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    })
+    .await;
+}

@@ -72,7 +72,7 @@ pub(super) async fn replace_or_post_after_edit_failure(
             } else {
                 legacy_send
                     .run(async {
-                        BodySource::captured(crate::services::discord::outbound::current_census())
+                        BodySource::captured(crate::services::legacy_body_census::request_context::current_census())
                             .observe(
                                 BodySite::WatcherPostFallback,
                                 BodyOffer::Body,

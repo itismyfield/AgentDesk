@@ -1,4 +1,4 @@
-import { examples, renderAvatarSvg, type AvatarDefinition } from "open-bot-avatar";
+import { avatarFrame, examples, renderAvatarSvg, type AvatarDefinition, type EyeMark, type Matrix } from "open-bot-avatar";
 import { GALLERY_AVATARS } from "./galleryAvatars";
 
 export interface BotAvatar {
@@ -112,6 +112,7 @@ export function botAvatarFor(agentId: string, roster?: Map<string, BotAvatar>): 
 }
 
 const stills = new Map<string, string>();
+const blinkingStills = new Map<string, string>();
 
 /** Cached calm frame (eyes open) as a data URL; an <img> keeps each SVG's internal ids out of the page DOM. */
 export function botAvatarStill({ definition, color, eyeColor }: BotAvatar): string {
@@ -121,5 +122,87 @@ export function botAvatarStill({ definition, color, eyeColor }: BotAvatar): stri
     url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(renderAvatarSvg(definition, { color, eyeColor, reducedMotion: true }))}`;
     stills.set(key, url);
   }
+  return url;
+}
+
+const f2 = (n: number) => {
+  const r = Math.round(n * 100) / 100;
+  return (Object.is(r, -0) ? 0 : r).toString();
+};
+const matSvg = (m: Matrix) =>
+  `matrix(${m.map((v, i) => (i < 4 ? (Math.round(v * 10000) / 10000).toString() : f2(v))).join(" ")})`;
+const escXml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function blinkingEyeMarkup(mark: EyeMark, ink: string): { markup: string; closedScale: number } {
+  if (mark.shape === "arc") {
+    return {
+      markup: `<path d="${mark.d}" fill="none" stroke="${ink}" stroke-width="${f2(mark.strokeWidth)}" stroke-linecap="round"/>`,
+      closedScale: 1,
+    };
+  }
+  const cx = mark.x + mark.width / 2;
+  // Matches open-bot-avatar's downward lid shift ((h - open) * 0.18) around local (0, 0).
+  const yOrigin = mark.y + mark.height * 0.68;
+  const closedScale = Math.min(1, Math.max(0.16, (mark.width * 0.55) / mark.height));
+  return {
+    markup:
+      `<g transform="translate(${f2(cx)} ${f2(yOrigin)})">` +
+      `<rect class="oba-eye" x="${f2(-mark.width / 2)}" y="${f2(mark.y - yOrigin)}" width="${f2(mark.width)}" height="${f2(mark.height)}" rx="${f2(mark.radius)}" fill="${ink}"/>` +
+      `</g>`,
+    closedScale,
+  };
+}
+
+/**
+ * Cached SVG data URL whose eyes blink asynchronously via pure CSS @keyframes (zero JS timers/rAF).
+ * Each `seedKey` gets its own cycle duration, negative phase offset, and occasional double-blink.
+ */
+export function botAvatarBlinking({ definition, color, eyeColor }: BotAvatar, seedKey = definition.id): string {
+  const key = `${definition.id}|${color}|${eyeColor ?? ""}|${seedKey}`;
+  const cached = blinkingStills.get(key);
+  if (cached) return cached;
+
+  const frame = avatarFrame(definition, { color, eyeColor, reducedMotion: true });
+  const defsMarkup = frame.paths
+    .map((d) => `<path id="${d.id}" d="${d.d}"${d.evenOdd ? ' fill-rule="evenodd"' : ""}/>`)
+    .join("");
+
+  let closedScale: number | undefined;
+  const body = frame.shapes
+    .map((s) => {
+      if (s.kind === "slice") return `<use href="#${s.path}" transform="${matSvg(s.matrix)}"/>`;
+      const eye = blinkingEyeMarkup(s.mark, frame.ink);
+      if (s.mark.shape === "pill") closedScale ??= eye.closedScale;
+      return `<g transform="${matSvg(s.matrix)}">${eye.markup}</g>`;
+    })
+    .join("");
+
+  const seed = hash(`blink:${seedKey}`);
+  const durationMs = 3800 + (seed % 2001);
+  const delayMs = (seed >>> 11) % durationMs;
+  const closed = f2(closedScale ?? 0.22);
+  const doubleBlink = ((seed >>> 22) % 100) < 22;
+  const keyframes = doubleBlink
+    ? `0%,46%,50.6%,53.2%,57.8%,100%{transform:scaleY(1)}48.3%,55.5%{transform:scaleY(${closed})}`
+    : `0%,47.8%,52.2%,100%{transform:scaleY(1)}50%{transform:scaleY(${closed})}`;
+  const style =
+    `<style>` +
+    `@keyframes oba-blink{${keyframes}}` +
+    `.oba-eye{animation:oba-blink ${durationMs}ms ease-in-out ${delayMs === 0 ? "0ms" : `-${delayMs}ms`} infinite}` +
+    `@media (prefers-reduced-motion:reduce){.oba-eye{animation:none}}` +
+    `</style>`;
+
+  const label = escXml(frame.name);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="${label}" overflow="visible">` +
+    `<title>${label}</title>` +
+    style +
+    `<defs>${defsMarkup}</defs>` +
+    `<g transform="${matSvg(frame.root)}" fill="${frame.color}">${body}</g>` +
+    `</svg>`;
+
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  if (blinkingStills.size >= 256) blinkingStills.delete(blinkingStills.keys().next().value as string);
+  blinkingStills.set(key, url);
   return url;
 }

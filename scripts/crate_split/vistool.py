@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Compiler-driven visibility widening for one crate cut, in shadow or real mode (#7353 VT1, VT2).
 
-The partition (`partition.json`) lists, per future crate, the module groups it owns. For a target crate X,
+The partition (`partition.json`) lists, per future crate, the module groups it owns. A key may name a deeper
+module (`discord::outbound::notification_policy`); the longest key that prefixes a module owns it. For a target crate X,
 X and every crate before it in `order` are "below"; every crate after X is "above". Before any real cut the
 tool builds two throwaway copies of HEAD under `<repo>/target/crate_split_probe/<X>/`:
 
-  lower  the whole lib renamed `probe_lower`; only the `mod` chain down to each below group becomes `pub`.
-         Above modules still compile (privately), so a hard cut left in X does not break it.
+  lower  the whole lib renamed `probe_lower`; only the `mod` chain down to each below leaf group becomes `pub`.
+         Above modules still compile (privately), so a hard cut left in X does not break it. It declares the
+         `test-support` feature, which upper turns on, with its dev dependencies joined to the normal ones.
   upper  the whole tree again, depending on `probe_lower`; each below leaf group's `mod x;` line becomes
-         `pub use probe_lower::<path>::x;`, the parent re-export a member split will add.
+         `pub use probe_lower::<path>::x;`, the parent re-export a member split will add. Where the line's cfg
+         opens for upper but lower's build has no such module, an empty `mod x {}` stands in (vistool_gate.py).
 
 Every round runs `cargo check --lib` on lower and `cargo check --lib --tests` on upper, reads the visibility
-diagnostics (E0603 E0624 E0616 E0451 E0364 E0365, lower `private_interfaces`/`private_bounds`), and widens the
-modifier on the definition line to `pub` in both copies. Nothing else is ever edited; type mismatches from an
-uncut hard edge, test-only items, foreign impls and macro paths are classified and reported, not fixed.
+diagnostics (E0603 E0624 E0616 E0451 E0364 E0365, lower E0446 and `private_interfaces`/`private_bounds`), and
+widens the modifier on the definition line to `pub` in both copies (a type E0446 names: `pub(crate)` first, `pub`
+once rustc reports it again). Nothing else is ever edited; type mismatches from an uncut hard edge, test-only
+items, foreign impls and macro paths are classified and reported, not fixed.
 
 stdout line 1 is `VISTOOL_OK ...` or `VISTOOL_FAIL <reason> ...` (exit 2). `--apply` writes the patch into the
 worktree only on success; the manifest and the (partial) patch go to `--out-dir` and are never committed.
@@ -35,11 +39,13 @@ import subprocess
 import sys
 import time
 
-VERSION = "vt2-1"
+VERSION = "vt4-1"
 VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
 VIS_LINTS = {"private_interfaces", "private_bounds"}
+# A hard error in lower once a widened type's trait impl names a narrower type in an associated type.
+IFACE_CODE = "E0446"
 TEST_CFG_CODES = {"E0425", "E0412", "E0433", "E0599", "E0432", "E0422"}
 IMPL_CODES = {"E0116", "E0117", "E0390"}
 # Two copies of an above type (one compiled inside lower, one in upper) surface as these.
@@ -67,6 +73,7 @@ SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "
 TOOL_REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOL_REPO / "scripts" / "ci"))
 import rust_test_sources as rts  # noqa: E402
+sys.path.append(str(TOOL_REPO / "scripts"))  # rust_cfg, for vistool_gate
 
 # Children (vistool_real, vistool_testcfg) import this module; as a script it must be the same object.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -80,16 +87,24 @@ class VisFail(Exception):
 
 # ---------------------------------------------------------------------------------------------- partition
 
-def group_of(module):
-    """Group key for a module path tuple: `config`, `services::tui_o`, `discord::inflight`, `discord::(mod.rs)`."""
+# Groups of one file: `group_of` gives each of their child modules a key of its own.
+ONE_FILE = ("(root)", "services", "discord::(mod.rs)")
+
+
+def group_key(path):
+    """The one key spelling of an exact module path; `services::discord::X` is `discord::X`."""
+    if path[:2] == ("services", "discord"):
+        return "discord::" + ("::".join(path[2:]) or "(mod.rs)")
+    return "::".join(path) or "(root)"
+
+
+def group_of(module, keys=()):
+    """Group key for a module path tuple: `config`, `services::tui_o`, `discord::inflight`, `discord::(mod.rs)`.
+    A deeper key in `keys` wins over that group: the longest one that prefixes the module by whole segments."""
     m = tuple(x for x in module if x != "crate")
-    if not m:
-        return "(root)"
-    if m[0] == "services" and len(m) > 1:
-        if m[1] == "discord":
-            return "discord::" + (m[2] if len(m) > 2 else "(mod.rs)")
-        return "services::" + m[1]
-    return m[0]
+    base = 1 if m[:1] != ("services",) else 3 if m[1:2] == ("discord",) else 2
+    deep = (group_key(m[:n]) for n in range(len(m), base, -1))
+    return next((key for key in deep if key in keys), group_key(m[:base]))
 
 
 def group_path(group):
@@ -98,8 +113,8 @@ def group_path(group):
         return ()
     head, _, tail = group.partition("::")
     if head == "discord":
-        return ("services", "discord") if tail == "(mod.rs)" else ("services", "discord", tail)
-    return (head, tail) if tail else (head,)
+        return ("services", "discord") + (() if tail == "(mod.rs)" else tuple(tail.split("::")))
+    return tuple(group.split("::"))
 
 
 def load_partition(path):
@@ -114,6 +129,15 @@ def load_partition(path):
         for group in data["crates"][crate]:
             if group in seen:
                 raise VisFail("bad_partition", f"{group} in {seen[group]} and {crate}")
+            # One spelling per module path, or two crates could own the same module under different keys.
+            path = group_path(group)
+            if group_key(path) != group:
+                raise VisFail("bad_partition", f"{group} is not a group key (`a::b`, `discord::x::y`)")
+            # A crate cannot own a module inside the tree of a crate below it; the other way is a deep key.
+            over = next((a for a in (group_key(path[:n]) for n in range(1, len(path)))
+                         if a not in ONE_FILE and seen.get(a, crate) != crate), None)
+            if over:
+                raise VisFail("bad_partition", f"{group} ({crate}) is under {over} of the earlier crate {seen[over]}")
             seen[group] = crate
     return data
 
@@ -156,8 +180,8 @@ class Layout:
             module = min(tuple(x for x in m if x != "crate") for m in modules)
             self.module_of[rel] = module
             self.file_of.setdefault(module, rel)
-            chains = inv.file_cfgs.get(path, set())
-            if chains and all(any(rts._cfg_requires_test(p) for p in chain) for chain in chains):
+            chains = inv.file_cfg_texts.get(path, set())
+            if chains and all(any(rts._cfg_requires_test_text(cfg, strict=True) for cfg in chain) for chain in chains):
                 self.test_only.add(rel)
         self.file_of[()] = self.root_file
         self.module_of[self.root_file] = ()
@@ -166,13 +190,16 @@ class Layout:
         self.owner = {g: c for c in order for g in partition["crates"][c]}
         self.below = {g for c in order[:index + 1] for g in partition["crates"][c]}
         self.crate, self.order = crate, order
-        self.crate_of_file = {rel: self.owner.get(group_of(m)) for rel, m in self.module_of.items()}
+        self.crate_of_file = {rel: self.owner.get(group_of(m, self.owner)) for rel, m in self.module_of.items()}
         self.x_files = {rel for rel, c in self.crate_of_file.items() if c == crate}
-        all_paths = [group_path(g) for g in self.owner]
-        # A container group (discord::(mod.rs), services) also parents groups of other crates: chain only.
+        paths = {g: group_path(g) for g in self.owner}
+        parents = lambda g, pool: any(len(paths[h]) > len(paths[g]) and paths[h][:len(paths[g])] == paths[g]
+                                      for h in pool)
         self._inline = {}
-        self.leaves = sorted(g for g in self.below if g != "(root)" and not any(
-            len(p) > len(group_path(g)) and p[:len(group_path(g))] == group_path(g) for p in all_paths))
+        # A one-file group that parents other groups (discord::(mod.rs), services) is chain only. Any other
+        # below group goes to upper whole, so a deep key under it needs no line of its own.
+        whole = sorted(g for g in self.below if g != "(root)" and not (g in ONE_FILE and parents(g, self.owner)))
+        self.leaves = [g for g in whole if not any(parents(h, [g]) for h in whole)]
 
     def module_at(self, rel, line):
         """Module of a source line: the file's module plus any inline `mod x { }` blocks around it.
@@ -201,7 +228,8 @@ class Layout:
 
     def side_of(self, rel, line=None):
         """'x', 'prior' (below, not X), 'above', or None (file outside the partition) for a file or one line."""
-        c = self.crate_of_file.get(rel) if line is None else self.owner.get(group_of(self.module_at(rel, line)))
+        c = self.crate_of_file.get(rel) if line is None else \
+            self.owner.get(group_of(self.module_at(rel, line), self.owner))
         if c is None:
             return None
         if c == self.crate:
@@ -262,11 +290,24 @@ def toml_sections(text):
     return out
 
 
+PROBE_FEATURE = "test-support"
+REEXPORT = "pub use probe_lower::"
+# An always-true target table: cargo unions it with `[dependencies]`, so no dependency line has to be merged.
+PROBE_DEV_DEPS = "[target.'cfg(any(unix, not(unix)))'.dependencies"
+
+
 def lower_manifest(text, lib_path):
-    out, has_lib = [], False
+    out, has_lib, has_features = [], False, False
     for header, lines in toml_sections(text):
         if header.startswith("[[bin]]"):
             continue
+        if re.match(r"\[dev-dependencies[.\]]", header):
+            # Feature-gated items build outside `cfg(test)` here and still use dev dependencies.
+            lines[0] = lines[0].replace("[dev-dependencies", PROBE_DEV_DEPS, 1)
+        if header == "[features]":
+            has_features = True
+            if not any(re.match(rf"\s*{PROBE_FEATURE}\s*=", l) for l in lines):
+                lines.insert(1, f"{PROBE_FEATURE} = []")
         if header == "[package]":
             lines = [re.sub(r'^(\s*name\s*=\s*)"[^"]*"', r'\1"probe_lower"', l) for l in lines]
         if header == "[lib]":
@@ -276,6 +317,8 @@ def lower_manifest(text, lib_path):
         out.extend(lines)
     if not has_lib:
         out += ["", "[lib]", f'path = "{lib_path}"']
+    if not has_features:
+        out += ["", "[features]", f"{PROBE_FEATURE} = []"]
     return "\n".join(out)
 
 
@@ -291,7 +334,7 @@ def upper_manifest(text):
             # Share lower's workspace path crates so upper and lower agree on one copy of their types.
             lines = [re.sub(r'(\bpath\s*=\s*")(?!\.\./|/)([^"]+)"', r'\1../lower/\2"', l) for l in lines]
         if header == "[dependencies]":
-            lines.insert(1, 'probe_lower = { path = "../lower" }')
+            lines.insert(1, f'probe_lower = {{ path = "../lower", features = ["{PROBE_FEATURE}"] }}')
         out.extend(lines)
     return "\n".join(out)
 
@@ -310,7 +353,9 @@ def transform_lower(root, layout):
     manifest.write_text(lower_manifest(manifest.read_text("utf-8"), lib_rel), "utf-8")
     shutil.copyfile(root / layout.root_file, root / lib_rel)
     remap = {layout.root_file: lib_rel}
-    for group in sorted(layout.below):
+    # A deep key under a below group rides with that group. Opening its `mod` line here would change a file
+    # the patch is cut from, and the patch would no longer apply to HEAD.
+    for group in sorted(g for g in layout.below if g in ONE_FILE or g in layout.leaves):
         path = group_path(group)
         for depth in range(1, len(path) + 1):
             parent = layout.file_of.get(path[:depth - 1])
@@ -333,6 +378,7 @@ def transform_lower(root, layout):
 def transform_upper(root, layout):
     manifest = root / "Cargo.toml"
     manifest.write_text(upper_manifest(manifest.read_text("utf-8")), "utf-8")
+    import vistool_gate
     rewired = []
     for group in layout.leaves:
         path = group_path(group)
@@ -350,12 +396,21 @@ def transform_upper(root, layout):
             # An inline `mod x { ... }` (child files under it) goes as a whole block.
             close = i if rx.match(lines[i]).group("end") == ";" else \
                 next(b[1] - 1 for b in inline_blocks("\n".join(lines)) if b[0] == i + 1 and b[2][-1] == path[-1])
-            if any(re.search(r"cfg\s*\(.*\btest\b", a) for a in attrs):
+            verdict, lower_cfg = vistool_gate.lower_gate(attrs)
+            stand_in = f"{indent}mod {path[-1]} {{}}"
+            if verdict == "never":
                 # Lower's own test module: never checked by the probe (T slice), keep an empty stand-in.
-                lines[i:close + 1] = [f"{indent}mod {path[-1]} {{}}"]
+                # A module `test-support` opens is built in lower, so it is re-exported like any other.
+                lines[i:close + 1] = [stand_in]
                 continue
             kept = [a for a in attrs if not re.match(r"^\s*#\[\s*(path|macro_use)\b", a)]
-            lines[start:close + 1] = kept + [f"{indent}pub use probe_lower::{'::'.join(path)};"]
+            new = kept + [f"{indent}{REEXPORT}{'::'.join(path)};"]
+            if verdict == "split":
+                # The gate also opens where lower has no such module (`test` with another feature off):
+                # re-export only where lower has it, and keep the stand-in for the rest.
+                new = kept + [f"{indent}#[cfg({lower_cfg})]", new[-1]] + \
+                    kept + [f"{indent}#[cfg(not({lower_cfg}))]", stand_in]
+            lines[start:close + 1] = new
         write_lines(target, lines)
         rewired.append(f"{parent}:{path[-1]}")
     return rewired
@@ -436,12 +491,13 @@ def is_vis(diag):
 
 
 DEF_MARKS = ("defined here", "is only usable at visibility", "constructor is private if any of the fields",
-             "constructor is not visible here due to private fields")
+             "constructor is not visible here due to private fields", "` declared as ")
 
 
 def definition_span(diag, marks=DEF_MARKS):
-    """Where the restricted item is declared: the struct behind a tuple constructor first, then the
-    `... defined here` note (or label), then a lint's `... is only usable at visibility` note."""
+    """Where the restricted item is declared: the struct behind a tuple constructor (or E0446's
+    `X declared as ..` label) first, then the `... defined here` note (or label), then a lint's
+    `... is only usable at visibility` note."""
     spans = [s for s in diag.get("spans", []) if not s.get("is_primary")]
     notes = [(c.get("message", ""), sp) for c in diag.get("children", []) for sp in c.get("spans", [])]
     for mark in [m for m in DEF_MARKS[2:] if m in marks]:
@@ -535,15 +591,16 @@ def item_level_lines(lines):
     return out
 
 
-def widen_line(line):
-    """`pub` for the item on this line; None if it is already `pub` or not an item."""
+def widen_line(line, to="pub"):
+    """`to` (`pub`, or the `pub(crate)` notch) for the item on this line; None if it is already that wide or
+    not an item."""
     m = ITEM.match(line)
     if not m or m.group("kw") == "macro_rules!":
         return None
-    if m.group("vis") == "pub":
+    if re.sub(r"\s", "", m.group("vis") or "") in ("pub", to):
         return None
     body = line[m.start("quals"):]
-    return m.group("indent") + "pub " + body
+    return m.group("indent") + to + " " + body
 
 
 def split_fields(text):
@@ -622,6 +679,8 @@ def apply_op(line, op):
     """One widening on one line; ops on the same line commute (prefix vs. tuple fields vs. field)."""
     if op[0] == "item":
         new = widen_line(line)
+    elif op[0] == "crate":
+        new = widen_line(line, "pub(crate)")
     elif op[0] == "field":
         new = widen_field(line)
     else:
@@ -728,7 +787,14 @@ class Widener:
             # A re-export (often an already-`pub` `pub use inner::*;`): the blocker may be behind it, and
             # a `use` of an above item must stay restricted (P1-2), so resolve it before widening.
             return self._through_use(rel, index, name)
-        return self._edit(rel, index, ("item",), name)
+        return self._edit(rel, index, self._notch(diag, rel, index), name)
+
+    def _notch(self, diag, rel, index):
+        """`pub`, except for E0446 on a type narrower than the crate: rustc does not say how visible the
+        interface is, so the type goes to `pub(crate)` and the next round reports it again if that is short."""
+        if code_of(diag) != IFACE_CODE or "crate-private" in diag.get("message", ""):
+            return ("item",)
+        return ("item",) if widen_line(self.lines(rel)[index], "pub(crate)") is None else ("crate",)
 
     def _reexport(self, diag, name, resolver, run_root):
         """E0364/E0365 point at the `pub use` path, not the item: resolve the path through the module map."""
@@ -938,6 +1004,12 @@ def classify_residue(diag, restricted):
     if code in CUT_CODES:
         return "cut_residue"
     return "unclassified"
+
+
+def probe_reexport_error(diag):
+    """An unresolved import on a `pub use probe_lower::..;` line transform_upper wrote."""
+    lines = [t.get("text", "") for t in (primary_span(diag) or {}).get("text") or []]
+    return code_of(diag) == "E0432" and any(line.lstrip().startswith(REEXPORT) for line in lines)
 
 
 def where(diag, resolver):
@@ -1180,7 +1252,8 @@ class ShadowProbe:
         return layout, Resolver(self.lower, self.upper, lib_rel, layout.root_file)
 
     def check_lower(self, cargo):
-        return run_check(cargo, self.lower, ["--lib"], self.target_dir, self.lower)
+        # With the feature upper turns on, so a gated item that does not build is a lower error with a span.
+        return run_check(cargo, self.lower, ["--lib", "--features", PROBE_FEATURE], self.target_dir, self.lower)
 
     def check_upper(self, cargo):
         return run_check(cargo, self.upper, ["--lib", "--tests"], self.target_dir, self.upper)
@@ -1234,13 +1307,16 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
             vis, residue, low_err = [], defaultdict(list), []
             for d in low:
                 code = code_of(d)
-                if is_vis(d) or (code in VIS_LINTS and d.get("level") == "warning"):
+                if is_vis(d) or (code in VIS_LINTS and d.get("level") == "warning") or code == IFACE_CODE:
                     vis.append((d, probe.lower, True))
                 elif d.get("level") == "error":
                     low_err.append(d)
             for d in up:
                 if d.get("level") != "error":
                     continue
+                if probe_reexport_error(d):
+                    # Lower lacks a module upper re-exports; as residue it would hide every edit behind it.
+                    raise VisFail("upper_probe_broken", f"{where(d, resolver)} {d.get('message')}")
                 if is_vis(d):
                     vis.append((d, probe.upper, False))
                 else:

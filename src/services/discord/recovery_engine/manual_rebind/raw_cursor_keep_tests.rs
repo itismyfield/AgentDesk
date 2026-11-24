@@ -292,7 +292,7 @@ fn rebind_case_proving_writer(
                 use crate::services::discord::tmux::tmux_output_stream::read_native_codex_state;
                 let identity = crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&reader);
                 let decoder = read_native_codex_state(&actual_path, turn_start, outcome.initial_offset, identity, &tmux,
-                    crate::services::discord::tmux::read_generation_file_mtime_ns(&tmux), None).unwrap();
+                    crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(&tmux), None).unwrap();
                 let mut response = String::new();
                 let mut tools = crate::services::discord::tmux::WatcherToolState::new();
                 tools.set_provider(&ProviderKind::Codex);

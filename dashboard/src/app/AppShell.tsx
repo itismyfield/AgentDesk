@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Agent, CompanySettings } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
@@ -7,7 +7,9 @@ import { useWorkspace } from "../contexts/WorkspaceContext";
 import { useSettings } from "../contexts/SettingsContext";
 import type { Notification } from "../components/NotificationCenter";
 import { useFocusTrap } from "../components/common/overlay";
-import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
+import { agentName, buildRunningNowTasks, classifyAgents } from "../components/home/homeModel";
+import { AgentTurnsProvider, reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
+import { MOBILE_LAYOUT_MEDIA_QUERY, TABLET_RAIL_MEDIA_QUERY } from "./breakpoints";
 import { PRIMARY_ROUTES, findRouteByPath, type AppRouteEntry, type AppRouteId } from "./routes";
 import { AppMobileNavigation } from "./AppMobileNavigation";
 import { AppSidebar } from "./AppSidebar";
@@ -28,17 +30,13 @@ import {
 import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
-import { ShellFocusContext, type ShellFocus } from "./shellFocus";
+import { ShellFocusContext, ShellWindowFocusContext, type ShellFocus } from "./shellFocus";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
 
 interface AppShellProps {
   wsConnected: boolean;
-  /**
-   * Wall-clock ms timestamp of the latest WS event (`null` before first event).
-   * Drives the dashboard freshness indicator.
-   */
   wsLastEventTs: number | null;
   notifications: Notification[];
   pushNotification: (message: string, type?: Notification["type"]) => string;
@@ -52,12 +50,12 @@ interface AppShellProps {
 
 const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(4rem + env(safe-area-inset-bottom))";
 
-// Keep persistent shell chrome below route-level backdrops and modals.
 const ROUTE_OVERLAY_BASE_Z_INDEX = 50;
 const SHELL_HEADER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 30;
 const SHELL_POPOVER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 10;
 const SHELL_TABBAR_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 20;
 const SHELL_BOTTOM_SHEET_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 5;
+
 export default function AppShell({
   wsConnected,
   wsLastEventTs,
@@ -77,12 +75,16 @@ export default function AppShell({
   const {
     agents,
     departments,
+    sessions,
+    setSessions,
+    sessionsFailed,
     visibleDispatchedSessions,
     agentsWithDispatched,
     refreshAgents,
     refreshDepartments,
   } = useWorkspace();
 
+  const mainRef = useRef<HTMLElement>(null);
   const [agentInfoAgent, setAgentInfoAgent] = useState<Agent | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
@@ -104,16 +106,45 @@ export default function AppShell({
     if (typeof window === "undefined") return false;
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
-  // A page asked for the whole desktop window (the relations editor) or for the phone top bar's row (an audit detail).
-  // Phones keep their tab bar either way.
+  const [isTabletRailViewport, setIsTabletRailViewport] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(TABLET_RAIL_MEDIA_QUERY).matches;
+  });
+  const [sidebarOverride, setSidebarOverride] = useState<"collapsed" | "expanded" | null>(null);
+
   const [focusRequest, setFocusRequest] = useState<ShellFocus | null>(null);
   const focused = focusRequest === "window" && !isMobileViewport;
   const showTopBar = !focused && !(focusRequest === "topBar" && isMobileViewport);
+  const sidebarCollapsed = sidebarOverride !== null ? sidebarOverride === "collapsed" : isTabletRailViewport;
+  const modalOverlayOpen = showCommandPalette || Boolean(agentInfoAgent) || showShortcutHelp || showMobileMoreMenu;
+
+  const workingAgentIds = useMemo(
+    () =>
+      classifyAgents(agents, sessions, sessionsFailed)
+        .filter((entry) => entry.state === "working")
+        .map((entry) => entry.agent.id),
+    [agents, sessions, sessionsFailed],
+  );
+  const runningTurns = useAgentTurns(workingAgentIds);
+  const statsOnArrival = useRef(stats);
+  statsOnArrival.current = stats;
+  const sawShellRoute = useRef(false);
+  const runningTasks = useMemo(
+    () =>
+      buildRunningNowTasks({
+        agents,
+        sessions,
+        sessionsFailed,
+        turns: runningTurns,
+        tr,
+        isKo,
+      }),
+    [agents, sessions, sessionsFailed, runningTurns, tr, isKo],
+  );
 
   const unreadCount = notifications.filter(
     (notification) => Date.now() - notification.ts < 60_000,
   ).length;
-  // Cards waiting on a person (review or blocked) badge the campaigns tab.
   const attentionCount = (stats?.kanban.review_queue ?? 0) + (stats?.kanban.blocked ?? 0);
   const resolvedTheme = useMemo(
     () => resolveThemePreference(themePreference, prefersDarkScheme),
@@ -124,15 +155,12 @@ export default function AppShell({
   useEffect(() => {
     const query = window.matchMedia("(prefers-color-scheme: dark)");
     const sync = (matches: boolean) => setPrefersDarkScheme(matches);
-
     sync(query.matches);
-
     const listener = (event: MediaQueryListEvent) => sync(event.matches);
     if (typeof query.addEventListener === "function") {
       query.addEventListener("change", listener);
       return () => query.removeEventListener("change", listener);
     }
-
     query.addListener(listener);
     return () => query.removeListener(listener);
   }, []);
@@ -162,6 +190,41 @@ export default function AppShell({
   }, []);
 
   useEffect(() => {
+    const media = window.matchMedia(TABLET_RAIL_MEDIA_QUERY);
+    const sync = () => {
+      setIsTabletRailViewport(media.matches);
+      setSidebarOverride(null);
+    };
+    setIsTabletRailViewport(media.matches);
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  // #8369: While a full-window editor holds the window, mark background siblings outside the editor inert.
+  useLayoutEffect(() => {
+    if (!focused || !mainRef.current) return;
+    const root = mainRef.current;
+    const editor = root.querySelector<HTMLElement>(".campaign-pipeline.fixed, .campaign-relations-editor");
+    if (!editor) return;
+    const marked: HTMLElement[] = [];
+    let current: HTMLElement | null = editor;
+    while (current && current !== root) {
+      const parent: HTMLElement | null = current.parentElement;
+      if (!parent) break;
+      for (const child of Array.from(parent.children)) {
+        if (child !== current && child instanceof HTMLElement && child.tagName !== "DIALOG" && !child.inert) {
+          child.inert = true;
+          marked.push(child);
+        }
+      }
+      current = parent;
+    }
+    return () => {
+      for (const node of marked) node.inert = false;
+    };
+  }, [focused, location.key]);
+
+  useEffect(() => {
     setShowNotificationPanel(false);
     setShowTweaksPanel(false);
     setShowMobileMoreMenu(false);
@@ -174,14 +237,16 @@ export default function AppShell({
   }, [isMobileViewport]);
 
   useEffect(() => {
-    if (currentRoute?.id === "home" || currentRoute?.id === "stats") {
-      refreshStats();
-    }
+    const opening = !sawShellRoute.current;
+    sawShellRoute.current = true;
+    if (currentRoute?.id !== "home" && currentRoute?.id !== "stats") return;
+    // Bootstrap already loaded stats for the first paint. Refresh on later visits.
+    if (opening && statsOnArrival.current) return;
+    refreshStats();
   }, [currentRoute?.id, refreshStats]);
 
   const persistSettingsPatch = useCallback(
     async (patch: Record<string, unknown>) => {
-      // The PUT replaces the stored document; re-read it so another tab's saved fields are not reverted.
       const latest = await api.getSettings();
       await api.saveSettings({ ...latest, ...patch } as CompanySettings);
       const refreshed = await api.getSettings();
@@ -220,6 +285,73 @@ export default function AppShell({
     setAgentInfoAgent(null);
   }, []);
 
+  const handleOpenRunningTask = useCallback((taskId: string) => {
+    if (taskId.startsWith("agent:")) {
+      const targetId = taskId.slice("agent:".length);
+      const found = agents.find((agent) => agent.id === targetId);
+      if (found) {
+        openDefaultAgentInfo(found);
+        return;
+      }
+    }
+    navigateToRoute("/agents");
+  }, [agents, navigateToRoute, openDefaultAgentInfo]);
+
+  const handleStopRunningTask = useCallback(async (taskId: string) => {
+    if (taskId.startsWith("agent:")) {
+      const agentId = taskId.slice("agent:".length);
+      const target = agents.find((agent) => agent.id === agentId);
+      const label = target ? agentName(target, isKo) : agentId;
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(tr(`${label}의 실행 중인 턴을 중단할까요?`, `Stop ${label}'s running turn?`));
+      if (!confirmed) return;
+      try {
+        const res = await stopAgentTurn(agentId);
+        if (res.session_key) {
+          setSessions((prev) =>
+            prev.map((s) => (s.session_key === res.session_key ? { ...s, status: "disconnected" } : s)),
+          );
+        }
+        refreshAgents();
+        pushNotification(tr(`${label} 턴을 중단했어요.`, `Stopped ${label}'s turn.`), "success");
+      } catch (error) {
+        pushNotification(
+          error instanceof Error ? error.message : tr("턴 중단에 실패했어요.", "Failed to stop turn."),
+          "error",
+        );
+      }
+      return;
+    }
+    if (taskId.startsWith("session:")) {
+      const sessionKey = taskId.slice("session:".length);
+      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+        ? true
+        : window.confirm(tr("이 미연결 세션의 멈춘 턴 정리를 시도할까요?", "Try reconciling this unlinked session's turn?"));
+      if (!confirmed) return;
+      try {
+        const res = await reconcileStaleSessionTurn(sessionKey);
+        if (res.reconciled) {
+          setSessions((prev) =>
+            prev.map((s) => (s.session_key === sessionKey ? { ...s, status: "idle", last_seen_at: Date.now() } : s)),
+          );
+          pushNotification(tr("세션 턴을 정리했어요.", "Reconciled session turn."), "success");
+        } else {
+          pushNotification(
+            tr("현재 살아 있는 미연결 세션이에요. 에이전트 화면에서 확인해요.", "This unlinked lane is actively running; opening Agents."),
+            "info",
+          );
+          navigateToRoute("/agents");
+        }
+      } catch (error) {
+        pushNotification(
+          error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
+          "error",
+        );
+      }
+    }
+  }, [agents, isKo, navigateToRoute, pushNotification, refreshAgents, setSessions, tr]);
+
   const toggleShellTheme = useCallback(() => {
     setThemePreference((currentPreference) => {
       const activeTheme =
@@ -228,8 +360,16 @@ export default function AppShell({
     });
   }, [resolvedTheme]);
 
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarOverride((prev) => {
+      const currentlyCollapsed = prev !== null ? prev === "collapsed" : isTabletRailViewport;
+      return currentlyCollapsed ? "expanded" : "collapsed";
+    });
+  }, [isTabletRailViewport]);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (focused) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       const isEditable = Boolean(
@@ -269,7 +409,7 @@ export default function AppShell({
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [navigateToRoute]);
+  }, [focused, navigateToRoute]);
 
   const mobilePrimaryRoutes = useMemo(
     () =>
@@ -295,97 +435,113 @@ export default function AppShell({
   );
 
   return (
+    <AgentTurnsProvider turns={runningTurns} watched={workingAgentIds}>
     <div
       className="fixed inset-0 flex overflow-hidden"
       style={{
         background: "var(--th-bg-primary)",
       }}
     >
-      {!isMobileViewport && !focused && (
-        <AppSidebar
-          currentRouteId={currentRoute?.id ?? null}
-          iconForRoute={iconForRoute}
-          isKo={isKo}
-          routeBadge={sidebarBadgeForRoute}
-          routes={PRIMARY_ROUTES}
-          sections={SIDEBAR_SECTION_ORDER}
-          setAgentsPageTab={setAgentsPageTab}
-          wsConnected={wsConnected}
-          wsLastEventTs={wsLastEventTs}
-        />
-      )}
-
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {showTopBar && (
-          <AppTopBar
-            wsConnected={wsConnected}
-            currentRoute={currentRoute ?? null}
-            dismissNotification={dismissNotification}
-            headerZIndex={SHELL_HEADER_Z_INDEX}
+      <div
+        data-testid="app-shell-frame"
+        inert={modalOverlayOpen || undefined}
+        className="flex min-w-0 flex-1 overflow-hidden"
+      >
+        {!isMobileViewport && !focused && (
+          <AppSidebar
+            collapsed={sidebarCollapsed}
+            onToggleCollapsed={toggleSidebarCollapsed}
+            currentRouteId={currentRoute?.id ?? null}
+            iconForRoute={iconForRoute}
             isKo={isKo}
-            isMobileViewport={isMobileViewport}
-            notificationBadgeCount={unreadCount}
-            popoverZIndex={SHELL_POPOVER_Z_INDEX}
-            recentNotifications={recentNotifications}
-            resolvedTheme={resolvedTheme}
-            setShowCommandPalette={setShowCommandPalette}
-            setShowNotificationPanel={setShowNotificationPanel}
-            setShowTweaksPanel={setShowTweaksPanel}
-            showNotificationPanel={showNotificationPanel}
-            toggleShellTheme={toggleShellTheme}
+            routeBadge={sidebarBadgeForRoute}
+            routes={PRIMARY_ROUTES}
+            sections={SIDEBAR_SECTION_ORDER}
+            setAgentsPageTab={setAgentsPageTab}
+            wsConnected={wsConnected}
+            wsLastEventTs={wsLastEventTs}
           />
         )}
 
-        <main
-          data-testid="app-main-scroll"
-          className="min-h-0 flex-1 overflow-hidden"
-          style={{
-            marginBottom: isMobileViewport
-              ? MOBILE_TABBAR_SAFE_AREA_HEIGHT
-              : undefined,
-          }}
-        >
-          <Suspense
-            fallback={
-              <AppViewSkeleton
-                label={
-                  currentRoute
-                    ? isKo
-                      ? currentRoute.labelKo
-                      : currentRoute.labelEn
-                    : tr("로딩 중...", "Loading...")
-                }
-              />
-            }
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {showTopBar && (
+            <AppTopBar
+              wsConnected={wsConnected}
+              currentRoute={currentRoute ?? null}
+              dismissNotification={dismissNotification}
+              headerZIndex={SHELL_HEADER_Z_INDEX}
+              isKo={isKo}
+              isMobileViewport={isMobileViewport}
+              notificationBadgeCount={unreadCount}
+              popoverZIndex={SHELL_POPOVER_Z_INDEX}
+              recentNotifications={recentNotifications}
+              resolvedTheme={resolvedTheme}
+              runningTasks={runningTasks}
+              onOpenRunningTask={handleOpenRunningTask}
+              onStopRunningTask={(taskId) => void handleStopRunningTask(taskId)}
+              onViewAllRunning={() => navigateToRoute(currentRoute?.id === "home" ? "/agents" : "/home")}
+              setShowCommandPalette={setShowCommandPalette}
+              setShowNotificationPanel={setShowNotificationPanel}
+              setShowTweaksPanel={setShowTweaksPanel}
+              showNotificationPanel={showNotificationPanel}
+              toggleShellTheme={toggleShellTheme}
+            />
+          )}
+
+          <main
+            ref={mainRef}
+            data-testid="app-main-scroll"
+            className="min-h-0 flex-1 overflow-hidden"
+            style={{
+              marginBottom: isMobileViewport
+                ? MOBILE_TABBAR_SAFE_AREA_HEIGHT
+                : undefined,
+            }}
           >
-            <ShellFocusContext.Provider value={setFocusRequest}>
-              <AppShellRoutes
-                ctx={{
-                  agents,
-                  agentsPageTab,
-                  agentsWithDispatched,
-                  departments,
-                  handleSettingsSave,
-                  isKo,
-                  isMobileViewport,
-                  navigateToRoute,
-                  notifications,
-                  openDefaultAgentInfo,
-                  pushNotification,
-                  setAgentsPageTab,
-                  settings,
-                  stats,
-                  updateNotification,
-                  visibleDispatchedSessions,
-                  wsConnected,
-                  wsLastEventTs,
-                  refreshAgents,
-                  refreshDepartments,
-                }}
-              />
-            </ShellFocusContext.Provider>
-          </Suspense>
-        </main>
+            <Suspense
+              fallback={
+                <AppViewSkeleton
+                  label={
+                    currentRoute
+                      ? isKo
+                        ? currentRoute.labelKo
+                        : currentRoute.labelEn
+                      : tr("로딩 중...", "Loading...")
+                  }
+                />
+              }
+            >
+              <ShellFocusContext.Provider value={setFocusRequest}>
+                <ShellWindowFocusContext.Provider value={focused}>
+                  <AppShellRoutes
+                    ctx={{
+                      agents,
+                      agentsPageTab,
+                      agentsWithDispatched,
+                      departments,
+                      handleSettingsSave,
+                      isKo,
+                      isMobileViewport,
+                      navigateToRoute,
+                      notifications,
+                      openDefaultAgentInfo,
+                      pushNotification,
+                      setAgentsPageTab,
+                      settings,
+                      stats,
+                      updateNotification,
+                      visibleDispatchedSessions,
+                      wsConnected,
+                      wsLastEventTs,
+                      refreshAgents,
+                      refreshDepartments,
+                    }}
+                  />
+                </ShellWindowFocusContext.Provider>
+              </ShellFocusContext.Provider>
+            </Suspense>
+          </main>
+        </div>
       </div>
 
       {isMobileViewport && (
@@ -418,12 +574,14 @@ export default function AppShell({
           closeAgentInfo,
           departments,
           dismissNotification,
+          focused,
           isKo,
           locale,
           navigateToRoute,
           notifications,
           openDefaultAgentInfo,
           popoverZIndex: SHELL_POPOVER_Z_INDEX,
+          pushNotification,
           refreshAgents,
           setAccentPreset,
           setShowCommandPalette,
@@ -439,5 +597,6 @@ export default function AppShell({
         }}
       />
     </div>
+    </AgentTurnsProvider>
   );
 }

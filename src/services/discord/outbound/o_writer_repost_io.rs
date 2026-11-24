@@ -34,7 +34,7 @@ pub(crate) enum Unsupported {
 pub(crate) struct RepostHttp {
     http: Arc<serenity::Http>,
     client: reqwest::Client,
-    base: Option<String>,
+    pub(crate) base: Option<String>,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 }
 
@@ -212,7 +212,7 @@ impl BoundedTransport for RepostHttp {
                     return WireOutcome::Withheld(error.to_string());
                 }
             };
-            crate::services::discord::outbound::census_scope(
+            crate::services::legacy_body_census::request_context::census_scope(
                 None,
                 hold.run(async move {
                     let started_at = chrono::Utc::now().timestamp_millis();
@@ -432,7 +432,3 @@ impl ProbeRead for RepostHttp {
         Ok(page.into_iter().map(Seen::observed).collect())
     }
 }
-
-#[cfg(test)]
-#[path = "o_writer_repost_io_tests.rs"]
-pub(crate) mod tests;

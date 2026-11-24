@@ -4,6 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { getAgentAnchors, type AgentAnchor, type AgentAnchors, type AuditProvider } from "../../api/promptAudit";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
+import { CodeBlock } from "../../kit/free/code-block-clean";
 import type { Agent } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { formatTranscriptTimestamp } from "../agent-manager/turn-transcript-utils";
@@ -17,7 +18,7 @@ import {
 } from "./anchorModel";
 import { auditState } from "./auditModel";
 import {
-  AUDIT_PRE_CLASS, AuditSummaryCard, counter, FilterChipGroup, FULL_TOUCH_BUTTON_STYLE, sessionMeta, useCachedCaptions, useCachedReads,
+  AuditSummaryCard, counter, FilterChipGroup, FULL_TOUCH_BUTTON_STYLE, sessionMeta, useCachedCaptions, useCachedReads,
   useCopyFeedback, type AuditDetailProps,
 } from "./AuditDetailFrame";
 import { AuditRequestState } from "./AuditWorkspace";
@@ -135,9 +136,13 @@ function AnchorDetailSections({
           </div>
         ) : null}
         {!phone ? <h3 className="m-0 text-base leading-6 font-semibold text-[var(--fg)]">{anchorTitle(anchor.text)}</h3> : null}
-        <Well className="p-3">
-          <pre className={AUDIT_PRE_CLASS}>{anchor.text}</pre>
-        </Well>
+        <CodeBlock
+          code={anchor.text}
+          filename={anchor.scope || anchor.type || tr(`앵커 ${index + 1}`, `Anchor ${index + 1}`)}
+          showLineNumbers
+          wrap
+          maxHeight={280}
+        />
         <div className="flex items-center gap-2">
           {anchor.limit != null ? (
             <MeterBar
@@ -283,7 +288,12 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
       <AuditSummaryCard
         detail={detail}
         label={tr("앵커 요약", "Anchor summary")}
-        meta={sessionMeta(detail, read?.session_started_at, state === "ready" ? read?.source : undefined, tr("세션 사본", "session copy"))}
+        meta={sessionMeta(
+          detail,
+          read?.session_started_at,
+          state === "ready" ? read?.source : undefined,
+          anchors.length > 0 ? tr("세션 사본", "session copy") : tr("저장된 앵커 없음", "no saved anchors"),
+        )}
         fetching={query.isFetching}
         onRefresh={retry}
         stats={phone && state === "ready" ? [
@@ -312,7 +322,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
           </Cap>
         </Well>
       ) : null}
-      {read ? <MementoNotice memento={read.memento} copied={state === "ready"} isKo={isKo} tr={tr} /> : null}
+      {read ? <MementoNotice memento={read.memento} copied={state === "ready" && anchors.length > 0} isKo={isKo} tr={tr} /> : null}
 
       {state !== "ready" ? (
         <AuditRequestState state={state} retrying={query.isFetching} onRetry={retry} tr={tr} />

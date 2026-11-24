@@ -1,10 +1,15 @@
 use std::collections::HashSet;
+#[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
+#[cfg(test)]
 use super::*;
 
 thread_local! {
@@ -47,10 +52,12 @@ pub(crate) fn configured_channels() -> Vec<u64> {
         .collect()
 }
 
+#[cfg(test)]
 const TEXT: &str = "are you there?";
 
 /// Windows only bound the waits for evidence that never comes; found evidence returns at once.
 /// Lock retries ride out a map shard another test holds for an instant.
+#[cfg(test)]
 const FAST: Timing = Timing {
     lock_retries: &[
         Duration::ZERO,
@@ -190,16 +197,18 @@ esac
 exit 0
 "#;
 
+#[cfg(test)]
 struct Tui {
     dir: tempfile::TempDir,
     transcript: PathBuf,
 }
 
+#[cfg(test)]
 impl Tui {
     /// A busy 160x50 pane, wide enough for the input header to render flat, whose composer holds
     /// `draft` (empty for none) and no stash.
     fn new(draft: &str) -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+        let root = Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
         let transcript = dir.path().join("transcript.jsonl");
@@ -429,9 +438,11 @@ fn menus_and_permission_cards_precede_stash_and_paste() {
     }
 }
 
+#[cfg(test)]
 #[path = "stash_confirm_tests.rs"]
 mod confirm_tests;
 
+#[cfg(test)]
 mod environment_tests {
     use super::*;
     #[test]

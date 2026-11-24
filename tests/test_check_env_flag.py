@@ -47,6 +47,8 @@ class EnvFlagGuardTests(unittest.TestCase):
         #[cfg(all(unix, test))]
         fn test_helper() { let _ = std::env::var("FLAG").as_deref() == Ok("1"); }
         #[cfg(test)] mod tests { fn test() { let _ = std::env::var("FLAG") == Ok("1"); } }
+        #[cfg(any(test, feature = "test-support"))]
+        fn fixture() { let _ = std::env::var("FLAG").as_deref() == Ok("1"); }
         fn credential() { std::env::var("TOKEN").is_ok_and(|v| !v.is_empty()); }
         fn url() { std::env::var("URL").unwrap_or_default() == "https://example.com"; }
         #[test] fn standalone() { std::env::var("FLAG") == Ok("1"); }
@@ -59,6 +61,11 @@ class EnvFlagGuardTests(unittest.TestCase):
         '''
         self.assertEqual(guard.sites(text), [])
         self.assertEqual(guard.collect([('src/a_tests.rs', 'fn f() { std::env::var("F") == Ok("1"); }')])[0], {})
+
+    def test_a_test_support_gated_read_is_skipped_and_its_negation_is_not(self):
+        gate = 'any(test, feature = "test-support")'
+        for cfg, count in ((gate, 0), (f'not({gate})', 1), ('all(unix /*, feature = "test-support" */)', 1)):
+            self.assertEqual(len(guard.sites(f'#[cfg({cfg})]\nfn f() {{ std::env::var("F") == Ok("1"); }}')), count, cfg)
 
     def test_cfg_boundary_errors_fail_the_command(self):
         with tempfile.TemporaryDirectory() as tmp:

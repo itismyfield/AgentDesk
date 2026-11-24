@@ -30,23 +30,23 @@ use crate::services::tui_o::writer::transition_port::{
 };
 use crate::services::tui_o::writer::{ReaderConfig, WriterConfig};
 
-const JOB: &str = "hrot-job";
+pub(crate) const JOB: &str = "hrot-job";
 /// A well-formed digest of no scope.
 const UNSCOPED: &str =
     "hrot-scope-v1:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A channel switched over source 0, then `hops` sources each bound from the one before in one
 /// pane by a launch record no hook made, so no hop is proven. The last source is current.
-struct Chain {
-    harness: Harness,
-    bindings: Arc<FakeBindings>,
-    pane: String,
-    sources: Vec<SourceId>,
-    paths: Vec<PathBuf>,
+pub(crate) struct Chain {
+    pub(crate) harness: Harness,
+    pub(crate) bindings: Arc<FakeBindings>,
+    pub(crate) pane: String,
+    pub(crate) sources: Vec<SourceId>,
+    pub(crate) paths: Vec<PathBuf>,
     _hosts: Option<ForcedSessionHosts>,
 }
 
-fn chain(hops: usize) -> Chain {
+pub(crate) fn chain(hops: usize) -> Chain {
     chain_on(hops, true)
 }
 
@@ -57,7 +57,11 @@ fn chain_on(hops: usize, herdr: bool) -> Chain {
 }
 
 /// As `chain_on`, with hop `n`'s session and transcript body from `hop(n)`.
-fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>)) -> Chain {
+pub(crate) fn chain_named(
+    hops: usize,
+    herdr: bool,
+    hop: impl Fn(usize) -> (String, Vec<u8>),
+) -> Chain {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
     let pane = format!("hrot-{}", uuid::Uuid::new_v4().simple());
     let (mut sources, mut paths) = (vec![a], vec![a_path.clone()]);
@@ -91,11 +95,11 @@ fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>
 }
 
 impl Chain {
-    fn hops(&self) -> u64 {
+    pub(crate) fn hops(&self) -> u64 {
         self.sources.len() as u64 - 1
     }
 
-    fn request(&self, job: &str) -> Request {
+    pub(crate) fn request(&self, job: &str) -> Request {
         let end = ExecutionEnd {
             host: "mac-mini".into(),
             pane: self.pane.clone(),
@@ -114,7 +118,7 @@ impl Chain {
         }
     }
 
-    fn context(&self) -> Context {
+    pub(crate) fn context(&self) -> Context {
         Context {
             codex: None,
             tmux: self.pane.clone(),
@@ -165,7 +169,7 @@ impl Chain {
     }
 
     /// An Apply of `request` under the digest its Inspect gives, or one no scope has.
-    fn apply(&self, request: Request) -> Operation {
+    pub(crate) fn apply(&self, request: Request) -> Operation {
         let digest = self
             .digest(&request)
             .unwrap_or_else(|| ScopeDigest::parse(UNSCOPED).unwrap());
@@ -173,12 +177,12 @@ impl Chain {
     }
 
     /// The pane's execution holds only the current source.
-    fn current(&self) -> impl Drop {
+    pub(crate) fn current(&self) -> impl Drop {
         let current = self.sources.last().unwrap();
         force_execution_for_tests(Ok(execution(current, Utc::now())))
     }
 
-    fn cursor(&self, n: usize) -> Cursor {
+    pub(crate) fn cursor(&self, n: usize) -> Cursor {
         self.harness
             .channel()
             .cursor(&self.sources[n])
@@ -186,28 +190,28 @@ impl Chain {
             .unwrap()
     }
 
-    fn key(&self, n: usize) -> String {
+    pub(crate) fn key(&self, n: usize) -> String {
         source_key(&self.sources[n])
     }
 
-    fn dir(&self) -> PathBuf {
+    pub(crate) fn dir(&self) -> PathBuf {
         let runtime = self.paths[0].parent().unwrap();
         runtime.join("o_store").join(CHANNEL.to_string())
     }
 
-    fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
+    pub(crate) fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
         let name = format!("{}.json", self.key(n));
         std::fs::read(self.dir().join(CURSOR_DIR).join(name)).ok()
     }
 
-    fn audit(&self, n: usize) -> Option<String> {
+    pub(crate) fn audit(&self, n: usize) -> Option<String> {
         let cursor = self.cursor(n);
         cursor.transition_cleanup.map(|audit| audit.job_id)
     }
 }
 
 /// Every file of the store directory `dir`, by path.
-fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut found = BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -220,7 +224,10 @@ fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
-fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, SourceHistory) {
+pub(crate) fn execution(
+    current: &SourceId,
+    seen: DateTime<Utc>,
+) -> (Option<SourceId>, SourceHistory) {
     let visit = Visit {
         session: current.session_id.clone(),
         pin: Some(current.clone()),
@@ -237,16 +244,16 @@ fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, Sour
     (Some(current.clone()), history)
 }
 
-struct Run {
-    port: TransitionPort,
-    stop: watch::Sender<bool>,
+pub(crate) struct Run {
+    pub(crate) port: TransitionPort,
+    pub(crate) stop: watch::Sender<bool>,
     /// The host's stop, which the actor's own stop follows only later.
     host: watch::Sender<bool>,
-    task: Actor,
+    pub(crate) task: Actor,
     unsettled: watch::Receiver<Option<usize>>,
 }
 
-fn run(chain: &Chain) -> Run {
+pub(crate) fn run(chain: &Chain) -> Run {
     run_with(chain, None, Arc::default())
 }
 
@@ -304,7 +311,7 @@ fn run_writer<A: AlarmSink + 'static>(
 }
 
 /// Polls until every hop's row is posted.
-async fn settle(chain: &Chain) {
+pub(crate) async fn settle(chain: &Chain) {
     for _ in 0..40 {
         polls(1).await;
         if chain.harness.port.posts().len() as u64 >= chain.hops() {
@@ -316,12 +323,12 @@ async fn settle(chain: &Chain) {
 
 type Asked = tokio::task::JoinHandle<Result<Reply, String>>;
 
-fn send(run: &Run, operation: Operation, context: Context) -> Asked {
+pub(crate) fn send(run: &Run, operation: Operation, context: Context) -> Asked {
     let port = run.port.clone();
     tokio::spawn(async move { port.request(operation, context).await })
 }
 
-async fn ask(run: &Run, operation: Operation, context: Context) -> Reply {
+pub(crate) async fn ask(run: &Run, operation: Operation, context: Context) -> Reply {
     answered(send(run, operation, context)).await
 }
 
@@ -331,7 +338,7 @@ async fn answered(asked: Asked) -> Reply {
 
 /// Runs the actor until it answers `asked`, letting each probe worker finish, and calls `between`
 /// once `at` workers of the job have sent their probes.
-async fn answered_after(
+pub(crate) async fn answered_after(
     asked: Asked,
     at: usize,
     mut between: impl FnMut(),
@@ -352,7 +359,7 @@ async fn answered_after(
     asked.await.unwrap()
 }
 
-fn outcomes(reply: &Reply) -> BTreeMap<String, Outcome> {
+pub(crate) fn outcomes(reply: &Reply) -> BTreeMap<String, Outcome> {
     let outcome = |hop: &transition_port::Hop| (hop.judged.key.clone(), hop.outcome.clone());
     reply.hops.iter().map(outcome).collect()
 }
@@ -465,7 +472,7 @@ async fn transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_h
 
 /// Writes the boundary record of each old source in `legacy` as a store from before hop fields
 /// were kept: only its successor's identity.
-fn strip_hop_fields(chain: &Chain, legacy: &[usize]) {
+pub(crate) fn strip_hop_fields(chain: &Chain, legacy: &[usize]) {
     use crate::services::tui_o::store::rotation::BOUNDARY_FILE;
     let file = chain.dir().join(BOUNDARY_FILE);
     let mut written: serde_json::Value =
@@ -1238,15 +1245,6 @@ async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retireme
         }
     }
 }
-
-#[path = "transition_route_tests.rs"]
-mod route_tests;
-
-#[path = "transition_apply_tests.rs"]
-mod apply_tests;
-
-#[path = "transition_automatic_tests.rs"]
-mod automatic_tests;
 
 #[tokio::test(start_paused = true)]
 async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_restore() {

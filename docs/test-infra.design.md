@@ -82,7 +82,7 @@ provider 인증은 독립 config home에 사전 준비하며 운영 credential �
 | Herdr daemon | `src/services/session_host/herdr/launch_host.rs:641`은 UserDefault에서 autostart; `src/services/session_host/herdr/autostart/spawn.rs:244`는 env_clear/setsid | legacy_dedicated 유지, test mode autostart 금지. wrapper receipt daemon만 사용·정리. env_clear/setsid를 FD close 증거로 쓰지 않음 |
 | keychain·자원 | provider HOME 격리만으로 macOS keychain 항목 분리는 코드에서 입증되지 않음 | 준비 단계에서 값 없이 항목 이름/소유 범위가 독립인지 확인 전 BLOCKED_AUTH. 운영 항목을 이번 조사에서 열지 않음; 동일 호스트 자원 경합은 nice/taskpolicy·headroom·§2 한도로 제한 |
 | 하네스 재시작·CLI | `scripts/e2e/tui_relay/restart_guard.py:10`, `:19`는 미확인 포트를 release로 선택; `scripts/e2e/tui_relay/herdr.py:27`, `:69`, `:247`은 기본 CLI 경로/endpoint 사용 가능 | 신규 instance adapter는 restart target을 receipt PID로만 결정하고 endpoint·lane absolute binary를 전달. 미지정은 시작 전 오류. 기존 release/dev 분기를 시험 인스턴스에 사용하지 않음 |
-| 기존 dcserver 중복 정리 | `src/cli/dcserver.rs:291`은 root marker substring 판정, `:454`는 종료 경로; `src/cli/dcserver/replay_recovery.rs:28`은 root별 lock | 신규 test startup은 고정 길이 UUID root와 정확한 instance identity 검증을 먼저 적용. substring을 test cleanup 권한으로 쓰지 않음. 기존 일반 경로의 결함 범위는 넓히지 않고 별도 후속으로 남김 |
+| 기존 dcserver 중복 정리 | `src/cli/dcserver.rs:291`은 root marker substring 판정, `:454`는 종료 경로; `src/services/dcserver_singleton.rs:36`은 root별 lock | 신규 test startup은 고정 길이 UUID root와 정확한 instance identity 검증을 먼저 적용. substring을 test cleanup 권한으로 쓰지 않음. 기존 일반 경로의 결함 범위는 넓히지 않고 별도 후속으로 남김 |
 | 실행·복원·정리 | 기존 session 이름/host 경로는 여러 소비자가 사용 | up뿐 아니라 서버 재시작·startup recovery·provider respawn·cancel/stop/clear/down에 같은 manifest가 전달되는지 전수표·음성 시험으로 확인 |
 
 호스트 전체 프로세스 스캔도 I2 격리 전수표에 포함한다(P2-4). `ps -ax*`·`pgrep` 호출 전체를 조사하고 **root·socket·receipt 밖 PID를 읽거나 종료하지 않는 test 경계**를 적용한다.
@@ -201,7 +201,7 @@ bookkeeping은 local run ID·새 message snowflake·관측 창에만 기록한�
 
 임대는 `~/.adk/dev/control/<bot-set>.lease` **고정 파일 inode의 커널 flock**이다.
 supervisor는 Python 표준 `fcntl.flock(LOCK_EX|LOCK_NB)`을 쓰고, dcserver는 기존 libc 사용 선례
-(`Cargo.toml:109`, `src/cli/dcserver/replay_recovery.rs:28`)를 따라 상속 FD를 검증·보유한다. shell flock 설치·새 분산 잠금은 필요 없다.
+(`Cargo.toml:109`, `src/services/dcserver_singleton.rs:36`)를 따라 상속 FD를 검증·보유한다. shell flock 설치·새 분산 잠금은 필요 없다.
 supervisor가 FD를 보유한 채 child **exec로 dcserver에 동일 open-file-description FD를 상속**한다.
 wrapper/owner 기록 전후 crash에도 살아 있는 dcserver가 lock을 유지하므로 새 인스턴스는 `DEFERRED_BUSY`다.
 owner JSON은 진단 receipt이며 배타권 정본은 커널 lock이다. 파일이 남고 holder가 없으면 재획득할 수 있다.

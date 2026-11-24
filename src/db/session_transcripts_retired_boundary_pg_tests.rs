@@ -56,7 +56,7 @@ fn entry(turn_id: &str) -> PersistSessionTranscript<'_> {
 #[tokio::test]
 async fn unresolved_retired_marker_preserves_general_clear_readers_and_turn_fences_pg() -> Result<()>
 {
-    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+    let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
         "agentdesk_retired_clear_boundary",
         "retired clear compatibility",
     )

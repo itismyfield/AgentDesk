@@ -5,7 +5,7 @@ export const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
   "campaigns",
   "agents",
-  "audit",
+  "stats",
 ];
 
 // Sections render without headings; a horizontal separator divides workspace and system pages.

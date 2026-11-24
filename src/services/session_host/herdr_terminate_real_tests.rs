@@ -5,7 +5,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,13 +16,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed};
-use super::herdr::model::{HerdrCall, HerdrEndpoint};
-use super::herdr::observe::{CANONICAL_CONFIG, RestoreUnverified};
-use super::herdr::pane_probe::start_text;
-use super::herdr::provenance;
-use super::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
-use super::herdr_registry::{self, HerdrRegistry};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedCasOutcome, HostedExecution, HostedLookup, HostedLookupKey, HostedOwner, HostedRecord,
@@ -34,6 +27,15 @@ use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
 };
+use crate::services::session_host::herdr::contract::{
+    HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed,
+};
+use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint};
+use crate::services::session_host::herdr::observe::{CANONICAL_CONFIG, RestoreUnverified};
+use crate::services::session_host::herdr::pane_probe::start_text;
+use crate::services::session_host::herdr::provenance;
+use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
+use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
 
 const NODE: &str = "mac-mini";
 const SESSION: &str = "adk";
@@ -429,7 +431,7 @@ impl Witnessing {
             inner: HerdrSocketTransport::new(
                 endpoint,
                 HerdrSocketConfig::default(),
-                super::herdr::wire::LineJsonFraming,
+                crate::services::session_host::herdr::wire::LineJsonFraming,
             ),
             seen: Arc::default(),
             writes: Arc::default(),
@@ -472,7 +474,7 @@ impl HerdrTransport for Witnessing {
         let outcome = self.inner.call_with_witness(call, expected);
         let unsent = matches!(
             &outcome,
-            Err(super::herdr::contract::HerdrTransportError::NotSent(_))
+            Err(crate::services::session_host::herdr::contract::HerdrTransportError::NotSent(_))
         );
         let witness = if unsent {
             Err("not sent".into())
@@ -633,16 +635,17 @@ pub(crate) async fn launch(
             command: format!("/bin/sh {}", path.display()),
         })
     };
-    let host: Arc<dyn HerdrLaunchHost> = Arc::new(super::SocketHerdrLaunchHost::new(
-        vec![real.endpoint()],
-        HerdrSocketConfig::default(),
-    ));
+    let host: Arc<dyn HerdrLaunchHost> =
+        Arc::new(crate::services::session_host::SocketHerdrLaunchHost::new(
+            vec![real.endpoint()],
+            HerdrSocketConfig::default(),
+        ));
     let mut launched = launch_herdr_session(pool, launch(), prepare, host.clone()).await;
     // Until the script's exec reaches python its environment is unreadable; the launch path
     // probes the recorded pane again on the next launch, as it does in service.
     for _ in 0..10 {
         let Ok(HerdrLaunchOutcome::Launched {
-            evidence: Err(super::EvidenceGap::EnvUnreadable),
+            evidence: Err(crate::services::session_host::EvidenceGap::EnvUnreadable),
             ..
         }) = &launched
         else {
@@ -711,8 +714,10 @@ pub(crate) async fn stored(pool: &PgPool, key: &str) -> HostedExecution {
 /// A pane on `real` running `/bin/sleep`, created as the launch host creates one; its shell and
 /// sleep are recorded.
 pub(crate) fn control(real: &mut Real, label: &str) -> String {
-    let host =
-        super::SocketHerdrLaunchHost::new(vec![real.endpoint()], HerdrSocketConfig::default());
+    let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+        vec![real.endpoint()],
+        HerdrSocketConfig::default(),
+    );
     let witness = host
         .restore_resume(&real.launch_endpoint())
         .admitted_witness()

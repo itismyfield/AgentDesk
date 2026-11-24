@@ -5,9 +5,6 @@
 pub(crate) mod evidence;
 #[path = "matcher.rs"]
 pub(crate) mod matcher;
-#[cfg(test)]
-#[path = "probe_tests.rs"]
-pub(crate) mod tests;
 
 use std::collections::BTreeMap;
 use std::future::Future;

@@ -5,9 +5,27 @@ use axum::Json;
 use serde_json::{Value, json};
 
 use super::route_tests::{self as route, send as routed_send};
-use super::*;
+use crate::services::claude_tui::source_verify::Visit;
+use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::writer::actor::{force_execution_for_tests, transition_hooks as hooks};
+use crate::services::tui_o::writer::binding::BindingCause;
 use crate::services::tui_o::writer::host::Readiness;
+use crate::services::tui_o::writer::tests::CHANNEL;
+use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::hop_at;
+use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::*;
+use crate::services::tui_o::writer::tests::actor::rotation::transcript;
+use crate::services::tui_o::writer::tests::actor::{FakeBindings, halt, polls, row};
 use crate::services::tui_o::writer::transition_cleanup::scope::ScopeApproval;
+use crate::services::tui_o::writer::transition_cleanup::{Request, Termination};
+use crate::services::tui_o::writer::transition_port::{
+    Context, Hold, Kind, Operation, Outcome, Refused, Reply,
+};
+use chrono::Utc;
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// The approved scope a reply carries.
 fn scope(reply: &Reply) -> &ScopeApproval {

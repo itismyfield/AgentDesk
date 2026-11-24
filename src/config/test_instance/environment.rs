@@ -8,18 +8,20 @@ use super::agy_cell::{self, AgyLogin};
 use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
-pub(super) struct Environment {
+pub(crate) struct Environment {
     api: String,
     claude_login: Option<ClaudeLogin>,
     agy_login: Option<AgyLogin>,
     #[cfg(unix)]
     pub(super) credentials: &'static [&'static str],
+    #[cfg(unix)]
+    pub(super) provider_credentials: &'static [&'static str],
     pub(super) required: BTreeMap<String, String>,
     pub(super) flags: BTreeMap<String, String>,
 }
 
 impl Environment {
-    pub(super) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
+    pub(crate) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
         let id = manifest["instance_id"].as_str().ok_or_else(rejected)?;
         let port = manifest["api"]["port"].as_u64().ok_or_else(rejected)?;
         let api = format!("http://127.0.0.1:{port}");
@@ -156,6 +158,8 @@ impl Environment {
             agy_login,
             #[cfg(unix)]
             credentials: profile.credentials,
+            #[cfg(unix)]
+            provider_credentials: profile.provider_credentials,
             required,
             flags,
         })
@@ -362,9 +366,13 @@ pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), Strin
             .agy_login
             .as_ref()
             .filter(|_| marked(agy_cell::AGY_LOGIN_MARKER));
-        if let Some(login) = agy {
-            login.verify_no_mcp_servers()?;
-        }
+        let api_key = match agy {
+            Some(login) => {
+                login.verify_no_mcp_servers()?;
+                login.api_key_env()?
+            }
+            None => None,
+        };
         let provider = snapshot
             .claude_login
             .as_ref()
@@ -397,6 +405,10 @@ pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), Strin
             .env_remove("TMUX_PANE");
         if let Some(provider) = provider {
             command.envs(provider);
+        }
+        // Only the marked agy child receives the key; the dcserver env itself stays key-free.
+        if let Some((key, value)) = api_key {
+            command.env(key, value);
         }
     }
     Ok(())
@@ -905,5 +917,5 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
 
 #[cfg(all(test, unix))]
 pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
-    super::environment_tests::review_fixture()
+    super::login_test_support::review_fixture()
 }

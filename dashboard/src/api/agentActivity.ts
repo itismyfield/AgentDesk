@@ -46,10 +46,12 @@ export async function getDispatchDeliveryEvents(
 
 export async function getDispatchedSessions(
   includeMerged = false,
+  opts?: Pick<RequestOptions, "suppressErrorToast" | "maxRetries" | "signal">,
 ): Promise<DispatchedSession[]> {
   const q = includeMerged ? "?includeMerged=1" : "";
   const data = await request<{ sessions: DispatchedSession[] }>(
     `/api/dispatched-sessions${q}`,
+    opts,
   );
   return data.sessions;
 }

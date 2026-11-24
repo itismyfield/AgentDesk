@@ -19,8 +19,7 @@ use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 use crate::services::provider::ProviderKind;
 
-pub use super::source_registry::SendCallerClass;
-use super::source_registry::validate_send_source_for;
+use crate::services::message_outbox::source_registry::{SendCallerClass, validate_send_source_for};
 
 /// Handle POST /api/discord/send — agent-to-agent native routing.
 /// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify", "summary":"..."}
@@ -450,10 +449,10 @@ pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool
 #[cfg(test)]
 mod send_source_tests {
     use super::{
-        SendCallerClass, dm_default_agent_authorizes_unmapped_private_channel,
-        is_allowed_send_source, is_allowed_send_source_for,
-        rejects_untrusted_message_outbox_delivery_id,
+        dm_default_agent_authorizes_unmapped_private_channel, is_allowed_send_source,
+        is_allowed_send_source_for, rejects_untrusted_message_outbox_delivery_id,
     };
+    use crate::services::message_outbox::source_registry::SendCallerClass;
     use crate::services::provider::ProviderKind;
 
     #[tokio::test]

@@ -16,7 +16,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
+        let root = PathBuf::from(crate::runtime_layout::REPO_ROOT).join("target/i01-tmp");
         fs::create_dir_all(&root).unwrap();
         Self {
             directory: tempfile::tempdir_in(root).unwrap(),

@@ -267,7 +267,7 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
     let pinned_output_path = handle.output_path.clone();
     let pinned_cancel = handle.cancel.clone();
     registry.insert(owner, handle);
-    super::write_spawn_nonce(tmux).expect("spawn nonce");
+    crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux).expect("spawn nonce");
 
     // The complete T3-R2 pin, captured the way the TUI call site captures it.
     let fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Enforce, SITE, tmux)
@@ -365,7 +365,7 @@ fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
         registry.insert(owner, handle);
         // A readable marker, so a read that happens is visible as a tally move
         // and a read that is skipped cannot be excused by an absent marker.
-        super::write_spawn_nonce(tmux).expect("spawn nonce");
+        crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux).expect("spawn nonce");
         let baseline = spawn_nonce_reads_for(tmux);
 
         let fence = WatcherIdentityFence::capture(mode, SITE, tmux)

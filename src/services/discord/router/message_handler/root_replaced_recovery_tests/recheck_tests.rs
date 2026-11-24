@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::discord::session_transition::SessionTransitionLease;
-use crate::services::herdr_launch::tests::retired_durability_tests::SyncFault;
+use crate::services::herdr_launch::retired_durability_tests::SyncFault;
 
 pub(super) fn retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries() {
     let case = Case::launched("rr-cache");

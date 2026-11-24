@@ -638,14 +638,14 @@ mod tests {
     fn captured_hooks_bind_only_once_payload_and_opened_file_agree() {
         let fixture: Value = serde_json::from_str(
             &std::fs::read_to_string(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
+                Path::new(crate::runtime_layout::REPO_ROOT)
                     .join("tests/fixtures/hook_payload/claude-2.1.283.json"),
             )
             .unwrap(),
         )
         .unwrap();
         // The first complete line of each captured run's own transcript, as the CLI wrote it.
-        let shapes = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let shapes = Path::new(crate::runtime_layout::REPO_ROOT)
             .join("tests/fixtures/hook_payload/claude-2.1.283.transcript-first-records.jsonl");
         let first_records: std::collections::HashMap<String, String> =
             std::fs::read_to_string(shapes)

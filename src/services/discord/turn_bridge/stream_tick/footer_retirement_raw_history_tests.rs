@@ -259,8 +259,8 @@ async fn retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn failed_rollover_records_the_freeze_and_restored_body_but_not_the_anchor() {
+    use crate::services::discord::krx_tui_o_test_host::repost_io::{CHANNEL, Mock, reply};
     use crate::services::discord::outbound::raw_output::tests as observation;
-    use crate::services::tui_o::repost::io::tests::{CHANNEL, Mock, reply};
     if observation::isolated(
         concat!(
             module_path!(),

@@ -20,7 +20,7 @@ pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod progress;
-mod replay;
+pub(in crate::services) mod replay;
 pub(crate) mod restart_end;
 pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;
@@ -285,7 +285,7 @@ mod past_bind;
 mod renumbered;
 #[cfg(unix)]
 pub(crate) use renumbered::claude_cursor_continues;
-mod transition_cleanup;
+pub(crate) mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.
 pub(crate) mod transition_port;
 
@@ -294,4 +294,4 @@ pub(crate) mod transition_port;
 pub(crate) mod tests;
 
 #[cfg(test)]
-mod source_read_tests;
+pub(crate) mod source_read_tests;

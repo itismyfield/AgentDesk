@@ -1201,7 +1201,7 @@ pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTran
     .await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn send_review_result_to_primary_for_preflight_harness_with_transport<
     T: DispatchTransport,
 >(

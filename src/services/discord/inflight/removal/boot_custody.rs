@@ -484,9 +484,11 @@ pub(super) fn inflight_age_secs_for_path(path: &Path) -> Option<u64> {
 #[cfg(unix)]
 #[path = "native_input_custody.rs"]
 mod native_input_custody;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use native_input_custody::persist_native_boot_record;
 #[cfg(unix)]
 pub(in crate::services::discord) use native_input_custody::{
-    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+    native_boot_records, persist_native_boot_record_off_worker, preserve_native_before_discard,
 };
 
 pub(in crate::services::discord) fn inflight_runtime_root() -> Option<PathBuf> {

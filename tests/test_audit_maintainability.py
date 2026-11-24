@@ -1167,8 +1167,7 @@ class LegacySqliteCheck(unittest.TestCase):
             REPO_ROOT
             / "src"
             / "services"
-            / "discord"
-            / "outbound"
+            / "message_outbox"
             / "source_registry.rs"
         ).read_text(encoding="utf-8")
 

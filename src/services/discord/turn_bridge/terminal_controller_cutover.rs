@@ -1310,7 +1310,7 @@ mod tests {
         #[cfg(unix)]
         #[rustfmt::skip]
         fn flip(source: ExactJsonlSourceIdentity) -> Arc<dyn Fn() + Send + Sync> {
-            Arc::new(move || { assert_eq!(crate::services::discord::outbound::current_census().unwrap()["site"], "W10e"); let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
+            Arc::new(move || { assert_eq!(crate::services::legacy_body_census::request_context::current_census().unwrap()["site"], "W10e"); let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
         }
         #[cfg(unix)]
         #[rustfmt::skip]
@@ -1945,7 +1945,8 @@ mod tests {
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
             gw.hook = Some(Arc::new(|| {
-                let tag = crate::services::discord::outbound::current_census().unwrap();
+                let tag =
+                    crate::services::legacy_body_census::request_context::current_census().unwrap();
                 assert_eq!(tag["site"], "W10b");
                 assert_eq!(tag["reason"], "NO_CLAIM");
             }));
@@ -2173,7 +2174,8 @@ mod tests {
             let _root = runtime_root_guard();
             let mut gw = long_gateway(true, true);
             gw.hook = Some(Arc::new(|| {
-                let tag = crate::services::discord::outbound::current_census().unwrap();
+                let tag =
+                    crate::services::legacy_body_census::request_context::current_census().unwrap();
                 assert_eq!(tag["site"], "W10c");
                 assert_eq!(tag["reason"], "NO_CLAIM");
             }));

@@ -101,3 +101,6 @@ mod tests {
         assert_eq!(identity.identity_kind, SCHEDULED_SNAPSHOT_IDENTITY_KIND);
     }
 }
+
+#[cfg(test)]
+pub(crate) mod krx_services_dl_tests;

@@ -39,7 +39,7 @@ pub(crate) struct Port {
     /// Runs inside each POST's first poll, under the gate and any record lock.
     on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
-    delay: Mutex<Option<std::time::Duration>>,
+    pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl Port {
@@ -148,7 +148,7 @@ impl Bindings {
         })
     }
 
-    fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
+    pub(crate) fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
         let mut events = self.events.lock().unwrap();
         let seq = events.len() as u64 + 1;
         let evidence = BindingEvidence {
@@ -277,7 +277,7 @@ fn switched() -> (tempfile::TempDir, OStore, SourceId) {
     switched_on(CHANNEL)
 }
 
-fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
+pub(crate) fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     let runtime = tempfile::tempdir().unwrap();
     let head = header("s1");
     let path = runtime.path().join("a.jsonl");
@@ -309,7 +309,7 @@ fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     (runtime, store, source)
 }
 
-fn opened(store: &OStore) -> ChannelStore {
+pub(crate) fn opened(store: &OStore) -> ChannelStore {
     let era = store.read_era().unwrap().unwrap();
     let channel = era.initial_channels[0];
     store.open_channel(&era, channel).unwrap().unwrap()
@@ -559,4 +559,4 @@ async fn the_running_actor_posts_the_same_and_leaves_the_sidecar_alone() {
 }
 
 #[path = "verified_delivery_tests.rs"]
-mod verified;
+pub(crate) mod verified;

@@ -16,7 +16,8 @@ async fn an_agentdesk_name_in_hangul_closes_only_its_exact_pane() {
     server.start_named("i8177-bystander");
     let prepared =
         PreparedIncarnation::prepare("claude", &logical, Some(8177), Some("argv-a"), true).unwrap();
-    crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(&logical, Some(&prepared))
+        .unwrap();
     let result = end_with(server.command(), &logical, 8177, None, |_| async {
         Ok(true)
     })

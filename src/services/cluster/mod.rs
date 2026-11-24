@@ -11,6 +11,7 @@
 pub(crate) mod agent_execution_node;
 pub(crate) mod attachment_transfer;
 pub(crate) mod capability_routing;
+pub(crate) mod dispatch_hooks;
 pub(crate) mod execution_capacity;
 pub(crate) mod execution_requirements;
 #[cfg(test)]

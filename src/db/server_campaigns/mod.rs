@@ -8,12 +8,12 @@ use crate::domain::campaign::model::{
 };
 
 #[cfg(test)]
-use crate::domain::campaign::{definition::DefinitionInput, model::*};
+use crate::domain::campaign::model::*;
 
 pub(crate) mod command_transaction;
 pub mod evidence_store;
 mod read;
-mod write;
+pub(crate) mod write;
 pub use read::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -89,16 +89,3 @@ async fn write_evidence(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod recovery_tests;
-#[cfg(test)]
-mod stage_store_tests;
-#[cfg(test)]
-#[path = "storage_tests.rs"]
-mod tests;
-#[cfg(test)]
-mod verification_store_tests;
-
-#[cfg(test)]
-mod decision_gate_tests;

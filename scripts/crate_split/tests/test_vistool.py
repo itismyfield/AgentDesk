@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -30,6 +31,7 @@ import vistool_testcfg  # noqa: E402
 FX = HERE / "fixtures" / "vistool"
 MINI = FX / "mini"
 UPPER = Path("/nonexistent-vistool-upper")
+MINI_HIGH = ["(root)", "app", "services", "services::web"]
 
 
 def load(name):
@@ -57,6 +59,16 @@ class Mini:
 
 def widener():
     return vistool.Widener(Mini.get(), MINI, UPPER), vistool.Resolver(MINI, UPPER, "src/probe_lower_lib.rs", "src/lib.rs")
+
+
+def leak(descr, name, rel, text):
+    """rustc's E0446 as the KRX shadow run recorded it on `impl FromStr for IntakeOutboxStatus { type Err = .. }`:
+    the primary span is the associated type, the labelled one the declaration of the type it leaks."""
+    at = line_of(rel, text)
+    return {"level": "error", "code": {"code": "E0446"}, "message": f"{descr} type `{name}` in public interface",
+            "children": [], "spans": [
+                {"is_primary": True, "file_name": rel, "line_start": at + 3, "line_end": at + 3, "label": f"can't leak {descr} type"},
+                {"is_primary": False, "file_name": rel, "line_start": at, "line_end": at, "label": f"`{name}` declared as {descr}"}]}
 
 
 # message -> (file, declaration line as written, widened line)
@@ -422,7 +434,38 @@ class GlobSafety(unittest.TestCase):
             self.assertFalse(any(r["fail"] for r in self.risks("struct Error;")))
 
 
+def split(low, high, path=None, **more):
+    crates = {"LOW": low, "HIGH": high, **more}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = path or Path(tmp) / "p"
+        path.write_text(json.dumps(dict(base="", order=list(crates), crates=crates)))
+        return vistool.load_partition(path)
+
+
 class Partition(unittest.TestCase):
+    def test_deep_key_wins_over_its_ancestor_group(self):
+        keys = {"discord::out", "discord::out::deep", "config::a", "config::a::b"}
+        self.assertEqual([vistool.group_path(k) for k in ("discord::o::d", "c::a::b")], [("services", "discord", "o", "d"), ("c", "a", "b")])
+        # The longest key wins, by whole segments: a sibling named like the deep key stays where it was.
+        of = lambda path: vistool.group_of(tuple(path.split("::")), keys)
+        got = [of("config::a::b::c")] + [of("services::discord::" + t) for t in ("out::deep::x", "out::deep_x", "out_x::deep")]
+        self.assertEqual(got, ["config::a::b", "discord::out::deep", "discord::out", "discord::out_x"])
+        high = MINI_HIGH
+        cut = split(["core::util", "services::store"], high + ["core"])
+        low, top = vistool.Layout(MINI, cut, "LOW"), vistool.Layout(MINI, cut, "HIGH")
+        self.assertEqual((low.crate_of_file["src/core/util.rs"], low.crate_of_file["src/core.rs"]), ("LOW", "HIGH"))
+        self.assertEqual((low.side_of("src/core/util.rs", 1), low.leaves), ("x", ["core::util", "services::store"]))
+        # Once the ancestor is below too it goes to upper whole, the deep key inside it.
+        self.assertEqual(top.leaves, ["app", "core", "services::store", "services::web"])
+        both = vistool.Layout(MINI, split(["core", "core::util", "services::store"], high), "LOW")
+        self.assertEqual((both.leaves, both.crate_of_file), (Mini.get().leaves, Mini.get().crate_of_file))
+
+    def test_conflicting_keys_are_rejected(self):
+        for low, high, why in ((["core::util"], ["core::util"], "bad_partition: core::util in LOW and HIGH"),
+                               (["services::discord::outbound"], ["discord::outbound"], "is not a group key"),
+                               (["core"], ["core::util"], "under core of the earlier crate LOW")):
+            self.assertRaisesRegex(vistool.VisFail, why, split, low, high)
+
     def test_group_keys(self):
         self.assertEqual(vistool.group_of(("services", "discord")), "discord::(mod.rs)")
         self.assertEqual(vistool.group_of(("services", "discord", "inflight", "x")), "discord::inflight")
@@ -436,20 +479,28 @@ class Partition(unittest.TestCase):
         p = vistool.load_partition(HERE.parent / "partition.json")
         self.assertRegex(p["base"], r"^[0-9a-f]{40}$")
         self.assertEqual(p["order"], ["KRX", "KE", "DL", "ROOT"])
-        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 82, "KE": 88, "DL": 85, "ROOT": 46})
+        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 88, "KE": 86, "DL": 85, "ROOT": 46})
 
     def test_manifests(self):
         text = '[package]\nname = "agentdesk"\n\n[workspace]\nmembers = ["crates/x"]\n\n[lib]\npath = "src/lib.rs"\n\n' \
-               '[[bin]]\nname = "agentdesk"\npath = "src/main.rs"\n\n[dependencies]\nx = { path = "crates/x" }\n'
+               '[[bin]]\nname = "agentdesk"\npath = "src/main.rs"\n\n[dependencies]\nx = { path = "crates/x" }\n\n' \
+               '[dev-dependencies]\nx = { path = "crates/x", features = ["test-support"] }\ntower = "0.5"\n'
         low = vistool.lower_manifest(text, "src/probe_lower_lib.rs")
         self.assertIn('name = "probe_lower"', low)
         self.assertNotIn("[[bin]]", low)
         self.assertIn('path = "src/probe_lower_lib.rs"', low)
         up = vistool.upper_manifest(text)
-        self.assertIn('probe_lower = { path = "../lower" }', up)
         self.assertIn('x = { path = "../lower/crates/x" }', up)
         self.assertIn("members = []", up)
         self.assertIn("[[bin]]", up)
+        low, up = tomllib.loads(low), tomllib.loads(up)
+        self.assertEqual((low["features"], low["dependencies"], "dev-dependencies" in low),
+                         ({"test-support": []}, {"x": {"path": "crates/x"}}, False))
+        self.assertEqual(low["target"]["cfg(any(unix, not(unix)))"]["dependencies"],
+                         {"x": {"path": "crates/x", "features": ["test-support"]}, "tower": "0.5"})
+        self.assertEqual(up["dependencies"]["probe_lower"], {"path": "../lower", "features": ["test-support"]})
+        kept = vistool.lower_manifest('[package]\nname = "a"\n\n[features]\ntest-support = ["dep:x"]\n', "l.rs")
+        self.assertEqual(tomllib.loads(kept)["features"], {"test-support": ["dep:x"]})
 
     def test_multiline_members_are_emptied(self):
         # VT1 review P2-4 (1): a wrapped `members = [...]` must not keep the members in upper.
@@ -489,22 +540,77 @@ class Probe(unittest.TestCase):
             self.assertIn("pub use probe_lower::services::store;",
                           (probe / "upper/src/services/mod.rs").read_text("utf-8"))
             self.assertEqual(rewired, ["src/lib.rs:core", "src/services/mod.rs:store"])
+            self.assertIn("[features]\ntest-support = []", (probe / "lower/Cargo.toml").read_text("utf-8"))
+            deep = vistool.Layout(repo, split(["core::util"], ["(root)", "app", "core", "services"]), "LOW")
+            for side in ("lower", "upper"):
+                vistool.extract_head(repo, probe / "deep" / side)
+            vistool.transform_lower(probe / "deep/lower", deep)
+            self.assertEqual(vistool.transform_upper(probe / "deep/upper", deep), ["src/core.rs:util"])
+            self.assertIn("pub mod util;", (probe / "deep/lower/src/core.rs").read_text("utf-8"))
+            self.assertIn("pub use probe_lower::core::util;", (probe / "deep/upper/src/core.rs").read_text("utf-8"))
+            # A key naming a module its group already owns: lower keeps the group's files as HEAD has them.
+            same = vistool.Layout(repo, split(["core", "core::util", "services::store"], MINI_HIGH), "LOW")
+            vistool.extract_head(repo, probe / "same")
+            vistool.transform_lower(probe / "same", same)
+            self.assertEqual((probe / "same/src/core.rs").read_text("utf-8"), (repo / "src/core.rs").read_text("utf-8"))
             status = subprocess.run(git[:3] + ["status", "--porcelain", "--ignored=no", "--", "src", "Cargo.toml"],
                                     capture_output=True, text=True, check=True).stdout
             self.assertEqual(status, "")
             self.assertEqual((repo / "src/lib.rs").read_text("utf-8"), (MINI / "src/lib.rs").read_text("utf-8"))
+
+    def test_deep_key_goes_alone_and_its_ancestor_goes_whole(self):
+        # The repo shape: an early crate owns one module inside a later crate's group.
+        bridge = "src/services/discord/turn_bridge"
+        tree = {"Cargo.toml": '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2024"\n',
+                "src/lib.rs": "mod app;\nmod services;\n", "src/app.rs": "", "src/services/mod.rs": "mod discord;\n",
+                "src/services/discord/mod.rs": "mod turn_bridge;\n", f"{bridge}/tap.rs": "",
+                f"{bridge}/mod.rs": "pub(in crate::services::discord) mod stale_resume;\nmod tap;\n",
+                f"{bridge}/stale_resume.rs": ""}
+        with tempfile.TemporaryDirectory() as tmp:
+            for rel, text in tree.items():
+                for side in ("repo", "LOW/lower", "LOW/upper", "HIGH/lower", "HIGH/upper"):
+                    (Path(tmp) / side / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(tmp) / side / rel).write_text(text)
+            cut = split(["discord::turn_bridge::stale_resume"], ["discord::(mod.rs)", "discord::turn_bridge", "services"],
+                        ROOT=["(root)", "app"])
+            got = {}
+            for crate in ("LOW", "HIGH"):
+                layout = vistool.Layout(Path(tmp) / "repo", cut, crate)
+                root = Path(tmp) / crate
+                vistool.transform_lower(root / "lower", layout)
+                got[crate] = (sorted(Path(f).name for f in layout.x_files), layout.leaves,
+                              vistool.transform_upper(root / "upper", layout),
+                              (root / "lower" / bridge / "mod.rs").read_text().split("\n")[0])
+            path = "probe_lower::services::discord::turn_bridge"
+            self.assertEqual(got["LOW"], (["stale_resume.rs"], ["discord::turn_bridge::stale_resume"],
+                                          [f"{bridge}/mod.rs:stale_resume"], "pub mod stale_resume;"))
+            self.assertEqual((Path(tmp) / "LOW/upper" / bridge / "mod.rs").read_text(),
+                             f"pub use {path}::stale_resume;\nmod tap;\n")
+            # Later the whole group goes, the deep key inside it, and its files stay as HEAD has them.
+            self.assertEqual(got["HIGH"], (["mod.rs", "mod.rs", "mod.rs", "tap.rs"], ["discord::turn_bridge"],
+                                           ["src/services/discord/mod.rs:turn_bridge"], tree[f"{bridge}/mod.rs"].split("\n")[0]))
+            self.assertEqual((Path(tmp) / "HIGH/upper/src/services/discord/mod.rs").read_text(), f"pub use {path};\n")
+            self.assertEqual((Path(tmp) / "HIGH/lower/src/services/discord/mod.rs").read_text(), "pub mod turn_bridge;\n")
 
     def test_test_gated_and_path_mods(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
             (root / "Cargo.toml").write_text('[package]\nname = "t"\n')
-            (root / "src/lib.rs").write_text('#[cfg(test)]\nmod low_tests;\n#[path = "w/x.rs"]\nmod low;\nmod high;\n'
+            gated = '#[cfg(any(test, feature = "test-support"))]\n'
+            other = '#[cfg(any(test, feature = "optional"))]\n'
+            (root / "src/lib.rs").write_text(other + "mod low_opt;\n" + gated + 'mod low_gated;\n'
+                                             '#[cfg(test)]\nmod low_tests;\n#[path = "w/x.rs"]\nmod low;\nmod high;\n'
                                              '#[allow(dead_code)]\npub(crate) mod block {\n    mod low;\n    pub(crate) mod a;\n}\n')
-            layout = SimpleNamespace(leaves=["block", "low", "low_tests"], file_of={(): "src/lib.rs"},
-                                     module_of={"src/lib.rs": ()})
+            layout = SimpleNamespace(leaves=["block", "low", "low_gated", "low_opt", "low_tests"],
+                                     file_of={(): "src/lib.rs"}, module_of={"src/lib.rs": ()})
             vistool.transform_upper(root, layout)
+            # Lower builds without `test` and without `optional`: the re-export stays only where lower has the module.
+            lower_has = 'any(any(), feature = "optional")'
             self.assertEqual((root / "src/lib.rs").read_text(),
+                             other + f"#[cfg({lower_has})]\npub use probe_lower::low_opt;\n"
+                             + other + f"#[cfg(not({lower_has}))]\nmod low_opt {{}}\n"
+                             + gated + "pub use probe_lower::low_gated;\n"
                              "#[cfg(test)]\nmod low_tests {}\npub use probe_lower::low;\nmod high;\n"
                              "#[allow(dead_code)]\npub use probe_lower::block;\n")
 
@@ -521,28 +627,56 @@ class Probe(unittest.TestCase):
 
 
 class LoopGuard(unittest.TestCase):
-    def test_unrepaired_lower_visibility_error_fails_closed(self):
-        # VT1 fix1 review P2-1: a lower visibility error that resolves to no edit keeps upper from running,
-        # so the run must stop as lower_probe_broken (not no_progress, never VISTOOL_OK).
-        broken = {"level": "error", "code": {"code": "E0603"}, "message": "struct `Gone` is private", "spans": [],
-                  "children": []}
+    def scripted(self, rounds):
+        """The tool on the mini fixture, cargo replaced by one (lower, upper) diagnostic list per round."""
         calls = []
 
         def fake(cargo, cwd, args, target_dir, own_root, manifest=None):
             calls.append(cwd.name)
-            return ([dict(broken, _root=str(cwd), _test=False)] if cwd.name == "lower" else []), 0.1
+            return [{"_test": False, **d, "_root": str(cwd)} for d in rounds[calls.count("lower") - 1][cwd.name == "upper"]], 0.1
 
         with tempfile.TemporaryDirectory() as tmp:
             repo, git = fixture_repo(Path(tmp))
             with mock.patch.object(vistool, "run_check", fake):
                 ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                      apply=True, log=lambda *a, **k: None)
-            self.assertFalse(ok)
-            self.assertTrue(line.startswith("VISTOOL_FAIL lower_probe_broken "), line)
-            self.assertEqual(calls, ["lower"])
-            self.assertFalse((Path(tmp) / "out" / "vistool-LOW.patch").exists())
             status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
-            self.assertEqual(status, "")
+            return ok, line, calls, status, (Path(tmp) / "out" / "vistool-LOW.patch").exists(), manifest
+
+    def test_unrepaired_lower_visibility_error_fails_closed(self):
+        # VT1 fix1 review P2-1: a lower visibility error that resolves to no edit keeps upper from running,
+        # so the run must stop as lower_probe_broken (not no_progress, never VISTOOL_OK).
+        broken = {"level": "error", "code": {"code": "E0603"}, "message": "struct `Gone` is private", "spans": [],
+                  "children": []}
+        ok, line, calls, status, patched, _ = self.scripted([([broken], [])])
+        self.assertFalse(ok)
+        self.assertTrue(line.startswith("VISTOOL_FAIL lower_probe_broken "), line)
+        self.assertEqual((calls, patched, status), (["lower"], False, ""))
+
+    def test_unresolved_generated_reexport_fails_closed(self):
+        # As test residue it would pass and, standing as an error, hide the field-privacy pass behind it.
+        gone = {"level": "error", "code": {"code": "E0432"}, "message": "unresolved import `probe_lower::core`",
+                "children": [], "_test": True,
+                "spans": [{"is_primary": True, "file_name": "src/lib.rs", "line_start": 3, "line_end": 3,
+                           "text": [{"text": "pub use probe_lower::core;"}]}]}
+        ok, line, *_ = self.scripted([([], [gone])])
+        self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL upper_probe_broken"))
+
+
+    def test_leaked_type_goes_as_far_as_the_interface_and_no_further(self):
+        token = leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")
+        thing = lambda descr: leak(descr, "Thing", "src/services/store.rs", "pub(super) struct Thing {")
+        ok, line, *_, manifest = self.scripted([([token, thing("restricted")], []), ([thing("crate-private")], []), ([], [])])
+        self.assertTrue(ok, (line, manifest.get("fail")))
+        self.assertEqual([(e["iter"], e["after"]) for e in manifest["edits"]],
+                         [(1, "pub struct Token;"), (1, "pub(crate) struct Thing {"), (2, "pub struct Thing {")])
+        # A crate-wide interface: rustc stops reporting, and the type stays at `pub(crate)`.
+        ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
+        self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
+        # No declaration to widen: the lower error stands, it is never residue.
+        gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
+        ok, line, *_ = self.scripted([([gone], [])])
+        self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL lower_probe_broken"))
 
 
 class TestCfgList(unittest.TestCase):
@@ -574,7 +708,7 @@ class TestCfgList(unittest.TestCase):
 
     def test_gated_declarations_by_scan(self):
         src = ["pub(crate) fn plain() {}", "#[cfg(all(test, unix))]", "mod tests {", "    pub(crate) fn h() {}", "}",
-               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"x\"))]",
+               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"test-support\"))]",
                "pub(crate) fn either() {}", "#[cfg(test)]", "pub(crate) fn h() {}"]
         layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set(), module_at=lambda rel, line: ("a",))
         defs = vistool_testcfg.gated_defs(layout, lambda rel: src)
@@ -770,6 +904,84 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual((repo / "src/app.rs").read_text(), app)
             self.assertNotIn("src/app.rs", {e["file"] for e in manifest["final_edits"]})
             self.assertEqual(manifest["residue"]["cut_residue"]["count"], 1, line)
+
+    def test_gated_item_behind_a_dev_dependency_is_widened(self):
+        # Lower builds with `test-support` on, so a gated item an upper test reads is a visibility edit.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = fixture_repo(Path(tmp))
+            for rel, text in (("dd/Cargo.toml", '[package]\nname = "dd"\nversion = "0.1.0"\nedition = "2024"\n'),
+                              ("dd/src/lib.rs", "pub const SEVEN: u32 = 7;\n"),
+                              ("Cargo.toml", '\n[dev-dependencies]\ndd = { path = "dd" }\n'),
+                              ("src/core.rs", '\n#[cfg(any(test, feature = "test-support"))]\n'
+                                              "pub(crate) fn gated() -> u32 {\n    dd::SEVEN\n}\n"
+                                              '\n#[cfg(any(test, feature = "test-support"))]\n'
+                                              "pub(crate) struct Hidden;\n"
+                                              '\n#[cfg(any(test, feature = "test-support"))]\n'
+                                              "pub fn exposes() -> Hidden {\n    Hidden\n}\n"),
+                              ("src/app.rs", "\n#[cfg(test)]\nmod gated_tests {\n    #[test]\n    fn reads_gated() {\n"
+                                             "        assert_eq!(crate::core::gated(), 7);\n    }\n}\n")):
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                with open(repo / rel, "a") as f:
+                    f.write(text)
+            subprocess.run(git[:3] + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", "gated"], check=True)
+            ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
+                                                 apply=True, log=lambda *a, **k: None)
+            self.assertTrue(ok and " test_cfg=0 " in line, (line, manifest.get("fail")))
+            self.assertIn("pub fn gated() -> u32 {", (repo / "src/core.rs").read_text())
+            # Upper never names `Hidden`: only lower's own check, built with the feature, reports it.
+            self.assertIn("pub struct Hidden;", (repo / "src/core.rs").read_text())
+
+    def test_nested_deep_key_and_feature_gated_deep_leaf(self):
+        gated = (("src/core.rs", '\n#[cfg(any(test, feature = "test-support"))]\npub(crate) mod gated;\n'),
+                 ("src/core/gated.rs", "pub(crate) fn hidden() -> u32 {\n    7\n}\n"),
+                 ("src/app.rs", "\n#[cfg(test)]\nmod gated_tests {\n    #[test]\n    fn reads_gated() {\n"
+                                "        assert_eq!(crate::core::gated::hidden(), 7);\n    }\n}\n"))
+        # A group only another feature (or `test`) opens: lower has no such module, and a test-only field use
+        # behind it must still be found. `sup` is the control `test-support` opens in lower.
+        other = (("src/lib.rs", '\n#[cfg(any(test, feature = "optional"))]\nmod opt;\n'
+                                '#[cfg(any(test, feature = "test-support"))]\nmod sup;\n'),
+                 ("src/opt.rs", ""), ("src/sup.rs", "pub fn one() -> u32 {\n    1\n}\n"),
+                 ("src/core.rs", "\npub struct Probe {\n    pub(crate) depth: u32,\n}\n"),
+                 ("src/app.rs", "\n#[cfg(test)]\nmod sup_tests {\n    #[test]\n    fn reads_sup() {\n"
+                                "        let _probe = crate::core::Probe { depth: 2 };\n"
+                                "        assert_eq!(crate::sup::one(), 1);\n    }\n}\n"))
+        # HIGH names LOW's `Status`; once that is `pub`, the error type its `FromStr` impl names leaks (E0446).
+        leaked = (("src/services/store.rs", "\npub(super) enum Status {\n    On,\n}\n\npub(super) struct BadStatus;\n\n"
+                                            "impl std::str::FromStr for Status {\n    type Err = BadStatus;\n\n"
+                                            "    fn from_str(_: &str) -> Result<Self, Self::Err> {\n"
+                                            "        Ok(Status::On)\n    }\n}\n"),
+                  ("src/services/web.rs", "\npub(super) fn parses() -> bool {\n"
+                                          "    \"on\".parse::<super::store::Status>().is_ok()\n}\n"))
+        # (LOW, HIGH, files appended to the fixture, (summary part, file, widened line)) of a run that applies.
+        for low, high, extra, want in (
+                (["core", "core::util", "services::store"], MINI_HIGH, (), None),
+                (["core::gated"], MINI_HIGH + ["core", "services::store"], gated,
+                 (" edits=1 cut_residue=0 test_cfg=0 ", "src/core/gated.rs", "pub fn hidden() -> u32 {")),
+                (["core", "opt", "services::store", "sup"], MINI_HIGH, other,
+                 (" cut_residue=0 test_cfg=0 ", "src/core.rs", "    pub depth: u32,")),
+                (["core", "services::store"], MINI_HIGH, leaked,
+                 (" cut_residue=0 test_cfg=0 ", "src/services/store.rs", "pub struct BadStatus;"))):
+            with self.subTest(low=low), tempfile.TemporaryDirectory() as tmp:
+                repo, git = fixture_repo(Path(tmp))
+                for rel, text in extra:
+                    with open(repo / rel, "a") as f:
+                        f.write(text)
+                subprocess.run(git[:3] + ["add", "-A"], check=True)
+                subprocess.run(git + ["commit", "-qm", "deep", "--allow-empty"], check=True)
+                split(low, high, path=Path(tmp) / "partition.json")
+                out = Path(tmp) / "out"
+                ok, line, manifest = vistool.vistool(repo, Path(tmp) / "partition.json", "LOW", out_dir=out,
+                                                     apply=True, log=lambda *a, **k: None)
+                self.assertTrue(ok, (line, manifest.get("fail"), manifest.get("unresolved")))
+                if not extra:
+                    # A key naming a module the group already owns changes nothing.
+                    self.assertEqual((out / "vistool-LOW.patch").read_text("utf-8"),
+                                     (FX / "mini.expected.patch").read_text("utf-8"))
+                    continue
+                # A leaf `test-support` opens is re-exported from lower, so its item is a visibility edit.
+                self.assertIn(want[0], line)
+                self.assertIn(want[2], (repo / want[1]).read_text())
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.

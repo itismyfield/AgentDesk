@@ -83,7 +83,7 @@ fn repository_preserves_org_extensions_and_rejects_unknown_profiles_without_writ
 
 #[test]
 fn auth_projection_has_no_document_escape_or_recovery_publication() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = std::path::Path::new(crate::runtime_layout::REPO_ROOT);
     let source = |path| std::fs::read_to_string(root.join(path)).unwrap();
     let catalog = source("src/services/org_catalog.rs");
     let auth_reader = catalog

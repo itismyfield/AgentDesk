@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::services::pipeline_override::{PipelineOverride, parse_override, parse_override_strict};
+
 /// Global singleton pipeline config (the default), loaded once at startup.
 static PIPELINE: OnceLock<PipelineConfig> = OnceLock::new();
 const PIPELINE_OVERRIDE_HEALTH_KV_KEY: &str = "pipeline_override_health_report";
@@ -63,7 +65,7 @@ pub fn ensure_loaded() {
     // Try standard paths in order
     let candidates = [
         std::path::PathBuf::from("policies/default-pipeline.yaml"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/default-pipeline.yaml"),
+        Path::new(crate::runtime_layout::REPO_ROOT).join("policies/default-pipeline.yaml"),
     ];
     for path in &candidates {
         if path.exists() {
@@ -572,12 +574,6 @@ pub async fn resolve_for_card_pg(
 
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
-
-/// `PipelineOverride` and its strict/lenient parsers moved to the write boundary
-/// that owns them (#5718); every reader still names them through `crate::pipeline::`.
-pub use crate::services::pipeline_override::{
-    PipelineOverride, parse_override, parse_override_strict,
-};
 
 // ── Schema ───────────────────────────────────────────────────────
 
@@ -1279,7 +1275,7 @@ mod schema_strictness_tests {
     use std::path::{Path as StdPath, PathBuf};
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(crate::runtime_layout::REPO_ROOT)
     }
 
     /// Discover every pipeline manifest tracked under `policies/`. A pipeline

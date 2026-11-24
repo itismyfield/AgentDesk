@@ -8,10 +8,10 @@ from pathlib import Path
 
 try:
     from rust_cfg import find_test_only_cfg_attributes as _cfg_test_only_matches
-    from rust_lex import StripState, strip_line
+    from rust_lex import StripState, cfg_item_end, strip_line
 except ModuleNotFoundError:
     from scripts.rust_cfg import find_test_only_cfg_attributes as _cfg_test_only_matches
-    from scripts.rust_lex import StripState, strip_line
+    from scripts.rust_lex import StripState, cfg_item_end, strip_line
 
 # Anchor item keywords to item positions so function-pointer fields still
 # terminate their test-only region at the following comma.
@@ -65,7 +65,7 @@ def production_lines(path: Path, *, parameter_gates: set[int] | None = None, gat
         line_starts.append(offset)
         offset += len(code) + 1
     full_code = "\n".join(code_lines)
-    all_matches = list(_cfg_test_only_matches(full_code))
+    all_matches = list(_cfg_test_only_matches(full_code, source="\n".join(raw_lines)))
     file_test_only = any(
         match.is_inner and _only_inner_attributes_before(full_code, match.start())
         for match in all_matches
@@ -244,6 +244,10 @@ def production_lines(path: Path, *, parameter_gates: set[int] | None = None, gat
 def _production_text(path: Path, *, handled_gates: set[int] | None = None) -> str:
     """Return stripped production text while preserving cross-line chains."""
 
+    try:
+        from generate_inventory_docs import ParseError, scan_balanced
+    except ModuleNotFoundError:
+        from scripts.generate_inventory_docs import ParseError, scan_balanced
     classified = list(production_lines(path, handled_gates=handled_gates))
     lines = [
         code if countable else " " * len(code)
@@ -255,7 +259,8 @@ def _production_text(path: Path, *, handled_gates: set[int] | None = None) -> st
         line_starts.append(offset)
         offset += len(line) + 1
     full_code = "\n".join(code for _line, code, _countable in classified)
-    for match in _cfg_test_only_matches(full_code):
+    source = "\n".join(path.read_text(encoding="utf-8").splitlines())
+    for match in _cfg_test_only_matches(full_code, source=source):
         if handled_gates and match.start() in handled_gates:
             continue
         start_line = bisect_right(line_starts, match.start()) - 1
@@ -265,9 +270,15 @@ def _production_text(path: Path, *, handled_gates: set[int] | None = None) -> st
             classified[end_line][1], max(0, end - 1)
         ):
             continue  # Keep mixed production/test item lines fail-closed here too.
-        if start_line == end_line and classified[end_line][2]:
-            start = match.start() - line_starts[start_line]
-            lines[end_line] = lines[end_line][:start] + " " * (len(lines[end_line]) - start)
-        elif classified[end_line][2]:
-            lines[end_line] = " " * len(lines[end_line])
+        if not classified[end_line][2]:
+            continue
+        try:
+            item_end = cfg_item_end(full_code, match.start(), scan_balanced)
+        except (ParseError, ValueError):
+            continue  # An uncertain item boundary keeps the line scanned.
+        # Blank the gated item only; code after it on the same line stays production.
+        line = lines[end_line]
+        start = match.start() - line_starts[start_line] if start_line == end_line else 0
+        stop = min(len(line), item_end - line_starts[end_line])
+        lines[end_line] = line[:start] + " " * (stop - start) + line[stop:]
     return "\n".join(lines)

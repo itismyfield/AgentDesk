@@ -1,3 +1,4 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays } from 'lucide-react';
 
@@ -181,31 +182,18 @@ function useReducedMotion() {
 /** A single animation clock keeps every numeric value in the same telemetry snapshot. */
 function useUsageNumbers(target: NumericSnapshot, root: RefObject<HTMLElement | null>, reduced: boolean) {
   const key = JSON.stringify(target);
-  const [entered, setEntered] = useState(false);
-  const [numbers, setNumbers] = useState<NumericSnapshot>(() => Object.fromEntries(Object.keys(target).map((name) => [name, 0])));
+  const [entered] = useState(true);
+  const [numbers, setNumbers] = useState<NumericSnapshot>(() => ({ ...target }));
   const displayed = useRef(numbers);
   const hasStarted = useRef(false);
   useEffect(() => {
-    const element = root.current;
-    if (!element || typeof IntersectionObserver === 'undefined') { setEntered(true); return; }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting && entry.intersectionRatio >= 0.2)) {
-        setEntered(true);
-        observer.disconnect();
-      }
-    }, { threshold: 0.2 });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [root]);
-  useEffect(() => {
     if (!entered) return;
     const destination = JSON.parse(key) as NumericSnapshot;
-    const origin = displayed.current;
-    const duration = hasStarted.current ? 650 : 1200;
-    hasStarted.current = true;
-    let frame = 0;
     const publish = (next: NumericSnapshot) => { displayed.current = next; setNumbers(next); };
-    if (reduced) { publish(destination); return; }
+    if (!hasStarted.current || reduced) { hasStarted.current = true; publish(destination); return; }
+    const origin = displayed.current;
+    const duration = 650;
+    let frame = 0;
     const start = performance.now();
     const tick = (now: number) => {
       const t = clamp((now - start) / duration, 0, 1);
@@ -615,6 +603,7 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
 }
 
 const usageMeterStyles = `
+@layer kit {
 .aui-usage-meter {
   --aui-usage-meter-tray: var(--aui-bg-2, #f0f0f0); --aui-usage-meter-card: var(--aui-bg-1, #fff);
   --aui-usage-meter-line: var(--aui-line, #ececec); --aui-usage-meter-ink: var(--aui-fg, #171717);
@@ -807,121 +796,5 @@ const usageMeterStyles = `
 @media (prefers-reduced-motion: reduce) {
   .aui-usage-meter *, .aui-usage-meter *::before, .aui-usage-meter *::after { transition: none !important; animation: none !important; }
 }
-.aui-usage-meter-demo { width: 100%; min-width: 0; }
-.aui-usage-meter-demo[data-narrow] { width: 300px; max-width: 100%; }
-.aui-usage-meter-demo-feedback { max-width: 460px; margin: 10px 0 0; color: var(--aui-fg-muted, #737373); font: 12px/1.45 var(--aui-font-sans, sans-serif); word-break: keep-all; overflow-wrap: anywhere; }
-:where(.dark,[data-theme="dark"]) .aui-usage-meter-demo-feedback { color: var(--aui-fg-muted, #a3a3a3); }
+}
 `;
-
-export type UsageMeterDemoState = 'ok' | 'warning' | 'over' | 'empty' | 'periods' | 'extreme' | 'no-plan' | 'long' | 'narrow' | 'single-period' | 'fractional' | 'boundaries' | 'negative-day' | 'read-only' | 'limits' | 'danger';
-
-/** Small amounts, a reset more than 60 days away, 130 daily bars and long limit numbers. */
-function UsageMeterBoundaryDemo() {
-  const [request, setRequest] = useState('');
-  const reset = useMemo(() => new Date(Date.now() + 75 * 86_400_000), []);
-  const days: UsageDay[] = Array.from({ length: 130 }, (_, index) => ({ label: `${index + 1}일째`, value: index % 17 === 0 ? Number.NaN : index > 120 ? null : 2 + (index * 37) % 19 }));
-  return <div className="aui-usage-meter-demo"><UsageMeter title="Discord 릴레이 분기 사용량" plan="AgentDesk Relay" unit="토큰" total={1000} used={[{ label: '알림 요약', value: 0.4 }, { label: '채널 중계', value: 318 }, { label: '오류 응답', value: Number.NaN }]} resetAt={reset} daily={days} limits={[
-    { label: '누적 처리 바이트', used: 123_456_789.5, total: 987_654_321, unit: 'B', decimals: 1 },
-    { label: '재시도', used: -2, total: 50, unit: '회' },
-  ]} periods={[{ id: 'quarter', label: '이번 분기와 직전 분기를 함께 비교하는 긴 기간' }, { id: 'month', label: '이번 달' }]} onUpgrade={(next) => setRequest(`요청을 전달했어요. (${next})`)} />
-    {request && <p className="aui-usage-meter-demo-feedback" role="status">{request}</p>}</div>;
-}
-
-/** A refund day: −2 and 6 average to 2, the unmeasured third day reads as a dash and stays out of the average. */
-function UsageMeterNegativeDayDemo() {
-  const [request, setRequest] = useState('');
-  const days: UsageDay[] = [{ label: '11월 16일 · 환불 정산', value: -2 }, { label: '11월 17일', value: 6 }, { label: '11월 18일', value: null }];
-  return <div className="aui-usage-meter-demo"><UsageMeter title="리뷰 디스패치 크레딧" plan="AgentDesk Review" unit="크레딧" total={40} used={[{ label: '리뷰 디스패치', value: 4 }]} daily={days} resetAt="2026-12-01T00:00:00+09:00" onUpgrade={(next) => setRequest(`요청을 전달했어요. (${next})`)} />
-    {request && <p className="aui-usage-meter-demo-feedback" role="status">{request}</p>}</div>;
-}
-
-const englishUsageLabels: Partial<UsageMeterLabels> = {
-  limitReached: 'Limit reached', nearLimit: 'Close to the limit', nearLimitStatus: 'Almost at the limit',
-  over: (amount) => <>{amount} over</>, remaining: (amount) => <>{amount} left</>,
-  resetToday: 'Resets today', resetTomorrow: 'Resets tomorrow', resetInDays: (days) => `Resets in ${days} days`, resetOn: (date) => `Resets ${date}`,
-  announce: (state, title, actual, percent) => state === 'limit' ? `${title}, limit reached. ${actual}.` : state === 'warn' ? `${title}, ${percent}% used.` : `${title}, ${actual} used.`,
-  periods: 'Usage period', barHint: (actual) => `${actual} used. Use the arrow keys to read each category.`, meter: 'Total usage', zeroTotal: (amount) => `No plan total · ${amount} used`,
-  categories: 'By category', empty: 'No usage yet.', daily: 'Daily', average: (amount) => <>Avg <strong>{amount}</strong> / day</>,
-  dailyHint: (title, average) => `${title} by day, average ${average}. Use the arrow keys to read each day.`,
-  dayTools: 'Day picker', previousDay: 'Previous day', nextDay: 'Next day', daySelect: 'Day', averageOption: 'Show average', unmeasuredDay: 'not counted yet',
-  limits: 'Plan limits', unlimited: 'unlimited', notMeasured: 'not measured',
-};
-
-/** No onUpgrade: the footer keeps the status and drops the button. The English card passes every label. */
-function UsageMeterReadOnlyDemo() {
-  const days: UsageDay[] = Array.from({ length: 7 }, (_, index) => ({ label: `11월 ${index + 17}일`, value: [42_000, 38_500, 51_200, 47_800, 60_100, null, null][index] }));
-  return <div className="aui-usage-meter-demo" style={{ display: 'grid', gap: 12 }}>
-    <UsageMeter title="Claude 주간 사용량" plan="AgentDesk Team" unit="토큰" total={400_000} used={[{ label: '에이전트 대화', value: 168_000 }, { label: '도구 호출', value: 71_600 }]} daily={days} resetAt="2026-11-24T00:00:00+09:00" limits={[{ label: '동시 세션', used: 4, total: 10, unit: '개' }]} />
-    <UsageMeter title="Claude weekly usage" plan="AgentDesk Team" unit="tokens" locale="en-US" total={400_000} used={[{ label: 'Agent turns', value: 330_000 }, { label: 'Tool calls', value: 22_000 }]} daily={days} labels={englishUsageLabels} />
-  </div>;
-}
-
-/** The `limits` layout: small bars per provider for the 5-hour and weekly ratios, an unmeasured provider and a 300px frame. */
-function UsageMeterLimitsDemo() {
-  const limits: UsageLimit[] = [
-    { group: 'Claude', label: '5시간', used: 62, total: 100, unit: '%', detail: '1시간 12분 뒤 초기화' },
-    { group: 'Claude', label: '주간', used: 84, total: 100, unit: '%', detail: '목요일 09:00 초기화' },
-    { group: 'Codex', label: '5시간', used: 18, total: 100, unit: '%' },
-    { group: 'Codex', label: '주간', used: 100, total: 100, unit: '%', detail: '한도에 닿아 새 작업을 미뤄요' },
-    { group: 'Gemini', label: '일간', used: null, total: 100, unit: '%', detail: '공급자가 사용량을 알려 주지 않아요' },
-  ];
-  return <div className="aui-usage-meter-demo" style={{ display: 'grid', gap: 12 }}>
-    <UsageMeter layout="limits" title="공급자 한도" plan="5시간 · 주간" limits={limits} />
-    <div style={{ width: 300, maxWidth: '100%' }}><UsageMeter layout="limits" title="공급자 한도 · 300px" limits={limits.slice(0, 4)} /></div>
-  </div>;
-}
-
-/** dangerAt 0.9 adds a third level between the 80% warning and the limit, e.g. a rule that pauses automatic work at 90%. */
-function UsageMeterDangerDemo() {
-  const limits: UsageLimit[] = [
-    { group: 'Claude', label: '5시간', used: 62, total: 100, unit: '%' },
-    { group: 'Claude', label: '주간', used: 84, total: 100, unit: '%', detail: '경고 단계예요' },
-    { group: 'Codex', label: '5시간', used: 90, total: 100, unit: '%', detail: '90%부터 자동 진행을 멈춰요' },
-    { group: 'Codex', label: '주간', used: 97, total: 100, unit: '%' },
-    { group: 'Gemini', label: '일간', used: 100, total: 100, unit: '%', detail: '한도에 닿았어요' },
-  ];
-  return <div className="aui-usage-meter-demo" style={{ display: 'grid', gap: 12 }}>
-    <UsageMeter layout="limits" title="공급자 한도 · 멈춤 기준 90%" limits={limits} dangerAt={0.9} />
-    <UsageMeter title="Claude 5시간 사용량" plan="AgentDesk Team" unit="토큰" total={1_000_000} used={[{ label: '에이전트 대화', value: 610_000 }, { label: '도구 호출', value: 310_000 }]} dangerAt={0.9} limits={[{ label: '동시 세션', used: 9, total: 10, unit: '개' }, { label: '실행 로그', used: 4.1, total: 5, unit: 'GB' }]} />
-  </div>;
-}
-
-/** The host owns period snapshots; this example includes a name disappearing and another appearing. */
-export function UsageMeterDemo({ state = 'ok' }: { state?: UsageMeterDemoState }) {
-  if (state === 'boundaries') return <UsageMeterBoundaryDemo />;
-  if (state === 'negative-day') return <UsageMeterNegativeDayDemo />;
-  if (state === 'read-only') return <UsageMeterReadOnlyDemo />;
-  if (state === 'limits') return <UsageMeterLimitsDemo />;
-  if (state === 'danger') return <UsageMeterDangerDemo />;
-  return <UsageMeterHostDemo state={state} />;
-}
-
-function UsageMeterHostDemo({ state }: { state: Exclude<UsageMeterDemoState, 'boundaries' | 'negative-day' | 'read-only' | 'limits' | 'danger'> }) {
-  const [period, setPeriod] = useState('month');
-  const [request, setRequest] = useState('');
-  const empty = state === 'empty';
-  const noPlan = state === 'no-plan';
-  const base = state === 'extreme' ? 12_480_000 : state === 'over' ? 1_120_000 : state === 'warning' ? 840_000 : 642_000;
-  const amount = Math.round(base * (period === 'week' ? 0.32 : period === 'thirty' ? 0.85 : 1));
-  const labels = state === 'long' ? ['사용자 요청의 맥락을 빠짐없이 검토하는 한국어 에이전트 대화', 'claude-sonnet-agentdesk-long-context-evaluation-2026-10-18T090000Z', '문서·코드베이스 검색', '팀을 위한 실행 결과 요약'] : ['에이전트 대화', '도구 호출 · Codex', '문서 검색', '실행 결과 요약'];
-  const weights = [0.46, 0.29, 0.16];
-  const portions = weights.map((weight) => Math.round(amount * weight));
-  const categories: UsageCategory[] = labels.map((label, index) => ({ label, value: index === 3 ? amount - portions.reduce((sum, value) => sum + value, 0) : portions[index] }));
-  if (period === 'week') categories.splice(2, 1, { label: '일정 자동화', value: portions[2] });
-  if (period === 'thirty') categories.splice(0, 1, { label: labels[0], value: portions[0] });
-  const count = period === 'week' ? 7 : period === 'thirty' ? 30 : 31;
-  const measuredCount = period === 'month' ? 18 : count;
-  const dayWeights = Array.from({ length: measuredCount }, (_, index) => 165 + ((index * 73) % 350));
-  const weightTotal = dayWeights.reduce((sum, weight) => sum + weight, 0);
-  const dayValues = dayWeights.map((weight) => Math.floor(amount * weight / weightTotal));
-  dayValues[dayValues.length - 1] += amount - dayValues.reduce((sum, value) => sum + value, 0);
-  const days: UsageDay[] = Array.from({ length: count }, (_, index) => ({ label: `10월 ${index + 1}일`, value: index < measuredCount ? dayValues[index] : null }));
-  return <div className="aui-usage-meter-demo" data-narrow={state === 'narrow' || undefined}>
-    <UsageMeter total={noPlan ? 0 : 1_000_000} used={empty ? [] : categories} title={state === 'long' ? 'Claude 계정의 모든 에이전트가 함께 사용하는 5시간 토큰 한도' : 'Claude 5시간 사용량'} plan={state === 'long' ? 'AgentDesk workspace-for-long-running-agent-research-and-development' : 'AgentDesk Team'} unit="토큰" limits={empty || noPlan ? [] : [
-      { label: '동시 세션', used: state === 'over' || state === 'extreme' ? 10 : state === 'warning' ? 8.4 : 6, total: 10, unit: '개' },
-      { label: '실행 로그', used: state === 'fractional' ? 2 : 2.6, total: state === 'fractional' ? 5.5 : 5, unit: 'GB', decimals: state === 'fractional' ? 1 : undefined },
-      { label: '연결 채널', used: 12, total: state === 'fractional' ? Infinity : null, unit: '개' },
-    ]} periods={state === 'single-period' ? [{ id: 'month', label: '이번 달' }] : [{ id: 'month', label: '이번 달' }, { id: 'thirty', label: '30일' }, { id: 'week', label: '7일' }]} period={period} onPeriodChange={setPeriod} resetAt={noPlan ? 'not-a-date' : '2026-11-01T00:00:00Z'} daily={empty || noPlan ? [] : days} onUpgrade={(next) => setRequest(next === 'ok' ? '업그레이드 요청을 전달했습니다.' : `크레딧 추가 요청을 전달했습니다. (${next === 'warn' ? '경고' : '한도'})`)} />
-    {request && <p className="aui-usage-meter-demo-feedback" role="status">{request}</p>}
-  </div>;
-}

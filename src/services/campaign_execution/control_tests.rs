@@ -158,6 +158,7 @@ pub(crate) fn stop(state: &CampaignState, mode: StopMode) -> CampaignState {
     )
 }
 
+#[cfg(test)]
 fn error(state: &CampaignState, command: Command, expected: RejectionCode) {
     assert_eq!(
         decide(state, &envelope(command)).unwrap_err().code,
@@ -165,6 +166,7 @@ fn error(state: &CampaignState, command: Command, expected: RejectionCode) {
     );
 }
 
+#[cfg(test)]
 fn observe(state: &CampaignState, observation: ActionObservation) -> CampaignState {
     step(
         state,
@@ -176,6 +178,7 @@ fn observe(state: &CampaignState, observation: ActionObservation) -> CampaignSta
     )
 }
 
+#[cfg(test)]
 fn acknowledge(state: &CampaignState) -> CampaignState {
     let run = state.run.as_ref().unwrap();
     let target = run.actions["action"].target.clone();

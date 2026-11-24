@@ -20,6 +20,7 @@ use crate::services::provider::ProviderKind;
 //   * `headless_turn` — headless agent-turn reserve/start API
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
+pub(in crate::services::discord) mod boot_hold;
 mod consumer_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
@@ -90,8 +91,6 @@ pub(crate) use thread_turn::ThreadTurnRuntime;
 mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
-#[cfg(test)]
-pub(crate) use super::tmux_watcher_registry::owner_publication_fence_held_for_tests;
 pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
 pub(in crate::services::discord) mod watcher_respawn;
 #[cfg(all(test, unix))]
@@ -117,13 +116,11 @@ pub(crate) use super::turn_presence::supervisor::{
 };
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
+#[allow(unused_imports)]
+pub use crate::services::discord::outbound::send_gate::is_allowed_send_source_for;
 pub(crate) use crate::services::discord::outbound::send_gate::{
     ManualOutboundOptions, send_message_with_backends,
     send_message_with_backends_and_delivery_options,
-};
-#[allow(unused_imports)]
-pub use crate::services::discord::outbound::send_gate::{
-    SendCallerClass, is_allowed_send_source_for,
 };
 #[allow(unused_imports)]
 pub use headless_turn::HeadlessAgentTurnReservation;

@@ -1,12 +1,16 @@
 //! Acceptance tests for the single derived run-completion writer: readiness
 //! blockers, transactional slot release and notification, idempotency.
 
-use super::runs::{
+use crate::db::auto_queue::run_completion_barrier_tests::{COMPLETION_BARRIER, CompletionBarrier};
+use crate::db::auto_queue::runs::{
     RunCompletionBlockedReason, RunCompletionOutcome, acquire_run_advisory_xact_lock_on_pg_tx,
 };
-use super::test_support::TestPostgresDb;
-use super::{ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions, update_entry_status_on_pg};
-use super::{finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg};
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::auto_queue::{ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions};
+use crate::services::auto_queue::transactions::update_entry_status_on_pg;
+use crate::services::auto_queue::transactions::{
+    finalize_run_if_ready_on_pg_tx, finalize_run_if_ready_pg,
+};
 use sqlx::PgPool;
 
 async fn setup_pool(pg_db: &TestPostgresDb) -> PgPool {
@@ -201,26 +205,6 @@ async fn grace_window_blocks_every_derived_entry_point_pg() {
     pg_db.drop().await;
 }
 
-#[derive(Clone)]
-struct CompletionBarrier {
-    point: &'static str,
-    reached: std::sync::Arc<tokio::sync::Notify>,
-    resume: std::sync::Arc<tokio::sync::Notify>,
-}
-
-tokio::task_local! {
-    static COMPLETION_BARRIER: CompletionBarrier;
-}
-
-pub(super) async fn pause_completion_at(point: &str) {
-    if let Ok(barrier) = COMPLETION_BARRIER.try_with(Clone::clone)
-        && barrier.point == point
-    {
-        barrier.reached.notify_one();
-        barrier.resume.notified().await;
-    }
-}
-
 async fn paused_completion(
     pool: &PgPool,
     point: &'static str,
@@ -291,11 +275,11 @@ async fn grace_writer_committed_after_grace_read_blocks_completion_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db).await;
     seed_entry(&pool, "entry-done", "failed").await;
-    let engine = super::run_admission_pg_tests::policy_engine(&pool);
+    let engine = crate::krx_db_b_tests::run_admission_pg::policy_engine(&pool);
     let (completion, resume) = paused_completion(&pool, "grace_read").await;
     let opened = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        super::run_admission_pg_tests::begin_grace(&engine, "run-1"),
+        crate::krx_db_b_tests::run_admission_pg::begin_grace(&engine, "run-1"),
     )
     .await
     .expect("grace writer commits while the finalizer is paused")
@@ -340,7 +324,7 @@ async fn completion_after_writer_waits<T>(
     let (completion, resume) = paused_completion(pool, point).await;
     let writer = start_writer(pool.clone());
     let waited = crate::test_support::wait::poll_within(
-        async || super::run_admission_pg_tests::lock_waiter_sample(pool, &writer).await,
+        async || crate::krx_db_b_tests::run_admission_pg::lock_waiter_sample(pool, &writer).await,
         std::time::Duration::from_secs(5),
         "completion writer lock waiter",
     )
@@ -370,11 +354,11 @@ async fn gate_saved_after_readiness_read_blocks_completion_pg() {
         let (outcome, saved, waited) =
             completion_after_writer_waits(&pool, "readiness_read", |pool| {
                 tokio::spawn(async move {
-                    super::phase_gates::save_phase_gate_state_on_pg(
+                    crate::db::auto_queue::phase_gates::save_phase_gate_state_on_pg(
                         &pool,
                         "run-1",
                         0,
-                        &super::phase_gates::PhaseGateStateWrite {
+                        &crate::db::auto_queue::phase_gates::PhaseGateStateWrite {
                             status: status.to_string(),
                             ..Default::default()
                         },
@@ -422,7 +406,7 @@ async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
     .await;
     // Grace is still open behind the gate: clearing the gate exposes it.
     assert!(
-        super::phase_gates::clear_phase_gate_state_on_pg(&pool, "run-1", 0)
+        crate::db::auto_queue::phase_gates::clear_phase_gate_state_on_pg(&pool, "run-1", 0)
             .await
             .expect("clear phase gate through its writer")
     );
@@ -449,7 +433,7 @@ async fn entry_reopened_after_readiness_read_blocks_completion_pg() {
                 update_entry_status_on_pg(
                     &pool,
                     "entry-done",
-                    super::ENTRY_STATUS_PENDING,
+                    crate::db::auto_queue::ENTRY_STATUS_PENDING,
                     "test_reopen",
                     &EntryStatusUpdateOptions::default(),
                 )

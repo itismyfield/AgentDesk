@@ -4,6 +4,7 @@ use crate::services::cluster::intake_router_hook::owner_record::{
 };
 use crate::services::cluster::intake_router_hook::pg_tests::ctx_for_channel;
 use crate::services::cluster::intake_router_hook::*;
+use sqlx::PgPool;
 
 struct Config {
     _guards: [crate::config::TestEnvVarGuard; 2],
@@ -47,7 +48,7 @@ fn active(channel: &str) -> impl FnOnce(&mut crate::config::ClusterIntakeRouting
     }
 }
 fn entered(channel: &str) -> usize {
-    super::ENTERED
+    crate::services::cluster::intake_router_hook::o_input::fallback_route::ENTERED
         .lock()
         .unwrap()
         .iter()
@@ -342,7 +343,9 @@ async fn input_fallback_replans_head_when_observation_changes_before_plan_pg() {
     let _config = install(active(CHANNEL));
     let f = Fixture::new(CHANNEL).await;
     offline(&f, "mac-a").await;
-    *super::BEFORE_PLAN.lock().unwrap() =
+    *crate::services::cluster::intake_router_hook::o_input::fallback_route::BEFORE_PLAN
+        .lock()
+        .unwrap() =
         Some("UPDATE worker_nodes SET last_heartbeat_at=NOW() WHERE instance_id='mac-a'".into());
     let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
     ctx.leader_instance_id = "mac-b";

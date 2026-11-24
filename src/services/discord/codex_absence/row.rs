@@ -30,8 +30,10 @@ pub(crate) fn install(read: Reader) {
 
 /// The channel's saved Codex row, read without repair; an uninstalled reader reads as an error.
 pub(super) fn load_read_only(channel: u64) -> Result<Option<CodexRow>, String> {
-    #[cfg(test)]
-    crate::services::discord::install_codex_absence_reader();
-    let read = READER.get().ok_or("codex inflight reader not installed")?;
+    let read = READER.get();
+    // Test builds panic instead: a test reaching this port installs it at its own entry point.
+    #[cfg(any(test, feature = "test-support"))]
+    let read = Some(read.expect("codex inflight reader not installed"));
+    let read = read.ok_or("codex inflight reader not installed")?;
     read(channel)
 }

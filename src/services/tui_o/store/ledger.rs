@@ -222,7 +222,7 @@ pub struct LedgerState {
     output_origins:
         BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     latest: HashMap<(UnitKey, u32), u64>,
-    excluded: BTreeMap<UnitKey, String>,
+    pub(crate) excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
     resolved: HashMap<SourceId, (u64, Option<Box<BoundaryEvidence>>)>,
     violation: Option<String>,
@@ -232,7 +232,7 @@ pub struct LedgerState {
 }
 
 impl LedgerState {
-    fn starting_at(initial_anchor: u64) -> Self {
+    pub(crate) fn starting_at(initial_anchor: u64) -> Self {
         Self {
             anchor: initial_anchor,
             floor: initial_anchor,
@@ -444,7 +444,7 @@ impl LedgerState {
             && (self.anchor >> 22).saturating_sub(msg_id >> 22) <= POST_ORDER_SKEW_MS
     }
 
-    pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
+    pub(crate) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
             LedgerEntry::InputNotice { entry } => {
                 input_notices::settlement::apply(self, at, *entry);
@@ -652,7 +652,7 @@ pub(super) fn create_empty(path: &Path) -> Result<(), StoreError> {
     Ok(fsync_parent_dir(path)?)
 }
 
-pub(super) fn append(
+pub(crate) fn append(
     path: &Path,
     at: DateTime<Utc>,
     entry: &LedgerEntry,
@@ -750,7 +750,7 @@ impl Unsent {
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
-pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+pub(crate) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 

@@ -8,8 +8,8 @@ use regex::Regex;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use tokio::task::JoinHandle;
 
-use super::PhaseGateStateWrite;
-use super::test_support::TestPostgresDb;
+use crate::db::auto_queue::PhaseGateStateWrite;
+use crate::db::auto_queue::test_support::TestPostgresDb;
 
 const AGENT: &str = "agent-owner-guard";
 const CARD: &str = "card-owner-guard";
@@ -368,10 +368,16 @@ fn spawn_save(
     pool: &PgPool,
     run_id: &'static str,
     dispatch_id: &'static str,
-) -> JoinHandle<Result<super::PhaseGateSaveResult, String>> {
+) -> JoinHandle<Result<crate::db::auto_queue::PhaseGateSaveResult, String>> {
     let pool = pool.clone();
     tokio::spawn(async move {
-        super::save_phase_gate_state_on_pg(&pool, run_id, PHASE, &gate_state(&[dispatch_id])).await
+        crate::db::auto_queue::save_phase_gate_state_on_pg(
+            &pool,
+            run_id,
+            PHASE,
+            &gate_state(&[dispatch_id]),
+        )
+        .await
     })
 }
 
@@ -579,7 +585,11 @@ fn retry_meta(origin: &str) -> crate::db::dispatched_sessions::RetryDispatchMeta
 fn spawn_retry(pool: &PgPool, origin: &'static str) -> JoinHandle<Result<String, String>> {
     let pool = pool.clone();
     tokio::spawn(async move {
-        crate::db::dispatched_sessions::create_retry_dispatch_pg(&pool, &retry_meta(origin)).await
+        crate::services::auto_queue::transactions::create_retry_dispatch_pg(
+            &pool,
+            &retry_meta(origin),
+        )
+        .await
     })
 }
 

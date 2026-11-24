@@ -616,7 +616,7 @@ fn creation_fault(step: &str) -> io::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::config::TestEnvVarGuard as Guard;
-    use crate::services::discord::stamp_spawn_markers;
+    use crate::services::tmux_common::spawn_markers::stamp_spawn_markers;
     use SessionPresence::{Missing, Present, ProbeFailed};
     use std::os::unix::fs::PermissionsExt;
 
@@ -841,7 +841,11 @@ pub(crate) mod tests {
         let _value = Guard::capture_after_shared_test_env_lock("AGENTDESK_BINDING_CONTEXT");
         unsafe { std::env::remove_var("AGENTDESK_BINDING_CONTEXT") };
         let p = prepared();
-        crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, None).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            &p.context.tmux_session,
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             observe_spawn_nonce_marker(&p.context.tmux_session),
             SpawnNonceMarker::Known(_)
@@ -850,7 +854,11 @@ pub(crate) mod tests {
             HookBindingEnvelope::capture("claude").context,
             CapturedContext::Absent(AbsentReason::EnvUnset)
         );
-        crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, Some(&p)).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            &p.context.tmux_session,
+            Some(&p),
+        )
+        .unwrap();
         assert_eq!(
             HookBindingEnvelope::capture("claude").context,
             CapturedContext::Absent(AbsentReason::EnvUnset)

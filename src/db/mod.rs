@@ -13,13 +13,16 @@ pub(crate) mod decisions;
 #[cfg(test)]
 mod discarded_tx_result_scan_tests;
 pub mod dispatch_semaphores;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "dispatch_test_db_tests.rs"]
+pub(crate) mod dispatch_test_db;
 #[path = "dispatched_sessions/canonical_identity.rs"]
 pub(crate) mod dispatched_session_canonical_identity;
 #[path = "dispatched_sessions/rebind_override.rs"]
 pub(crate) mod dispatched_session_rebind_override;
 pub mod dispatched_sessions;
 pub mod dispatches;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod fixture_target;
 pub mod idempotency;
 pub mod imsg_reply;
@@ -34,6 +37,10 @@ pub mod kanban;
 pub mod kanban_cards;
 pub(crate) mod message_outbox;
 pub(crate) mod o_channel_activation;
+// Stays at its allowlisted path: its forwarding loop waits on a channel without a cap.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "../services/health_diagnostics/pg_wire_proxy_tests.rs"]
+pub(crate) mod pg_wire_proxy;
 pub mod postgres;
 pub mod prompt_manifests;
 pub(crate) use adk_store::provider_session_prompts;
@@ -46,7 +53,5 @@ pub(crate) mod session_evidence;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;
-#[cfg(test)]
-pub(crate) mod status_check_migration_tests;
 pub(crate) mod timestamps;
 pub mod turns;

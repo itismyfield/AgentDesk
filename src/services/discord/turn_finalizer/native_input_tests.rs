@@ -945,6 +945,7 @@ fn native_8148_b2b2_runtime_witness_rejects_nonce_aba_under_row_lock() {
     let (outcome, detail) = inflight::GuardedClearOutcome::for_native_snapshot_with_detail(
         &ProviderKind::Claude,
         &captured,
+        false,
     );
     assert_eq!(outcome, inflight::GuardedClearOutcome::UserMsgMismatch);
     assert_eq!(detail.reason, "native_runtime_changed");
@@ -5679,3 +5680,6 @@ async fn native_8148_receipt_live_and_boot_resume_without_manual_event_pg() {
 mod completion;
 #[path = "native_terminal_tests.rs"]
 mod terminal;
+
+#[path = "native_receipt_tests.rs"]
+mod native_receipt_tests;

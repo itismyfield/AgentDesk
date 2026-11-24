@@ -11,12 +11,12 @@ fn snapshot_kanban_diagnostic_uses_published_manager_channel() {
         );
         let mut headers = HeaderMap::new();
         headers.insert("x-channel-id", "41".parse().unwrap());
-        let (_, values) = crate::config::snapshot_reader_tests::capture_identity(|| {
+        let (_, values) = crate::api_caller_observability::capture_identity(|| {
             log_kanban_identity_consumption("snapshot fixture", &headers, &None, "fixture");
         });
         assert_eq!(values, vec![true]);
         fixture.reload();
-        let (_, values) = crate::config::snapshot_reader_tests::capture_identity(|| {
+        let (_, values) = crate::api_caller_observability::capture_identity(|| {
             log_kanban_identity_consumption("snapshot fixture", &headers, &None, "fixture");
         });
         assert_eq!(values, vec![false]);

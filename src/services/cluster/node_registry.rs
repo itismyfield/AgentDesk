@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
 use crate::config::{ClusterConfig, ClusterRole, Config};
 use crate::db::postgres::AdvisoryLockLease;
+use crate::services::cluster::dispatch_hooks::DispatchQueueHooks;
 use crate::services::cluster::session_routing::worker_api_base_url_from_capabilities;
 
 pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
@@ -117,7 +119,11 @@ fn auto_node_can_attempt_leadership(config: &Config) -> bool {
     })
 }
 
-pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> ClusterRuntime {
+pub(crate) async fn bootstrap(
+    config: &Config,
+    pg_pool: Option<PgPool>,
+    hooks: DispatchQueueHooks,
+) -> ClusterRuntime {
     if !config.cluster.enabled {
         tracing::info!("[cluster] disabled; running in standalone hub mode");
         return ClusterRuntime::single_node();
@@ -211,7 +217,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         tracing::warn!("[cluster] worker MCP endpoint registration failed: {error}");
     }
     if should_wake_wait_queue_after_node_join(&leader_active) {
-        crate::services::dispatches::wait_queue::spawn_wait_queue_wake_pg(
+        (hooks.wake_wait_queue)(
             pool.clone(),
             config.cluster.clone(),
             "node_join",
@@ -226,6 +232,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         stale_reassignment_pool,
         stale_reassignment_config,
         leader_active.clone(),
+        hooks.reassign_stale_claim_owners,
     );
 
     spawn_heartbeat_loop(
@@ -435,6 +442,7 @@ fn spawn_stale_claim_owner_reassignment_loop(
     pool: PgPool,
     cluster_config: ClusterConfig,
     leader_active: Arc<AtomicBool>,
+    reassign: for<'a> fn(&'a PgPool, &'a ClusterConfig) -> BoxFuture<'a, Result<usize, String>>,
 ) {
     let interval_secs = cluster_config.heartbeat_interval_secs.max(1);
     crate::services::resident_loops::spawn_resident("cluster_claim_reassignment", async move {
@@ -460,12 +468,7 @@ fn spawn_stale_claim_owner_reassignment_loop(
                 }
                 continue;
             }
-            match crate::services::dispatches::outbox_claiming::reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(
-                &pool,
-                &cluster_config,
-            )
-            .await
-            {
+            match reassign(&pool, &cluster_config).await {
                 Ok(0) => {}
                 Ok(count) => {
                     tracing::info!(

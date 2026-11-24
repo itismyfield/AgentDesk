@@ -1,6 +1,8 @@
 use super::{health, *};
 use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
+#[cfg(unix)]
+mod boot_sigterm;
 mod deferred_restart;
 mod framework_setup;
 mod gateway_handback_breaker;
@@ -76,7 +78,8 @@ use self::shutdown::{run_bot_run_gateway_backend, run_bot_spawn_sigterm_handler}
 use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
 
 pub(crate) struct RunBotContext {
-    pub(crate) replay_restart: Option<crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
+    pub(crate) replay_restart:
+        Option<crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot>,
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,

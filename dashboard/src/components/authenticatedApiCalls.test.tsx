@@ -139,6 +139,23 @@ describe("dashboard widgets under token authentication", () => {
     expect(view.textContent).toContain("40%");
   });
 
+  it("home usage does not request rate limits again when the page already loaded them", async () => {
+    serve({});
+    const view = await render(
+      <MemoryRouter>
+        <HomeUsageCard
+          tr={(_ko, en) => en}
+          isKo={false}
+          usageState={{ data: [], failed: false, at: 1 }}
+          runtimeState={{ data: null, failed: false, at: null }}
+        />
+      </MemoryRouter>,
+    );
+    expect(callsTo("GET /api/rate-limits")).toHaveLength(0);
+    expect(callsTo("GET /api/settings/runtime-config")).toHaveLength(0);
+    expect(view.textContent).toContain("No measurements");
+  });
+
   it("receipt sends the tab token, a 401 starts re-login, and the next credential never sees the old receipt", async () => {
     serve({ "GET /api/receipt?period=month": ok(receipt("first-credential")) });
     let view = await render(<ReceiptWidget t={t} />);

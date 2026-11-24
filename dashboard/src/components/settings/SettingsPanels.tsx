@@ -68,7 +68,7 @@ const STATUS_DOT_TONE: Record<"ok" | "warn" | "unknown", DotTone> = {
 /** Chips for an unsaved change, an override and how the value applies; the phone row keeps only the first. */
 export function ItemChip({ item, tr, all = false }: { item: CatalogItem; tr: Tr; all?: boolean }) {
   const apply = applyChip(item, tr);
-  const pillClass = all ? "min-w-[76px] justify-center" : undefined;
+  const pillClass = all ? "justify-center whitespace-nowrap" : undefined;
   const chips = [
     item.draft !== null ? <Chip key="draft" tone="warn" className={pillClass}>{tr("바뀜", "Changed")}</Chip> : null,
     item.overridden ? <Chip key="override" tone="accent" className={pillClass}>{tr("덮어씀", "Overridden")}</Chip> : null,

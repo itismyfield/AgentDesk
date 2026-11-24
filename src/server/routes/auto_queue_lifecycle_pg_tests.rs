@@ -498,10 +498,13 @@ mod tests {
         .unwrap();
 
         assert!(
-            crate::db::auto_queue::finalize_run_if_ready_pg(&pool, "run-stale-rebind")
-                .await
-                .expect("canonically complete run after route status read")
-                .is_completed()
+            crate::services::auto_queue::transactions::finalize_run_if_ready_pg(
+                &pool,
+                "run-stale-rebind"
+            )
+            .await
+            .expect("canonically complete run after route status read")
+            .is_completed()
         );
         assert_eq!(run_status(&pool, "run-stale-rebind").await, "completed");
         assert_eq!(slot_run(&pool).await, None);

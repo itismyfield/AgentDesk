@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 #[allow(unused_imports)]
-use super::entries::resume_session_id_from_context;
+use crate::db::auto_queue::entries::resume_session_id_from_context;
 #[allow(unused_imports)]
-use super::*;
+use crate::db::auto_queue::*;
 
 #[cfg(test)]
 mod resume_session_context_tests {
@@ -106,16 +106,18 @@ mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
-        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
-        finalize_completed_dispatch_terminal_entry_on_pg_tx, finalize_run_if_ready_pg,
-        pause_run_on_pg, record_consultation_dispatch_on_pg, record_entry_dispatch_failure_on_pg,
-        resume_run_on_pg, save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
-        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
-        update_entry_status_on_pg, update_entry_status_on_pg_tx,
+        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg, pause_run_on_pg,
+        record_consultation_dispatch_on_pg, resume_run_on_pg, save_phase_gate_state_on_pg,
+        slot_has_active_dispatch_pg, slot_has_recent_terminal_auto_queue_dispatch_pg,
     };
     use crate::db::auto_queue::runs::acquire_run_advisory_xact_lock_on_pg_tx;
     use crate::db::auto_queue::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::auto_queue::transactions::{
+        finalize_completed_dispatch_terminal_entry_on_pg_tx, finalize_run_if_ready_pg,
+        record_entry_dispatch_failure_on_pg, sync_dispatch_terminal_entries_on_pg_tx,
+        update_entry_status_on_pg, update_entry_status_on_pg_tx,
+    };
     use crate::test_support::wait::poll_within;
     use chrono::{DateTime, Utc};
     use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -2305,8 +2307,9 @@ mod card_soft_delete_pg_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::kanban_cards::{
         CardDeleteOutcome, IssueCardUpsert, ListCardsFilter, card_status_pg, list_cards_pg,
-        load_card_json_pg, soft_delete_card_pg, upsert_card_from_issue_pg,
+        load_card_json_pg, upsert_card_from_issue_pg,
     };
+    use crate::services::kanban_cards::entry_transactions::soft_delete_card_pg;
     use sqlx::PgPool;
 
     async fn setup(pg_db: &TestPostgresDb) -> PgPool {

@@ -88,7 +88,7 @@ async fn operator_resume_middle_piece_and_following_output_survive_actor_restart
         let (stop, task) = spawn_as(harness.writer(), provider);
         polls(3).await;
         let sent = harness.port.posts();
-        let mut expected: Vec<_> = crate::services::discord::formatting::split_for_shadow(&body)
+        let mut expected: Vec<_> = crate::domain::message_split::split_for_shadow(&body)
             .into_iter()
             .map(|(payload, _)| payload)
             .collect();

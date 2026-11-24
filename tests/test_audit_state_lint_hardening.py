@@ -40,6 +40,12 @@ class TestRegionTests(unittest.TestCase):
 
         self.assertIn(3, lines)
 
+    def test_test_support_gate_marks_module_as_test_region_and_its_negation_does_not(self) -> None:
+        gate = 'any(test, feature = "test-support")'
+        for cfg, expected in ((gate, True), (f"not({gate})", False)):
+            lines = self.classified_lines(f"#[cfg({cfg})]\nmod probes {{\n    probe().unwrap();\n}}\n")
+            self.assertEqual(3 in lines, expected, cfg)
+
     def test_cfg_any_test_only_attribute_marks_module_as_test_region(self) -> None:
         lines = self.classified_lines(
             "#[cfg(any(test))]\nmod alternate_probes {\n    probe().unwrap();\n}\n"
@@ -367,6 +373,10 @@ class SourceTextGuardAuditTests(AuditRepoCase):
             "lexer": "    let text = crate::test_support::strip_rust_comments(TEXT);\n",
             "manifest-rooted tree walk": (
                 '    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));\n'
+                '    let text = std::fs::read_dir(root.join("src"));\n'
+            ),
+            "root-constant tree walk": (
+                "    let root = std::path::Path::new(crate::runtime_layout::REPO_ROOT);\n"
                 '    let text = std::fs::read_dir(root.join("src"));\n'
             ),
             "cwd-relative read": '    let text = std::fs::read_to_string("src/lib.rs");\n',

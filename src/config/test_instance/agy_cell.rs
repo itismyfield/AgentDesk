@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::{checked_path, rejected};
 
 pub(super) const AGY_LOGIN_MARKER: &str = "AGENTDESK_TEST_AGY_LOGIN";
+const GEMINI_API_KEY: &str = "gemini_api_key";
 
 /// Providers and the exact credential basenames (sorted) one profile admits.
 #[derive(Debug)]
@@ -15,6 +16,9 @@ pub(super) struct Profile {
     pub(super) providers: &'static [&'static str],
     #[cfg(unix)]
     pub(super) credentials: &'static [&'static str],
+    /// Optional provider keys beside the bot tokens; they never take part in Discord identity.
+    #[cfg(unix)]
+    pub(super) provider_credentials: &'static [&'static str],
 }
 
 const TUI_LIVE: Profile = Profile {
@@ -26,6 +30,8 @@ const TUI_LIVE: Profile = Profile {
         "codex_bot_token",
         "notify_bot_token",
     ],
+    #[cfg(unix)]
+    provider_credentials: &[],
 };
 
 const AGY_HEADLESS: Profile = Profile {
@@ -36,6 +42,8 @@ const AGY_HEADLESS: Profile = Profile {
         "antigravity_bot_token",
         "notify_bot_token",
     ],
+    #[cfg(unix)]
+    provider_credentials: &[GEMINI_API_KEY],
 };
 
 /// Declarations without the agy profile name keep the original two-provider contract.
@@ -51,6 +59,7 @@ pub(super) fn profile(manifest: &Value) -> &'static Profile {
 pub(super) struct AgyLogin {
     pub(super) home: PathBuf,
     pub(super) cli: PathBuf,
+    api_key: PathBuf,
 }
 
 impl AgyLogin {
@@ -93,7 +102,8 @@ impl AgyLogin {
         if !metadata.is_file() || !executable {
             return Err(rejected());
         }
-        Ok(Some(Self { home, cli }))
+        let api_key = root.join("credential").join(GEMINI_API_KEY);
+        Ok(Some(Self { home, cli, api_key }))
     }
 
     pub(super) fn provider_env(&self) -> BTreeMap<String, String> {
@@ -103,12 +113,19 @@ impl AgyLogin {
         ])
     }
 
+    /// The Gemini key for agy API-key mode, from the instance credential file when present.
+    pub(super) fn api_key_env(&self) -> Result<Option<(&'static str, String)>, String> {
+        Ok(read_private_credential(&self.api_key)?.map(|value| ("GEMINI_API_KEY", value)))
+    }
+
     /// agy reads MCP servers from its HOME; only an absent or empty server map may spawn.
     pub(super) fn verify_no_mcp_servers(&self) -> Result<(), String> {
         let path = self.home.join(".gemini/config/mcp_config.json");
         checked_path(&path)?;
         match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // agy itself creates this file empty on its first run.
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(()),
             Ok(metadata) if metadata.is_file() && metadata.len() <= 1024 * 1024 => {}
             _ => return Err(rejected()),
         }
@@ -136,6 +153,46 @@ impl AgyLogin {
     }
 }
 
+/// Absent is `None`; anything but a private one-line regular file is refused.
+#[cfg(unix)]
+fn read_private_credential(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    checked_path(path)?;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        file => file.map_err(|_| rejected())?,
+    };
+    let metadata = file.metadata().map_err(|_| rejected())?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+    {
+        return Err(rejected());
+    }
+    let mut value = String::new();
+    file.take(4097)
+        .read_to_string(&mut value)
+        .map_err(|_| rejected())?;
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(rejected());
+    }
+    Ok(Some(value))
+}
+
+#[cfg(not(unix))]
+fn read_private_credential(_path: &Path) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
 #[cfg(all(test, unix))]
 #[path = "agy_cell_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

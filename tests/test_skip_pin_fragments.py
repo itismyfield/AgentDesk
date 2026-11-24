@@ -196,7 +196,7 @@ class FailClosedTests(TempRoot):
 
     def test_invalid_fragments_fail_the_pin_import_in_a_fresh_process(self) -> None:
         for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "rust_lex.py",
-                     "registration_fragments.py", "generate_inventory_docs.py"):
+                     "registration_fragments.py", "generate_inventory_docs.py", "rust_cfg.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         write(self.root, SPLIT, block(NAMES[1], ["src/helper.rs"]))
         self.fragment("mac-mini-1-base.txt", "basename | src/a_tests.rs")
@@ -219,7 +219,8 @@ class WriterGateVerdictTests(TempRoot):
         write(self.root, "src/main.rs", "mod prod;\n#[cfg(test)]\nmod helper;\nfn main() {}\n")
         for rel in ("src/prod.rs", "src/helper.rs", "src/alpha_tests.rs", "src/beta/tests.rs"):
             write(self.root, rel, "fn fixture() {}\n")
-        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py", "rust_lex.py"):
+        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py", "rust_lex.py",
+                     "rust_cfg.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         self.real = (ROOT / LEGACY).read_text("utf-8")
         self.loads = 0
@@ -267,6 +268,17 @@ class WriterGateVerdictTests(TempRoot):
         for ok, message in after:
             self.assertFalse(ok, "a formerly test-only helper must enter the writer scan")
             self.assertIn("pin-only (no longer skipped): src/helper.rs", message)
+
+    def test_a_test_support_gated_helper_stays_skipped_and_its_negation_does_not(self) -> None:
+        pinned, gate = ["src/helper.rs"], 'any(test, feature = "test-support")'
+        for cfg in (gate, f"all({gate}, unix)"):
+            write(self.root, "src/main.rs", f"mod prod;\n#[cfg({cfg})]\nmod helper;\nfn main() {{}}\n")
+            self.assertTrue(all(ok for ok, _ in self.verdicts(pinned)), cfg)
+        for cfg in (f"not({gate})", 'any(test, feature = "other")'):
+            write(self.root, "src/main.rs", f"mod prod;\n#[cfg({cfg})]\nmod helper;\nfn main() {{}}\n")
+            for ok, message in self.verdicts(pinned):
+                self.assertFalse(ok, cfg)
+                self.assertIn("pin-only (no longer skipped): src/helper.rs", message)
 
 
 class SyncWriterTests(TempRoot):

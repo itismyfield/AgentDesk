@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::Row;
 
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 mod catalog;
 use catalog::CONFIG_KEYS;
@@ -16,7 +16,7 @@ pub use catalog::{RuntimeConfigResponse, SettingsConfigEntriesResponse, Settings
 mod resolve;
 mod runtime_config_put;
 pub mod startup;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use resolve::clamp_retry_limit;
 pub use resolve::{
     CONTEXT_COMPACT_LOWER_BOUND_TOKENS, CONTEXT_COMPACT_PERCENT, CONTEXT_COMPACT_PERCENT_CLAUDE,
@@ -460,7 +460,7 @@ pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec
 
     actions.push(KvSeedAction::PutIfAbsent {
         key: "workspace_root".to_string(),
-        value: env!("CARGO_MANIFEST_DIR").to_string(),
+        value: crate::runtime_layout::REPO_ROOT.to_string(),
     });
 
     for key in RETIRED_CONFIG_KEYS {
@@ -810,11 +810,11 @@ fn seeded_runtime_config_map(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
-    pub(super) struct TestDatabase {
+    pub(crate) struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -822,7 +822,7 @@ mod tests {
     }
 
     impl TestDatabase {
-        pub(super) async fn create() -> Self {
+        pub(crate) async fn create() -> Self {
             crate::db::postgres::postgres_test_database_url_base().expect(
                 "POSTGRES_TEST_DATABASE_URL_BASE required for settings runtime-config PG tests",
             ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
@@ -833,11 +833,11 @@ mod tests {
         async fn create_with_lifecycle(
             lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         ) -> Self {
-            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let admin_url = crate::db::dispatch_test_db::postgres_admin_database_url();
             let database_name = format!("agentdesk_settings_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!(
                 "{}/{}",
-                crate::dispatch::test_support::postgres_base_database_url(),
+                crate::db::dispatch_test_db::postgres_base_database_url(),
                 database_name
             );
             crate::db::postgres::create_test_database(
@@ -855,7 +855,7 @@ mod tests {
             }
         }
 
-        pub(super) async fn connect(&self) -> sqlx::PgPool {
+        pub(crate) async fn connect(&self) -> sqlx::PgPool {
             let pool = crate::db::postgres::connect_test_pool(
                 &self.database_url,
                 "settings runtime-config pg tests",
@@ -875,7 +875,7 @@ mod tests {
             pool
         }
 
-        pub(super) async fn drop(self) {
+        pub(crate) async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,
@@ -1366,51 +1366,6 @@ mod tests {
 
         assert_runtime_blob_and_no_mirrors(&pool, &json!({"maxEntryRetries": 99})).await;
 
-        pool.close().await;
-        database.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cli_pg_put_get_set_round_trip_survives_startup_seed() {
-        let database = TestDatabase::create().await;
-        let pool = database.connect().await;
-        let mut config = crate::config::Config::default();
-        config.runtime.max_entry_retries = Some(3);
-        let service = SettingsService::new(Some(pool.clone()), Arc::new(config.clone()));
-        let cli_put = crate::cli::client::runtime_config_payload(json!({
-            "maxEntryRetries": 7
-        }))
-        .expect("normalize CLI PUT body");
-
-        service
-            .put_runtime_config(cli_put)
-            .await
-            .expect("write metadata-less CLI runtime config");
-        let cli_get = serde_json::to_value(
-            service
-                .get_runtime_config()
-                .await
-                .expect("GET runtime config after CLI PUT"),
-        )
-        .expect("serialize runtime config response");
-        let cli_round_trip = crate::cli::client::runtime_config_payload(cli_get)
-            .expect("preserve explicit keys in CLI GET-to-SET payload");
-        service
-            .put_runtime_config(cli_round_trip)
-            .await
-            .expect("write CLI GET-to-SET runtime config");
-        seed_runtime_config_defaults_pg(&pool, &config)
-            .await
-            .expect("run startup runtime-config seed");
-
-        let seeded = service
-            .get_runtime_config()
-            .await
-            .expect("GET runtime config after startup seed");
-        assert_eq!(seeded.current.get("maxEntryRetries"), Some(&json!(7)));
-        assert_eq!(seeded.explicit_keys, vec!["maxEntryRetries"]);
-
-        drop(service);
         pool.close().await;
         database.drop().await;
     }

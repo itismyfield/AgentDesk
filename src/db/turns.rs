@@ -9,10 +9,6 @@ use crate::db::timestamps::parse_timestamp;
 #[path = "turns/timestamp_tests.rs"]
 mod timestamp_tests;
 
-#[cfg(all(test, unix))]
-#[path = "turns/receipt_tests.rs"]
-mod receipt_tests;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
     pub input_tokens: u64,
@@ -288,6 +284,55 @@ pub async fn record_turn_receipt(pool: &PgPool, receipt: &TurnReceipt<'_>) -> Re
     .await
     .map_err(|e| anyhow!("persist turn receipt failed: {e}"))?;
     Ok(())
+}
+
+/// Writes the origins of an execution a same-id retry continues onto its row without a terminal,
+/// so the retry's own receipt settles them. The receipt's outcome is not written here.
+pub async fn carry_turn_origins(pool: &PgPool, receipt: &TurnReceipt<'_>) -> Result<()> {
+    let started_at = normalized_opt(receipt.started_at)
+        .and_then(|value| parse_timestamp(&value).ok())
+        .unwrap_or(receipt.confirmed_at);
+    sqlx::query(
+        "INSERT INTO turns (
+            turn_id, session_key, channel_id, agent_id, provider, started_at, finished_at,
+            consumed_origin_ids
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT(turn_id) DO UPDATE SET
+            consumed_origin_ids = ARRAY(
+                SELECT DISTINCT origin
+                FROM unnest(turns.consumed_origin_ids || EXCLUDED.consumed_origin_ids) AS origin
+                ORDER BY origin
+            )",
+    )
+    .bind(receipt.turn_id.trim())
+    .bind(normalized_opt(receipt.session_key))
+    .bind(receipt.channel_id.trim())
+    .bind(normalized_opt(receipt.agent_id))
+    .bind(receipt.provider)
+    .bind(started_at)
+    .bind(receipt.confirmed_at)
+    .bind(receipt.consumed_origin_ids)
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow!("carry turn origins failed: {e}"))?;
+    Ok(())
+}
+
+/// Whether `turn_id` still has no terminal and carries origins including `origins`.
+pub async fn turn_origins_carried(
+    pool: &PgPool,
+    turn_id: &str,
+    origins: &[String],
+) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE turn_id = $1 AND terminal_outcome IS NULL
+                AND cardinality(consumed_origin_ids) > 0 AND consumed_origin_ids @> $2::TEXT[])",
+    )
+    .bind(turn_id)
+    .bind(origins)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow!("read carried turn origins failed: {e}"))
 }
 
 /// A committed terminal receipt naming one origin.

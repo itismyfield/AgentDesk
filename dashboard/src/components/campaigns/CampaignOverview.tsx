@@ -1,4 +1,4 @@
-import { ChevronRight, LockKeyhole, Search, TriangleAlert } from "lucide-react";
+import { ChevronRight, Search, TriangleAlert } from "lucide-react";
 import { useId, useState, type CSSProperties, type ReactNode } from "react";
 import type { CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { formatRelativeTime } from "../../app/shellFormatting";
@@ -11,8 +11,10 @@ import {
   Cap, CardNote, Chip, Desc, KitCard, Num, ROW_HOVER_CLASS, Row, StatusDot, Well, cn, type DotTone,
 } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
-import { GATE_LABELS, findAgent, findTasks, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
+import { CampaignGateApprovalCard } from "./CampaignApprovalBanner";
+import { findAgent, findTasks, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
 import { LABELS, LiveChip, liveSession, type Tr } from "./campaignPresentation";
+import type { Connection } from "./serverCampaignModel";
 import { StatusMarker, nodeMarker } from "./StatusMarker";
 import { TaskRow, moveListFocus } from "./TaskListParts";
 
@@ -27,35 +29,30 @@ const SELECTED_CARD_STYLE = {
   background: "color-mix(in srgb, var(--accent) 7%, var(--bg-2))",
   "--ui-crdc-shadow-selected": "none",
 } as CSSProperties;
-const GATE_CARD_STYLE = {
-  borderColor: "color-mix(in srgb, var(--warn) 50%, var(--line))",
-  background: "color-mix(in srgb, var(--warn) 8%, var(--bg-2))",
-} as CSSProperties;
 
-/** How long an approval has waited, in minutes and then hours. */
-function waited(since: string, tr: Tr) {
-  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(since)) / 60_000));
-  return minutes < 60 ? tr(`${minutes}분째 기다려요`, `Waiting ${minutes} min`) : tr(`${Math.floor(minutes / 60)}시간째 기다려요`, `Waiting ${Math.floor(minutes / 60)} h`);
-}
 const clock = (date: Date, seconds = false) => date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined });
 // Today's entries read as a clock time; older ones lead with the month and day.
 const when = (value: string) => { const date = new Date(value); return date.toDateString() === new Date().toDateString() ? clock(date) : `${date.getMonth() + 1}/${date.getDate()} ${clock(date)}`; };
 
-/** The 현황 tab: summary numbers, what needs someone, running work as cards, the other statuses as lists, recent changes. */
-export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryExtra, recent, footer, selectedId, controls, onOpen, language, tr }: {
+/** The 현황 tab: landing approval banner, summary numbers, what needs someone, running work as cards, the other statuses as lists, recent changes. */
+export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryExtra, recent, footer, selectedId, controls, onOpen, campaignId = null, connection = "live", onApproved, language, tr }: {
   tasks: TaskView[]; limit: number | null; showPr: boolean; asOf: string | null; summaryExtra?: ReactNode;
   recent: { title: string; entries: RecentEntry[] | null; note?: string | null }; footer?: ReactNode;
-  selectedId: string | null; controls?: string; onOpen: (id: string) => void; language: string; tr: Tr;
+  selectedId: string | null; controls?: string; onOpen: (id: string) => void;
+  campaignId?: string | null; connection?: Connection; onApproved?: () => void;
+  language: string; tr: Tr;
 }) {
   const phone = useIsMobile();
   const roster = useWorkspaceAgents();
   const counts = taskCounts(tasks);
   const ko = language === "ko";
   const running = tasks.filter((task) => task.status === "running").sort((a, b) => (Date.parse(b.updatedAt ?? "") || 0) - (Date.parse(a.updatedAt ?? "") || 0));
-  const gates = tasks.filter((task) => task.gate);
+  const landingGates = tasks.filter((task) => task.gate?.gate === "landing");
+  const otherGates = tasks.filter((task) => task.gate && task.gate.gate !== "landing");
   const stuck = tasks.filter((task) => task.attention && !task.gate);
   const [allRunning, setAllRunning] = useState(false);
   const [allStuck, setAllStuck] = useState(false);
+  const [allLanding, setAllLanding] = useState(false);
   const [openStatus, setOpenStatus] = useState<CampaignNodeStatus | null>(null);
   const [listAll, setListAll] = useState(false);
   const [query, setQuery] = useState("");
@@ -81,7 +78,31 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
     placeholder={tr("제목, 번호, 담당, 세션…", "Title, ID, assignee, session…")} prefix={<Search aria-hidden />} />;
   const stat = (label: string, value: string) => <div className="grid gap-0.5"><Cap>{label}</Cap><Num className="text-lg leading-6 font-semibold text-[var(--fg)]">{value}</Num></div>;
 
+  const renderApproval = (task: TaskView) => (
+    <CampaignGateApprovalCard
+      key={task.id}
+      taskId={task.id}
+      taskTitle={task.title}
+      taskNumber={task.number}
+      gate={task.gate!}
+      stageText={task.step ? tr(...task.step) : task.stage || null}
+      prUrl={task.prUrl}
+      campaignId={campaignId}
+      connection={connection}
+      onOpenTask={onOpen}
+      onApproved={onApproved}
+      tr={tr}
+    />
+  );
+
   return <div className="campaign-overview @container/overview flex min-w-0 flex-col gap-4">
+    {landingGates.length > 0 && <section aria-label={tr("착지 승인 대기", "Awaiting landing approval")} className="campaign-landing-banner grid min-w-0 gap-2">
+      {(allLanding ? landingGates : landingGates.slice(0, 1)).map(renderApproval)}
+      {landingGates.length > 1 && <div className="px-1"><Button variant="ghost" size="sm" aria-expanded={allLanding} onClick={() => setAllLanding((v) => !v)}>
+        {allLanding ? tr("착지 승인 배너 접기", "Show fewer approvals") : tr(`착지 승인 대기 ${landingGates.length - 1}개 더 보기`, `Show ${landingGates.length - 1} more landing approvals`)}
+      </Button></div>}
+    </section>}
+
     <Well as="section" aria-label={tr("요약", "Summary")} className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3 max-[899px]:order-last">
       {stat(tr("진행 작업", "Running"), limit ? `${counts.running} / ${limit}` : String(counts.running))}
       {showPr && stat(tr("PR 연결", "With PR"), `${counts.withPr} / ${counts.running}`)}
@@ -89,24 +110,8 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
       {summaryExtra && <div className="flex min-w-0 flex-wrap items-center gap-3 @[36rem]/overview:border-l @[36rem]/overview:border-[var(--line-soft)] @[36rem]/overview:pl-6">{summaryExtra}</div>}
     </Well>
 
-    {(gates.length > 0 || stuck.length > 0) && <section aria-label={tr("주의", "Needs attention")} className="campaign-attention grid min-w-0 gap-2">
-      {gates.map((task) => <KitCard key={task.id} pad="none" style={GATE_CARD_STYLE}>
-        <div className="campaign-gate grid min-w-0 gap-3 px-3.5 py-3 @[36rem]/overview:grid-cols-[minmax(0,1fr)_auto] @[36rem]/overview:items-center sm:px-4">
-          <button type="button" data-task-id={task.id} aria-controls={controls} onClick={() => onOpen(task.id)} className="m-0 flex min-w-0 cursor-pointer items-start gap-3 border-0 bg-transparent p-0 text-left font-inherit text-inherit">
-            <span aria-hidden className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[7px] bg-[var(--warn-soft)] text-[var(--warn)] max-[899px]:size-5 max-[899px]:bg-transparent">
-              <LockKeyhole className="size-4" />
-            </span>
-            <span className="grid min-w-0 gap-0.5">
-              <strong className="text-sm font-semibold text-[var(--fg)] [word-break:keep-all]">{tr(`${GATE_LABELS[task.gate!.gate][0]} 승인 대기`, `Waiting for ${GATE_LABELS[task.gate!.gate][1].toLowerCase()} approval`)} · {task.title}</strong>
-              <Desc>{waited(task.gate!.openedAt, tr)}</Desc>
-            </span>
-          </button>
-          <span className="flex min-w-0 items-center justify-between gap-3">
-            <Cap>{tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}</Cap>
-            <Button variant="primary" size="sm" disabled title={tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}>{tr("승인", "Approve")}</Button>
-          </span>
-        </div>
-      </KitCard>)}
+    {(otherGates.length > 0 || stuck.length > 0) && <section aria-label={tr("주의", "Needs attention")} className="campaign-attention grid min-w-0 gap-2">
+      {otherGates.map(renderApproval)}
       {stuck.length > 0 && <KitCard pad="none">
         <div className="grid min-w-0 gap-0.5 p-1.5" onKeyDown={moveListFocus}>
           <h3 className="m-0 flex items-center gap-1.5 px-2 pt-1 !text-[13px] !font-semibold text-[var(--warn)]"><TriangleAlert aria-hidden className="size-3.5" />{tr(`막힘·실패 ${stuck.length}`, `Blocked or failed ${stuck.length}`)}</h3>

@@ -3,6 +3,7 @@ pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_recovery;
 pub mod agents;
+pub(crate) mod agy_acp;
 pub mod analytics;
 pub mod api_friction;
 pub mod auto_queue;
@@ -21,6 +22,7 @@ pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
+pub(crate) mod dcserver_singleton;
 pub mod decision_gate;
 pub mod discord;
 pub mod discord_config_audit;
@@ -180,11 +182,16 @@ pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 pub(crate) mod turn_summary_line;
 
-// The disabled remote types keep their `services::remote` path; no remote runtime exists.
-pub use remote_stub as remote;
-
 #[cfg(test)]
 mod krx_claude_tests;
+#[cfg(test)]
+mod krx_config_tests;
+#[cfg(test)]
+mod krx_db_b_tests;
+#[cfg(test)]
+mod krx_db_tests;
+#[cfg(all(test, unix))]
+mod krx_db_unix_tests;
 #[cfg(test)]
 mod provider_output_guard_tests;
 

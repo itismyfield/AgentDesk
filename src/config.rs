@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub(crate) mod decision_gate;
 pub(crate) mod decisions;
 mod runtime_settings;
-mod runtime_validation;
+pub(crate) mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_memory;
@@ -31,6 +31,7 @@ pub mod reload_classes;
 pub(crate) mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
+pub(crate) mod transcript_homes;
 pub use config_path::resolved_config_path;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
@@ -127,6 +128,11 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::services::agy_acp::AgyAcpConfig::is_default"
+    )]
+    pub agy_acp: crate::services::agy_acp::AgyAcpConfig,
     /// Validated file edits update the snapshot when true (default); false keeps the boot value.
     /// Failed edits/watchers retain the last value; `reload_classes::FIELDS` lists when fields act.
     #[serde(default = "default_true")]
@@ -850,8 +856,11 @@ impl ClusterDispatchRoutingConfig {
     }
 }
 
+/// The routing constraint that admits every candidate; the default constraint list holds only it.
+pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
+
 fn default_dispatch_routing_constraints() -> Vec<String> {
-    vec![crate::services::dispatches::routing_constraint::NOOP_CONSTRAINT_NAME.to_string()]
+    vec![NOOP_CONSTRAINT_NAME.to_string()]
 }
 
 fn is_default_dispatch_routing_constraints(values: &[String]) -> bool {
@@ -2449,6 +2458,7 @@ impl Default for Config {
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
             tui_o: None,
             session_hosts: SessionHostsConfig::default(),
+            agy_acp: Default::default(),
             config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()
@@ -2505,7 +2515,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
-    crate::services::session_resume::catalog::warn_unusable_transcript_homes(config);
+    transcript_homes::warn_unusable_transcript_homes(config);
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,
     )
@@ -2915,9 +2925,9 @@ pub(crate) mod test_env_lock {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_env;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.

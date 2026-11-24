@@ -62,7 +62,7 @@ pub(in crate::services::discord) fn record(
         return Ok(());
     }
     let path = path(provider).ok_or("runtime root unavailable")?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_WRITES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -115,11 +115,11 @@ pub(in crate::services::discord) fn read(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FAIL_WRITES: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct FailureGuard(PathBuf, u64);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for FailureGuard {
     fn drop(&mut self) {
         FAIL_WRITES
@@ -128,7 +128,7 @@ impl Drop for FailureGuard {
             .retain(|entry| entry != &(self.0.clone(), self.1));
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fail_writes_for_tests(provider: &ProviderKind, channel: ChannelId) -> FailureGuard {
     let path = path(provider).expect("test runtime root");
     FAIL_WRITES

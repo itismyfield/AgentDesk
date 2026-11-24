@@ -6,15 +6,12 @@ pub(super) use crate::db::message_outbox::census::store;
 /// Capture provenance only; enqueue success is never a transport observation.
 pub(super) fn capture(source: &str) -> Option<Value> {
     if source != "headless_turn" {
-        return crate::services::discord::outbound::source_registry::is_registered_nonbody_source(
-            source,
-        )
-        .then(|| {
+        return super::source_registry::is_registered_nonbody_source(source).then(|| {
             json!({"schema_version":1,"notice_kind":source,
                 "producer":crate::services::legacy_body_census::producer_identity()})
         });
     }
-    crate::services::discord::outbound::current_census().map(|tag| {
+    crate::services::legacy_body_census::request_context::current_census().map(|tag| {
         json!({"schema_version":1,"tag":tag,
             "producer":crate::services::legacy_body_census::producer_identity()})
     })
@@ -50,7 +47,7 @@ fn restore(stored: &Value) -> Option<Value> {
         return None;
     }
     if let Some(kind) = stored.get("notice_kind").and_then(Value::as_str) {
-        return crate::services::discord::outbound::source_registry::is_static_notice_kind(kind)
+        return crate::domain::outbound::outbox::source::is_static_notice_kind(kind)
             .then(|| json!({"output_class":"NonBody"}));
     }
     let mut tag = stored["tag"].as_object()?.clone();

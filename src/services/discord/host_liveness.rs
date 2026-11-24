@@ -155,3 +155,8 @@ pub(in crate::services::discord) fn tui_structurally_idle(
         ),
     ))
 }
+
+#[cfg(test)]
+mod krx_discord_dl_tests;
+#[cfg(all(test, unix))]
+mod krx_discord_dl_unix_tests;

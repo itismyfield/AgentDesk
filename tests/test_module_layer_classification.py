@@ -29,13 +29,13 @@ class ReplayEvidencePrivacyTest(unittest.TestCase):
     def compile(self, body="", *, test=False):
         module, key = (json.dumps(str(self.paths[name])) for name in ("module", "key"))
         recovery_key = json.dumps(str(ROOT / "src/services/discord/replay_policy/recovery/issuer_key.rs"))
-        root_key = json.dumps(str(ROOT / "src/cli/dcserver/replay_recovery/issuer_key.rs"))
+        root_key = json.dumps(str(ROOT / "src/services/dcserver_singleton/issuer_key.rs"))
         source = f"""
 mod domain {{ #[path = {module}] pub(crate) mod replay_evidence; }}
-mod cli {{ pub(crate) mod dcserver {{ pub(crate) mod replay_recovery {{
+mod services {{ pub(crate) mod dcserver_singleton {{
     #[path = {root_key}] pub(crate) mod issuer_key;
-}} }} }}
-mod services {{ pub(crate) mod discord {{ pub(crate) mod replay_policy {{
+}}
+pub(crate) mod discord {{ pub(crate) mod replay_policy {{
     pub(crate) mod recovery {{ #[path = {recovery_key}] pub(crate) mod issuer_key; }}
     pub(crate) mod live {{
         #[path = {key}] pub(crate) mod issuer_key;
@@ -178,9 +178,9 @@ class RecoveryEvidencePrivacyTest(ReplayEvidencePrivacyTest):
             "snapshot": ROOT / "src/domain/replay_evidence/recovery/snapshot.rs",
             "root": ROOT / "src/domain/replay_evidence/recovery/root.rs",
             "issuer": ROOT / "src/services/replay_evidence/recovery_issuer.rs",
-            "root_issuer": ROOT / "src/cli/dcserver/replay_root_issuer.rs",
+            "root_issuer": ROOT / "src/services/replay_evidence/root_issuer.rs",
             "key": ROOT / "src/services/discord/replay_policy/recovery/issuer_key.rs",
-            "root_key": ROOT / "src/cli/dcserver/replay_recovery/issuer_key.rs",
+            "root_key": ROOT / "src/services/dcserver_singleton/issuer_key.rs",
         }
         for path in self.paths.values():
             self.assertTrue(path.is_file(), f"missing recovery authority source: {path}")
@@ -190,7 +190,7 @@ class RecoveryEvidencePrivacyTest(ReplayEvidencePrivacyTest):
         live_key = json.dumps(str(ROOT / "src/services/discord/replay_policy/live/issuer_key.rs"))
         source = f"""
 mod domain {{ #[path = {paths['module']}] pub(crate) mod replay_evidence; }}
-mod cli {{ pub(crate) mod dcserver {{ pub(crate) mod replay_recovery {{
+mod services {{ pub(crate) mod dcserver_singleton {{
     #[path = {paths['root_key']}] pub(crate) mod issuer_key;
     #[cfg(unix)]
     pub(crate) fn owned(path: std::path::PathBuf, lock: std::sync::Arc<std::fs::File>) ->
@@ -198,8 +198,8 @@ mod cli {{ pub(crate) mod dcserver {{ pub(crate) mod replay_recovery {{
         crate::domain::replay_evidence::recovery::root::issuer::owned(
             issuer_key::SingletonRootKey(()), path, lock)
     }}
-}} }} }}
-mod services {{ pub(crate) mod discord {{ pub(crate) mod replay_policy {{
+}}
+pub(crate) mod discord {{ pub(crate) mod replay_policy {{
     pub(crate) mod live {{ #[path = {live_key}] pub(crate) mod issuer_key; }}
     pub(crate) mod recovery {{
         #[path = {paths['key']}] pub(crate) mod issuer_key;
@@ -216,7 +216,7 @@ mod services {{ pub(crate) mod discord {{ pub(crate) mod replay_policy {{
 }} }} }}
 use domain::replay_evidence::recovery::{{LocalSnapshot, root::OwnedRuntimeRoot}};
 use services::discord::replay_policy::recovery::issuer_key::LoadedSnapshotKey;
-use cli::dcserver::replay_recovery::issuer_key::SingletonRootKey;
+use services::dcserver_singleton::issuer_key::SingletonRootKey;
 fn positive_control(root: OwnedRuntimeRoot) {{
     let proof = services::discord::replay_policy::recovery::observed(root.clone());
     assert!(proof.understood());
@@ -226,7 +226,7 @@ fn positive_control(root: OwnedRuntimeRoot) {{
 }}
 #[cfg(unix)]
 fn singleton_positive_control(path: std::path::PathBuf, lock: std::sync::Arc<std::fs::File>) {{
-    positive_control(cli::dcserver::replay_recovery::owned(path, lock));
+    positive_control(services::dcserver_singleton::owned(path, lock));
 }}
 {body}
 """

@@ -39,6 +39,11 @@ class BlankTestModulesTests(unittest.TestCase):
         source = '#[cfg(not(test))]\nmod prod {\n    const X: &str = "AGENTDESK_PROD";\n}\n'
         self.assertIn("AGENTDESK_PROD", gen.blank_test_modules(source))
 
+    def test_test_support_gated_module_is_blanked_and_its_negation_is_kept(self) -> None:
+        for cfg, kept in (('any(test, feature = "test-support")', False), ('not(any(test, feature = "test-support"))', True)):
+            source = f'#[cfg({cfg})]\nmod m {{\n    const X: &str = "AGENTDESK_GATED";\n}}\n'
+            self.assertEqual("AGENTDESK_GATED" in gen.blank_test_modules(source), kept, cfg)
+
 
 class DescriptionTests(unittest.TestCase):
     def test_prefers_comment_that_names_the_variable(self) -> None:
@@ -134,6 +139,8 @@ class SourceTreeStabilityTests(unittest.TestCase):
             pub(crate) async fn helper() { env_flag("ADK_TEST_HELPER", false); }
             #[cfg(test)] const NAME: &str = "ADK_TEST_CONST";
             #[cfg(test)] static VALUE: &str = "ADK_TEST_STATIC";
+            #[cfg(any(test, feature = "test-support"))]
+            fn fixture() { env_flag("ADK_TEST_SUPPORT", false); }
             #[cfg(not(test))]
             fn prod() { env_flag("AGENTDESK_ITEM_PROD", false); }
             #[cfg(any(test, unix))]
@@ -145,7 +152,7 @@ class SourceTreeStabilityTests(unittest.TestCase):
         self.assertIn("AGENTDESK_ITEM_PROD", output)
         self.assertIn("AGENTDESK_ITEM_SHARED", output)
         self.assertIn("AGENTDESK_AFTER_FIELD", output)
-        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC"):
+        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC", "ADK_TEST_SUPPORT"):
             self.assertNotIn(name, output)
 
     def test_named_helper_argument_records_the_reader_file(self) -> None:

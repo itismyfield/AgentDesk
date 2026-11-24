@@ -143,6 +143,7 @@ impl IntakeRig {
             .try_init()
             .unwrap();
         let f = Fixture::after_shared_test_env_lock();
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         let (mut env, mut config) = d1_fixture_config(&f, &[id]);
         if bot == ProviderKind::Codex {
             let path = f.root.path().join("cg-d1-fixture.yaml");
