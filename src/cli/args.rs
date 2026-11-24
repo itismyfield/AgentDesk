@@ -777,6 +777,7 @@ mod tests {
             "machine-compare",
             "activity",
             "herdr",
+            "decision",
             "help",
         ];
 
