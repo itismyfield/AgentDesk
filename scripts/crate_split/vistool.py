@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "vt4-1"
+VERSION = "mkrxv-1"
 VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
@@ -196,6 +196,9 @@ class Layout:
         parents = lambda g, pool: any(len(paths[h]) > len(paths[g]) and paths[h][:len(paths[g])] == paths[g]
                                       for h in pool)
         self._inline = {}
+        # transform_upper's record, per file it rewrote: for each upper line the index of lower's line it
+        # still is (None: a line upper has of its own).
+        self.upper_origin = {}
         # A one-file group that parents other groups (discord::(mod.rs), services) is chain only. Any other
         # below group goes to upper whole, so a deep key under it needs no line of its own.
         whole = sorted(g for g in self.below if g != "(root)" and not (g in ONE_FILE and parents(g, self.owner)))
@@ -379,12 +382,13 @@ def transform_upper(root, layout):
     manifest = root / "Cargo.toml"
     manifest.write_text(upper_manifest(manifest.read_text("utf-8")), "utf-8")
     import vistool_gate
-    rewired = []
+    rewired, layout.upper_origin = [], {}
     for group in layout.leaves:
         path = group_path(group)
         parent = layout.file_of.get(path[:-1])
         target = root / parent
         lines = read_lines(target)
+        origin = layout.upper_origin.setdefault(parent, list(range(len(lines))))
         rx = re.compile(MOD_DECL.format(name=re.escape(path[-1])))
         hits = decl_hits(lines, path[-1], path[:-1], layout.module_of.get(parent, ()))
         if not hits:
@@ -402,6 +406,7 @@ def transform_upper(root, layout):
                 # Lower's own test module: never checked by the probe (T slice), keep an empty stand-in.
                 # A module `test-support` opens is built in lower, so it is re-exported like any other.
                 lines[i:close + 1] = [stand_in]
+                origin[i:close + 1] = [None]
                 continue
             kept = [a for a in attrs if not re.match(r"^\s*#\[\s*(path|macro_use)\b", a)]
             new = kept + [f"{indent}{REEXPORT}{'::'.join(path)};"]
@@ -411,6 +416,7 @@ def transform_upper(root, layout):
                 new = kept + [f"{indent}#[cfg({lower_cfg})]", new[-1]] + \
                     kept + [f"{indent}#[cfg(not({lower_cfg}))]", stand_in]
             lines[start:close + 1] = new
+            origin[start:close + 1] = [None] * len(new)
         write_lines(target, lines)
         rewired.append(f"{parent}:{path[-1]}")
     return rewired
@@ -942,18 +948,33 @@ class Widener:
         return self._edit(rel, index, ("field",), f"{owner}.{field}")
 
     def apply(self, ops):
-        """Apply {(rel, idx): {op, ...}} to the text and both probe copies; returns {(rel, idx): new line}."""
-        out, touched = {}, set()
+        """Apply {(rel, idx): {op, ...}} to the text and both probe copies; returns {(rel, idx): new line}.
+
+        Upper's files hold its re-exports, so each edit goes to upper's own copy of the line, never lower's
+        file. A line upper does not have as lower has it stops the run before anything is written."""
+        out, upper = {}, {}
         for (rel, index), group in sorted(ops.items()):
-            lines = self.lines(rel)
-            new = apply_ops(lines[index], group)
-            if new != lines[index]:
-                lines[index] = new
-                out[(rel, index)] = new
-                touched.add(rel)
-        for rel in sorted(touched):
-            for root in (self.lower, self.upper):
-                write_lines(root / rel, self.lines(rel))
+            old = self.lines(rel)[index]
+            new = apply_ops(old, group)
+            if new == old:
+                continue
+            out[(rel, index)] = new
+            origin = self.layout.upper_origin.get(rel) if self.upper != self.lower else []
+            at = index if origin is None else origin.index(index) if index in origin else None
+            if at is None:
+                continue  # one checkout serves both sides, or the line is in a module upper re-exports
+            if rel not in upper:
+                upper[rel] = read_lines(self.upper / rel)
+            if at >= len(upper[rel]) or upper[rel][at] != old:
+                raise VisFail("upper_probe_broken",
+                              f"{rel}:{index + 1} is not this line in the upper copy: {old.strip()}")
+            upper[rel][at] = new
+        lower = {}
+        for (rel, index), new in out.items():
+            lower.setdefault(rel, self.lines(rel))[index] = new
+        for root, files in ((self.lower, lower), (self.upper, upper)):
+            for rel in sorted(files):
+                write_lines(root / rel, files[rel])
         return out
 
 
@@ -1314,8 +1335,9 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
             for d in up:
                 if d.get("level") != "error":
                     continue
-                if probe_reexport_error(d):
-                    # Lower lacks a module upper re-exports; as residue it would hide every edit behind it.
+                if probe_reexport_error(d) or code_of(d) == IFACE_CODE:
+                    # Lower lacks a module upper re-exports, or upper's interface leaks a type no edit here
+                    # reaches: as residue it would hide every edit behind it and pass a build that failed.
                     raise VisFail("upper_probe_broken", f"{where(d, resolver)} {d.get('message')}")
                 if is_vis(d):
                     vis.append((d, probe.upper, False))
