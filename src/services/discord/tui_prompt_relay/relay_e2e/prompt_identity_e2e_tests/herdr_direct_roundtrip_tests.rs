@@ -85,7 +85,7 @@ fn discord_direct_prompt_and_followup_keep_one_live_execution_source_pg() {
 
 // Reuse the same executable and P11 environment; nested summaries remain inside one raw JSON line.
 fn composed_child(path: &str, channel: u64) -> bool {
-    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+    use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
     if herdr::is_child() {
         assert!(herdr::in_child(path, channel));
         return true;

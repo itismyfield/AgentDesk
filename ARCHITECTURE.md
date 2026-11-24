@@ -3819,7 +3819,7 @@ src/
 │   │   ├── krx_claude_tests.rs
 │   │   ├── krx_claude_unix_tests.rs
 │   │   ├── krx_config_tests.rs
-│   │   ├── krx_session_host_tests.rs
+│   │   ├── krx_session_host_test_host.rs
 │   │   ├── krx_tui_o_test_host.rs
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs

@@ -57,7 +57,7 @@ mod retired_selector {
     };
     use crate::services::discord::commands::SESSION_CLEARED_RESPONSE;
     use crate::services::discord::host_defer_gate::tests as gate;
-    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+    use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
     const SELECTOR: &str = "pre-clear-sid";
     const LIVE: u64 = 5_340_221;

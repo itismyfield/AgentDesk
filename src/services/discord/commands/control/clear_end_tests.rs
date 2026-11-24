@@ -324,7 +324,7 @@ const HERDR_CHANNEL: u64 = 1_479_671_305_341_200_001;
 // retires the execution, so the next input launches a fresh one.
 #[test]
 fn a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg() {
-    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+    use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
     let path = concat!(
         module_path!(),
         "::a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg"
@@ -371,7 +371,7 @@ const HERDR_RETIRED_CHANNEL: u64 = 1_479_671_305_341_200_002;
 // A Retired execution cannot authorize managed fallback; an unmatched owner stays Held.
 #[test]
 fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
-    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+    use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
     let path = concat!(
         module_path!(),
         "::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg"
@@ -444,7 +444,7 @@ const HERDR_NEVER_ATTACHED_CHANNEL: u64 = 1_479_671_305_341_200_003;
 // nothing is closed or retired and the end is unconfirmed, yet the queue is still dropped.
 #[test]
 fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
-    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+    use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
     let path = concat!(
         module_path!(),
         "::a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg"

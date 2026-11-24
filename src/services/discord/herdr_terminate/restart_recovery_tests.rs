@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 const CHANNEL: u64 = 8_128_303;
 

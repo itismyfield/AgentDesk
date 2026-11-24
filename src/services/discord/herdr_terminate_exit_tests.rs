@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{OperatorTerminate, TerminationResult, terminate_registered_herdr, test_turn};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 const CHANNEL: u64 = 5_340_212;
 const PHASE: &str = "ADK_HERDR_TERMINATE_EXIT_PHASE";

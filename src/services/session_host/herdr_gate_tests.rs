@@ -820,7 +820,7 @@ const TERMINATE_TEST_CHILD: &str = "ADK_HERDR_TERMINATE_TEST_CHILD";
 
 // Isolate the live config snapshot from parallel tests that install their own config.
 fn run_terminate_child(name: &str) -> bool {
-    let name = format!("services::discord::krx_session_host_tests::herdr_gate::{name}");
+    let name = format!("services::discord::krx_session_host_test_host::herdr_gate::{name}");
     if let Some(child) = std::env::var_os(TERMINATE_TEST_CHILD) {
         assert_eq!(child, name.as_str());
         return false;

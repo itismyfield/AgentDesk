@@ -14,7 +14,7 @@ use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, probe_after_settlement, probe_settlement_window,
     terminate_explicit_herdr, test_turn,
 };
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::queue_io::cancel_backstop_test_support as observed;
 use crate::services::provider::ProviderKind;
 

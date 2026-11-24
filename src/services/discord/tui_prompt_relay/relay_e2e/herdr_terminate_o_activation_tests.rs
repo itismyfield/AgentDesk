@@ -16,7 +16,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, ProceedReason, observe_binding_hook,
 };
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_launched_herdr_source,
 };

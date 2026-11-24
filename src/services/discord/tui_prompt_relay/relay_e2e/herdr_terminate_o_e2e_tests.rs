@@ -27,7 +27,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
 use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
 };
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::recovery_engine::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
 };

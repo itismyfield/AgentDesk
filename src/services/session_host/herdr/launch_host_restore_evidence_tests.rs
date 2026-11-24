@@ -271,7 +271,7 @@ pub(super) fn reused_id(server: &mut T19Server, session: &Path, before: &Value, 
         );
     }
     let termination_method =
-        crate::services::discord::krx_session_host_tests::herdr_termination_rig::SINGLE_PANE_TERMINATION;
+        crate::services::discord::krx_session_host_test_host::herdr_termination_rig::SINGLE_PANE_TERMINATION;
     let termination_log_field = format!("method=\"{termination_method}\"");
     let closes = log
         .lines()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Selector {

@@ -9,7 +9,7 @@ use super::registered_bootstrap_e2e::{FALLBACK, kick_off, recent_message_id, reg
 use super::{CHANNEL_ID, RelayE2eHarness, wait_until};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::inflight;
-use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::provider::ProviderKind;
 use crate::services::provider::cancel_token_claude_interrupt::{
     HERDR_CANCEL_OVERRIDE, herdr_cancel_enabled,
