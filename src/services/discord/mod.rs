@@ -199,6 +199,7 @@ mod krx_claude_tests;
 mod krx_claude_unix_tests;
 #[cfg(test)]
 mod krx_config_tests;
+pub(crate) mod krx_session_host_test_host;
 pub(crate) mod krx_tui_o_test_host;
 #[cfg(test)]
 mod relay_coord_tests;

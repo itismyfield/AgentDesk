@@ -22,7 +22,7 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{
 use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_explicit_herdr_for_test,
 };
-use crate::services::session_host::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 const CHANNEL: u64 = 1_479_671_301_387_059_402;
 const HERDR_TMUX: &str = "AgentDesk-claude-p11-t8";

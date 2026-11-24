@@ -353,6 +353,7 @@ jobs:
               - 'src/services/discord/krx_claude_tests.rs'
               - 'src/services/discord/krx_config_tests.rs'
               - 'src/services/discord/krx_config_tests/**'
+              - 'src/services/discord/krx_session_host_test_host.rs'
               - 'src/services/discord/krx_tui_o_test_host.rs'
               - 'src/services/discord/live_bridge.rs'
               - 'src/services/discord/mailbox_ops.rs'

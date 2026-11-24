@@ -15,13 +15,13 @@ use super::super::{
 };
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::probe_before_postlude;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::rebind_channel_session;
 use crate::services::discord::session_banner::relays_body;
 use crate::services::discord::tui_prompt_relay::relay_e2e::{
     CHANNEL_ID, SESSION_UUID, discord_mock,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::writer::WriterAlarm;
 use crate::services::tui_prompt_dedupe::binding_events;

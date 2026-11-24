@@ -83,7 +83,7 @@ pub(super) fn running_real_server_stays_unverified_until_a_later_start() {
 /// dedicated homes, so the candidate's home is never written, and a canonical home is not touched.
 #[test]
 fn boot_ensures_only_the_installed_snapshot_dedicated_homes() {
-    const TEST: &str = "services::session_host::herdr::launch_host::real_tests::managed_config::boot_ensures_only_the_installed_snapshot_dedicated_homes";
+    const TEST: &str = "krx_session_host_tests::launch_host_real::managed_config::boot_ensures_only_the_installed_snapshot_dedicated_homes";
     let Some(root) = std::env::var_os("ADK_CONFIG_BOOT_PROBE").map(std::path::PathBuf::from) else {
         let root = tempfile::tempdir().unwrap();
         let user = root.path().join("user");

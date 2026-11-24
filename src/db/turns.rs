@@ -9,10 +9,6 @@ use crate::db::timestamps::parse_timestamp;
 #[path = "turns/timestamp_tests.rs"]
 mod timestamp_tests;
 
-#[cfg(all(test, unix))]
-#[path = "turns/receipt_tests.rs"]
-mod receipt_tests;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
     pub input_tokens: u64,

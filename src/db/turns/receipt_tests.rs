@@ -1,5 +1,6 @@
-use super::*;
+use crate::db::turns::*;
 use chrono::{DateTime, Duration, SubsecRound, Utc};
+use sqlx::PgPool;
 
 /// Postgres keeps microseconds; instants compared after a round trip are taken at that precision.
 fn now_us() -> DateTime<Utc> {
@@ -271,7 +272,7 @@ async fn receipt_instants_survive_non_utc_host_and_session_zones_pg() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "db::turns::receipt_tests::receipt_instants_survive_non_utc_host_and_session_zones_pg",
+                "services::krx_db_unix_tests::turns_receipt::receipt_instants_survive_non_utc_host_and_session_zones_pg",
                 "--nocapture",
                 "--test-threads=1",
             ])
