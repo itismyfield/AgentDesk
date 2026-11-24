@@ -67,6 +67,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
   const [routines, setRoutines] = useState<RoutineRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null);
   const [selectedRuns, setSelectedRuns] = useState<RoutineRunRecord[]>([]);
@@ -77,6 +78,9 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
   const [now, setNow] = useState(() => Date.now());
   const optimistic = useRef(new Map<string, string>());
   const listRef = useRef<HTMLUListElement>(null);
+  const routinesRef = useRef<RoutineRecord[]>([]);
+  routinesRef.current = routines;
+  const filterRef = useRef<RoutineFilter | null>(null);
   const returnTarget = useRef<ReturnTarget>({ element: null, routineId: null });
   const pendingFocus = useRef<ReturnTarget | null>(null);
   const isMobile = useIsMobile(), split = !isMobile, toast = useToast();
@@ -85,17 +89,38 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
 
   useEffect(() => {
     let mounted = true;
-    const load = async () => {
-      setError(false); setLoading(true);
+    let generation = 0;
+    const replace = filterRef.current !== filter;
+    filterRef.current = filter;
+    const load = async (quiet: boolean) => {
+      const requestId = ++generation;
+      if (!quiet) {
+        setError(false);
+        setRefreshFailed(false);
+        setLoading(true);
+        if (replace) {
+          routinesRef.current = [];
+          setRoutines([]);
+        }
+      }
+      const keepRows = routinesRef.current.length > 0;
       try {
         const next = await getRoutines(filter === "all" ? undefined : { status: filter });
+        if (!mounted || requestId !== generation) return;
         const p = optimistic.current;
-        if (mounted) setRoutines(p.size ? next.map((item) => (p.has(item.id) ? { ...item, status: p.get(item.id)! } : item)) : next);
-      } catch { if (mounted) setError(true); }
-      finally { if (mounted) setLoading(false); }
+        setRoutines(p.size ? next.map((item) => (p.has(item.id) ? { ...item, status: p.get(item.id)! } : item)) : next);
+        setError(false);
+        setRefreshFailed(false);
+      } catch {
+        if (!mounted || requestId !== generation) return;
+        if (keepRows) setRefreshFailed(true);
+        else setError(true);
+      } finally {
+        if (mounted && requestId === generation) setLoading(false);
+      }
     };
-    void load();
-    const stop = pollWhileVisible(() => void load(), 60_000);
+    void load(false);
+    const stop = pollWhileVisible(() => void load(true), 60_000);
     return () => { mounted = false; stop(); };
   }, [filter, reloadKey]);
 
@@ -214,6 +239,11 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
         </div>
       </div>
 
+      {refreshFailed && !error ? (
+        <p role="alert" data-testid="routines-refresh-error" className="m-0 text-sm text-[var(--fg-muted)]">
+          {m("목록을 새로 읽지 못했어요. 마지막 목록을 보여 드려요.", "Could not refresh the list. Showing the last one.", "一覧を更新できませんでした。最後の一覧を表示しています。", "无法刷新列表，仍显示上次的列表。")}
+        </p>
+      ) : null}
       {error ? (
         <SectionCard title={m("루틴", "Routines")}>
           <InspSection className="items-start gap-3">

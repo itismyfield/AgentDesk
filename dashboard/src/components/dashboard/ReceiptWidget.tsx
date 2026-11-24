@@ -64,21 +64,28 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
 
   useEffect(() => {
     let mounted = true;
+    let generation = 0;
     const load = async () => {
+      const requestId = ++generation;
       const cached = receiptCache.get(period);
-      if (cached && mounted) setData(cached.data);
+      if (cached && mounted && requestId === generation) setData(cached.data);
       const fresh = cached ? Date.now() - cached.fetchedAt < RECEIPT_CACHE_TTL[period] : false;
       const failedAt = receiptFailedAt.get(period);
-      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) { if (mounted) setLoading(false); return; }
-      if (mounted) setLoading(true);
+      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) {
+        if (mounted && requestId === generation) setLoading(false);
+        return;
+      }
+      if (mounted && requestId === generation) setLoading(true);
       try {
         const json = await request<ReceiptData>(`/api/receipt?period=${period}`, { ...SLOW_AGGREGATE_GET, suppressErrorToast: true });
+        if (!mounted || requestId !== generation) return;
         receiptCache.set(period, { data: json, fetchedAt: Date.now() });
         receiptFailedAt.delete(period);
-        if (mounted) setData(json);
+        setData(json);
       } catch (error) {
+        if (!mounted || requestId !== generation) return;
         if (!(error instanceof Error && error.name === "AbortError")) receiptFailedAt.set(period, Date.now());
-      } finally { if (mounted) setLoading(false); }
+      } finally { if (mounted && requestId === generation) setLoading(false); }
     };
     void load();
     const stop = pollWhileVisible(() => void load(), 60_000);

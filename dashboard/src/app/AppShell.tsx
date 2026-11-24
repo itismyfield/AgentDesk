@@ -8,7 +8,7 @@ import { useSettings } from "../contexts/SettingsContext";
 import type { Notification } from "../components/NotificationCenter";
 import { useFocusTrap } from "../components/common/overlay";
 import { agentName, buildRunningNowTasks, classifyAgents } from "../components/home/homeModel";
-import { reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
+import { AgentTurnsProvider, reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
 import { MOBILE_LAYOUT_MEDIA_QUERY, TABLET_RAIL_MEDIA_QUERY } from "./breakpoints";
 import { PRIMARY_ROUTES, findRouteByPath, type AppRouteEntry, type AppRouteId } from "./routes";
 import { AppMobileNavigation } from "./AppMobileNavigation";
@@ -126,6 +126,9 @@ export default function AppShell({
     [agents, sessions, sessionsFailed],
   );
   const runningTurns = useAgentTurns(workingAgentIds);
+  const statsOnArrival = useRef(stats);
+  statsOnArrival.current = stats;
+  const sawShellRoute = useRef(false);
   const runningTasks = useMemo(
     () =>
       buildRunningNowTasks({
@@ -234,9 +237,12 @@ export default function AppShell({
   }, [isMobileViewport]);
 
   useEffect(() => {
-    if (currentRoute?.id === "home" || currentRoute?.id === "stats") {
-      refreshStats();
-    }
+    const opening = !sawShellRoute.current;
+    sawShellRoute.current = true;
+    if (currentRoute?.id !== "home" && currentRoute?.id !== "stats") return;
+    // Bootstrap already loaded stats for the first paint. Refresh on later visits.
+    if (opening && statsOnArrival.current) return;
+    refreshStats();
   }, [currentRoute?.id, refreshStats]);
 
   const persistSettingsPatch = useCallback(
@@ -429,6 +435,7 @@ export default function AppShell({
   );
 
   return (
+    <AgentTurnsProvider turns={runningTurns} watched={workingAgentIds}>
     <div
       className="fixed inset-0 flex overflow-hidden"
       style={{
@@ -590,5 +597,6 @@ export default function AppShell({
         }}
       />
     </div>
+    </AgentTurnsProvider>
   );
 }

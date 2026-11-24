@@ -27,6 +27,9 @@ export interface BreakdownChartProps {
   style?: CSSProperties;
 }
 const palette = ['#4fb0fe', '#a651f0', '#ee3e9e', '#7bc4fe', '#d7bcf6', '#a3a3a3', '#f6abd4'];
+/** Narrowest column. Seven days still fit a 390px phone; longer ranges scroll inside the plot. */
+const BAR_MIN_PX = 32;
+const BAR_GAP_PX = 4;
 const oneDecimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 /** Table, total and tooltip numbers: grouping, at most one decimal, and <0.1 for tiny positives. */
 const format = (value: number) => value > 0 && value < 0.05 ? '<0.1' : oneDecimal.format(value);
@@ -248,7 +251,7 @@ function BreakdownChartBody({ records, dimensions, measures, title = '에이전�
           {!records.length && <p className="aui-breakdown-chart-zero-note">실행 기록을 기다리는 중입니다. 정의된 분류의 0값을 표시합니다.</p>}
           <div className="aui-breakdown-chart-chart">
             <div className="aui-breakdown-chart-scroll">
-              <div className="aui-breakdown-chart-plot" ref={plot} style={{ minWidth: (rows.length * 44 + Math.max(0, rows.length - 1) * 4) + 'px' }}>
+              <div className="aui-breakdown-chart-plot" ref={plot} style={{ minWidth: (rows.length * BAR_MIN_PX + Math.max(0, rows.length - 1) * BAR_GAP_PX) + 'px' }}>
                 <div className="aui-breakdown-chart-grid" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <span key={index} style={{ top: (index * 20) + '%' }} />)}</div>
                 <div className="aui-breakdown-chart-bars" onPointerLeave={() => { if (!pinned) setSelected(null); }}>
                   {rows.map((row, index) => {
@@ -322,8 +325,8 @@ const styles = `
 .aui-breakdown-chart-grid { position:absolute; top:0; width:100%; height:200px; pointer-events:none; }
 .aui-breakdown-chart-grid > span { position:absolute; width:100%; border-top:1px dashed var(--aui-breakdown-chart-grid); }
 .aui-breakdown-chart-grid > span:last-child { border-top:1px solid var(--aui-breakdown-chart-zero); }
-.aui-breakdown-chart-bars { position:relative; display:flex; gap:4px; height:200px; }
-.aui-breakdown-chart-bar-button { position:relative; flex:1 0 44px; min-width:44px; height:200px; border:0; padding:0; background:none; transition:opacity 200ms ease; touch-action:pan-x pan-y!important; }
+.aui-breakdown-chart-bars { position:relative; display:flex; gap:${BAR_GAP_PX}px; height:200px; }
+.aui-breakdown-chart-bar-button { position:relative; flex:1 0 ${BAR_MIN_PX}px; min-width:${BAR_MIN_PX}px; height:200px; border:0; padding:0; background:none; transition:opacity 200ms ease; touch-action:pan-x pan-y!important; }
 .aui-breakdown-chart-bar-button:focus-visible { outline-offset:2px!important; }
 .aui-breakdown-chart-bar-button[data-dim="true"] { opacity:.38; }
 .aui-breakdown-chart-stack { position:absolute; bottom:0; left:50%; translate:-50% 0; display:flex; flex-direction:column-reverse; gap:1px; width:min(10px,100%); overflow:hidden; transition:height 520ms var(--aui-breakdown-chart-ease); }
@@ -332,8 +335,8 @@ const styles = `
 .aui-breakdown-chart-bar-button[data-active="true"] .aui-breakdown-chart-empty-bar { opacity:1; }
 .aui-breakdown-chart-ticks { position:absolute; top:0; right:0; width:26px; height:200px; color:var(--aui-breakdown-chart-muted); font-size:11px; line-height:16px; }
 .aui-breakdown-chart-ticks > span { position:absolute; right:0; white-space:nowrap; }
-.aui-breakdown-chart-axis { display:flex; gap:4px; margin-top:8px; height:24px; color:var(--aui-breakdown-chart-muted); font-size:11px; }
-.aui-breakdown-chart-axis > div { position:relative; flex:1 0 44px; min-width:44px; text-align:center; }
+.aui-breakdown-chart-axis { display:flex; gap:${BAR_GAP_PX}px; margin-top:8px; height:24px; color:var(--aui-breakdown-chart-muted); font-size:11px; }
+.aui-breakdown-chart-axis > div { position:relative; flex:1 0 ${BAR_MIN_PX}px; min-width:${BAR_MIN_PX}px; text-align:center; }
 .aui-breakdown-chart-axis-base { display:block; height:24px; line-height:24px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .aui-breakdown-chart-axis-pill { position:absolute; z-index:2; left:0; top:0; display:flex; align-items:center; gap:6px; max-width:min(220px,80cqw); height:24px; padding:0 10px 0 7px; border-radius:999px; background:var(--aui-breakdown-chart-float); color:var(--aui-breakdown-chart-fg); box-shadow:0 0 0 1px var(--aui-breakdown-chart-border),var(--aui-breakdown-chart-pill-shadow); font-size:12px; font-weight:500; white-space:nowrap; animation:aui-breakdown-chart-pill-in 200ms var(--aui-breakdown-chart-ease); }
 .aui-breakdown-chart-icon { display:inline-flex; flex:none; align-items:center; justify-content:center; width:15px; height:15px; }

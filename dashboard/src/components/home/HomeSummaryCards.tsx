@@ -264,7 +264,7 @@ export function HomeSystemCard({ campaigns, healthState, onlyWhenOff, tr, classN
   tr: Tr;
   className?: string;
 }) {
-  const internalHealth = usePolled(loadHomeHealth, healthState ? 600_000 : 30_000);
+  const internalHealth = usePolled(loadHomeHealth, 30_000, healthState === undefined);
   const health = healthState ?? internalHealth;
   const [reasonsOpen, setReasonsOpen] = useState(false);
   const [freshDetail, setFreshDetail] = useState<HomeHealth | null>(null);

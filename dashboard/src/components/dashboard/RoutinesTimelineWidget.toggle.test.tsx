@@ -136,4 +136,24 @@ describe("RoutinesTimelineWidget pause and resume", () => {
     expect(document.body.textContent).toContain("rt-b 다시 켜지 못했어요: paused routine rt-b not found");
     expect(api.getRoutines).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the newer list when an older read answers last and keeps the list when a refresh fails", async () => {
+    vi.useFakeTimers();
+    const first = deferred<RoutineRecord[]>();
+    api.getRoutines.mockReturnValueOnce(first.promise).mockResolvedValueOnce([routine("fresh", "enabled")]).mockRejectedValue(new Error("down"));
+    await act(async () => {
+      root.render(<ToastProvider><RoutinesTimelineWidget t={koT} localeTag="ko-KR" language="ko" /></ToastProvider>);
+    });
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    await act(async () => first.resolve([routine("stale", "enabled")]));
+    await flush();
+    expect(container.textContent).toContain("fresh");
+    expect(container.textContent).not.toContain("stale");
+
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    await flush();
+    expect(container.querySelector("[data-testid='routines-refresh-error']")).toBeTruthy();
+    expect(container.textContent).toContain("fresh");
+    vi.useRealTimers();
+  });
 });
