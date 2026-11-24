@@ -2136,6 +2136,7 @@ src/
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
 │   │   ├── krx_claude_tests/
+│   │   │   ├── claude_readiness_tests.rs
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
