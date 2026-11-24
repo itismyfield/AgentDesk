@@ -31,10 +31,12 @@ CFG_ATTR = re.compile(r"#!?\[\s*cfg\s*\((.*)\)\s*\]")
 
 
 def gated_attr(lines, index):
-    """Whether the attributes directly above lines[index] include a cfg that only holds under `test`."""
+    """Whether the attributes directly above lines[index] include a cfg that only holds under `test`.
+
+    The `test-support` feature does not count: a dependency built with it still has the item."""
     for j in range(vt.attr_start(lines, index), index):
         m = CFG_ATTR.search(lines[j])
-        if m and vt.rts._cfg_requires_test_text(m.group(1)):
+        if m and vt.rts._cfg_requires_test_text(m.group(1), strict=True):
             return True
     return False
 

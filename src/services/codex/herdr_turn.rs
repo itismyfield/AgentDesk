@@ -38,7 +38,7 @@ use crate::services::codex_tui::session::{
     read_codex_tui_launch_options_fingerprint, write_codex_tui_launch_options_fingerprint,
 };
 use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint;
-use crate::services::discord::UnplacedLease;
+use crate::services::discord::session_transition::UnplacedLease;
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, OwnerPort, clear_epoch,
     launch_herdr_session,

@@ -3,7 +3,7 @@ use super::*;
 use crate::services::turn_orchestrator::{HeadlessTurnStartOutcome, HeadlessTurnStartStatus};
 
 #[derive(Debug)]
-pub(super) enum AgentTurnStartDisposition {
+pub(crate) enum AgentTurnStartDisposition {
     Started,
     Accepted,
     Pending,
@@ -117,20 +117,20 @@ pub(super) async fn may_observe(
         .await
         .map_err(anyhow::Error::msg)?
     {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let test = REJECTION_TEST.try_with(Clone::clone).ok();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let pool = match &test {
             Some((pool, _)) => pool.clone(),
             None => input.runtime_pool().await.map_err(anyhow::Error::msg)?,
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let pool = input.runtime_pool().await.map_err(anyhow::Error::msg)?;
         let delivery = delivery.clone();
         // The poller's transaction already holds this row; close after it releases its locks.
         tokio::spawn(async move {
             let result = close_start_rejected(&pool, &delivery, &reason).await;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some((_, done)) = test {
                 let _ = done.send(result.is_ok());
             }
@@ -162,7 +162,7 @@ async fn owner(
     provider: &str,
     channel: u64,
 ) -> anyhow::Result<crate::services::turn_orchestrator::ChannelMailboxHandle> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(handle) = OWNER.try_with(Clone::clone) {
         return Ok(handle);
     }
@@ -174,8 +174,8 @@ async fn owner(
         .map_err(anyhow::Error::msg)
 }
 
-#[cfg(test)]
-tokio::task_local! { pub(super) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! { pub(crate) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
 
 /// The owner's start of a scheduled turn after the launch fence, keeping its metadata, hint and
 /// label; `None` leaves an unowned channel to the legacy start.
@@ -220,7 +220,7 @@ pub(super) async fn owned(
     Ok(Some(started))
 }
 
-pub(super) async fn start_owned(
+pub(crate) async fn start_owned(
     pool: &PgPool,
     fire: &ClaimedFire,
     handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
@@ -294,7 +294,7 @@ pub(super) async fn start_owned(
     Ok(disposition)
 }
 
-pub(super) async fn bind_observer(
+pub(crate) async fn bind_observer(
     connection: &mut sqlx::PgConnection,
     delivery: &RunningAgentDelivery,
     handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
@@ -340,7 +340,7 @@ pub(super) async fn bind_observer(
     Ok(updated.rows_affected() == 1)
 }
 
-pub(super) async fn close_start_rejected(
+pub(crate) async fn close_start_rejected(
     pool: &PgPool,
     delivery: &RunningAgentDelivery,
     reason: &str,
@@ -387,5 +387,5 @@ pub(super) async fn close_start_rejected(
     Ok(())
 }
 
-#[cfg(test)]
-tokio::task_local! { pub(super) static REJECTION_TEST: (PgPool,tokio::sync::mpsc::UnboundedSender<bool>); }
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! { pub(crate) static REJECTION_TEST: (PgPool,tokio::sync::mpsc::UnboundedSender<bool>); }

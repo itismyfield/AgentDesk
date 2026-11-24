@@ -145,7 +145,7 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
     tokens = rust_tokens(raw, extended=True)
     state = StripState()
     code = "".join(strip_line(line, state).ljust(len(line)) for line in raw.splitlines(keepends=True))
-    matches = list(find_test_only_cfg_attributes(code, raw))
+    matches = list(find_test_only_cfg_attributes(code, source=raw))
     gated = {match.start() for match in matches if not match.is_inner}
     inner = {match.start() for match in matches if match.is_inner}
     containers, braces = {}, []
@@ -284,8 +284,10 @@ class Inventory:
     # Test ID -> every (site, cfg chain) that declares it; cfg-disjoint duplicates keep one entry each.
     tests: dict = field(default_factory=dict)
     reached: set = field(default_factory=set)
-    # Reached file -> every cfg chain it is reached under; all test-only means the whole file is test code.
+    # Reached file -> every cfg chain it is reached under.
     file_cfgs: dict = field(default_factory=dict)
+    # Reached file -> each chain's cfg source texts (`_cfg_text`); all test-only means the whole file is test code.
+    file_cfg_texts: dict = field(default_factory=dict)
     # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
     # A file can own different child directories under plain mod and #[path] loads.
@@ -329,21 +331,16 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
     if manifest_dir is None:
         manifest_dir = next((directory for directory in root.parents
                              if directory.is_relative_to(repo_root) and (directory / "Cargo.toml").is_file()), repo_root)
-    if production:
-        try:
-            from rust_cfg import cfg_requires_test
-        except ModuleNotFoundError:
-            from scripts.rust_cfg import cfg_requires_test
-    # (file, module names, children directory, directory its own #[path] resolves against, cfg chain)
-    queue = [(root, (), module_directory(root, crate_root=True), root.parent, ())]
+    # (file, module names, children directory, directory its own #[path] resolves against, cfg chain, its source texts)
+    queue = [(root, (), module_directory(root, crate_root=True), root.parent, (), ())]
     seen = set()
     while queue:
-        source, outer, base_dir, path_dir, file_cfgs = queue.pop()
-        identity = (source.resolve(), outer, file_cfgs)
+        source, outer, base_dir, path_dir, file_cfgs, file_texts = queue.pop()
+        identity = (source.resolve(), outer, file_cfgs, file_texts)
         if identity in seen:
             continue
         seen.add(identity)
-        if production and any(cfg_requires_test("".join(cfg[1:-1])) for cfg in file_cfgs):
+        if production and any(_cfg_requires_test_text(cfg) for cfg in file_texts):
             continue
         if production and not source.resolve().is_relative_to(repo_root.resolve()):
             inv.errors.append(f"{source}: source is outside repository root")
@@ -354,16 +351,18 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
             continue
         inv.reached.add(source.resolve())
         inv.file_cfgs.setdefault(source.resolve(), set()).add(file_cfgs)
+        inv.file_cfg_texts.setdefault(source.resolve(), set()).add(file_texts)
         inv.modules.setdefault(source.resolve(), set()).add(outer)
         inv.module_dirs.setdefault(source.resolve(), set()).add(base_dir)
         try:
+            text = source.read_text("utf-8")
             if production:
                 if source.resolve() not in inv.source_tokens:
                     inv.source_tokens[source.resolve()] = production_tokens(
                         source, unreadable=inv.unreadable, diagnostic_path=source.relative_to(repo_root).as_posix())
                 tokens = inv.source_tokens[source.resolve()]
             else:
-                tokens = rust_tokens(source.read_text("utf-8"))
+                tokens = rust_tokens(text)
         except (OSError, UnicodeError) as exc:
             if not production:
                 raise
@@ -377,8 +376,9 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
         # A `#[path = "../x.rs"]` load must name the file the same way as a plain `mod` does.
         resolved = source.resolve()
         rel = resolved.relative_to(repo_root) if resolved.is_relative_to(repo_root) else source.relative_to(repo_root)
-        scopes, cfg_stack = [], [(0, file_cfgs)]
+        scopes, cfg_stack = [], [(0, file_cfgs, file_texts)]
         depth, pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = 0, None, False, (), (), ()
+        pending_texts = ()
         index = 0
         while index < len(tokens):
             token = tokens[index]
@@ -386,7 +386,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
             directory = scopes[-1][2] if scopes else base_dir
             # A #[path] in an inline module resolves under that module; at file level, beside the file.
             redirect_dir = scopes[-1][2] if scopes else path_dir
-            cfgs = cfg_stack[-1][1]
+            cfgs, texts = cfg_stack[-1][1], cfg_stack[-1][2]
             site = f"{rel}:{token.line}"
             span = attribute_span(tokens, index)
             if span is not None:
@@ -402,10 +402,12 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                     pending_path = next((item.value for item in attr if item.kind == "string"), pending_path)
                 elif attr_path == ("cfg",):
                     predicate = tuple(item.value for item in attr[path_end:])
+                    cfg_text = _cfg_text(text, attr[path_end:])
                     if outer_attr:
                         pending_cfgs += (predicate,)
+                        pending_texts += (cfg_text,)
                     else:
-                        cfg_stack[-1] = (cfg_stack[-1][0], cfg_stack[-1][1] + (predicate,))
+                        cfg_stack[-1] = (cfg_stack[-1][0], cfg_stack[-1][1] + (predicate,), cfg_stack[-1][2] + (cfg_text,))
                 elif attr_path == ("ignore",) and outer_attr:
                     pending_ignore += ((),)
                 elif attr_path == ("cfg_attr",) and GATING_CFG_ATTR & cfg_attr_payload(attr[path_end:]):
@@ -426,6 +428,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                         inv.ignores[site] = pending_ignore
                     inv.attrs[site] = pending_attrs
                 pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = None, False, (), (), ()
+                pending_texts = ()
             elif token.kind == "ident" and token.value == "mod" and index + 2 < len(tokens) \
                     and tokens[index + 1].kind == "ident":
                 name = tokens[index + 1].value
@@ -435,11 +438,11 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                 if cursor < len(tokens) and tokens[cursor].value == "{":
                     depth += 1
                     scopes.append((depth, name, redirect_dir / pending_path if pending_path else directory / name))
-                    cfg_stack.append((depth, cfgs + pending_cfgs))
+                    cfg_stack.append((depth, cfgs + pending_cfgs, texts + pending_texts))
                     if production:
                         inv.logical_modules.add(names + (name,))
                     index = cursor + 1
-                    pending_path, pending_test, pending_cfgs, pending_attrs = None, False, (), ()
+                    pending_path, pending_test, pending_cfgs, pending_attrs, pending_texts = None, False, (), (), ()
                     continue
                 if cursor < len(tokens):
                     candidates = ((redirect_dir / pending_path,) if pending_path
@@ -451,8 +454,8 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                         inv.missing_files.append(inv.errors[-1])
                     else:
                         queue.append((child, names + (name,), module_directory(child, explicit_path=pending_path is not None),
-                                      child.parent, cfgs + pending_cfgs))
-                    pending_path, pending_test, pending_cfgs = None, False, ()
+                                      child.parent, cfgs + pending_cfgs, texts + pending_texts))
+                    pending_path, pending_test, pending_cfgs, pending_texts = None, False, (), ()
             elif token.kind == "ident" and token.value == "include" and index + 3 < len(tokens) \
                     and tokens[index + 1].value == "!" and tokens[index + 2].value == "(":
                 target = _include_target(tokens, index, source, manifest_dir)
@@ -463,21 +466,22 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                     inv.missing_files.append(inv.errors[-1])
                 else:
                     # Included text keeps this module's names, but rustc resolves its mod and #[path] beside the included file.
-                    queue.append((target, names, target.parent, target.parent, cfgs + pending_cfgs))
+                    queue.append((target, names, target.parent, target.parent, cfgs + pending_cfgs, texts + pending_texts))
             if token.kind == "punct" and token.value == "{":
                 depth += 1
                 if pending_cfgs:
-                    cfg_stack.append((depth, cfgs + pending_cfgs))
-                pending_cfgs, pending_attrs = (), ()
+                    cfg_stack.append((depth, cfgs + pending_cfgs, texts + pending_texts))
+                pending_cfgs, pending_attrs, pending_texts = (), (), ()
             elif token.kind == "punct" and token.value == "}":
                 # A tail-expression attribute ends with its block; it must not reach the next item.
-                depth, pending_cfgs, pending_attrs = depth - 1, (), ()
+                depth, pending_cfgs, pending_attrs, pending_texts = depth - 1, (), (), ()
                 while scopes and scopes[-1][0] > depth:
                     scopes.pop()
                 while len(cfg_stack) > 1 and cfg_stack[-1][0] > depth:
                     cfg_stack.pop()
             elif token.kind == "punct" and token.value == ";":
                 pending_path, pending_test, pending_cfgs, pending_ignore, pending_attrs = None, False, (), (), ()
+                pending_texts = ()
             index += 1
     return inv
 
@@ -570,6 +574,8 @@ def lib_inventory(repo_root):
     lib.reached = reached.reached
     for path, chains in reached.file_cfgs.items():
         lib.file_cfgs.setdefault(path, set()).update(chains)
+    for path, chains in reached.file_cfg_texts.items():
+        lib.file_cfg_texts.setdefault(path, set()).update(chains)
     for path, directories in reached.module_dirs.items():
         lib.module_dirs.setdefault(path, set()).update(directories)
     lib.errors += [e for e in reached.errors if e not in lib.errors]
@@ -790,25 +796,23 @@ def _ignored_on(conditions, target_os, features):
     return True if True in verdicts else (None if None in verdicts else False)
 
 
-def _cfg_requires_test_text(expression):
-    """`rust_cfg.cfg_requires_test` for a cfg predicate's source text; the script may run from any cwd."""
+def _cfg_requires_test_text(expression, strict=False):
+    """`rust_cfg.cfg_requires_test` for a cfg predicate's source text, comments ignored; the script may run from any cwd."""
     try:
         from rust_cfg import cfg_requires_test
+        from rust_lex import COMMENT, blank_segments
     except ModuleNotFoundError:
         sys.path.append(str(Path(__file__).resolve().parents[1]))
         from rust_cfg import cfg_requires_test
-    return cfg_requires_test(expression)
+        from rust_lex import COMMENT, blank_segments
+    return cfg_requires_test(blank_segments(expression, {COMMENT})[0], strict=strict)
 
 
-def _cfg_requires_test(predicate):
-    """Whether one cfg token tuple from `walk` can only hold under `test`."""
-    words = list(predicate[1:-1])
-    text = ""
-    for n, word in enumerate(words):
-        if n and words[n - 1] not in "(=" and word not in "()=":
-            text += ","
-        text += f'"{word}"' if n and words[n - 1] == "=" else word
-    return _cfg_requires_test_text(text)
+def _cfg_text(text, predicate):
+    """Source text inside one `cfg(...)` attribute's parentheses, so a verdict sees its literals as written."""
+    if len(predicate) < 2 or predicate[0].value != "(" or predicate[-1].value != ")":
+        return ""
+    return text[predicate[0].start + 1:predicate[-1].start]
 
 
 def unbounded_waits(raw, tokens, whole_file):
@@ -924,7 +928,7 @@ def wait_allowlist(repo_root):
 def unbounded_wait_files(repo_root, inventory):
     """{repo path: [(line, kind)]} of the test code that waits without a cap."""
     root = repo_root.resolve()
-    files = {path: chains for path, chains in inventory.file_cfgs.items()}
+    files = {path: chains for path, chains in inventory.file_cfg_texts.items()}
     for path in sorted((root / "tests").rglob("*.rs")):
         if "fixtures" not in path.relative_to(root).parts:
             files[path.resolve()] = None
@@ -934,7 +938,7 @@ def unbounded_wait_files(repo_root, inventory):
         if rel == WAIT_HELPER:
             continue
         chains = files[path]
-        whole = chains is None or all(any(_cfg_requires_test(cfg) for cfg in chain) for chain in chains)
+        whole = chains is None or all(any(_cfg_requires_test_text(cfg) for cfg in chain) for chain in chains)
         raw = path.read_text("utf-8")
         if not WAIT_CALL.search(raw):
             continue

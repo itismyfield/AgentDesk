@@ -6,13 +6,13 @@ use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use super::execution_mode::{
-    ExecutionDefinition, RoutineExecutionMode, is_definition_constraint_violation,
-};
-use super::store::{NewRoutine, RoutinePatch, RoutineStore};
-use super::{RoutineAgentExecutor, RoutineScriptLoader, run_due_tick};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::routines::execution_mode::{
+    ExecutionDefinition, RoutineExecutionMode, is_definition_constraint_violation,
+};
+use crate::services::routines::store::{NewRoutine, RoutinePatch, RoutineStore};
+use crate::services::routines::{RoutineAgentExecutor, RoutineScriptLoader, run_due_tick};
 
 fn store(pool: &PgPool) -> RoutineStore {
     RoutineStore::new_with_timezone_and_checkpoint_limit(

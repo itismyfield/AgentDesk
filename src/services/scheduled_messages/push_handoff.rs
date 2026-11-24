@@ -28,13 +28,13 @@ fn render_discord_content(content: &str, user_ids: &[String]) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PushHandoffOutcome {
+pub(crate) enum PushHandoffOutcome {
     Committed,
     Canceled,
 }
 
 #[derive(Debug, Error)]
-pub(super) enum PushHandoffError {
+pub(crate) enum PushHandoffError {
     #[error("scheduled push target is invalid: {0}")]
     Invalid(&'static str),
     #[error("scheduled push handoff failed: {0}")]
@@ -60,7 +60,7 @@ pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: Date
     }
 }
 
-pub(super) async fn commit(
+pub(crate) async fn commit(
     pool: &sqlx::PgPool,
     fire: &ClaimedFire,
     now: DateTime<Utc>,

@@ -137,12 +137,13 @@ def _parse_cfg_expression(expression: str) -> _CfgNode | None:
             return _CfgNode(name, children=tuple(children))
 
         # Keep a key/value predicate as one unknown atom; its string survives
-        # only when the caller passed unblanked text.
-        value = None
+        # only when the caller passed unblanked text.  Only the plain
+        # ``key = "value"`` spelling is read: a raw string stays an unknown atom.
+        start = index
         while index < len(tokens) and tokens[index] not in {",", ")"}:
-            if tokens[index].startswith('"'):
-                value = tokens[index][1:-1]
             index += 1
+        rest = tokens[start:index]
+        value = rest[1][1:-1] if len(rest) == 2 and rest[0] == "=" and rest[1].startswith('"') else None
         return _CfgNode("atom", name=name, value=value)
 
     node = parse_expr()
@@ -231,11 +232,15 @@ def parse_cfg_condition(expression: str) -> _CfgNode | None:
     return _parse_cfg_expression(_strip_comments(expression))
 
 
-def cfg_requires_test(expression: str) -> bool:
-    """Return whether a raw cfg predicate cannot hold with ``test`` disabled."""
+def cfg_requires_test(expression: str, *, strict: bool = False) -> bool:
+    """Return whether a raw cfg predicate cannot hold with ``test`` disabled.
+
+    ``strict=True`` asks the narrower question a crate cut needs, whether the item
+    is missing from a dependency build, where the test-support feature can be on.
+    """
 
     parsed = parse_cfg_condition(expression)
-    return parsed is not None and not _can_be_true_without_test(parsed)
+    return parsed is not None and not _can_be_true_without_test(parsed, feature_aware=not strict)
 
 
 def cfg_conditions_gate(conditions: Iterable[str]) -> str | None:

@@ -31,6 +31,7 @@ pub mod reload_classes;
 pub(crate) mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
+pub(crate) mod transcript_homes;
 pub use config_path::resolved_config_path;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
@@ -855,8 +856,11 @@ impl ClusterDispatchRoutingConfig {
     }
 }
 
+/// The routing constraint that admits every candidate; the default constraint list holds only it.
+pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
+
 fn default_dispatch_routing_constraints() -> Vec<String> {
-    vec![crate::services::dispatches::routing_constraint::NOOP_CONSTRAINT_NAME.to_string()]
+    vec![NOOP_CONSTRAINT_NAME.to_string()]
 }
 
 fn is_default_dispatch_routing_constraints(values: &[String]) -> bool {
@@ -2511,7 +2515,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
-    crate::services::session_resume::catalog::warn_unusable_transcript_homes(config);
+    transcript_homes::warn_unusable_transcript_homes(config);
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,
     )

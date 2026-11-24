@@ -678,7 +678,10 @@ class DiscriminationTests(unittest.TestCase):
                     self.assertFalse(ok, message)
                     self.assertIn(
                         "production module mounts basename test file"
-                        if name == "basename_production_mod" else f"scan-only (newly skipped): {child}",
+                        if name == "basename_production_mod"
+                        # A comment does not detach `#[path]`, so the production mount is scanned.
+                        else f"UNLISTED call site in {child}" if name == "path_mod_comment"
+                        else f"scan-only (newly skipped): {child}",
                         message,
                     )
 
@@ -1093,6 +1096,23 @@ class DiscriminationTests(unittest.TestCase):
         expected["write_delivered_frontier"][rel] = 1
         ok, message = self.run_guard(root, expected)
         self.assertTrue(ok, message)
+
+    def test_test_support_gated_writer_is_test_only_and_look_alikes_are_scanned(self):
+        root = self.fixture()
+        rel = "src/services/discord/cfg_support_writer.rs"
+        gate = 'any(test, feature = "test-support")'
+        for cfg in (gate, f"all({gate}, unix)"):
+            write(root, rel, f"#[cfg({cfg})]\nfn only_tests() {{ write_delivered_frontier(); }}\n")
+            ok, message = self.run_guard(root)
+            self.assertTrue(ok, f"{cfg}: {message}")
+        for cfg in (f"not({gate})", 'any(test, feature = /* feature = "test-support" */ "live")'):
+            write(root, rel, f"#[cfg({cfg})]\nfn sneaky() {{ write_delivered_frontier(); }}\n")
+            ok, message = self.run_guard(root)
+            self.assertFalse(ok, f"{cfg}: {message}")
+            self.assertIn(f"write_delivered_frontier: UNLISTED call site in {rel} (1x)", message)
+        # The gate covers its own statement only; a call after it on the same line is production.
+        write(root, rel, f"fn mixed() {{\n    #[cfg({gate})] let _p = write_delivered_frontier(); write_delivered_frontier();\n}}\n")
+        self.assertIn(f"write_delivered_frontier: UNLISTED call site in {rel} (1x)", self.run_guard(root)[1])
 
     def test_s8_bare_reference_gate_is_mutation_proof_and_excludes_calls_defs_use(self):
         root = self.fixture()

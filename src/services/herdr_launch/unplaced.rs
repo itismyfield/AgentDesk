@@ -17,7 +17,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedOwner,
     HostedRecord, HostedState, ProcessStamp, record_launch_evidence_pg,
 };
-use crate::services::discord::UnplacedLease;
+use crate::services::discord::session_transition::UnplacedLease;
 use crate::services::session_host::{PaneOccupant, START_SLACK, ServerWitness};
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, context_of_env_path, execution_context,

@@ -364,6 +364,7 @@ def test_region_lines(path: str) -> set[int]:
         _TEST_REGION_CACHE[path] = result
         return result
     code_lines = strip_rust_non_code(source).splitlines()
+    raw_lines = source.splitlines()
 
     depth = 0
     active_depth: int | None = None
@@ -376,7 +377,10 @@ def test_region_lines(path: str) -> set[int]:
         opens = code_line.count("{")
         closes = code_line.count("}")
         module_text = stripped
-        cfg_test_attribute = find_test_only_cfg_attribute(module_text)
+        # Same columns as `stripped`, with the literals the stripper blanked.
+        lead = len(code_line) - len(code_line.lstrip())
+        raw_text = raw_lines[idx - 1][lead : lead + len(stripped)] if idx <= len(raw_lines) else ""
+        cfg_test_attribute = find_test_only_cfg_attribute(module_text, source=raw_text)
         if cfg_test_attribute is not None and cfg_test_attribute.start() != 0:
             cfg_test_attribute = None
         if cfg_test_attribute:

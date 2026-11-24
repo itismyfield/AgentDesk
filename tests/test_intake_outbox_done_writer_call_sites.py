@@ -127,6 +127,7 @@ class DiscriminationTests(unittest.TestCase):
             ROOT / "scripts/rust_lex.py",
             root / "scripts/rust_lex.py",
         )
+        shutil.copy2(ROOT / "scripts/rust_cfg.py", root / "scripts/rust_cfg.py")
         declarations = []
         for index, rel in enumerate(sorted(guard.PINNED_TEST_ONLY_MODULE_FILES)):
             write(root, rel, "")
@@ -544,6 +545,9 @@ class SharedSkipRuleTests(unittest.TestCase):
             '#[path="hidden_tests.rs"] mod helper;',
             '#[cfg(not(test))] mod hidden_tests;',
             '#[cfg(any(test, feature="x"))] mod hidden_tests;',
+            '#[cfg(not(any(test, feature = "test-support")))] mod hidden_tests;',
+            '// #[cfg(any(test, feature = "test-support"))]\n#[cfg(not(any(test, feature = "test-support")))] mod hidden_tests;',
+            '#[cfg(all(unix /*, feature = "test-support", */))] mod hidden_tests;',
         ):
             with self.subTest(declaration=declaration):
                 root = Path(tempfile.mkdtemp())
@@ -553,6 +557,17 @@ class SharedSkipRuleTests(unittest.TestCase):
                 for ok, message in self.run_both_skip_gates(root, frozenset()):
                     self.assertFalse(ok, message)
                     self.assertIn("production module mounts basename test file", message)
+
+    def test_test_support_gated_mounts_of_basename_files_pass(self):
+        gate = 'any(test, feature = "test-support")'
+        for cfg in (gate, f"all({gate}, unix)"):
+            with self.subTest(cfg=cfg):
+                root = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, root)
+                write(root, "src/main.rs", f"#[cfg({cfg})] mod hidden_tests;\nfn main() {{}}\n")
+                write(root, "src/hidden_tests.rs", "pub fn probe() {}\n")
+                for ok, message in self.run_both_skip_gates(root, frozenset()):
+                    self.assertTrue(ok, message)
 
     def test_basename_classifier_widening_is_rejected(self):
         root = Path(tempfile.mkdtemp())

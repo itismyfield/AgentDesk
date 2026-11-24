@@ -522,7 +522,7 @@ pub(crate) fn probe_health_once(addr: &str, host: &str, deadline: Instant) -> Pr
 /// Serializes tests that assert on deltas of the process-global counters, so a
 /// parallel test cannot move them mid-assertion. Outside `mod tests` because
 /// `services::health_diagnostics` tests must share the same lock.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn counter_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static COUNTER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     COUNTER_TESTS.lock().unwrap_or_else(|e| e.into_inner())

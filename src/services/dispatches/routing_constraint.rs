@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::config::{ClusterBlackoutWindowConfig, ClusterConfig, ClusterNodeConfig};
+use crate::config::{
+    ClusterBlackoutWindowConfig, ClusterConfig, ClusterNodeConfig, NOOP_CONSTRAINT_NAME,
+};
 use crate::services::cluster::node_registry::CapabilityRouteCandidate;
 
-pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
 pub(crate) const NODE_CONCURRENCY_CAP_CONSTRAINT_NAME: &str = "node_concurrency_cap";
 pub(crate) const BLACKOUT_WINDOW_CONSTRAINT_NAME: &str = "blackout_window";
 

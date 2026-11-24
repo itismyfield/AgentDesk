@@ -173,7 +173,7 @@ pub(in crate::services::discord) async fn merge_v2_held_sources(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn recovery_known_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {

@@ -235,7 +235,7 @@ pub(crate) fn dispatch_delivery_event_mismatch_metrics_snapshot()
     rows
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_dispatch_delivery_event_mismatch_metrics_for_tests() {
     if let Some(counters) = DISPATCH_DELIVERY_MISMATCH_COUNTERS.get() {
         counters.clear();
@@ -251,7 +251,7 @@ pub(crate) fn reset_dispatch_delivery_event_mismatch_metrics_for_tests() {
 /// another test (in this module or in route tests) is concurrently asserting.
 /// Acquire this guard at the very top of any such test. Returns a guard that
 /// must be held for the duration of the test.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn lock_dispatch_delivery_metric_tests() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))

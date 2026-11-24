@@ -419,9 +419,7 @@ fn routing_constraints_configured_for_unqualified_dispatch(
             .dispatch_routing
             .constraints
             .iter()
-            .any(|name| {
-                name != crate::services::dispatches::routing_constraint::NOOP_CONSTRAINT_NAME
-            })
+            .any(|name| name != crate::config::NOOP_CONSTRAINT_NAME)
 }
 
 fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str) {
