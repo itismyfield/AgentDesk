@@ -22,5 +22,7 @@ export const step = (action) => ({
  HandoffDecision:"잘못된 handoff 우회 대조", WakeFailed:"실패 원본 재큐잉 대조",
  SelfDeclared:"승인 event 없이 source=decision을 자기 선언한 요청 대조",
  Journal:"쓰기 직전 may_have_sent 기록 한 번", ReleaseHeld:"입력창 사용 중: 미전송 증명 뒤 같은 원본으로 다시 대기",
- OwnerPending:"owner 수용 응답 불명: 닫고 그 원본만 제거", PreserveApproved:"승인된 의견의 원문 보존 frame"
+ OwnerPending:"owner 수용 응답 불명: 닫고 그 원본만 제거", PreserveApproved:"승인된 의견의 원문 보존 frame",
+ PeerRecover:"다른 노드의 부팅 복구: holder 실행이 끝난 시도만 종결", Sweep:"종결된 event의 남은 원본을 requeue·안내 전에 제거",
+ Notice:"종결된 Decision 원본의 재전송 안내 대조", OtherNotice:"같은 채널 다른 사용자 원본의 안내"
 })[action] ?? action;
