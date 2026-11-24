@@ -169,7 +169,7 @@ pub(in crate::services::discord::outbound) async fn send_authorized_manual_messa
             request_source,
             options.body_census.clone(),
         );
-        super::super::census_scope(Some(tag), send).await
+        crate::services::legacy_body_census::request_context::census_scope(Some(tag), send).await
     } else {
         send.await
     }

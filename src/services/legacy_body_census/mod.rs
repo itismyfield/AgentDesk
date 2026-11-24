@@ -13,6 +13,7 @@ mod evaluation;
 mod evidence;
 mod history;
 mod manifest;
+pub(crate) mod request_context;
 #[cfg(test)]
 #[path = "entry_tests.rs"]
 mod tests;

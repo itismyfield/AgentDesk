@@ -11,7 +11,7 @@ pub(super) fn capture(source: &str) -> Option<Value> {
                 "producer":crate::services::legacy_body_census::producer_identity()})
         });
     }
-    crate::services::discord::outbound::current_census().map(|tag| {
+    crate::services::legacy_body_census::request_context::current_census().map(|tag| {
         json!({"schema_version":1,"tag":tag,
             "producer":crate::services::legacy_body_census::producer_identity()})
     })

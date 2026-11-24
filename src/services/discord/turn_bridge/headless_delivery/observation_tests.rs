@@ -1,7 +1,8 @@
 use super::*;
 use crate::server::outbox_worker::{drain_message_outbox_once, origin_fixture::Discord};
 use crate::services::cluster::intake_router_hook::owner_record::output;
-use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
+use crate::services::discord::outbound::raw_output::tests as recording;
+use crate::services::legacy_body_census::request_context::census_scope;
 use crate::services::message_outbox;
 use serde_json::{Value, json};
 use std::path::Path;
