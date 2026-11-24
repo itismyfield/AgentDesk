@@ -9,8 +9,6 @@ use super::runs::{
 
 mod dispatch_failure;
 pub(crate) mod status_write;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_access;
 use status_write::{EntryStatusStage, EntryStatusWrite, StagedEntryStatus, run_finalize_due};
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -74,6 +72,25 @@ pub(crate) struct EntryStatusRow {
     thread_group: i64,
     batch_phase: i64,
     completed_at: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl EntryStatusRow {
+    pub(crate) fn status_for_test(&self) -> &str {
+        &self.status
+    }
+
+    pub(crate) fn dispatch_id_for_test(&self) -> Option<&str> {
+        self.dispatch_id.as_deref()
+    }
+
+    pub(crate) fn slot_index_for_test(&self) -> Option<i64> {
+        self.slot_index
+    }
+
+    pub(crate) fn completed_at_for_test(&self) -> Option<&str> {
+        self.completed_at.as_deref()
+    }
 }
 
 pub async fn reactivate_done_entry_on_pg(
@@ -1221,6 +1238,11 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
+    resume_session_id_from_context(context)
+}
+
 pub(super) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
     let context = context
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -1297,6 +1319,14 @@ pub async fn latest_entry_phase_codex_session_id_pg(
     }
 
     Ok(None)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn load_entry_status_row_pg_for_test(
+    pool: &PgPool,
+    entry_id: &str,
+) -> Result<EntryStatusRow, String> {
+    load_entry_status_row_pg(pool, entry_id).await
 }
 
 async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {

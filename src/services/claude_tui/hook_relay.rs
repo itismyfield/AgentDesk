@@ -22,8 +22,6 @@ mod reaping_tests;
 #[cfg(test)]
 mod relay_probe_tests;
 mod response_window;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_access;
 mod too_early;
 mod transport_retry;
 pub(crate) use ordered_queue::OrderedHookRelayRecoveryOwner;
@@ -43,6 +41,16 @@ const STOP_RELAY_TIMEOUT: Duration = Duration::from_millis(750);
 const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
 const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER";
 const NON_WAIT_RELAY_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER";
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn failure_marker_worker_env_for_test() -> &'static str {
+    FAILURE_MARKER_WORKER_ENV
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn non_wait_relay_worker_env_for_test() -> &'static str {
+    NON_WAIT_RELAY_WORKER_ENV
+}
 
 #[cfg(test)]
 const FAILURE_MARKER_PARENT_TEST_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST";

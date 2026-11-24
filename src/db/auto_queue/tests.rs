@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 #[allow(unused_imports)]
-use crate::db::auto_queue::entries::test_access::resume_session_id_from_context_for_test as resume_session_id_from_context;
+use crate::db::auto_queue::entries::resume_session_id_from_context_for_test as resume_session_id_from_context;
 #[allow(unused_imports)]
 use crate::db::auto_queue::*;
 

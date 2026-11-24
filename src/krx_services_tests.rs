@@ -16,7 +16,7 @@ mod cluster_owner_record_event;
 /// Each handoff runs in a child of this test, so the env change never reaches the test process.
 #[test]
 fn run_from_args_serves_a_hook_relay_worker_handoff_before_parsing_arguments() {
-    use crate::services::claude_tui::hook_relay::test_access::{
+    use crate::services::claude_tui::hook_relay::{
         failure_marker_worker_env_for_test, non_wait_relay_worker_env_for_test,
     };
     const CELL: &str = "ADK_KRX_WORKER_HANDOFF_PROBE";

@@ -1,6 +1,6 @@
 //! Moved from src/db/auto_queue/entries.rs: these cases write entry status through the KE writer.
 
-use crate::db::auto_queue::entries::test_access::load_entry_status_row_pg_for_test as load_entry_status_row_pg;
+use crate::db::auto_queue::entries::load_entry_status_row_pg_for_test as load_entry_status_row_pg;
 use crate::db::auto_queue::entries::tests::{
     begin_run_token_holder, entry_status, run_token_waiter_sample, seed_dispatch, setup_entry,
     transition_count,

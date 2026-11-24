@@ -6,9 +6,6 @@ use std::future::Future;
 
 use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_access;
-
 const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
             transcript.assistant_message,
             transcript.created_at,
@@ -349,6 +346,14 @@ pub(crate) async fn observe_channel_clear_fence_once(
 ) {
     slot.get_or_init(|| capture_channel_clear_fence(pool, channel_id))
         .await;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn capture_channel_clear_fence_for_test(
+    pool: Option<&PgPool>,
+    channel_id: &str,
+) -> ChannelClearFence {
+    capture_channel_clear_fence(pool, channel_id).await
 }
 
 async fn capture_channel_clear_fence(pool: Option<&PgPool>, channel_id: &str) -> ChannelClearFence {
