@@ -199,7 +199,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── entries/
 │   │   │   ├── dispatch_failure.rs
-│   │   │   └── status_write.rs
+│   │   │   ├── status_write.rs
+│   │   │   └── test_access.rs
 │   │   ├── phase_gates/
 │   │   │   ├── current_batch_phase_pg_tests.rs
 │   │   │   ├── reconcile_phase_gate_pg_tests.rs
@@ -367,6 +368,8 @@ src/
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── session_transcripts/
+│   │   └── test_access.rs
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
@@ -1233,6 +1236,7 @@ src/
 │   │   │   ├── recovery_pace.rs
 │   │   │   ├── relay_probe_tests.rs
 │   │   │   ├── response_window.rs
+│   │   │   ├── test_access.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/

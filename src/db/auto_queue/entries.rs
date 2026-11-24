@@ -9,6 +9,8 @@ use super::runs::{
 
 mod dispatch_failure;
 pub(crate) mod status_write;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access;
 use status_write::{EntryStatusStage, EntryStatusWrite, StagedEntryStatus, run_finalize_due};
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -65,13 +67,13 @@ pub(crate) struct EntryStatusRow {
     run_id: String,
     card_id: String,
     agent_id: String,
-    pub(crate) status: String,
-    pub(crate) dispatch_id: Option<String>,
+    status: String,
+    dispatch_id: Option<String>,
     retry_count: i64,
-    pub(crate) slot_index: Option<i64>,
+    slot_index: Option<i64>,
     thread_group: i64,
     batch_phase: i64,
-    pub(crate) completed_at: Option<String>,
+    completed_at: Option<String>,
 }
 
 pub async fn reactivate_done_entry_on_pg(
@@ -1219,7 +1221,7 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
+pub(super) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
     let context = context
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .filter(|value| value.is_object())?;
@@ -1297,10 +1299,7 @@ pub async fn latest_entry_phase_codex_session_id_pg(
     Ok(None)
 }
 
-pub(crate) async fn load_entry_status_row_pg(
-    pool: &PgPool,
-    entry_id: &str,
-) -> Result<EntryStatusRow, String> {
+async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
                 COALESCE(kanban_card_id, '') AS kanban_card_id,

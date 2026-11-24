@@ -2,7 +2,9 @@
 
 use super::*;
 
-pub(crate) mod fallback_route;
+mod fallback_route;
+#[cfg(test)]
+pub(crate) use fallback_route::{BEFORE_PLAN, ENTERED};
 
 pub(super) async fn route(pool: &PgPool, ctx: &IntakeRouterContext<'_>) -> IntakeRouterDecision {
     if let Some(decision) = fallback_route::route(pool, ctx).await {

@@ -1,6 +1,7 @@
 //! Moved from src/db/session_transcripts.rs: these clear-fence tests drive the KE routine store.
 
 use crate::db::session_transcripts::clear_fence_pg_tests::{channel_pairs, create_pool, entry};
+use crate::db::session_transcripts::test_access::capture_channel_clear_fence_for_test as capture_channel_clear_fence;
 use crate::db::session_transcripts::*;
 use crate::services::routines::{RoutineAgentExecutor, RoutineStore};
 use sqlx::PgPool;
