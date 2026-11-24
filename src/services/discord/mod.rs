@@ -126,7 +126,7 @@ pub(crate) mod session_identity;
 mod session_idle_cleanup;
 mod session_runtime;
 mod session_status_hook;
-mod session_transition;
+pub(crate) mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
@@ -218,9 +218,9 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
 mod tui_prompt_relay;
 #[cfg(test)]
 pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
-pub(crate) use session_notice::input_notice::{
-    input_notice_content, input_notice_line, scheduled_input_notice_content,
-};
+#[cfg(test)]
+pub(crate) use session_notice::input_notice::input_notice_content;
+pub(crate) use session_notice::input_notice::input_notice_line;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
@@ -669,9 +669,9 @@ pub(super) use shared_data::make_shared_data_for_tests_with_barrier;
 #[cfg(test)]
 pub(super) use shared_data::make_shared_data_for_tests_with_storage;
 
-pub(crate) use session_transition::{
-    SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy, UnplacedLease,
-};
+#[cfg(unix)]
+pub(crate) use session_transition::UnplacedLease;
+pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 use queue_dispatch::persistence_context as queue_persistence_context;
 

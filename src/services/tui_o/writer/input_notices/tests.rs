@@ -70,8 +70,8 @@ fn native_uuid_separates_identical_inputs_and_rejects_changed_identity() {
     let before = record("long-uuid", &format!("{prefix}a"));
     let after = record("long-uuid", &format!("{prefix}b"));
     assert_eq!(
-        discord::input_notice_content(&format!("{prefix}a")),
-        discord::input_notice_content(&format!("{prefix}b"))
+        input_notice::input_notice_content(&format!("{prefix}a")),
+        input_notice::input_notice_content(&format!("{prefix}b"))
     );
     assert!(project(&mut projection, &before).unwrap().is_some());
     assert!(project(&mut projection, &after).is_err());
@@ -81,8 +81,8 @@ fn native_uuid_separates_identical_inputs_and_rejects_changed_identity() {
     let after = format!("{x}{y}\nz");
     assert_ne!(before.as_bytes(), after.as_bytes());
     assert_eq!(
-        discord::input_notice_content(&before),
-        discord::input_notice_content(&after)
+        input_notice::input_notice_content(&before),
+        input_notice::input_notice_content(&after)
     );
     let display = |text: &str| {
         crate::services::tui_o::shadow::unit_plan::plan(

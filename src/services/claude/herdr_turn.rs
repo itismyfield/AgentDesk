@@ -33,7 +33,7 @@ use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
-use crate::services::discord::UnplacedLease;
+use crate::services::discord::session_transition::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, OwnerPort, clear_epoch, launch_herdr_session,

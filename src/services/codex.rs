@@ -67,7 +67,7 @@ use crate::services::provider::{
     tmux_followup_fallback_after_read_error,
 };
 use crate::services::provider_teardown::TeardownClearance;
-use crate::services::remote::RemoteProfile;
+use crate::services::remote_stub::RemoteProfile;
 use crate::services::session_backend::{
     insert_process_session, process_session_is_alive, process_session_probe,
     read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,

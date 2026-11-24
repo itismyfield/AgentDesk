@@ -181,9 +181,6 @@ pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 pub(crate) mod turn_summary_line;
 
-// The disabled remote types keep their `services::remote` path; no remote runtime exists.
-pub use remote_stub as remote;
-
 #[cfg(test)]
 mod krx_claude_tests;
 #[cfg(test)]
