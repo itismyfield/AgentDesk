@@ -1647,24 +1647,24 @@ mod child_exit_tests {
     fn actual_quiet_provider_observes_exact_token_manual_cancel() {
         let fixture = ProviderFixture::new("qwen", "cancel");
         let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-        let cancel = fixture.cancel_after_accept(token.clone());
         let (tx, _rx) = std::sync::mpsc::channel();
-        let result = execute_qwen_streaming_attempt(
-            fixture.cli.to_str().unwrap(),
-            &fixture.resolution(),
-            "test",
-            None,
-            QwenResumeStrategy::Fresh,
-            fixture.path().to_str().unwrap(),
-            tx,
-            Some(token.clone()),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let result = fixture.run_with_cancel_after_accept(token.clone(), || {
+            execute_qwen_streaming_attempt(
+                fixture.cli.to_str().unwrap(),
+                &fixture.resolution(),
+                "test",
+                None,
+                QwenResumeStrategy::Fresh,
+                fixture.path().to_str().unwrap(),
+                tx,
+                Some(token.clone()),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
         assert!(matches!(result, QwenAttemptResult::Cancelled));
-        cancel.join().unwrap();
         assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
         assert_eq!(token.child_pid_value(), None);
         fixture.verify_return("cancel");
