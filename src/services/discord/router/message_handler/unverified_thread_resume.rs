@@ -54,9 +54,16 @@ pub(in crate::services::discord) async fn apply(
     }
     *selected.memento_context_loaded = false;
     *selected.reason = REASON;
-    let pool = shared.pg_pool.as_ref();
-    crate::services::claude::fresh_notice::announce_unverified(pool, channel_id.get(), &replaced)
-        .await;
+    // The notice module exists where the judgment can be true.
+    #[cfg(unix)]
+    crate::services::claude::fresh_notice::announce_unverified(
+        shared.pg_pool.as_ref(),
+        channel_id.get(),
+        &replaced,
+    )
+    .await;
+    #[cfg(not(unix))]
+    drop(replaced);
 }
 
 #[cfg(all(test, unix))]
