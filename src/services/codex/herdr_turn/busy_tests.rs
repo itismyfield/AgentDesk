@@ -15,7 +15,7 @@ const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
 const PLACEHOLDER: &str = "\u{1b}[2mAsk Codex to do anything\u{1b}[0m";
 
 fn fixture(name: &str) -> String {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     std::fs::read_to_string(dir.join(name)).unwrap()
 }
 

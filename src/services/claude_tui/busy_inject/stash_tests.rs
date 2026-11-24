@@ -208,7 +208,7 @@ impl Tui {
     /// A busy 160x50 pane, wide enough for the input header to render flat, whose composer holds
     /// `draft` (empty for none) and no stash.
     fn new(draft: &str) -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+        let root = Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
         let transcript = dir.path().join("transcript.jsonl");

@@ -363,8 +363,8 @@ fn history_v2_actual_writer_golden_is_read_only_for_the_approved_rollback_reader
     assert!(old.entries.is_empty());
     let mut golden = serde_json::from_slice::<Value>(&before).unwrap();
     normalize(&mut golden);
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/input_owner/history-v2.json");
+    let fixture = Path::new(crate::runtime_layout::REPO_ROOT)
+        .join("tests/fixtures/input_owner/history-v2.json");
     if std::env::var_os("ADK_UPDATE_HISTORY_GOLDEN").is_some() {
         std::fs::write(
             &fixture,

@@ -13,7 +13,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let runtime = crate::config::TestRuntimeRootGuard::new();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
+        let root = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("target/i01-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
         fs::write(

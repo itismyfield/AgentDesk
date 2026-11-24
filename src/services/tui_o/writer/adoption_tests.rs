@@ -484,10 +484,7 @@ mod past_stall;
 fn recap_is_undelivered_output_without_reopening_adoption_turn() {
     let channel = Channel::new(814_301);
     let before = channel.end();
-    let recap = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/claude_away_summary.jsonl"
-    ));
+    let recap = include_str!("../../../../tests/fixtures/claude_away_summary.jsonl");
     append(&channel.source.path, recap);
     *channel.legacy.cursor.lock().unwrap() = Some(channel.end());
     let snapshot = channel

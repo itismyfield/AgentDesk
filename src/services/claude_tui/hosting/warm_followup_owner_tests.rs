@@ -194,10 +194,9 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
 
 /// What an in-CLI `/clear` appends to the session it leaves (Claude 2.1.316, production launch).
 fn clear_suffix() -> String {
-    const FIXTURE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl"
-    ));
+    const FIXTURE: &str = include_str!(
+        "../../../../tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl"
+    );
     let line = FIXTURE
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())

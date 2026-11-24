@@ -27,7 +27,7 @@ const FAST: Timing = Timing {
 };
 
 fn fixture(name: &str) -> String {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     fs::read_to_string(dir.join(name)).unwrap()
 }
 
@@ -366,7 +366,7 @@ struct Fake {
 impl Fake {
     /// An unattended 80x24 viewport over an open turn with two empty pre-paste snapshots.
     fn new() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/codex-busy-inject-tmp");
+        let root = Path::new(crate::runtime_layout::REPO_ROOT).join("target/codex-busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
         let dir = tempfile::tempdir_in(root).unwrap();
         let rollout = dir.path().join("rollout.jsonl");

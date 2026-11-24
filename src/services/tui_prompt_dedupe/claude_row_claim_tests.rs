@@ -46,7 +46,8 @@ const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"con
 
 /// A scripted busy Claude pane writing `transcript.jsonl` in its own directory.
 fn fake_pane() -> tempfile::TempDir {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+    let root =
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
     std::fs::create_dir_all(&root).unwrap();
     let dir = tempfile::tempdir_in(root).unwrap();
     let path = |name: &str| dir.path().join(name);

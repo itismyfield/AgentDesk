@@ -63,7 +63,7 @@ pub fn ensure_loaded() {
     // Try standard paths in order
     let candidates = [
         std::path::PathBuf::from("policies/default-pipeline.yaml"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/default-pipeline.yaml"),
+        Path::new(crate::runtime_layout::REPO_ROOT).join("policies/default-pipeline.yaml"),
     ];
     for path in &candidates {
         if path.exists() {
@@ -1279,7 +1279,7 @@ mod schema_strictness_tests {
     use std::path::{Path as StdPath, PathBuf};
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(crate::runtime_layout::REPO_ROOT)
     }
 
     /// Discover every pipeline manifest tracked under `policies/`. A pipeline

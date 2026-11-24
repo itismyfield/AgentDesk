@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn transaction_statements_never_discard_their_result() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = Path::new(crate::runtime_layout::REPO_ROOT).join("src");
     let mut files = Vec::new();
     collect_rs_files(&root, &mut files);
     let discarded = Regex::new(

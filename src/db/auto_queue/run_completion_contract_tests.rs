@@ -21,7 +21,7 @@ const PARAMETERIZED_STATUS_OWNERS: &[&str] = &[
 ];
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(crate::runtime_layout::REPO_ROOT)
 }
 
 fn collect_files(root: &Path, extension: &str, skip_dir: &str) -> Vec<PathBuf> {
