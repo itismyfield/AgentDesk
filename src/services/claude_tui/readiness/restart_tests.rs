@@ -175,6 +175,38 @@ fn a_turns_trailing_session_metadata_keeps_its_hard_terminal() {
     );
 }
 
+/// What Claude 2.1.330+ writes after a turn's end; a long idle adds the away recap.
+fn data_flow(r: &Rig) {
+    r.append(json!({"type":"data-flow-records","records":[{"response_id":"r1"}],"v":1}));
+}
+fn recap(r: &Rig) {
+    data_flow(r);
+    r.append(json!({"type":"system","subtype":"away_summary","content":"recap"}));
+}
+
+#[test]
+fn an_away_recap_after_the_turn_keeps_its_hard_terminal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    finished(&r);
+    recap(&r);
+    assert!(r.ready(), "the recap is no turn record");
+    let r = old_launch();
+    finished(&r);
+    recap(&r);
+    daemon_restart(&r.session);
+    assert!(restored(&r) == Some(true), "the restart floor rests on it");
+}
+
+#[test]
+fn trailing_data_flow_records_keep_the_hard_terminal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    finished(&r);
+    (0..3).for_each(|_| data_flow(&r));
+    assert!(r.ready());
+}
+
 #[test]
 fn turn_records_after_the_metadata_still_run() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -198,10 +230,19 @@ fn turn_records_after_the_metadata_still_run() {
             json!({"type":"api-request","timestamp":Utc::now()}),
         ),
         ("an unknown record", json!({"type":"something-new"})),
+        (
+            "a task",
+            json!({"type":"system","subtype":"scheduled_task_fire"}),
+        ),
+        (
+            "a compaction",
+            json!({"type":"system","subtype":"compact_boundary"}),
+        ),
     ] {
         let r = Rig::new();
         finished(&r);
         metadata(&r, &ADK_CC_TAIL);
+        recap(&r);
         r.append(record);
         assert!(!r.ready(), "{name}");
     }
