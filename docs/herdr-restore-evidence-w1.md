@@ -26,7 +26,7 @@ ADK_TEST_HERDR_ROOT="$scratch" \
 ADK_TEST_HERDR_BIN="$scratch/bin/herdr" \
 ADK_TEST_HERDR_PIDS="$scratch/w1.pids.jsonl" \
   "$lib_test_bin" --ignored --exact \
-  services::session_host::herdr::launch_host::t19_real_tests::herdr_t19_resume_true_restores_claude_and_codex_as_shells_only \
+  services::discord::krx_session_host_tests::launch_host_t19_real::herdr_t19_resume_true_restores_claude_and_codex_as_shells_only \
   --nocapture
 ```
 

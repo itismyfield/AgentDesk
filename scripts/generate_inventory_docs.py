@@ -109,6 +109,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "krx_db_b_tests.rs": "Test-only host that declares the second slice of KRX db tests calling root-crate items.",
     "krx_db_tests.rs": "Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate.",
     "krx_services_tests.rs": "Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate.",
+    "krx_session_host_tests.rs": "Test-only host that declares KRX session_host tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_tests.rs": "Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_unix_tests.rs": "Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
