@@ -107,13 +107,16 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertIn("not a per-step peak", (self.root / "job-summary.md").read_text())
 
     def test_checkpoint_keeps_an_independent_copy_before_a_lost_build(self):
-        self.env["CARGO_BUILD_JOBS"] = "2"
+        self.env.update(CARGO_BUILD_JOBS="2", ImageOS="ubuntu26", ImageVersion="20261116.202.1", RUNNER_NAME="GitHub Actions 7")
         self.run_probe("start")
         self.run_probe("checkpoint")
         checkpoint = self.root / "runner-memory-checkpoint"
         before = (checkpoint / "samples.jsonl").read_bytes()
         metadata = json.loads((checkpoint / "metadata.json").read_text())
         self.assertEqual(metadata["cargo_build_jobs"], "2")
+        # Runner image and the swap present before the build separate hosts that later behave differently.
+        self.assertEqual({key: metadata[key] for key in ("image_os", "image_version", "runner_name", "swap_total_bytes_at_start")},
+                         {"image_os": "ubuntu26", "image_version": "20261116.202.1", "runner_name": "GitHub Actions 7", "swap_total_bytes_at_start": 16 * MIB})
         self.assertTrue(before)
         self.memory(available=8)
         self.run_probe("begin", "just lint")
@@ -123,7 +126,7 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertNotIn(self.env["MEMORY_TEST_SECRET"], "".join(p.read_text() for p in checkpoint.iterdir()))
 
     def test_begin_uploads_a_copy_while_the_build_step_still_runs(self):
-        requests, refusals, finalized = [], [500], threading.Event()
+        requests, refusals, finalized = [], [500], threading.Semaphore(0)
 
         class Artifacts(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -136,7 +139,7 @@ class RunnerMemoryTests(unittest.TestCase):
                 requests.append((self.command + " " + self.path, self.headers.get("Authorization"), body))
                 self.wfile.write(json.dumps({"ok": True, "signed_upload_url": origin + "/blob?sig=signed"}).encode())
                 if self.path.endswith("/FinalizeArtifact"):
-                    finalized.set()
+                    finalized.release()
 
             do_PUT = do_POST
             log_message = lambda *_: None
@@ -154,13 +157,11 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertFalse((state / "export.log").exists())
         claims = base64.urlsafe_b64encode(b'{"scp": "Actions.Other Actions.Results:run-1:job-2"}').decode().rstrip("=")
         token = f"header.{claims}.signature"
-        self.env.update(RUNNER_MEMORY_EXPORT_MINUTES="0 0.02", RUNNER_MEMORY_EXPORT_NAME="runner-memory-job-3-attempt-1",
+        self.env.update(RUNNER_MEMORY_EXPORT_MINUTES="0 0.02 0.04", RUNNER_MEMORY_EXPORT_NAME="runner-memory-job-3-attempt-1",
                         ACTIONS_RESULTS_URL=origin + "/results/", ACTIONS_RUNTIME_TOKEN=token, no_proxy="*")
         self.run_probe("begin", "build")
-        self.assertTrue(finalized.wait(20))
-        # A refused upload is logged by type and status only, and the next copy still leaves.
-        self.assertIn("-at-0m failed (HTTPError 500)", (state / "export.log").read_text())
-        (create_call, create_auth, create), (blob_call, blob_auth, blob), (final_call, final_auth, final) = requests
+        self.assertTrue(finalized.acquire(timeout=20) and finalized.acquire(timeout=20))
+        (create_call, create_auth, create), (blob_call, blob_auth, blob), (final_call, final_auth, final) = requests[:3]
         prefix = "POST /twirp/github.actions.results.api.v1.ArtifactService/"
         self.assertEqual((create_call, blob_call, final_call), (prefix + "CreateArtifact", "PUT /blob?sig=signed", prefix + "FinalizeArtifact"))
         self.assertEqual((create_auth, blob_auth, final_auth), ("Bearer " + token, None, "Bearer " + token))
@@ -170,8 +171,13 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(created, {**ids, "version": 4})
         self.assertEqual(json.loads(final), {**ids, "size": str(len(blob)), "hash": "sha256:" + hashlib.sha256(blob).hexdigest()})
         with zipfile.ZipFile(io.BytesIO(blob)) as archive:
-            self.assertEqual(sorted(archive.namelist()), ["metadata.json", "phase.json", "samples.jsonl"])
+            self.assertEqual(sorted(archive.namelist()), ["export.log", "metadata.json", "phase.json", "samples.jsonl"])
             self.assertEqual(json.loads(archive.read("samples.jsonl").splitlines()[-1])["phase"], "build")
+        # Each copy carries the earlier results, so the last copy a lost runner left shows a refused upload.
+        with zipfile.ZipFile(io.BytesIO(requests[4][2])) as archive:
+            results = archive.read("export.log").decode()
+        self.assertRegex(results, r"failed runner-memory-job-3-attempt-1-at-0m \(HTTPError 500\) scheduled=0 elapsed=\d+\.\d host_used=16\.0 swap_used=4\.0\n")
+        self.assertRegex(results, r"exported runner-memory-job-3-attempt-1-at-0\.02m scheduled=0\.02 elapsed=\d+\.\d host_used=16\.0 swap_used=4\.0\n")
         self.assertFalse((state / "stop").exists())
         self.assertNotIn(token, "".join(path.read_text() for path in state.iterdir() if path.is_file()))
 

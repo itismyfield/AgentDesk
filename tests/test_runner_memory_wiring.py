@@ -96,8 +96,10 @@ class RunnerMemoryWiring(unittest.TestCase):
             job = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"][job_id]
             with self.subTest(workflow=workflow):
                 self.assertEqual(job["env"]["RUNNER_MEMORY_EXPORT_NAME"], ARTIFACT["name"])
-                minutes = [float(value) for value in job["env"]["RUNNER_MEMORY_EXPORT_MINUTES"].split()]
-                self.assertTrue(minutes and all(0 < value < job["timeout-minutes"] for value in minutes))
+                # Dense copies near the 61-63 minute loss bound how long the runner stayed alive.
+                self.assertEqual(job["env"]["RUNNER_MEMORY_EXPORT_MINUTES"], "15 30 45 50 55 58 60")
+                gate = next(step for step in job["steps"] if step.get("name") == PHASES[job_id][0])
+                self.assertLess(60, gate["timeout-minutes"])
                 # The exporter reads the artifact token that Setup sccache leaves in the environment.
                 names = [step.get("name") for step in job["steps"]]
                 self.assertLess(names.index("Setup sccache"), names.index(NAMES[1]))
