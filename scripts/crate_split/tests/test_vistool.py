@@ -424,8 +424,8 @@ class GlobSafety(unittest.TestCase):
             self.assertFalse(any(r["fail"] for r in self.risks("struct Error;")))
 
 
-def split(low, high, mid=None, path=None):
-    crates = {"LOW": low, **({"MID": mid} if mid else {}), "HIGH": high}
+def split(low, high, path=None, **more):
+    crates = {"LOW": low, "HIGH": high, **more}
     with tempfile.TemporaryDirectory() as tmp:
         path = path or Path(tmp) / "p"
         path.write_text(json.dumps(dict(base="", order=list(crates), crates=crates)))
@@ -538,18 +538,48 @@ class Probe(unittest.TestCase):
             self.assertEqual(vistool.transform_upper(probe / "deep/upper", deep), ["src/core.rs:util"])
             self.assertIn("pub mod util;", (probe / "deep/lower/src/core.rs").read_text("utf-8"))
             self.assertIn("pub use probe_lower::core::util;", (probe / "deep/upper/src/core.rs").read_text("utf-8"))
-            # A deep key under a below group: lower keeps that group's files as HEAD has them, or the patch
-            # cut from them would not apply.
-            for crate, cut in (("LOW", split(["core", "core::util", "services::store"], MINI_HIGH)),
-                               ("MID", split(["core::util"], MINI_HIGH, ["core", "services::store"]))):
-                vistool.extract_head(repo, probe / "nested" / crate)
-                vistool.transform_lower(probe / "nested" / crate, vistool.Layout(repo, cut, crate))
-                self.assertEqual((probe / "nested" / crate / "src/core.rs").read_text("utf-8"),
-                                 (repo / "src/core.rs").read_text("utf-8"), crate)
+            # A key naming a module its group already owns: lower keeps the group's files as HEAD has them.
+            same = vistool.Layout(repo, split(["core", "core::util", "services::store"], MINI_HIGH), "LOW")
+            vistool.extract_head(repo, probe / "same")
+            vistool.transform_lower(probe / "same", same)
+            self.assertEqual((probe / "same/src/core.rs").read_text("utf-8"), (repo / "src/core.rs").read_text("utf-8"))
             status = subprocess.run(git[:3] + ["status", "--porcelain", "--ignored=no", "--", "src", "Cargo.toml"],
                                     capture_output=True, text=True, check=True).stdout
             self.assertEqual(status, "")
             self.assertEqual((repo / "src/lib.rs").read_text("utf-8"), (MINI / "src/lib.rs").read_text("utf-8"))
+
+    def test_deep_key_goes_alone_and_its_ancestor_goes_whole(self):
+        # The repo shape: an early crate owns one module inside a later crate's group.
+        bridge = "src/services/discord/turn_bridge"
+        tree = {"Cargo.toml": '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2024"\n',
+                "src/lib.rs": "mod app;\nmod services;\n", "src/app.rs": "", "src/services/mod.rs": "mod discord;\n",
+                "src/services/discord/mod.rs": "mod turn_bridge;\n", f"{bridge}/tap.rs": "",
+                f"{bridge}/mod.rs": "pub(in crate::services::discord) mod stale_resume;\nmod tap;\n",
+                f"{bridge}/stale_resume.rs": ""}
+        with tempfile.TemporaryDirectory() as tmp:
+            for rel, text in tree.items():
+                for side in ("repo", "LOW/lower", "LOW/upper", "HIGH/lower", "HIGH/upper"):
+                    (Path(tmp) / side / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(tmp) / side / rel).write_text(text)
+            cut = split(["discord::turn_bridge::stale_resume"], ["discord::(mod.rs)", "discord::turn_bridge", "services"],
+                        ROOT=["(root)", "app"])
+            got = {}
+            for crate in ("LOW", "HIGH"):
+                layout = vistool.Layout(Path(tmp) / "repo", cut, crate)
+                root = Path(tmp) / crate
+                vistool.transform_lower(root / "lower", layout)
+                got[crate] = (sorted(Path(f).name for f in layout.x_files), layout.leaves,
+                              vistool.transform_upper(root / "upper", layout),
+                              (root / "lower" / bridge / "mod.rs").read_text().split("\n")[0])
+            path = "probe_lower::services::discord::turn_bridge"
+            self.assertEqual(got["LOW"], (["stale_resume.rs"], ["discord::turn_bridge::stale_resume"],
+                                          [f"{bridge}/mod.rs:stale_resume"], "pub mod stale_resume;"))
+            self.assertEqual((Path(tmp) / "LOW/upper" / bridge / "mod.rs").read_text(),
+                             f"pub use {path}::stale_resume;\nmod tap;\n")
+            # Later the whole group goes, the deep key inside it, and its files stay as HEAD has them.
+            self.assertEqual(got["HIGH"], (["mod.rs", "mod.rs", "mod.rs", "tap.rs"], ["discord::turn_bridge"],
+                                           ["src/services/discord/mod.rs:turn_bridge"], tree[f"{bridge}/mod.rs"].split("\n")[0]))
+            self.assertEqual((Path(tmp) / "HIGH/upper/src/services/discord/mod.rs").read_text(), f"pub use {path};\n")
 
     def test_test_gated_and_path_mods(self):
         with tempfile.TemporaryDirectory() as tmp:
