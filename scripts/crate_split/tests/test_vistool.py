@@ -61,6 +61,16 @@ def widener():
     return vistool.Widener(Mini.get(), MINI, UPPER), vistool.Resolver(MINI, UPPER, "src/probe_lower_lib.rs", "src/lib.rs")
 
 
+def leak(descr, name, rel, text):
+    """rustc's E0446 as the KRX shadow run recorded it on `impl FromStr for IntakeOutboxStatus { type Err = .. }`:
+    the primary span is the associated type, the labelled one the declaration of the type it leaks."""
+    at = line_of(rel, text)
+    return {"level": "error", "code": {"code": "E0446"}, "message": f"{descr} type `{name}` in public interface",
+            "children": [], "spans": [
+                {"is_primary": True, "file_name": rel, "line_start": at + 3, "line_end": at + 3, "label": f"can't leak {descr} type"},
+                {"is_primary": False, "file_name": rel, "line_start": at, "line_end": at, "label": f"`{name}` declared as {descr}"}]}
+
+
 # message -> (file, declaration line as written, widened line)
 EXPECTED = {
     "struct `Config` is private": ("src/core.rs", "pub(crate) struct Config {", "pub struct Config {"),
@@ -580,6 +590,7 @@ class Probe(unittest.TestCase):
             self.assertEqual(got["HIGH"], (["mod.rs", "mod.rs", "mod.rs", "tap.rs"], ["discord::turn_bridge"],
                                            ["src/services/discord/mod.rs:turn_bridge"], tree[f"{bridge}/mod.rs"].split("\n")[0]))
             self.assertEqual((Path(tmp) / "HIGH/upper/src/services/discord/mod.rs").read_text(), f"pub use {path};\n")
+            self.assertEqual((Path(tmp) / "HIGH/lower/src/services/discord/mod.rs").read_text(), "pub mod turn_bridge;\n")
 
     def test_test_gated_and_path_mods(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -587,14 +598,19 @@ class Probe(unittest.TestCase):
             (root / "src").mkdir()
             (root / "Cargo.toml").write_text('[package]\nname = "t"\n')
             gated = '#[cfg(any(test, feature = "test-support"))]\n'
-            (root / "src/lib.rs").write_text(gated + 'mod low_gated;\n'
+            other = '#[cfg(any(test, feature = "optional"))]\n'
+            (root / "src/lib.rs").write_text(other + "mod low_opt;\n" + gated + 'mod low_gated;\n'
                                              '#[cfg(test)]\nmod low_tests;\n#[path = "w/x.rs"]\nmod low;\nmod high;\n'
                                              '#[allow(dead_code)]\npub(crate) mod block {\n    mod low;\n    pub(crate) mod a;\n}\n')
-            layout = SimpleNamespace(leaves=["block", "low", "low_gated", "low_tests"], file_of={(): "src/lib.rs"},
-                                     module_of={"src/lib.rs": ()})
+            layout = SimpleNamespace(leaves=["block", "low", "low_gated", "low_opt", "low_tests"],
+                                     file_of={(): "src/lib.rs"}, module_of={"src/lib.rs": ()})
             vistool.transform_upper(root, layout)
+            # Lower builds without `test` and without `optional`: the re-export stays only where lower has the module.
+            lower_has = 'any(any(), feature = "optional")'
             self.assertEqual((root / "src/lib.rs").read_text(),
-                             gated + "pub use probe_lower::low_gated;\n"
+                             other + f"#[cfg({lower_has})]\npub use probe_lower::low_opt;\n"
+                             + other + f"#[cfg(not({lower_has}))]\nmod low_opt {{}}\n"
+                             + gated + "pub use probe_lower::low_gated;\n"
                              "#[cfg(test)]\nmod low_tests {}\npub use probe_lower::low;\nmod high;\n"
                              "#[allow(dead_code)]\npub use probe_lower::block;\n")
 
@@ -611,28 +627,56 @@ class Probe(unittest.TestCase):
 
 
 class LoopGuard(unittest.TestCase):
-    def test_unrepaired_lower_visibility_error_fails_closed(self):
-        # VT1 fix1 review P2-1: a lower visibility error that resolves to no edit keeps upper from running,
-        # so the run must stop as lower_probe_broken (not no_progress, never VISTOOL_OK).
-        broken = {"level": "error", "code": {"code": "E0603"}, "message": "struct `Gone` is private", "spans": [],
-                  "children": []}
+    def scripted(self, rounds):
+        """The tool on the mini fixture, cargo replaced by one (lower, upper) diagnostic list per round."""
         calls = []
 
         def fake(cargo, cwd, args, target_dir, own_root, manifest=None):
             calls.append(cwd.name)
-            return ([dict(broken, _root=str(cwd), _test=False)] if cwd.name == "lower" else []), 0.1
+            return [{"_test": False, **d, "_root": str(cwd)} for d in rounds[calls.count("lower") - 1][cwd.name == "upper"]], 0.1
 
         with tempfile.TemporaryDirectory() as tmp:
             repo, git = fixture_repo(Path(tmp))
             with mock.patch.object(vistool, "run_check", fake):
                 ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                      apply=True, log=lambda *a, **k: None)
-            self.assertFalse(ok)
-            self.assertTrue(line.startswith("VISTOOL_FAIL lower_probe_broken "), line)
-            self.assertEqual(calls, ["lower"])
-            self.assertFalse((Path(tmp) / "out" / "vistool-LOW.patch").exists())
             status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
-            self.assertEqual(status, "")
+            return ok, line, calls, status, (Path(tmp) / "out" / "vistool-LOW.patch").exists(), manifest
+
+    def test_unrepaired_lower_visibility_error_fails_closed(self):
+        # VT1 fix1 review P2-1: a lower visibility error that resolves to no edit keeps upper from running,
+        # so the run must stop as lower_probe_broken (not no_progress, never VISTOOL_OK).
+        broken = {"level": "error", "code": {"code": "E0603"}, "message": "struct `Gone` is private", "spans": [],
+                  "children": []}
+        ok, line, calls, status, patched, _ = self.scripted([([broken], [])])
+        self.assertFalse(ok)
+        self.assertTrue(line.startswith("VISTOOL_FAIL lower_probe_broken "), line)
+        self.assertEqual((calls, patched, status), (["lower"], False, ""))
+
+    def test_unresolved_generated_reexport_fails_closed(self):
+        # As test residue it would pass and, standing as an error, hide the field-privacy pass behind it.
+        gone = {"level": "error", "code": {"code": "E0432"}, "message": "unresolved import `probe_lower::core`",
+                "children": [], "_test": True,
+                "spans": [{"is_primary": True, "file_name": "src/lib.rs", "line_start": 3, "line_end": 3,
+                           "text": [{"text": "pub use probe_lower::core;"}]}]}
+        ok, line, *_ = self.scripted([([], [gone])])
+        self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL upper_probe_broken"))
+
+
+    def test_leaked_type_goes_as_far_as_the_interface_and_no_further(self):
+        token = leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")
+        thing = lambda descr: leak(descr, "Thing", "src/services/store.rs", "pub(super) struct Thing {")
+        ok, line, *_, manifest = self.scripted([([token, thing("restricted")], []), ([thing("crate-private")], []), ([], [])])
+        self.assertTrue(ok, (line, manifest.get("fail")))
+        self.assertEqual([(e["iter"], e["after"]) for e in manifest["edits"]],
+                         [(1, "pub struct Token;"), (1, "pub(crate) struct Thing {"), (2, "pub struct Thing {")])
+        # A crate-wide interface: rustc stops reporting, and the type stays at `pub(crate)`.
+        ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
+        self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
+        # No declaration to widen: the lower error stands, it is never residue.
+        gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
+        ok, line, *_ = self.scripted([([gone], [])])
+        self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL lower_probe_broken"))
 
 
 class TestCfgList(unittest.TestCase):
@@ -893,9 +937,31 @@ class EndToEnd(unittest.TestCase):
                  ("src/core/gated.rs", "pub(crate) fn hidden() -> u32 {\n    7\n}\n"),
                  ("src/app.rs", "\n#[cfg(test)]\nmod gated_tests {\n    #[test]\n    fn reads_gated() {\n"
                                 "        assert_eq!(crate::core::gated::hidden(), 7);\n    }\n}\n"))
-        # (LOW, HIGH, files appended to the fixture) -> the run applies and what it leaves behind.
-        for low, high, extra in ((["core", "core::util", "services::store"], MINI_HIGH, ()),
-                                 (["core::gated"], MINI_HIGH + ["core", "services::store"], gated)):
+        # A group only another feature (or `test`) opens: lower has no such module, and a test-only field use
+        # behind it must still be found. `sup` is the control `test-support` opens in lower.
+        other = (("src/lib.rs", '\n#[cfg(any(test, feature = "optional"))]\nmod opt;\n'
+                                '#[cfg(any(test, feature = "test-support"))]\nmod sup;\n'),
+                 ("src/opt.rs", ""), ("src/sup.rs", "pub fn one() -> u32 {\n    1\n}\n"),
+                 ("src/core.rs", "\npub struct Probe {\n    pub(crate) depth: u32,\n}\n"),
+                 ("src/app.rs", "\n#[cfg(test)]\nmod sup_tests {\n    #[test]\n    fn reads_sup() {\n"
+                                "        let _probe = crate::core::Probe { depth: 2 };\n"
+                                "        assert_eq!(crate::sup::one(), 1);\n    }\n}\n"))
+        # HIGH names LOW's `Status`; once that is `pub`, the error type its `FromStr` impl names leaks (E0446).
+        leaked = (("src/services/store.rs", "\npub(super) enum Status {\n    On,\n}\n\npub(super) struct BadStatus;\n\n"
+                                            "impl std::str::FromStr for Status {\n    type Err = BadStatus;\n\n"
+                                            "    fn from_str(_: &str) -> Result<Self, Self::Err> {\n"
+                                            "        Ok(Status::On)\n    }\n}\n"),
+                  ("src/services/web.rs", "\npub(super) fn parses() -> bool {\n"
+                                          "    \"on\".parse::<super::store::Status>().is_ok()\n}\n"))
+        # (LOW, HIGH, files appended to the fixture, (summary part, file, widened line)) of a run that applies.
+        for low, high, extra, want in (
+                (["core", "core::util", "services::store"], MINI_HIGH, (), None),
+                (["core::gated"], MINI_HIGH + ["core", "services::store"], gated,
+                 (" edits=1 cut_residue=0 test_cfg=0 ", "src/core/gated.rs", "pub fn hidden() -> u32 {")),
+                (["core", "opt", "services::store", "sup"], MINI_HIGH, other,
+                 (" cut_residue=0 test_cfg=0 ", "src/core.rs", "    pub depth: u32,")),
+                (["core", "services::store"], MINI_HIGH, leaked,
+                 (" cut_residue=0 test_cfg=0 ", "src/services/store.rs", "pub struct BadStatus;"))):
             with self.subTest(low=low), tempfile.TemporaryDirectory() as tmp:
                 repo, git = fixture_repo(Path(tmp))
                 for rel, text in extra:
@@ -914,8 +980,8 @@ class EndToEnd(unittest.TestCase):
                                      (FX / "mini.expected.patch").read_text("utf-8"))
                     continue
                 # A leaf `test-support` opens is re-exported from lower, so its item is a visibility edit.
-                self.assertIn(" edits=1 cut_residue=0 test_cfg=0 ", line)
-                self.assertIn("pub fn hidden() -> u32 {", (repo / "src/core/gated.rs").read_text())
+                self.assertIn(want[0], line)
+                self.assertIn(want[2], (repo / want[1]).read_text())
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
