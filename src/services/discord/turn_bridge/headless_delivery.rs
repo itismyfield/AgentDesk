@@ -500,7 +500,7 @@ pub(super) async fn enqueue_headless_delivery(
             pool: pool.clone(),
             provider: provider.as_str().into(),
         });
-        crate::services::discord::outbound::raw_output::scope(
+        crate::services::legacy_body_census::request_context::scope(
             scope,
             None,
             content,

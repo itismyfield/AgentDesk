@@ -121,8 +121,11 @@ impl DiscordPort for GatewayPort {
                 Some(correlation) => correlation.attach(message),
                 None => message,
             };
-            match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
-                .await
+            match crate::services::legacy_body_census::request_context::census_scope(
+                None,
+                ChannelId::new(channel).send_message(&*http, message),
+            )
+            .await
             {
                 Ok(message)
                     if agy.as_ref().is_some_and(|correlation| {

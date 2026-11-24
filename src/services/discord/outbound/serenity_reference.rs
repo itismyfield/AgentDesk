@@ -305,7 +305,7 @@ mod tests {
             http: Arc::new(fixture::client(&mock)),
             shared: crate::services::discord::make_shared_data_for_tests_with_storage(None),
         };
-        crate::services::discord::outbound::census_scope(Some(serde_json::json!({"case":"reference","output_class":"LegacyBody","binding_mode":"TUI"})), async {
+        crate::services::legacy_body_census::request_context::census_scope(Some(serde_json::json!({"case":"reference","output_class":"LegacyBody","binding_mode":"TUI"})), async {
             client.post_message(&fixture::CHANNEL.to_string(), "body").await.unwrap();
             client.post_message_with_reference(&fixture::CHANNEL.to_string(), "body", &fixture::CHANNEL.to_string(), "8001").await.unwrap();
             client.post_message_with_reference_and_nonce(&fixture::CHANNEL.to_string(), "body", &fixture::CHANNEL.to_string(), "8001", "nonce", true).await.unwrap();

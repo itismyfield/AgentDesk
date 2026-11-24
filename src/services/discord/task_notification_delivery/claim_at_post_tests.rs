@@ -231,7 +231,8 @@ impl ResponseChunkTransport for Counting<'_> {
 /// the transport drops, so no adoption lands between two chunks of one Legacy body.
 #[tokio::test]
 async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_drops() {
-    use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
+    use crate::services::discord::outbound::raw_output::tests as recording;
+    use crate::services::legacy_body_census::request_context::census_scope;
     use serde_json::{Value, json};
     if recording::isolated(
         concat!(

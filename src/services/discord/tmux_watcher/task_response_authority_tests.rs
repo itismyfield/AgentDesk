@@ -174,7 +174,8 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         assert_eq!(check.adoption(), Adoption::Pending, "{case}");
     }
 
-    use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
+    use crate::services::discord::outbound::raw_output::tests as recording;
+    use crate::services::legacy_body_census::request_context::census_scope;
     use serde_json::{Value, json};
     let log = recording::journal().await;
     for (index, chunks) in [false, true].into_iter().enumerate() {
