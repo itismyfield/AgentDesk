@@ -1,18 +1,10 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 // Adapted from affectUI (https://github.com/flohoeller/affectui @ f83f008), MIT License, Copyright (c) 2026 Florian Höller (adfects). See LICENSE.affectui.
 // Changes: isolated slug styles; responsive label wrapping and 44px touch targets; complete reduced-motion support; AgentDesk demos.
 "use client";
 
-import { Check, Copy, Send, Trash2 } from "lucide-react";
 
-import {
-  isValidElement,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ComponentPropsWithRef,
-  type ReactNode,
-} from "react";
+import { isValidElement, useEffect, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type ReactNode } from "react";
 
 /*
  * Button – a single self-contained file, clean style.
@@ -162,6 +154,7 @@ function contentKey(node: ReactNode) {
 /* ---------- Styles ---------- */
 
 const css = /* css */ `
+@layer kit {
 /* Colors and motion as variables – override them on .aui-button-clean (see Theming in the docs) */
 .aui-button-clean {
   --aui-button-clean-title: #000;
@@ -449,20 +442,5 @@ const css = /* css */ `
 @media (prefers-reduced-motion: reduce) {
   .aui-button-clean, .aui-button-clean *, .aui-button-clean *::before, .aui-button-clean *::after { animation: none !important; transition: none !important; }
 }
-`;
-
-
-export function ButtonDemo({ variant = 'default' }: { variant?: 'default' | 'long' | 'loading' | 'disabled' }) {
-  const [copied, setCopied] = useState(false);
-  const [sent, setSent] = useState(false);
-  const busy = variant === 'loading';
-  const disabled = variant === 'disabled';
-  return <div className="aui-button-clean-demo">
-    <style>{`.aui-button-clean-demo { display: grid; justify-items: start; gap: 16px; width: 100%; max-width: 520px; min-width: 0; color: #737373; font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; word-break: keep-all; overflow-wrap: anywhere; } .aui-button-clean-demo-status { margin: 0; } :where(.dark,[data-theme="dark"]) .aui-button-clean-demo { color: #aaa; }`}</style>
-    <Button icon={sent ? <Check /> : <Send />} loading={busy} disabled={disabled} onClick={() => setSent(true)}>{variant === 'long' ? 'AgentDesk 릴레이 검증 결과를 development-runtime-observability-channel에 전달하기' : sent ? '검토 요청 준비됨' : '검토 요청 · Request review'}</Button>
-    <Button variant="secondary" icon={copied ? <Check /> : <Copy />} disabled={disabled || busy} onClick={() => setCopied(true)}>{copied ? '턴 식별자 복사됨' : '턴 식별자 복사'}</Button>
-    <Button variant="ghost" icon={<Copy />} aria-label="요약 복사" disabled={disabled || busy} onClick={() => setCopied(true)} />
-    <Button variant="destructive" icon={<Trash2 />} disabled={disabled || busy} onClick={() => { setSent(false); setCopied(false); }}>데모 상태 초기화</Button>
-    <p className="aui-button-clean-demo-status" role="status">{busy ? '에이전트 응답을 기다리고 있습니다.' : disabled ? '런타임 동기화 중 행동을 잠시 잠갔습니다.' : copied ? 'demo-turn-018 복사 요청을 기록했습니다.' : sent ? 'AgentDesk 검토 요청을 준비했습니다.' : '버튼을 눌러 로컬 데모 상태를 바꿀 수 있습니다.'}</p>
-  </div>;
 }
+`;

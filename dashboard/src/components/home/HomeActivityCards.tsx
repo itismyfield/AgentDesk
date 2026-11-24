@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router";
+import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { Button } from "../../kit/free/button-clean";
 import { UsageMeter, type UsageMeterLabels } from "../../kit/pro/usage-meter";
 import {
   Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
 } from "../common/KitPrimitives";
 import { describeRoutinePurpose, formatClock } from "../dashboard/routineModel";
-import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, pauseMeterScale, usageDetail, type Tr } from "./homeModel";
+import { autoPauseRule, buildCampaignRows, buildTodayRoutines, buildUsageRows, pauseMeterScale, usageDetail, type RawUsageProvider, type Tr } from "./homeModel";
 import { loadHomeRoutines, loadHomeUsage, loadRuntimeConfig, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
-
-// Home's lower row: campaigns, today's routines and account usage.
 
 const CAMPAIGN_ROWS = 4;
 const FULL_TOUCH_BUTTON_STYLE = {
@@ -18,8 +17,6 @@ const FULL_TOUCH_BUTTON_STYLE = {
   width: "100%",
 } as CSSProperties;
 
-/** Open campaigns with a progress track and one line of where each stands; a row opens the campaign. Campaigns
- * under way lead and the rest unfold on home. */
 export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loaded<HomeCampaigns>; tr: Tr; className?: string }) {
   const [expanded, setExpanded] = useState(false);
   const { rows, shown } = buildCampaignRows({
@@ -29,7 +26,6 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
     tr,
     limit: CAMPAIGN_ROWS,
   });
-  // A failed latest poll or one failed list makes the shown rows incomplete, and an empty list is not "no campaigns".
   const unreadable = campaigns.failed || Boolean(campaigns.data && (!campaigns.data.legacy || !campaigns.data.summaries));
   const rest = rows.length - shown;
   return (
@@ -81,7 +77,6 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
   );
 }
 
-/** Today's routine runs: time, the routine's name and what it does, and the result or that it is still to come. */
 export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
   const routines = usePolled(loadHomeRoutines, 60_000);
   const [now, setNow] = useState(() => Date.now());
@@ -134,7 +129,6 @@ export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolea
 const AUTO_PAUSE_SETTINGS = "/settings?category=usage";
 const USAGE_METER_STYLE = { "--aui-usage-meter-meter-fill": "var(--accent)" } as CSSProperties;
 
-/** Kit texts the limit list can show or speak. */
 function usageLabels(tr: Tr): Partial<UsageMeterLabels> {
   return {
     limits: tr("공급자별 한도", "Limits by provider"),
@@ -150,11 +144,23 @@ function usageLabels(tr: Tr): Partial<UsageMeterLabels> {
   };
 }
 
-/** Account limits from the limit tracker as the kit's per-provider limit list, when they were measured, and the
- * auto-run pause rule. No upgrade button: home has nothing to upgrade. */
-export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
-  const usage = usePolled(loadHomeUsage, 60_000);
-  const runtime = usePolled(loadRuntimeConfig, 300_000);
+export function HomeUsageCard({
+  tr,
+  isKo,
+  usageState,
+  runtimeState,
+  className,
+}: {
+  tr: Tr;
+  isKo: boolean;
+  usageState?: Loaded<RawUsageProvider[]>;
+  runtimeState?: Loaded<RuntimeConfigResponse>;
+  className?: string;
+}) {
+  const internalUsage = usePolled(loadHomeUsage, usageState ? 600_000 : 60_000);
+  const internalRuntime = usePolled(loadRuntimeConfig, runtimeState ? 600_000 : 300_000);
+  const usage = usageState ?? internalUsage;
+  const runtime = runtimeState ?? internalRuntime;
   const rows = buildUsageRows(usage.data ?? [], isKo);
   const measured = rows.map((row) => row.measuredAt).filter((time): time is number => time !== null);
   const unknown = tr("확인 불가", "Unknown");
@@ -166,7 +172,6 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
       : tr("사용량으로 자동 진행을 멈추지 않아요", "Auto-run does not pause for usage")
     : runtime.failed ? tr("자동 진행을 멈추는 기준은 확인 불가예요", "The auto-run pause rule is unknown") : null;
 
-  // The settings link stays even when the rule could not be read.
   const pauseFooter = (
     <p className={`m-0 flex flex-wrap items-center gap-x-1.5 text-xs leading-4 text-[var(--fg-muted)] ${hasRows ? "" : "px-3 pb-3.5 sm:px-4"}`}>
       {ruleText ? <span>{ruleText} ·</span> : null}
@@ -201,7 +206,6 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
           {pauseFooter}
         </>
       ) : (
-        // The kit caps its card at 460px; home lets it fill the column and fills the bars with the accent, as the design does.
         <InspSection className="gap-3 [&_.aui-usage-meter]:max-w-none!" style={USAGE_METER_STYLE}>
           <UsageMeter
             layout="limits"

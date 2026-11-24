@@ -1,21 +1,21 @@
-import { ChevronRight } from "lucide-react";
-import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorLabels } from "../../kit/pro/agent-monitor";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import {
-  Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, KeyValue, RowButton, RowLink, SectionCard, StatusDot,
+  Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, KeyValue, KitCard, RowButton, RowLink, SectionCard, StatusDot, cn,
 } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, monitorView, systemNeedsAttention, todoStatus,
-  type HomeAgent, type HomeAgentState, type HomeTone, type MonitorView, type SourceState, type TodoItem, type Tr,
+  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
+  systemNeedsAttention, todoStatus, unlinkedMonitorView,
+  type HomeAgent, type HomeAgentState, type HomeHealth, type HomeTone, type MonitorView, type SourceState, type TodoItem,
+  type Tr, type TriageAlert,
 } from "./homeModel";
-import { loadHomeHealth, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
-
-// Home's first three sections: what needs a person, how the system is, and who is working.
+import { loadHealthDetailOnDemand, loadHomeHealth, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 const TODO_ROWS = 5;
 const FULL_TOUCH_BUTTON_STYLE = {
@@ -24,10 +24,13 @@ const FULL_TOUCH_BUTTON_STYLE = {
   width: "100%",
 } as CSSProperties;
 
-const BUTTON_STYLE = { "--aui-button-clean-muted": "var(--fg-dim)" } as CSSProperties;
+const BUTTON_STYLE = {
+  "--aui-button-clean-muted": "var(--fg-dim)",
+  "--aui-button-clean-surface": "var(--bg-3)",
+  "--aui-button-clean-shadow": "inset 0 0 0 1px var(--line)",
+  "--aui-button-clean-shadow-hover": "inset 0 0 0 1px var(--fg-muted)",
+} as CSSProperties;
 
-/** Desktop row button: approval stays disabled with its reason until the server takes dashboard approvals;
- * decisions and deploys open the screen where they are handled. */
 function TodoAction({ item, tr, onOpen }: { item: TodoItem; tr: Tr; onOpen: () => void }) {
   const reasonId = useId();
   if (item.kind === "other") return null;
@@ -48,31 +51,110 @@ function TodoAction({ item, tr, onOpen }: { item: TodoItem; tr: Tr; onOpen: () =
   );
 }
 
-// Dashboard approval needs the coordinator's forum evidence (docs/dashboard-campaign-decisions-api.md).
 const approvalNote = (tr: Tr) => tr("결정 포럼에서 승인해요", "Approve in the Decision forum");
 
-/** What only a person can move, at the top of home. Each row opens the screen where it is handled; desktop rows
- * add the approval, decision or deploy button. `details` counts the server campaigns whose to-dos went unread. */
-export function HomeTodoCard({ items, agents, cards, campaigns, details, isMobile, tr, className }: {
+function HealthReasonList({ reasons, tr, loading }: { reasons: string[]; tr: Tr; loading: boolean }) {
+  if (loading) {
+    return <Cap className="block px-3 pb-3 sm:px-4">{tr("상세 원인을 확인하고 있어요…", "Loading detailed reasons…")}</Cap>;
+  }
+  if (reasons.length === 0) {
+    return (
+      <Cap className="block px-3 pb-3 sm:px-4">
+        {tr("상세 원인 코드가 비어 있어요. 설정 > 시스템에서 연결 상태를 확인해 주세요.", "No specific reason code was returned; check Settings > System.")}
+      </Cap>
+    );
+  }
+  return (
+    <ul data-testid="home-health-reasons" className="m-0 flex list-none flex-col gap-1 border-t border-[var(--line-soft)] bg-[var(--bg-1)] px-3 py-2.5 text-xs leading-4 text-[var(--fg-dim)] sm:px-4">
+      {reasons.map((reason) => (
+        <li key={reason} className="flex items-start gap-2">
+          <StatusDot tone="warn" className="mt-1" />
+          <span>{reason}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Top 3-second triage + human to-do card. Collapses to a 1-line status banner when both alerts and to-dos are zero. */
+export function HomeTodoCard({
+  items,
+  alerts = [],
+  agents,
+  cards,
+  campaigns,
+  details,
+  isMobile,
+  tr,
+  onReconcileSession,
+  busySessionKeys,
+  className,
+}: {
   items: TodoItem[];
+  alerts?: TriageAlert[];
   agents: Agent[];
   cards: SourceState;
   campaigns: SourceState;
   details?: { failed: number; cut: number };
   isMobile: boolean;
   tr: Tr;
+  onReconcileSession?: (sessionKey: string) => Promise<void> | void;
+  busySessionKeys?: ReadonlySet<string>;
   className?: string;
 }) {
   const navigate = useNavigate();
   const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
-  const total = items.length;
-  const hidden = total - TODO_ROWS;
+  const [healthOpen, setHealthOpen] = useState(false);
+  const [detailReasons, setDetailReasons] = useState<string[] | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const total = alerts.length + items.length;
+  const hidden = Math.max(0, items.length - TODO_ROWS);
   const status = todoStatus(total, [cards, campaigns]);
+
+  const toggleHealthReasons = useCallback(async (fallbackReasons: string[]) => {
+    setHealthOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setDetailLoading(true);
+        void loadHealthDetailOnDemand()
+          .then((detail) => {
+            const parsed = describeHealthReasons(detail, tr);
+            setDetailReasons(parsed.length > 0 ? parsed : fallbackReasons);
+          })
+          .catch(() => setDetailReasons(fallbackReasons))
+          .finally(() => setDetailLoading(false));
+      }
+      return next;
+    });
+  }, [tr]);
+
+  if (status === "empty") {
+    return (
+      <KitCard
+        as="section"
+        aria-label={tr("할 일", "To do")}
+        data-testid="home-todo"
+        data-collapsed="true"
+        className={cn("w-full", className)}
+      >
+        <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 sm:px-4">
+          <span className="flex min-w-0 items-center gap-2 text-sm leading-5 text-[var(--fg-dim)]">
+            <StatusDot tone="ok" />
+            <strong className="font-semibold text-[var(--fg)]">{tr("할 일 0", "To do 0")}</strong>
+            <span className="truncate text-[var(--fg-muted)]">{tr("지금 할 일이나 긴급 경보가 없어요.", "Nothing needs you right now.")}</span>
+          </span>
+          <HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>
+        </div>
+      </KitCard>
+    );
+  }
+
   return (
     <SectionCard
       title={tr("할 일", "To do")}
       count={status === "loading" || (status === "partial" && total === 0) ? null : total}
-      countTone={total > 0 ? "warn" : undefined}
+      countTone={alerts.some((a) => a.tone === "err") ? "err" : total > 0 ? "warn" : undefined}
       aside={<HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>}
       testId="home-todo"
       className={className}
@@ -81,9 +163,59 @@ export function HomeTodoCard({ items, agents, cards, campaigns, details, isMobil
         <CardSkeleton label={tr("할 일 불러오는 중", "Loading to-dos")} />
       ) : (
         <>
-          {status === "empty" ? <CardNote>{tr("지금 할 일이 없어요.", "Nothing needs you right now.")}</CardNote> : null}
-          {items.length > 0 ? (
+          {(alerts.length > 0 || items.length > 0) ? (
             <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
+              {alerts.map((alert) => {
+                const reconciling = Boolean(alert.sessionKey && busySessionKeys?.has(alert.sessionKey));
+                return (
+                  <li key={alert.key} data-testid={`home-triage-${alert.kind}`} className="border-t border-[var(--line-soft)] first:border-t-0">
+                    <div className="flex min-w-0 items-center">
+                      <RowLink to={alert.to} className="min-h-14 flex-1">
+                        <Chip tone={alert.tone} className="justify-center sm:min-w-[4.5rem]">{alert.chip}</Chip>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm leading-5 font-medium" title={alert.title}>{alert.title}</span>
+                          <Cap className="mt-0.5 block truncate" title={alert.detail}>{alert.detail}</Cap>
+                        </span>
+                      </RowLink>
+                      {alert.kind === "stale-session" && alert.sessionKey && onReconcileSession ? (
+                        <span className="shrink-0 pr-3 sm:pr-4">
+                          <Button
+                            size="lg"
+                            variant="secondary"
+                            loading={reconciling}
+                            onClick={() => void onReconcileSession(alert.sessionKey!)}
+                            style={BUTTON_STYLE}
+                          >
+                            {tr("정리", "Clean up")}
+                          </Button>
+                        </span>
+                      ) : alert.kind === "health" ? (
+                        <span className="shrink-0 pr-3 sm:pr-4">
+                          <Button
+                            size="lg"
+                            variant="secondary"
+                            aria-expanded={healthOpen}
+                            iconRight={<ChevronDown size={14} className={cn("transition-transform", healthOpen && "rotate-180")} />}
+                            onClick={() => void toggleHealthReasons(alert.reasons ?? [])}
+                            style={BUTTON_STYLE}
+                          >
+                            {healthOpen ? tr("접기", "Hide") : tr("원인 보기", "Why")}
+                          </Button>
+                        </span>
+                      ) : (
+                        <span className="hidden shrink-0 pr-4 sm:inline-flex">
+                          <Button size="lg" variant="secondary" onClick={() => navigate(alert.to)} style={BUTTON_STYLE}>
+                            {tr("한도 보기", "View limits")}
+                          </Button>
+                        </span>
+                      )}
+                    </div>
+                    {alert.kind === "health" && healthOpen ? (
+                      <HealthReasonList reasons={detailReasons ?? alert.reasons ?? []} tr={tr} loading={detailLoading} />
+                    ) : null}
+                  </li>
+                );
+              })}
               {items.slice(0, TODO_ROWS).map((item) => {
                 const assignee = item.agentId ? agentById.get(item.agentId) : undefined;
                 const action = !isMobile && item.kind !== "other";
@@ -124,15 +256,20 @@ export function HomeTodoCard({ items, agents, cards, campaigns, details, isMobil
   );
 }
 
-/** Server, Discord bots, Memento, campaign runs and the queue, one dot and value per line. A failed read shows
- * unknown values and when the last answer came, never the last answer itself. */
-export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: {
+/** Server, Discord bots, Memento, campaign runs and the queue, with expandable `/api/health/detail` cause inspection. */
+export function HomeSystemCard({ campaigns, healthState, onlyWhenOff, tr, className }: {
   campaigns: Loaded<HomeCampaigns>;
+  healthState?: Loaded<HomeHealth>;
   onlyWhenOff?: boolean;
   tr: Tr;
   className?: string;
 }) {
-  const health = usePolled(loadHomeHealth, 30_000);
+  const internalHealth = usePolled(loadHomeHealth, healthState ? 600_000 : 30_000);
+  const health = healthState ?? internalHealth;
+  const [reasonsOpen, setReasonsOpen] = useState(false);
+  const [freshDetail, setFreshDetail] = useState<HomeHealth | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+
   const current = health.failed ? null : health.data;
   const rows = buildSystemRows({
     health: current,
@@ -141,19 +278,52 @@ export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: {
     documents: campaigns.failed ? [] : campaigns.data?.documents ?? [],
     tr,
   });
-  // Phones keep this card for trouble only, judged once both reads have answered.
   const settled = (health.data !== null || health.failed) && (campaigns.data !== null || campaigns.failed);
   if (onlyWhenOff && !(settled && systemNeedsAttention(rows, tr))) return null;
+
   const publicOnly = current?.publicOnly;
   const clock = health.at === null ? null : formatClock(health.at);
+  const serverRow = rows.find((row) => row.key === "server");
+  const serverDegraded = serverRow?.tone === "warn" || serverRow?.tone === "err";
+  const reasons = describeHealthReasons(freshDetail ?? current, tr);
+
+  const handleToggleReasons = () => {
+    setReasonsOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setLoadingDetail(true);
+        void loadHealthDetailOnDemand()
+          .then((detail) => setFreshDetail(detail))
+          .catch(() => {})
+          .finally(() => setLoadingDetail(false));
+      }
+      return next;
+    });
+  };
+
   return (
     <SectionCard
       title={tr("시스템", "System")}
-      aside={clock ? (
-        <Cap className="font-display tabular-nums">
-          {health.failed ? tr(`마지막 확인 ${clock}`, `Last checked ${clock}`) : tr(`${clock} 확인`, `Checked ${clock}`)}
-        </Cap>
-      ) : null}
+      aside={(
+        <span className="flex items-center gap-2">
+          {serverDegraded ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={reasonsOpen}
+              data-testid="home-system-reasons-toggle"
+              onClick={handleToggleReasons}
+            >
+              {reasonsOpen ? tr("원인 접기", "Hide why") : tr("원인 보기", "Why")}
+            </Button>
+          ) : null}
+          {clock ? (
+            <Cap className="font-display tabular-nums">
+              {health.failed ? tr(`마지막 확인 ${clock}`, `Last checked ${clock}`) : tr(`${clock} 확인`, `Checked ${clock}`)}
+            </Cap>
+          ) : null}
+        </span>
+      )}
       testId="home-system"
       className={className}
     >
@@ -173,6 +343,9 @@ export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: {
           </KeyValue>
         ))}
       </InspSection>
+      {serverDegraded && reasonsOpen ? (
+        <HealthReasonList reasons={reasons} tr={tr} loading={loadingDetail} />
+      ) : null}
       {publicOnly ? (
         <CardNote>
           {publicOnly === "forbidden"
@@ -184,17 +357,14 @@ export function HomeSystemCard({ campaigns, onlyWhenOff, tr, className }: {
   );
 }
 
-// The legend dots use the persona dot colors, so a count and its avatars read the same. A session opens when a
-// Discord message arrives, so an agent without one is at rest: gray, never the error color.
 const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle", unknown: "offline" };
 const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
-/** Desktop shows two rows of four: up to seven agents and the fold, unless more are busy. */
 const DESKTOP_SHOWN = 7;
 
-function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo: boolean; onOpen: (agent: Agent) => void }) {
+function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo: boolean; onOpen: (entry: HomeAgent) => void }) {
   const line = agentLine(entry, tr, isKo);
   return (
-    <RowButton className="min-h-14 gap-2.5 py-2.5 sm:py-3" onClick={() => onOpen(entry.agent)}>
+    <RowButton className="min-h-14 gap-2.5 py-2.5 sm:py-3" onClick={() => onOpen(entry)}>
       <span aria-hidden className="flex"><AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={32} /></span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm leading-5 font-medium">{agentName(entry.agent, isKo)}</span>
@@ -204,10 +374,10 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
   );
 }
 
-/** Monitor texts home can show or speak: a running monitor without steps, with fold and log buttons. */
 export const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
   agent: tr("에이전트", "Agent"),
   statusRunning: tr("실행 중", "Running"),
+  cancel: tr("중단", "Stop"),
   log: tr("로그", "Log"),
   elapsed: tr("경과 시간", "Elapsed"),
   expand: (label) => tr(`${label}, 펼치기`, `${label}, expand`),
@@ -216,9 +386,21 @@ export const monitorLabels = (tr: Tr): Partial<AgentMonitorLabels> => ({
   recent: tr("완료한 단계", "Finished steps"),
 });
 
-/** Working agents with a live turn as kit monitors: what runs now and for how long. The host clock ticks once a
- * second instead of the monitor's own 100ms clock; the log button opens the agent detail with its activity log. */
-function AgentMonitors({ items, tr, isKo, onOpen }: { items: Array<{ entry: HomeAgent; view: MonitorView }>; tr: Tr; isKo: boolean; onOpen: (agent: Agent) => void }) {
+function AgentMonitors({
+  items,
+  isMobile,
+  tr,
+  isKo,
+  onOpen,
+  onStopTurn,
+}: {
+  items: Array<{ entry: HomeAgent; view: MonitorView }>;
+  isMobile: boolean;
+  tr: Tr;
+  isKo: boolean;
+  onOpen: (entry: HomeAgent) => void;
+  onStopTurn?: (agent: Agent) => void;
+}) {
   const [now, setNow] = useState(() => Date.now());
   const labels = useMemo(() => monitorLabels(tr), [tr]);
   useEffect(() => {
@@ -227,45 +409,66 @@ function AgentMonitors({ items, tr, isKo, onOpen }: { items: Array<{ entry: Home
   }, []);
   return (
     <ul className="m-0 grid list-none gap-2 border-t border-[var(--line-soft)] p-3 sm:grid-cols-2 sm:gap-3 sm:px-4">
-      {items.map(({ entry, view }) => (
-        <li key={entry.agent.id} className="min-w-0" data-testid={`home-agent-monitor-${entry.agent.id}`}>
-          <AgentMonitor
-            status="running"
-            agent={{ name: agentName(entry.agent, isKo), role: view.role ?? undefined, mark: <AgentPersona agent={entry.agent} state="working" size={28} /> }}
-            current={{ label: view.label, kind: view.kind }}
-            started={view.started ?? undefined}
-            now={now}
-            onOpenLog={() => onOpen(entry.agent)}
-            labels={labels}
-            style={{ width: "100%" }}
-          />
-        </li>
-      ))}
+      {items.map(({ entry, view }) => {
+        const canCancel = Boolean(onStopTurn && !entry.agent.id.startsWith("dispatched:"));
+        return (
+          <li key={entry.agent.id} className="min-w-0" data-testid={`home-agent-monitor-${entry.agent.id}`}>
+            <AgentMonitor
+              status="running"
+              defaultFolded={isMobile}
+              agent={{ name: agentName(entry.agent, isKo), role: view.role ?? undefined, mark: <AgentPersona agent={entry.agent} state="working" size={28} /> }}
+              current={{ label: view.label, kind: view.kind }}
+              steps={view.steps}
+              started={view.started ?? undefined}
+              now={now}
+              onCancel={canCancel ? () => onStopTurn!(entry.agent) : undefined}
+              onOpenLog={() => onOpen(entry)}
+              labels={labels}
+              style={{ width: "100%" }}
+            />
+          </li>
+        );
+      })}
     </ul>
   );
 }
 
-/** Everyone with a state dot and one line of what they do. On desktop working agents with a live turn get a kit
- * monitor and the rest follow, busy first, folded into one cell; phones list only busy agents as one-line rows, since
- * the monitor wraps to about five rows' height there. */
-export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAgent }: {
+/** Agents + unlinked lanes, ordered working -> background/stalled -> recent activity, with mobile folded monitors and turn stop. */
+export function HomeAgentsCard({
+  entries: everyone,
+  isMobile,
+  tr,
+  isKo,
+  onOpenAgent,
+  onStopAgentTurn,
+}: {
   entries: HomeAgent[];
   isMobile: boolean;
   tr: Tr;
   isKo: boolean;
   onOpenAgent: (agent: Agent) => void;
+  onStopAgentTurn?: (agent: Agent) => void;
 }) {
+  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
-  // Phones show no monitors, so they read no turns either.
-  const turns = useAgentTurns(isMobile ? [] : everyone.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
-  const monitors = isMobile ? [] : everyone.flatMap((entry) => {
-    const view = monitorView(turns.get(entry.agent.id), entry, tr);
-    return view ? [{ entry, view }] : [];
-  });
+  const workingAgentIds = useMemo(
+    () => everyone.filter((entry) => entry.state === "working" && !entry.agent.id.startsWith("dispatched:")).map((entry) => entry.agent.id),
+    [everyone],
+  );
+  const turns = useAgentTurns(workingAgentIds);
+  const monitors = useMemo(
+    () => everyone.flatMap((entry) => {
+      const view = entry.unlinkedSession
+        ? unlinkedMonitorView(entry, tr)
+        : monitorView(turns.get(entry.agent.id), entry, tr);
+      return view ? [{ entry, view }] : [];
+    }),
+    [everyone, tr, turns],
+  );
   const monitored = new Set(monitors.map(({ entry }) => entry.agent.id));
   const entries = everyone.filter((entry) => !monitored.has(entry.agent.id));
   const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, everyone.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
-  const busy = entries.filter((entry) => entry.state === "working" || entry.state === "background").length;
+  const busy = entries.filter((entry) => entry.state === "working" || entry.state === "background" || entry.stalled).length;
   const legendStates = AGENT_STATES.filter((state) => counts[state] > 0 || (!isMobile && state !== "unknown"));
   const legend = isMobile ? (
     <Cap className="font-display tabular-nums">
@@ -282,6 +485,14 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
     </Cap>
   );
 
+  const handleOpenEntry = useCallback((entry: HomeAgent) => {
+    if (entry.unlinkedSession || entry.agent.id.startsWith("dispatched:")) {
+      navigate("/agents");
+      return;
+    }
+    onOpenAgent(entry.agent);
+  }, [navigate, onOpenAgent]);
+
   const preferred = entries.slice(0, isMobile ? busy : Math.max(DESKTOP_SHOWN, busy));
   const folds = isMobile ? preferred.length < entries.length : entries.length > DESKTOP_SHOWN + 1 && preferred.length < entries.length;
   const shown = expanded || !folds ? entries : preferred;
@@ -292,7 +503,16 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
 
   return (
     <SectionCard title={tr("에이전트", "Agents")} count={isMobile ? null : everyone.length} aside={legend} testId="home-agents">
-      {monitors.length > 0 ? <AgentMonitors items={monitors} tr={tr} isKo={isKo} onOpen={onOpenAgent} /> : null}
+      {monitors.length > 0 ? (
+        <AgentMonitors
+          items={monitors}
+          isMobile={isMobile}
+          tr={tr}
+          isKo={isKo}
+          onOpen={handleOpenEntry}
+          onStopTurn={onStopAgentTurn}
+        />
+      ) : null}
       {everyone.length === 0 ? (
         <CardNote>{tr("등록된 에이전트가 없어요.", "No agents yet.")}</CardNote>
       ) : entries.length === 0 ? null : isMobile ? (
@@ -304,7 +524,7 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
           ) : null}
           {shown.map((entry) => (
             <li key={entry.agent.id} className="border-b border-[var(--line-soft)] last:border-b-0">
-              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={onOpenAgent} />
+              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={handleOpenEntry} />
             </li>
           ))}
           {folds ? (
@@ -321,11 +541,10 @@ export function HomeAgentsCard({ entries: everyone, isMobile, tr, isKo, onOpenAg
           ) : null}
         </ul>
       ) : (
-        // Desktop starts at 900px, so four columns hold from there. Negative margins tuck the last borders under the card edge.
         <ul className="m-0 -mr-px -mb-px grid list-none grid-cols-4 border-t border-[var(--line-soft)] p-0">
           {shown.map((entry) => (
             <li key={entry.agent.id} className="min-w-0 border-r border-b border-[var(--line-soft)]">
-              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={onOpenAgent} />
+              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={handleOpenEntry} />
             </li>
           ))}
           {folds ? (

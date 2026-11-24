@@ -26,12 +26,14 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
     closeAgentInfo,
     departments,
     dismissNotification,
+    focused,
     isKo,
     locale,
     navigateToRoute,
     notifications,
     openDefaultAgentInfo,
     popoverZIndex,
+    pushNotification,
     refreshAgents,
     setAccentPreset,
     setShowCommandPalette,
@@ -44,8 +46,7 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
     themePreference,
     tr,
   } = ctx;
-  const { sessions, sessionsFailed } = useWorkspace();
-  // The live agent in home's session-based words, as home and the agents tab show it.
+  const { sessions, sessionsFailed, visibleDispatchedSessions } = useWorkspace();
   const infoAgent = agentInfoAgent ? agents.find((agent: { id: string }) => agent.id === agentInfoAgent.id) ?? agentInfoAgent : null;
   const infoState = infoAgent ? classifyAgents([infoAgent], sessions, sessionsFailed)[0]?.state : undefined;
 
@@ -71,9 +72,11 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
           <CommandPalette
             agents={agents}
             departments={departments}
+            sessions={visibleDispatchedSessions}
             isKo={isKo}
             onSelectAgent={openDefaultAgentInfo}
             onNavigate={(path) => navigateToRoute(path)}
+            onNotify={pushNotification}
             onClose={() => setShowCommandPalette(false)}
             routes={PALETTE_ROUTES}
             departmentRouteId="/agents"
@@ -81,7 +84,7 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
         )}
       </Suspense>
 
-      {showTweaksPanel && (
+      {showTweaksPanel && !focused && (
         <AppTweaksPanel
           accentPreset={accentPreset}
           isKo={isKo}
@@ -96,10 +99,10 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
       <ToastOverlay notifications={notifications} onDismiss={dismissNotification} />
 
       {showShortcutHelp && (
-          <AppShortcutHelpModal
-            isKo={isKo}
-            onClose={() => setShowShortcutHelp(false)}
-          />
+        <AppShortcutHelpModal
+          isKo={isKo}
+          onClose={() => setShowShortcutHelp(false)}
+        />
       )}
     </>
   );

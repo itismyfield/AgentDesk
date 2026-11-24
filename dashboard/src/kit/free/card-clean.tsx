@@ -1,3 +1,4 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 "use client";
 // Adapted from affectUI (https://github.com/flohoeller/affectui @ e610c3ba), MIT License, Copyright (c) 2026 Florian Höller (adfects). See LICENSE.affectui.
 // Changes: aui- class prefix; coarse-pointer targets at least 44px; max-width containment for phone, tablet and desktop.
@@ -91,6 +92,7 @@ export function CardFooter({ className, ...rest }: CardFooterProps) {
 /* ---------- Styles ---------- */
 
 const css = /* css */ `
+@layer kit {
 /* Colors as variables – override them on .aui-card-clean (see Theming in the docs) */
 .aui-card-clean {
   --ui-crdc-surface: var(--aui-surface, #ffffff);
@@ -215,5 +217,6 @@ const css = /* css */ `
     min-width: 44px;
     min-height: 44px;
   }
+}
 }
 `;

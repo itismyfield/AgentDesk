@@ -1,3 +1,4 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 
@@ -71,6 +72,7 @@ export const compactBreakdownDefaultLabels: CompactBreakdownLabels = {
 };
 
 const styles = `
+@layer kit {
 .aui-compact-breakdown {
   --aui-compact-breakdown-surface: var(--aui-bg-1, #ffffff);
   --aui-compact-breakdown-tray: var(--aui-bg-2, #f0f0f0);
@@ -171,12 +173,6 @@ const styles = `
 .aui-compact-breakdown-footer strong { color: var(--aui-compact-breakdown-fg); font-weight: 500; }
 .aui-compact-breakdown-empty { margin: 10px 0 2px; color: var(--aui-compact-breakdown-muted); font-size: 12px; }
 .aui-compact-breakdown-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.aui-compact-breakdown-demo { width: 100%; max-width: 360px; min-width: 0; }
-.aui-compact-breakdown-demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; color: var(--aui-fg-muted, #737373); font: 12px/1.5 var(--aui-font-sans, system-ui, sans-serif); }
-.aui-compact-breakdown-demo-controls button { min-width: 44px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--aui-line, #d4d4d8); border-radius: 8px; background: var(--aui-bg-1, #fff); color: var(--aui-fg, #171717); cursor: pointer; font: inherit; }
-.aui-compact-breakdown-demo-controls button:focus-visible { outline: 2px solid var(--aui-focus, rgb(0 96 226 / 70%)); outline-offset: 2px; }
-:where(.dark, [data-theme="dark"]) .aui-compact-breakdown-demo-controls { color: var(--aui-fg-muted, #8b8b92); }
-:where(.dark, [data-theme="dark"]) .aui-compact-breakdown-demo-controls button { background: var(--aui-bg-1, #19191b); color: var(--aui-fg, #ededed); border-color: var(--aui-line, #2a2a2e); }
 @container (max-width: 300px) {
   .aui-compact-breakdown-header { align-items: stretch; flex-direction: column; }
   .aui-compact-breakdown-title { flex: none; }
@@ -198,14 +194,15 @@ const styles = `
 }
 @keyframes aui-compact-breakdown-content-in { from { opacity: 0; transform: translateY(5px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 @keyframes aui-compact-breakdown-badge-in { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
+}
 `;
 
 const colors = ['var(--aui-compact-breakdown-accent)', 'var(--aui-compact-breakdown-series-2)', 'var(--aui-compact-breakdown-series-3)', 'var(--aui-compact-breakdown-series-4)', 'var(--aui-compact-breakdown-series-5)'];
 const safeValue = (value: number) => Number.isFinite(value) ? Math.max(0, value) : 0;
 const defaultFormat = (value: number) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
-const shareOf = (value: number, total: number) => value / Math.max(total, .0001) * 100;
+const shareOf = (value: number, total: number) => total <= 0 || value <= 0 ? 0 : value >= total ? 100 : value / total * 100;
 /** Rounded shares, except open intervals near the ends: (0,1) → <1% and (99,100) → >99%. */
-const shareText = (share: number) => share > 0 && share < 1 ? '<1%' : share > 99 && share < 100 ? '>99%' : `${Math.round(share)}%`;
+const shareText = (share: number) => share <= 0 ? '0%' : share < 1 ? '<1%' : share >= 100 ? '100%' : share > 99 ? '>99%' : `${Math.round(share)}%`;
 const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 type RememberedItem = { id: string; source: string; label: string; value: number; color: string; order: number; present: boolean };
 type AmountFrame = { values: Record<string, number>; total: number; headline: number };
@@ -236,7 +233,8 @@ function useAmounts(items: RememberedItem[], activeId: string | undefined) {
       hasAnimated.current = true;
       const t = Math.min(1, (time - start) / duration);
       const progress = 1 - Math.pow(1 - t, 4);
-      const interpolate = (a: number, b: number) => a + (b - a) * progress;
+      const integerMode = Object.values(to.values).every((v) => Number.isInteger(v));
+      const interpolate = (a: number, b: number) => integerMode ? Math.round(a + (b - a) * progress) : a + (b - a) * progress;
       publish({
         values: Object.fromEntries(Object.entries(to.values).map(([key, value]) => [key, interpolate(from.values[key] ?? 0, value)])),
         total: interpolate(from.total, to.total),
@@ -453,7 +451,7 @@ export function CompactBreakdown({ items, title: titleProp, periods = [], period
           </li>;
         })}</ol>
         {onSelect && text.selectHint && <span id={`${id}-select-hint`} className="aui-compact-breakdown-sr">{text.selectHint}</span>}
-        {active && <p className="aui-compact-breakdown-full-readout" data-long={active.label.length > 24} aria-hidden="true">{active.label} · {format(active.value)} · {shareText(shareOf(active.value, total))}</p>}
+        {(() => { const readout = active ?? (selectedId != null ? remembered.find((item) => item.present && item.source === selectedId) : undefined); return readout ? <p className="aui-compact-breakdown-full-readout" data-long={readout.label.length > 16} aria-hidden="true">{readout.label} · {format(readout.value)} · {shareText(shareOf(readout.value, total))}</p> : null; })()}
         {!items.length && <p className="aui-compact-breakdown-empty">{text.empty}</p>}
       </div>
       {!hideFooter && footer !== null && <div className="aui-compact-breakdown-footer">{footer !== undefined ? footer : leader ? <span key={leader.id} className="aui-compact-breakdown-footer-auto" title={`${text.leader} ${leader.label}`}>{text.leader} <strong dir="auto">{leader.label}</strong></span> : null}</div>}
@@ -461,97 +459,4 @@ export function CompactBreakdown({ items, title: titleProp, periods = [], period
       <span className="aui-compact-breakdown-sr" aria-live="polite" aria-atomic="true">{active ? readingName(active) : ''}</span>
     </div>
   </section>;
-}
-
-export type CompactBreakdownDemoState = 'default' | 'empty' | 'long' | 'transitions' | 'zero' | 'tiny' | 'many' | 'custom-footer' | 'hidden-footer' | 'rapid' | 'duplicates' | 'selectable' | 'english';
-
-const demoPeriods = [{ id: 'week', label: '7일' }, { id: 'month', label: '30일' }, { id: 'quarter', label: '90일' }];
-const money = (value: number) => `$${value.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-
-const demoModels: CompactBreakdownItem[] = [
-  { id: 'claude', label: 'Claude · 구현', value: 620 }, { id: 'codex', label: 'Codex · 도구 호출', value: 548 },
-  { id: 'research', label: '연구 모델', value: 252 }, { id: 'review', label: '검수 모델', value: 168 }, { id: 'ops', label: '운영 모델', value: 92 },
-];
-
-/** The host opens a row: onSelect hands the id over and selectedId marks the open row; choosing it again closes it here. */
-function CompactBreakdownSelectDemo() {
-  const [selected, setSelected] = useState<string | null>('codex');
-  const open = demoModels.find((item) => item.id === selected);
-  return <div className="aui-compact-breakdown-demo">
-    <CompactBreakdown items={demoModels} title="모델별 실행 비용" format={money} totalLabel="전체 에이전트 실행 비용" onSelect={(id) => setSelected((current) => current === id ? null : id)} selectedId={selected} />
-    <div className="aui-compact-breakdown-demo-controls"><span role="status">{open ? `${open.label} 상세를 열었어요. 같은 줄을 다시 누르면 닫혀요.` : '줄을 누르면 호스트가 상세를 열어요.'}</span></div>
-  </div>;
-}
-
-const englishBreakdownLabels: Partial<CompactBreakdownLabels> = {
-  title: 'Usage by agent', total: 'All run credits', periods: 'Usage period', list: 'Usage rank and share',
-  row: (label, value, share) => `${label}, ${value}, ${share} of the total`,
-  summary: (total, amount, change) => `${total}: ${amount}.${change ? ` ${change.decrease ? 'Down' : 'Up'} ${change.percent} from the previous period.` : ''}`,
-  empty: 'Usage by part shows up after the first agent run.', leader: 'Top usage:', selectHint: 'Opens the details.',
-};
-
-/** An English host passes every label; the second card is the empty state. */
-function CompactBreakdownEnglishDemo() {
-  const [period, setPeriod] = useState('month');
-  const values = period === 'week' ? [126, 218, 84] : [620, 548, 252];
-  const items = ['Claude · build', 'Codex · tool calls', 'Research'].map((label, index) => ({ id: `en-${index}`, label, value: values[index] }));
-  return <div className="aui-compact-breakdown-demo" style={{ display: 'grid', gap: 12 }}>
-    <CompactBreakdown items={items} periods={[{ id: 'week', label: '7 days' }, { id: 'month', label: '30 days' }]} period={period} onPeriodChange={setPeriod} delta={period === 'week' ? -2.4 : 6.1} format={money} labels={englishBreakdownLabels} />
-    <CompactBreakdown items={[]} labels={englishBreakdownLabels} />
-  </div>;
-}
-
-/** The host owns period snapshots; the control only announces a period selection. */
-export function CompactBreakdownDemo({ state = 'default' }: { state?: CompactBreakdownDemoState }) {
-  if (state === 'selectable') return <CompactBreakdownSelectDemo />;
-  if (state === 'english') return <CompactBreakdownEnglishDemo />;
-  return <CompactBreakdownStateDemo state={state} />;
-}
-
-function CompactBreakdownStateDemo({ state }: { state: Exclude<CompactBreakdownDemoState, 'selectable' | 'english'> }) {
-  const [period, setPeriod] = useState('month');
-  const [notifications, setNotifications] = useState(0);
-  const [refresh, setRefresh] = useState(0);
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
-  const values = period === 'week' ? [126, 218, 84, 46, 32] : period === 'quarter' ? [1480, 1830, 720, 920, 350] : [620, 548, 252, 168, 92];
-  let data: CompactBreakdownItem[] = ['Claude · 구현', 'Codex · 도구 호출', '연구 모델', '검수 모델', '운영 모델'].map((label, index) => ({ id: `model-${index}`, label, value: values[index] }));
-  if (state === 'empty') data = [];
-  if (state === 'long') data = [
-    { id: 'research', label: '한국어 문서와 릴레이 실행 기록을 모두 검토하는 연구 모델', value: 284 },
-    { id: 'release', label: 'agentdesk_release_verification_worker_20261018_extended', value: 242 },
-    { id: 'review', label: '독립 리뷰와 회귀 검수', value: 96 },
-    { id: 'relay', label: 'Discord 릴레이 분석', value: 62 },
-    { id: 'archive', label: '장기 실행 기록 보관', value: 38 },
-    { id: 'sixth', label: '여섯 번째 보조 모델', value: 22 },
-    { id: 'seventh', label: '일곱 번째 대기 모델', value: 12 },
-  ];
-  if (state === 'transitions') {
-    const snapshots: Record<string, CompactBreakdownItem[]> = {
-      month: [{ id: 'a', label: '구현 워커', value: 520, color: '#8b5cf6' }, { id: 'b', label: '도구 호출', value: 410 }, { id: 'c', label: '릴레이 분석', value: 240 }, { id: 'd', label: '독립 검수', value: 130 }, { id: 'e', label: '장기 보관', value: 80 }, { id: 'f', label: '대기 워커', value: 40 }],
-      week: [{ id: 'c', label: '릴레이 분석 · 이름 갱신', value: 610 }, { id: 'b', label: '도구 호출', value: 185, color: '#e09b35' }, { id: 'a', label: '구현 워커 · 이름 갱신', value: 210 }, { id: 'g', label: '새 실험 워커', value: 155 }, { id: 'e', label: '장기 보관', value: 80 }, { id: 'f', label: '대기 워커', value: 0 }],
-      quarter: [{ id: 'f', label: '대기 워커', value: 80 }, { id: 'e', label: '장기 보관', value: 80 }, { id: 'd', label: '독립 검수 · 재등장', value: 820 }, { id: 'c', label: '릴레이 분석', value: 220 }, { id: 'b', label: '도구 호출 · 색 기억', value: 310 }, { id: 'a', label: '구현 워커', value: 740 }],
-    };
-    data = snapshots[period];
-  }
-  if (state === 'zero') data = [{ id: 'zero', label: '측정된 0', value: 0 }, { id: 'negative', label: '음수는 0으로 정규화', value: -42 }, { id: 'invalid', label: '비정상 입력 방어', value: Number.NaN }];
-  if (state === 'tiny') data = [{ id: 'large', label: '전체 실행', value: 9989 }, { id: 'threshold', label: '정확히 0.05% · 숨긴 조각', value: 5 }, { id: 'above', label: '0.06% · 최소 2px 조각', value: 6 }, { id: 'zero', label: '0인 현재 항목', value: 0 }];
-  if (state === 'many') data = Array.from({ length: 28 }, (_, index) => ({ id: `worker-${index}`, label: `분산 실행 워커 ${String(index + 1).padStart(2, '0')}`, value: 280 - index * 7 }));
-  if (state === 'duplicates') {
-    const shift = period === 'week' ? 3 : period === 'quarter' ? -2 : 0;
-    data = [
-      { label: '독립 검수', value: 4990 - shift }, { label: '독립 검수', value: 6 + shift },
-      { id: 'relay', label: '릴레이 분석 · 1차', value: 4 }, { id: 'relay', label: '릴레이 분석 · 재시도', value: 0 },
-    ];
-  }
-  if (state === 'rapid') data = data.map((item, index) => ({ ...item, value: item.value * (1 + ((refresh + index) % 3) * .4) }));
-  const choose = (next: string) => { setPeriod(next); setNotifications((count) => count + 1); };
-  const rapid = () => {
-    timers.current.forEach(clearTimeout);
-    [0, 160, 320, 480].forEach((delay, index) => timers.current.push(setTimeout(() => { setRefresh((value) => value + 1); choose(demoPeriods[index % 3].id); }, delay)));
-  };
-  return <div className="aui-compact-breakdown-demo" style={state === 'long' ? { maxWidth: 250 } : undefined}>
-    <CompactBreakdown items={data} title={state === 'long' ? '모델별 실행 비용과 긴 식별자' : '모델별 실행 비용'} periods={state === 'custom-footer' ? [{ id: 'month', label: '이번 달' }] : state === 'duplicates' ? [{ id: 'week', label: '최근 7일 · 재시도 포함' }, { id: 'month', label: '최근 30일 · 모든 에이전트 실행' }, { id: 'quarter', label: '이번 분기 전체 집계' }] : demoPeriods} period={period} onPeriodChange={choose} delta={state === 'zero' ? 0 : state === 'duplicates' ? Number.NaN : period === 'quarter' ? -3.8 : period === 'week' ? 0 : 8.4} format={money} totalLabel="전체 에이전트 실행 비용" footer={state === 'custom-footer' ? 0 : state === 'hidden-footer' ? null : undefined} />
-    {(state === 'rapid' || state === 'transitions' || state === 'custom-footer') && <div className="aui-compact-breakdown-demo-controls">{state === 'rapid' && <button type="button" onClick={rapid}>빠른 연속 갱신</button>}<span role="status">{state === 'custom-footer' ? '기간 1개는 선택기를 숨기고, 사용자 받침 0은 표시합니다.' : `기간 알림 ${notifications}회`}</span></div>}
-  </div>;
 }
