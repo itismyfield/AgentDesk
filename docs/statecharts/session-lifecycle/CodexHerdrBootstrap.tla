@@ -156,7 +156,7 @@ MarkerOk ==
     /\ Keep(<<row, cleanup, listing, tmuxLive, writer, resumedBy, watch, viaBoot, exec, pub,
               fails, boots>>)
 
-\* tmux_session_files.rs:326-355 removes the torn marker; herdr_launch.rs:508-510,590-632
+\* tmux_common/spawn_markers.rs:323-352 removes the torn marker; herdr_launch.rs:508-510,590-632
 \* retire_unsent: the Pending goes back to Retired, the listing (n2, false) stays, no hold.
 MarkerFail ==
     /\ intake = "cas" /\ fails < FailBudget

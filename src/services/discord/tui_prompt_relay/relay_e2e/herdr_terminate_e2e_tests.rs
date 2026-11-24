@@ -14,9 +14,9 @@ use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, probe_after_settlement, probe_settlement_window,
     terminate_explicit_herdr, test_turn,
 };
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::queue_io::cancel_backstop_test_support as observed;
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_termination_rig as herdr;
 
 const ORIGINAL: &str = "input arriving inside the settlement window [5340-m2a]";
 /// The event backstop that takes over a listener's no-start waits 60s; the start follows it.

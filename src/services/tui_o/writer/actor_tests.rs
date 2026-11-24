@@ -37,7 +37,7 @@ pub(crate) fn append(path: &Path, bytes: &[u8]) {
     file.write_all(bytes).unwrap();
 }
 /// A harness whose channel was switched over a transcript already holding `body`.
-fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
+pub(crate) fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
     switched_over_on(CHANNEL, body)
 }
 pub(crate) fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
@@ -62,10 +62,13 @@ pub(crate) async fn polls(count: u32) {
 }
 /// A spawned actor; it returns why it stopped.
 pub(crate) type Actor = tokio::task::JoinHandle<Option<super::super::deliver::StopCause>>;
-fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
+pub(crate) fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
     spawn_as(writer, ShadowProvider::Claude)
 }
-fn spawn_as(mut writer: Writer, provider: ShadowProvider) -> (watch::Sender<bool>, Actor) {
+pub(crate) fn spawn_as(
+    mut writer: Writer,
+    provider: ShadowProvider,
+) -> (watch::Sender<bool>, Actor) {
     let bindings = startup_log(&mut writer);
     spawn_with(writer, provider, bindings)
 }
@@ -79,7 +82,7 @@ pub(crate) fn spawn_with(
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
     (stop, task)
 }
-fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
+pub(crate) fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
     BindingEvent {
         seq,
         channel_id: CHANNEL,
@@ -112,7 +115,7 @@ pub(crate) fn bound(
     event(seq, record, Utc::now())
 }
 /// A binding log whose startup binds name every source the channel was switched over.
-fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
+pub(crate) fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
     let bindings = Arc::new(FakeBindings::new());
     let sources: Vec<SourceId> = writer.store().cursors().map(|c| c.source.clone()).collect();
     for (seq, source) in (1..).zip(sources) {
@@ -138,7 +141,7 @@ impl FakeBindings {
             failing,
         }
     }
-    fn fail(&self, error: Option<&str>) {
+    pub(crate) fn fail(&self, error: Option<&str>) {
         *self.failing.lock().unwrap() = error.map(str::to_string);
     }
     /// Commits `event` and moves the notice to its seq.
@@ -166,7 +169,7 @@ impl BindingEvents for FakeBindings {
     }
 }
 
-fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
+pub(crate) fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
     let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
     let lease = Arc::clone(&harness.lease);
     ChannelWriter::new(store, gate, port, lease, harness.alarms.clone())
@@ -920,9 +923,6 @@ pub(crate) mod rotation;
 #[path = "unpinned_past_tests.rs"]
 mod unpinned_past;
 
-#[path = "host_tests.rs"]
-mod host_start;
-
 #[path = "drain_projection_tests.rs"]
 mod drain_projection;
 
@@ -1046,12 +1046,7 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
     dedupe::binding_events::set_test_root(None);
 }
 
-#[path = "canary_policy_tests.rs"]
-pub(crate) mod canary_policy;
 #[path = "local_retry_actor_tests.rs"]
 mod local_retry;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;
-
-#[path = "repost_turn_tests.rs"]
-mod repost_turn;

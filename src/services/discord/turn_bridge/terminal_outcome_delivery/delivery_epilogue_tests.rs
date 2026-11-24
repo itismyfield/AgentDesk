@@ -505,7 +505,7 @@ impl TurnGateway for DriverGateway {
             let index = completed.fetch_add(1, Ordering::Release);
             #[cfg(unix)]
             census.lock().unwrap().push(
-                crate::services::discord::outbound::current_census()
+                crate::services::legacy_body_census::request_context::current_census()
                     .unwrap_or(serde_json::Value::Null),
             );
             bodies.lock().unwrap().push(body);

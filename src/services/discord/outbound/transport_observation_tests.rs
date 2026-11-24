@@ -1,10 +1,13 @@
 use crate::services::cluster::intake_router_hook::owner_record::output;
-use crate::services::discord::outbound::raw_output::{self, Operation};
-use crate::services::legacy_body_census as census;
-pub(in crate::services::discord) use crate::services::tui_o::repost::io::tests::{
+pub(in crate::services::discord) use crate::services::discord::krx_tui_o_test_host::repost_io::{
     CHANNEL, Mock, reply,
 };
-use crate::services::tui_o::repost::io::tests::{Reply, always, dispatch, route_429};
+use crate::services::discord::krx_tui_o_test_host::repost_io::{
+    Reply, always, dispatch, route_429,
+};
+use crate::services::discord::outbound::raw_output::{self, Operation};
+use crate::services::legacy_body_census as census;
+use crate::services::legacy_body_census::request_context;
 use crate::services::tui_o::repost::send::WireOutcome;
 use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
@@ -86,7 +89,7 @@ async fn common_http_client_observes_each_raw_post_and_edit() {
     let log = journal().await;
     let mock = Mock::start(vec![message(9001), message(9001)]).await;
     let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
-    raw_output::census_scope(
+    request_context::census_scope(
         Some(json!({"case":"common_http","output_class":"LegacyBody","binding_mode":"TUI"})),
         async {
             client
@@ -170,7 +173,7 @@ async fn common_http_client_preserves_errors_retries_and_unknown_destinations() 
     ] {
         let mock = Mock::start(replies).await;
         let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
-        let result = raw_output::census_scope(
+        let result = request_context::census_scope(
             Some(json!({"case":case,"output_class":"LegacyBody","binding_mode":"TUI"})),
             client.post_message(&CHANNEL.to_string(), "body"),
         )
@@ -199,7 +202,7 @@ async fn common_http_client_preserves_errors_retries_and_unknown_destinations() 
     }
     let mock = Mock::start(vec![message(9502)]).await;
     let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
-    let result = raw_output::census_scope(
+    let result = request_context::census_scope(
         Some(
             json!({"case":"invalid-destination","output_class":"LegacyBody","binding_mode":"TUI"}),
         ),
@@ -314,7 +317,7 @@ async fn raw_requests_observe_body_operations_and_retry_once() {
                 json!({"case":case})
             }
         });
-        let result = raw_output::census_scope(tagged, async {
+        let result = request_context::census_scope(tagged, async {
             match case {
                 "edit" => crate::services::discord::http::edit_channel_message(&http, channel, MessageId::new(9001), "body").await.map(|_| ()),
                 "delete" => crate::services::discord::http::delete_channel_message(&http, channel, MessageId::new(9001)).await,
@@ -398,16 +401,16 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
         let mut call: std::pin::Pin<
             Box<dyn std::future::Future<Output = serenity::Result<serenity::Message>>>,
         > = if case.starts_with("census_") {
-            Box::pin(raw_output::scope(
+            Box::pin(request_context::scope(
                 Some(scope.clone()),
                 Some(&artifact),
                 body,
-                raw_output::census_scope(tag, send),
+                request_context::census_scope(tag, send),
             ))
         } else {
-            Box::pin(raw_output::census_scope(
+            Box::pin(request_context::census_scope(
                 tag,
-                raw_output::scope(Some(scope.clone()), Some(&artifact), body, send),
+                request_context::scope(Some(scope.clone()), Some(&artifact), body, send),
             ))
         };
         if stalled {
@@ -508,7 +511,7 @@ async fn o_ack_counts_only_fresh_created_responses() {
         };
         let mock = Mock::start(vec![response]).await;
         let before = o_count();
-        raw_output::census_scope(Some(json!({"case":case})), async {
+        request_context::census_scope(Some(json!({"case":case})), async {
             if matches!(case, "repost" | "nonce_echo") {
                 let result = dispatch(&mock.port(), always()).await;
                 assert!(matches!(result.outcome, WireOutcome::Created(_)));
@@ -557,7 +560,7 @@ async fn claim_api_scopes_no_claim_transport_without_creating_a_tag() {
     let log = journal().await;
     let mock = Mock::start(vec![message(9010)]).await;
     let http = client(&mock);
-    let result = raw_output::census_scope(Some(json!({"case":"claim-none"})), async {
+    let result = request_context::census_scope(Some(json!({"case":"claim-none"})), async {
         crate::services::tui_o::cutover::claim_then_send_at(
             crate::services::tui_o::cutover::BodySite::StandbyRelay,
             None,
@@ -589,7 +592,7 @@ async fn claim_api_scopes_no_claim_transport_without_creating_a_tag() {
         crate::services::tui_o::cutover::BodySite::StandbyRelay,
         None,
         || async {
-            assert!(raw_output::CONTEXT.try_with(|_| ()).is_err());
+            assert!(request_context::current().is_none());
             crate::services::discord::http::send_channel_message(
                 &http,
                 ChannelId::new(CHANNEL),
@@ -639,7 +642,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
         let mock = Mock::start(vec![message(9011), message(9011)]).await;
         let http = client(&mock);
         let claim = claimed.then(|| BodyClaim::new(CHANNEL, Some(ClaudeTui)));
-        let (sent, context) = raw_output::census_scope(
+        let (sent, context) = request_context::census_scope(
             Some(json!({"case":case})),
             cutover::claim_then_send_held_at(BodySite::StandbyRelay, claim, || async {
                 crate::services::discord::http::send_channel_message(
@@ -685,7 +688,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
     }
     let mock = Mock::start(vec![message(9012)]).await;
     let http = client(&mock);
-    raw_output::census_scope(
+    request_context::census_scope(
         Some(json!({"case":"outer-claim", "site":"W30", "reason":"RELEASED"})),
         cutover::claim_then_send_at(BodySite::StandbyRelay, None, || async {
             cutover::claim_then_send_at(BodySite::StandbyRelay, None, || async {
@@ -740,7 +743,7 @@ async fn tagged_http_send_does_not_wait_for_a_blocked_journal() {
     )
     .await;
     assert!(matches!(control, Ok(Ok(_))));
-    let tagged = raw_output::census_scope(
+    let tagged = request_context::census_scope(
         Some(json!({"case":"blocked-journal","site":"W30"})),
         crate::services::discord::http::send_channel_message(&http, channel, "body"),
     );
@@ -900,7 +903,7 @@ async fn a_full_observation_queue_keeps_the_send_and_invalidates_the_window() {
     let http = client(&mock);
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        raw_output::census_scope(
+        request_context::census_scope(
             Some(json!({"case":"full-queue"})),
             crate::services::discord::http::send_channel_message(
                 &http,
@@ -945,7 +948,7 @@ async fn a_crash_before_body_drain_cannot_certify_the_next_window() {
         lock.lock().unwrap();
         let mock = Mock::start(vec![message(9024)]).await;
         let http = client(&mock);
-        raw_output::census_scope(
+        request_context::census_scope(
             Some(json!({"case":"crash-before-drain"})),
             crate::services::discord::http::send_channel_message(
                 &http,

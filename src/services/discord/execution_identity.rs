@@ -6,7 +6,7 @@
 //! removes a registry entry, or writes any marker.
 //!
 //! The only backing store is the per-spawn `.spawn_nonce` marker that
-//! `tmux_session_files` already writes at each provider spawn. This slice adds
+//! `tmux_common::spawn_markers` already writes at each provider spawn. This slice adds
 //! no durable row, no new marker file, and no new file format — it reuses
 //! `read_spawn_nonce` verbatim. The `.generation` mtime identity conjunct keeps
 //! its existing reader (`read_generation_file_mtime_ns`) and is deliberately
@@ -259,7 +259,7 @@ fn observation_counts() -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::tmux::write_spawn_nonce;
+    use crate::services::tmux_common::spawn_markers::write_spawn_nonce;
 
     fn isolated_runtime_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
         let root = tempfile::tempdir().expect("isolated runtime root");

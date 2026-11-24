@@ -15,7 +15,8 @@ pub(in super::super) fn execution_proof(name: &str, channel: u64) -> String {
     let sid = uuid::Uuid::new_v4().to_string();
     let prepared =
         PreparedIncarnation::prepare("codex", name, Some(channel), Some(&sid), false).unwrap();
-    let stamped = discord::stamp_spawn_markers(name, Some(&prepared));
+    let stamped =
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(name, Some(&prepared));
     prepared.finish_spawn(stamped).unwrap();
     sid
 }

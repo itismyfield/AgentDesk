@@ -14,7 +14,7 @@ use crate::services::tui_o::writer::host::HostIo;
 use crate::services::tui_o::writer::rotation::bound_source;
 
 mod prefix;
-pub(in crate::services::tui_o::writer) mod thread {
+pub(in crate::services) mod thread {
     use sha2::{Digest, Sha256};
 
     use crate::services::tui_o::cutover::claude_thread::protected_launch;
@@ -47,7 +47,7 @@ pub(in crate::services::tui_o::writer) mod thread {
         })
     }
 
-    pub(in crate::services::tui_o::writer) fn plan(
+    pub(in crate::services) fn plan(
         events: &[BindingEvent],
         parent: u64,
     ) -> Option<((SourceId, u64), Vec<InitSource>)> {

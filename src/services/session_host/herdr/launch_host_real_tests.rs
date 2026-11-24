@@ -6,10 +6,22 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use super::*;
+use std::path::Path;
+use std::time::Duration;
+
 use crate::services::herdr_launch::unset_herdr_env_before_exec;
+use crate::services::herdr_launch::{
+    HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
+};
+use crate::services::session_host::herdr::contract::{self, HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr::launch_host::*;
+use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use crate::services::session_host::herdr::model::{HerdrResult, HerdrSnapshot};
 use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
+use crate::services::session_host::herdr::observe::{
+    self, RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified,
+};
+use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
 use crate::services::session_host::herdr::wire::LineJsonFraming;
 use crate::services::session_host::herdr_host::HerdrHost;
 use crate::services::session_host::model::{HostMutation, HostRefusal, HostSessionRef};

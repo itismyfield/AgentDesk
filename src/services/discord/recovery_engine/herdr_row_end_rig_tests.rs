@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use super::super::*;
 use super::{CURRENT, PRIOR, on};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::{self, DiscordMockState};
 use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal, record_verified};
 
 #[path = "herdr_row_end_gate_tests.rs"]
@@ -374,7 +374,11 @@ impl Run {
                 let switches = rig
                     .bind_as(&pool, (&token, &key), bound, "codex", &prepared.path)
                     .await;
-                crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+                crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                    &logical,
+                    Some(&prepared),
+                )
+                .unwrap();
                 switches
             }
             _ => {

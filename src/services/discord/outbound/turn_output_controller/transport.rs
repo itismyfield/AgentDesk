@@ -329,7 +329,7 @@ impl<G: TurnGateway + ?Sized> OriginGateway<'_, G> {
     ) -> Result<T, String> {
         use crate::services::cluster::intake_router_hook::owner_record::output;
         if self.inner.has_raw_output_boundaries() {
-            return crate::services::discord::outbound::raw_output::scope(
+            return crate::services::legacy_body_census::request_context::scope(
                 self.scope.clone(),
                 self.origin,
                 self.body,

@@ -464,7 +464,7 @@ fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_sock
         module_path!(),
         "::test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket"
     )
-    .strip_prefix("agentdesk::")
+    .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
     .unwrap();
     let output = crate::config::test_instance::tests::command(&root)
         .args(["--exact", filter, "--nocapture"])

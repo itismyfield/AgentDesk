@@ -31,7 +31,12 @@ fn started(body: &[u8]) -> (Harness, PathBuf, SourceId, Arc<FakeBindings>) {
     (harness, path, source, bindings)
 }
 
-fn transcript(beside: &Path, name: &str, session: &str, body: &[u8]) -> (PathBuf, SourceId) {
+pub(crate) fn transcript(
+    beside: &Path,
+    name: &str,
+    session: &str,
+    body: &[u8],
+) -> (PathBuf, SourceId) {
     let path = beside.with_file_name(name);
     std::fs::write(&path, body).unwrap();
     let source = source_id_for(session, &path).unwrap();

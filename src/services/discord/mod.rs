@@ -172,14 +172,10 @@ pub(crate) use test_fixtures::resume_owner_channel_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use test_fixtures::revoke_notice_author_for_test;
 
+mod tmux_error_detect;
 mod turn_completion_events;
 mod turn_end_summary;
 pub(in crate::services::discord) mod turn_end_wip_warning;
-#[cfg(unix)]
-pub(crate) use tmux::stamp_spawn_markers;
-#[cfg(all(test, unix))]
-pub(crate) use tmux::write_spawn_nonce;
-mod tmux_error_detect;
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 mod live_bridge;
 #[cfg(unix)]
@@ -200,6 +196,7 @@ mod krx_claude_tests;
 mod krx_claude_unix_tests;
 #[cfg(test)]
 mod krx_config_tests;
+pub(crate) mod krx_session_host_test_host;
 pub(crate) mod krx_tui_o_test_host;
 #[cfg(test)]
 mod relay_coord_tests;
@@ -452,7 +449,7 @@ pub(crate) use bot_runtime::has_fresh_inflight_for_channel;
 use bot_runtime::increment_counter;
 pub(in crate::services::discord) use bot_runtime::increment_global_active;
 pub(crate) use bot_runtime::inflight_state_allows_idle_tmux_repair_for_channel;
-pub(super) use bot_runtime::mark_reconcile_complete;
+pub(crate) use bot_runtime::mark_reconcile_complete;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_counter;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_global_active;
 pub(super) use bot_runtime::single_message_panel_enabled;
@@ -668,7 +665,7 @@ pub(crate) use shared_data::make_shared_data_for_tests;
 #[cfg(test)]
 pub(super) use shared_data::make_shared_data_for_tests_with_barrier;
 #[cfg(test)]
-pub(super) use shared_data::make_shared_data_for_tests_with_storage;
+pub(crate) use shared_data::make_shared_data_for_tests_with_storage;
 
 #[cfg(unix)]
 pub(crate) use session_transition::UnplacedLease;

@@ -13,7 +13,7 @@ use crate::services::codex_tui::rollout_index::read_rollout_session_meta;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
 
 fn fixture_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    Path::new(crate::runtime_layout::REPO_ROOT)
         .join("tests/fixtures/hook_payload")
         .join(name)
 }

@@ -108,11 +108,8 @@ impl ClearRig {
             &self.path(native),
             || {
                 Some(
-                    include_str!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-                    ))
-                    .into(),
+                    include_str!("../../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt")
+                        .into(),
                 )
             },
             None,

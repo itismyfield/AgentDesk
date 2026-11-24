@@ -22,6 +22,7 @@ pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
+pub(crate) mod dcserver_singleton;
 pub mod decision_gate;
 pub mod discord;
 pub mod discord_config_audit;
@@ -189,8 +190,8 @@ mod krx_config_tests;
 mod krx_db_b_tests;
 #[cfg(test)]
 mod krx_db_tests;
-#[cfg(test)]
-mod krx_tui_o_tests;
+#[cfg(all(test, unix))]
+mod krx_db_unix_tests;
 #[cfg(test)]
 mod provider_output_guard_tests;
 

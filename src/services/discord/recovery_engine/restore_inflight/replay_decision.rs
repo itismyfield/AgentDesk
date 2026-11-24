@@ -9,7 +9,7 @@ use crate::db::replay_disposition::{
 pub(super) async fn resume(
     pool: Option<&sqlx::PgPool>,
     state: &inflight::InflightTurnState,
-    root: Option<&crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
+    root: Option<&crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot>,
 ) -> bool {
     if !state.replay_rerun_blocked()
         || matches!(

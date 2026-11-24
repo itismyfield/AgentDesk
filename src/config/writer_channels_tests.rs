@@ -36,7 +36,7 @@ fn roundtrip_channels(config: &Config) -> serde_json::Value {
 // The disk loader rejects malformed membership and targets without one valid TUI identity.
 #[test]
 fn writer_channels_disk_loader_rejects_invalid_membership_and_identity() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     load_fixture(
         root.path(),
         "tui_o: {writer: {channels: [41]}}",
@@ -114,7 +114,7 @@ fn writer_channels_disk_loader_rejects_invalid_membership_and_identity() {
 // Membership round-trips as a set, and only a changed applied set requires restart.
 #[test]
 fn writer_channels_disk_loader_normalizes_and_reports_restart_required() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let load = |writer: &str| load_fixture(root.path(), writer, BINDINGS, "{}").unwrap();
     let duplicated = load("tui_o: {writer: {channels: [41, 41]}}");
     assert_eq!(roundtrip_channels(&duplicated), serde_json::json!([41]));
@@ -154,7 +154,7 @@ fn writer_all_tui_selects_only_tui_bindings_and_applies_on_restart() {
     use crate::services::tui_o::channel_policy::BootChannels;
     // Loading resolves paths against AGENTDESK_ROOT_DIR, which parallel tests set under this lock.
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let path = root.path().join("agentdesk.yaml");
     let data_dir = serde_json::to_string(&root.path().join("data")).unwrap();
     let load = |cluster: &str, writer: &str| {
@@ -208,7 +208,7 @@ fn writer_all_tui_selects_only_tui_bindings_and_applies_on_restart() {
 
 #[test]
 fn readers_s1b_dormant_disk_loader_defaults_empty_and_omits_empty_set() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     for writer in [
         "",
         "tui_o: {writer: {channels: [41]}}",
@@ -226,7 +226,7 @@ fn readers_s1b_dormant_disk_loader_defaults_empty_and_omits_empty_set() {
 
 #[test]
 fn readers_s1b_dormant_disk_loader_normalizes_without_granting_ownership() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let config = load_fixture(
         root.path(),
         "tui_o: {writer: {channels: [41, 42], dormant_channels: [42, 41, 42]}}",
@@ -250,7 +250,7 @@ fn readers_s1b_dormant_disk_loader_normalizes_without_granting_ownership() {
 
 #[test]
 fn readers_s1b_dormant_disk_loader_rejects_zero_invalid_and_unselected_ids() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     load_fixture(
         root.path(),
         "tui_o: {writer: {channels: [41], dormant_channels: [41]}}",
@@ -288,7 +288,7 @@ fn readers_s1b_dormant_disk_loader_rejects_zero_invalid_and_unselected_ids() {
 
 #[test]
 fn readers_s1b_dormant_disk_loader_validates_actual_all_tui_selection() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let bindings = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: pipe}";
     let config = load_fixture(
         root.path(),
@@ -337,7 +337,7 @@ fn boot_selection(config: &Config) -> (Vec<u64>, bool, Vec<u64>) {
 // Unset writer and turn flags select every TUI binding; a list or an explicit false keeps its mode.
 #[test]
 fn tui_o_defaults_select_every_tui_binding_unless_a_list_or_false_says_otherwise() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let bindings = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: tui}\n      \
                     gemini: {id: '43'}";
     let select =
@@ -378,7 +378,7 @@ fn tui_o_defaults_select_every_tui_binding_unless_a_list_or_false_says_otherwise
 // selection still refuses the boot.
 #[test]
 fn tui_o_default_selection_turns_off_on_a_cluster_node_without_ids() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).unwrap();
     let cluster = "cluster: {enabled: true, instance_id: a}\ntui_o:";
     let load =
         |writer: &str| load_fixture(root.path(), &format!("{cluster} {writer}"), BINDINGS, "{}");

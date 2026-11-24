@@ -997,7 +997,7 @@ fn p5_live_foreign_boot_does_not_preempt_the_owner_pg() {
     if role == "peer" && std::env::var(SCENARIO).ok().as_deref() == Some("same-root-overlap") {
         let root = std::env::var("ADK_TEST_REPLAY_PEER_ROOT").unwrap();
         assert!(
-            crate::cli::dcserver::replay_recovery::acquire_for_tests(std::path::Path::new(&root))
+            crate::services::dcserver_singleton::acquire_for_tests(std::path::Path::new(&root))
                 .is_err()
         );
         println!("P5_SAME_ROOT_OVERLAP_REFUSED");
@@ -1089,7 +1089,7 @@ fn p5_live_foreign_boot_does_not_preempt_the_owner_pg() {
         let channel=ChannelId::new(7_330_522);let host=Host::new(&[channel]).await;
         let locked_root=crate::services::discord::runtime_store::agentdesk_root().unwrap();
         std::fs::create_dir_all(locked_root.join("runtime")).unwrap();
-        let authority=crate::cli::dcserver::replay_recovery::acquire_for_tests(&locked_root).unwrap();
+        let authority=crate::services::dcserver_singleton::acquire_for_tests(&locked_root).unwrap();
         host.shared.restart.replay_restart.set(authority).unwrap();
         assert!(crate::services::discord::replay_policy::activation::production_requested(&channel.to_string()));
         let metadata=|reservation:&health::HeadlessAgentTurnReservation,run:&str| serde_json::json!({

@@ -21,7 +21,7 @@ pub(crate) const BOT: u64 = 42;
 pub(crate) const CHANNEL: u64 = 7;
 
 thread_local! {
-    static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
+    pub(crate) static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -63,23 +63,23 @@ pub(crate) struct FakePort {
     pub(crate) replies: Mutex<VecDeque<Reply>>,
     posts: Mutex<Vec<String>>,
     prepared_before_post: Mutex<Vec<bool>>,
-    ledger: Mutex<Option<PathBuf>>,
-    unreadable: AtomicBool,
+    pub(crate) ledger: Mutex<Option<PathBuf>>,
+    pub(crate) unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
-    lazy: AtomicBool,
+    pub(crate) lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
-    started: Arc<Mutex<Vec<&'static str>>>,
+    pub(crate) started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
-    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub(crate) on_post: PostHook,
     pub(crate) history_reads: AtomicUsize,
-    on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {
-    fn say(&self, author_id: u64, content: &str) -> SeenMessage {
+    pub(crate) fn say(&self, author_id: u64, content: &str) -> SeenMessage {
         let mut history = self.history.lock().unwrap();
         let id = 1000 + history.len() as u64;
         let content = content.to_string();
@@ -218,10 +218,10 @@ impl DiscordPort for FakePort {
 #[derive(Default)]
 pub(crate) struct FakeLease {
     pub(crate) busy: AtomicBool,
-    released: Arc<AtomicUsize>,
-    on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub(crate) released: Arc<AtomicUsize>,
+    pub(crate) on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
-    unavailable: Mutex<Vec<u64>>,
+    pub(crate) unavailable: Mutex<Vec<u64>>,
 }
 
 pub(crate) struct Held(Arc<AtomicUsize>);
@@ -251,8 +251,8 @@ impl DeliveryLease for Arc<FakeLease> {
 #[derive(Clone)]
 pub(crate) struct Alarms {
     channel: u64,
-    raised: Arc<Mutex<Vec<WriterAlarm>>>,
-    cleared: Arc<AtomicUsize>,
+    pub(crate) raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    pub(crate) cleared: Arc<AtomicUsize>,
     /// The reader count the writer last reported.
     readers: Arc<Mutex<Option<usize>>>,
 }
@@ -287,9 +287,9 @@ impl Alarms {
 pub(crate) type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
 
 pub(crate) struct Harness {
-    channel_id: u64,
+    pub(crate) channel_id: u64,
     pub(crate) _runtime: tempfile::TempDir,
-    store: OStore,
+    pub(crate) store: OStore,
     pub(crate) gate: Arc<OwnershipGate>,
     pub(crate) port: Arc<FakePort>,
     pub(crate) lease: Arc<FakeLease>,
@@ -302,7 +302,7 @@ impl Harness {
     }
 
     /// `sources` may create transcripts under the runtime root before the era begins.
-    fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
+    pub(crate) fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
         Self::build_channel(CHANNEL, sources)
     }
 
@@ -431,7 +431,7 @@ pub(crate) fn piece(native_key: &str, payload: &str) -> Derived {
     })
 }
 
-fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
+pub(crate) fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
     let ledger = writer.store().ledger();
     ledger
         .latest_piece(&unit(native_key), 0)
@@ -1026,9 +1026,6 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
-use crate::services::discord::krx_tui_o_test_host::input_notice_transport as input_notice_transport_tests;
-#[path = "local_retry_tests.rs"]
-mod local_retry_tests;
 #[path = "notice_retry_tests.rs"]
 mod notice_retry_tests;
 #[path = "tool_card_replay_tests.rs"]

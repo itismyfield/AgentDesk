@@ -5,16 +5,35 @@ use std::sync::mpsc;
 
 use sqlx::PgPool;
 
-use super::*;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use serde_json::{Value, json};
+
+use crate::config::session_hosts::EndpointMode;
+use crate::db::dispatched_sessions::hosted_execution::ExpectedExecution;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedOwner, HostedRecord, HostedState,
 };
 use crate::services::discord::herdr_terminate::route_tests::{current_thread, in_child, switch};
 use crate::services::discord::{UnplacedLease, make_shared_data_for_tests};
+use crate::services::herdr_launch::unplaced::{ChannelPane, Residue};
 use crate::services::herdr_launch::unplaced::{Resolution, Unplaced, resolve_unplaced};
+use crate::services::herdr_launch::{
+    EvidenceProbe, HerdrCreateOutcome, HerdrLaunchEndpoint, HerdrLaunchHost,
+};
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchOutcome, launch_herdr_session, workspace_marker,
 };
+use crate::services::session_host::herdr::contract::{HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr::launch_host::tests::*;
+use crate::services::session_host::herdr::model::HerdrEndpoint;
+use crate::services::session_host::herdr::observe::{
+    RestoreResume, RestoreUnverified, read_restore_resume_with,
+};
+use crate::services::session_host::herdr::pane_probe::{EvidenceGap, ProcessOs};
+use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
 use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use poise::serenity_prelude::ChannelId;

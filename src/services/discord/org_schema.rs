@@ -419,12 +419,12 @@ pub(crate) fn api_agent_identity(
     agent_identity::identity_json(&identity)
 }
 
-pub(super) fn org_schema_exists() -> bool {
+pub(crate) fn org_schema_exists() -> bool {
     org_schema_path().map(|p| p.exists()).unwrap_or(false)
 }
 
 /// Check if a role_id exists in the org schema's agents map.
-pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
+pub(crate) fn is_known_agent(role_id: &str) -> Option<bool> {
     let schema = load_org_schema()?;
     Some(schema.agents.contains_key(role_id))
 }

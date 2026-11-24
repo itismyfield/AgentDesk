@@ -201,7 +201,7 @@ pub(in crate::services) struct Data {
     pub(in crate::services) provider: ProviderKind,
 }
 
-pub(in crate::services) fn mark_reconcile_complete(shared: &SharedData) {
+pub(crate) fn mark_reconcile_complete(shared: &SharedData) {
     let duration_ms = shared.restart.recovery_started_at.elapsed().as_millis();
     let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
     let _ = shared.restart.recovery_duration_ms.compare_exchange(

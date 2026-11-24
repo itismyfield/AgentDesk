@@ -1,4 +1,5 @@
 use super::*;
+use std::{fs, os::unix::io::AsRawFd};
 
 #[test]
 fn p5_singleton_requires_exclusive_ownership_across_processes() {
@@ -43,5 +44,29 @@ fn p5_singleton_requires_exclusive_ownership_across_processes() {
     assert!(
         acquire_for_tests(root.path()).is_ok(),
         "the same root can restart after its owner exits"
+    );
+}
+
+#[test]
+fn lock_pid_write_removes_stale_suffix() {
+    let lock = tempfile::NamedTempFile::new().expect("temporary lock file");
+    let current_pid = std::process::id().to_string();
+    fs::write(lock.path(), format!("{current_pid}999")).expect("seed longer PID");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(false)
+        .open(lock.path())
+        .expect("open existing lock file");
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "acquire single-instance lock before PID write"
+    );
+
+    write_dcserver_lock_pid(&file).expect("write current PID");
+
+    assert_eq!(
+        fs::read(lock.path()).expect("read PID"),
+        current_pid.as_bytes()
     );
 }

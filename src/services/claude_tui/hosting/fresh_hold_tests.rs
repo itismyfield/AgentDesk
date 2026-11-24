@@ -185,10 +185,12 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         )
         .unwrap();
     recreated
-        .finish_spawn(crate::services::discord::stamp_spawn_markers(
-            session,
-            Some(&recreated),
-        ))
+        .finish_spawn(
+            crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                session,
+                Some(&recreated),
+            ),
+        )
         .unwrap();
     tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&new));
     crate::services::claude_tui::readiness::tests::pre_source(session, &new);

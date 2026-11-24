@@ -328,8 +328,8 @@ fn recovery_takeover_keeps_different_completion_footer_target() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
+    use crate::services::discord::krx_tui_o_test_host::repost_io::Mock;
     use crate::services::discord::outbound::raw_output::tests as observation;
-    use crate::services::tui_o::repost::io::tests::Mock;
     if observation::isolated(
         concat!(
             module_path!(),

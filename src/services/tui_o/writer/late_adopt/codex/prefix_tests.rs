@@ -8,7 +8,7 @@ use crate::services::tui_o::shadow::binding_reader::source_id_for;
 
 /// The captured model turn, one record per line, without a session_meta of its own.
 fn captured() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     let text = std::fs::read_to_string(dir.join("model_turn.jsonl")).unwrap();
     text.lines().map(str::to_owned).collect()
 }
@@ -191,7 +191,7 @@ const CAPTURED_SESSION: &str = "01a0e15a-0000-7000-8000-000000000001";
 /// A TUI rollout as Codex 0.147 wrote it from its session_meta to the first prompt's mirror,
 /// with identifiers, paths and texts replaced.
 fn captured_prefix() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     let text = std::fs::read_to_string(dir.join("takeover_prefix.jsonl")).unwrap();
     text.lines().map(str::to_owned).collect()
 }

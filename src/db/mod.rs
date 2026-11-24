@@ -22,7 +22,7 @@ pub(crate) mod dispatched_session_canonical_identity;
 pub(crate) mod dispatched_session_rebind_override;
 pub mod dispatched_sessions;
 pub mod dispatches;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod fixture_target;
 pub mod idempotency;
 pub mod imsg_reply;

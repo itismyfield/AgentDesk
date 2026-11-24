@@ -3,9 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[cfg(all(test, unix))]
-use std::os::unix::io::AsRawFd;
-
 use crate::config;
 use crate::engine::PolicyEngine;
 use crate::server;
@@ -860,17 +857,8 @@ pub fn handle_restart_dcserver(
     Ok(())
 }
 
-pub(crate) mod replay_recovery;
 pub(crate) mod startup;
 use startup::raise_fd_soft_limit;
-
-#[cfg(unix)]
-fn write_dcserver_lock_pid(mut file: &fs::File) -> std::io::Result<()> {
-    use std::io::Write;
-    // Clear the previous PID only after flock succeeds so shorter PIDs leave no suffix.
-    file.set_len(0)?;
-    file.write_all(std::process::id().to_string().as_bytes())
-}
 
 pub fn handle_dcserver(token: Option<String>) {
     let _test_lease =
@@ -905,11 +893,13 @@ pub fn handle_dcserver(token: Option<String>) {
     }
 
     #[cfg(unix)]
-    let singleton = replay_recovery::Singleton::acquire(crate::config::runtime_root().as_deref())
-        .unwrap_or_else(|error| {
-            eprintln!("  ✗ {error}");
-            std::process::exit(1)
-        });
+    let singleton = crate::services::dcserver_singleton::Singleton::acquire(
+        crate::config::runtime_root().as_deref(),
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("  ✗ {error}");
+        std::process::exit(1)
+    });
     #[cfg(unix)]
     let replay_restart = singleton.recovery_root();
     #[cfg(not(unix))]
@@ -1398,35 +1388,6 @@ pub fn handle_dcserver(token: Option<String>) {
 
 fn should_run_http_only_onboarding(token: Option<&str>, launch_config_count: usize) -> bool {
     token.is_none() && launch_config_count == 0
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lock_pid_write_removes_stale_suffix() {
-        let lock = tempfile::NamedTempFile::new().expect("temporary lock file");
-        let current_pid = std::process::id().to_string();
-        fs::write(lock.path(), format!("{current_pid}999")).expect("seed longer PID");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .truncate(false)
-            .open(lock.path())
-            .expect("open existing lock file");
-        assert_eq!(
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0,
-            "acquire single-instance lock before PID write"
-        );
-
-        write_dcserver_lock_pid(&file).expect("write current PID");
-
-        assert_eq!(
-            fs::read(lock.path()).expect("read PID"),
-            current_pid.as_bytes()
-        );
-    }
 }
 
 #[path = "dcserver_decision_boot.rs"]

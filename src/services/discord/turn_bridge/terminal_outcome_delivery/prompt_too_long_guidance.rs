@@ -62,7 +62,7 @@ mod tests {
             let content = content.to_string();
             Box::pin(async move {
                 self.census.lock().unwrap().push(
-                    crate::services::discord::outbound::current_census()
+                    crate::services::legacy_body_census::request_context::current_census()
                         .unwrap_or(serde_json::Value::Null),
                 );
                 self.replacements

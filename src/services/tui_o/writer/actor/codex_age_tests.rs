@@ -151,10 +151,7 @@ fn automatic_codex_age_uses_maximum_activity_time_including_metadata_and_empty_t
 
 #[test]
 fn automatic_codex_age_real_native_mirrors_and_terminal_fallback_are_pure() {
-    let fixture = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/codex_busy_inject/model_turn.jsonl"
-    ));
+    let fixture = include_str!("../../../../../tests/fixtures/codex_busy_inject/model_turn.jsonl");
     let rows: Vec<Value> = fixture
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -313,10 +310,8 @@ fn automatic_codex_age_shared_exact_cursor_hash_eof_and_budget_guards_hold() {
 
 #[test]
 fn automatic_codex_age_operating_rollout_016x_activity_is_known_and_maximal() {
-    let fixture = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/codex_retention/activity_rollout_016x.jsonl"
-    ));
+    let fixture =
+        include_str!("../../../../../tests/fixtures/codex_retention/activity_rollout_016x.jsonl");
     let mut rows: Vec<Value> = fixture
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

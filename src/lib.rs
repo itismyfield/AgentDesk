@@ -307,12 +307,14 @@ mod krx_db_tests;
 #[cfg(test)]
 mod krx_services_tests;
 #[cfg(test)]
+mod krx_session_host_tests;
+#[cfg(test)]
 mod krx_tui_o_tests;
 #[cfg(all(test, unix))]
 mod krx_tui_o_unix_tests;
 #[cfg(test)]
 use crate::config::test_env::panic_probe as test_env_panic_probe;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use adk_test_support::test_support;
 
 /// Managed writer lifetime contracts; hosting and ownership admission remain internal.

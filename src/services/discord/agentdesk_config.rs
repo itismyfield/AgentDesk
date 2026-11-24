@@ -493,11 +493,6 @@ pub(super) fn collect_agent_bot_names() -> HashSet<String> {
         .collect()
 }
 
-pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
-    let config = load_agentdesk_config()?;
-    Some(config.agents.iter().any(|agent| agent.id == role_id))
-}
-
 pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
     load_agentdesk_config()
         .map(|config| peer_agents_from_config(&config))

@@ -1,7 +1,7 @@
 //! Production reader recovery over real Herdr and PostgreSQL.
 use super::*;
+use crate::krx_session_host_tests::herdr_terminate_real_tests as real;
 use crate::services::discord::recovery_engine::herdr_reader;
-use crate::services::session_host::herdr_terminate_real_tests as real;
 use real::missing_marker_rig::{CHANNEL, Case, TOKEN, child};
 impl Case {
     pub(crate) fn pass(&self) {

@@ -110,7 +110,9 @@ pub(super) async fn run_idle_jsonl_relay_loop(
             }
             let source_marker = source_epoch_observer::marker_if_enabled(&session_name);
             let current_generation_signature =
-                super::tmux::read_generation_file_mtime_ns(&session_name);
+                crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(
+                    &session_name,
+                );
             if idle_jsonl_clear_session_init_on_generation_signature_change(
                 &mut session_init_seen,
                 &mut session_generation_signatures,

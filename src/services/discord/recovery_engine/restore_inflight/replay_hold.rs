@@ -22,7 +22,7 @@ pub(super) enum ReplayLookup {
 pub(super) async fn hydrate_replay_hold(
     pool: Option<&sqlx::PgPool>,
     state: &mut inflight::InflightTurnState,
-    root: Option<&crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
+    root: Option<&crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot>,
 ) -> bool {
     match hydrate_replay_hold_checked(pool, state).await {
         ReplayLookup::Verified => super::replay_decision::resume(pool, state, root).await,

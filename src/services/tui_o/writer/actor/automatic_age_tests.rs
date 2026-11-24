@@ -23,10 +23,9 @@ fn timestamp(raw: &str) -> SystemTime {
 
 #[test]
 fn automatic_age_reads_captured_claude_rows_and_uses_the_latest_dialogue() {
-    let fixture = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/hook_payload/claude-2.1.283.transcript-shapes.jsonl"
-    ));
+    let fixture = include_str!(
+        "../../../../../tests/fixtures/hook_payload/claude-2.1.283.transcript-shapes.jsonl"
+    );
     let mut bytes = Vec::new();
     for line in fixture.lines() {
         let captured: serde_json::Value = serde_json::from_str(line).unwrap();

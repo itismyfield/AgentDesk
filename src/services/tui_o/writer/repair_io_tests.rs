@@ -1,12 +1,12 @@
 //! Failed final boot writes keep readiness and stale-halt clearing behind durability.
 use super::*;
+use crate::services::discord::krx_tui_o_test_host::admission::bind as bind_notice;
 use crate::services::tui_o::alarm::{AlarmHealth, AlarmRouter};
 use crate::services::tui_o::store::cleanup_witness::CleanupWitness;
 use crate::services::tui_o::store::fault::{self, Keep, Step as FaultStep};
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::actor::{Owing, spawn_projecting};
-use crate::services::tui_o::writer::input_notices::admission::tests::bind as bind_notice;
 use crate::services::tui_o::writer::pieces::UnitDeriver;
 use crate::services::tui_o::writer::rotation::Sources;
 use std::collections::BTreeMap;

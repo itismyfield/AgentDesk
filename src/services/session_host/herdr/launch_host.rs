@@ -49,7 +49,7 @@ pub(crate) struct ReplacedServer {
 }
 
 pub(crate) struct SocketHerdrLaunchHost {
-    endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
+    pub(crate) endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
     #[cfg(test)]
@@ -59,9 +59,9 @@ pub(crate) struct SocketHerdrLaunchHost {
     grants: Mutex<GrantCache>,
     grant_store: super::policy::grant_store::FileGrantStore,
     next_id: AtomicU64,
-    read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
-    os: Box<dyn ProcessOs>,
-    provider_window: Duration,
+    pub(crate) read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
+    pub(crate) os: Box<dyn ProcessOs>,
+    pub(crate) provider_window: Duration,
 }
 
 struct CachedGrant {
@@ -616,7 +616,7 @@ impl SocketHerdrLaunchHost {
             other => unconfirmed(format!("command input: {other:?}")),
         }
     }
-    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+    pub(crate) fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.create_checked(
             PaneCommand {
                 endpoint: &request.endpoint,
@@ -835,12 +835,4 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
 
 #[cfg(test)]
 #[path = "launch_host_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "launch_host_real_tests.rs"]
-mod real_tests;
-
-#[cfg(all(test, unix))]
-#[path = "launch_host_t19_real_tests.rs"]
-mod t19_real_tests;
+pub(crate) mod tests;

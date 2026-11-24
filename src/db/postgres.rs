@@ -626,7 +626,7 @@ fn database_url_override() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Read the shared PG fixture base; required PG lanes must not silently turn
 /// a missing base into a soft-skip. Every fixture that creates a database must
 /// use this authority; callers that can skip return `None`, while required
@@ -645,25 +645,25 @@ pub(crate) fn postgres_test_database_url_base() -> Option<String> {
     base
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_db_reclaim;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS: u32 = 1;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const AGENTDESK_REQUIRE_PG_ENV: &str = "AGENTDESK_REQUIRE_PG";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV: &str = "AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static POSTGRES_TEST_SETUP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static POSTGRES_TEST_LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static POSTGRES_TEST_DATABASE_OWNERS: std::sync::OnceLock<
     std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>>,
 > = std::sync::OnceLock::new();
@@ -726,25 +726,25 @@ pub(crate) fn assert_test_lifecycle_lock_not_held_before_env_lock() {
     panic!("{message}"); // agentdesk-audit: allow-unwrap — #[cfg(test)]-gated tripwire, never compiled into production; the panic converts a silent ABBA hang into a red test naming the offender
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct TestDatabaseOwnershipToken {
     registry_key: (String, String),
     admin_url: String,
     database_name: String,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_database_owners()
 -> &'static std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>> {
     POSTGRES_TEST_DATABASE_OWNERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_database_server_identity(options: &PgConnectOptions) -> String {
     super::fixture_target::server_identity(options)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_database_registry_key(options: &PgConnectOptions, database_name: &str) -> (String, String) {
     (
         test_database_server_identity(options),
@@ -752,7 +752,7 @@ fn test_database_registry_key(options: &PgConnectOptions, database_name: &str) -
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn register_test_database_ownership(
     admin_options: &PgConnectOptions,
     admin_url: &str,
@@ -776,7 +776,7 @@ fn register_test_database_ownership(
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn take_test_database_ownership(
     database_options: &PgConnectOptions,
     database_name: &str,
@@ -788,7 +788,7 @@ fn take_test_database_ownership(
         .remove(&registry_key)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn restore_test_database_ownership(ownership: TestDatabaseOwnershipToken) {
     let mut owners = test_database_owners()
         .lock()
@@ -803,7 +803,7 @@ fn restore_test_database_ownership(ownership: TestDatabaseOwnershipToken) {
     owners.insert(ownership.registry_key.clone(), ownership);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
     let mutex = POSTGRES_TEST_SETUP_LOCK.get_or_init(|| std::sync::Mutex::new(()));
     mutex
@@ -811,7 +811,7 @@ fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct PostgresTestLifecycleGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
@@ -819,7 +819,7 @@ pub(crate) struct PostgresTestLifecycleGuard {
 /// Keeps `PG_LIFECYCLE_HELD` in step with real ownership so the E-after-P
 /// tripwire cannot go stale. The counter is decremented here and the inner
 /// `MutexGuard` releases P immediately afterwards, both on this thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for PostgresTestLifecycleGuard {
     fn drop(&mut self) {
         crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.release();
@@ -827,7 +827,7 @@ impl Drop for PostgresTestLifecycleGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[track_caller]
 pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
     let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
@@ -840,7 +840,7 @@ pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
     PostgresTestLifecycleGuard { _guard: guard }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn run_test_postgres_sqlx_op_with_timeout<T, F>(
     timeout: Duration,
     label: &str,
@@ -855,7 +855,7 @@ where
         .map_err(|error| format!("{label}: {error}"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn run_test_postgres_sqlx_op<T, F>(label: &str, future: F) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, sqlx::Error>>,
@@ -863,7 +863,7 @@ where
     run_test_postgres_sqlx_op_with_timeout(TEST_POSTGRES_OP_TIMEOUT, label, future).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Escalate failed shared PostgreSQL test-helper results in PG-backed CI lanes.
 /// Direct SQLx connections are outside this funnel and remain hard-fail-only.
 /// The six public shared-helper entrypoints call this exactly once at their
@@ -882,7 +882,7 @@ fn require_pg_guard<T>(result: Result<T, String>) -> Result<T, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn parse_test_postgres_options(
     database_url: &str,
     label: &str,
@@ -890,7 +890,7 @@ fn parse_test_postgres_options(
     super::fixture_target::parse_fixture_url(database_url, label).map(|parsed| parsed.options)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn connect_test_pool_with_options(
     options: PgConnectOptions,
     label: &str,
@@ -918,7 +918,7 @@ async fn connect_test_pool_with_options(
     .await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn connect_test_pool_with_max_connections_inner(
     database_url: &str,
     label: &str,
@@ -928,7 +928,7 @@ async fn connect_test_pool_with_max_connections_inner(
     connect_test_pool_with_options(options, label, max_connections).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn connect_test_pool_with_max_connections(
     database_url: &str,
     label: &str,
@@ -954,7 +954,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 // SAFETY (await_holding_lock): `lock_test_setup()` is a std Mutex held across
 // the pool-connect/query awaits *on purpose* — it serializes concurrent
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
@@ -1009,7 +1009,7 @@ pub(crate) async fn create_test_database(
     require_pg_guard(result)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn migrate_test_pool(pool: &PgPool, label: &str) -> Result<(), String> {
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(pool))
         .await
@@ -1021,7 +1021,7 @@ async fn migrate_test_pool(pool: &PgPool, label: &str) -> Result<(), String> {
         })?
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn is_safe_test_database_name(database_name: &str) -> bool {
     !database_name.is_empty()
         && database_name
@@ -1029,7 +1029,7 @@ fn is_safe_test_database_name(database_name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn best_effort_drop_test_database_with_options(
     admin_options: PgConnectOptions,
     database_name: &str,
@@ -1043,13 +1043,13 @@ async fn best_effort_drop_test_database_with_options(
     drop_test_database_with_options(admin_options, database_name, label).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct TestDatabaseDropError {
     message: String,
     drop_succeeded: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestDatabaseDropError {
     fn before_drop(message: impl Into<String>) -> Self {
         Self {
@@ -1066,7 +1066,7 @@ impl TestDatabaseDropError {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn drop_owned_test_database_with_options(
     database_options: &PgConnectOptions,
     database_name: &str,
@@ -1112,7 +1112,7 @@ async fn drop_owned_test_database_with_options(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn best_effort_drop_owned_test_database(
     database_options: &PgConnectOptions,
     database_name: &str,
@@ -1130,7 +1130,7 @@ async fn best_effort_drop_owned_test_database(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn best_effort_drop_owned_test_database_for_database_options(
     database_options: PgConnectOptions,
     label: &str,
@@ -1141,7 +1141,7 @@ async fn best_effort_drop_owned_test_database_for_database_options(
     best_effort_drop_owned_test_database(&database_options, &database_name, label).await;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Migration setup does not hold `POSTGRES_TEST_SETUP_LOCK`; acquire it here
 /// before the owned DROP. The create close-failure path calls the unlocked
 /// helper while it already holds that lock, and public `drop_test_database`
@@ -1158,7 +1158,7 @@ async fn best_effort_drop_owned_test_database_with_setup_lock(
     best_effort_drop_owned_test_database_for_database_options(database_options, label).await;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Close a failed migration pool and best-effort drop only a database whose
 /// successful CREATE left an ownership token in this test process.
 async fn best_effort_cleanup_after_migration_failure(
@@ -1176,7 +1176,7 @@ async fn best_effort_cleanup_after_migration_failure(
     best_effort_drop_owned_test_database_with_setup_lock(database_options, label).await;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn connect_test_pool_and_migrate_inner(
     database_url: &str,
     label: &str,
@@ -1195,7 +1195,7 @@ async fn connect_test_pool_and_migrate_inner(
     Ok(pool)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
@@ -1279,7 +1279,7 @@ pub(crate) async fn connect_test_pool_and_migrate_config(
     require_pg_guard(connect_test_pool_and_migrate_config_inner(config, label).await)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// The primitive intentionally does not acquire `POSTGRES_TEST_SETUP_LOCK`:
 /// create's close-failure path calls it while that lock is held. Callers
 /// outside that critical section must use the setup-lock wrapper above.
@@ -1358,7 +1358,7 @@ async fn drop_test_database_with_options(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 // SAFETY (await_holding_lock): same serialization rationale as
 // `create_test_database` — `lock_test_setup()` is held across the teardown
 // awaits to keep concurrent PG test DB drops from racing. Test-only.
@@ -1375,7 +1375,7 @@ pub(crate) async fn drop_test_database(
     drop_owned_test_database_with_options(&admin_options, database_name, label).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), String> {
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, pool.close())
         .await

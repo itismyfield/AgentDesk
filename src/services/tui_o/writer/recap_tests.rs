@@ -4,10 +4,9 @@ use crate::services::tui_o::writer::pieces::{SummaryInputs, ToolCardInputs};
 use serde_json::{Value, json};
 
 fn fixture() -> Value {
-    serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/claude_away_summary.jsonl"
-    )))
+    serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/claude_away_summary.jsonl"
+    ))
     .unwrap()
 }
 

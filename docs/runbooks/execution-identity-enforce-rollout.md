@@ -33,9 +33,10 @@ Fixed by `absent_spawn_nonce_is_never_observed_as_a_match` and
 `only_enforce_denies_and_only_on_a_non_matching_incarnation`.
 
 **Absence is permanent.** No production code writes a `.spawn_nonce` for an
-already-running session: the only writers are the five provider spawn sites that
-call `discord::stamp_spawn_markers` (two in `services::claude`, two in
-`services::codex`, one in `services::qwen`), while restart adoption
+already-running session: the only writers are the six provider spawn sites that
+call `tmux_common::spawn_markers::stamp_spawn_markers` (two in `services::claude`,
+two in `services::codex` — `codex.rs` and `codex/tui_session_launch/first_input.rs` —
+one in `services::qwen`, one in `services::herdr_launch`), while restart adoption
 (`watchers::lifecycle::restore::restore_tmux_watchers`), manual rebind
 (`recovery_engine::manual_rebind`), and every recovery path write none. A session
 whose marker is absent when Enforce goes live stays `Unknown` — and therefore
@@ -56,7 +57,7 @@ they leave any trace at all — see step 2 for what is measurable.
 hash over two inputs: the runtime root (`current_tmux_owner_marker()`, built from
 `config::runtime_root`) and the host namespace
 (`tmux_common::host_temp_namespace`). Two ways in: the tmux session was created
-outside the five spawn sites, so no marker was ever minted; or it was spawned
+outside the six spawn sites, so no marker was ever minted; or it was spawned
 under a **different runtime root or host namespace** (dev↔release switch,
 `AGENTDESK_ROOT_DIR` change, hostname change) and is now read under the current
 one — the prefix differs, so `tmux_common::resolve_session_temp_path` misses at
@@ -68,18 +69,26 @@ namespace and spawn provenance are.
 
 ### B — Write failed at spawn
 
-`tmux_session_files::write_spawn_nonce` is deliberately fail-to-absent: on any
-error it removes both the temp sibling **and any pre-existing destination**, so a
-failed respawn leaves no readable nonce rather than the prior spawn's stale one.
-`stamp_spawn_markers` propagates that error and every spawn site only logs and
-continues — the spawn is not aborted.
+The production entry point is `tmux_common::spawn_markers::stamp_spawn_markers`;
+the write and its failure cleanup live in `write_spawn_nonce_value` in the same
+module (`write_spawn_nonce` is a `#[cfg(test)]` wrapper, not a production path).
+`write_spawn_nonce_value` is deliberately fail-to-absent: on any error it removes
+both the temp sibling **and any pre-existing destination**, so a failed respawn
+leaves no readable nonce rather than the prior spawn's stale one.
+`stamp_spawn_markers` returns that error verbatim (fixed by
+`stamp_spawn_markers_returns_nonce_result_verbatim`), and what happens next
+depends on the caller:
 
-**Observability gap:** the two `services::claude` sites log through
-`claude::debug_log`, gated on `DEBUG_ENABLED` and writing to
-`$RUNTIME_ROOT/debug/claude.log`, **not** the dcserver log (`services::codex` and
-`services::qwen` use `tracing::warn!`). A Claude marker-write failure is
-therefore invisible in normal operation — "no warning in the dcserver log" is not
-evidence that category B is empty for Claude sessions.
+| Spawn site | On a nonce write error |
+|---|---|
+| `services::claude`, `services::codex` — the two sites that pass the result to `PreparedIncarnation::finish_spawn` | the tmux session is killed and the launch fails with `publish binding context: …` |
+| `services::claude`, `services::codex` — the two sites that map the error themselves | the launch fails with `Held(marker_publication_failed): …` |
+| `services::herdr_launch` | the launch returns `HerdrLaunchError::Marker` through `retire_unsent` (`herdr_launch.rs:558–559`), which retires the unsent Pending; nothing is sent to the pane |
+| `services::qwen` (`stamp_qwen_spawn_markers`) | `tracing::warn!("failed to write spawn nonce for …")` and the spawn continues |
+
+So only the Qwen site leaves a **running** session without a nonce after a write
+failure; the others end the launch. "No warning in the dcserver log" is evidence
+about Qwen sessions only.
 
 ### C — Marker deleted while the session outlives it
 

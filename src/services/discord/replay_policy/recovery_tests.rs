@@ -138,7 +138,7 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
         let (url, root, target): (String, std::path::PathBuf, String) =
             serde_json::from_str(&raw).unwrap();
         let _env = crate::config::set_agentdesk_root_for_test(&root);
-        let _lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+        let _lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
         runtime().block_on(async {
             let pool = PgPool::connect(&url).await.unwrap();
             let mut saved = state(0);
@@ -210,7 +210,7 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
             let after:Vec<StoredAttempt>=sqlx::query_as("SELECT id,replay_disposition,replay_episode_nonce,replay_owner_incarnation,replay_preserved FROM intake_outbox ORDER BY id").fetch_all(&pool).await.unwrap();
             assert_eq!(after,before);assert!(sink.calls().is_empty());
         }
-        let lock=crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+        let lock=crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
         let shared=crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         shared.restart.replay_restart.set(lock).unwrap();
         let sink=o_cut_recorder::start(state(0).channel_id).await;
@@ -233,7 +233,7 @@ async fn p5_db_locked_recovery_rejects_each_unproved_local_identity_pg() {
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -292,7 +292,7 @@ async fn p5_db_locked_recovery_rejects_each_unproved_local_identity_pg() {
             let other = tempfile::tempdir().unwrap();
             std::fs::create_dir(other.path().join("runtime")).unwrap();
             let other_lock =
-                crate::cli::dcserver::replay_recovery::acquire_for_tests(other.path()).unwrap();
+                crate::services::dcserver_singleton::acquire_for_tests(other.path()).unwrap();
             assert!(LocalSnapshot::load(Some(&other_lock), &s).is_none());
             write::recover_hold_notice(
                 &pool,
@@ -440,7 +440,7 @@ fn p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg() {
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let lock = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let lock = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     runtime().block_on(async {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -484,7 +484,7 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     let _env = crate::config::TestRuntimeRootGuard::new();
     let root = runtime_store::agentdesk_root().unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let loader = crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).unwrap();
+    let loader = crate::services::dcserver_singleton::acquire_for_tests(&root).unwrap();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let target = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -500,7 +500,7 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     );
     drop(loader);
     assert!(
-        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err(),
+        crate::services::dcserver_singleton::acquire_for_tests(&root).is_err(),
         "the sealed snapshot retains the original singleton lock"
     );
     let other = tempfile::tempdir().unwrap();
@@ -527,10 +527,10 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     assert_eq!(held.1, attempt.nonce());
     assert_eq!(held.2, "previous-process");
     assert_eq!(held.3["recovery_snapshot"], capture);
-    assert!(crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_err());
+    assert!(crate::services::dcserver_singleton::acquire_for_tests(&root).is_err());
     drop(snapshot);
     assert!(
-        crate::cli::dcserver::replay_recovery::acquire_for_tests(&root).is_ok(),
+        crate::services::dcserver_singleton::acquire_for_tests(&root).is_ok(),
         "dropping the last sealed snapshot releases its original root"
     );
     pool.close().await;

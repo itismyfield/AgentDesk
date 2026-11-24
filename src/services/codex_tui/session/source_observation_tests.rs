@@ -19,7 +19,7 @@ use crate::services::codex_tui::rollout_index::{
 };
 
 fn fixture() -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let path = Path::new(crate::runtime_layout::REPO_ROOT)
         .join("tests/fixtures/hook_payload/codex-0.157.1.json");
     let text = std::fs::read_to_string(&path).expect("read codex fixture");
     serde_json::from_str(&text).expect("parse codex fixture")

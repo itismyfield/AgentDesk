@@ -13,13 +13,13 @@ use super::{
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::herdr_terminate::route_tests::capture;
-use crate::services::discord::herdr_terminate::test_turn;
-use crate::services::session_host::herdr_terminate_real_tests::{
+use crate::krx_session_host_tests::herdr_terminate_real_tests::{
     ROUTE_REQUESTS, Real, Scratch, Witnessing, alive, boot, cli_terminate, control, field, launch,
     print_panes, print_results, serve_api, stored, the_close,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::herdr_terminate::route_tests::capture;
+use crate::services::discord::herdr_terminate::test_turn;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::writer::WriterAlarm;
 use crate::services::tui_prompt_dedupe::binding_events;

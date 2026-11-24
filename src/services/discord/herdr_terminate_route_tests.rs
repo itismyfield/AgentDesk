@@ -16,7 +16,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use super::{probe_after_capture, probe_after_close, probe_after_fence};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::session_host::herdr_termination_rig as herdr;
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 const CHILD_ENV: &str = "ADK_HERDR_TERMINATE_ROUTE_CHILD";
 pub(crate) const LOOPBACK: &str = "127.0.0.1:40000";

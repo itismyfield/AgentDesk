@@ -818,9 +818,10 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
         return text[spans[0][0] + 1:spans[0][1]] if len(spans) == 1 else ""
 
     raw_path = "src/services/discord/outbound/raw_output.rs"
+    context_path = "src/services/legacy_body_census/request_context.rs"
     request = body(raw_path, "request")
-    owner = body(raw_path, "scope")
-    census = body(raw_path, "census_scope")
+    owner = body(context_path, "scope")
+    census = body(context_path, "census_scope")
     compact = lambda value: re.sub(r"\s+", "", value)
     raw_ok = all(token in compact(request) for token in (
         "op!=Operation::Delete", "context.scope.as_ref()", "context.artifact.as_ref()",
@@ -851,14 +852,14 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
         ok = True
         ok = ok and re.search(r"Ok\(message\)=>\{crate::services::legacy_body_census::transport::record_o_created\(channel,message.id.get\(\),None,?\);PostOutcome::Created\(seen\(message\)\)\}", post)
         ok = ok and post.count("record_o_created(") == 1 and "self.post(channel,content.clone())" in origin and "record_o_created(" not in origin
-        ok = ok and "super::census_scope(None,ChannelId::new(channel).send_message" in post
+        ok = ok and "request_context::census_scope(None,ChannelId::new(channel).send_message" in post
         if not (ok and ack_ok):
             problems.append("transport guard: O gateway ACK must follow its sole Created response")
     if "O_REPOST_CREATED_ACK" in active:
         create = compact(body("src/services/discord/outbound/o_writer_repost_io.rs", "create"))
         ok = "letstarted_at=chrono::Utc::now().timestamp_millis();" in create
         ok = ok and re.search(r"letoutcome=settle\(response\).await;ifletWireOutcome::Created\(created\)=&outcome\{crate::services::legacy_body_census::transport::record_o_created\(channel_id.get\(\),created.id,Some\(started_at\),?\);\}returnoutcome;", create)
-        ok = ok and create.count("record_o_created(") == 1 and "outbound::census_scope(None,hold.run(asyncmove{" in create
+        ok = ok and create.count("record_o_created(") == 1 and "request_context::census_scope(None,hold.run(asyncmove{" in create
         if not (ok and ack_ok):
             problems.append("transport guard: O repost ACK must follow its sole Created response")
     return problems
@@ -982,6 +983,7 @@ def measure(root: Path, pinned_test_only_files=None):
                 ack_sites[rel] = sites
             if rel in {row["path"] for row in TRANSPORT_PROBES.values()} or rel in {
                 "src/services/discord/outbound/raw_output.rs", "src/services/legacy_body_census/transport.rs",
+                "src/services/legacy_body_census/request_context.rs",
             }:
                 transport_texts[rel] = text
         admission_problems.extend(_admission_order_problems(rel, text))

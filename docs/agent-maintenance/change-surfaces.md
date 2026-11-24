@@ -271,7 +271,7 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery,source_registry}.rs`; `src/services/discord/outbound/turn_output_controller/{fresh_send,transport}.rs`
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery}.rs`; `src/services/message_outbox/source_registry.rs`; `src/services/discord/outbound/turn_output_controller/{fresh_send,transport}.rs`
   (#1006 v3 domain types, pure planner, delivery implementation, shared
   transport/dedup primitives, and the #3038 send-to-agent/manual outbound
   dispatch surface).
