@@ -28,6 +28,11 @@ fn text() -> String {
     frame("iMessage", "200", "ann", NONCE, "are you there?")
 }
 
+/// A v1 frame, as transcripts and composers written before the plain frame still show one.
+fn v1(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
+    format!("[User: {name} (ID: {author}) · 📱 v1 mode=inject source={source} · {nonce}]\n{body}")
+}
+
 // Claude draws continuation rows two columns in.
 fn screen(composer: &str, extra: &str) -> String {
     let composer = composer.replace('\n', "\n  ");
@@ -319,18 +324,25 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
     );
 }
 
-/// A Discord header left in the composer, tagged or not, is AgentDesk's prompt; an unclosed one is
-/// a person's draft.
+/// A running turn's input left in the composer, flat, wrapped or after a person's keys, is
+/// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
 #[test]
-fn a_discord_header_in_the_composer_is_agentdesks_prompt_and_an_unclosed_one_a_draft() {
+fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     use crate::services::claude_tui::composer_lock::DraftSighting;
+    let source = "discord:1479671298497183835:1561196979327869080";
+    let framed = v1(source, "343742347365974026", "0hbujang", NONCE, "status?");
+    let header = framed.lines().next().unwrap();
+    let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
+    let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());
+    let typed_first = format!("person typed {wrapped}");
+    for composer in [&framed, &wrapped, &typed_first] {
+        let shown = screen(composer, "");
+        assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{shown}");
+        assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{shown}");
+    }
     let idle = screen("[User: 0hbujang (ID: 343742347365974026)] status?", "");
     assert_eq!(composer_owner(&idle), ComposerOwner::AgentDesk);
-    assert_eq!(
-        composer_owner(&screen(&text(), "")),
-        ComposerOwner::AgentDesk
-    );
     let person = screen("[User: my own draft", "");
     assert_eq!(draft_sighting(&person), DraftSighting::PersonDraft);
 }

@@ -218,33 +218,45 @@ fn unreadable_tails_read_as_unknown() {
 /// the turn that record belongs to.
 #[test]
 fn the_nonce_is_confirmed_only_by_a_later_user_record() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    let session = format!("confirm-{}", uuid::Uuid::new_v4());
+    let register = crate::services::tui_input::human_frame::history::register;
     let path = dir.path().join("rollout.jsonl");
     let before = records("model_turn.jsonl", 11);
-    fs::write(&path, records("model_turn.jsonl", 20)).unwrap();
+    let user = item(T, "UserMessage", &frame_text());
+    let rest = &records("model_turn.jsonl", 20)[before.len()..];
+    fs::write(&path, &before).unwrap();
     let offset = before.len() as u64;
-    let nonce = "845246b2";
-    assert_eq!(
-        rollout::submitted(&path, offset, nonce),
-        Some(Some(T.into()))
-    );
-    let after = records("model_turn.jsonl", 13).len() as u64;
-    assert_eq!(rollout::submitted(&path, after, nonce), None);
-    // An answer that quotes the frame is not the input.
-    let quoted = serde_json::json!({"type": "response_item", "payload": {"type": "message",
-        "role": "assistant", "content": [{"type": "output_text", "text": "[x · y · feedf00d]"}]}});
-    fs::write(
+    register(
+        ("codex", &session, NONCE, AUTHOR),
         &path,
-        format!("{quoted}\n") + &item("t2", "UserMessage", "[x · y · feedf00d]"),
+        offset,
+        &frame_text(),
     )
     .unwrap();
+    fs::write(&path, format!("{before}{user}{rest}")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, offset, NONCE),
+        Some(Some(T.into()))
+    );
+    let after = offset + user.len() as u64;
+    assert_eq!(rollout::submitted(&path, after, NONCE), None);
+    // An answer that quotes the frame is not the input.
+    let path = dir.path().join("quoted.jsonl");
+    let framed = frame(SOURCE, AUTHOR, NAME, "feedf00d", BODY);
+    fs::write(&path, "").unwrap();
+    register(("codex", &session, "feedf00d", AUTHOR), &path, 0, &framed).unwrap();
+    let quoted = serde_json::json!({"type": "response_item", "payload": {"type": "message",
+        "role": "assistant", "content": [{"type": "output_text", "text": framed}]}});
+    let unfinished = item("t2", "UserMessage", &framed);
+    fs::write(&path, unfinished.trim_end()).unwrap();
+    assert_eq!(rollout::submitted(&path, 0, "feedf00d"), None);
+    fs::write(&path, format!("{quoted}\n{unfinished}")).unwrap();
     assert_eq!(
         rollout::submitted(&path, 0, "feedf00d"),
         Some(Some("t2".into()))
     );
-    let unfinished = item("t2", "UserMessage", "[x · y · feedf00d]");
-    fs::write(&path, unfinished.trim_end()).unwrap();
-    assert_eq!(rollout::submitted(&path, 0, "feedf00d"), None);
 }
 
 fn frame_text() -> String {
