@@ -293,4 +293,5 @@ pub(super) fn observe(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[path = "first_input/pending_lookup_probe_tests.rs"]
 pub(crate) mod pending_lookup_probe;
