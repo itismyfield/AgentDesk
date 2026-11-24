@@ -1,0 +1,60 @@
+---
+title: "Frame ledger file: V2 owner, out-of-scope writer and the 5b ops procedure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RecordedExactlyOnce
+    lg1: Path to the RecordedExactlyOnce bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: file none #183; owner input owner #183; out-of-scope input queued
+  s1: file none #183; owner input owner #183; out-of-scope input queued (read outside the lock)
+  s2: file v2 #183; owner input pasted #183; out-of-scope input queued
+  s3: file v2 #183; owner input done #183; out-of-scope input queued
+  s4: file v2 #183; owner input pasted #183; out-of-scope input queued (read outside the lock)
+  s5: file v2 #183; owner input owner #183; out-of-scope input pasted
+  s6: file v2 #183; owner input done #183; out-of-scope input queued (read outside the lock)
+  s7: file v2 #183; owner input owner #183; out-of-scope input done
+  s8: RED: a pasted input without exactly one record (file v2)
+  s9: file v2 #183; owner input owner #183; out-of-scope input unknown
+  s10: file v2 #183; owner input pasted #183; out-of-scope input pasted
+  s11: file v2 #183; owner input pasted #183; out-of-scope input done
+  s12: file v2 #183; owner input done #183; out-of-scope input pasted
+  s13: file v2 #183; owner input pasted #183; out-of-scope input unknown
+  s14: file v2 #183; owner input done #183; out-of-scope input done
+  s15: file v2 #183; owner input done #183; out-of-scope input unknown
+  [*] --> s0
+  s0 --> s1: XRead
+  s0 --> s2: OwnerPrepare
+  s1 --> s4: OwnerPrepare
+  s1 --> s5: XWrite
+  s2 --> s3: Settle
+  s2 --> s4: XRead
+  s3 --> s6: XRead
+  s4 --> s6: Settle
+  s4 --> s8: XWrite
+  s5 --> s7: Settle
+  s5 --> s9: Crash
+  s5 --> s10: OwnerPrepare
+  s4 --> s10: XWrite
+  s6 --> s8: XWrite
+  s7 --> s11: OwnerPrepare
+  s9 --> s7: Mend
+  s9 --> s13: OwnerPrepare
+  s10 --> s11: Settle
+  s10 --> s12: Settle
+  s10 --> s13: Crash
+  s6 --> s12: XWrite
+  s11 --> s14: Settle
+  s12 --> s14: Settle
+  s12 --> s15: Crash
+  s13 --> s11: Mend
+  s13 --> s15: Settle
+  s15 --> s14: Mend
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 bugPath
+  class s8 breaks
+  class s8 bugPath

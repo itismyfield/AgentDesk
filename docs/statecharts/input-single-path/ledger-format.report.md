@@ -15,6 +15,10 @@ Model: `InputLedgerFormat.tla`, view `ledger-format.view.mjs`. Revisions:
   (`Joined`) passes. A missing transcript row is no proof that nothing was pasted
   (`append.rs:483-500 replay_start`; `codex_tui/busy_inject.rs:396-453` marks EffectPossible before the
   paste and Admitted after Enter).
+- 5 adds the slice 5b1 split writer (`Writer = "split"`, 5b1 DESIGN_DELTA, mac-0903). The format is chosen
+  under the ledger lock: a V1 file keeps the V1 writer, and a missing or V2 file is written keyless. The
+  code is `v2/keyless.rs:11-19` → `history.rs:171-185 update_v1` | `reconcile`, and `v2.rs:279-329 locked`,
+  at 5b1 head `4c116ef2a5`.
 
 ## What this model checks, and what it does not
 
@@ -45,7 +49,7 @@ What it leaves out:
 
 | Constant | Range | Meaning |
 |---|---|---|
-| `Writer` | `v1`, `v2` | how the out-of-scope writer registers |
+| `Writer` | `v1`, `v2`, `split` | how the out-of-scope writer registers: V1 update (before 5b1), V2 transaction (5b2), or split by format under the lock (5b1) |
 | `Migrate` | BOOLEAN | `migration::restore` of a V1 file exists |
 | `View` | `v1`, `v2` | proof read of the start binary: V1 `read()` (main before slice 4) or the `owned()` view (slice 4 repair 1). For procedure configs this is also E3. |
 | `Boot` | `none`, `v1`, `v2` | ledger file on disk when the first binary starts |
@@ -80,7 +84,7 @@ Rules:
 ## Results
 
 `scripts/ci/statecharts_tlc.py --base 6b91594c5c --jobs 4`: see the slice 5 leg report (21/21 against
-`expected.tsv`).
+`expected.tsv`; 25/25 with the split configs).
 
 | Config | View / Boot / Deploy / Rollback | Expected | Broken rules |
 |---|---|---|---|
@@ -91,6 +95,8 @@ Rules:
 | `After`, `AfterBootV2` | v2 / none or v2 / none / none (after) | GREEN | none |
 | `AfterBootV1` | v2 / **v1** / none / none (after) | RED: E1 | OwnerProgress: [chart](ledger-format-boot-v1.chart.mmd) |
 | `AfterUnlocked` | after, **unlocked** | RED mutant | RecordedExactlyOnce: [chart](ledger-format-unlocked.chart.mmd) |
+| `Split`, `SplitBootV1`, `SplitBootV2` | v2 / none, v1, v2 / none / none (Writer **split**, Migrate) | GREEN (5b1) | none |
+| `SplitUnlocked` | v2 / none / none / none (split, **unlocked**) | RED mutant (5b1 R1) | RecordedExactlyOnce: [chart](ledger-format-split-unlocked.chart.mmd) |
 | `DeployPrecheck` | v2 / none / **precheck** / none | RED (rev 0) | BindingKept, NewBootSupported, NoDebtAcrossReplace, OwnerProgress, ObligationsSettled: [chart](ledger-format-deploy-precheck.chart.mmd) |
 | `DeployGuarded` | v2 / none / guarded / none | GREEN (rev 4) | none (1,500 states) |
 | `DeployGuardedBootV1` | v2 / **v1** / guarded / none | GREEN | none |
@@ -112,6 +118,12 @@ Rules:
   V2-recorded Unknown head. It is not a product of the procedure.
 
 ## Counterexamples against the code
+
+### Split writer (5b1)
+`Split*` are GREEN from a missing, V1 or V2 file. A V1 file stays V1 until the owner's restore, and the
+out-of-scope register is never refused, so path A/B no longer hands back with `load_failed` on V2.
+`SplitUnlocked` (`XRead` → `OwnerPrepare` → `XWrite`) shows why the format check and the write must stay
+in one locked step, as 5b1's `locked(true, …)` does (R1).
 
 ### Before repair 1
 1. Path B head H registers V1 on a missing file (`history.rs:264`).

@@ -21,7 +21,11 @@
 \*
 \* Ranges come from the entry census only:
 \*   fmt      none | v1 | v2          file missing / `{"entries":..}` / `{"version":2|3,..}`
-\*   Writer   v1 | v2                 out-of-scope register: V1 update (now) or V2 transaction (5b)
+\*   Writer   v1 | v2 | split         out-of-scope register: V1 update (before 5b1), V2 transaction
+\*                                    (5b2), or split (5b1): the format is chosen under the ledger
+\*                                    lock, a V1 file keeps the V1 writer and a missing or V2 file is
+\*                                    written keyless (`v2/keyless.rs:11-19` -> `history.rs:171-185
+\*                                    update_v1` | `reconcile`; `v2.rs:279-329 locked`) at 4c116ef2a5
 \*   Migrate  BOOLEAN                 `v2.rs:299 migration::restore` of a V1 file (now TRUE)
 \*   View     v1 | v2                 proof read of the binary that is not 5b: V1 `read()` (main
 \*                                    before slice 4, `history.rs:342,894` there) or `readable()`
@@ -134,8 +138,12 @@ Intake == Running /\ bin # "closing"
 V2Opens(f) == f \in {"none", "v2"} \/ (f = "v1" /\ EffMigrate)
 
 \* V1 update refuses a V2 file (`compat.rs:98 read_legacy`); a V2 transaction refuses what V2Opens refuses.
-XAccepts(f) == IF EffWriter = "v1" THEN f \in {"none", "v1"} ELSE V2Opens(f)
-XFormat(f) == IF EffWriter = "v1" THEN "v1" ELSE "v2"
+XAccepts(f) == CASE EffWriter = "v1" -> f \in {"none", "v1"}
+                  [] EffWriter = "split" -> TRUE
+                  [] OTHER -> V2Opens(f)
+XFormat(f) == CASE EffWriter = "v1" -> "v1"
+                [] EffWriter = "split" -> IF f = "v1" THEN "v1" ELSE "v2"
+                [] OTHER -> "v2"
 
 Frozen == UNCHANGED <<bin, plan, bootfmt, binding, snap>> /\ UNCHANGED Obl
 

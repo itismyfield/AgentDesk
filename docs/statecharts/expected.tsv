@@ -683,6 +683,10 @@ input-single-path/InputLedgerFormatDropMigrationOnly.cfg	InputLedgerFormat	-	Own
 input-single-path/InputLedgerFormatNow.cfg	InputLedgerFormat	-	-
 input-single-path/InputLedgerFormatNowBeforeRepair.cfg	InputLedgerFormat	-	OwnerProgress
 input-single-path/InputLedgerFormatNowOpsV2.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatSplit.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatSplitBootV1.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatSplitBootV2.cfg	InputLedgerFormat	-	-
+input-single-path/InputLedgerFormatSplitUnlocked.cfg	InputLedgerFormat	RecordedExactlyOnce	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
