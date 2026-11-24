@@ -433,7 +433,7 @@ async fn fence_handback(
     shared: &SharedData,
     channel: ChannelId,
 ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    let guard = shared.acquire_session_transition(channel).await.ok();
+    let guard = shared.session_transition_locks.acquire(channel).await.ok();
     if guard.is_none() {
         tracing::warn!(
             channel_id = channel.get(),

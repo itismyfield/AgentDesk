@@ -35,7 +35,8 @@ pub(super) async fn end_live(
 ) -> Option<()> {
     let channel = ChannelId::new(picked.channel_id);
     let _transition = shared
-        .session_transition_lock(channel)
+        .session_transition_locks
+        .lock(channel)
         .try_lock_owned()
         .ok()?;
     let fresh = inflight::load_inflight_state_read_only(provider, picked.channel_id);

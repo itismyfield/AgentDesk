@@ -26,7 +26,8 @@ impl WakeTrace {
                 Some(Arc::new(move || {
                     assert!(
                         shared
-                            .session_transition_lock(channel)
+                            .session_transition_locks
+                            .lock(channel)
                             .try_lock_owned()
                             .is_ok(),
                         "completion wake must run after the recovery transition lease releases"

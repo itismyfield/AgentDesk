@@ -1094,7 +1094,8 @@ async fn race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170() 
         .await;
 
     let transition_guard = shared
-        .session_transition_lock(channel_id)
+        .session_transition_locks
+        .lock(channel_id)
         .lock_owned()
         .await;
     let kick_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1146,7 +1147,10 @@ async fn race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170() 
     // It is the exact acquisition shape intake and the kickoff dequeue gate
     // both use.
     drop(transition_guard);
-    let reacquired = shared.session_transition_lock(channel_id).try_lock_owned();
+    let reacquired = shared
+        .session_transition_locks
+        .lock(channel_id)
+        .try_lock_owned();
     assert!(
         reacquired.is_ok(),
         "a released transition must be reacquirable by a non-blocking acquirer; a parked recheck waiter would have intercepted the permit"

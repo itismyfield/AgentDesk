@@ -1256,7 +1256,8 @@ mod idle_queue_background_supersede_tests {
             .await;
 
         let transition_guard = shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .lock_owned()
             .await;
         let blocked = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;

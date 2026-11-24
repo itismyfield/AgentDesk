@@ -279,7 +279,8 @@ fn persisted_clear_still_resets_the_session_and_arms_no_kick() {
         );
         assert!(
             shared
-                .session_transition_lock(channel_id)
+                .session_transition_locks
+                .lock(channel_id)
                 .try_lock_owned()
                 .is_ok(),
             "a persisted clear releases the transition"

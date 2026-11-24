@@ -70,7 +70,8 @@ async fn owner_cleanup_exact_native_rejects_successor_and_preserves_transition_p
     inside.await.unwrap();
     assert!(
         shared
-            .acquire_session_transition(ChannelId::new(channel))
+            .session_transition_locks
+            .acquire(ChannelId::new(channel))
             .await
             .is_err(),
         "actual task retains the native pin while its caller is elsewhere"
@@ -78,7 +79,8 @@ async fn owner_cleanup_exact_native_rejects_successor_and_preserves_transition_p
     drop(task);
     assert!(
         shared
-            .acquire_session_transition(ChannelId::new(channel))
+            .session_transition_locks
+            .acquire(ChannelId::new(channel))
             .await
             .is_err(),
         "dropping the request handle must not release the end task pin"
@@ -87,7 +89,8 @@ async fn owner_cleanup_exact_native_rejects_successor_and_preserves_transition_p
     let next = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         shared
-            .session_transition_lock(ChannelId::new(channel))
+            .session_transition_locks
+            .lock(ChannelId::new(channel))
             .lock_owned(),
     )
     .await
@@ -320,7 +323,8 @@ async fn owner_cleanup_normal_end_rechecks_source_at_physical_boundary_pg() {
     let successor = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     std::fs::write(&marker, successor).unwrap();
     let pin = shared
-        .session_transition_lock(ChannelId::new(channel))
+        .session_transition_locks
+        .lock(ChannelId::new(channel))
         .lock_owned()
         .await;
     assert_eq!(

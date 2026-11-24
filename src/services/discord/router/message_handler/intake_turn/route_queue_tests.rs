@@ -177,7 +177,8 @@ async fn s2f_lost_claim_replays_its_resolved_route() {
     let busy = async {
         resolved.await.unwrap();
         let held = shared
-            .session_transition_lock(ids.thread)
+            .session_transition_locks
+            .lock(ids.thread)
             .lock_owned()
             .await;
         resume.send(()).unwrap();
@@ -219,7 +220,8 @@ async fn s2f_transition_busy_intake_replays_its_resolved_route() {
     let workspace = tempfile::tempdir().unwrap();
     let (shared, _api, http) = runtime(&ids, workspace.path()).await;
     let held = shared
-        .session_transition_lock(ids.thread)
+        .session_transition_locks
+        .lock(ids.thread)
         .lock_owned()
         .await;
     assert!(intake(&shared, &http, &ids).await, "C's intake returns");

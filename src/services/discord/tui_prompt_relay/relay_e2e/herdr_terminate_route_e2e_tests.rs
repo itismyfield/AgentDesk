@@ -204,7 +204,8 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         let shared = shared.clone();
         Box::pin(async move {
             shared
-                .session_transition_lock(channel)
+                .session_transition_locks
+                .lock(channel)
                 .try_lock_owned()
                 .is_ok()
         })

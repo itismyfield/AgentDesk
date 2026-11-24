@@ -345,7 +345,7 @@ fn e08_force_kill_failure_matrix_pg() {
         let node = Node::again_e08(node, &rig).await;
         node.start(51, "turn-a", Some(DISPATCH)).await;
         test_queue::queue_original(&node.shared, channel()).await;
-        let held = node.shared.session_transition_lock(channel()).lock_owned().await;
+        let held = node.shared.session_transition_locks.lock(channel()).lock_owned().await;
         refused_case(&node, conflict("refused", "transition busy"), 0).await;
         drop(held);
 

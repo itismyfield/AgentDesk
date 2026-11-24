@@ -192,7 +192,7 @@ async fn with_ready_pane<T: Send + 'static>(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs_f64();
-    let transition = shared.session_transition_lock(channel);
+    let transition = shared.session_transition_locks.lock(channel);
     let _transition = transition.lock().await;
     let reader = shared.clone();
     let applied = tokio::task::spawn_blocking(move || -> Result<T, String> {

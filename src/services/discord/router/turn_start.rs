@@ -148,7 +148,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     front: Option<crate::services::turn_orchestrator::OwnerFront>,
 ) -> Result<(tokio::sync::OwnedMutexGuard<()>, Arc<CancelToken>), HeadlessTurnStartError> {
     let channel = channel_id.get();
-    let transition = shared.acquire_session_transition(channel_id).await;
+    let transition = shared.session_transition_locks.acquire(channel_id).await;
     let transition = transition.map_err(|_| {
         let wait = super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs();
         let error =
@@ -614,7 +614,8 @@ pub(crate) async fn try_intake_runtime_transition_after_redirect(
     fallback_state: (Option<String>, bool, String),
 ) -> Result<IntakeRuntimeTransition, super::super::SessionTransitionBusy> {
     let guard = shared
-        .session_transition_lock(effective_channel_id)
+        .session_transition_locks
+        .lock(effective_channel_id)
         .try_lock_owned()
         .map_err(|_| super::super::SessionTransitionBusy)?;
     Ok(

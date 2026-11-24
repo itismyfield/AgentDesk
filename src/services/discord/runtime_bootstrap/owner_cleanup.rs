@@ -143,7 +143,8 @@ mod tests {
             fx.pool.clone(),
         ));
         let pin = shared
-            .session_transition_lock(ChannelId::new(channel))
+            .session_transition_locks
+            .lock(ChannelId::new(channel))
             .lock_owned()
             .await;
         spawn(&shared, &ProviderKind::Claude);

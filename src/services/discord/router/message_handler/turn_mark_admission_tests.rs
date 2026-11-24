@@ -187,7 +187,7 @@ async fn intake_at_provider(resumed: bool, ending: &str) {
                 );
             }
             "clear-timeout" => {
-                let transition = shared.session_transition_lock(channel);
+                let transition = shared.session_transition_locks.lock(channel);
                 let held = transition.lock_owned().await;
                 let clearing = crate::services::discord::commands::control::clear_channel_session_state_with_session_key(&api.http, &shared, &ProviderKind::Codex, channel, "fixture", None);
                 let mut clearing = Box::pin(clearing);

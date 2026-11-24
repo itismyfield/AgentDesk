@@ -170,7 +170,11 @@ pub(in crate::services::discord) fn request_row_end(
         if ask == RowEndAsk::Input {
             super::herdr_server_replaced::ensure_server(channel.get()).await;
         }
-        let transition = shared.session_transition_lock(channel).lock_owned().await;
+        let transition = shared
+            .session_transition_locks
+            .lock(channel)
+            .lock_owned()
+            .await;
         end_locked(&shared, &provider, picked, transition).await;
     });
 }
@@ -194,7 +198,11 @@ async fn end_row(
 ) {
     let channel = ChannelId::new(picked.channel_id);
     // A held transition is another owner's turn change; the next pass reads the row again.
-    match shared.session_transition_lock(channel).try_lock_owned() {
+    match shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned()
+    {
         Ok(transition) => end_locked(shared, provider, picked, transition).await,
         Err(_) => diagnostics::held(provider, &picked, "transition_busy"),
     }

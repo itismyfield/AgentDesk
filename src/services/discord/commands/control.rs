@@ -563,7 +563,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         &shared.token_hash,
         channel_id.get(),
     );
-    let transition = shared.session_transition_lock(channel_id);
+    let transition = shared.session_transition_locks.lock(channel_id);
     let wait = super::super::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT;
     let transition_guard = tokio::time::timeout(wait, transition.lock_owned()).await;
     if transition_guard.is_err() {

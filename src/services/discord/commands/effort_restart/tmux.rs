@@ -78,7 +78,7 @@ pub(in crate::services::discord) async fn restart(
     use crate::services::discord::herdr_terminate::{capture_turn, settle_captured};
     // Declared before the guard: the owner is woken once the guard is released.
     let _completion = shared.session_transition_completion(channel);
-    let Ok(_transition) = shared.acquire_session_transition(channel).await else {
+    let Ok(_transition) = shared.session_transition_locks.acquire(channel).await else {
         return Restart::Kept("다른 세션 전환이 진행 중입니다".into());
     };
     let named = {

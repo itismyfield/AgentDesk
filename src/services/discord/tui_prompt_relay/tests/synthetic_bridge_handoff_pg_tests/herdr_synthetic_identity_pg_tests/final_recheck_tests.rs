@@ -126,7 +126,8 @@ async fn refresh_case(replace: bool, id: u64) {
         assert!(
             fixture
                 .shared
-                .session_transition_lock(channel)
+                .session_transition_locks
+                .lock(channel)
                 .try_lock_owned()
                 .is_err()
         );
@@ -251,7 +252,8 @@ async fn dormant_case(replace: bool, id: u64) {
         assert!(
             fixture
                 .shared
-                .session_transition_lock(channel)
+                .session_transition_locks
+                .lock(channel)
                 .try_lock_owned()
                 .is_err()
         );

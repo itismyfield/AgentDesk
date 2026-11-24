@@ -172,21 +172,5 @@ impl SessionTransitionLocks {
     }
 }
 
-impl SharedData {
-    pub(crate) fn session_transition_lock(
-        &self,
-        channel_id: ChannelId,
-    ) -> Arc<tokio::sync::Mutex<()>> {
-        self.session_transition_locks.lock(channel_id)
-    }
-
-    pub(crate) async fn acquire_session_transition(
-        &self,
-        channel_id: ChannelId,
-    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
-        self.session_transition_locks.acquire(channel_id).await
-    }
-}
-
 #[cfg(test)]
 mod registry_tests;

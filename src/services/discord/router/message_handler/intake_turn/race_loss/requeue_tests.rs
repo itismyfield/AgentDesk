@@ -40,7 +40,8 @@ async fn busy_transition_is_durable_before_the_guard_is_released() {
     let channel_id = ChannelId::new(4_794_101);
     let message_id = MessageId::new(4_794_102);
     let held = shared
-        .session_transition_lock(channel_id)
+        .session_transition_locks
+        .lock(channel_id)
         .lock_owned()
         .await;
 
@@ -75,7 +76,8 @@ async fn busy_transition_is_durable_before_the_guard_is_released() {
     assert_eq!(disk_queue[0].text, "resume transition queue");
     assert!(
         shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .try_lock_owned()
             .is_err(),
         "durability must be established while `/resume` still owns the transition"

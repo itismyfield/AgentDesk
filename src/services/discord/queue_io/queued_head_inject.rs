@@ -104,7 +104,7 @@ pub(in crate::services::discord) async fn try_busy(
     // The durable echo may yield before the enqueue's caller releases its transition.
     // This automatic wake retries briefly without parking a transition waiter.
     if trigger == "post_enqueue_queued_head" {
-        let transition = deps.shared.session_transition_lock(channel);
+        let transition = deps.shared.session_transition_locks.lock(channel);
         let released = async {
             while transition.try_lock().is_err() {
                 tokio::time::sleep(Duration::from_millis(10)).await;

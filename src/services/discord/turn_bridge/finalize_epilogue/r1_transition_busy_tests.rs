@@ -65,7 +65,7 @@ async fn t5_real_gateway_busy_never_arms_finalize_error_kick() {
                 && shared.mailbox(channel).snapshot().await.pending_user_dispatch.is_some()
                 && held.lock().unwrap().is_none()
             {
-                let guard = shared.session_transition_lock(channel).try_lock_owned().expect("finalize releases its dequeue guard before Gateway intake");
+                let guard = shared.session_transition_locks.lock(channel).try_lock_owned().expect("finalize releases its dequeue guard before Gateway intake");
                 *held.lock().unwrap() = Some(guard);
             }
             axum::Json(serde_json::json!({"id":channel.get().to_string(),"type":0,"name":"r1-test","guild_id":"8000000",

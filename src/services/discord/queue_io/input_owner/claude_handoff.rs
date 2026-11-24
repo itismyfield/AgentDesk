@@ -158,7 +158,10 @@ pub(crate) async fn prepare(
             begun.await?
         }
     };
-    let transition = shared.session_transition_lock(channel).try_lock_owned();
+    let transition = shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned();
     let Ok(transition) = transition else {
         return hold(
             shared,

@@ -457,7 +457,8 @@ fn force_postlude_runs_before_transition_release_pg() {
                 let other = super::super::super::make_shared_data_for_tests();
                 assert!(
                     other
-                        .session_transition_lock(channel())
+                        .session_transition_locks
+                        .lock(channel())
                         .try_lock_owned()
                         .is_ok(),
                     "another runtime's transition on the channel is free"
@@ -702,7 +703,7 @@ fn force_terminal_failure_matrix_pg() {
         let node = Node::bind_again(node, &rig).await;
         node.start(51, "turn-a", Some(DISPATCH)).await;
         test_queue::queue_original(&node.shared, channel()).await;
-        let held = node.shared.session_transition_lock(channel()).lock_owned().await;
+        let held = node.shared.session_transition_locks.lock(channel()).lock_owned().await;
         refused_case(&node, conflict("refused", "transition busy"), 0).await;
         drop(held);
 
@@ -927,7 +928,11 @@ fn force_o_and_legacy_output_continuity_pg() {
             .await
             .expect("the run reached its end check")
             .unwrap();
-        let free = node.shared.session_transition_lock(other).try_lock_owned();
+        let free = node
+            .shared
+            .session_transition_locks
+            .lock(other)
+            .try_lock_owned();
         assert!(free.is_ok(), "another channel's transition is free");
         drop(free);
         let taken = test_queue::take_queued(&node.shared, other).await;

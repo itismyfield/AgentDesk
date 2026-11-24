@@ -86,7 +86,8 @@ fn a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head() {
         );
         // The queued injector holds the transition from its claim through its settle.
         let effect = shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .lock_owned()
             .await;
 
