@@ -51,8 +51,9 @@ impl Owner {
         }
     }
 
-    /// Ends the event's original unrun: a queued or proven-unsent copy leaves the queue alone,
-    /// and every record kept of it stops owing its notice. An attempted head is not touched.
+    /// Ends the event's original unrun: a queued copy leaves the queue alone, a kept one leaves
+    /// with its body whatever kept it, and every record of it stops owing its notice. An attempted
+    /// head is not touched, and a unit that also carries another input stays kept.
     pub(crate) fn discard_decision(&mut self, message: u64, origin: &str) -> Result<(), String> {
         let queued = (self.snapshot.items.iter())
             .chain((self.snapshot.retained_inputs.iter()).flat_map(|entry| entry.input.members()))
@@ -65,6 +66,31 @@ impl Owner {
             }
         }
         let mut next = self.snapshot.clone();
+        let own = |entry: &RetainedInput| {
+            (entry.input.members()).all(|item| named(item, message, origin))
+        };
+        let gone: Vec<InputAttempt> = (next.retained_inputs.iter())
+            .filter(|entry| own(*entry))
+            .map(|entry| entry.input.clone())
+            .collect();
+        next.retained_inputs.retain(|entry| !own(entry));
+        // The tickets of a removed original end with it; their receipts keep a retry a duplicate.
+        let digests: Vec<String> = (gone.iter())
+            .map(|input| source_admission::digest(&source_admission::canonical(&input.original)))
+            .collect();
+        next.admission_binds.retain(|bind| match &bind.at {
+            BindAt::Attempt { identity, attempt } => !gone.iter().any(|input| {
+                input.attempt.as_ref() == Some(attempt)
+                    && (input.members()).any(|item| sources::identity(item) == *identity)
+            }),
+            BindAt::Opaque => {
+                !(digests.iter()).any(|digest| bind.receipt.ends_with(&format!(":{digest}")))
+            }
+            _ => true,
+        });
+        for input in &gone {
+            next.handoff_input_left(&sources::identity(&input.original));
+        }
         let kept = (next.retained_inputs.iter_mut())
             .filter(|entry| {
                 entry
@@ -84,7 +110,7 @@ impl Owner {
             owed |= !notice.enqueued;
             notice.enqueued = true;
         }
-        match owed {
+        match owed || !gone.is_empty() {
             true => self.commit(next),
             false => Ok(()),
         }
