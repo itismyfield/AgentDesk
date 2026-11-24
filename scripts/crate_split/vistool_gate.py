@@ -1,7 +1,8 @@
 """Which shadow probe build opens a cfg-gated `mod` line that upper re-exports from lower.
 
 Upper checks with and without `test`; lower builds without it and with the probe feature on. Every other cfg
-atom has one value for both builds, so lower's reading of a gate is the gate with those two atoms fixed.
+atom is taken to have one value for both builds (a feature the probe feature itself turns on is not followed),
+so lower's reading of a gate is the gate with those two atoms fixed.
 """
 
 import itertools

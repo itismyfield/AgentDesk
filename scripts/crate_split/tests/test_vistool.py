@@ -61,6 +61,16 @@ def widener():
     return vistool.Widener(Mini.get(), MINI, UPPER), vistool.Resolver(MINI, UPPER, "src/probe_lower_lib.rs", "src/lib.rs")
 
 
+def leak(descr, name, rel, text):
+    """rustc's E0446 as the KRX shadow run recorded it on `impl FromStr for IntakeOutboxStatus { type Err = .. }`:
+    the primary span is the associated type, the labelled one the declaration of the type it leaks."""
+    at = line_of(rel, text)
+    return {"level": "error", "code": {"code": "E0446"}, "message": f"{descr} type `{name}` in public interface",
+            "children": [], "spans": [
+                {"is_primary": True, "file_name": rel, "line_start": at + 3, "line_end": at + 3, "label": f"can't leak {descr} type"},
+                {"is_primary": False, "file_name": rel, "line_start": at, "line_end": at, "label": f"`{name}` declared as {descr}"}]}
+
+
 # message -> (file, declaration line as written, widened line)
 EXPECTED = {
     "struct `Config` is private": ("src/core.rs", "pub(crate) struct Config {", "pub struct Config {"),
@@ -653,6 +663,22 @@ class LoopGuard(unittest.TestCase):
         self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL upper_probe_broken"))
 
 
+    def test_leaked_type_goes_as_far_as_the_interface_and_no_further(self):
+        token = leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")
+        thing = lambda descr: leak(descr, "Thing", "src/services/store.rs", "pub(super) struct Thing {")
+        ok, line, *_, manifest = self.scripted([([token, thing("restricted")], []), ([thing("crate-private")], []), ([], [])])
+        self.assertTrue(ok, (line, manifest.get("fail")))
+        self.assertEqual([(e["iter"], e["after"]) for e in manifest["edits"]],
+                         [(1, "pub struct Token;"), (1, "pub(crate) struct Thing {"), (2, "pub struct Thing {")])
+        # A crate-wide interface: rustc stops reporting, and the type stays at `pub(crate)`.
+        ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
+        self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
+        # No declaration to widen: the lower error stands, it is never residue.
+        gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
+        ok, line, *_ = self.scripted([([gone], [])])
+        self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL lower_probe_broken"))
+
+
 class TestCfgList(unittest.TestCase):
     def test_recorded_test_cfg_diagnostic_becomes_a_row(self):
         w, r = widener()
@@ -920,13 +946,22 @@ class EndToEnd(unittest.TestCase):
                  ("src/app.rs", "\n#[cfg(test)]\nmod sup_tests {\n    #[test]\n    fn reads_sup() {\n"
                                 "        let _probe = crate::core::Probe { depth: 2 };\n"
                                 "        assert_eq!(crate::sup::one(), 1);\n    }\n}\n"))
+        # HIGH names LOW's `Status`; once that is `pub`, the error type its `FromStr` impl names leaks (E0446).
+        leaked = (("src/services/store.rs", "\npub(super) enum Status {\n    On,\n}\n\npub(super) struct BadStatus;\n\n"
+                                            "impl std::str::FromStr for Status {\n    type Err = BadStatus;\n\n"
+                                            "    fn from_str(_: &str) -> Result<Self, Self::Err> {\n"
+                                            "        Ok(Status::On)\n    }\n}\n"),
+                  ("src/services/web.rs", "\npub(super) fn parses() -> bool {\n"
+                                          "    \"on\".parse::<super::store::Status>().is_ok()\n}\n"))
         # (LOW, HIGH, files appended to the fixture, (summary part, file, widened line)) of a run that applies.
         for low, high, extra, want in (
                 (["core", "core::util", "services::store"], MINI_HIGH, (), None),
                 (["core::gated"], MINI_HIGH + ["core", "services::store"], gated,
                  (" edits=1 cut_residue=0 test_cfg=0 ", "src/core/gated.rs", "pub fn hidden() -> u32 {")),
                 (["core", "opt", "services::store", "sup"], MINI_HIGH, other,
-                 (" cut_residue=0 test_cfg=0 ", "src/core.rs", "    pub depth: u32,"))):
+                 (" cut_residue=0 test_cfg=0 ", "src/core.rs", "    pub depth: u32,")),
+                (["core", "services::store"], MINI_HIGH, leaked,
+                 (" cut_residue=0 test_cfg=0 ", "src/services/store.rs", "pub struct BadStatus;"))):
             with self.subTest(low=low), tempfile.TemporaryDirectory() as tmp:
                 repo, git = fixture_repo(Path(tmp))
                 for rel, text in extra:

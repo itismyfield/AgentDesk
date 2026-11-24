@@ -14,9 +14,10 @@ tool builds two throwaway copies of HEAD under `<repo>/target/crate_split_probe/
          opens for upper but lower's build has no such module, an empty `mod x {}` stands in (vistool_gate.py).
 
 Every round runs `cargo check --lib` on lower and `cargo check --lib --tests` on upper, reads the visibility
-diagnostics (E0603 E0624 E0616 E0451 E0364 E0365, lower `private_interfaces`/`private_bounds`), and widens the
-modifier on the definition line to `pub` in both copies. Nothing else is ever edited; type mismatches from an
-uncut hard edge, test-only items, foreign impls and macro paths are classified and reported, not fixed.
+diagnostics (E0603 E0624 E0616 E0451 E0364 E0365, lower E0446 and `private_interfaces`/`private_bounds`), and
+widens the modifier on the definition line to `pub` in both copies (a type E0446 names: `pub(crate)` first, `pub`
+once rustc reports it again). Nothing else is ever edited; type mismatches from an uncut hard edge, test-only
+items, foreign impls and macro paths are classified and reported, not fixed.
 
 stdout line 1 is `VISTOOL_OK ...` or `VISTOOL_FAIL <reason> ...` (exit 2). `--apply` writes the patch into the
 worktree only on success; the manifest and the (partial) patch go to `--out-dir` and are never committed.
@@ -38,11 +39,13 @@ import subprocess
 import sys
 import time
 
-VERSION = "vt3-2"
+VERSION = "vt4-1"
 VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
 VIS_LINTS = {"private_interfaces", "private_bounds"}
+# A hard error in lower once a widened type's trait impl names a narrower type in an associated type.
+IFACE_CODE = "E0446"
 TEST_CFG_CODES = {"E0425", "E0412", "E0433", "E0599", "E0432", "E0422"}
 IMPL_CODES = {"E0116", "E0117", "E0390"}
 # Two copies of an above type (one compiled inside lower, one in upper) surface as these.
@@ -488,12 +491,13 @@ def is_vis(diag):
 
 
 DEF_MARKS = ("defined here", "is only usable at visibility", "constructor is private if any of the fields",
-             "constructor is not visible here due to private fields")
+             "constructor is not visible here due to private fields", "` declared as ")
 
 
 def definition_span(diag, marks=DEF_MARKS):
-    """Where the restricted item is declared: the struct behind a tuple constructor first, then the
-    `... defined here` note (or label), then a lint's `... is only usable at visibility` note."""
+    """Where the restricted item is declared: the struct behind a tuple constructor (or E0446's
+    `X declared as ..` label) first, then the `... defined here` note (or label), then a lint's
+    `... is only usable at visibility` note."""
     spans = [s for s in diag.get("spans", []) if not s.get("is_primary")]
     notes = [(c.get("message", ""), sp) for c in diag.get("children", []) for sp in c.get("spans", [])]
     for mark in [m for m in DEF_MARKS[2:] if m in marks]:
@@ -587,15 +591,16 @@ def item_level_lines(lines):
     return out
 
 
-def widen_line(line):
-    """`pub` for the item on this line; None if it is already `pub` or not an item."""
+def widen_line(line, to="pub"):
+    """`to` (`pub`, or the `pub(crate)` notch) for the item on this line; None if it is already that wide or
+    not an item."""
     m = ITEM.match(line)
     if not m or m.group("kw") == "macro_rules!":
         return None
-    if m.group("vis") == "pub":
+    if re.sub(r"\s", "", m.group("vis") or "") in ("pub", to):
         return None
     body = line[m.start("quals"):]
-    return m.group("indent") + "pub " + body
+    return m.group("indent") + to + " " + body
 
 
 def split_fields(text):
@@ -674,6 +679,8 @@ def apply_op(line, op):
     """One widening on one line; ops on the same line commute (prefix vs. tuple fields vs. field)."""
     if op[0] == "item":
         new = widen_line(line)
+    elif op[0] == "crate":
+        new = widen_line(line, "pub(crate)")
     elif op[0] == "field":
         new = widen_field(line)
     else:
@@ -780,7 +787,14 @@ class Widener:
             # A re-export (often an already-`pub` `pub use inner::*;`): the blocker may be behind it, and
             # a `use` of an above item must stay restricted (P1-2), so resolve it before widening.
             return self._through_use(rel, index, name)
-        return self._edit(rel, index, ("item",), name)
+        return self._edit(rel, index, self._notch(diag, rel, index), name)
+
+    def _notch(self, diag, rel, index):
+        """`pub`, except for E0446 on a type narrower than the crate: rustc does not say how visible the
+        interface is, so the type goes to `pub(crate)` and the next round reports it again if that is short."""
+        if code_of(diag) != IFACE_CODE or "crate-private" in diag.get("message", ""):
+            return ("item",)
+        return ("item",) if widen_line(self.lines(rel)[index], "pub(crate)") is None else ("crate",)
 
     def _reexport(self, diag, name, resolver, run_root):
         """E0364/E0365 point at the `pub use` path, not the item: resolve the path through the module map."""
@@ -1293,7 +1307,7 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
             vis, residue, low_err = [], defaultdict(list), []
             for d in low:
                 code = code_of(d)
-                if is_vis(d) or (code in VIS_LINTS and d.get("level") == "warning"):
+                if is_vis(d) or (code in VIS_LINTS and d.get("level") == "warning") or code == IFACE_CODE:
                     vis.append((d, probe.lower, True))
                 elif d.get("level") == "error":
                     low_err.append(d)
