@@ -1,6 +1,11 @@
 schema_version = 1
 issue = 7353
-summary = "KR-C10e-2: 세션 전이 lock 등록부를 KRX discord::session_transition의 SessionTransitionLocks로 묶고 KE legacy_state 필드가 그 타입을 보관한다. session_transition은 아직 SharedData를 참조해 discord 층에 남아 있어 adapter→discord 참조 1건이 생긴다. C10e-1에서 그 참조가 없어지면 재분류로 해소한다"
+summary = "KR-C10e-2: 세션 전이 lock 등록부를 KRX discord::session_transition의 SessionTransitionLocks로 묶고 KE legacy_state 필드가 그 타입을 보관한다. session_transition은 아직 SharedData를 참조해 discord 층에 남아 있어 adapter→discord 참조 1건이 생긴다. 해소 지점은 #7353 KR-C10e-1(M-KRX 앞)이다: 그 조각에서 session_transition의 SharedData 참조가 없어지면 adapter 층으로 재분류하고 이 파일을 지운다(아래 주석)"
+# 해소 지점: #7353 KR-C10e-1(KR 단계, M-KRX 앞). 그 조각이 파일 상한 때문에 재분류를 못 넣으면 M-KRX(crates/adk-runtime 실제 분리) 착수 전 조각에서 지운다. 이 항목을 남긴 채 M-KRX에 들어가지 않는다.
+# 지우는 조건: C10e-1이 SessionTransitionLease의 host를 trait generic으로 바꾸고 SharedData용 구현을 DL discord/shared_state/g7_host.rs로 옮겨,
+#   discord/session_transition.rs에서 `use super::SharedData`(:1)와 lease 인자의 SharedData가 없어지면
+#   layers.toml에 prefix "services::discord::session_transition"을 adapter 층으로 넣는다. 남는 참조는 ChannelId·std·crate::db(adapter)뿐이라 새 역방향이 없다.
+#   그러면 legacy_state(adapter) → session_transition(adapter)가 역방향이 아니게 되어 이 increase 행과 이 파일이 필요 없다.
 increase = [
   { section = "reverse_dependencies", id = "1acdcbcd2422e935fe1ede8904431ca6566facad1614019a0f9b3d2d6f40fd5c", source = "src/lib.rs::crate::services::engine_runtime::legacy_state", target = "src/lib.rs::crate::services::discord::session_transition", kind = "path", max_count = 1, reason = "accepted-debt" },
 ]
