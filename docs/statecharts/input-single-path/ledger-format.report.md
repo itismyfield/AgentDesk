@@ -1,5 +1,7 @@
 # Shared frame ledger file: V2 owner and out-of-scope writer (#8343 slice 5)
 
+<!-- doc-path-refs: proposed src/services/tui_input/human_frame/history/v2/keyless.rs -->
+
 Production base: `6b91594c5c`, which is slice 4 repair 1. The scope-free proof reads `history::registered`
 (`history.rs:335`) and `unique_attempt` (`:894`) through `readable()` → `v2::unscoped_store()` → `owned()`.
 
