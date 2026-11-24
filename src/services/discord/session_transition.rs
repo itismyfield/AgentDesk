@@ -26,7 +26,8 @@ impl<'a> SessionTransitionLease<'a> {
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
-            .session_transition_lock(channel)
+            .session_transition_locks
+            .lock(channel)
             .try_lock_owned()
             .map_err(|_| SessionTransitionBusy)?;
         Ok(Self {
@@ -43,7 +44,7 @@ impl<'a> SessionTransitionLease<'a> {
     ) -> Result<Self, SessionTransitionBusy> {
         if !Arc::ptr_eq(
             tokio::sync::OwnedMutexGuard::mutex(guard),
-            &shared.session_transition_lock(channel),
+            &shared.session_transition_locks.lock(channel),
         ) {
             return Err(SessionTransitionBusy);
         }
@@ -63,7 +64,7 @@ impl<'a> SessionTransitionLease<'a> {
             && self.channel == channel
             && Arc::ptr_eq(
                 tokio::sync::OwnedMutexGuard::mutex(guard),
-                &shared.session_transition_lock(channel),
+                &shared.session_transition_locks.lock(channel),
             )
     }
 }
@@ -82,7 +83,7 @@ impl UnplacedLease {
         shared: &SharedData,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
-        let guard = shared.acquire_session_transition(channel).await?;
+        let guard = shared.session_transition_locks.acquire(channel).await?;
         Ok(Self::held(shared, channel, guard))
     }
 
@@ -91,7 +92,8 @@ impl UnplacedLease {
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
-            .session_transition_lock(channel)
+            .session_transition_locks
+            .lock(channel)
             .try_lock_owned()
             .map_err(|_| SessionTransitionBusy)?;
         Ok(Self::held(shared, channel, guard))
@@ -118,20 +120,20 @@ impl UnplacedLease {
     }
 }
 
-impl SharedData {
-    pub(crate) fn session_transition_lock(
-        &self,
-        channel_id: ChannelId,
-    ) -> Arc<tokio::sync::Mutex<()>> {
-        if let Some(lock) = self
-            .session_transition_locks
-            .get(&channel_id)
-            .and_then(|lock| lock.upgrade())
-        {
+/// One runtime's channel transition locks. An entry is a `Weak`: the lock lives while a guard or a
+/// handle holds it, and dead entries are pruned when a new channel is inserted.
+#[derive(Default)]
+pub(crate) struct SessionTransitionLocks(
+    dashmap::DashMap<ChannelId, std::sync::Weak<tokio::sync::Mutex<()>>>,
+);
+
+impl SessionTransitionLocks {
+    pub(crate) fn lock(&self, channel_id: ChannelId) -> Arc<tokio::sync::Mutex<()>> {
+        if let Some(lock) = self.0.get(&channel_id).and_then(|lock| lock.upgrade()) {
             return lock;
         }
         let lock = Arc::new(tokio::sync::Mutex::new(()));
-        match self.session_transition_locks.entry(channel_id) {
+        match self.0.entry(channel_id) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 if let Some(existing) = entry.get().upgrade() {
                     existing
@@ -145,22 +147,46 @@ impl SharedData {
                 // Prune only on registry growth. The common existing-channel path
                 // above remains O(1), while dead Weak entries are still bounded by
                 // subsequent vacant insertions.
-                self.session_transition_locks
-                    .retain(|_, candidate| candidate.strong_count() > 0);
+                self.0.retain(|_, candidate| candidate.strong_count() > 0);
                 lock
             }
         }
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
+        tokio::time::timeout(
+            SESSION_TRANSITION_LOCK_WAIT_TIMEOUT,
+            self.lock(channel_id).lock_owned(),
+        )
+        .await
+        .map_err(|_| SessionTransitionBusy)
+    }
+
+    /// Whether the registry still carries an entry for `channel_id`, live or dead.
+    #[cfg(test)]
+    pub(crate) fn has_entry(&self, channel_id: ChannelId) -> bool {
+        self.0.contains_key(&channel_id)
+    }
+}
+
+impl SharedData {
+    pub(crate) fn session_transition_lock(
+        &self,
+        channel_id: ChannelId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.session_transition_locks.lock(channel_id)
     }
 
     pub(crate) async fn acquire_session_transition(
         &self,
         channel_id: ChannelId,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
-        tokio::time::timeout(
-            SESSION_TRANSITION_LOCK_WAIT_TIMEOUT,
-            self.session_transition_lock(channel_id).lock_owned(),
-        )
-        .await
-        .map_err(|_| SessionTransitionBusy)
+        self.session_transition_locks.acquire(channel_id).await
     }
 }
+
+#[cfg(test)]
+mod registry_tests;

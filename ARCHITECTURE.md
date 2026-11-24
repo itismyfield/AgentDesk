@@ -2966,6 +2966,8 @@ src/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
 │   │   │   └── worktree.rs
+│   │   ├── session_transition/
+│   │   │   └── registry_tests.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── content_snapshot_tests.rs
