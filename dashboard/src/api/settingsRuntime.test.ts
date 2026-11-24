@@ -45,3 +45,17 @@ it("keeps asking for detail after a transient failure and marks the summary as a
   expect(recovered.dispatch_outbox?.pending).toBe(2);
   expect(urls().at(-1)).toBe("/api/health/detail");
 });
+
+it("asks for detail again after the tab credential changes", async () => {
+  const { getHealthDetail } = await load();
+  const { beginAuthentication } = await import("./authState");
+  fetchMock.mockImplementation(async (url) => String(url) === "/api/health/detail"
+    ? json(403, { error: "auth_token required for non-loopback host" })
+    : json(200, summary));
+
+  await getHealthDetail();
+  fetchMock.mockClear();
+  beginAuthentication("rotated-token");
+  await getHealthDetail();
+  expect(urls()[0]).toBe("/api/health/detail");
+});

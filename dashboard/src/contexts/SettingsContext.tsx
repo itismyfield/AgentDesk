@@ -32,12 +32,14 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
   const [stats, setStats] = useState<DashboardStats | null>(initialStats);
 
   const [refreshingStats, setRefreshingStats] = useState(false);
+  const statsRead = useRef(0);
   const refreshStats = useCallback(() => {
+    const read = ++statsRead.current;
     setRefreshingStats(true);
     api.getStats()
-      .then(setStats)
+      .then((next) => { if (read === statsRead.current) setStats(next); })
       .catch(() => {})
-      .finally(() => setRefreshingStats(false));
+      .finally(() => { if (read === statsRead.current) setRefreshingStats(false); });
   }, []);
 
   // #2050 P2 finding 6 — debounce kanban_card_* refresh.

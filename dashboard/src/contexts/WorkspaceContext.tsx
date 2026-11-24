@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { Agent, Department, DispatchedSession, WSEvent } from "../types";
 import * as api from "../api/client";
+import { pollWhileVisible } from "../lib/pollWhileVisible";
 import { applySessionOverlay, deriveDispatchedAsAgents, mergeAgentStatus } from "./session-overlay";
 
 interface WorkspaceContextValue {
@@ -47,6 +48,7 @@ export function WorkspaceProvider({
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
   const [departments, setDepartments] = useState<Department[]>(initialDepartments);
   const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions ?? []);
+  const [sessionsFailed, setSessionsFailed] = useState(initialSessions === null);
 
   const sessionAwareAgents = useMemo(() => applySessionOverlay(agents, sessions), [agents, sessions]);
   const agentsRef = useRef<Agent[]>(sessionAwareAgents);
@@ -61,6 +63,26 @@ export function WorkspaceProvider({
 
   const pushNotificationRef = useRef(pushNotification);
   useEffect(() => { pushNotificationRef.current = pushNotification; }, [pushNotification]);
+
+  // A failed bootstrap leaves every agent "unknown". Keep trying until the list arrives.
+  useEffect(() => {
+    if (!sessionsFailed) return;
+    let active = true;
+    let generation = 0;
+    const load = () => {
+      const requestId = ++generation;
+      api.getDispatchedSessions(true, { suppressErrorToast: true, maxRetries: 0 })
+        .then((next) => {
+          if (!active || requestId !== generation) return;
+          setSessions(next);
+          setSessionsFailed(false);
+        })
+        .catch(() => {});
+    };
+    load();
+    const stop = pollWhileVisible(load, 30_000);
+    return () => { active = false; stop(); };
+  }, [sessionsFailed]);
 
   useEffect(() => {
     function handleWs(e: Event) {
@@ -123,7 +145,7 @@ export function WorkspaceProvider({
         departments,
         sessions,
         setSessions,
-        sessionsFailed: initialSessions === null,
+        sessionsFailed,
         visibleDispatchedSessions,
         agentsWithDispatched,
         refreshAgents,

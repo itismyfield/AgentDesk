@@ -1907,16 +1907,16 @@ test.describe("Dashboard smoke tests", () => {
     });
     await page.goto("/stats");
     const chart = page.getByTestId("stats-daily-token-scroll");
+    const plot = chart.locator(".aui-breakdown-chart-scroll");
     await chart.scrollIntoViewIfNeeded();
-    await expect(chart.locator("svg.recharts-surface")).toBeVisible();
-    await expect.poll(() => chart.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await expect(plot).toBeVisible();
+    await expect.poll(() => plot.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
     await page.getByTestId("stats-range-30d").click();
-    await expect(page.getByText("날짜가 가려지면 차트를 좌우로 움직여 확인하세요.", { exact: true })).toBeVisible();
     if (testInfo.project.name === "mobile") {
-      await expect.poll(() => chart.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
-      await chart.focus();
+      await expect.poll(() => plot.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      await plot.locator(".aui-breakdown-chart-bar-button").first().focus();
       await page.keyboard.press("ArrowRight");
-      await expect.poll(() => chart.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+      await expect(plot.locator(".aui-breakdown-chart-bar-button").nth(1)).toBeFocused();
     }
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
@@ -1999,8 +1999,9 @@ test.describe("Dashboard smoke tests", () => {
       "routine-row-routine-late",
       "routine-row-routine-manual",
     ]);
-    await expect(page.getByText("매일 13:00")).toBeVisible();
-    await expect(page.getByText("수동 실행")).toBeVisible();
+    const routineList = page.getByTestId("routines-timeline-list");
+    await expect(routineList.getByText("매일 13:00")).toBeVisible();
+    await expect(routineList.getByText("수동 실행")).toBeVisible();
     // Slug stays visible as secondary text under the plain-language title.
     await expect(page.getByTestId("routine-row-routine-soon")).toContainText("오부장 프로필 점검");
 

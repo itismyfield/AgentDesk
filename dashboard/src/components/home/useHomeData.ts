@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getCampaigns, type Campaign } from "../../api/campaigns";
+import { healthDetailBlocked, noteHealthDetailError } from "../../api/healthDetailAccess";
 import { ApiRequestError, request } from "../../api/httpClient";
 import type { RoutineRecord } from "../../api/routines";
 import {
@@ -20,20 +21,32 @@ export interface Loaded<T> {
   at: number | null;
 }
 
-/** Reads on mount and again every `intervalMs` while the page is visible. `load` must be stable. */
-export function usePolled<T>(load: () => Promise<T>, intervalMs: number): Loaded<T> {
+/** Reads on mount and again every `intervalMs` while the page is visible. `load` must be stable.
+ * Once a newer read settles, an older one cannot overwrite it. `enabled` skips the read when a parent already supplies the value. */
+export function usePolled<T>(load: () => Promise<T>, intervalMs: number, enabled = true): Loaded<T> {
   const [state, setState] = useState<Loaded<T>>({ data: null, failed: false, at: null });
   useEffect(() => {
+    if (!enabled) return;
     let active = true;
+    let generation = 0;
+    // The newest read that has settled wins. An older read can still paint until that happens,
+    // so a retry that finishes first is kept, and a late failure cannot wipe a newer success.
+    let settled = 0;
     const run = () => {
+      const requestId = ++generation;
+      const finish = (apply: () => void) => {
+        if (!active || requestId < settled) return;
+        settled = requestId;
+        apply();
+      };
       load()
-        .then((data) => { if (active) setState({ data, failed: false, at: Date.now() }); })
-        .catch(() => { if (active) setState((previous) => ({ ...previous, failed: true })); });
+        .then((data) => finish(() => setState({ data, failed: false, at: Date.now() })))
+        .catch(() => finish(() => setState((previous) => ({ ...previous, failed: true }))));
     };
     run();
     const stop = pollWhileVisible(run, intervalMs);
     return () => { active = false; stop(); };
-  }, [load, intervalMs]);
+  }, [load, intervalMs, enabled]);
   return state;
 }
 
@@ -75,8 +88,6 @@ export function campaignTodoSource({ data, failed }: Loaded<HomeCampaigns>): Sou
   return data.detailFailed > 0 || data.detailsCut > 0 ? "partial" : "ok";
 }
 
-let healthDetailForbidden = false;
-
 function toHealth(raw: unknown): HomeHealth {
   const source = (raw ?? {}) as HomeHealth;
   return {
@@ -99,12 +110,11 @@ async function readHealth(path: string): Promise<HomeHealth> {
 }
 
 export async function loadHomeHealth(): Promise<HomeHealth> {
-  if (!healthDetailForbidden) {
+  if (!healthDetailBlocked()) {
     try {
       return await readHealth("/api/health/detail");
     } catch (error) {
-      healthDetailForbidden = error instanceof ApiRequestError && error.status === 403;
-      if (!healthDetailForbidden) return { ...(await readHealth("/api/health")), publicOnly: "failed" };
+      if (noteHealthDetailError(error) === "failed") return { ...(await readHealth("/api/health")), publicOnly: "failed" };
     }
   }
   return { ...(await readHealth("/api/health")), publicOnly: "forbidden" };
@@ -166,9 +176,29 @@ export async function loadAgentTurns(ids: string[]): Promise<Map<string, HomeTur
   return new Map(reads.flatMap((read, index) => (read.status === "fulfilled" ? [[ids[index], read.value] as const] : [])));
 }
 
-/** Turns of the working agents, cached per agent: one that starts working is read at once and the rest keep the polling cycle. */
+interface AgentTurnSource {
+  turns: Map<string, HomeTurn>;
+  watched: ReadonlySet<string>;
+}
+
+const AgentTurnsContext = createContext<AgentTurnSource | null>(null);
+
+/** Shell-level turn poll. Descendants reuse it instead of reading the same agents again. */
+export function AgentTurnsProvider({ turns, watched, children }: {
+  turns: Map<string, HomeTurn>;
+  watched: readonly string[];
+  children: ReactNode;
+}) {
+  const value = useMemo<AgentTurnSource>(() => ({ turns, watched: new Set(watched) }), [turns, watched]);
+  return createElement(AgentTurnsContext.Provider, { value }, children);
+}
+
+/** Turns of the working agents, cached per agent: one that starts working is read at once and the rest keep the polling cycle.
+ * Inside `AgentTurnsProvider`, ids the provider already watches are not read again. */
 export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, HomeTurn> {
-  const key = ids.join("|");
+  const source = useContext(AgentTurnsContext);
+  const idsKey = ids.join("|");
+  const key = (source ? ids.filter((id) => !source.watched.has(id)) : ids).join("|");
   const [turns, setTurns] = useState<Map<string, HomeTurn>>(() => new Map());
   const wanted = useRef<string[]>([]);
   const generation = useRef(new Map<string, number>());
@@ -202,7 +232,15 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
     read.current(started);
   }, [key]);
   useEffect(() => pollWhileVisible(() => read.current(wanted.current), intervalMs), [intervalMs]);
-  return turns;
+  return useMemo(() => {
+    if (!source) return turns;
+    const merged = new Map<string, HomeTurn>();
+    for (const id of idsKey ? idsKey.split("|") : []) {
+      const turn = source.watched.has(id) ? source.turns.get(id) : turns.get(id);
+      if (turn) merged.set(id, turn);
+    }
+    return merged;
+  }, [source, turns, idsKey]);
 }
 
 export function loadRuntimeConfig(): Promise<RuntimeConfigResponse> {

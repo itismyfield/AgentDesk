@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { request } from "../../api/httpClient";
 import { getServerCampaignSummaries } from "../../api/serverCampaigns";
 import { todoStatus, type HomeTurn } from "./homeModel";
-import { campaignTodoSource, loadHomeCampaigns, useAgentTurns } from "./useHomeData";
+import { AgentTurnsProvider, campaignTodoSource, loadHomeCampaigns, useAgentTurns, usePolled, type Loaded } from "./useHomeData";
 
 vi.mock("../../api/httpClient", () => ({ ApiRequestError: class extends Error {}, request: vi.fn(async () => ({ status: "working" })) }));
 vi.mock("../../api/campaigns", () => ({ getCampaigns: vi.fn(async () => ({ campaigns: [] })) }));
@@ -75,6 +75,50 @@ describe("home data", () => {
     await act(async () => answers[2]({ status: "new" }));
     await act(async () => { answers[0]({ status: "a" }); answers[1]({ status: "old" }); });
     expect(latest.get("b")).toEqual({ status: "new" });
+    await act(async () => root.unmount());
+  });
+
+  it("keeps the newer poll when an older read fails afterwards", async () => {
+    vi.useFakeTimers();
+    const answers: Array<(value: string) => void> = [];
+    const rejects: Array<(error: Error) => void> = [];
+    const load = vi.fn(() => new Promise<string>((resolve, reject) => { answers.push(resolve); rejects.push(reject); }));
+    let polled: Loaded<string> = { data: null, failed: false, at: null };
+    const Poll = () => { polled = usePolled(load, 60_000); return null; };
+    const root = createRoot(document.createElement("div"));
+    await act(async () => root.render(<Poll />));
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => answers[1]("new"));
+    await act(async () => rejects[0](new Error("stale")));
+    expect(polled).toMatchObject({ data: "new", failed: false });
+    await act(async () => root.unmount());
+  });
+
+  it("does not read while polling is disabled", async () => {
+    const load = vi.fn(async () => "ready");
+    const Poll = ({ enabled }: { enabled: boolean }) => { usePolled(load, 60_000, enabled); return null; };
+    const root = createRoot(document.createElement("div"));
+    await act(async () => root.render(<Poll enabled={false} />));
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => root.render(<Poll enabled />));
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("does not read an agent the surrounding shell is already watching", async () => {
+    vi.mocked(request).mockClear();
+    const root = createRoot(document.createElement("div"));
+    const Shell = ({ ids, extra }: { ids: string[]; extra: string[] }) => {
+      const turns = useAgentTurns(ids);
+      return <AgentTurnsProvider turns={turns} watched={ids}><Probe ids={[...ids, ...extra]} /></AgentTurnsProvider>;
+    };
+    await act(async () => root.render(<Shell ids={["a"]} extra={[]} />));
+    expect(reads()).toEqual(["a"]);
+    vi.mocked(request).mockClear();
+    await act(async () => root.render(<Shell ids={["a"]} extra={["b"]} />));
+    expect(reads()).toEqual(["b"]);
+    expect(latest.get("a")).toEqual({ status: "working" });
     await act(async () => root.unmount());
   });
 });

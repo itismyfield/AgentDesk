@@ -157,8 +157,8 @@ export function HomeUsageCard({
   runtimeState?: Loaded<RuntimeConfigResponse>;
   className?: string;
 }) {
-  const internalUsage = usePolled(loadHomeUsage, usageState ? 600_000 : 60_000);
-  const internalRuntime = usePolled(loadRuntimeConfig, runtimeState ? 600_000 : 300_000);
+  const internalUsage = usePolled(loadHomeUsage, 60_000, usageState === undefined);
+  const internalRuntime = usePolled(loadRuntimeConfig, 300_000, runtimeState === undefined);
   const usage = usageState ?? internalUsage;
   const runtime = runtimeState ?? internalRuntime;
   const rows = buildUsageRows(usage.data ?? [], isKo);

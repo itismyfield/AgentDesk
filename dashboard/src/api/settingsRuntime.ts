@@ -1,6 +1,7 @@
 import type { CompanySettings } from "../types";
 import type { ConfigEditValue, ConfigEntry } from "../components/settings/SettingsModel";
-import { ApiRequestError, readCachedGet, request, type CachedGetEntry } from "./httpClient";
+import { healthDetailBlocked, noteHealthDetailError } from "./healthDetailAccess";
+import { request } from "./httpClient";
 
 export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
@@ -187,18 +188,14 @@ function normalizeHealth(raw: unknown): HealthResponse {
   };
 }
 
-// Without a server auth token, detail answers loopback peers only, so tailnet devices get 403 every time.
-let healthDetailForbidden = false;
-
 /** Detail health (providers, uptime, queues) where the server allows it, otherwise the public summary marked `publicOnly`. */
 export async function getHealthDetail(): Promise<HealthResponse> {
   let publicOnly: HealthResponse["publicOnly"] = "forbidden";
-  if (!healthDetailForbidden) {
+  if (!healthDetailBlocked()) {
     try {
       return normalizeHealth(await request<unknown>("/api/health/detail", { suppressErrorToast: true }));
     } catch (error) {
-      healthDetailForbidden = error instanceof ApiRequestError && error.status === 403;
-      if (!healthDetailForbidden) publicOnly = "failed";
+      if (noteHealthDetailError(error) === "failed") publicOnly = "failed";
     }
   }
   return { ...normalizeHealth(await request<unknown>("/api/health")), publicOnly };

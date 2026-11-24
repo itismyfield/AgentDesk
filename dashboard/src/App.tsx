@@ -50,6 +50,30 @@ export default function App() {
   const { t } = useI18n();
   const data = bootstrapQuery.data;
 
+  if (bootstrapQuery.isError) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-300">
+        <div role="alert" data-testid="bootstrap-error" className="max-w-md px-6 text-center">
+          <p className="m-0 text-sm">
+            {t({
+              ko: "대시보드를 불러오지 못했어요.",
+              en: "Could not load the dashboard.",
+            })}
+          </p>
+          <button
+            type="button"
+            data-testid="bootstrap-retry"
+            className="mt-4 inline-flex min-h-11 items-center justify-center rounded-md border border-gray-600 px-4 text-sm text-gray-100"
+            disabled={bootstrapQuery.isFetching}
+            onClick={() => { void bootstrapQuery.refetch(); }}
+          >
+            {t({ ko: "다시 시도", en: "Try again" })}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!data) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-400">
