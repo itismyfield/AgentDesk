@@ -1019,7 +1019,13 @@ class NightlyMutationBackstopTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         pr_run = next(step for step in pr["steps"] if step.get("run") == runs[0]["run"])
         self.assertEqual(runs[0]["timeout-minutes"], pr_run["timeout-minutes"])
+        # The memory observers only record; check-ci-runner-hardening.sh pins their exact shapes.
+        observers = {"Start runner memory sampler", "Begin runner memory step", "End runner memory step",
+                     "Summarize runner memory", "Upload runner memory"}
+        self.assertNotIn(runs[0]["name"], observers)
         for step in nightly["steps"]:
+            if step.get("name") in observers:
+                continue
             with self.subTest(step=step.get("name") or step.get("uses")):
                 self.assertFalse(step.get("continue-on-error"))
                 self.assertNotIn("paths-filter", str(step.get("uses", "")))
