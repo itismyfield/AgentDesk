@@ -9,7 +9,7 @@ use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCo
 
 mod cancel_lookup;
 pub(crate) mod probe;
-mod trusted_target;
+pub(crate) mod trusted_target;
 #[cfg(test)]
 use cancel_lookup::legacy_session_key_matches_channel;
 #[cfg(unix)]

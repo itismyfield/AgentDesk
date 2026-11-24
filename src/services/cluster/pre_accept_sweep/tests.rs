@@ -2,7 +2,7 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{FailedPreAcceptSweepOutcome, IntakeOutboxRow};
 use crate::services::cluster::execution_requirements::tests::ready_node;
-use crate::services::session_forwarding::probe::tests::ScopedReadinessProbe;
+use crate::services::session_forwarding::probe::test_support::ScopedReadinessProbe;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};

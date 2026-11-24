@@ -128,7 +128,7 @@ pub(crate) fn spawn(config: crate::config::Config, pool: sqlx::PgPool, local: St
     });
 }
 
-async fn probe(context: &ForwardCallerContext, node: &Value) -> Value {
+pub(crate) async fn probe(context: &ForwardCallerContext, node: &Value) -> Value {
     let mut trusted = false;
     let result = tokio::time::timeout(PROBE_DEADLINE, async {
         if node["status"] != "online" {
@@ -160,7 +160,7 @@ async fn probe(context: &ForwardCallerContext, node: &Value) -> Value {
         "observed_at_ms":now,"expires_at_ms":now + TTL_MS})
 }
 
-async fn probe_target(
+pub(crate) async fn probe_target(
     context: &ForwardCallerContext,
     target: &super::TrustedForwardTarget,
 ) -> Result<(), &'static str> {
@@ -203,4 +203,4 @@ async fn probe_target(
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(crate) mod test_support;
