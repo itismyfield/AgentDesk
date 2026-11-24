@@ -226,6 +226,7 @@ pub(crate) fn verified_claude_sources(channel: u64) -> io::Result<Vec<BindingEve
 }
 
 /// Whether a hook-verified record or a published resume frontier of this channel names `native`.
+#[cfg(unix)]
 pub(crate) fn names_session(channel: u64, native: &str) -> io::Result<bool> {
     let bound = |event: &BindingEvent| {
         matches!(&event.new,
