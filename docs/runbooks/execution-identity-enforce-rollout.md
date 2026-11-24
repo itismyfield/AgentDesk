@@ -68,7 +68,7 @@ namespace and spawn provenance are.
 
 ### B — Write failed at spawn
 
-`tmux_session_files::write_spawn_nonce` is deliberately fail-to-absent: on any
+`tmux_common::spawn_markers::write_spawn_nonce` is deliberately fail-to-absent: on any
 error it removes both the temp sibling **and any pre-existing destination**, so a
 failed respawn leaves no readable nonce rather than the prior spawn's stale one.
 `stamp_spawn_markers` propagates that error and every spawn site only logs and

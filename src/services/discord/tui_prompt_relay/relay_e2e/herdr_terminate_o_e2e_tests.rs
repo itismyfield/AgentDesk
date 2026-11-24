@@ -265,7 +265,8 @@ impl Terminating {
             .bind_as(pool, key, pending, "codex", &prepared.path)
             .await;
         dedupe::install_herdr_execution(&logical, herdr::EXECUTION);
-        crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(&logical, Some(&prepared))
+            .unwrap();
         dedupe::register_provider_session("codex", &logical, &logical);
         dedupe::register_codex_herdr_placeholder(&logical, CHANNEL_ID);
         let record = rig.record_as(key, herdr::HostedState::Bound, "codex");

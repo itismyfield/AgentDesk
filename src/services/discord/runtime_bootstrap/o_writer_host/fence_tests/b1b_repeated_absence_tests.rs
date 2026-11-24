@@ -59,7 +59,8 @@ pub(super) async fn unproved_successor_holds_actual_input(
     context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
     context.created_at = chrono::Utc::now() + chrono::Duration::seconds(2);
     let prepared = PreparedIncarnation::create(context).unwrap();
-    crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(CANARY_TMUX, Some(&prepared))
+        .unwrap();
     assert!(dedupe::clear_relaunch::successor_unproved_for_channel(
         CANARY_CHANNEL
     ));

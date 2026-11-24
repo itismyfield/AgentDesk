@@ -1201,9 +1201,11 @@ async fn dead_frontier_registry_cas_fails_closed_on_replacement_and_respawn() {
         "post-gate-respawn",
     )
     .await;
-    let first_nonce = super::super::write_spawn_nonce(tmux).expect("first spawn nonce");
+    let first_nonce = crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux)
+        .expect("first spawn nonce");
     let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
-        let respawned = super::super::write_spawn_nonce(tmux).expect("respawn nonce");
+        let respawned = crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux)
+            .expect("respawn nonce");
         assert_ne!(first_nonce, respawned, "each spawn mints a fresh nonce");
     }));
     let _ = apply_relay_recovery_decision(
@@ -1292,7 +1294,7 @@ async fn enforce_permits_the_dead_frontier_cancel_when_the_spawn_nonce_still_mat
         "enforce-matching",
     )
     .await;
-    super::super::write_spawn_nonce(tmux).expect("spawn nonce");
+    crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux).expect("spawn nonce");
 
     let _ = apply_relay_recovery_decision(
         &registry,

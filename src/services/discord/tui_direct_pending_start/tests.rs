@@ -1331,13 +1331,15 @@ fn enforce_mode_stale_foreign_demote_refuses_across_a_respawn() {
         shared.tmux_watchers.insert(channel, watcher);
         let mut rec = record("claude", channel_id, 4_030_319);
         rec.tmux_session_name = tmux.to_string();
-        let first_nonce = super::super::write_spawn_nonce(tmux).expect("first spawn nonce");
+        let first_nonce = crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux)
+            .expect("first spawn nonce");
 
         let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move |point| {
             if point != DestructiveCancelHookPoint::PreRegistryCas {
                 return;
             }
-            let respawned = super::super::write_spawn_nonce(tmux).expect("respawn nonce");
+            let respawned = crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux)
+                .expect("respawn nonce");
             assert_ne!(first_nonce, respawned, "each spawn mints a fresh nonce");
         }));
 
@@ -1654,7 +1656,7 @@ async fn stale_foreign_demote_with_replaced_binding(
     rec.tmux_session_name = tmux.clone();
     // Spawned once and never respawned, so the nonce conjunct matches at
     // the CAS and cannot be what decides this run.
-    super::super::write_spawn_nonce(&tmux).expect("spawn nonce");
+    crate::services::tmux_common::spawn_markers::write_spawn_nonce(&tmux).expect("spawn nonce");
 
     let (mut replacement, _replacement_cancel) =
         test_watcher_handle(&tmux, &replacement_output_path);

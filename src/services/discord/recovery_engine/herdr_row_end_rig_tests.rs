@@ -374,7 +374,11 @@ impl Run {
                 let switches = rig
                     .bind_as(&pool, (&token, &key), bound, "codex", &prepared.path)
                     .await;
-                crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+                crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                    &logical,
+                    Some(&prepared),
+                )
+                .unwrap();
                 switches
             }
             _ => {

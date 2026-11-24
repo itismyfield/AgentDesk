@@ -369,7 +369,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
     crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(session)
         .expect("generation");
     let generation =
-        crate::services::discord::tmux::tmux_session_files::read_generation_file_mtime_ns(session);
+        crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(session);
     let pin = tc::with_tmux_source_authority(session, |authority| authority.pin()).expect("pin");
     let fd = Arc::new(std::fs::File::open(&path).expect("original fd"));
     let proof = SourceReadProof::capture(

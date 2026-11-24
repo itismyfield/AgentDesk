@@ -1649,8 +1649,11 @@ fn execute_streaming_local_tmux(
 
     fence.validate_tmux_publisher(tmux_session_name)?;
     // A wrapper publication failure stays held; completion receives only published evidence.
-    let stamped = crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
-        .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
+    let stamped = crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+        tmux_session_name,
+        Some(&prepared),
+    )
+    .map_err(|error| format!("Held(marker_publication_failed): {error}"))?;
     prepared.finish_spawn(Ok(stamped))?;
 
     drop(fence);

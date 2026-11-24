@@ -542,8 +542,11 @@ pub(crate) async fn launch_herdr_session(
     // Hooks and binding events name an execution by its spawn nonce marker, as on tmux.
     #[cfg(unix)]
     let markers = markers.and_then(|()| {
-        crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
-            .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            &owner.logical_key,
+            Some(&incarnation),
+        )
+        .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
     });
     let markers = match markers {
         Ok(_) => {

@@ -678,7 +678,8 @@ mod tests {
                 &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
             );
             write_generation_marker(tmux);
-            let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
+            let current_generation =
+                crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(tmux);
             assert!(
                 current_generation > 0,
                 "generation marker mtime is observable"
@@ -746,7 +747,8 @@ mod tests {
             assert_eq!(snapshot.relay_frontier, None);
 
             let generation_path = write_generation_marker(tmux);
-            let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
+            let current_generation =
+                crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(tmux);
             assert!(
                 current_generation > 0,
                 "generation marker mtime is observable"
@@ -815,7 +817,7 @@ mod tests {
             assert_eq!(snapshot.relay_frontier, None);
 
             let generation_path = write_generation_marker(tmux);
-            let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
+            let current_generation = crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(tmux);
             assert!(
                 current_generation > 0,
                 "generation marker mtime is observable"

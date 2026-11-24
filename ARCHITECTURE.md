@@ -4579,6 +4579,7 @@ src/
 │   │   ├── runtime_activity.rs
 │   │   ├── runtime_hint_fence.rs
 │   │   ├── session_markers.rs
+│   │   ├── spawn_markers.rs
 │   │   └── unified_thread.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs

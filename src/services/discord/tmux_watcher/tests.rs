@@ -5407,9 +5407,7 @@ mod s2a1_frontier_tests {
             coord.frontier_tuple_for_tests(),
             (
                 300,
-                crate::services::discord::tmux::tmux_session_files::read_generation_file_mtime_ns(
-                    session
-                ),
+                crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(session),
                 0,
                 false
             )

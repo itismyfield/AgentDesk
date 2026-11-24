@@ -207,7 +207,11 @@ async fn restored_head_stays_held(refusal: Refusal) {
             context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
             context.created_at = chrono::Utc::now();
             let prepared = PreparedIncarnation::create(context).unwrap();
-            crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+            crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+                CANARY_TMUX,
+                Some(&prepared),
+            )
+            .unwrap();
         }
         Refusal::ProbeFailed => fixture.fake.fail_probes(),
         Refusal::ProcessPid => {
