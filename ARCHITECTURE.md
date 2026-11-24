@@ -1378,6 +1378,7 @@ src/
 │   │   │   │   ├── fallback.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
+│   │   │   │   ├── output_fixture_tests.rs
 │   │   │   │   ├── output_tests.rs
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
@@ -1471,6 +1472,7 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   ├── pg_tests/
 │   │   │   │   │   └── pending_lookup_tests.rs
+│   │   │   │   ├── pending_lookup_probe.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -4404,6 +4406,7 @@ src/
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
 │   │   ├── probe/
+│   │   │   ├── test_support.rs
 │   │   │   └── tests.rs
 │   │   ├── trusted_target/
 │   │   │   └── loopback_seam_tests.rs
