@@ -10,21 +10,14 @@ fn canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavail
     let before_marker = fs::read(h.marker()).unwrap();
     let before_nonce = dedupe::binding_context::observe_spawn_nonce_marker(&h.context.tmux_session);
     let (before_channel, before_binding) = {
-        let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = state.aged_stamp_for_tests(SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
-        let expired = Instant::now() - SESSION_MAPPING_TTL - std::time::Duration::from_secs(1);
-        let channel = state
-            .channel_by_tmux
-            .get_mut(&h.context.tmux_session)
-            .unwrap();
-        channel.recorded_at = expired;
-        let before_channel = (channel.value, channel.recorded_at);
-        let binding = state
-            .runtime_by_tmux
-            .get_mut(&h.context.tmux_session)
-            .unwrap();
-        binding.recorded_at = expired;
-        (before_channel, (binding.value.clone(), binding.recorded_at))
+        let expired = dedupe::expired_session_mapping_stamp_for_tests();
+        dedupe::with_tmux_entries_for_tests(&h.context.tmux_session, |binding, channel| {
+            let channel = channel.as_mut().unwrap();
+            channel.1 = expired;
+            let binding = binding.as_mut().unwrap();
+            binding.1 = expired;
+            (*channel, binding.clone())
+        })
     };
     fs::remove_file(&h.canonical).unwrap();
     for _ in 0..5 {
@@ -36,20 +29,14 @@ fn canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavail
             codex_verified_hold_detail(&h.context.tmux_session),
             "execution_context_unreadable"
         );
-        let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-        let channel = state
-            .channel_by_tmux
-            .get(&h.context.tmux_session)
-            .expect("a diagnostic must not purge the expired channel mapping");
-        let binding = state
-            .runtime_by_tmux
-            .get(&h.context.tmux_session)
-            .expect("a diagnostic must not purge the expired runtime binding");
-        assert_eq!((channel.value, channel.recorded_at), before_channel);
-        assert_eq!(
-            (&binding.value, binding.recorded_at),
-            (&before_binding.0, before_binding.1)
-        );
+        let (binding, channel) =
+            dedupe::with_tmux_entries_for_tests(&h.context.tmux_session, |binding, channel| {
+                (binding.clone(), *channel)
+            });
+        let channel = channel.expect("a diagnostic must not purge the expired channel mapping");
+        let binding = binding.expect("a diagnostic must not purge the expired runtime binding");
+        assert_eq!(channel, before_channel);
+        assert_eq!(binding, before_binding);
     }
     assert_eq!(h.raw(), Some(before_binding.0));
     assert_eq!(h.fold(), before_fold);
@@ -162,21 +149,18 @@ fn detailed_hold_reason_separates_ownership_and_binding_failures() {
                     )
                     .unwrap(),
                     "binding_missing" => {
-                        STATE
-                            .lock()
-                            .unwrap()
-                            .runtime_by_tmux
-                            .remove(&h.context.tmux_session);
+                        dedupe::with_tmux_entries_for_tests(
+                            &h.context.tmux_session,
+                            |binding, _| *binding = None,
+                        );
                     }
                     "source_identity_mismatch" => {
-                        STATE
-                            .lock()
-                            .unwrap()
-                            .runtime_by_tmux
-                            .get_mut(&h.context.tmux_session)
-                            .unwrap()
-                            .value
-                            .session_id = Some(CHILD.into());
+                        dedupe::with_tmux_entries_for_tests(
+                            &h.context.tmux_session,
+                            |binding, _| {
+                                binding.as_mut().unwrap().0.session_id = Some(CHILD.into())
+                            },
+                        );
                     }
                     _ => unreachable!(),
                 }
@@ -217,11 +201,9 @@ fn detailed_hold_reason_separates_history_and_canary_fallbacks() {
         h.send("session-start", ID, Value::Null, None);
         fs::remove_file(&h.canonical).unwrap();
         if reason != "execution_history_unreadable" {
-            STATE
-                .lock()
-                .unwrap()
-                .channel_by_tmux
-                .remove(&h.context.tmux_session);
+            dedupe::with_tmux_entries_for_tests(&h.context.tmux_session, |_, channel| {
+                *channel = None
+            });
         }
         if reason != "proof_context_missing" {
             fs::remove_file(h.marker()).unwrap();
