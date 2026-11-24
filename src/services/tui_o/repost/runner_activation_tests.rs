@@ -1,24 +1,39 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use chrono::Utc;
+use sqlx::PgPool;
+use tokio::time::Instant;
 
-use super::*;
+use super::admission_tests::{BOT, CHANNEL, admit_on, sidecar};
+use super::repost_probe::{Fake, absent_evidence};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::krx_tui_o_test_host::admission_tests::{
-    BOT, CHANNEL, admit_on, sidecar,
-};
-use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, absent_evidence};
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::repost::identity::{marker, payload_sha256, piece_of};
-use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
-use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
-use crate::services::tui_o::repost::o_piece_delivery::DeliveryRow;
+use crate::services::tui_o::repost::admission::OriginalGate;
+use crate::services::tui_o::repost::dispatch::{
+    self, Admission, DispatchPermit, GuardReason, RepostWriter,
+};
+use crate::services::tui_o::repost::identity::{PieceKey, marker, payload_sha256, piece_of};
+use crate::services::tui_o::repost::io::probe::evidence::{
+    EvidenceScope, FIRST_PASS_AFTER, RunScope, SECOND_PASS_AFTER,
+};
+use crate::services::tui_o::repost::io::probe::matcher::{AttributionSnapshot, ObservedMessage};
+use crate::services::tui_o::repost::io::probe::{ProbeRead, ProbeSession, Progress};
+use crate::services::tui_o::repost::o_piece_attempts;
+use crate::services::tui_o::repost::o_piece_delivery::{self, DeliveryRow};
+use crate::services::tui_o::repost::provenance::{ProvenanceEntry, ProvenanceLog};
+use crate::services::tui_o::repost::runner::{
+    ChannelTurn, DispatchIntent, RepostHook, Runner, TurnWriter,
+};
 use crate::services::tui_o::repost::send::{
-    AttemptGuard, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds, WireOutcome, hand_over,
+    AttemptGuard, BoundedTransport, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds,
+    WireOutcome, hand_over,
 };
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::tui_o::store::ledger::LedgerEntry;
+use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceRecord};
 use crate::services::tui_o::store::{ChannelStore, Initialized, OEra, OStore, StoreConfig};
 
 #[path = "backlog_tests.rs"]
@@ -310,7 +325,7 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
     let opened = Arc::new(AtomicUsize::new(0));
     let mut runner = Runner::new(pool.clone(), BOT, run());
     runner
-        .probes
+        .probes_mut()
         .insert(ready.clone(), ready_probe(&pool, &ready, &io).await);
     let mut turn = ChannelTurn::new(
         runner,
@@ -327,14 +342,14 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
     if broken && matches!(failure, Failure::Open) {
         let blocked = dir.path().join("blocked-parent");
         std::fs::write(&blocked, b"a file is not a sidecar directory").unwrap();
-        turn.sidecar = blocked.join("provenance.jsonl");
+        *turn.sidecar_mut() = blocked.join("provenance.jsonl");
     } else {
         if broken && matches!(failure, Failure::Activation) {
             log.fail_after = Some(0);
         }
-        turn.log = Some(log);
+        *turn.log_slot() = Some(log);
     }
-    turn.run(&mut writer).await;
+    turn.turn(&mut writer).await;
     assert_eq!(io.posts.load(Ordering::SeqCst), usize::from(!broken));
     assert_eq!(writer.prepared, usize::from(!broken));
     assert_eq!(opened.load(Ordering::SeqCst), usize::from(!broken));
@@ -362,7 +377,16 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
             );
         }
         if matches!(failure, Failure::IdentityConflict) {
-            conflict_turns(&mut turn, &mut writer, &io, &opened, &candidate, &ready).await;
+            conflict_turns(
+                pool.clone(),
+                &mut turn,
+                &mut writer,
+                &io,
+                &opened,
+                &candidate,
+                &ready,
+            )
+            .await;
         }
     }
     pool.close().await;
@@ -370,6 +394,7 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
 }
 
 async fn conflict_turns(
+    pool: PgPool,
     turn: &mut ChannelTurn<Io>,
     writer: &mut Writer,
     io: &Io,
@@ -377,7 +402,6 @@ async fn conflict_turns(
     candidate: &PieceKey,
     ready: &PieceKey,
 ) {
-    let pool = turn.runner.pool.clone();
     let record = writer.store.ledger().piece(0).unwrap().clone();
     let original = o_piece_attempts::attempts(&pool, candidate).await.unwrap();
     let ready_original = o_piece_attempts::attempts(&pool, ready).await.unwrap();
@@ -388,8 +412,8 @@ async fn conflict_turns(
         .collect();
 
     // Reopen the same durable sidecar; an unresolved collision must hold the next turn too.
-    turn.log = None;
-    turn.run(writer).await;
+    *turn.log_slot() = None;
+    turn.turn(writer).await;
     assert_eq!(
         io.posts.load(Ordering::SeqCst),
         0,
@@ -407,7 +431,7 @@ async fn conflict_turns(
         original
     );
     assert_eq!(
-        turn.log
+        turn.log_slot()
             .as_ref()
             .unwrap()
             .state()
@@ -416,18 +440,18 @@ async fn conflict_turns(
         [0]
     );
     assert_eq!(
-        turn.original_gate(0, record.clone()).await,
+        RepostHook::<Writer>::original(turn, 0, record.clone()).await,
         OriginalGate::Admitted
     );
 
     let repaired = repair_identity_conflict(&pool, candidate, &record).await;
-    turn.log = None;
-    turn.run(writer).await;
+    *turn.log_slot() = None;
+    turn.turn(writer).await;
     assert_eq!(io.posts.load(Ordering::SeqCst), 1);
     assert_eq!(writer.prepared, 1);
     assert_eq!(opened.load(Ordering::SeqCst), 1);
     assert!(
-        turn.log
+        turn.log_slot()
             .as_ref()
             .unwrap()
             .state()
@@ -447,7 +471,7 @@ async fn conflict_turns(
         .collect();
     assert_eq!(ready_slots, [0, 1]);
     assert_eq!(
-        turn.original_gate(0, record.clone()).await,
+        RepostHook::<Writer>::original(turn, 0, record.clone()).await,
         OriginalGate::Admitted
     );
     let retained: BTreeSet<_> = o_piece_delivery::admitted_keys(&pool, CHANNEL)
@@ -572,15 +596,15 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
             if broken && matches!(cause, OriginalFailure::Open) {
                 let blocked = dir.path().join("blocked-parent");
                 std::fs::write(&blocked, b"file").unwrap();
-                turn.sidecar = blocked.join("provenance.jsonl");
+                *turn.sidecar_mut() = blocked.join("provenance.jsonl");
             } else if broken && matches!(cause, OriginalFailure::Activation) {
-                let mut log = ProvenanceLog::open(&turn.sidecar).unwrap();
+                let mut log = ProvenanceLog::open(turn.sidecar_mut()).unwrap();
                 log.fail_after = Some(0);
-                turn.log = Some(log);
+                *turn.log_slot() = Some(log);
             } else {
-                turn.log(0).unwrap().fail_after = broken.then_some(0);
+                turn.fail_log_after(0, broken.then_some(0));
             }
-            let gate = turn.original_gate(0, record).await;
+            let gate = RepostHook::<Writer>::original(&mut turn, 0, record).await;
             assert_eq!(
                 gate,
                 if broken {
@@ -601,7 +625,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
             assert_eq!(io.posts.load(Ordering::SeqCst), usize::from(!broken));
             if broken {
                 // Reopening cuts the failed append and writes the same key's durable intent.
-                turn.sidecar = dir.path().join("provenance.jsonl");
+                *turn.sidecar_mut() = dir.path().join("provenance.jsonl");
                 let retry = PieceRecord {
                     notice_origin: None,
                     local_retry: None,
@@ -615,11 +639,11 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                     outcome: None,
                 };
                 assert_eq!(
-                    turn.original_gate(0, retry).await,
+                    RepostHook::<Writer>::original(&mut turn, 0, retry).await,
                     OriginalGate::SendPgManaged
                 );
                 assert_eq!(
-                    turn.log
+                    turn.log_slot()
                         .as_ref()
                         .unwrap()
                         .state()
@@ -663,8 +687,11 @@ async fn d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable
         outcome: None,
     };
     assert!(ProvenanceEntry::intent(0, &record, 0).is_none());
-    assert_eq!(turn.original_gate(0, record).await, OriginalGate::SendLocal);
-    assert!(turn.log.is_none());
+    assert_eq!(
+        RepostHook::<Writer>::original(&mut turn, 0, record).await,
+        OriginalGate::SendLocal
+    );
+    assert!(turn.log_slot().is_none());
     pool.close().await;
     db.drop().await;
 }

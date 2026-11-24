@@ -47,5 +47,8 @@ pub(crate) mod repost_probe;
 #[path = "../tui_o/writer/repost_turn_tests.rs"]
 mod repost_turn;
 #[cfg(test)]
+#[path = "../tui_o/repost/runner_activation_tests.rs"]
+mod runner_activation;
+#[cfg(test)]
 #[path = "../tui_o/repost/runner_tests.rs"]
 mod runner_tests;
