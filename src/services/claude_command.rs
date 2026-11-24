@@ -155,7 +155,7 @@ impl ClaudeCommandBuilder {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Legacy)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_future_for_test(
         binary: &ClaudeBinary,
         resolution: &BinaryResolution,

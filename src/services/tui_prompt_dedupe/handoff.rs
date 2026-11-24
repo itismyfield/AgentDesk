@@ -894,7 +894,7 @@ pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Pa
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn held_handoff_inputs_for_tests(provider: &str, tmux: &str) -> Option<usize> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state

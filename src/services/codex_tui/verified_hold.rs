@@ -6,7 +6,7 @@ use crate::services::{
 };
 use std::{sync::Arc, time::Duration};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static HOLD_ENTERED_FOR_TESTS: std::sync::Mutex<
     Option<std::sync::mpsc::Sender<String>>,
 > = std::sync::Mutex::new(None);

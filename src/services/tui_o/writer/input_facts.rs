@@ -572,7 +572,7 @@ impl InputFacts {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn observe_native(&mut self) -> Result<(), String> {
         if !matches!(&self.capture, Capture::Full(_))
             || self.capture.captured_through() != 0
@@ -585,7 +585,7 @@ impl InputFacts {
         Ok(())
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn native_evidence(
         &self,
         registrations: &[native::Registration],

@@ -96,7 +96,7 @@ impl PreparedWrite<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod rename_fault {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;

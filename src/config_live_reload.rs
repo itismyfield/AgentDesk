@@ -299,7 +299,7 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct TestLiveGuard {
     previous: Option<Arc<Config>>,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
@@ -331,7 +331,7 @@ impl Drop for TestLiveGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_live_guard(
     lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 ) -> TestLiveGuard {
@@ -344,7 +344,7 @@ pub(crate) fn test_live_guard(
 }
 
 /// Capture LIVE while an enclosing fixture keeps the environment lock.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
     crate::config::test_env_lock::assert_shared_test_env_lock_held();
     TestLiveGuard {

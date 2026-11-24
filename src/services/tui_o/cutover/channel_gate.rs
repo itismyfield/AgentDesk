@@ -72,7 +72,7 @@ pub(crate) fn o_owns_tui_output_for_channel(
     o_owns_tui_output_for_channel_reserving(channel_id, kind).map(|claimed| claimed.owned)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,

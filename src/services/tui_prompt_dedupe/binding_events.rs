@@ -394,7 +394,7 @@ pub(crate) fn admit_committed_seq<R>(
     Ok((!writer.poisoned && !writer.tainted && writer.last_seq == expected).then(hand_off))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn admission_mutex_held_for_tests() -> bool {
     matches!(LOGS.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }
@@ -1036,18 +1036,18 @@ fn fault(step: &str) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_root() -> Option<PathBuf> {
     TEST_ROOT.with(|slot| slot.borrow().clone())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_test_root(root: Option<&Path>) {
     TEST_ROOT.with(|slot| *slot.borrow_mut() = root.map(Path::to_path_buf));
 }
 
 /// Drops what this process remembers about `channel_id`, as a restart would.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn forget_channel_for_tests(channel_id: u64) {
     if let Ok(Some(path)) = log_path(channel_id) {
         let mut logs = lock_logs();

@@ -36,7 +36,7 @@ use crate::domain::file_sync::PARENT_DIR_FSYNC_FLUSHES;
 use crate::services::session_host::surface_policy::InitScope;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable::fault;
 
 pub const STORE_DIR_NAME: &str = "o_store";
@@ -487,7 +487,7 @@ impl ChannelStore {
     }
 
     /// Small segments let a test see GC keep or drop a source's older records.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_segment_max_for_tests(&mut self, max: u64) {
         self.segment_max = max;
     }
@@ -887,7 +887,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ChannelStore {
     /// Shrinks the segment and spool limits so a test can fill the spool.
     pub(crate) fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {

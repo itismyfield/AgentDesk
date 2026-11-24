@@ -62,7 +62,7 @@ impl RetiredProbe {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_os(mut self, os: Arc<dyn ProcessOs>) -> Self {
         self.os = os;
         self

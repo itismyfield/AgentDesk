@@ -29,7 +29,7 @@ pub(super) fn note_work(owed: usize, unsealed: bool) {
     WORK.1.store(unsealed, Ordering::SeqCst);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn work_for_tests() -> (usize, bool) {
     (WORK.0.load(Ordering::SeqCst), WORK.1.load(Ordering::SeqCst))
 }

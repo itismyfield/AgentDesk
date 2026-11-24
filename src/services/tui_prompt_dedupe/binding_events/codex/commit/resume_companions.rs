@@ -13,7 +13,7 @@ pub(crate) fn after_companion_for_tests(action: impl FnOnce() + 'static) {
     AFTER_APPEND.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn corrupt_companion_candidate_for_tests() {
     CORRUPT_SEQ.with(|slot| slot.set(true));
 }

@@ -95,12 +95,12 @@ thread_local! {
     static SNAPSHOTS: std::cell::RefCell<Option<Vec<Snapshot>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) fn capture() {
     SNAPSHOTS.with_borrow_mut(|snapshots| *snapshots = Some(Vec::new()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) fn snapshots() -> Vec<Snapshot> {
     SNAPSHOTS.with_borrow(|snapshots| snapshots.clone().unwrap_or_default())
 }

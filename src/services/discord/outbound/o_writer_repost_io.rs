@@ -55,7 +55,7 @@ impl RepostHttp {
     }
 
     /// Sends to `base` in place of `https://discord.com`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn at(http: Arc<serenity::Http>, base: String) -> Result<Self, Unsupported> {
         Self::build(http, Some(base))
     }

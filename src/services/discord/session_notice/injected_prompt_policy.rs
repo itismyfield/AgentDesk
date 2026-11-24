@@ -51,7 +51,7 @@ impl InjectedPromptClass {
     }
 
     /// Whether this injected class should keep the provider-output bridge tail.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services::discord) fn still_delivers_assistant_output(self) -> bool {
         !matches!(
             self,

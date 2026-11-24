@@ -23,7 +23,7 @@ mod channel_lookup_tests;
 mod child_funnel_tests;
 #[cfg(all(test, unix))]
 mod thread_child_record_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };

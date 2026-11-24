@@ -492,7 +492,7 @@ pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()

@@ -25,7 +25,7 @@ impl Drop for Installed {
         CURRENT.with(|current| *current.borrow_mut() = self.0.take());
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
     Installed(CURRENT.with(|current| {
         current.replace(Some(Capability {
@@ -122,9 +122,9 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use commit_barrier::{COMMIT_BARRIER, CommitBarrier, before_commit};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod commit_barrier {
     use uuid::Uuid;
     pub(crate) struct CommitBarrier {

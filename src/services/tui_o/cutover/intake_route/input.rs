@@ -173,7 +173,7 @@ static PROBE: std::sync::Mutex<Option<InputProbe>> = std::sync::Mutex::new(None)
 #[cfg(test)]
 pub(crate) struct ProbeGuard;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn install_probe(probe: InputProbe) -> ProbeGuard {
     let mut slot = PROBE.lock().unwrap();
     assert!(slot.is_none(), "an O input probe is already installed");

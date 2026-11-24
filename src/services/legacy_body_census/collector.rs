@@ -256,7 +256,7 @@ fn evaluate_host(value: &mut Value, now: i64) {
     value["local_evaluation"] = report;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Collector {
     pub(crate) fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
         let mut value = self.collect(root, current, now, None);

@@ -13,7 +13,7 @@ pub(crate) mod usage_footer;
 pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
 
 /// Enumerate channel-named files with each store's existing channel loader.
@@ -337,7 +337,7 @@ impl ProcessGenerationAllocation {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_generation_publication {
     use super::*;
 
@@ -408,7 +408,7 @@ mod test_generation_publication {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use test_generation_publication::{
     ADVANCED as ADVANCED_ROUTE_FOR_TESTS,
     allocate_and_publish as allocate_and_publish_process_generation_for_tests,
@@ -778,7 +778,7 @@ pub fn next_process_generation() -> u64 {
     load_generation().saturating_add(1)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_process_generation_for_tests(generation: Option<u64>) {
     let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
     *test_generation_override() = generation;
@@ -950,7 +950,7 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     prepared.publish().map(|Published| ()).map_err(failed)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::domain::atomic_write::rename_fault;
 
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
