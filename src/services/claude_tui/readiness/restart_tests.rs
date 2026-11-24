@@ -205,6 +205,18 @@ fn trailing_data_flow_records_keep_the_hard_terminal() {
     finished(&r);
     (0..3).for_each(|_| data_flow(&r));
     assert!(r.ready());
+    // A resumed or compacted session's derivation and re-attached context are no turn records.
+    r.append(json!({"type":"derived-from","sessions":["s0"],"v":1}));
+    assert!(r.ready(), "derived-from");
+    for (kind, event) in [
+        ("file", None),
+        ("compact_file_reference", None),
+        ("invoked_skills", None),
+        ("hook_success", Some("SessionStart")),
+    ] {
+        r.append(json!({"type":"attachment","attachment":{"type":kind,"hookEvent":event}}));
+        assert!(r.ready(), "{kind}");
+    }
 }
 
 #[test]

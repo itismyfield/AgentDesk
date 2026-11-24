@@ -192,9 +192,10 @@ fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
 fn a_finished_reply_stays_idle_past_its_recap_but_not_past_a_scheduled_task() {
     let data_flow = r#"{"type":"data-flow-records","records":[{"response_id":"r1"}],"v":1}"#;
     let recap = r#"{"type":"system","subtype":"away_summary","content":"recap","uuid":"s3"}"#;
+    let derived = r#"{"type":"derived-from","sessions":["s0"],"v":1}"#;
     let task = r#"{"type":"system","subtype":"scheduled_task_fire","uuid":"s4"}"#;
     for (tail, idle) in [
-        (&[data_flow][..], true),
+        (&[data_flow, derived][..], true),
         (&[data_flow, recap], true),
         (&[recap, task], false),
     ] {
