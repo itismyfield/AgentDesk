@@ -69,12 +69,11 @@ fn ask_body(title: &str) -> Value {
     ]})
 }
 
-async fn count(pool: &sqlx::PgPool, table: &str) -> i64 {
-    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-        .fetch_one(pool)
-        .await
-        .unwrap()
+async fn count(pool: &sqlx::PgPool, sql: &'static str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
+
+const REQUESTS: &str = "SELECT COUNT(*) FROM decision_requests";
 
 /// An ask is stored once per idempotency key, only the capability's hash is kept, another
 /// capability or payload cannot take the key, and nothing is queued for Discord.
@@ -115,7 +114,10 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     .await
     .unwrap();
     assert_eq!(leaked, 0, "the capability itself is stored");
-    assert_eq!(count(&pool, "decision_options").await, 2);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM decision_options").await,
+        2
+    );
 
     // The same key, payload and capability is the same request.
     let (status, again) = call(&app, post, Some(&mine), &ask_body("질문")).await;
@@ -130,7 +132,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
         assert_eq!(status, StatusCode::CONFLICT, "{refused}");
         assert_eq!(refused["error"], "idempotency_conflict");
     }
-    assert_eq!(count(&pool, "decision_requests").await, 1);
+    assert_eq!(count(&pool, REQUESTS).await, 1);
 
     // A request without a capability, with one option or for an unknown agent stores nothing.
     let (status, _) = call(&app, post, None, &ask_body("질문")).await;
@@ -144,7 +146,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     stranger["agent_id"] = json!("no-such-agent");
     let (status, _) = call(&app, post, Some(&mine), &stranger).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(count(&pool, "decision_requests").await, 1);
+    assert_eq!(count(&pool, REQUESTS).await, 1);
 
     // The read shows the question and never the capability or its hash.
     let read = ("GET", format!("/api/decisions/{id}"));
@@ -158,7 +160,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let (status, _) = call(&app, ("GET", missing.as_str()), None, &json!(null)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(
-        count(&pool, "message_outbox").await,
+        count(&pool, "SELECT COUNT(*) FROM message_outbox").await,
         0,
         "an ask posts nothing"
     );
