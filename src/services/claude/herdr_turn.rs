@@ -212,16 +212,26 @@ pub(crate) trait HerdrTurnPorts {
 /// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
 pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
-/// The source a prompt goes to.
-pub(crate) struct Attached {
-    nonce: String,
-    session_id: String,
-    transcript: PathBuf,
-    target: HerdrTarget,
-    bound: bool,
-    awaiting_clear: bool,
-    /// The record's socket and pane, which the gate fences as `socket#pane`.
-    physical: Option<(String, String)>,
+#[cfg(not(any(test, feature = "test-support")))]
+use attached::Attached;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use attached::Attached;
+
+/// Defined once here; the uses above name it only inside `herdr_turn` outside test builds.
+mod attached {
+    use super::{HerdrTarget, PathBuf};
+
+    /// The source a prompt goes to.
+    pub(crate) struct Attached {
+        pub(super) nonce: String,
+        pub(super) session_id: String,
+        pub(super) transcript: PathBuf,
+        pub(super) target: HerdrTarget,
+        pub(super) bound: bool,
+        pub(super) awaiting_clear: bool,
+        /// The record's socket and pane, which the gate fences as `socket#pane`.
+        pub(super) physical: Option<(String, String)>,
+    }
 }
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.

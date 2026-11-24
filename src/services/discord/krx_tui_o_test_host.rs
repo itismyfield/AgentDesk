@@ -1,5 +1,5 @@
 //! KRX (tui_o) tests that call discord-layer items, declared here so they leave the KRX crate.
-//! Mounted ungated, so each `mod` keeps its original declaration's exact cfg; files stay put.
+//! Mounted under the test gate; each `mod` keeps its original declaration's exact cfg; files stay put.
 
 #[cfg(all(test, unix))]
 #[path = "../tui_o/writer/input_notices/admission_tests.rs"]

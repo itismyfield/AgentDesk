@@ -1,5 +1,5 @@
 //! KRX session_host tests that call discord-layer items, declared here so they leave the KRX crate.
-//! Mounted ungated: each `mod` carries its original cfg chain; every `#[path]` file stays in place.
+//! Mounted under the test gate; each `mod` carries its original cfg chain; `#[path]` files stay put.
 
 #[cfg(test)]
 #[path = "../session_host/herdr_gate_tests.rs"]

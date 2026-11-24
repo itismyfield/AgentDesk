@@ -26,6 +26,10 @@ use followup_reader::send_followup_to_tmux;
 mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
+#[cfg(unix)]
+mod launch_script;
+#[cfg(unix)]
+use launch_script::CodexTuiLaunchScript;
 mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(test, unix))]
@@ -1253,18 +1257,6 @@ fn cleanup_existing_codex_tui_session(
     if !pane_already_stopped {
         crate::services::session_host::TmuxHost.kill(tmux_session_name, reason_text);
     }
-}
-
-/// Paths and timing produced while preparing a Codex Direct TUI launch script.
-#[cfg(unix)]
-pub(crate) struct CodexTuiLaunchScript {
-    fence: crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
-    prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
-    script_path: String,
-    owner_path: String,
-    rollout_modified_since: std::time::SystemTime,
-    /// The Discord handoff reserved before launch, held until the tail returns.
-    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the
