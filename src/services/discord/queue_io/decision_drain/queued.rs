@@ -30,9 +30,8 @@ pub(crate) enum Dequeued {
     Unread,
 }
 
-/// Checks a dequeued original against the event PG approved and takes the journal its start runs
-/// under. A journal an earlier attempt left on an original that is still queued proves no
-/// delivery, so that event closes unknown instead of running again.
+/// Checks a dequeued original against its PG event and takes the journal its start runs under.
+/// A journal an earlier attempt left on a still queued original closes unknown, never reruns.
 pub(crate) async fn begin(pool: Option<&PgPool>, channel: u64, entry: &Intervention) -> Dequeued {
     use AttemptState::{MayHaveSent, UnknownClosed};
     let Some(origin) = origin(entry) else {

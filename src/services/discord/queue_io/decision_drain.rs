@@ -229,9 +229,8 @@ async fn settle(
     settle_as(pool, mailbox, row, written, None).await
 }
 
-/// Settles one event from its owner's records and its turn's receipt; `written` is the result
-/// of the attempt that just ran. A waiting or still running event is left as it is, and a stale
-/// one ends only while `run` may still claim its holder gone.
+/// Settles one event from its owner's records and its turn's receipt; `written` is the attempt
+/// that just ran. A waiting or running event stays, and a stale one ends only under `run`.
 async fn settle_as(
     pool: &PgPool,
     mailbox: Option<&ChannelMailboxHandle>,
@@ -297,9 +296,8 @@ async fn settle_as(
     }
 }
 
-/// Runs the owner's idle handoff of `front`. A Decision front is first checked against the event
-/// PG approved and journaled there: an unapproved or closed one is removed unrun, and the
-/// handoff's result settles the event.
+/// Runs the owner's idle handoff of `front`. A Decision front is first checked against its PG
+/// event and journaled: an unapproved or closed one leaves unrun, and the result settles it.
 #[cfg(unix)]
 pub(crate) async fn hand_idle(
     pool: Option<&PgPool>,
@@ -378,11 +376,8 @@ pub(crate) async fn hand_idle(
     result
 }
 
-/// Settles every unsettled event of `channel` from its owner's records, then removes each
-/// original the owner still holds of an event PG already closed: a close recorded before the
-/// owner held the channel, or whose removal failed, is found again here. The owner's requeue and
-/// notice drain run this first. Returns the originals whose removal is still owed, so their
-/// notices wait while every other input's is posted.
+/// Settles the channel's open events, then removes each original its owner still holds of an
+/// event PG closed. Returns the originals whose removal failed: only their notices wait.
 pub(crate) async fn settle_channel(
     pool: &PgPool,
     mailbox: &ChannelMailboxHandle,

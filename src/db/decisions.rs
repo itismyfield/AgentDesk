@@ -257,9 +257,8 @@ pub(crate) async fn close(
     Ok(moved.rows_affected() == 1)
 }
 
-/// Moves a row from `from` to `to` only while the run that last moved it is over, as `run` may
-/// claim it: the same node moved it before this start, or its node is no longer listed online.
-/// A holder that is alive, or that moved the row since it was read, keeps its attempt.
+/// Moves a row only while its holder's run is over for `run`: the same node moved it before this
+/// start, or its node is no longer listed online. A live holder keeps its attempt.
 pub(crate) async fn end_abandoned(
     pool: &PgPool,
     event_id: Uuid,

@@ -65,9 +65,8 @@ impl Owner {
         tickets
     }
 
-    /// Ends the event's original unrun: a queued copy leaves the queue alone, a kept one leaves
-    /// with its body whatever kept it, and every record of it stops owing its notice. An attempted
-    /// head is not touched, and a unit that also carries another input stays kept.
+    /// Ends the event's original unrun: its queued or kept copy leaves with its body and no record
+    /// of it owes a notice. An attempted head and a unit carrying another input are not touched.
     pub(crate) fn discard_decision(&mut self, message: u64, origin: &str) -> Result<(), String> {
         let queued = (self.snapshot.items.iter())
             .chain((self.snapshot.retained_inputs.iter()).flat_map(|entry| entry.input.members()))
