@@ -225,7 +225,7 @@ fn run(case: Case) {
                 );
                 if !matches!(case, Case::Capture) {
                     let pane = attached
-                        .target
+                        .target_for_test()
                         .capture_ansi(-80)
                         .expect("owned draft capture exists");
                     assert!(!readiness::empty_draft(&pane));
