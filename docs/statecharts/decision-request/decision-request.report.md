@@ -138,3 +138,37 @@ P2-4 수정(정상 보존 경로):
 모델과 코드가 다른 곳: 코드는 시작 응답을 Observe로 쓰지 않으므로 non-owner·정상화 시작은 receipt가 올 때까지
 `may_have_sent`다(producer 활성 전까지 이 receipt 조회는 owner drain·부팅 때만 돈다). 원본 식별은 event의 안정
 message id와 source origin_id로 하며, 그 밖의 id로 들어간 원본은 찾지 못해 `Gone`으로 읽는다(운영 진입은 `start::original`의 안정 id만 씀).
+
+## 조각 2c — 실행권 holder·종결 뒤 정리·non-owner 큐 (코드 좌표)
+
+좌표는 조각 2c head 기준이다. producer는 여전히 없다.
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| PeerRecover(신규, `tookLive`) · CloseUnknown · CloseAbandoned의 종결 조건 | `src/db/decisions.rs` `end_abandoned`(:263), 판정 `unsettled`(:317), holder 기록 `holder`(:155)·`Run`(:161). 호출 `src/services/discord/queue_io/decision_drain.rs` `settle_as`(:235)의 `row.stale` 분기 | 행을 옮길 때마다 holder(worker_nodes instance id)를 적는다. 종결 UPDATE가 "같은 노드가 이번 실행 시작 전에 옮긴 행" 또는 "holder 노드가 online이 아님"을 다시 확인한다. 시각만으로는 닫지 않는다 |
+| Crash/Boot의 실행 경계 | `decision_drain.rs` `run`(:54). 묻는 곳: `recover_boot`(:450), `hand_idle`(:304), `decision_target.rs:208`(예약 전), `decision_drain/queued.rs` `begin`(:36) | 실행 시작 시각은 먼저 묻는 쪽이 한 번 고정한다. 이 process가 옮긴 행은 그 뒤 시각이라 자기 부팅 복구가 닫지 않는다 |
+| `kept`(신규) · CloseUnknown·Finalize의 `done` 선택 | `decision_drain.rs` `discard`(:131) — owner가 없거나 snapshot commit이 실패하면 원본이 남는다 | PG 종결(실행권)과 owner 원본 제거(정리)는 두 단계다 |
+| Sweep(신규) | `decision_drain.rs` `settle_channel`(:386) → `queued_head/v2/decision.rs` `decision_tickets`(:56) → `src/db/decisions.rs` `closed_under`(:356) → `discard_decision`(:71) | owner가 아직 든 Decision ticket을 종결 event와 대조해 requeue·안내 전에 그 원본만 지운다. ticket이 없고 승인 event도 만난 적 없으면 PG를 읽지 않는다 |
+| Notice(대조) · OtherNotice | `input_owner/notice.rs` `owed`의 `withheld`(:44), 호출 `:16`·`:128` | 정리가 실패한 Decision 원본의 안내만 보류한다. 다른 입력의 안내는 그대로 나간다 |
+| Finalize의 원본 제거(P2-3) | `queued_head/v2/decision.rs` `discard_decision`(:71)의 `gone`(:86) | Unconfirmed·시작 거부·영구 거부로 보관된 Decision 원본을 본문째 지우고 그 시도의 bind를 닫는다. 다른 입력이 섞인 unit과 물리 작업 중인 head는 그대로 둔다 |
+| Journal의 승인 대조(P2-4) · SelfDeclared 대조 | `decision_drain.rs` `claim_of`(:84), `hand_idle`의 `load_event` 대조(:326), `refuse_unapproved`(:103) | origin·channel·actor·본문이 승인 event와 같을 때만 journal. 근거 없는 Decision 주장은 쓰기 0, event 상태 불변 |
+| DrainCurrent(non-owner) → Journal | `router/intake_dispatch/queued.rs:109` → `decision_drain/queued.rs` `begin`(:36) | 수용 경계에서 대조하고 journal을 잡는다. 닫힌·미승인 원본은 실행하지 않고 큐에 돌려놓지 않는다(`ClosedDecision`). 재시작 drain도 같은 경계를 지난다 |
+| ReleaseHeld(non-owner) | `queued.rs:138`·`:201`·`:252`(수용 단계 복귀), `:428`(시작 뒤 큐 복귀) → `decision_drain/queued.rs` `end`(:86) | 아무것도 쓰지 않고 큐로 돌아간 원본만 may_have_sent→normal_wait |
+| CancelClear · CloseUnknown(non-owner) | `queued.rs:429`·`:430` → `end`(:86). kickoff의 재투입 생략 `queue_dispatch/kickoff.rs:288` | clear는 failed(`cleared`), journal 뒤 오류는 unknown_closed(`queue_start_failed`). 실패한 Decision 시작은 큐에 다시 넣지 않는다 |
+| Observe(non-owner) | `queue_dispatch/kickoff.rs:131` → `decision_drain/queued.rs` `settle_started`(:108) | owner 없는 채널은 kickoff의 턴 경계에서 그 턴의 receipt로 정산한다 |
+| ResolvePresent(busy) 유지 | `queue_io/queued_head_inject.rs:124` | Decision head는 busy pane 붙여넣기 대상에서 빠진다 |
+
+수정 전 RED / 후 GREEN(2c 모델, TLC 1.7.4):
+
+| cfg | Mode(수정 전 동작) | 수정 전 | 수정 후(Fixed) |
+|---|---|---|---|
+| TimeOnlyRecovery | 시각만으로 부팅 복구(P2-1) | `LiveHolderKeeps` 반례: holder가 살아 있는데 다른 노드가 종결 | PASS |
+| NoSweepNotice | 종결 뒤 남은 원본을 다시 찾지 않음(P2-2) | `NoDecisionNotice` 반례: 종결된 Decision의 안내가 나감 | PASS |
+| NoSweep | 같은 Mode의 liveness | `ClosedLeavesNothing` 반례: 종결 뒤 원본이 끝내 남음 | PASS |
+| WideSweep | 정리를 채널 전체로 넓힘(대조) | `OthersKept` 반례: 다른 사용자 원본이 지워짐 | PASS |
+
+Fixed는 `LiveHolderKeeps`·`NoDecisionNotice`·`OthersKept`와 liveness `ClosedLeavesNothing`·`OthersTold`를 더해 통과한다.
+
+모델과 코드가 다른 곳: 모델의 PeerRecover는 holder가 죽은 뒤에만 켜지지만, 코드는 holder 노드가 `worker_nodes`에서
+online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 offline으로 바꾼다). 클러스터를 끈 단일 노드는 instance id가
+하나라서 같은 노드 규칙만 쓴다. Closing 행의 마무리(Finalize)는 holder를 확인하지 않는다 — 원본 제거가 빠져도 Sweep이 다시 찾는다.

@@ -2299,6 +2299,9 @@ src/
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
+│   │   │   ├── decision_drain/
+│   │   │   │   ├── queued.rs
+│   │   │   │   └── queued_tests.rs
 │   │   │   ├── input_owner/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
@@ -2547,6 +2550,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── decision_tests.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
