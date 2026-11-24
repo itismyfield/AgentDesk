@@ -224,42 +224,6 @@ pub(crate) struct Attached {
     physical: Option<(String, String)>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
-impl Attached {
-    /// An attached source built field by field, for tests outside this module.
-    pub(crate) fn for_test(
-        nonce: String,
-        session_id: String,
-        transcript: PathBuf,
-        target: HerdrTarget,
-        bound: bool,
-        awaiting_clear: bool,
-        physical: Option<(String, String)>,
-    ) -> Self {
-        Self {
-            nonce,
-            session_id,
-            transcript,
-            target,
-            bound,
-            awaiting_clear,
-            physical,
-        }
-    }
-
-    pub(crate) fn nonce_for_test(&self) -> &str {
-        &self.nonce
-    }
-
-    pub(crate) fn session_id_for_test(&self) -> &str {
-        &self.session_id
-    }
-
-    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
-        &self.target
-    }
-}
-
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(test, unix))]
 pub(crate) fn owned_prompt_for_tests(

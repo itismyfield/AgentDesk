@@ -222,6 +222,12 @@ pub(crate) fn exhausted_for_test(detail: Option<&str>) -> String {
     exhausted(detail)
 }
 
+/// The fresh prompt readiness attempt limit, for tests outside `claude`.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn claude_tui_fresh_prompt_max_ready_attempts_for_test() -> usize {
+    CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+}
+
 pub(super) fn observe(
     transcript_path_string: &str,
     sender: Sender<StreamMessage>,

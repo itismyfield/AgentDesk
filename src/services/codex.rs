@@ -27,25 +27,24 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::CodexHerdrLaunchable;
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::first_input::{
-    Create, Observe, Submitted, create_for_test, observe_for_test,
-};
 use tui_session_launch::launch_policy::codex_tui_option_args;
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::launch_policy::codex_tui_option_args_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::launch_policy::prepare_codex_herdr_launch_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
 pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use tui_session_launch::{
+    CodexHerdrLaunchable,
+    first_input::{Create, Observe, Submitted, create_for_test, observe_for_test},
+    launch_policy::{
+        codex_tui_option_args_for_test, prepare_codex_herdr_launch_for_test,
+        resolve_codex_binary_for_test,
+    },
+};
 #[cfg(unix)]
 pub(crate) use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
@@ -256,12 +255,6 @@ pub(crate) use crate::services::codex_tui::session::source_observation::SOURCE_M
 pub(crate) use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
-
-/// The resolved Codex binary, for tests outside this module.
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
-    resolve_codex_binary()
-}
 
 fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
@@ -1272,24 +1265,6 @@ pub(crate) struct CodexTuiLaunchScript {
     rollout_modified_since: std::time::SystemTime,
     /// The Discord handoff reserved before launch, held until the tail returns.
     handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
-}
-
-#[cfg(all(any(test, feature = "test-support"), unix))]
-impl CodexTuiLaunchScript {
-    /// The prepared incarnation, for tests outside this module.
-    pub(crate) fn prepared_for_test(
-        &self,
-    ) -> &crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {
-        &self.prepared
-    }
-
-    pub(crate) fn script_path_for_test(&self) -> &str {
-        &self.script_path
-    }
-
-    pub(crate) fn owner_path_for_test(&self) -> &str {
-        &self.owner_path
-    }
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the

@@ -1,5 +1,4 @@
 #![cfg(unix)]
-use crate::services::claude::claude_tui_fresh_prompt_max_ready_attempts_for_test;
 use crate::services::claude::first_input::*;
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};

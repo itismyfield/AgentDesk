@@ -145,10 +145,32 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
     Ok((Some(prepared), resume_root))
 }
 
-/// The TUI argv up to its prompt, for tests outside this module.
+/// The TUI argv up to its prompt, for tests outside `codex`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
     codex_tui_option_args(options)
+}
+
+/// The resolved Codex binary, for tests outside `codex`.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
+    resolve_codex_binary()
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+impl CodexTuiLaunchScript {
+    /// The prepared incarnation, for tests outside `codex`.
+    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+        &self.prepared
+    }
+
+    pub(crate) fn script_path_for_test(&self) -> &str {
+        &self.script_path
+    }
+
+    pub(crate) fn owner_path_for_test(&self) -> &str {
+        &self.owner_path
+    }
 }
 
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.

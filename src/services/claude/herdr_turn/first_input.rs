@@ -17,6 +17,42 @@ impl Submitted {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Attached {
+    /// An attached source built field by field, for tests outside `herdr_turn`.
+    pub(crate) fn for_test(
+        nonce: String,
+        session_id: String,
+        transcript: PathBuf,
+        target: HerdrTarget,
+        bound: bool,
+        awaiting_clear: bool,
+        physical: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            nonce,
+            session_id,
+            transcript,
+            target,
+            bound,
+            awaiting_clear,
+            physical,
+        }
+    }
+
+    pub(crate) fn nonce_for_test(&self) -> &str {
+        &self.nonce
+    }
+
+    pub(crate) fn session_id_for_test(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+        &self.target
+    }
+}
+
 /// Posts the hold's one notice row; keyed by execution and hold, so a repeat returns the row.
 pub(crate) type Notice = dyn Fn(&str) -> Result<i64, String> + Send + Sync;
 
