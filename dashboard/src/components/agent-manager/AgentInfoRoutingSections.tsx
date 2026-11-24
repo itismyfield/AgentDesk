@@ -12,6 +12,7 @@ import {
   DiscordDeepLinkChip,
   DiscordSummaryLabel,
   SectionEmpty,
+  SectionErrorRetry,
   SectionLoading,
   type DetailFold,
 } from "./AgentInfoCardSections";
@@ -33,7 +34,7 @@ const FINISHED_PAGE = 20;
 
 /** Connections: Discord routes and live sessions. Finished sessions (hundreds on busy agents) stay a count and open
  * twenty at a time, without Discord lookups. */
-export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, resolveChannel, resolveParent }: {
+export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, resolveChannel, resolveParent, onRetrySessions }: {
   tr: Translator;
   fold: DetailFold;
   summary: string;
@@ -41,16 +42,24 @@ export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, 
   sessions: Read<{ live: DispatchedSession[]; finished: DispatchedSession[] }>;
   resolveChannel: ChannelLookup;
   resolveParent: ParentLookup;
+  onRetrySessions?: () => void;
 }) {
   const [shown, setShown] = useState(0);
   const live = sessions?.live ?? [];
   const finished = sessions?.finished ?? [];
   const rest = finished.length - shown;
 
+  const closedLabel = (status: DispatchedSession["status"]) => {
+    if (status === "aborted") return tr("중단됨", "Aborted");
+    if (status === "disconnected") return tr("연결 끊김", "Disconnected");
+    return tr("끝남", "Finished");
+  };
+
   const sessionRow = (session: DispatchedSession, open: boolean) => {
     const channelInfo = open ? resolveChannel(session.thread_channel_id ?? null) : null;
     const target = describeDispatchedSession(session, channelInfo, resolveParent(channelInfo));
     const working = isTurnSession(session);
+    const waitingBg = open && session.status === "awaiting_bg";
     return (
       <li key={session.id} className={rowClass}>
         <div className="min-w-0 flex-1">
@@ -62,8 +71,8 @@ export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, 
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           <Badge tone="neutral">{getProviderMeta(session.provider).label}</Badge>
-          <Badge tone={working ? "success" : "neutral"} dot={open} live={working}>
-            {working ? tr("작업중", "Working") : open ? tr("대기", "Idle") : tr("끝남", "Finished")}
+          <Badge tone={working ? "success" : waitingBg ? "warning" : "neutral"} dot={open} live={working}>
+            {working ? tr("작업중", "Working") : waitingBg ? tr("백그라운드 대기", "Background wait") : open ? tr("대기", "Idle") : closedLabel(session.status)}
           </Badge>
         </div>
       </li>
@@ -99,8 +108,14 @@ export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, 
       ) : null}
       {sessions === undefined ? (
         <SectionLoading label={tr("불러오는 중...", "Loading...")} />
+      ) : sessions === null ? (
+        <SectionErrorRetry
+          message={tr("세션을 불러오지 못했어요", "Could not load sessions")}
+          retryLabel={tr("다시 시도", "Retry")}
+          onRetry={onRetrySessions}
+        />
       ) : live.length === 0 ? (
-        <SectionEmpty>{sessions === null ? tr("세션을 불러오지 못했어요", "Could not load sessions") : tr("지금 열린 세션이 없어요", "No open sessions right now")}</SectionEmpty>
+        <SectionEmpty>{tr("지금 열린 세션이 없어요", "No open sessions right now")}</SectionEmpty>
       ) : (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">{live.map((session) => sessionRow(session, true))}</ul>
       )}

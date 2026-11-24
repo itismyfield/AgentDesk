@@ -1,78 +1,127 @@
+import { z } from "zod";
+import { request } from "../../api/httpClient";
 import type { Agent, DispatchedSession } from "../../types";
 import type { PersonaState } from "../AgentPersona";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
-import type { HomeAgentState } from "../home/homeModel";
+import type { Translator } from "../agent-manager/types";
+import { agentStateLabel, type HomeAgentState } from "../home/homeModel";
 
 export const STALE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
+export const STALE_ACTIVE_MS = 30 * 60 * 1000;
+export const LIVE_SESSION_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
+
+const sessionOutputSchema = z.object({
+  recent_output: z.string(), backend: z.string(), available: z.boolean(),
+  unavailable_reason: z.string().nullish(), output_format: z.string(), captured_at_ms: z.number(),
+});
+const reconcileSchema = z.object({
+  ok: z.boolean(), session_key: z.string().optional(), reconciled: z.boolean(), status: z.string().optional(), reason: z.string().optional(),
+});
+
+export type SessionOutputSnapshot = z.infer<typeof sessionOutputSchema>;
+export type ReconcileStaleResult = z.infer<typeof reconcileSchema>;
+
+export const fetchSessionOutput = (id: number | string, lines = 80, signal?: AbortSignal) =>
+  request(`/api/sessions/${encodeURIComponent(id)}/output?lines=${lines}`, { signal, cache: "no-store", suppressErrorToast: true, maxRetries: 0 }, sessionOutputSchema);
+
+export const reconcileStaleSessionTurn = (sessionKey: string) =>
+  request(`/api/sessions/${encodeURIComponent(sessionKey)}/reconcile-stale-turn`, { method: "POST", suppressErrorToast: true, maxRetries: 0 }, reconcileSchema);
 
 export function normalizeTimestamp(value: unknown): number | null {
   if (value == null) return null;
-
-  const normalizeEpoch = (epoch: number): number | null => {
-    if (!Number.isFinite(epoch) || epoch <= 0) return null;
-    return epoch < 1e12 ? Math.trunc(epoch * 1000) : Math.trunc(epoch);
-  };
-
-  if (typeof value === "number") return normalizeEpoch(value);
-
+  const toMs = (epoch: number) => (!Number.isFinite(epoch) || epoch <= 0 ? null : epoch < 1e12 ? Math.trunc(epoch * 1000) : Math.trunc(epoch));
+  if (typeof value === "number") return toMs(value);
+  if (value instanceof Date) return toMs(value.getTime());
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) return null;
-
     const numeric = Number(trimmed);
-    if (Number.isFinite(numeric)) return normalizeEpoch(numeric);
-
+    if (Number.isFinite(numeric)) return toMs(numeric);
     const parsed = Date.parse(trimmed);
     return Number.isFinite(parsed) ? parsed : null;
   }
-
-  if (value instanceof Date) {
-    return normalizeEpoch(value.getTime());
-  }
-
   return null;
 }
 
-/** Home's words for a live session: a turn is working, a background wait is background, anything else rests. */
-export function sessionState(s: DispatchedSession): Extract<HomeAgentState, "working" | "background" | "resting"> {
+export const isLiveSessionStatus = (status: string) => LIVE_SESSION_STATUSES.has(status);
+export type SessionDisplayState = Extract<HomeAgentState, "working" | "background" | "resting"> | "closed";
+
+/** Home's words for live sessions; statuses outside `LIVE_SESSION_STATUSES` (`disconnected`, `aborted`, etc.) stay `closed`. */
+export function sessionState(s: DispatchedSession): SessionDisplayState {
+  if (!isLiveSessionStatus(s.status)) return "closed";
   if (s.status === "working" || s.status === "turn_active") return "working";
   return s.status === "awaiting_bg" ? "background" : "resting";
 }
 
-const PERSONA: Record<ReturnType<typeof sessionState>, PersonaState> = { working: "working", background: "waiting", resting: "idle" };
+export function sessionStateText(s: DispatchedSession, tr: Translator): string {
+  const state = sessionState(s);
+  if (state !== "closed") return agentStateLabel(state, tr);
+  return s.status === "aborted" ? tr("중단됨", "Aborted") : tr("연결 끊김", "Disconnected");
+}
 
-export function sessionPersona(s: DispatchedSession): {
-  agent: Pick<Agent, "id" | "name" | "avatar_emoji" | "department_color">;
-  state: PersonaState;
-} {
+const PERSONA: Record<SessionDisplayState, PersonaState> = { working: "working", background: "waiting", resting: "idle", closed: "offline" };
+
+export function sessionPersona(s: DispatchedSession): { agent: Pick<Agent, "id" | "name" | "avatar_emoji" | "department_color">; state: PersonaState } {
   return {
     agent: { id: s.id, name: s.name || s.session_key, avatar_emoji: s.avatar_emoji, department_color: s.department_color ?? null },
     state: PERSONA[sessionState(s)],
   };
 }
 
-/** Short name from the session key (the name is often the whole key): the channel for AgentDesk sessions, and whether
- * it is a background child (`<parent>:child:<id>`). */
+/** Short name from the session key; background children (`<parent>:child:<id>`) append a short child token so sibling rows stay distinct. */
 export function sessionTitle(s: DispatchedSession): { title: string; child: boolean } {
-  const [parent, ...child] = s.session_key.split(":child:");
+  const [parent, ...childParts] = s.session_key.split(":child:");
+  const raw = childParts.join(":child:").trim();
+  const suffix = raw ? (raw.length <= 14 ? raw : `${raw.slice(0, 8)}…${raw.slice(-4)}`) : "";
   const channel = parseChannelNameFromSessionKey(parent);
-  if (channel) return { title: `#${channel}`, child: child.length > 0 };
-  const name = s.name && s.name !== s.session_key ? s.name : parent.slice(parent.lastIndexOf("/") + 1);
-  return { title: name || s.session_key, child: child.length > 0 };
+  const base = channel ? `#${channel}` : (s.name && s.name !== s.session_key ? s.name : parent.slice(parent.lastIndexOf("/") + 1)) || s.session_key;
+  return { title: suffix ? `${base} · ${suffix}` : base, child: childParts.length > 0 };
 }
 
-export function sessionLastActivityTs(s: DispatchedSession): number | null {
-  return normalizeTimestamp(s.last_seen_at) ?? normalizeTimestamp(s.connected_at);
-}
+export const sessionLastActivityTs = (s: DispatchedSession): number | null => normalizeTimestamp(s.last_seen_at) ?? normalizeTimestamp(s.connected_at);
 
-/** Idle for a week by its own signal; a session without any signal is not called stale. */
+/** Idle for 7+ days by its own signal; reconciled notes alone never re-classify a recently reconciled idle session as stale. */
 export function isStaleIdleSession(s: DispatchedSession, now = Date.now()): boolean {
+  if (!isLiveSessionStatus(s.status)) return false;
   const last = sessionLastActivityTs(s);
   return sessionState(s) === "resting" && last !== null && now - last >= STALE_IDLE_MS;
 }
 
-/** Working, then background, then resting (stale ones last), newest signal first within each. */
+/** Active turns with no heartbeat for 30+ minutes. */
+export function isStaleActiveTurn(s: DispatchedSession, now = Date.now()): boolean {
+  if (s.status !== "turn_active" && s.status !== "working") return false;
+  const last = sessionLastActivityTs(s);
+  return last !== null && now - last >= STALE_ACTIVE_MS;
+}
+
+export function canReconcileStaleSession(s: DispatchedSession, now = Date.now()): boolean {
+  return isStaleActiveTurn(s, now);
+}
+
+export type SessionSummaryBucket = "working" | "background" | "stale" | "resting" | "closed";
+
+export function sessionBucket(s: DispatchedSession, now = Date.now()): SessionSummaryBucket {
+  const state = sessionState(s);
+  if (state === "closed") return "closed";
+  if (state === "working") return isStaleActiveTurn(s, now) ? "stale" : "working";
+  if (state === "background") return "background";
+  return isStaleIdleSession(s, now) ? "stale" : "resting";
+}
+
+export function sessionSummaryCounts(sessions: DispatchedSession[], tr: Translator, now = Date.now()): string {
+  const counts: Record<SessionSummaryBucket, number> = { working: 0, background: 0, stale: 0, resting: 0, closed: 0 };
+  for (const session of sessions) counts[sessionBucket(session, now)] += 1;
+  const labels: Record<SessionSummaryBucket, string> = {
+    working: agentStateLabel("working", tr), background: agentStateLabel("background", tr),
+    stale: tr("멈춤", "Stale"), resting: agentStateLabel("resting", tr), closed: tr("연결 끊김", "Disconnected"),
+  };
+  return (["working", "background", "stale", "resting", "closed"] as const)
+    .filter((key) => counts[key] > 0)
+    .map((key) => `${labels[key]} ${counts[key]}`)
+    .join(" · ");
+}
+
+const BUCKET_ORDER: Record<SessionSummaryBucket, number> = { working: 0, background: 1, resting: 2, stale: 3, closed: 4 };
 export function compareSessions(a: DispatchedSession, b: DispatchedSession): number {
-  const rank = (session: DispatchedSession) => ["working", "background", "resting"].indexOf(sessionState(session)) + (isStaleIdleSession(session) ? 1 : 0);
-  return rank(a) - rank(b) || (sessionLastActivityTs(b) ?? 0) - (sessionLastActivityTs(a) ?? 0);
+  return BUCKET_ORDER[sessionBucket(a)] - BUCKET_ORDER[sessionBucket(b)] || (sessionLastActivityTs(b) ?? 0) - (sessionLastActivityTs(a) ?? 0);
 }

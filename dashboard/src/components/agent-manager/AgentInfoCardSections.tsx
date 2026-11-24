@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, RotateCcw } from "lucide-react";
+import { Button } from "../../kit/free/button-clean";
 import { Loading, Skeleton } from "../../kit/free/skeleton-clean";
 import { formatDiscordSummary } from "./discord-routing";
 
@@ -121,6 +122,19 @@ export function SectionLoading({ label }: { label: string }) {
 
 export function SectionEmpty({ children }: { children: ReactNode }) {
   return <p className="m-0 text-[13px] leading-5 text-(--fg-muted)">{children}</p>;
+}
+
+export function SectionErrorRetry({ message, retryLabel, onRetry }: { message: string; retryLabel: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-(--r-md) bg-[color-mix(in_oklch,var(--warn)_10%,var(--bg-1))] px-3 py-2 text-xs leading-5 text-(--fg-dim)">
+      <span>{message}</span>
+      {onRetry ? (
+        <Button variant="secondary" size="sm" icon={<RotateCcw size={13} aria-hidden />} onClick={onRetry}>
+          {retryLabel}
+        </Button>
+      ) : null}
+    </div>
+  );
 }
 
 /** Tinted well for free text such as the current work or the personality prompt. */

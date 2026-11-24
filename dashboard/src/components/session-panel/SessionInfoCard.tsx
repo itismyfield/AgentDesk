@@ -1,28 +1,41 @@
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
 import type { Department, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
-import { agentStateLabel } from "../home/homeModel";
+import { Button } from "../../kit/free/button-clean";
+import { CodeBlock } from "../../kit/free/code-block-clean";
+import { Cap } from "../common/KitPrimitives";
 import type { Translator } from "../agent-manager/types";
-import { normalizeTimestamp, sessionState } from "./SessionPanelModel";
+import { fetchSessionOutput, normalizeTimestamp, sessionStateText, type SessionOutputSnapshot } from "./SessionPanelModel";
 
-/** What the server sends about one unlinked session, under its row: state, Provider, summary, signals and the key. */
+/** What the server sends about one unlinked session, under its row: state, Provider, summary, signals, key and live output preview. */
 export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo }: {
-  id: string;
-  session: DispatchedSession;
-  departments: Department[];
-  locale: string;
-  tr: Translator;
-  isKo: boolean;
+  id: string; session: DispatchedSession; departments: Department[]; locale: string; tr: Translator; isKo: boolean;
 }) {
+  const [output, setOutput] = useState<SessionOutputSnapshot | null | undefined>(undefined);
+  const [loadingOutput, setLoadingOutput] = useState(false);
+
+  const loadOutput = useCallback((signal?: AbortSignal) => {
+    setLoadingOutput(true);
+    fetchSessionOutput(s.id, 80, signal)
+      .then((res) => { if (!signal?.aborted) setOutput(res); })
+      .catch(() => { if (!signal?.aborted) setOutput(null); })
+      .finally(() => { if (!signal?.aborted) setLoadingOutput(false); });
+  }, [s.id]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    loadOutput(ctrl.signal);
+    return () => ctrl.abort();
+  }, [loadOutput]);
+
   const department = departments.find((entry) => entry.id === s.department_id);
-  const lastSeen = normalizeTimestamp(s.last_seen_at);
-  const connected = normalizeTimestamp(s.connected_at);
+  const lastSeen = normalizeTimestamp(s.last_seen_at), connected = normalizeTimestamp(s.connected_at);
   const at = (time: number) => new Date(time).toLocaleString(isKo ? "ko-KR" : "en-US");
-  // Rows the server left empty are dropped, never filled in.
   const rows = ([
-    [tr("상태", "State"), `${agentStateLabel(sessionState(s), tr)} (${s.status})`],
+    [tr("상태", "State"), `${sessionStateText(s, tr)} (${s.status})`],
     ["Provider", getProviderMeta(s.provider).label],
     [tr("모델", "Model"), s.model],
     [tr("세션 요약", "Summary"), s.session_info, "whitespace-pre-line"],
@@ -32,14 +45,29 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
     [tr("세션 ID", "Session ID"), s.id, "font-mono"],
     [tr("세션 키", "Session key"), s.session_key, "font-mono text-xs break-all"],
   ] satisfies Array<[string, ReactNode, string?]>).filter(([, value]) => value);
+
+  const outputText = output?.available ? output.recent_output.trim() : "";
+
   return (
-    <dl id={id} className="m-0 grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-t border-(--line-soft) bg-(--bg-1) px-3 py-3 text-[13px] leading-5 sm:px-4">
-      {rows.map(([label, value, valueClass]) => (
-        <div key={label} className="contents">
-          <dt className="text-(--fg-muted)">{label}</dt>
-          <dd className={`m-0 min-w-0 text-(--fg) [overflow-wrap:anywhere] ${valueClass ?? ""}`}>{value}</dd>
+    <div id={id} className="flex min-w-0 flex-col gap-3 border-t border-(--line-soft) bg-(--bg-1) px-3 py-3 text-[13px] leading-5 sm:px-4">
+      <dl className="m-0 grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+        {rows.map(([label, value, valueClass]) => (
+          <div key={label} className="contents">
+            <dt className="text-(--fg-muted)">{label}</dt>
+            <dd className={`m-0 min-w-0 text-(--fg) [overflow-wrap:anywhere] ${valueClass ?? ""}`}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="flex min-w-0 flex-col gap-1.5 border-t border-(--line-soft) pt-2.5" data-testid={`session-output-${s.id}`}>
+        <div className="flex items-center justify-between gap-2">
+          <Cap>{tr("실시간 출력 미리보기 (최근 80줄)", "Live output preview (last 80 lines)")}</Cap>
+          <Button variant="ghost" size="sm" className="shrink-0 [&_.aui-button-clean__label]:whitespace-nowrap" icon={<RefreshCw size={13} aria-hidden />} loading={loadingOutput} onClick={() => loadOutput()}>{tr("새로고침", "Refresh")}</Button>
         </div>
-      ))}
-    </dl>
+        {output === undefined ? <Cap>{tr("출력을 불러오는 중...", "Loading output...")}</Cap>
+          : output === null ? <Cap>{tr("출력을 불러오지 못했어요.", "Could not load session output.")}</Cap>
+          : outputText ? <CodeBlock code={outputText} filename={output.backend || "session"} showLineNumbers wrap maxHeight={240} />
+          : <Cap>{output.unavailable_reason ? tr(`연결된 터미널 출력 없음 (${output.unavailable_reason})`, `No attached output (${output.unavailable_reason})`) : tr("표시할 최근 출력이 없어요.", "No recent output.")}</Cap>}
+      </div>
+    </div>
   );
 }
