@@ -148,17 +148,38 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(count(&pool, REQUESTS).await, 1);
 
-    // The read shows the question and never the capability or its hash.
-    let read = ("GET", format!("/api/decisions/{id}"));
-    let (status, shown) = call(&app, (read.0, read.1.as_str()), None, &json!(null)).await;
+    // Only the requester reads its request: the capability that asked it, and nothing of the
+    // capability or its hash comes back.
+    let path = format!("/api/decisions/{id}");
+    let read = ("GET", path.as_str());
+    let (status, shown) = call(&app, read, Some(&mine), &json!(null)).await;
     assert_eq!(status, StatusCode::OK, "{shown}");
     assert_eq!(shown["title"], "질문");
     assert_eq!(shown["options"].as_array().map(Vec::len), Some(2));
     let text = shown.to_string();
     assert!(!text.contains(&mine) && !text.contains(&stored), "{text}");
+    // Another requester's own request, asked under its own capability.
+    let mut theirs = ask_body("남의 질문");
+    theirs["idempotency_key"] = json!("k3");
+    let (status, _) = call(&app, post, Some(&other), &theirs).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    for (who, capability) in [
+        ("no capability", None),
+        ("another requester's", Some(&other)),
+    ] {
+        let (status, refused) =
+            call(&app, read, capability.map(String::as_str), &json!(null)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {refused}");
+        let text = refused.to_string();
+        assert!(
+            !text.contains("질문") && !text.contains("진행"),
+            "{who}: {text}"
+        );
+    }
+    // An id nobody asked reads the same as a request that is not the caller's.
     let missing = format!("/api/decisions/{}", uuid::Uuid::new_v4());
-    let (status, _) = call(&app, ("GET", missing.as_str()), None, &json!(null)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, ("GET", missing.as_str()), Some(&mine), &json!(null)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
         count(&pool, "SELECT COUNT(*) FROM message_outbox").await,
         0,
