@@ -1400,6 +1400,8 @@ src/
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
+│   │   │   ├── host.rs
+│   │   │   ├── host_tests.rs
 │   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_fence_pg_tests.rs
@@ -2968,6 +2970,9 @@ src/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
 │   │   │   └── worktree.rs
+│   │   ├── session_transition/
+│   │   │   ├── host_tests.rs
+│   │   │   └── registry_tests.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── content_snapshot_tests.rs
@@ -2975,6 +2980,9 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── shared_state/
+│   │   │   ├── g7_host.rs
+│   │   │   └── g7_host_tests.rs
 │   │   ├── standby_relay/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs

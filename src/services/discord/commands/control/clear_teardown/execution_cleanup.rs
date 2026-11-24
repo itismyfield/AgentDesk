@@ -60,7 +60,7 @@ where
             Err(response) => return response,
         }
     };
-    let Ok(transition) = shared.acquire_session_transition(channel_id).await else {
+    let Ok(transition) = shared.session_transition_locks.acquire(channel_id).await else {
         return if proven {
             Response::Busy
         } else {

@@ -39,7 +39,7 @@ fn each_held_pass_names_its_gate_pg() {
             replace_source(&run.source);
             run.pass().await;
             assert_eq!(reason(&run), Some("file_identity"), "replaced source");
-            let transition = run.shared.session_transition_lock(run.channel);
+            let transition = run.shared.session_transition_locks.lock(run.channel);
             let held = transition.try_lock().unwrap();
             run.pass().await;
             assert_eq!(reason(&run), Some("transition_busy"), "held transition");

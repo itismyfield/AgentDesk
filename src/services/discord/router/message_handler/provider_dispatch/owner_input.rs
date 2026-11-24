@@ -263,7 +263,8 @@ pub(in crate::services::discord) fn owner_drive(
                         Ok(true) => {
                             let transition = runtime.as_ref().map(|shared| {
                                 shared
-                                    .session_transition_lock(ChannelId::new(channel))
+                                    .session_transition_locks
+                                    .lock(ChannelId::new(channel))
                                     .try_lock_owned()
                             });
                             if let Some(hold) = runtime

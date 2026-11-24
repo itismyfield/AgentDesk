@@ -17,7 +17,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedOwner, HostedRecord, HostedState,
 };
 use crate::services::discord::herdr_terminate::route_tests::{current_thread, in_child, switch};
-use crate::services::discord::{UnplacedLease, make_shared_data_for_tests};
+use crate::services::discord::make_shared_data_for_tests;
+use crate::services::discord::session_transition::UnplacedLease;
 use crate::services::herdr_launch::unplaced::{ChannelPane, Residue};
 use crate::services::herdr_launch::unplaced::{Resolution, Unplaced, resolve_unplaced};
 use crate::services::herdr_launch::{
@@ -386,7 +387,7 @@ impl Rig {
 
     async fn resolve(&self, host: &Arc<dyn HerdrLaunchHost>, nonce: &str) -> Resolution {
         let shared = make_shared_data_for_tests();
-        let lease = UnplacedLease::try_acquire(&shared, ChannelId::new(CHANNEL)).unwrap();
+        let lease = UnplacedLease::try_acquire(shared.as_ref(), ChannelId::new(CHANNEL)).unwrap();
         let endpoint = launch_endpoint(&self.server);
         let target = Unplaced {
             pool: &self.pool,
@@ -803,7 +804,7 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
     });
     let shared = make_shared_data_for_tests();
     let channel = ChannelId::new(CHANNEL);
-    let lease = UnplacedLease::try_acquire(&shared, channel).unwrap();
+    let lease = UnplacedLease::try_acquire(shared.as_ref(), channel).unwrap();
     let holder = {
         let (pool, owner, endpoint, nonce) = (
             rig.pool.clone(),
@@ -828,7 +829,7 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
         .await
         .unwrap();
     let requests = rig.server.methods().len();
-    let next = UnplacedLease::acquire(&shared, channel).await;
+    let next = UnplacedLease::acquire(shared.as_ref(), channel).await;
     assert!(
         next.is_err(),
         "R1 entered the critical section while R2 held the lease"

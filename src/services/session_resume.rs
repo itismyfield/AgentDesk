@@ -347,7 +347,8 @@ pub(crate) async fn perform_resume_rebind(
     let _transition_guard = match resume_runtime.as_ref().zip(channel_id) {
         Some((shared, channel_id)) => Some(
             shared
-                .acquire_session_transition(channel_id)
+                .session_transition_locks
+                .acquire(channel_id)
                 .await
                 .map_err(|_| ResumeRebindError::TransitionBusy)?,
         ),
@@ -1154,7 +1155,8 @@ mod tests {
         .await;
 
         let held = shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .lock_owned()
             .await;
         let resume_pool = pool.clone();
@@ -1183,7 +1185,7 @@ mod tests {
         );
         drop(held);
 
-        let resume_lock = shared.session_transition_lock(channel_id);
+        let resume_lock = shared.session_transition_locks.lock(channel_id);
         let resume_guard = resume_lock.lock().await;
         let busy_transition =
             crate::services::discord::try_intake_runtime_transition_after_redirect(

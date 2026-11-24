@@ -195,7 +195,8 @@ impl ProcessMailbox {
         }
         let transition = self
             .shared
-            .session_transition_lock(self.channel)
+            .session_transition_locks
+            .lock(self.channel)
             .try_lock_owned()
             .ok();
         let mut retry = transition.is_none().then_some("transition_busy");

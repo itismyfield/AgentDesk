@@ -1,0 +1,58 @@
+---
+title: "One channel's transition lock in two bot runtimes"
+---
+stateDiagram-v2
+  direction LR
+  state "At the same time" as all {
+    state "Bot A" as r0 {
+      s0: free
+      s1: free, handle kept
+      s2: guard held
+      s3: lease held
+      s4: unplaced lease held
+      s5: lease on a borrowed guard
+      [*] --> s0
+      s0 --> s1: a caller keeps the lock handle
+      s0 --> s2: a caller takes the lock
+      s0 --> s3: a caller takes a transition lease
+      s0 --> s4: a caller takes an unplaced lease
+      s1 --> s0: the kept handle is dropped
+      s1 --> s2: a caller takes the lock or the kept handle takes the lock
+      s1 --> s3: a caller takes a transition lease
+      s1 --> s4: a caller takes an unplaced lease
+      s2 --> s0: the guard is released
+      s2 --> s5: a held guard is lent to a lease
+      s3 --> s0: the lease is dropped
+      s4 --> s0: the unplaced lease is dropped
+      s2 --> s1: the guard is released
+      s3 --> s1: the lease is dropped
+      s4 --> s1: the unplaced lease is dropped
+      s5 --> s2: the lease is dropped
+    }
+    --
+    state "Bot B" as r1 {
+      s6: free
+      s7: free, handle kept
+      s8: guard held
+      s9: lease held
+      s10: unplaced lease held
+      s11: lease on a borrowed guard
+      [*] --> s6
+      s6 --> s7: a caller keeps the lock handle
+      s6 --> s8: a caller takes the lock
+      s6 --> s9: a caller takes a transition lease
+      s6 --> s10: a caller takes an unplaced lease
+      s7 --> s6: the kept handle is dropped
+      s7 --> s8: a caller takes the lock or the kept handle takes the lock
+      s7 --> s9: a caller takes a transition lease
+      s7 --> s10: a caller takes an unplaced lease
+      s8 --> s6: the guard is released
+      s8 --> s11: a held guard is lent to a lease
+      s9 --> s6: the lease is dropped
+      s10 --> s6: the unplaced lease is dropped
+      s8 --> s7: the guard is released
+      s9 --> s7: the lease is dropped
+      s10 --> s7: the unplaced lease is dropped
+      s11 --> s8: the lease is dropped
+    }
+  }

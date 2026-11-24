@@ -489,7 +489,7 @@ async fn terminate_scoped(
         .map_err(Refused)?;
     #[cfg(test)]
     run_probe(&AFTER_CAPTURE).await;
-    let Ok(transition) = shared.acquire_session_transition(channel).await else {
+    let Ok(transition) = shared.session_transition_locks.acquire(channel).await else {
         return Err(Refused("transition busy".into()));
     };
     // An unreadable or replaced actor is a changed turn, never an idle channel.

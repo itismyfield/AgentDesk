@@ -182,7 +182,8 @@ async fn runtime_transition_refusal_has_only_queue_effects() {
     let probe = observe(&h, false);
     let _transition = h
         .shared
-        .session_transition_lock(h.channel_id)
+        .session_transition_locks
+        .lock(h.channel_id)
         .lock_owned()
         .await;
     finish(&mut intake(&h)).await.expect("durable queue");
@@ -207,7 +208,8 @@ async fn persistence_refusal_never_emits_pending() {
     std::fs::create_dir_all(queue_file).unwrap();
     let _transition = h
         .shared
-        .session_transition_lock(h.channel_id)
+        .session_transition_locks
+        .lock(h.channel_id)
         .lock_owned()
         .await;
     assert!(
@@ -399,7 +401,8 @@ async fn merged_runtime_refusal_has_only_plus_effects() {
     let probe = observe(&h, false);
     let _transition = h
         .shared
-        .session_transition_lock(h.channel_id)
+        .session_transition_locks
+        .lock(h.channel_id)
         .lock_owned()
         .await;
     let mut prior =

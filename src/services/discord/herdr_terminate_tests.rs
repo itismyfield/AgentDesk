@@ -109,7 +109,11 @@ fn m1_hold_release_window_preserves_input_until_settlement() {
         .block_on(async {
             let shared = super::super::make_shared_data_for_tests();
             let channel = ChannelId::new(5_340_114);
-            let transition = shared.session_transition_lock(channel).lock_owned().await;
+            let transition = shared
+                .session_transition_locks
+                .lock(channel)
+                .lock_owned()
+                .await;
             crate::services::claude::herdr_turn::hold("execution-window").unwrap();
             test_queue::queue_original(&shared, channel).await;
             let opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -178,10 +182,10 @@ fn m1_host_terminated_settles_exact_turn_and_publishes_queue_once() {
         crate::services::claude::herdr_turn::hold("execution-a").unwrap();
         let mut events = super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
         test_queue::queue_original(&shared, channel).await;
-        let transition = shared.session_transition_lock(channel).lock_owned().await;
+        let transition = shared.session_transition_locks.lock(channel).lock_owned().await;
         let probe_shared = shared.clone();
         probe_settlement_window(Box::new(move || Box::pin(async move {
-            assert!(probe_shared.session_transition_lock(channel).try_lock_owned().is_err(), "transition stays owned until settlement");
+            assert!(probe_shared.session_transition_locks.lock(channel).try_lock_owned().is_err(), "transition stays owned until settlement");
             assert_eq!(test_queue::take_queued(&probe_shared, channel).await, None);
         })));
         assert_eq!(settle_and_release(&shared, &ProviderKind::Claude, "execution-a", captured, transition).await.map(drop), Ok(()));
@@ -216,7 +220,11 @@ fn m2_natural_a_then_b_late_settlement_preserves_b() {
                 .unwrap();
             crate::services::claude::herdr_turn::hold("execution-a").unwrap();
             crate::services::claude::herdr_turn::hold("execution-b").unwrap();
-            let transition = shared.session_transition_lock(channel).lock_owned().await;
+            let transition = shared
+                .session_transition_locks
+                .lock(channel)
+                .lock_owned()
+                .await;
             let token_b = Arc::new(std::sync::Mutex::new(None));
             let (probe_shared, probe_a, probe_b) =
                 (shared.clone(), token_a.clone(), token_b.clone());

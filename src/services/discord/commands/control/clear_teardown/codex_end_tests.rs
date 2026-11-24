@@ -220,7 +220,8 @@ impl Pane {
             let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
             let guard = guarded.then(|| {
                 shared
-                    .session_transition_lock(serenity::ChannelId::new(self.channel))
+                    .session_transition_locks
+                    .lock(serenity::ChannelId::new(self.channel))
                     .try_lock_owned()
                     .unwrap()
             });

@@ -44,7 +44,11 @@ async fn pending_worker_defers_its_production_claim_while_recovery_holds_transit
         .expect("main-compatible durable pending record");
     tui_direct_pending_start::persist(&record).expect("persist original obligation");
 
-    let transition = shared.session_transition_lock(channel).lock_owned().await;
+    let transition = shared
+        .session_transition_locks
+        .lock(channel)
+        .lock_owned()
+        .await;
     let attempts = Arc::new(AtomicUsize::new(0));
     let production_claim = Arc::new(synthetic_start::pending_start_claim_fn());
     let first_return = Arc::new(tokio::sync::Notify::new());
@@ -85,7 +89,8 @@ async fn pending_worker_defers_its_production_claim_while_recovery_holds_transit
         .expect("claim result");
     assert!(
         shared
-            .session_transition_lock(channel)
+            .session_transition_locks
+            .lock(channel)
             .try_lock_owned()
             .is_err(),
         "recovery still excludes another transition owner"

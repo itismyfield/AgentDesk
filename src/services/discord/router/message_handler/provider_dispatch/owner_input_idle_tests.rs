@@ -947,7 +947,7 @@ fn busy_hold_case(
     let mut transition = (hold == Some(Hold::SessionSwitch) && resume != Some("short_intake"))
         .then(|| {
             rig.runtime
-                .block_on(shared.session_transition_lock(id).lock_owned())
+                .block_on(shared.session_transition_locks.lock(id).lock_owned())
         });
     let exercise = || {
         for _ in 0..2 {

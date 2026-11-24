@@ -382,7 +382,8 @@ async fn busy_active_closed_gate_keeps_mailbox_op() {
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
     let _transition = rig
         .shared
-        .session_transition_lock(rig.channel)
+        .session_transition_locks
+        .lock(rig.channel)
         .lock_owned()
         .await;
     let (drive, mut settled) = rig.drive();
@@ -425,7 +426,8 @@ async fn busy_active_transition_handback_keeps_mailbox_op() {
     let message = busy_active_arrival(&rig, false).await;
     let _transition = rig
         .shared
-        .session_transition_lock(rig.channel)
+        .session_transition_locks
+        .lock(rig.channel)
         .lock_owned()
         .await;
     let (drive, mut settled) = rig.drive();
@@ -987,7 +989,8 @@ async fn parent_gate_pre_injection_handback_without_route_keeps_mailbox_op() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let _transition = rig
         .shared
-        .session_transition_lock(rig.channel)
+        .session_transition_locks
+        .lock(rig.channel)
         .lock_owned()
         .await;
     let (drive, mut settled) = rig.drive();

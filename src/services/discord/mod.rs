@@ -666,10 +666,6 @@ pub(super) use shared_data::make_shared_data_for_tests_with_barrier;
 #[cfg(test)]
 pub(crate) use shared_data::make_shared_data_for_tests_with_storage;
 
-#[cfg(unix)]
-pub(crate) use session_transition::UnplacedLease;
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
-
 use queue_dispatch::persistence_context as queue_persistence_context;
 
 mod mailbox_ops;
@@ -1257,7 +1253,8 @@ mod idle_queue_background_supersede_tests {
             .await;
 
         let transition_guard = shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .lock_owned()
             .await;
         let blocked = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;

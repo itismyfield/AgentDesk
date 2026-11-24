@@ -310,7 +310,10 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
         // here. Not owning the transition means not owning an edge: defer to
         // the slow fail-open backstop, the same treatment the finalize epilogue
         // transition fence already gives a transition-owned channel.
-        let Ok(transition_guard) = shared.session_transition_lock(channel_id).try_lock_owned()
+        let Ok(transition_guard) = shared
+            .session_transition_locks
+            .lock(channel_id)
+            .try_lock_owned()
         else {
             tracing::debug!(
                 provider = provider.as_str(),

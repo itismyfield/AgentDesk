@@ -92,7 +92,11 @@ async fn follow_channel_selector(
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
     admitted: Option<&str>,
 ) -> Followed {
-    let Ok(_transition) = runtime.session_transition_lock(channel_id).try_lock_owned() else {
+    let Ok(_transition) = runtime
+        .session_transition_locks
+        .lock(channel_id)
+        .try_lock_owned()
+    else {
         return Followed::Busy;
     };
     let pool = runtime.pg_pool.as_ref();

@@ -88,7 +88,8 @@ pub(in crate::services::discord) async fn recover_ended(
         .await
         .map_err(Refused)?;
     let transition = shared
-        .acquire_session_transition(channel)
+        .session_transition_locks
+        .acquire(channel)
         .await
         .map_err(|_| Refused("transition busy".into()))?;
     let actor = shared.mailbox_peek(channel);

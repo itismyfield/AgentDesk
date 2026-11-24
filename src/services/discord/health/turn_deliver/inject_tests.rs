@@ -1129,7 +1129,7 @@ async fn a_session_of_another_runtime_stops_before_the_transition_and_the_pane()
     let mut row = load(&ProviderKind::Claude, ch).expect("seeded row");
     row.runtime_kind = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
     crate::services::discord::inflight::save_inflight_state(&row).expect("stamped row");
-    let transition = shared.session_transition_lock(ChannelId::new(ch));
+    let transition = shared.session_transition_locks.lock(ChannelId::new(ch));
     let _held = transition.try_lock_owned().expect("transition free");
     let request = HumanInputRequest {
         channel_id: ChannelId::new(ch),
@@ -1412,7 +1412,8 @@ async fn a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_
     assert!(request.await.unwrap_err().is_cancelled());
     let held = |shared: &SharedData| {
         shared
-            .session_transition_lock(ChannelId::new(ch))
+            .session_transition_locks
+            .lock(ChannelId::new(ch))
             .try_lock_owned()
             .is_err()
     };
@@ -1470,7 +1471,8 @@ async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
             })
             .collect();
         let free = shared
-            .session_transition_lock(ChannelId::new(ch))
+            .session_transition_locks
+            .lock(ChannelId::new(ch))
             .try_lock_owned()
             .is_ok();
         let queue = queue_texts(&shared, ch).await.len();
@@ -1734,7 +1736,10 @@ async fn a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox() {
     let _ = shared.mailboxes.handle(channel).snapshot().await;
     assert_eq!(inject::mode(ch), InjectMode::Off);
     let purge = crate::services::discord::health::purge_idle_channel_mailbox_registry_entry;
-    let held = shared.session_transition_lock(channel).try_lock_owned();
+    let held = shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned();
     let held = held.expect("transition free");
     let while_held = purge(&registry, Some("claude"), ch).await;
     let kept = shared.mailboxes.peek(channel).is_some();
@@ -1785,7 +1790,7 @@ async fn an_idle_transcript_stops_before_the_reservation_and_the_pane() {
     let pane = InjectPane::new(ch, "all");
     let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
     pane.set(InjectPane::TRANSCRIPT, &ended);
-    let transition = shared.session_transition_lock(ChannelId::new(ch));
+    let transition = shared.session_transition_locks.lock(ChannelId::new(ch));
     let _held = transition.try_lock_owned().expect("transition free");
     let request = HumanInputRequest {
         channel_id: ChannelId::new(ch),

@@ -789,7 +789,8 @@ async fn admitted_herdr_pending_worker_waits_for_recovery_transition_then_claims
     );
     let transition = fixture
         .shared
-        .session_transition_lock(channel)
+        .session_transition_locks
+        .lock(channel)
         .lock_owned()
         .await;
     let production_claim = Arc::new(synthetic_start::pending_start_claim_fn());

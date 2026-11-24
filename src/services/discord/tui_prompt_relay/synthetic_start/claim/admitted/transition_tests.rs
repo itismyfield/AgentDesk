@@ -278,7 +278,8 @@ async fn prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the
     let fixture = Fixture::new(root.path(), 7_186_702);
     let held = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     let claim = tokio::time::timeout(
@@ -301,7 +302,8 @@ async fn prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the
     assert!(
         fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .try_lock_owned()
             .is_err(),
         "finishing a borrowed claim must not unlock the caller's guard"
@@ -310,7 +312,8 @@ async fn prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the
     assert!(
         fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .try_lock_owned()
             .is_ok()
     );
@@ -326,15 +329,19 @@ async fn prepared_claim_rejects_a_guard_for_another_channel_runtime_or_mutex() {
         let other = match foreign_kind {
             "channel" => fixture
                 .shared
-                .session_transition_lock(ChannelId::new(fixture.channel.get() + 2)),
-            "runtime" => foreign_runtime.session_transition_lock(fixture.channel),
+                .session_transition_locks
+                .lock(ChannelId::new(fixture.channel.get() + 2)),
+            "runtime" => foreign_runtime
+                .session_transition_locks
+                .lock(fixture.channel),
             _ => Arc::new(tokio::sync::Mutex::new(())),
         };
         let foreign = other.clone().lock_owned().await;
         assert!(
             fixture
                 .shared
-                .session_transition_lock(fixture.channel)
+                .session_transition_locks
+                .lock(fixture.channel)
                 .try_lock_owned()
                 .is_ok(),
             "the actual target mutex starts free"
@@ -353,7 +360,8 @@ async fn prepared_claim_rejects_a_guard_for_another_channel_runtime_or_mutex() {
         assert!(
             fixture
                 .shared
-                .session_transition_lock(fixture.channel)
+                .session_transition_locks
+                .lock(fixture.channel)
                 .try_lock_owned()
                 .is_ok(),
             "a rejected guard must not retain the target transition"
@@ -371,7 +379,8 @@ async fn failed_existing_actor_readoption_preserves_the_original_actor_and_saved
     let fixture = Fixture::new(root.path(), 7_186_752);
     let held = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     assert!(
@@ -435,7 +444,8 @@ async fn failed_existing_actor_readoption_preserves_the_original_actor_and_saved
     assert!(
         fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .try_lock_owned()
             .is_err()
     );

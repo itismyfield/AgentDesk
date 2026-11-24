@@ -73,7 +73,8 @@ impl Fixture {
         // The real route must enqueue H, rather than inject it on arrival, and schedule nothing.
         let transition = fixture
             .shared
-            .session_transition_lock(channel)
+            .session_transition_locks
+            .lock(channel)
             .lock_owned()
             .await;
         queue_io::with_post_enqueue_idle_queue_kick_suppressed(async {
@@ -607,7 +608,8 @@ async fn kickoff_reuses_channel_routing_lookup_before_queued_head_attempt_pg() {
         }
         let transition = fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .lock_owned()
             .await;
         // System heads isolate routing reads; a user head also reads its author-name context.
@@ -660,7 +662,8 @@ async fn s2b_a_head_whose_author_is_not_named_stays_queued_pg() {
         fixture.answer_names(lookup, 300);
         let transition = fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .lock_owned()
             .await;
         if discord_message {
@@ -821,7 +824,8 @@ async fn s2b_a_received_queued_head_lets_the_same_body_be_injected_again_pg() {
     );
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     queue_io::with_post_enqueue_idle_queue_kick_suppressed(fixture.enqueue("status?")).await;
