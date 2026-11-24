@@ -137,10 +137,7 @@ impl Case {
         let mut shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.into();
-        shared
-            .restart
-            .reconcile_done
-            .store(true, std::sync::atomic::Ordering::Release);
+        crate::services::discord::mark_reconcile_complete(&shared);
         recovery::prune(&[]);
         CAS_ATTEMPTS.with(|count| count.set(0));
         Self {
