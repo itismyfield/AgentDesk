@@ -16,7 +16,9 @@ PHASES = {
     "scripts": ["Run script checks"],
     "relay_authority_mutations": ["Require relay-authority mutations to be killed"],
 }
-TARGETS = {"ci-pr.yml": set(PHASES), "ci-main.yml": {"rust_build", "lint", "scripts"}, "ci-nightly.yml": {"rust_build"}}
+NIGHTLY_RELAY = "relay_authority_mutations_full"
+TARGETS = {"ci-pr.yml": set(PHASES), "ci-main.yml": {"rust_build", "lint", "scripts"}, "ci-nightly.yml": {"rust_build", NIGHTLY_RELAY}}
+PHASES[NIGHTLY_RELAY] = PHASES["relay_authority_mutations"]
 NAMES = ["Start runner memory sampler", "Begin runner memory step", "End runner memory step", "Summarize runner memory", "Upload runner memory"]
 COMMANDS = dict(zip(NAMES[:4], ["start", 'begin "$MEMORY_STEP"', "end", "finish"]))
 CHECKPOINT = ["Save runner memory checkpoint", "Upload runner memory checkpoint"]
@@ -88,6 +90,17 @@ class RunnerMemoryWiring(unittest.TestCase):
             for job_id in targets:
                 with self.subTest(workflow=workflow, job=job_id):
                     self.assert_job(workflow, job_id, jobs[job_id])
+
+    def test_relay_mutation_jobs_name_mid_build_copies_after_their_final_artifact(self):
+        for workflow, job_id in (("ci-pr.yml", "relay_authority_mutations"), ("ci-nightly.yml", NIGHTLY_RELAY)):
+            job = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"][job_id]
+            with self.subTest(workflow=workflow):
+                self.assertEqual(job["env"]["RUNNER_MEMORY_EXPORT_NAME"], ARTIFACT["name"])
+                minutes = [float(value) for value in job["env"]["RUNNER_MEMORY_EXPORT_MINUTES"].split()]
+                self.assertTrue(minutes and all(0 < value < job["timeout-minutes"] for value in minutes))
+                # The exporter reads the artifact token that Setup sccache leaves in the environment.
+                names = [step.get("name") for step in job["steps"]]
+                self.assertLess(names.index("Setup sccache"), names.index(NAMES[1]))
 
     def test_cleanup_condition_and_phase_label_are_required(self):
         source = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]["rust_build"]
