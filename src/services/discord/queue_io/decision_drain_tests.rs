@@ -608,6 +608,82 @@ async fn decision_boot_recovery_settles_each_interrupted_event_exactly_once_pg()
     rig.close().await;
 }
 
+/// A booting node ends only attempts whose holder's run is over. Another node that is still
+/// online keeps its attempts whatever their age, and they settle once it is listed offline.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_boot_recovery_leaves_a_live_nodes_attempts_alone_pg() {
+    const NODE_A: &str = "decision-node-a";
+    let rig = Rig::new().await;
+    sqlx::query(
+        "INSERT INTO worker_nodes (instance_id, status, last_heartbeat_at)
+         VALUES ($1, 'online', NOW())",
+    )
+    .bind(NODE_A)
+    .execute(&rig.pool)
+    .await
+    .unwrap();
+    // Node A journaled these long ago and is still running them.
+    let rows = [
+        rig.event("resolving", false).await,
+        rig.event("normalizing", false).await,
+        rig.event("may_have_sent", false).await,
+    ];
+    sqlx::query(
+        "UPDATE decision_delivery_attempts
+         SET holder_instance_id = $1, updated_at = NOW() - INTERVAL '1 day'",
+    )
+    .bind(NODE_A)
+    .execute(&rig.pool)
+    .await
+    .unwrap();
+    let read = || async {
+        sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>, Option<String>)>(
+            "SELECT state, updated_at, detail FROM decision_delivery_attempts ORDER BY event_id",
+        )
+        .fetch_all(&rig.pool)
+        .await
+        .unwrap()
+    };
+    let before = read().await;
+    // Node B boots: its own mailbox registry holds none of A's originals.
+    recover_boot(&rig.pool).await.unwrap();
+    let boot = decisions::clock(&rig.pool).await.unwrap();
+    for _ in 0..2 {
+        recover_before(&rig.pool, boot, |_| None).await.unwrap();
+    }
+    assert_eq!(read().await, before, "a live node's attempts were ended");
+    // A row read as abandoned just before its holder moved it is not ended either.
+    for row in &rows {
+        let judged = Unsettled {
+            stale: true,
+            ..row.clone()
+        };
+        settle(&rig.pool, None, &judged, None).await.unwrap();
+    }
+    assert_eq!(
+        read().await,
+        before,
+        "the closing update ignored the holder"
+    );
+    // A's run is over: the cluster lists it offline.
+    sqlx::query("UPDATE worker_nodes SET status = 'offline' WHERE instance_id = $1")
+        .bind(NODE_A)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    assert_eq!(recover_before(&rig.pool, boot, |_| None).await.unwrap(), 3);
+    let ends = [
+        ("failed", Some(INTERRUPTED)),
+        ("failed", Some(INTERRUPTED)),
+        ("unknown_closed", None),
+    ];
+    for (row, (state, detail)) in rows.iter().zip(ends) {
+        let ended = (state.to_string(), detail.map(str::to_string));
+        assert_eq!(rig.state(row).await, ended, "{}", row.origin);
+    }
+    rig.close().await;
+}
+
 /// A start is no delivery: without an owner the journaled row waits for the receipt of the turn
 /// that consumed its origin. A completed one delivers it; any other end closes it unknown.
 #[tokio::test(flavor = "current_thread")]
