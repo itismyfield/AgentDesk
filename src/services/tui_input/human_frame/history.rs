@@ -972,7 +972,7 @@ mod tests {
         )
         .unwrap();
         assert_replayed(&session, &frame);
-        let persisted = read(&path().unwrap()).unwrap();
+        let persisted = readable(&path().unwrap()).unwrap();
         let entry = persisted
             .entries
             .iter()
