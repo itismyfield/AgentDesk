@@ -1,4 +1,6 @@
-use crate::services::discord::{INPUT_NOTICE_RUNS, input_notice_content};
+use crate::services::discord::session_notice::input_notice::{
+    INPUT_NOTICE_RUNS, input_notice_content,
+};
 use crate::services::tui_input::human_frame::{history, idle};
 use sha2::Digest;
 
