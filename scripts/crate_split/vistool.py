@@ -6,7 +6,7 @@ module (`discord::outbound::notification_policy`); the longest key that prefixes
 X and every crate before it in `order` are "below"; every crate after X is "above". Before any real cut the
 tool builds two throwaway copies of HEAD under `<repo>/target/crate_split_probe/<X>/`:
 
-  lower  the whole lib renamed `probe_lower`; only the `mod` chain down to each below group becomes `pub`.
+  lower  the whole lib renamed `probe_lower`; only the `mod` chain down to each below leaf group becomes `pub`.
          Above modules still compile (privately), so a hard cut left in X does not break it. It declares the
          `test-support` feature, which upper turns on, with its dev dependencies joined to the normal ones.
   upper  the whole tree again, depending on `probe_lower`; each below leaf group's `mod x;` line becomes
@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "vt3-1"
+VERSION = "vt3-2"
 VIS_CODES = {"E0603", "E0624", "E0616", "E0451", "E0364", "E0365"}
 # rustc reports a tuple-struct constructor hidden by restricted fields as E0423 (call) / E0532 (pattern).
 CTOR_CODES = {"E0423", "E0532"}
@@ -69,6 +69,8 @@ SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "
 TOOL_REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOL_REPO / "scripts" / "ci"))
 import rust_test_sources as rts  # noqa: E402
+sys.path.append(str(TOOL_REPO / "scripts"))
+import rust_cfg  # noqa: E402
 
 # Children (vistool_real, vistool_testcfg) import this module; as a script it must be the same object.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -347,7 +349,9 @@ def transform_lower(root, layout):
     manifest.write_text(lower_manifest(manifest.read_text("utf-8"), lib_rel), "utf-8")
     shutil.copyfile(root / layout.root_file, root / lib_rel)
     remap = {layout.root_file: lib_rel}
-    for group in sorted(layout.below):
+    # A deep key under a below group rides with that group. Opening its `mod` line here would change a file
+    # the patch is cut from, and the patch would no longer apply to HEAD.
+    for group in sorted(g for g in layout.below if g in ONE_FILE or g in layout.leaves):
         path = group_path(group)
         for depth in range(1, len(path) + 1):
             parent = layout.file_of.get(path[:depth - 1])
@@ -387,8 +391,9 @@ def transform_upper(root, layout):
             # An inline `mod x { ... }` (child files under it) goes as a whole block.
             close = i if rx.match(lines[i]).group("end") == ";" else \
                 next(b[1] - 1 for b in inline_blocks("\n".join(lines)) if b[0] == i + 1 and b[2][-1] == path[-1])
-            if any(re.search(r"cfg\s*\(.*\btest\b", a) for a in attrs):
+            if rust_cfg.cfg_conditions_gate(rust_cfg.attribute_conditions("\n".join(attrs))) == "strict":
                 # Lower's own test module: never checked by the probe (T slice), keep an empty stand-in.
+                # A module `test-support` opens is built in lower, so it is re-exported like any other.
                 lines[i:close + 1] = [f"{indent}mod {path[-1]} {{}}"]
                 continue
             kept = [a for a in attrs if not re.match(r"^\s*#\[\s*(path|macro_use)\b", a)]
