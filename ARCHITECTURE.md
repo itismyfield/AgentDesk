@@ -2596,6 +2596,7 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
+│   │   │   │   ├── decision_guard_tests.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
