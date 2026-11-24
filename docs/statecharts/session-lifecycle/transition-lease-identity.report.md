@@ -1,6 +1,7 @@
 # Whose transition a session-transition lease fits
 
 Code SHA: written against `4bf7c64ec3` (#7353 KR-C10e design input); coordinates below are the KR-C10e-2 head, which moves the lock lookup into `SessionTransitionLocks` without changing a step.
+KR-C10e-1 makes the leases generic over a host trait. Production implements that trait for `SharedData` only, so `Ident = host` still reads the `SharedData` address; a test fixture host may share one registry with another, which is the `shared` wiring.
 
 Every bot runtime (`SharedData`) keeps one registry of channel transition locks.
 A caller takes a channel's lock as a plain guard, as a `SessionTransitionLease`, or as an `UnplacedLease`; a lease can also stand on a guard its caller already holds.

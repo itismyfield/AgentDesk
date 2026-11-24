@@ -665,10 +665,6 @@ pub(super) use shared_data::make_shared_data_for_tests_with_barrier;
 #[cfg(test)]
 pub(super) use shared_data::make_shared_data_for_tests_with_storage;
 
-#[cfg(unix)]
-pub(crate) use session_transition::UnplacedLease;
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
-
 use queue_dispatch::persistence_context as queue_persistence_context;
 
 mod mailbox_ops;

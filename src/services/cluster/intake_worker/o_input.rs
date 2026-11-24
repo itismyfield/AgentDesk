@@ -92,11 +92,11 @@ async fn scope_before_effects<T>(
         .await
 }
 
-pub(super) async fn execute_before_effects(
+pub(super) async fn execute_before_effects<S>(
     row: &IntakeOutboxRow,
-    execute: ExecuteIntakeTurn,
+    execute: ExecuteIntakeTurn<S>,
     http: &Arc<serenity::http::Http>,
-    shared: &Arc<SharedData>,
+    shared: &Arc<S>,
     token: &str,
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,

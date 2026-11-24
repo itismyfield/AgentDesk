@@ -209,7 +209,7 @@ fn e08_force_kill_retires_then_applies_effects_once_pg() {
         let (shared, probe_flag) = (node.shared.clone(), held_flag.clone());
         probe_before_postlude(Box::new(move || {
             Box::pin(async move {
-                let lease = SessionTransitionLease::try_acquire(&shared, channel());
+                let lease = SessionTransitionLease::try_acquire(shared.as_ref(), channel());
                 assert!(lease.is_err(), "the effects run under the transition");
                 probe_flag.store(true, Ordering::SeqCst);
             })
@@ -217,7 +217,7 @@ fn e08_force_kill_retires_then_applies_effects_once_pg() {
         let (shared, pool, key, probe_flag) = (node.shared.clone(), node.pool.clone(), node.key.clone(), free_flag.clone());
         probe_before_released(Box::new(move || {
             Box::pin(async move {
-                let lease = SessionTransitionLease::try_acquire(&shared, channel());
+                let lease = SessionTransitionLease::try_acquire(shared.as_ref(), channel());
                 assert!(lease.is_ok(), "the drain and the wake run once the transition is free");
                 let status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE session_key = $1")
                     .bind(&key).fetch_one(&pool).await.unwrap();

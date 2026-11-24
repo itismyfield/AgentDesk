@@ -7,11 +7,11 @@ use std::sync::Arc;
 fn transition_lease_excludes_a_second_claim_until_it_is_dropped() {
     let shared = make_shared_data_for_tests();
     let channel = ChannelId::new(4_794_903);
-    let lease = SessionTransitionLease::try_acquire(&shared, channel).unwrap();
+    let lease = SessionTransitionLease::try_acquire(shared.as_ref(), channel).unwrap();
     assert!(lease.matches(&shared, channel));
-    assert!(SessionTransitionLease::try_acquire(&shared, channel).is_err());
+    assert!(SessionTransitionLease::try_acquire(shared.as_ref(), channel).is_err());
     drop(lease);
-    assert!(SessionTransitionLease::try_acquire(&shared, channel).is_ok());
+    assert!(SessionTransitionLease::try_acquire(shared.as_ref(), channel).is_ok());
 }
 
 #[test]
@@ -24,16 +24,18 @@ fn borrowed_transition_requires_the_same_channel_and_shared_owner() {
         .lock(channel)
         .try_lock_owned()
         .unwrap();
-    let lease = SessionTransitionLease::borrow(&shared, channel, &guard).unwrap();
+    let lease = SessionTransitionLease::borrow(shared.as_ref(), channel, &guard).unwrap();
     assert!(lease.matches(&shared, channel));
     assert!(!lease.matches(&other, channel));
     assert!(!lease.matches(&shared, ChannelId::new(4_794_905)));
-    assert!(SessionTransitionLease::borrow(&other, channel, &guard).is_err());
-    assert!(SessionTransitionLease::borrow(&shared, ChannelId::new(4_794_905), &guard).is_err());
+    assert!(SessionTransitionLease::borrow(other.as_ref(), channel, &guard).is_err());
+    assert!(
+        SessionTransitionLease::borrow(shared.as_ref(), ChannelId::new(4_794_905), &guard).is_err()
+    );
     drop(lease);
-    assert!(SessionTransitionLease::try_acquire(&shared, channel).is_err());
+    assert!(SessionTransitionLease::try_acquire(shared.as_ref(), channel).is_err());
     drop(guard);
-    assert!(SessionTransitionLease::try_acquire(&shared, channel).is_ok());
+    assert!(SessionTransitionLease::try_acquire(shared.as_ref(), channel).is_ok());
 }
 
 #[tokio::test(start_paused = true)]

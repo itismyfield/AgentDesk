@@ -450,7 +450,7 @@ fn force_postlude_runs_before_transition_release_pg() {
             Box::pin(async move {
                 let lease =
                     super::super::super::session_transition::SessionTransitionLease::try_acquire(
-                        &shared,
+                        shared.as_ref(),
                         channel(),
                     );
                 assert!(lease.is_err(), "the channel transition is still held");
@@ -1051,7 +1051,7 @@ fn e07_root_replaced_force_race_pg() {
         probe_before_postlude(Box::new(move || {
             Box::pin(async move {
                 let lease = super::super::super::session_transition::SessionTransitionLease::try_acquire(
-                    &shared,
+                    shared.as_ref(),
                     channel(),
                 );
                 assert!(lease.is_err(), "a recovery finds the transition held");

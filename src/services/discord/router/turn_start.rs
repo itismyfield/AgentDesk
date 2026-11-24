@@ -150,7 +150,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     let channel = channel_id.get();
     let transition = shared.session_transition_locks.acquire(channel_id).await;
     let transition = transition.map_err(|_| {
-        let wait = super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs();
+        let wait = super::super::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs();
         let error =
             format!("session transition stayed busy for {wait} seconds on channel {channel}");
         HeadlessTurnStartError::Conflict(error)
@@ -612,12 +612,12 @@ pub(crate) async fn try_intake_runtime_transition_after_redirect(
     shared: &Arc<SharedData>,
     effective_channel_id: ChannelId,
     fallback_state: (Option<String>, bool, String),
-) -> Result<IntakeRuntimeTransition, super::super::SessionTransitionBusy> {
+) -> Result<IntakeRuntimeTransition, super::super::session_transition::SessionTransitionBusy> {
     let guard = shared
         .session_transition_locks
         .lock(effective_channel_id)
         .try_lock_owned()
-        .map_err(|_| super::super::SessionTransitionBusy)?;
+        .map_err(|_| super::super::session_transition::SessionTransitionBusy)?;
     Ok(
         intake_runtime_transition_with_guard(shared, effective_channel_id, fallback_state, guard)
             .await,

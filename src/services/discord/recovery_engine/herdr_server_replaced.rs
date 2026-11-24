@@ -218,8 +218,9 @@ async fn unplaced(
     launch: &HerdrLaunchEndpoint,
     channel: ChannelId,
 ) -> Result<(), String> {
-    let lease = crate::services::discord::UnplacedLease::try_acquire(shared, channel)
-        .map_err(|_| "transition busy")?;
+    let lease =
+        crate::services::discord::session_transition::UnplacedLease::try_acquire(shared, channel)
+            .map_err(|_| "transition busy")?;
     let host = crate::services::claude::herdr_turn::boot_launch_host().ok_or("no launch host")?;
     let target = Unplaced {
         pool,

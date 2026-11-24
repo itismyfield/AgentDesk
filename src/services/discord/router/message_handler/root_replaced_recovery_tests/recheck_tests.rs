@@ -177,7 +177,8 @@ fn rr_borrowed_transition_recovers_without_releasing_its_callers_guard_pg() {
         .try_lock_owned()
         .unwrap();
     let lease =
-        SessionTransitionLease::borrow(&case.shared, ChannelId::new(CHANNEL), &guard).unwrap();
+        SessionTransitionLease::borrow(case.shared.as_ref(), ChannelId::new(CHANNEL), &guard)
+            .unwrap();
     let result = case.fx.rt.block_on(recovery::recover(
         &case.shared,
         &case.fx.pool,
@@ -207,7 +208,9 @@ fn rr_borrowed_transition_recovers_without_releasing_its_callers_guard_pg() {
             .is_err()
     );
     drop(guard);
-    assert!(SessionTransitionLease::try_acquire(&case.shared, ChannelId::new(CHANNEL)).is_ok());
+    assert!(
+        SessionTransitionLease::try_acquire(case.shared.as_ref(), ChannelId::new(CHANNEL)).is_ok()
+    );
 }
 
 #[test]
@@ -219,7 +222,8 @@ fn rr_borrowed_transition_from_another_channel_holds_without_cleanup_pg() {
         .unwrap()
         .expect("exact RootReplaced read");
     let guard =
-        SessionTransitionLease::try_acquire(&case.shared, ChannelId::new(CHANNEL + 1)).unwrap();
+        SessionTransitionLease::try_acquire(case.shared.as_ref(), ChannelId::new(CHANNEL + 1))
+            .unwrap();
     let result = case.fx.rt.block_on(recovery::recover(
         &case.shared,
         &case.fx.pool,

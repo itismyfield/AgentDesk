@@ -67,6 +67,6 @@ impl Drop for Recorder {
     }
 }
 
-/// The production admission check; only the executor is stood in.
-pub(crate) const CHECKPOINT_WAITS: super::CheckpointWaits =
-    crate::services::discord::checkpoint_waits_for_admission;
+/// No channel's checkpoint waits in the worker's own unit tests: they read rows as a dormant
+/// channel's worker does, which is what the router's check answers until a channel is activated.
+pub(crate) const CHECKPOINT_WAITS: super::CheckpointWaits = |_| false;

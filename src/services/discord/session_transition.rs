@@ -1,4 +1,3 @@
-use super::SharedData;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 
@@ -8,9 +7,16 @@ pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionTransitionBusy;
 
+/// The runtime whose channel transitions a lease stands for. A lease is told apart by the address
+/// of its host, so only the runtime object itself implements this, never a pointer to one.
+pub(crate) trait SessionTransitionHost {
+    fn transition_locks(&self) -> &SessionTransitionLocks;
+    fn transition_token_hash(&self) -> &str;
+}
+
 /// The exact channel lock held by a claim; a borrowed guard cannot release its caller's lock.
-pub(crate) struct SessionTransitionLease<'a> {
-    shared: &'a SharedData,
+pub(crate) struct SessionTransitionLease<'a, S> {
+    shared: &'a S,
     channel: ChannelId,
     hold: TransitionHold<'a>,
 }
@@ -20,13 +26,13 @@ enum TransitionHold<'a> {
     Borrowed(&'a tokio::sync::OwnedMutexGuard<()>),
 }
 
-impl<'a> SessionTransitionLease<'a> {
+impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
     pub(crate) fn try_acquire(
-        shared: &'a SharedData,
+        shared: &'a S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
-            .session_transition_locks
+            .transition_locks()
             .lock(channel)
             .try_lock_owned()
             .map_err(|_| SessionTransitionBusy)?;
@@ -38,13 +44,13 @@ impl<'a> SessionTransitionLease<'a> {
     }
 
     pub(crate) fn borrow(
-        shared: &'a SharedData,
+        shared: &'a S,
         channel: ChannelId,
         guard: &'a tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Self, SessionTransitionBusy> {
         if !Arc::ptr_eq(
             tokio::sync::OwnedMutexGuard::mutex(guard),
-            &shared.session_transition_locks.lock(channel),
+            &shared.transition_locks().lock(channel),
         ) {
             return Err(SessionTransitionBusy);
         }
@@ -55,7 +61,7 @@ impl<'a> SessionTransitionLease<'a> {
         })
     }
 
-    pub(crate) fn matches(&self, shared: &SharedData, channel: ChannelId) -> bool {
+    pub(crate) fn matches(&self, shared: &S, channel: ChannelId) -> bool {
         let guard = match &self.hold {
             TransitionHold::Owned(guard) => guard,
             TransitionHold::Borrowed(guard) => guard,
@@ -64,7 +70,7 @@ impl<'a> SessionTransitionLease<'a> {
             && self.channel == channel
             && Arc::ptr_eq(
                 tokio::sync::OwnedMutexGuard::mutex(guard),
-                &shared.session_transition_locks.lock(channel),
+                &shared.transition_locks().lock(channel),
             )
     }
 }
@@ -79,34 +85,34 @@ pub(crate) struct UnplacedLease {
 
 impl UnplacedLease {
     /// Waits as long as any transition claim does.
-    pub(crate) async fn acquire(
-        shared: &SharedData,
+    pub(crate) async fn acquire<S: SessionTransitionHost>(
+        shared: &S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
-        let guard = shared.session_transition_locks.acquire(channel).await?;
+        let guard = shared.transition_locks().acquire(channel).await?;
         Ok(Self::held(shared, channel, guard))
     }
 
-    pub(crate) fn try_acquire(
-        shared: &SharedData,
+    pub(crate) fn try_acquire<S: SessionTransitionHost>(
+        shared: &S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
-            .session_transition_locks
+            .transition_locks()
             .lock(channel)
             .try_lock_owned()
             .map_err(|_| SessionTransitionBusy)?;
         Ok(Self::held(shared, channel, guard))
     }
 
-    fn held(
-        shared: &SharedData,
+    fn held<S: SessionTransitionHost>(
+        shared: &S,
         channel: ChannelId,
         guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> Self {
         Self {
             _guard: guard,
-            token_hash: shared.token_hash.clone(),
+            token_hash: shared.transition_token_hash().to_owned(),
             channel,
         }
     }
@@ -172,5 +178,7 @@ impl SessionTransitionLocks {
     }
 }
 
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod registry_tests;
