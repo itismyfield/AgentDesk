@@ -105,13 +105,13 @@ pub(crate) fn set_permission_for_tests(context: &BindingContext, permission: Del
     });
 }
 #[cfg(test)]
-pub(super) fn clear_permissions_for_tests() {
+pub(crate) fn clear_permissions_for_tests() {
     PERMISSIONS.with(|values| values.borrow_mut().clear());
     BEFORE_COMMIT.with(|action| action.borrow_mut().take());
 }
 
 #[cfg(test)]
-pub(super) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
+pub(crate) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
@@ -348,7 +348,7 @@ fn commit(
     )
 }
 
-pub(super) fn proof_for_binding(
+pub(crate) fn proof_for_binding(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -373,7 +373,7 @@ pub(super) fn proof_for_binding(
     Ok(proof)
 }
 
-pub(super) fn publication_allowed(
+pub(crate) fn publication_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
