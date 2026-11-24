@@ -11,6 +11,8 @@ struct Fx {
 }
 fn fx() -> Fx {
     let (_root, _dir) = (TestRuntimeRootGuard::new(), tempfile::tempdir().unwrap());
+    // The runtime directory exists; the ledger file itself stays missing.
+    std::fs::create_dir_all(h::path().unwrap().parent().unwrap()).unwrap();
     let t = _dir.path().join("native.jsonl");
     std::fs::write(&t, "").unwrap();
     Fx {
@@ -69,6 +71,26 @@ fn keyless_reconcile_claude_register_then_receipt_changes_only_its_slot() {
         json!([{"key": "user:row", "row": "row", "kind": "user"}]);
     before["passive"][1]["state"] = after["passive"][1]["state"].clone();
     assert_eq!(after, before);
+}
+
+/// A keyless enqueue holds only its row: a same-frame keyed enqueue of another row lands, while
+/// the held row and a later command or user receipt stay refused.
+#[test]
+fn keyless_enqueue_leaves_another_row_to_a_same_frame_keyed_enqueue() {
+    let f = fx();
+    f.keyless("k1", &frame("same")).unwrap();
+    let enqueue = h::receipt("k1", &f.t, 0, "enqueue", Some("q1"), &frame("same"));
+    assert_eq!(enqueue, Some(true));
+    let key = f.keyed(1, &frame("same"));
+    let keyed =
+        |kind, row| (f.history).receipt("ns", &key, (&f.t, 0, kind, Some(row), &frame("same")));
+    assert_eq!(
+        keyed("enqueue", "q2"),
+        Some(true),
+        "another row's keyed enqueue"
+    );
+    assert_eq!(keyed("enqueue", "q1"), None, "the keyless row");
+    assert_eq!((keyed("command", "c"), keyed("user", "u")), (None, None));
 }
 
 /// An unscoped withdraw or receipt of a keyed attempt writes nothing; a recorded row still reads.
@@ -145,10 +167,16 @@ fn concurrent_owner_prepare_and_keyless_register_both_survive() {
             keyless_on(&t, &format!("k{n}"), &frame("keyless"))
         });
         join_within(keyed, WAIT_CAP);
-        assert_eq!(join_within(keyless, WAIT_CAP), Ok(()), "{n}");
+        let refused = join_within(keyless, WAIT_CAP);
+        assert_eq!(refused, Ok(()), "{n}: the keyless register was refused");
         let disk = f.disk();
-        assert_eq!(disk["live"][0]["id"], format!("nonce{n}"), "{n}");
-        assert_eq!(disk["passive"][0]["entry"]["id"], format!("k{n}"), "{n}");
+        assert_eq!(
+            disk["live"][0]["id"],
+            format!("nonce{n}"),
+            "{n}: keyed lost"
+        );
+        let kept = &disk["passive"][0]["entry"]["id"];
+        assert_eq!(*kept, format!("k{n}"), "{n}: keyless lost");
     }
 }
 
@@ -157,9 +185,20 @@ fn concurrent_owner_prepare_and_keyless_register_both_survive() {
 fn keyless_withdraw_after_owner_commit_leaves_keyed_bytes() {
     let f = fx();
     f.keyless("k1", &frame("one")).unwrap();
-    keyed_on(&Registry::at(h::path().unwrap()), &f.t, 1, &frame("keyed"));
     f.keyless("k2", &frame("two")).unwrap();
+    keyed_on(&Registry::at(h::path().unwrap()), &f.t, 1, &frame("keyed"));
     let mut before = f.disk();
+    let ids = |p: &Value| p["entry"]["id"].clone();
+    let keyless: Vec<_> = before["passive"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(ids)
+        .collect();
+    assert_eq!(
+        (&before["live"][0]["id"], keyless),
+        (&json!("nonce1"), vec![json!("k1"), json!("k2")])
+    );
     h::withdraw("k1", &f.t);
     before["passive"].as_array_mut().unwrap().remove(0);
     assert_eq!(f.disk(), before);
