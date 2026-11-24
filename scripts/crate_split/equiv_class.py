@@ -1,8 +1,12 @@
-"""Allow-list class of a crate-split diff for equiv_check.py (#7353 VT2): `vis`, `move` or `C`.
+"""Allow-list class of a crate-split diff for equiv_check.py (#7353 VT2): `cfg`, `vis`, `move` or `C`.
 
 Nothing is approved unless it is one of these edits, compared as Rust tokens (strings, raw/byte/C strings,
 chars and lifetimes are single tokens; comments, doc comments included, are dropped):
 
+  cfg   inside a `#[cfg(..)]` / `#![cfg(..)]` predicate, the `test` atom is spelled
+        `any(test, feature = "test-support")` (either argument order) or back, in a file whose package does not
+        declare a `test-support` feature (`cfg_equiv`): there the two predicates hold in exactly the same builds.
+        Nothing else in the file changes. Combined with vis or move edits the class is that of the others.
   vis   the visibility group (`pub`, `pub(crate|self|super|in ..)`) leading an item, a field of a braced
         struct/union, or a top-level tuple field — outside every macro token tree and fn body — is added,
         dropped or changed. Nothing else in the file changes.
@@ -114,8 +118,10 @@ class Unit:
     start: int
     end: int  # exclusive
     line: int
-    tokens: tuple = ()  # texts, allowed visibility removed
+    tokens: tuple = ()  # texts, allowed visibility removed and `test`-equivalent cfg atoms folded
     raw: tuple = ()     # texts as written
+    novis: tuple = ()   # texts, allowed visibility removed
+    nocfg: tuple = ()   # texts, `test`-equivalent cfg atoms folded
 
 
 @dataclass
@@ -125,6 +131,7 @@ class FileShape:
     toks: list
     units: list = field(default_factory=list)
     vis: set = field(default_factory=set)  # token indexes of allowed visibility groups
+    cfgeq: set = field(default_factory=set)  # token indexes dropped when `any(test, feature = "test-support")` folds
 
 
 def is_p(t, text):
@@ -309,15 +316,45 @@ class Shaper:
         self.shape.units.append(Unit(self.shape.path, module, kind, name, start, end, toks[line_at].line))
 
 
+TEST_SUPPORT = ('"test-support"',)
+
+
+def test_equivalent_atoms(toks, close) -> set:
+    """Token indexes to drop so each `any(test, feature = "test-support")` in a cfg predicate reads `test`."""
+    drop = set()
+    for i in range(len(toks) - 3):
+        if not (is_p(toks[i], "#") and (is_p(toks[i + 1], "[") or is_p(toks[i + 1], "!"))):
+            continue
+        b = i + 1 if is_p(toks[i + 1], "[") else i + 2
+        if b + 2 >= len(toks) or not is_p(toks[b], "[") or toks[b + 1].text != "cfg" or not is_p(toks[b + 2], "("):
+            continue
+        for k in range(b + 3, close[b + 2]):
+            texts = [t.text for t in toks[k:k + 9]]
+            forms = (["any", "(", "test", ",", "feature", "=", *TEST_SUPPORT, ")"],
+                     ["any", "(", "feature", "=", *TEST_SUPPORT, ",", "test", ")"])
+            for form in forms:
+                if texts[:8] == form and is_p(toks[k + 1], "(") and close.get(k + 1) == k + 7:
+                    keep = k + form.index("test")
+                    drop.update(n for n in range(k, k + 8) if n != keep)
+    return drop
+
+
 def finish(shape: FileShape):
     for u in shape.units:
+        span = list(enumerate(shape.toks[u.start:u.end], u.start))
         u.raw = tuple(t.text for t in shape.toks[u.start:u.end])
-        u.tokens = tuple(t.text for n, t in enumerate(shape.toks[u.start:u.end], u.start) if n not in shape.vis)
+        u.tokens = tuple(t.text for n, t in span if n not in shape.vis and n not in shape.cfgeq)
+        u.novis = tuple(t.text for n, t in span if n not in shape.vis)
+        u.nocfg = tuple(t.text for n, t in span if n not in shape.cfgeq)
     return shape
 
 
-def shape_file(path, module, text) -> FileShape:
-    return finish(Shaper(path, module, text).run())
+def shape_file(path, module, text, cfg_equiv=False) -> FileShape:
+    shaper = Shaper(path, module, text)
+    shape = shaper.run()
+    if cfg_equiv:
+        shape.cfgeq = test_equivalent_atoms(shape.toks, shaper.close)
+    return finish(shape)
 
 
 # ---------------------------------------------------------------------------------------------- scopes
@@ -485,6 +522,7 @@ class Verdict:
     paths: int = 0
     uses: int = 0
     moddecls: int = 0
+    cfg: int = 0
 
     def c(self, path, line, why):
         self.reasons.append((path, line, why))
@@ -537,12 +575,25 @@ class Classifier:
             if a is not None:
                 uses_r.remove(r)
                 uses_a.remove(a)
-                self.v.vis += 1
+                self.in_place(r, a)
         for u in uses_r + uses_a:
             if u.tokens and u.tokens[0] == "#":
                 self.v.c(u.path, u.line, f"`use` with attributes changed: {' '.join(u.raw[:12])}")
         rest_r = [u for u in keep_r if u.kind != "use"]
         rest_a = [u for u in keep_a if u.kind != "use"]
+        # A unit that stayed in its module and only changed allowed tokens pairs with its counterpart even when
+        # its key is shared (two `impl X` blocks): equal canonical tokens leave nothing to tell them apart.
+        same_tokens = collections.defaultdict(list)
+        for a in rest_a:
+            same_tokens[(a.module, a.tokens)].append(a)
+        for r in list(rest_r):
+            match = same_tokens.get((r.module, r.tokens))
+            if match:
+                a = match.pop(0)
+                rest_r.remove(r)
+                rest_a.remove(a)
+                self.in_place(r, a)
+                self.v.inplace += 1
         self.macro_order()
         pairs, moves = self.pair(rest_r, rest_a)
         for r, a in pairs:
@@ -554,7 +605,14 @@ class Classifier:
             self.v.klass = "move"
         elif self.v.vis:
             self.v.klass = "vis"
+        elif self.v.cfg:
+            self.v.klass = "cfg"
         return self.v
+
+    def in_place(self, r, a):
+        """A unit that stayed and changed only in allowed visibility and `test`-equivalent cfg atoms."""
+        self.v.vis += r.nocfg != a.nocfg
+        self.v.cfg += r.novis != a.novis
 
     def macro_order(self):
         """`macro_rules!` is textually scoped: a file holding one keeps the order of the units it keeps."""
@@ -601,7 +659,7 @@ class Classifier:
             self.v.c(a.path, a.line, f"macro `{a.name}` moved (textual order matters)")
             return
         if r.raw != a.raw and r.tokens == a.tokens and r.module == a.module:
-            self.v.vis += 1
+            self.in_place(r, a)
             self.v.inplace += 1
             return
         old, new = path_exprs(r.tokens), path_exprs(a.tokens)
@@ -681,8 +739,9 @@ class Classifier:
                 self.v.uses += 1
 
 
-def classify(base_files: dict, head_files: dict, modules: dict, crates: set) -> Verdict:
-    """base_files/head_files: {path: text or None} of the changed .rs files; modules: {(side, path): module}."""
+def classify(base_files: dict, head_files: dict, modules: dict, crates: set, cfg_equiv=frozenset()) -> Verdict:
+    """base_files/head_files: {path: text or None} of the changed .rs files; modules: {(side, path): module};
+    cfg_equiv: paths whose package declares no `test-support` feature on either side (the `cfg` class)."""
     shapes = {"-": [], "+": []}
     verdict = Verdict()
     for side, files in (("-", base_files), ("+", head_files)):
@@ -690,7 +749,7 @@ def classify(base_files: dict, head_files: dict, modules: dict, crates: set) -> 
             if text is None:
                 continue
             try:
-                shapes[side].append(shape_file(path, modules[(side, path)], text))
+                shapes[side].append(shape_file(path, modules[(side, path)], text, path in cfg_equiv))
             except LexError as err:
                 verdict.c(path, 0, f"cannot tokenize ({err})")
     if verdict.reasons:
