@@ -83,23 +83,26 @@ pub(super) fn running_real_server_stays_unverified_until_a_later_start() {
 /// dedicated homes, so the candidate's home is never written, and a canonical home is not touched.
 #[test]
 fn boot_ensures_only_the_installed_snapshot_dedicated_homes() {
-    const TEST: &str = "services::session_host::herdr::launch_host::real_tests::managed_config::boot_ensures_only_the_installed_snapshot_dedicated_homes";
     let Some(root) = std::env::var_os("ADK_CONFIG_BOOT_PROBE").map(std::path::PathBuf::from) else {
         let root = tempfile::tempdir().unwrap();
         let user = root.path().join("user");
         std::fs::create_dir(&user).unwrap();
+        let test = format!(
+            "{}::boot_ensures_only_the_installed_snapshot_dedicated_homes",
+            module_path!().split_once("::").unwrap().1
+        );
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+            .args(["--exact", &test, "--nocapture"])
             .env("ADK_CONFIG_BOOT_PROBE", root.path())
             .env("AGENTDESK_ROOT_DIR", root.path().join("runtime"))
             .env("HOME", &user)
             .env_remove("XDG_CONFIG_HOME")
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         return;

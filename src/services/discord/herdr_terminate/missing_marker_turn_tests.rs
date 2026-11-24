@@ -3,6 +3,7 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     self, HostedExecution, HostedLookupKey, HostedOwner, HostedRecord, HostedState,
 };
+use crate::krx_session_host_tests::herdr_terminate_real_tests as real;
 use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
 use crate::services::claude_tui::hook_server::{
     HookEvent, HookServerState, hook_receiver_router_with_state,
@@ -15,7 +16,7 @@ use crate::services::discord::tui_prompt_relay::herdr_source::{
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::herdr_launch::HerdrLaunchHost;
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
-use crate::services::session_host::{HerdrTarget, herdr_terminate_real_tests as real};
+use crate::services::session_host::HerdrTarget;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
 use crate::services::turn_host::{self, HerdrRefusal, TurnHost};
 use real::missing_marker_rig::{CHANNEL, Case, LOGICAL, TOKEN, child};

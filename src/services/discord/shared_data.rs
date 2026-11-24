@@ -326,7 +326,7 @@ pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
 }
 
 #[cfg(test)]
-pub(in crate::services) fn make_shared_data_for_tests_with_storage(
+pub(crate) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
     make_shared_data_for_tests_with_barrier(

@@ -25,7 +25,7 @@ async fn utc_session_preserves_turn_instants_pg() {
         return;
     }
     assert_eq!(Local::now().offset().local_minus_utc(), 9 * 60 * 60);
-    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+    let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
         "turn_timestamps",
         "turn timestamp storage",
     )
