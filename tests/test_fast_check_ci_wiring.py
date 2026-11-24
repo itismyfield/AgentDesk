@@ -384,6 +384,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "just fmt-check",
                 "npm run test:policies",
@@ -408,7 +409,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         mutants = (
-            ("rust_build", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}", "if: ${{ !github.event.pull_request.draft && !cancelled() }}", "required needs closure"),
+            ("rust_build", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_build == 'true' }}", "if: ${{ !github.event.pull_request.draft && !cancelled() }}", "required needs closure"),
             ("rust_build", "          python3 scripts/ci/nextest_ci.py selector-audit --plan \"$NEXTEST_DIR/plan/plan.json\"\n", "", "exact cargo/test command list"),
             ("rust_build", "python3 scripts/ci/rust_test_sources.py compare --platform linux", "true", "exact cargo/test command list"),
             ("rust_build", "          name: nextest-plan\n", "          name: nextest-plan-copy\n", "artifact uploads"),
@@ -423,7 +424,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
             ("base_compare", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
             ("base_compare", step_block(job_block(workflow, "base_compare"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
-            ("base_compare", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}", "if: ${{ !github.event.pull_request.draft && needs.rust_build.result == 'success' }}", "required needs closure"),
+            ("base_compare", " && needs.changes.outputs.rust_tests == 'true'", "", "required needs closure"),
             # The workers start at the plan upload; waiting for the base comparison again is red.
             ("rust_scope", "    needs: [changes, rust_build]\n", "    needs: [changes, rust_build, base_compare]\n", "exact needs"),
             ("rust_build", "--retry-mode all-once", "--retry-mode policy", "exact cargo/test command list"),
@@ -499,21 +500,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
             runs = " ".join(str(step.get("run", "")) for step in jobs[job_id]["steps"])
             self.assertIn("nextest_ci.py selector-audit --plan", runs, job_id)
 
-    def test_pg15_owner_proof_runs_whenever_the_rust_tests_run(self) -> None:
+    def test_pg15_owner_proof_follows_execution_gate_after_successful_build(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         self.assertEqual(jobs["pg15_owner_proof"]["needs"], ["changes", "rust_build"])
         for rust_tests in ("true", "false"):
-            for job_id in ("pg15_owner_proof", "rust_build"):
-                with self.subTest(job=job_id, rust_tests=rust_tests):
-                    condition = jobs[job_id]["if"].replace("!cancelled()", "true")
-                    context = {"github.event.pull_request.draft": False,
-                               "needs.changes.outputs.rust_tests": rust_tests,
-                               "needs.rust_build.result": "success" if rust_tests == "true" else "skipped"}
-                    self.assertEqual(eval_step_if(condition, context), rust_tests == "true")
-        for result in ("failure", "cancelled", "skipped"):
-            self.assertFalse(eval_step_if(jobs["pg15_owner_proof"]["if"], {
-                "github.event.pull_request.draft": False, "cancelled()": False,
-                "needs.rust_build.result": result}))
+            for result in ("success", "failure", "cancelled", "skipped"):
+                context = {"github.event.pull_request.draft": False, "cancelled()": False,
+                           "needs.changes.outputs.rust_tests": rust_tests, "needs.rust_build.result": result}
+                with self.subTest(rust_tests=rust_tests, build=result):
+                    self.assertEqual(eval_step_if(jobs["pg15_owner_proof"]["if"], context),
+                                     rust_tests == "true" and result == "success")
 
     def test_fast_targeted_context_fails_closed_on_each_pg15_outcome_its_gate_forbids(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
@@ -529,7 +525,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for (rust_tests, outcome), expected_red in red.items():
             n_result = "success" if rust_tests == "true" else "skipped"
             needs = {job: {"result": n_result} for job in ("rust_build", "base_compare", "rust_tests", "test_evidence")}
-            needs.update(changes={"result": "success", "outputs": {"rust_tests": rust_tests}}, pg15_owner_proof={"result": outcome})
+            needs.update(changes={"result": "success", "outputs": {"rust_build": rust_tests, "rust_tests": rust_tests}},
+                         pg15_owner_proof={"result": outcome})
             with self.subTest(rust_tests=rust_tests, outcome=outcome):
                 ok, lines = nextest_required.context_verdict("Fast targeted tests (ubuntu-latest)", needs)
                 self.assertEqual(not ok, expected_red, lines)
@@ -576,7 +573,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
         job = jobs["pg15_owner_proof"]
         self.assertEqual(job["needs"], ["changes", "rust_build"])
-        self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}")
         downloads = [s for s in job["steps"] if s.get("uses", "").startswith("actions/download-artifact")]
         self.assertEqual(downloads, [{"name": "Download nextest plan", "uses": "actions/download-artifact@v4",
                                      "with": {"name": "nextest-plan", "path": "${{ runner.temp }}/nextest"}}])
@@ -931,6 +927,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 if line.strip()
             ],
             [
+                'bash scripts/ci/preinstalled-tool.sh "$TOOL"',
                 "printf 'RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\nADK_CARGO_PRIORITY=1\\n' >> \"$GITHUB_ENV\"",
                 "npm run test:policies",
                 "just fmt-check",
@@ -1401,7 +1398,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             for check in outcomes:
                 for targets in outcomes:
                     needs = {job: {"result": "success"} for job in ("rust_build", "base_compare", "rust_tests", "test_evidence")}
-                    needs.update(changes={"result": "success", "outputs": {"rust_tests": "true", "cross_os_rust": cross_os_rust}},
+                    needs.update(changes={"result": "success", "outputs": {"rust_build": "true", "rust_tests": "true", "cross_os_rust": cross_os_rust}},
                                  check_fast_cross_os={"result": check}, check_fast_cross_os_targets={"result": targets})
                     with self.subTest(cross_os_rust=cross_os_rust, check=check, targets=targets):
                         allowed = {"success"} if cross_os_rust == "true" else {"success", "skipped"}
@@ -1428,9 +1425,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
-        built = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success'"
+        built = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' && needs.rust_build.result == 'success'"
         n_gate = built + " }}"
-        rust_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
+        rust_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_build == 'true' }}"
         cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
             "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_census": MIRROR_IF, "scripts_contracts": MIRROR_IF,
@@ -1454,7 +1451,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(closure, set(expected_if))
         for job_id, condition in expected_if.items():
             self.assertEqual(jobs[job_id].get("if"), condition, job_id)
-        context = {"github.event.pull_request.draft": False, "cancelled()": False,
+        context = {"github.event.pull_request.draft": False, "cancelled()": False, "needs.changes.outputs.rust_tests": "true",
                    "needs.rust_build.result": "success"}
         for workers, scope_result, sweep in (("[0]", "success", True), ("[0]", "failure", False),
                                              ("[0]", "skipped", False), ("[]", "skipped", True)):
@@ -2191,7 +2188,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             )
             (root / "scripts/ci").mkdir()
             for helper in ("nextest_required.py", "cargo_test_filters.py", "generated_artifact_steps.rb",
-                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name):
+                           "main_script_check_shards.rb", Path(PR_NEXTEST_WIRING).name, Path(PR_NEXTEST_WORKER).name,
+                           "preinstalled_tools_wiring.rb"):
                 (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:

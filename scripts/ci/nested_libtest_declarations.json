@@ -117,7 +117,7 @@
           "source": "src/services/claude_tui/hook_relay.rs",
           "function": "claude_non_wait_hanging_transport_returns_after_stdout_within_750ms",
           "stdout": "inherited",
-          "sha256": "67f88fe3fa923efced31fbbeab6384357a82307fdcbdc5b175491b858488bc30",
+          "sha256": "bdc0392185be1de1f8248a8d5b6a8384aad5ee75b6ce4c3ae2d9e9ff01808b46",
           "ignored_args": 1
         }
       ]

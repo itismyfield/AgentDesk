@@ -7,7 +7,7 @@ import type { Agent } from "../../types";
 import { HomeCampaignsCard, HomeRoutinesCard, HomeUsageCard } from "./HomeActivityCards";
 import { HomeAgentsCard, HomeSystemCard, HomeTodoCard } from "./HomeSummaryCards";
 import { buildTodoItems, classifyAgents, type SourceState } from "./homeModel";
-import { loadHomeCampaigns, usePolled } from "./useHomeData";
+import { campaignTodoSource, loadHomeCampaigns, usePolled } from "./useHomeData";
 
 /** v3 home in a fixed order: to-dos, system, agents, campaigns, today's routines, usage. */
 export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAgent }: {
@@ -32,7 +32,8 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
   );
   // Each to-do source keeps its own read state, so a slow or failed one never reads as nothing to do.
   const cardsSource: SourceState = kanbanCardsState === "error" ? "failed" : kanbanCardsState === "ready" ? "ok" : "loading";
-  const campaignsSource: SourceState = campaigns.failed ? "failed" : campaigns.data ? (campaigns.data.summaries ? "ok" : "failed") : "loading";
+  const campaignsSource = campaignTodoSource(campaigns);
+  const details = campaigns.data && !campaigns.failed ? { failed: campaigns.data.detailFailed, cut: campaigns.data.detailsCut } : undefined;
 
   return (
     <PageFrame
@@ -50,6 +51,7 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
             agents={agents}
             cards={cardsSource}
             campaigns={campaignsSource}
+            details={details}
             isMobile={isMobileViewport}
             tr={tr}
             className="flex-[2_1_32.5rem]"

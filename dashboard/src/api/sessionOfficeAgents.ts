@@ -172,6 +172,11 @@ export async function updateDepartment(
   });
 }
 
+/** Sets every listed department's `sort_order` in one transaction. */
+export async function reorderDepartments(order: Array<{ id: string; sort_order: number }>): Promise<void> {
+  await request("/api/departments/reorder", { method: "PATCH", body: JSON.stringify({ order }) });
+}
+
 export async function deleteDepartment(id: string): Promise<void> {
   await request(`/api/departments/${id}`, { method: "DELETE" });
 }

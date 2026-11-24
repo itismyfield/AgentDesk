@@ -32,9 +32,12 @@ pub(in crate::services::discord::runtime_bootstrap) async fn prepare_native_boot
         // Set by a peer runtime's SIGTERM handler; this runtime has none yet and registers none.
         let sigterm = super::super::boot_sigterm::watch();
         let attempt = || async move {
-            let prepared = crate::services::discord::runtime_store::runtime_root()
-                .ok_or_else(|| "native boot root unavailable".to_string())
-                .and_then(|root| BootInputs::prepare(&root, shared.restart.current_generation));
+            let prepared = match crate::services::discord::runtime_store::runtime_root() {
+                Some(root) => {
+                    BootInputs::prepare_off_worker(root, shared.restart.current_generation).await
+                }
+                None => Err("native boot root unavailable".to_string()),
+            };
             let plan = match prepared {
                 Ok(plan) => plan,
                 Err(error) => {

@@ -89,7 +89,7 @@ pub(crate) fn check() -> Result<(), StopCause> {
     }) {
         return Err(StopCause::ApprovalSnapshot);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return forced.check();
     }
@@ -113,7 +113,7 @@ pub(crate) fn force_for_test(admission: Admission) -> ForcedAdmission {
     ForcedAdmission(FORCED.with(|cell| cell.replace(forced)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedAdmission {
     fn drop(&mut self) {
         FORCED.with(|cell| *cell.borrow_mut() = self.0.take());

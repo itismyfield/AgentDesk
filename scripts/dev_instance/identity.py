@@ -21,7 +21,8 @@ import uuid
 
 from .discord_http import USER_AGENT
 
-from .files import ADMISSION_NAME_SETS, InstanceError, _open_parent, _token_bytes
+from .files import (ADMISSION_NAME_SETS, AGY_CREDENTIAL_NAMES, AGY_PROVIDER_CREDENTIAL_NAMES, InstanceError,
+                    _open_parent, _token_bytes)
 from .profile import spec_for_bots
 
 RUN_ENV = 'AGENTDESK_TEST_RUN'
@@ -207,7 +208,8 @@ def recheck_credentials(root, observed, names=None):
     names = set(names) if names is not None else {item['name'] for item in observed}
     parent, _ = _open_parent(root, 'credential/entry', private=True)
     try:
-        if names not in ADMISSION_NAME_SETS or set(os.listdir(parent)) != names:
+        optional = AGY_PROVIDER_CREDENTIAL_NAMES if names == AGY_CREDENTIAL_NAMES else frozenset()
+        if names not in ADMISSION_NAME_SETS or set(os.listdir(parent)) - optional != names:
             raise InstanceError('explicit live mode requires exactly the profile credentials')
     finally:
         os.close(parent)

@@ -113,9 +113,13 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         """Main's nextest build plans every lib test, this lane included, on every merge;
         a path filter there would silently skip it, so main keeps none."""
         workflow = WORKFLOW_DIR / "ci-main.yml"
-        job = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
-        self.assertNotIn("if", job["rust_build"])
-        self.assertNotIn("needs", job["rust_build"])
+        main = yaml.load(workflow.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        self.assertIn("main", main["on"]["push"]["branches"])
+        self.assertIn("workflow_dispatch", main["on"])
+        self.assertNotIn("if", main["jobs"]["rust_build"])
+        self.assertNotIn("needs", main["jobs"]["rust_build"])
+        for name in ("rust_tests", "test_evidence"):
+            self.assertNotIn("needs.changes", main["jobs"][name]["if"])
         self.assertEqual(list(filter_blocks(workflow)), [])
 
     def test_release_gates_doc_agrees_with_ci_main_gating(self) -> None:

@@ -47,6 +47,17 @@ impl<'a> ExpectedBinding<'a> {
     }
 }
 
+/// Why a destructive cleanup of `name` kills nothing: the binding moved off `expected`, or its
+/// host marker is not tmux. A force-kill's verdict judged the host once, so only others read it.
+fn host_refusal(name: Option<&str>, expected: Option<ExpectedBinding<'_>>) -> Option<String> {
+    if expected.is_some_and(|expected| expected.name() != name) {
+        return Some("binding moved".into());
+    }
+    let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
+    name.filter(|_| !judged)
+        .and_then(crate::services::tmux_common::host_marker::marker_refusal)
+}
+
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupOutcome {
@@ -67,6 +78,28 @@ impl CleanupOutcome {
 }
 
 impl CancelToken {
+    /// Whether a forced stop was admitted; a cancel cause alone never sets it.
+    pub(crate) fn termination_requested(&self) -> bool {
+        self.termination_requested.load(Ordering::Acquire)
+    }
+
+    /// Records a forced stop ahead of its cancel, so the turn never ends on a plain cancel;
+    /// a stale generation or a refused or moved host records nothing.
+    pub(crate) fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
+        let binding = self
+            .tmux_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let stale = matches!(
+            authority::authorize(binding.as_ref()),
+            KillAuthorization::Stale { .. }
+        );
+        if !stale && host_refusal(binding.as_ref().map(TmuxBinding::name), expected).is_none() {
+            self.termination_requested.store(true, Ordering::Release);
+        }
+    }
+
     /// Execute all token-owned destructive cleanup behind one generation fence.
     pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
         self.request_cleanup_inner(request, None)
@@ -87,7 +120,7 @@ impl CancelToken {
         request: CleanupRequest,
         expected: Option<ExpectedBinding<'_>>,
     ) -> CleanupOutcome {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         REQUESTED_INTENTS.with(|intents| intents.borrow_mut().push(request.intent));
         self.publish_cancel_if_source_absent(request.cancel_source.clone());
 
@@ -156,14 +189,8 @@ impl CancelToken {
         let name = binding.as_ref().map(TmuxBinding::name);
         // Checked before either claim, so a refused host leaves both kills untaken.
         let destructive = !matches!(request.intent, TmuxCleanupIntent::PreserveSession);
-        let moved = destructive && expected.is_some_and(|expected| expected.name() != name);
-        // A force-kill's verdict judged the host once; every other cleanup reads the marker here.
-        let judged = matches!(expected, Some(ExpectedBinding::Approved(_)));
-        let marker = crate::services::tmux_common::host_marker::marker_refusal;
-        let refusal = name
-            .filter(|_| destructive && !moved && !judged)
-            .and_then(marker);
-        if moved || refusal.is_some() {
+        let refusal = destructive.then(|| host_refusal(name, expected)).flatten();
+        if refusal.is_some() {
             let source = &request.cancel_source;
             tracing::warn!(?name, ?expected, ?refusal, %source, "cleanup refused before any kill");
             return CleanupOutcome {
@@ -175,6 +202,9 @@ impl CancelToken {
                 termination_recorded: false,
                 host_refused: true,
             };
+        }
+        if destructive {
+            self.termination_requested.store(true, Ordering::Release);
         }
         let mut pid_killed = false;
         let mut retry_pid_cleanup = false;
@@ -285,7 +315,7 @@ impl CancelToken {
 
     /// With no tmux binding the target is a process-backend wrapper, whose CLI groups go too.
     fn kill_pid_tree_guarded(&self, target: &CapturedProcess, wrapper: bool) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !REAL_PID_KILL.with(std::cell::Cell::get) {
             let _ = wrapper;
             let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
@@ -346,14 +376,14 @@ impl CancelToken {
         cancel_source: &str,
         authorization: KillAuthorizationState,
     ) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             TMUX_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return TMUX_KILL_SUCCEEDS.load(Ordering::Relaxed)
                 && !SUPPRESS_TMUX_AFTER_CLAIM.load(Ordering::Relaxed);
         }
-        #[cfg(all(unix, not(test)))]
+        #[cfg(all(unix, not(any(test, feature = "test-support"))))]
         {
             if self.tmux_cleanup_is_suppressed(name) {
                 tracing::debug!(
@@ -385,7 +415,7 @@ impl CancelToken {
             }
             killed
         }
-        #[cfg(all(not(unix), not(test)))]
+        #[cfg(all(not(unix), not(any(test, feature = "test-support"))))]
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             false
@@ -393,7 +423,7 @@ impl CancelToken {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::AtomicUsize;
@@ -401,11 +431,11 @@ use std::sync::atomic::AtomicUsize;
 static PID_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "test-support"))]
 static TMUX_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PID_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TMUX_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 
 #[cfg(any(test, feature = "test-support"))]
@@ -459,7 +489,7 @@ pub(crate) fn set_pid_kill_succeeds_for_test(succeeds: bool) {
     PID_KILL_SUCCEEDS.store(succeeds, Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PID_DISPATCH_BARRIERS: std::sync::Mutex<
     Option<(
         std::sync::Arc<std::sync::Barrier>,

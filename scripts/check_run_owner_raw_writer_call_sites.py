@@ -30,8 +30,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 try:
+    from rust_cfg import find_test_only_cfg_attributes
     from rust_lex import COMMENT, LITERAL, StripState, lex_segments
 except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_cfg import find_test_only_cfg_attributes
     from scripts.rust_lex import COMMENT, LITERAL, StripState, lex_segments
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +72,6 @@ UPDATES = {
 }
 SET_RE = re.compile(r"\bSET\b", _I)
 SET_END_RE = re.compile(r"\b(?:WHERE|RETURNING|FROM)\b", _I)
-CFG_EXCLUSIVELY_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*(?:,|\)))")
 
 # (file, pattern) -> (exact count, reason). Each site already serializes with cancel
 # or is not an owner publication.
@@ -139,12 +140,12 @@ def lex_rust(text: str) -> tuple[str, list[tuple[int, int, str]]]:
     return "".join(mask), [(start, line, body) for start, line, body in literals]
 
 
-def test_spans(mask: str) -> list[tuple[int, int]]:
-    """Offsets of every `#[cfg(test)]` / `#[cfg(all(test, ..))]` braced item."""
+def test_spans(mask: str, source: str | None = None) -> list[tuple[int, int]]:
+    """Offsets of every braced item behind a test-only cfg (`rust_cfg`); ``source`` is the unmasked text."""
     spans = []
-    for match in CFG_EXCLUSIVELY_TEST_RE.finditer(mask):
-        brace = mask.find("{", match.end())
-        semicolon = mask.find(";", match.end())
+    for match in find_test_only_cfg_attributes(mask, source):
+        brace = mask.find("{", match.attribute_end())
+        semicolon = mask.find(";", match.attribute_end())
         if brace == -1 or (semicolon != -1 and semicolon < brace):
             continue
         depth = 0
@@ -235,8 +236,9 @@ def scan(
         rel = path.relative_to(root).as_posix()
         if path in whole_file_skips or rel == GUARD_WRITES:
             continue
-        mask, literals = lex_rust(path.read_text(encoding="utf-8"))
-        spans = test_spans(mask)
+        text = path.read_text(encoding="utf-8")
+        mask, literals = lex_rust(text)
+        spans = test_spans(mask, text)
         for start, line, body in literals:
             if any(low <= start <= high for low, high in spans):
                 continue

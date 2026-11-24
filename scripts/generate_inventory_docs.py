@@ -14,6 +14,16 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterable
 from pathlib import Path
 
+try:
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
+    from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+except ModuleNotFoundError:  # loaded by path from another cwd
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
+    from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
+    from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 GENERATED_DOCS_DIR = REPO_ROOT / "docs" / "generated"
@@ -47,9 +57,8 @@ GIANT_FILE_ISSUE_RATCHET_WRITER = (
 #
 # A module's `#[cfg(...)]` attribute gates it to test-only builds when the
 # predicate *requires* the `test` flag. `cfg_requires_test` evaluates this
-# structurally (with balanced-paren awareness) so it handles nested forms that
-# combine `test`, `all(...)`, `any(...)`, `not(...)`, and feature checks.
-# Predicates that do not
+# with the shared `rust_cfg` evaluator, which also reads
+# `any(test, feature = "test-support")` as `test`. Predicates that do not
 # remove the module from production builds — `not(test)` (production-only) and
 # `any(test, …)` (compiles when the other option is set) — are rejected.
 
@@ -67,54 +76,10 @@ _CFG_MOD_RE = re.compile(
 )
 
 
-def _split_top_level_cfg_args(body: str) -> list[str]:
-    args: list[str] = []
-    depth = 0
-    start = 0
-    in_string = False
-    for index, ch in enumerate(body):
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            args.append(body[start:index])
-            start = index + 1
-    args.append(body[start:])
-    return [arg.strip() for arg in args if arg.strip()]
-
-
 def cfg_requires_test(predicate: str) -> bool:
-    """Return True when a `#[cfg(<predicate>)]` compiles only under `test`.
+    """Return True when a `#[cfg(<predicate>)]` compiles only under `test` (see `rust_cfg`)."""
 
-    * ``test`` -> True.
-    * ``all(a, b, …)`` -> True when any argument requires test (conjunction).
-    * ``any(a, b, …)`` -> True only when *every* argument requires test (the
-      module would otherwise also build without test).
-    * ``not(…)`` -> never test-gating for our purposes (``not(test)`` is
-      production-only; ``not(other)`` does not require test).
-    * anything else (e.g. ``feature = "x"``) -> False.
-    """
-
-    predicate = predicate.strip()
-    if predicate == "test":
-        return True
-    for keyword, combine in (("all", any), ("any", all)):
-        prefix = keyword + "("
-        if predicate.startswith(prefix) and predicate.endswith(")"):
-            inner = predicate[len(prefix):-1]
-            args = _split_top_level_cfg_args(inner)
-            if not args:
-                return False
-            return combine(cfg_requires_test(arg) for arg in args)
-    if predicate.startswith("not(") and predicate.endswith(")"):
-        return False
-    return False
+    return _shared_cfg_requires_test(predicate)
 
 TOP_LEVEL_MODULE_PURPOSES = {
     "adk_base_lib.rs": "Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths.",
@@ -226,6 +191,9 @@ class ModuleFileDeclaration:
     name: str
     child_paths: tuple[Path, ...]
     requires_test: bool
+    # Raw cfg bodies on the declaration and its enclosing inline modules.
+    conditions: tuple[str, ...] = ()
+    feature_dependent: bool = False
 
 
 class ParseError(RuntimeError):
@@ -729,7 +697,6 @@ _MOD_DECL_RE = re.compile(
     r"(?P<kind>[{;])",
     re.MULTILINE,
 )
-_CFG_ATTR_RE = re.compile(r"#\[\s*cfg\((?P<predicate>[^]]*?)\)\s*\]")
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
 
 
@@ -738,13 +705,7 @@ class _InlineModuleContext:
     end: int
     module_dir: Path
     requires_test: bool
-
-
-def _attrs_require_test(attrs: str) -> bool:
-    return any(
-        cfg_requires_test(match.group("predicate"))
-        for match in _CFG_ATTR_RE.finditer(attrs)
-    )
+    conditions: tuple[str, ...] = ()
 
 
 def _path_attr(attrs: str) -> str | None:
@@ -785,11 +746,10 @@ def _module_file_declarations(
     for match in _MOD_DECL_RE.finditer(text):
         start = match.start()
         contexts = [context for context in contexts if start < context.end]
-        inherited_test = parent_requires_test or any(
-            context.requires_test for context in contexts
-        )
         attrs = match.group("attrs") or ""
-        requires_test = inherited_test or _attrs_require_test(attrs)
+        conditions = (contexts[-1].conditions if contexts else ()) + attribute_conditions(attrs)
+        gate = cfg_conditions_gate(conditions)
+        requires_test = parent_requires_test or gate is not None
         name = match.group("name")
 
         if match.group("kind") == "{":
@@ -803,6 +763,7 @@ def _module_file_declarations(
                     end=end,
                     module_dir=base / name,
                     requires_test=requires_test,
+                    conditions=conditions,
                 )
             )
             continue
@@ -819,6 +780,8 @@ def _module_file_declarations(
                     path_attr=_path_attr(attrs),
                 ),
                 requires_test=requires_test,
+                conditions=conditions,
+                feature_dependent=gate == "feature" and not parent_requires_test,
             )
         )
     return declarations
@@ -856,6 +819,7 @@ def test_only_module_files(
             text,
             parent_requires_test=is_test_file(path),
         )
+    declarations_by_parent = demote_uncomposed_feature_mounts(declarations_by_parent, read_text_fn)
 
     result: set[Path] = set()
     while True:

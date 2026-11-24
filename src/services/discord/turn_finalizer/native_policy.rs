@@ -108,7 +108,11 @@ impl NativePrepared {
         history: &Registry,
         shared: &Arc<SharedData>,
     ) -> Result<(), String> {
-        history.try_native_not_sent(&self.namespace, &self.ticket)?;
+        // The leaf proved no key left, so custody goes even when the no-key record could not land.
+        let recorded = history.native_not_sent(&self.namespace, &self.ticket).await;
+        if recorded.is_err() {
+            self.record_not_sent_later(history.clone(), shared.clone());
+        }
         if self.actor.is_some() {
             let input = serde_json::to_string(&(&self.namespace, &self.ticket.key))
                 .map_err(|e| e.to_string())?;
@@ -119,7 +123,29 @@ impl NativePrepared {
                 return Err("native no-key custody removal unconfirmed".into());
             }
         }
-        Ok(())
+        recorded
+    }
+
+    /// The leaf's no-key proof still owes its record and cold source ACK; both land once the
+    /// registry lock frees, on a blocking thread, and a restart before that settles at boot.
+    fn record_not_sent_later(&self, history: Registry, shared: Arc<SharedData>) {
+        let (namespace, ticket) = (self.namespace.clone(), self.ticket.clone());
+        tokio::spawn(async move {
+            let (h, n, t) = (history.clone(), namespace.clone(), ticket.clone());
+            let recorded = tokio::task::spawn_blocking(move || h.native_not_sent_blocking(&n, &t))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|recorded| recorded);
+            let release =
+                crate::services::discord::turn_finalizer::native_prepare::release_unkeyed_source;
+            let acked = match recorded {
+                Ok(()) => release(&shared, &history, &namespace, &ticket).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = acked {
+                tracing::warn!(%error, "native no-key record left for boot reconciliation");
+            }
+        });
     }
 
     async fn settle_control(
@@ -183,9 +209,16 @@ impl NativePrepared {
                 if slot.cancel_token.is_some() {
                     return Err("native control row authority changed".into());
                 }
+                if super::record_native_terminal(shared, &row, &outcome.disposition)
+                    .await
+                    .is_none()
+                {
+                    return Ok(None);
+                }
                 let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                     &ProviderKind::Claude,
                     &row,
+                    false,
                 );
                 if !matches!(
                     (clear, detail.reason),
@@ -201,7 +234,8 @@ impl NativePrepared {
         let record = history.native_boot_record(&self.namespace, &ticket)?;
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native control root unavailable")?;
-        crate::services::discord::inflight::persist_native_boot_record(&root, &record)?;
+        crate::services::discord::inflight::persist_native_boot_record_off_worker(root, record)
+            .await?;
         Ok(Some(wake))
     }
 }

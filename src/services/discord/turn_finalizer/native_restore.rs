@@ -168,6 +168,7 @@ impl RestoredInput {
                     let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,
                         &row,
+                        false,
                     );
                     if !matches!(
                         (clear, detail.reason),
@@ -183,7 +184,7 @@ impl RestoredInput {
                 wake = slot.cancel_token.is_none();
             }
         }
-        self.preserve_terminal(history)?;
+        self.preserve_terminal(history).await?;
         self.settled = true;
         let (ack, rx) = oneshot::channel();
         shared
@@ -252,12 +253,12 @@ impl RestoredInput {
         })
     }
 
-    fn preserve_terminal(&self, history: &Registry) -> Result<(), String> {
+    async fn preserve_terminal(&self, history: &Registry) -> Result<(), String> {
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native boot root unavailable")?;
         let record = history
             .try_native_boot_record(&self.record.namespace, &self.record.settlement.ticket)?;
-        inflight::persist_native_boot_record(&root, &record)
+        inflight::persist_native_boot_record_off_worker(root, record).await
     }
 
     async fn drive(&mut self, shared: &Arc<SharedData>, history: &Registry) -> Result<(), String> {
@@ -268,7 +269,7 @@ impl RestoredInput {
             return Ok(());
         };
         if self.record.settlement.cleanup_complete {
-            self.preserve_terminal(history)?;
+            self.preserve_terminal(history).await?;
             self.settled = true;
             return Ok(());
         }
@@ -313,9 +314,21 @@ impl RestoredInput {
                     {
                         return Err("native boot row authority changed".into());
                     }
+                    let Some(committed) = super::super::terminal_handler::record_native_terminal(
+                        shared,
+                        &row,
+                        &outcome.disposition,
+                    )
+                    .await
+                    else {
+                        // The row stays marked and unsettled; boot goes on and the writer
+                        // retries this debt once the receipt can commit.
+                        return Ok(());
+                    };
                     let (cleared, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
                         &ProviderKind::Claude,
                         &row,
+                        committed,
                     );
                     if !matches!(
                         (cleared, detail.reason),
@@ -334,7 +347,7 @@ impl RestoredInput {
             &self.record.settlement.ticket,
             &outcome,
         )?;
-        self.preserve_terminal(history)?;
+        self.preserve_terminal(history).await?;
         self.settled = true;
         if first && wake {
             super::super::super::turn_completion_events::publish_queue_eligible_completion_event(
@@ -348,6 +361,16 @@ impl RestoredInput {
 }
 
 impl BootInputs {
+    /// `prepare` for an async caller: the custody flock is awaited on the blocking pool.
+    pub(in crate::services::discord) async fn prepare_off_worker(
+        root: std::path::PathBuf,
+        generation: u64,
+    ) -> Result<Self, String> {
+        tokio::task::spawn_blocking(move || Self::prepare(&root, generation))
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
     pub(in crate::services::discord) fn prepare(
         root: &std::path::Path,
         generation: u64,
@@ -371,6 +394,14 @@ impl BootInputs {
                     return Err("native boot no-key proof conflicts".into());
                 }
                 continue;
+            }
+            if owner_proves_not_sent(&record) {
+                // A refused record stays a boot input for this channel; no other channel waits on it.
+                match history.native_not_sent_blocking(&record.namespace, &record.settlement.ticket)
+                {
+                    Ok(()) => continue,
+                    Err(error) => tracing::warn!(%error, "native boot no-key settlement refused"),
+                }
             }
             let id = serde_json::to_string(&(&record.namespace, &record.settlement.ticket.key))
                 .map_err(|e| e.to_string())?;
@@ -420,6 +451,34 @@ impl BootInputs {
             .map_err(|_| "native boot actor unavailable")?;
         rx.await.map_err(|_| "native boot acknowledgement lost")?
     }
+}
+
+/// A record whose no-key witness never landed settles only on the queue owner's retained proof for
+/// its exact attempt; key evidence, a result or a missing proof leaves it a boot input.
+fn owner_proves_not_sent(record: &RestoredRecord) -> bool {
+    let settlement = &record.settlement;
+    let Some(token) = record.namespace.strip_prefix("claude/") else {
+        return false;
+    };
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        token,
+        None,
+    );
+    settlement.outcome.is_none()
+        && settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+        && crate::services::turn_orchestrator::v2_queue(
+            &persistence,
+            ChannelId::new(settlement.ticket.channel_id),
+        )
+        .is_ok_and(|(path, namespace)| {
+            namespace == record.namespace
+                && crate::services::turn_orchestrator::proves_not_sent(
+                    &path,
+                    &namespace,
+                    &settlement.ticket.key,
+                )
+        })
 }
 
 pub(super) async fn restore(

@@ -355,6 +355,22 @@ pub(super) async fn start_restart_handoff_from_state(
         }
     }
 
+    // The dead turn's terminal (failed unless its answer was delivered) commits before cleanup;
+    // a planned restart, rebind, or a row whose origins a same-id retry carries ends nothing.
+    let ended = if state.terminal_delivery_completed() {
+        super::receipt_settle::body_outcome(&state.full_response)
+    } else {
+        crate::db::turns::TerminalOutcome::Failed
+    };
+    let pool = shared.pg_pool.as_ref();
+    if state.restart_mode.is_none()
+        && !state.rebind_origin
+        && !super::receipt_settle::retry_owns(pool, &state).await
+        && !super::receipt_settle::record_or_stamp(pool, &state, ended).await
+    {
+        return false;
+    }
+
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 
     // tmux death during an inflight turn usually fails the bound dispatch.

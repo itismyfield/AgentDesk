@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import select
 import subprocess
 import sys
@@ -553,7 +554,8 @@ class AfterDeploy(Fixture):
         self.assertEqual(done.returncode, 0)
         self.assertEqual(read_json(self.root / "state/inbox/deploy-stamp.json", {})["deploy_sha"], HEAD)
         text = plist.read_text()
-        self.assertTrue(f"<string>{REPO}</string>" in text and str(self.path) in text and "__" not in text)
+        # Placeholders are __UPPER__ tokens; the temp root itself may contain "__".
+        self.assertTrue(f"<string>{REPO}</string>" in text and str(self.path) in text and not re.search(r"__[A-Z]+__", text))
         self.assertIn("bootstrap", calls)
         # Switched off with the job, the request and an enabled status all still in place.
         publication.heartbeat(self.root / "state", self.config, 1000)

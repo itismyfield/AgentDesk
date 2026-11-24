@@ -9,7 +9,50 @@ pub(in crate::services::discord) fn persist_native_boot_record(
     persist_record(root, record, true)
 }
 
+/// Writes inline while the custody lock is free; otherwise waits for it on the blocking pool,
+/// because the boot custody notice holds that lock across PG awaits on this same runtime.
+pub(in crate::services::discord) async fn persist_native_boot_record_off_worker(
+    root: PathBuf,
+    record: RestoredRecord,
+) -> Result<(), String> {
+    let written =
+        persist_locked(
+            &root,
+            &record,
+            |custody| match super::super::custody_notice::retention::lock(custody, false) {
+                Ok(lock) => Ok(Some(lock)),
+                Err(error) if lock_busy(&error) => Ok(None),
+                Err(error) => Err(error),
+            },
+        )?;
+    if written {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || persist_native_boot_record(&root, &record))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn lock_busy(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<fs::TryLockError>())
+        .is_some_and(|inner| matches!(inner, fs::TryLockError::WouldBlock))
+}
+
 fn persist_record(root: &Path, record: &RestoredRecord, blocking: bool) -> Result<(), String> {
+    persist_locked(root, record, |custody| {
+        super::super::custody_notice::retention::lock(custody, blocking).map(Some)
+    })
+    .map(|_| ())
+}
+
+/// False, with nothing written, when `lock` reports the custody lock held elsewhere.
+fn persist_locked(
+    root: &Path,
+    record: &RestoredRecord,
+    lock: impl FnOnce(&Path) -> std::io::Result<Option<fs::File>>,
+) -> Result<bool, String> {
     let provider = ProviderKind::Claude;
     let ticket = &record.settlement.ticket;
     let message = ticket
@@ -19,8 +62,9 @@ fn persist_record(root: &Path, record: &RestoredRecord, blocking: bool) -> Resul
         .or_else(|| ticket.key["identity"]["primary"].as_u64())
         .ok_or("native custody identity missing")?;
     let custody = root.join("discord_custody/claude");
-    let _lock = super::super::custody_notice::retention::lock(&custody, blocking)
-        .map_err(|e| e.to_string())?;
+    let Some(_lock) = lock(&custody).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
     let key = episode_key(&provider, [ticket.channel_id, message], None);
     let dir = custody.join(sha(key.to_string().as_bytes()));
     preserve_episode(
@@ -36,6 +80,7 @@ fn persist_record(root: &Path, record: &RestoredRecord, blocking: bool) -> Resul
         )],
         runtime_store::process_generation_binding().generation,
     )
+    .map(|()| true)
 }
 
 pub(in crate::services::discord) fn preserve_native_before_discard(

@@ -57,6 +57,8 @@ export interface AgentMonitorProps {
   onDeny?: () => void;
   onRetry?: () => void;
   onOpenLog?: () => void;
+  /** Every visible and spoken text. Missing keys keep the Korean defaults. */
+  labels?: Partial<AgentMonitorLabels>;
   /** Earlier kit shape: agent name. */
   name?: string;
   /** Earlier kit shape: current step text. */
@@ -67,6 +69,87 @@ export interface AgentMonitorProps {
   needsApproval?: string;
   className?: string;
   style?: CSSProperties;
+}
+
+export interface AgentMonitorLabels {
+  /** Name used when the agent has none. */
+  agent: string;
+  statusIdle: string;
+  statusRunning: string;
+  statusWaiting: string;
+  statusPaused: string;
+  statusDone: string;
+  statusFailed: string;
+  statusCancelled: string;
+  stepPending: string;
+  stepRunning: string;
+  stepDone: string;
+  stepFailed: string;
+  kindRead: string;
+  kindSearch: string;
+  kindEdit: string;
+  kindRun: string;
+  kindThink: string;
+  kindWeb: string;
+  /** Well text while waiting without an approval title. */
+  waiting: string;
+  /** Announced while waiting without an approval title. */
+  waitingAnnounce: string;
+  /** Well text of a failure without an error message. */
+  failed: string;
+  /** Announced for a failure without an error message. */
+  failedAnnounce: string;
+  /** Accessible name of the approval command. */
+  command: (command: string) => string;
+  /** Well prefix while paused. */
+  paused: string;
+  /** Done well line, from the formatted span. */
+  done: (span: string) => string;
+  files: (count: number) => string;
+  /** Cancelled well line, from the formatted span. */
+  cancelled: (span: string) => string;
+  idle: string;
+  cancel: string;
+  deny: string;
+  approve: string;
+  retry: string;
+  pause: string;
+  resume: string;
+  log: string;
+  /** Accessible name of the folded bar, from the card label. */
+  expand: (label: string) => string;
+  /** Accessible name of the fold button, from the agent name. */
+  fold: (name: string) => string;
+  /** Accessible name of the folded tools button. */
+  tools: (count: number) => string;
+  /** Heading of the tools sheet. */
+  toolsTitle: (count: number) => string;
+  close: string;
+  closeStep: string;
+  factStart: string;
+  factDuration: string;
+  factShare: string;
+  factStatus: string;
+  /** Accessible name of a step output. */
+  output: (output: string) => string;
+  /** Accessible name of the waiting card. */
+  request: (name: string, title: string) => string;
+  cost: string;
+  elapsed: string;
+  /** Accessible name of the step bar, from "label time" parts joined by commas. */
+  timeline: (steps: string) => string;
+  /** Accessible name of the finished-step list. */
+  recent: string;
+  /** Accessible name of a finished-step row. */
+  stepDetail: (label: string, time: string) => string;
+  /** Spoken before "3/5". */
+  position: string;
+  /** Spoken keyboard hint for the shortcuts the host enabled. */
+  keys: (approve: boolean, deny: boolean) => string;
+  /** Done and cancelled spans. */
+  span: (ms: number) => string;
+  /** Step durations. */
+  stepTime: (ms: number) => string;
 }
 
 const statusText: Record<AgentMonitorStatus, string> = { idle: "준비", running: "실행 중", waiting: "확인 필요", paused: "일시정지", done: "완료", failed: "실패", cancelled: "취소됨" };
@@ -96,6 +179,65 @@ export function formatAgentMonitorCost(value: number) {
   if (value > 0 && value < 0.001) return "<$0.001";
   return value < 1 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}`;
 }
+
+export const agentMonitorDefaultLabels: AgentMonitorLabels = {
+  agent: "에이전트",
+  statusIdle: statusText.idle,
+  statusRunning: statusText.running,
+  statusWaiting: statusText.waiting,
+  statusPaused: statusText.paused,
+  statusDone: statusText.done,
+  statusFailed: statusText.failed,
+  statusCancelled: statusText.cancelled,
+  stepPending: stepStatusText.pending,
+  stepRunning: stepStatusText.running,
+  stepDone: stepStatusText.done,
+  stepFailed: stepStatusText.failed,
+  kindRead: kindName.read,
+  kindSearch: kindName.search,
+  kindEdit: kindName.edit,
+  kindRun: kindName.run,
+  kindThink: kindName.think,
+  kindWeb: kindName.web,
+  waiting: "확인을 기다리는 중",
+  waitingAnnounce: "확인을 기다립니다",
+  failed: "실행 중 오류가 발생했습니다",
+  failedAnnounce: "오류가 발생했습니다",
+  command: (command) => `명령: ${command}`,
+  paused: "일시정지됨",
+  done: (span) => `완료 · ${span}`,
+  files: (count) => `파일 ${count}개`,
+  cancelled: (span) => `취소됨 · ${span}까지 실행`,
+  idle: "아직 작업 전입니다",
+  cancel: "취소",
+  deny: "거부",
+  approve: "허용",
+  retry: "다시 시도",
+  pause: "일시정지",
+  resume: "재개",
+  log: "로그",
+  expand: (label) => `${label} — 펼치기`,
+  fold: (name) => `${name} 모니터 접기`,
+  tools: (count) => `사용한 도구 ${count}개 정보`,
+  toolsTitle: (count) => `사용한 도구 ${count}개`,
+  close: "닫기",
+  closeStep: "단계 상세 닫기",
+  factStart: "시작",
+  factDuration: "소요",
+  factShare: "비중",
+  factStatus: "상태",
+  output: (output) => `출력: ${output}`,
+  request: (name, title) => `${name} 확인 요청: ${title}`,
+  cost: "지금까지 든 비용",
+  elapsed: "경과 시간",
+  timeline: (steps) => `실행한 단계: ${steps}`,
+  recent: "완료한 단계",
+  stepDetail: (label, time) => `${label}, ${time} — 단계 상세`,
+  position: "진행 단계",
+  keys: (approve, deny) => approve && deny ? "카드에 초점이 있을 때 Enter는 허용, Esc는 거부입니다." : approve ? "카드에 초점이 있으면 Enter로 허용해요." : deny ? "카드에 초점이 있으면 Esc로 거부해요." : "",
+  span: formatAgentMonitorSpan,
+  stepTime: formatAgentMonitorStep,
+};
 
 function useMedia(query: string) {
   const [matches, setMatches] = useState(() => typeof window !== "undefined" && window.matchMedia?.(query).matches === true);
@@ -157,7 +299,7 @@ interface Normal {
   approval?: AgentMonitorApproval;
 }
 
-function normalize(props: AgentMonitorProps): Normal {
+function normalize(props: AgentMonitorProps, fallbackName = "에이전트"): Normal {
   const steps = (props.steps ?? []).map((step) => ({
     ...step,
     status: step.status ?? (step.state === "done" ? "done" : step.state === "current" ? "running" : "pending") as AgentMonitorStepStatus,
@@ -166,7 +308,7 @@ function normalize(props: AgentMonitorProps): Normal {
   const approval = props.approval ?? (props.needsApproval ? { title: props.needsApproval } : undefined);
   const legacy = props.status === undefined && (props.step !== undefined || props.needsApproval !== undefined || props.elapsed !== undefined);
   const status = props.status ?? (legacy ? (approval ? "waiting" : "running") : "idle");
-  const name = (props.agent?.name ?? props.name ?? "").trim() || "에이전트";
+  const name = (props.agent?.name ?? props.name ?? "").trim() || fallbackName;
   return {
     status,
     name,
@@ -180,7 +322,11 @@ function normalize(props: AgentMonitorProps): Normal {
 
 export function AgentMonitor(props: AgentMonitorProps) {
   const { started, ended, pausedMs = 0, now: nowProp, cost, result, error, defaultFolded = false, onPause, onResume, onCancel, onApprove, onDeny, onRetry, onOpenLog, elapsed: legacyElapsed, className, style } = props;
-  const model = normalize(props);
+  const text: AgentMonitorLabels = { ...agentMonitorDefaultLabels, ...props.labels };
+  const statusWord: Record<AgentMonitorStatus, string> = { idle: text.statusIdle, running: text.statusRunning, waiting: text.statusWaiting, paused: text.statusPaused, done: text.statusDone, failed: text.statusFailed, cancelled: text.statusCancelled };
+  const stepWord: Record<AgentMonitorStepStatus, string> = { pending: text.stepPending, running: text.stepRunning, done: text.stepDone, failed: text.stepFailed };
+  const kindWord: Record<AgentMonitorStepKind, string> = { read: text.kindRead, search: text.kindSearch, edit: text.kindEdit, run: text.kindRun, think: text.kindThink, web: text.kindWeb };
+  const model = normalize(props, text.agent);
   const { status, name, role, mark, steps, approval } = model;
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const reduced = useMedia("(prefers-reduced-motion: reduce)");
@@ -216,7 +362,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
         if (!iconKeys.has(step.icon)) iconKeys.set(step.icon, `icon:${iconKeys.size}`);
         key = iconKeys.get(step.icon)!;
       }
-      const tool = step.tool ?? kindName[step.kind ?? "think"];
+      const tool = step.tool ?? kindWord[step.kind ?? "think"];
       const found = list.find((item) => item.key === key);
       if (found) { found.step = step; found.tool = tool; } else list.push({ key, kind: step.kind, icon: step.icon, tool, step });
     });
@@ -345,7 +491,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
   const firstAnnounce = useRef(true);
   useEffect(() => {
     if (firstAnnounce.current) { firstAnnounce.current = false; return; }
-    setAnnouncement(`${name} ${statusText[status]}${status === "waiting" ? `: ${approval?.title ?? "확인을 기다립니다"}` : ""}${status === "failed" ? `: ${error ?? "오류가 발생했습니다"}` : ""}${status === "done" ? `, ${formatAgentMonitorSpan(elapsedMs)}` : ""}`);
+    setAnnouncement(`${name} ${statusWord[status]}${status === "waiting" ? `: ${approval?.title ?? text.waitingAnnounce}` : ""}${status === "failed" ? `: ${error ?? text.failedAnnounce}` : ""}${status === "done" ? `, ${text.span(elapsedMs)}` : ""}`);
     // Only status, request and result changes are announced, never the clock.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [announceKey]);
@@ -356,7 +502,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
   const clockLabel = legacyElapsed ?? formatAgentMonitorClock(elapsedMs);
   const runningTask = model.current ?? (runningStep ? { label: runningStep.label, kind: runningStep.kind, icon: runningStep.icon } : undefined);
   const initial = Array.from(name)[0]?.toUpperCase() ?? "A";
-  const label = `${name}, ${statusText[status]}${status === "running" && runningTask ? `, ${runningTask.label}` : ""}${status === "waiting" && approval ? `, ${approval.title}` : ""}`;
+  const label = `${name}, ${statusWord[status]}${status === "running" && runningTask ? `, ${runningTask.label}` : ""}${status === "waiting" && approval ? `, ${approval.title}` : ""}`;
 
   const added = result?.added;
   const removed = result?.removed;
@@ -371,27 +517,27 @@ export function AgentMonitor(props: AgentMonitorProps) {
     if (status === "waiting") return <span className="aui-agent-monitor-well-line">
       <span className="aui-agent-monitor-well-icon" data-tone="waiting" aria-hidden="true">{approval?.icon ?? <TriangleAlert size={15} strokeWidth={2} />}</span>
       <span className="aui-agent-monitor-ask">
-        <span className="aui-agent-monitor-task" title={approval?.title ?? "확인을 기다리는 중"} dir="auto">{approval?.title ?? "확인을 기다리는 중"}</span>
-        {approval?.command && <code className="aui-agent-monitor-command" tabIndex={coarse ? undefined : 0} title={approval.command} aria-label={`명령: ${approval.command}`}>{approval.command}</code>}
+        <span className="aui-agent-monitor-task" title={approval?.title ?? text.waiting} dir="auto">{approval?.title ?? text.waiting}</span>
+        {approval?.command && <code className="aui-agent-monitor-command" tabIndex={coarse ? undefined : 0} title={approval.command} aria-label={text.command(approval.command)}>{approval.command}</code>}
       </span>
     </span>;
     if (status === "paused") return <span className="aui-agent-monitor-well-line">
       <span className="aui-agent-monitor-well-icon" aria-hidden="true"><Pause size={15} strokeWidth={2} /></span>
-      <span className="aui-agent-monitor-task" title={runningTask?.label} dir="auto"><span className="aui-agent-monitor-muted">일시정지됨</span>{runningTask ? ` · ${runningTask.label}` : ""}</span>
+      <span className="aui-agent-monitor-task" title={runningTask?.label} dir="auto"><span className="aui-agent-monitor-muted">{text.paused}</span>{runningTask ? ` · ${runningTask.label}` : ""}</span>
     </span>;
     if (status === "done") return <span className="aui-agent-monitor-well-line aui-agent-monitor-result">
       <span className="aui-agent-monitor-well-icon" data-tone="done" aria-hidden="true"><Check size={15} strokeWidth={2.4} /></span>
-      <span className="aui-agent-monitor-task">완료 · {formatAgentMonitorSpan(elapsedMs)}</span>
+      <span className="aui-agent-monitor-task">{text.done(text.span(elapsedMs))}</span>
       {hasDiff && <span className="aui-agent-monitor-diff"><span data-tone="add">+{(added ?? 0).toLocaleString("en-US")}</span><span data-tone="remove">−{(removed ?? 0).toLocaleString("en-US")}</span></span>}
-      {result?.files !== undefined && <span className="aui-agent-monitor-muted aui-agent-monitor-nowrap">파일 {result.files}개</span>}
+      {result?.files !== undefined && <span className="aui-agent-monitor-muted aui-agent-monitor-nowrap">{text.files(result.files)}</span>}
       {result?.note && <span className="aui-agent-monitor-muted aui-agent-monitor-note" title={result.note}>{result.note}</span>}
     </span>;
     if (status === "failed") return <span className="aui-agent-monitor-well-line">
       <span className="aui-agent-monitor-fail-dot" aria-hidden="true" />
-      <span className="aui-agent-monitor-task" title={error ?? "실행 중 오류가 발생했습니다"} dir="auto">{error ?? "실행 중 오류가 발생했습니다"}</span>
+      <span className="aui-agent-monitor-task" title={error ?? text.failed} dir="auto">{error ?? text.failed}</span>
     </span>;
-    if (status === "cancelled") return <span className="aui-agent-monitor-well-line"><span className="aui-agent-monitor-task aui-agent-monitor-muted">취소됨 · {formatAgentMonitorSpan(elapsedMs)}까지 실행</span></span>;
-    return <span className="aui-agent-monitor-well-line"><span className="aui-agent-monitor-idle">아직 작업 전입니다</span></span>;
+    if (status === "cancelled") return <span className="aui-agent-monitor-well-line"><span className="aui-agent-monitor-task aui-agent-monitor-muted">{text.cancelled(text.span(elapsedMs))}</span></span>;
+    return <span className="aui-agent-monitor-well-line"><span className="aui-agent-monitor-idle">{text.idle}</span></span>;
   })();
 
   const onCardKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -405,11 +551,11 @@ export function AgentMonitor(props: AgentMonitorProps) {
 
   type Action = { key: string; node: ReactNode };
   const actions: Action[] = [];
-  if (status === "running" && onCancel) actions.push({ key: "cancel", node: <button type="button" className="aui-agent-monitor-action" onClick={onCancel}><X size={14} aria-hidden="true" />취소</button> });
-  if (status === "paused" && onCancel) actions.push({ key: "cancel", node: <button type="button" className="aui-agent-monitor-action" onClick={onCancel}><X size={14} aria-hidden="true" />취소</button> });
-  if (status === "waiting" && onDeny) actions.push({ key: "deny", node: <button type="button" className="aui-agent-monitor-action" onClick={onDeny} aria-describedby={`${uid}-keys`}>거부<kbd className="aui-agent-monitor-key" aria-hidden="true">Esc</kbd></button> });
-  if (status === "waiting" && onApprove) actions.push({ key: "approve", node: <button type="button" className="aui-agent-monitor-action" data-tone="primary" onClick={onApprove} aria-describedby={`${uid}-keys`}><Check size={14} aria-hidden="true" />허용<kbd className="aui-agent-monitor-key" aria-hidden="true">↵</kbd></button> });
-  if (status === "failed" && onRetry) actions.push({ key: "retry", node: <button type="button" className="aui-agent-monitor-action" data-tone="primary" onClick={onRetry}><RotateCcw size={14} aria-hidden="true" />다시 시도</button> });
+  if (status === "running" && onCancel) actions.push({ key: "cancel", node: <button type="button" className="aui-agent-monitor-action" onClick={onCancel}><X size={14} aria-hidden="true" />{text.cancel}</button> });
+  if (status === "paused" && onCancel) actions.push({ key: "cancel", node: <button type="button" className="aui-agent-monitor-action" onClick={onCancel}><X size={14} aria-hidden="true" />{text.cancel}</button> });
+  if (status === "waiting" && onDeny) actions.push({ key: "deny", node: <button type="button" className="aui-agent-monitor-action" onClick={onDeny} aria-describedby={`${uid}-keys`}>{text.deny}<kbd className="aui-agent-monitor-key" aria-hidden="true">Esc</kbd></button> });
+  if (status === "waiting" && onApprove) actions.push({ key: "approve", node: <button type="button" className="aui-agent-monitor-action" data-tone="primary" onClick={onApprove} aria-describedby={`${uid}-keys`}><Check size={14} aria-hidden="true" />{text.approve}<kbd className="aui-agent-monitor-key" aria-hidden="true">↵</kbd></button> });
+  if (status === "failed" && onRetry) actions.push({ key: "retry", node: <button type="button" className="aui-agent-monitor-action" data-tone="primary" onClick={onRetry}><RotateCcw size={14} aria-hidden="true" />{text.retry}</button> });
   const shownActions = usePresence(actions, 240, reduced);
   const toggleAction = status === "running" && onPause ? "pause" : status === "paused" && onResume ? "resume" : null;
 
@@ -418,15 +564,15 @@ export function AgentMonitor(props: AgentMonitorProps) {
     const extra = tools.length - visibleTools.length;
     const activeKey = status === "running" && runningStep ? tools.find((item) => item.step.id === runningStep.id)?.key : undefined;
     const endKey = status;
-    const end = status === "done" ? <span className="aui-agent-monitor-end-badge" data-tone="done"><Check size={13} strokeWidth={2.4} aria-hidden="true" />{formatAgentMonitorSpan(elapsedMs)}</span>
-      : status === "waiting" ? <span className="aui-agent-monitor-end-badge" data-tone="waiting"><TriangleAlert size={13} aria-hidden="true" />확인 필요</span>
-      : status === "failed" ? <span className="aui-agent-monitor-end-badge" data-tone="failed"><X size={13} strokeWidth={2.4} aria-hidden="true" />실패</span>
+    const end = status === "done" ? <span className="aui-agent-monitor-end-badge" data-tone="done"><Check size={13} strokeWidth={2.4} aria-hidden="true" />{text.span(elapsedMs)}</span>
+      : status === "waiting" ? <span className="aui-agent-monitor-end-badge" data-tone="waiting"><TriangleAlert size={13} aria-hidden="true" />{statusWord.waiting}</span>
+      : status === "failed" ? <span className="aui-agent-monitor-end-badge" data-tone="failed"><X size={13} strokeWidth={2.4} aria-hidden="true" />{statusWord.failed}</span>
       : status === "running" || status === "paused" ? <span className="aui-agent-monitor-end-clock" data-live={status === "running" || undefined}>{clockLabel}</span>
-      : <span className="aui-agent-monitor-end-text">{statusText[status]}</span>;
+      : <span className="aui-agent-monitor-end-text">{statusWord[status]}</span>;
     return <section ref={rootRef} tabIndex={-1} className={["aui-agent-monitor", className].filter(Boolean).join(" ")} style={style} data-folded aria-label={label} onKeyDown={onRootKey}>
       <style>{agentMonitorStyles}</style>
       <div className="aui-agent-monitor-bar-folded" data-status={status}>
-        <button ref={expandButton} type="button" className="aui-agent-monitor-expand" aria-expanded={false} aria-controls={`${uid}-body`} aria-label={`${label} — 펼치기`} onClick={() => { pendingFocus.current = "fold"; setFolded(false); }} />
+        <button ref={expandButton} type="button" className="aui-agent-monitor-expand" aria-expanded={false} aria-controls={`${uid}-body`} aria-label={text.expand(label)} onClick={() => { pendingFocus.current = "fold"; setFolded(false); }} />
         <span className="aui-agent-monitor-chip" aria-hidden="true">
           <span className="aui-agent-monitor-mark" data-size="small">{mark ?? initial}</span>
           <span className="aui-agent-monitor-chip-name">{name}</span>
@@ -435,7 +581,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
           ref={toolsButton}
           type="button"
           className="aui-agent-monitor-tools"
-          aria-label={`사용한 도구 ${tools.length}개 정보`}
+          aria-label={text.tools(tools.length)}
           aria-haspopup="dialog"
           aria-expanded={panel?.kind === "tools"}
           onPointerDown={(event) => { toolsPointer.current = event.pointerType; }}
@@ -453,7 +599,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
               <KindIcon kind={item.kind} icon={item.icon} size={13} />
               {hoverId === `tool:${item.key}` && <span className="aui-agent-monitor-tip" role="tooltip">
                 <span className="aui-agent-monitor-tip-title">{item.step.label}</span>
-                <span className="aui-agent-monitor-tip-sub">{item.tool} · {item.step.status === "failed" ? "실패" : item.step.status === "running" ? "진행 중" : formatAgentMonitorStep(weightOf(item.step))}</span>
+                <span className="aui-agent-monitor-tip-sub">{item.tool} · {item.step.status === "failed" ? stepWord.failed : item.step.status === "running" ? stepWord.running : text.stepTime(weightOf(item.step))}</span>
               </span>}
             </span>;
           })}
@@ -482,14 +628,14 @@ export function AgentMonitor(props: AgentMonitorProps) {
     >
       {isTools && <>
         <div className="aui-agent-monitor-panel-head">
-          <div className="aui-agent-monitor-panel-heading"><h4 id={`${uid}-panel-title`} className="aui-agent-monitor-panel-title">사용한 도구 {tools.length}개</h4></div>
-          <button type="button" className="aui-agent-monitor-close" aria-label="닫기" data-autofocus onClick={() => closePanel(true)}><X size={14} aria-hidden="true" /></button>
+          <div className="aui-agent-monitor-panel-heading"><h4 id={`${uid}-panel-title`} className="aui-agent-monitor-panel-title">{text.toolsTitle(tools.length)}</h4></div>
+          <button type="button" className="aui-agent-monitor-close" aria-label={text.close} data-autofocus onClick={() => closePanel(true)}><X size={14} aria-hidden="true" /></button>
         </div>
         <ul className="aui-agent-monitor-tool-list">
           {tools.map((item) => <li key={item.key}>
             <span className="aui-agent-monitor-row-icon" aria-hidden="true"><KindIcon kind={item.kind} icon={item.icon} size={12} /></span>
             <span className="aui-agent-monitor-tool-text"><strong>{item.tool}</strong><span>{item.step.label}</span></span>
-            <span className="aui-agent-monitor-row-time" data-failed={item.step.status === "failed" || undefined}>{item.step.status === "failed" ? "실패" : item.step.status === "running" ? "진행 중" : formatAgentMonitorStep(weightOf(item.step))}</span>
+            <span className="aui-agent-monitor-row-time" data-failed={item.step.status === "failed" || undefined}>{item.step.status === "failed" ? stepWord.failed : item.step.status === "running" ? stepWord.running : text.stepTime(weightOf(item.step))}</span>
           </li>)}
         </ul>
       </>}
@@ -497,18 +643,18 @@ export function AgentMonitor(props: AgentMonitorProps) {
         <div className="aui-agent-monitor-panel-head">
           <div className="aui-agent-monitor-panel-heading">
             <h4 id={`${uid}-panel-title`} className="aui-agent-monitor-panel-title" title={step.label} dir="auto">{step.label}</h4>
-            <span className="aui-agent-monitor-panel-tool">{step.tool ?? kindName[step.kind ?? "think"]}</span>
+            <span className="aui-agent-monitor-panel-tool">{step.tool ?? kindWord[step.kind ?? "think"]}</span>
           </div>
-          <button type="button" className="aui-agent-monitor-close" aria-label="단계 상세 닫기" data-autofocus onClick={() => closePanel(true)}><X size={14} aria-hidden="true" /></button>
+          <button type="button" className="aui-agent-monitor-close" aria-label={text.closeStep} data-autofocus onClick={() => closePanel(true)}><X size={14} aria-hidden="true" /></button>
         </div>
         <dl className="aui-agent-monitor-facts">
-          <div><dt>시작</dt><dd>{formatAgentMonitorClock(startOffset)}</dd></div>
-          <div><dt>소요</dt><dd data-tone={step.status}>{formatAgentMonitorStep(weightOf(step))}</dd></div>
-          <div><dt>비중</dt><dd>{Math.max(1, Math.round((weight / Math.max(totalWeight, 1)) * 100))}%</dd></div>
-          <div><dt>상태</dt><dd data-tone={step.status}>{stepStatusText[step.status]}</dd></div>
+          <div><dt>{text.factStart}</dt><dd>{formatAgentMonitorClock(startOffset)}</dd></div>
+          <div><dt>{text.factDuration}</dt><dd data-tone={step.status}>{text.stepTime(weightOf(step))}</dd></div>
+          <div><dt>{text.factShare}</dt><dd>{Math.max(1, Math.round((weight / Math.max(totalWeight, 1)) * 100))}%</dd></div>
+          <div><dt>{text.factStatus}</dt><dd data-tone={step.status}>{stepWord[step.status]}</dd></div>
         </dl>
         {step.description && <p className="aui-agent-monitor-panel-text" dir="auto">{step.description}</p>}
-        {step.output && <code className="aui-agent-monitor-output" tabIndex={coarse ? undefined : 0} title={step.output} aria-label={`출력: ${step.output}`}>{step.output}</code>}
+        {step.output && <code className="aui-agent-monitor-output" tabIndex={coarse ? undefined : 0} title={step.output} aria-label={text.output(step.output)}>{step.output}</code>}
       </>}
     </dialog>;
   }
@@ -528,7 +674,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
         ref={cardRef}
         className="aui-agent-monitor-card"
         tabIndex={status === "waiting" && (onApprove || onDeny) ? 0 : undefined}
-        aria-label={status === "waiting" ? `${name} 확인 요청: ${approval?.title ?? "확인을 기다리는 중"}` : undefined}
+        aria-label={status === "waiting" ? text.request(name, approval?.title ?? text.waiting) : undefined}
         aria-describedby={status === "waiting" && (onApprove || onDeny) ? `${uid}-keys` : undefined}
         role={status === "waiting" && (onApprove || onDeny) ? "group" : undefined}
         onKeyDown={onCardKey}
@@ -542,23 +688,23 @@ export function AgentMonitor(props: AgentMonitorProps) {
             </span>
           </span>
           <span className="aui-agent-monitor-head-end">
-            {costShown && <span className="aui-agent-monitor-cost" data-live={live || undefined} title="지금까지 든 비용"><span className="aui-agent-monitor-sr">지금까지 든 비용 </span>{costLabel}</span>}
+            {costShown && <span className="aui-agent-monitor-cost" data-live={live || undefined} title={text.cost}><span className="aui-agent-monitor-sr">{text.cost} </span>{costLabel}</span>}
             <span className="aui-agent-monitor-pill" data-status={status}>
               <span className="aui-agent-monitor-pill-dot" aria-hidden="true" />
-              <Swap id={status} className="aui-agent-monitor-pill-text">{statusText[status]}</Swap>
+              <Swap id={status} className="aui-agent-monitor-pill-text">{statusWord[status]}</Swap>
             </span>
-            <button ref={foldButton} type="button" className="aui-agent-monitor-fold" aria-expanded={true} aria-controls={`${uid}-body`} aria-label={`${name} 모니터 접기`} onClick={() => { pendingFocus.current = "expand"; setFolded(true); }}><ChevronsUpDown size={12} strokeWidth={2.2} aria-hidden="true" /></button>
+            <button ref={foldButton} type="button" className="aui-agent-monitor-fold" aria-expanded={true} aria-controls={`${uid}-body`} aria-label={text.fold(name)} onClick={() => { pendingFocus.current = "expand"; setFolded(true); }}><ChevronsUpDown size={12} strokeWidth={2.2} aria-hidden="true" /></button>
           </span>
         </header>
         <div className="aui-agent-monitor-well" data-tone={wellTone}>
           <Swap id={wellKey} className="aui-agent-monitor-well-swap">{wellContent}</Swap>
-          {clockShown && <span className="aui-agent-monitor-clock" data-paused={!live || undefined} title="경과 시간"><span className="aui-agent-monitor-sr">경과 시간 </span>{clockLabel}</span>}
+          {clockShown && <span className="aui-agent-monitor-clock" data-paused={!live || undefined} title={text.elapsed}><span className="aui-agent-monitor-sr">{text.elapsed} </span>{clockLabel}</span>}
         </div>
         {executed.length > 0 && <div
           ref={barRef}
           className="aui-agent-monitor-timeline"
           role="img"
-          aria-label={`실행한 단계: ${executed.map((step) => `${step.label} ${step.status === "failed" ? "실패" : formatAgentMonitorStep(weightOf(step))}`).join(", ")}`}
+          aria-label={text.timeline(executed.map((step) => `${step.label} ${step.status === "failed" ? stepWord.failed : text.stepTime(weightOf(step))}`).join(", "))}
           data-complete={status === "done" || undefined}
         >
           {executed.map((step, index) => <span
@@ -581,7 +727,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
           ref={listRef}
           className="aui-agent-monitor-recent"
           role={recent.length > 3 ? "region" : undefined}
-          aria-label="완료한 단계"
+          aria-label={text.recent}
           tabIndex={recent.length > 3 ? 0 : undefined}
           data-fade-top={fade.top || undefined}
           data-fade-bottom={fade.bottom || undefined}
@@ -599,7 +745,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
                 data-dim={!!highlight && !highlight.startsWith("tool:") && highlight !== step.id || undefined}
                 aria-expanded={openId === step.id}
                 aria-controls={`${uid}-panel`}
-                aria-label={`${step.label}, ${step.status === "failed" ? "실패" : formatAgentMonitorStep(weightOf(step))} — 단계 상세`}
+                aria-label={text.stepDetail(step.label, step.status === "failed" ? stepWord.failed : text.stepTime(weightOf(step)))}
                 title={step.label}
                 onPointerEnter={(event) => { if (event.pointerType === "mouse") enterStep(step.id); }}
                 onPointerLeave={(event) => { if (event.pointerType === "mouse") leaveStep(); }}
@@ -607,7 +753,7 @@ export function AgentMonitor(props: AgentMonitorProps) {
               >
                 <span className="aui-agent-monitor-row-icon" aria-hidden="true"><KindIcon kind={step.kind} icon={step.icon} size={12} /></span>
                 <span className="aui-agent-monitor-row-label" dir="auto">{step.label}</span>
-                <span className="aui-agent-monitor-row-time" data-failed={step.status === "failed" || undefined}>{step.status === "failed" ? "실패" : formatAgentMonitorStep(weightOf(step))}</span>
+                <span className="aui-agent-monitor-row-time" data-failed={step.status === "failed" || undefined}>{step.status === "failed" ? stepWord.failed : text.stepTime(weightOf(step))}</span>
               </button>
             </li>)}
           </ul>
@@ -617,15 +763,15 @@ export function AgentMonitor(props: AgentMonitorProps) {
       <footer className="aui-agent-monitor-foot">
         <span className="aui-agent-monitor-actions">
           {toggleAction && <button type="button" className="aui-agent-monitor-action" data-tone={toggleAction === "resume" ? "primary" : undefined} onClick={toggleAction === "pause" ? onPause : onResume}>
-            <Swap id={toggleAction} className="aui-agent-monitor-action-swap">{toggleAction === "pause" ? <><Pause size={14} aria-hidden="true" />일시정지</> : <><Play size={14} aria-hidden="true" />재개</>}</Swap>
+            <Swap id={toggleAction} className="aui-agent-monitor-action-swap">{toggleAction === "pause" ? <><Pause size={14} aria-hidden="true" />{text.pause}</> : <><Play size={14} aria-hidden="true" />{text.resume}</>}</Swap>
           </button>}
           {shownActions.map(({ item, leaving }) => <span key={item.key} className="aui-agent-monitor-action-slot" data-leaving={leaving || undefined} inert={leaving || undefined} aria-hidden={leaving || undefined}>{item.node}</span>)}
         </span>
-        {position && <span className="aui-agent-monitor-position"><span className="aui-agent-monitor-sr">진행 단계 </span>{position}</span>}
-        {onOpenLog && <button type="button" className="aui-agent-monitor-log" onClick={onOpenLog}>로그<ArrowUpRight size={14} aria-hidden="true" /></button>}
+        {position && <span className="aui-agent-monitor-position"><span className="aui-agent-monitor-sr">{text.position} </span>{position}</span>}
+        {onOpenLog && <button type="button" className="aui-agent-monitor-log" onClick={onOpenLog}>{text.log}<ArrowUpRight size={14} aria-hidden="true" /></button>}
       </footer>
     </div>
-    <span id={`${uid}-keys`} className="aui-agent-monitor-sr">카드에 초점이 있을 때 Enter는 허용, Esc는 거부입니다.</span>
+    <span id={`${uid}-keys`} className="aui-agent-monitor-sr">{text.keys(!!onApprove, !!onDeny)}</span>
     <span className="aui-agent-monitor-sr" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
   </section>;
 }
@@ -935,7 +1081,7 @@ const agentMonitorStyles = `
 
 /* ------------------------------------------------------------------ demos */
 
-export type AgentMonitorDemoState = "default" | "approval" | "empty" | "long" | "loading" | "error" | "states" | "pause-resume" | "history" | "folded" | "outcome" | "boundaries" | "narrow";
+export type AgentMonitorDemoState = "default" | "approval" | "empty" | "long" | "loading" | "error" | "states" | "pause-resume" | "history" | "folded" | "outcome" | "boundaries" | "narrow" | "labels";
 
 const NOW = 1_763_380_800_000;
 const relay: AgentMonitorAgent = { name: "Relay 감사", role: "AgentDesk 세션 로그 점검" };
@@ -972,6 +1118,33 @@ function ApprovalDemo() {
       onDeny={() => { setStatus("cancelled"); setLog("거부 요청 → 호스트가 취소됨으로 바꿨습니다."); }}
       onCancel={() => setLog("취소 요청")} onOpenLog={() => setLog("로그 열기 요청")} />
     <div className="aui-agent-monitor-demo-bar"><button type="button" className="aui-agent-monitor-demo-button" onClick={() => { setStatus("waiting"); setLog("다시 확인 대기로 돌렸습니다."); }}>확인 대기로 되돌리기</button></div>
+    <p className="aui-agent-monitor-demo-log" role="status">{log}</p>
+  </div>;
+}
+
+const englishMonitorLabels: Partial<AgentMonitorLabels> = {
+  agent: "Agent", statusIdle: "Ready", statusRunning: "Running", statusWaiting: "Needs you", statusPaused: "Paused", statusDone: "Done", statusFailed: "Failed", statusCancelled: "Cancelled",
+  stepPending: "Pending", stepRunning: "Running", stepDone: "Done", stepFailed: "Failed",
+  kindRead: "Read", kindSearch: "Search", kindEdit: "Edit", kindRun: "Run", kindThink: "Think", kindWeb: "Web",
+  waiting: "Waiting for you", waitingAnnounce: "waiting for you", failed: "The run failed", failedAnnounce: "the run failed", command: (command) => `Command: ${command}`,
+  paused: "Paused", done: (span) => `Done · ${span}`, files: (count) => `${count} files`, cancelled: (span) => `Cancelled after ${span}`, idle: "Not started yet",
+  cancel: "Cancel", deny: "Deny", approve: "Allow", retry: "Retry", pause: "Pause", resume: "Resume", log: "Log",
+  expand: (label) => `${label} — expand`, fold: (name) => `Collapse ${name} monitor`, tools: (count) => `${count} tools used`, toolsTitle: (count) => `${count} tools used`,
+  close: "Close", closeStep: "Close step details", factStart: "Start", factDuration: "Took", factShare: "Share", factStatus: "Status",
+  output: (output) => `Output: ${output}`, request: (name, title) => `${name} asks: ${title}`, cost: "Cost so far", elapsed: "Elapsed",
+  timeline: (steps) => `Steps run: ${steps}`, recent: "Finished steps", stepDetail: (label, time) => `${label}, ${time} — step details`, position: "Step",
+  keys: (approve, deny) => [approve ? "Enter allows" : "", deny ? "Esc denies" : ""].filter(Boolean).join(", "),
+  span: (ms) => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`; },
+  stepTime: (ms) => ms < 10_000 ? `${(Math.max(0, ms) / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m ${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}s`,
+};
+
+/** labels: every visible and spoken text from the host, here in English, folded and unfolded. */
+function LabelsDemo() {
+  const [log, setLog] = useState("labels로 상태·버튼·접기/펼치기 이름까지 바꿔요.");
+  const steps = baseSteps().map((step) => ({ ...step, tool: undefined, description: undefined }));
+  return <div className="aui-agent-monitor-demo">
+    <AgentMonitor status="running" agent={{ name: "Relay audit", role: "AgentDesk session log check" }} steps={steps} started={NOW - 96_000} now={NOW} cost={0.06} labels={englishMonitorLabels} onPause={() => setLog("pause")} onCancel={() => setLog("cancel")} onOpenLog={() => setLog("log")} />
+    <AgentMonitor status="waiting" defaultFolded agent={{ name: "Relay audit" }} steps={steps} started={NOW - 96_000} now={NOW} labels={englishMonitorLabels} approval={{ title: "Replay to the ops channel?" }} onApprove={() => setLog("allow")} />
     <p className="aui-agent-monitor-demo-log" role="status">{log}</p>
   </div>;
 }
@@ -1120,6 +1293,7 @@ function LongDemo() {
 
 export function AgentMonitorDemo({ state = "default" }: { state?: AgentMonitorDemoState }) {
   if (state === "approval") return <ApprovalDemo />;
+  if (state === "labels") return <LabelsDemo />;
   if (state === "empty") return <div className="aui-agent-monitor-demo"><AgentMonitor status="idle" agent={relay} /></div>;
   if (state === "long") return <LongDemo />;
   if (state === "loading") return <div className="aui-agent-monitor-demo"><AgentMonitor status="running" agent={relay} steps={[s("read", "세션 로그 읽기", "read", "done", 9_000), s("load", "이벤트 묶음 불러오기", "read", "running", undefined, { started: NOW - 300 }), s("sum", "요약", "edit", "pending")]} started={NOW - 9_300} now={NOW} cost={0.06} onPause={() => undefined} /></div>;

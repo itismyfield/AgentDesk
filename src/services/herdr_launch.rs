@@ -84,7 +84,7 @@ pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
 /// O owns the channel's output, its writer accepts work, and its store holds a binding
 /// checkpoint, which only a found baseline or an applied binding writes; the store is not opened.
 fn o_ready_at(runtime_root: Option<&Path>, channel: u64, kind: RuntimeHandoffKind) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     READINESS_READS.with(|reads| reads.set(reads.get() + 1));
     o_owns_seeded(runtime_root, channel, kind, || writer_accepts(channel))
 }
@@ -110,7 +110,7 @@ fn o_owns_seeded(
 }
 
 fn writer_accepts(channel: u64) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(answer) = WRITER_ACCEPTS.with(std::cell::Cell::get) {
         return answer;
     }
@@ -296,7 +296,7 @@ pub(crate) fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAccept
     WriterAcceptsGuard(WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for WriterAcceptsGuard {
     fn drop(&mut self) {
         WRITER_ACCEPTS.with(|cell| cell.set(self.0));
@@ -342,7 +342,7 @@ pub(crate) fn admissions_on_this_thread() -> usize {
 
 /// First step of every Herdr launch; it reads nothing and refuses an incomplete endpoint.
 fn admit(endpoint: Option<&HerdrLaunchEndpoint>) -> Result<&HerdrLaunchEndpoint, HerdrLaunchError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSIONS.with(|count| count.set(count.get() + 1));
     let filled = |values: [&str; 3]| values.iter().all(|value| !value.trim().is_empty());
     endpoint

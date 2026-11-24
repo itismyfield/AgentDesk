@@ -21,10 +21,11 @@ from .wait_timeout import expand_markers, marker_identity
 # Discord text command (`!clear ...`): the router consumes it, so no native input or body follows.
 TEXT_COMMAND = re.compile(r"^![a-z][a-z_-]*(?:\s|$)")
 # turn/deliver input has no Discord mirror yet. Started turns carry `human_input` headless-trigger
-# metadata (its only producer); queued ones keep only the `[User: … (ID: author)]` prefix.
+# metadata (its only producer); queued ones keep only the `[User: … (ID: author)]` prefix,
+# a busy one's with its attempt tag.
 WRAPPER = r'\s*(?:<pasted_content id="[^"\n]+">\n)?'
 DELIVER_INPUT = re.compile(WRAPPER + r"\[Headless trigger context\]\n(?:source: [^\n]*\n)?metadata: ([^\n]+)\n")
-AUTHOR_PREFIX = re.compile(WRAPPER + r"\[User: [^\n]*? \(ID: (\d+)\)\]")
+AUTHOR_PREFIX = re.compile(WRAPPER + r"\[User: [^\n]*? \(ID: (\d+)\)(?: · [0-9a-f]{8})?\]")
 DELIVER_MIRROR_GAP = "#6245 deliver input mirror not implemented"
 # Claude's `last-prompt` row is a copy of an input already recorded as a user row; only observed key sets.
 LAST_PROMPT_SHAPES = ({"type", "leafUuid", "sessionId"}, {"type", "lastPrompt", "leafUuid", "sessionId"})

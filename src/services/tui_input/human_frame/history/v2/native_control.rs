@@ -1,5 +1,9 @@
 //! A release admission never waits for another registry owner or loses an unflushed candidate.
 use super::*;
+
+const CACHE_BUSY: &str = "native control cache busy";
+const HISTORY_BUSY: &str = "native control history busy";
+const PUBLICATION_BUSY: &str = "native control publication busy";
 use crate::services::discord::runtime_store::{
     AtomicWriteContext,
     durable_publish::{self, FlushStatus},
@@ -145,26 +149,37 @@ impl Registry {
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<(), String> {
-        self.try_control_transaction(|state| {
-            let (registration, _) = state
-                .locate(namespace, &ticket.key)
-                .ok_or("native no-key registration missing")?;
-            registration
-                .native_settlement
-                .as_ref()
-                .ok_or("native no-key ticket missing")?
-                .validate(registration)?;
-            let native = settlement_mut(state, namespace, &ticket.key)?;
-            if !native.matches_key_witness(ticket)
-                || native.outcome.is_some()
-                || native.extra.get("any_key") == Some(&Value::Bool(true))
-            {
-                return Err("native no-key witness superseded".into());
+        self.try_control_transaction(|state| mark_not_sent(state, namespace, ticket))
+    }
+
+    /// The same no-key record, waiting for the registry lock; only off the async workers.
+    pub(crate) fn native_not_sent_blocking(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.transaction(|state| mark_not_sent(state, namespace, ticket))
+    }
+
+    /// The no-key record outlasts a brief registry contention by awaiting between tries, so it
+    /// never parks a worker; past the bound the busy refusal stands.
+    pub(crate) async fn native_not_sent(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            match self.try_native_not_sent(namespace, ticket) {
+                Err(error)
+                    if [CACHE_BUSY, HISTORY_BUSY, PUBLICATION_BUSY].contains(&error.as_str())
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                done => return done,
             }
-            native.extra.insert("not_sent".into(), Value::Bool(true));
-            state.version = 3;
-            Ok(())
-        })
+        }
     }
 
     pub(crate) fn try_native_control(
@@ -247,7 +262,7 @@ impl Registry {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut cached = try_mutex(&self.cached, "native control cache busy")?;
+        let mut cached = try_mutex(&self.cached, CACHE_BUSY)?;
         std::fs::create_dir_all(self.path.parent().ok_or("history parent missing")?)
             .map_err(|e| e.to_string())?;
         let lock = std::fs::OpenOptions::new()
@@ -257,14 +272,14 @@ impl Registry {
             .truncate(false)
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
-        lock.try_lock().map_err(|_| "native control history busy")?;
+        lock.try_lock().map_err(|_| HISTORY_BUSY)?;
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => migration::MISSING.into(),
             Err(e) => return Err(e.to_string()),
         };
         let context = || AtomicWriteContext::new("injected_frames_v2");
-        let mut pending = try_mutex(&self.pending, "native control publication busy")?;
+        let mut pending = try_mutex(&self.pending, PUBLICATION_BUSY)?;
         if let Some((old, candidate)) = pending.as_ref() {
             if raw == *candidate {
                 if durable_publish::retry_published_status(&self.path, context())
@@ -318,6 +333,27 @@ impl Registry {
             }
         }
     }
+}
+
+fn mark_not_sent(state: &mut Snapshot, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+    let (registration, _) = state
+        .locate(namespace, &ticket.key)
+        .ok_or("native no-key registration missing")?;
+    registration
+        .native_settlement
+        .as_ref()
+        .ok_or("native no-key ticket missing")?
+        .validate(registration)?;
+    let native = settlement_mut(state, namespace, &ticket.key)?;
+    if !native.matches_key_witness(ticket)
+        || native.outcome.is_some()
+        || native.extra.get("any_key") == Some(&Value::Bool(true))
+    {
+        return Err("native no-key witness superseded".into());
+    }
+    native.extra.insert("not_sent".into(), Value::Bool(true));
+    state.version = 3;
+    Ok(())
 }
 
 fn settlement_mut<'a>(

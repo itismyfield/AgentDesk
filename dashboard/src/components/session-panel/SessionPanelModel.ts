@@ -1,5 +1,7 @@
 import type { Agent, DispatchedSession } from "../../types";
 import type { PersonaState } from "../AgentPersona";
+import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
+import type { HomeAgentState } from "../home/homeModel";
 
 export const STALE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -31,105 +33,46 @@ export function normalizeTimestamp(value: unknown): number | null {
   return null;
 }
 
+/** Home's words for a live session: a turn is working, a background wait is background, anything else rests. */
+export function sessionState(s: DispatchedSession): Extract<HomeAgentState, "working" | "background" | "resting"> {
+  if (s.status === "working" || s.status === "turn_active") return "working";
+  return s.status === "awaiting_bg" ? "background" : "resting";
+}
+
+const PERSONA: Record<ReturnType<typeof sessionState>, PersonaState> = { working: "working", background: "waiting", resting: "idle" };
+
 export function sessionPersona(s: DispatchedSession): {
   agent: Pick<Agent, "id" | "name" | "avatar_emoji" | "department_color">;
   state: PersonaState;
 } {
-  const state: PersonaState =
-    s.status === "disconnected" ? "offline" : s.status === "working" || s.status === "turn_active" ? "working" : "idle";
   return {
     agent: { id: s.id, name: s.name || s.session_key, avatar_emoji: s.avatar_emoji, department_color: s.department_color ?? null },
-    state,
+    state: PERSONA[sessionState(s)],
   };
 }
 
-/** Display name for a session; full key used as tooltip */
-export function sessionDisplayName(s: DispatchedSession): { label: string; full: string } {
-  if (s.name) return { label: s.name, full: s.name };
-  return { label: `Session ${s.session_key.slice(0, 8)}`, full: s.session_key };
+/** Short name from the session key (the name is often the whole key): the channel for AgentDesk sessions, and whether
+ * it is a background child (`<parent>:child:<id>`). */
+export function sessionTitle(s: DispatchedSession): { title: string; child: boolean } {
+  const [parent, ...child] = s.session_key.split(":child:");
+  const channel = parseChannelNameFromSessionKey(parent);
+  if (channel) return { title: `#${channel}`, child: child.length > 0 };
+  const name = s.name && s.name !== s.session_key ? s.name : parent.slice(parent.lastIndexOf("/") + 1);
+  return { title: name || s.session_key, child: child.length > 0 };
 }
 
-export function sessionLastActivityTs(s: DispatchedSession): number {
-  const lastSeenAt = normalizeTimestamp(s.last_seen_at);
-  if (lastSeenAt != null) return lastSeenAt;
-  const connectedAt = normalizeTimestamp(s.connected_at);
-  if (connectedAt != null) return connectedAt;
-  return 0;
+export function sessionLastActivityTs(s: DispatchedSession): number | null {
+  return normalizeTimestamp(s.last_seen_at) ?? normalizeTimestamp(s.connected_at);
 }
 
-export function isStaleIdleSession(s: DispatchedSession): boolean {
-  return s.status === "idle" && Date.now() - sessionLastActivityTs(s) >= STALE_IDLE_MS;
+/** Idle for a week by its own signal; a session without any signal is not called stale. */
+export function isStaleIdleSession(s: DispatchedSession, now = Date.now()): boolean {
+  const last = sessionLastActivityTs(s);
+  return sessionState(s) === "resting" && last !== null && now - last >= STALE_IDLE_MS;
 }
 
+/** Working, then background, then resting (stale ones last), newest signal first within each. */
 export function compareSessions(a: DispatchedSession, b: DispatchedSession): number {
-  const rank = (session: DispatchedSession): number => {
-    if (session.status === "working") return 0;
-    if (session.status === "idle" && !isStaleIdleSession(session)) return 1;
-    if (session.status === "idle") return 2;
-    return 3;
-  };
-
-  const rankDiff = rank(a) - rank(b);
-  if (rankDiff !== 0) return rankDiff;
-  return sessionLastActivityTs(b) - sessionLastActivityTs(a);
-}
-
-export function linkedAgentLabel(s: DispatchedSession, agents: Agent[]): string | null {
-  const linked = agents.find((agent) => agent.id === s.linked_agent_id);
-  if (linked) return linked.name_ko || linked.name;
-  return s.linked_agent_id;
-}
-
-export function sessionProviderLabel(provider?: string): string {
-  switch (provider) {
-    case "codex":
-      return "Codex";
-    case "gemini":
-      return "Gemini";
-    case "qwen":
-      return "Qwen";
-    case "claude":
-      return "Claude";
-    default:
-      return provider || "Unknown";
-  }
-}
-
-export function sessionProviderTone(provider?: string): "neutral" | "info" | "accent" | "success" {
-  switch (provider) {
-    case "codex":
-      return "info";
-    case "gemini":
-      return "accent";
-    case "qwen":
-      return "success";
-    case "claude":
-      return "accent";
-    default:
-      return "neutral";
-  }
-}
-
-export function formatTimeAgo(ts: unknown, isKo = true): string {
-  const normalized = normalizeTimestamp(ts);
-  if (normalized == null) return isKo ? "알 수 없음" : "Unknown";
-
-  const diff = Math.max(0, Date.now() - normalized);
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return isKo ? `${sec}초 전` : `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return isKo ? `${min}분 전` : `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return isKo ? `${hr}시간 전` : `${hr}h ago`;
-  const days = Math.floor(hr / 24);
-  return isKo ? `${days}일 전` : `${days}d ago`;
-}
-
-export function formatDuration(ms: number, isKo = true): string {
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return isKo ? `${sec}초` : `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const hr = Math.floor(min / 60);
-  if (hr > 0) return isKo ? `${hr}시간 ${min % 60}분` : `${hr}h ${min % 60}m`;
-  return isKo ? `${min}분` : `${min}m`;
+  const rank = (session: DispatchedSession) => ["working", "background", "resting"].indexOf(sessionState(session)) + (isStaleIdleSession(session) ? 1 : 0);
+  return rank(a) - rank(b) || (sessionLastActivityTs(b) ?? 0) - (sessionLastActivityTs(a) ?? 0);
 }

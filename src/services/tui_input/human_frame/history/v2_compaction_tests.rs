@@ -609,3 +609,16 @@ fn unchanged_history_bytes_are_parsed_once_and_new_bytes_are_read_again() {
     assert_eq!(ask("row-7"), "known:nonce10007", "a replaced file");
     assert!(!super::super::known(&fresh_frame));
 }
+
+#[test]
+fn history_v2_runtime_handles_share_one_parse() {
+    let (_root, dir) = (TestRuntimeRootGuard::new(), tempfile::tempdir().unwrap());
+    let path = dir.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let (a, handle) = (key(950, &path, false), || Registry::runtime().unwrap());
+    handle().prepare(NS, &input(&a, &frame("a"))).unwrap();
+    compat::COST.with(|cost| cost.set((0, 0, 0)));
+    handle().project(&projection(None, &[], &[&a])).unwrap();
+    let parses = compat::COST.with(|cost| cost.get().0);
+    assert_eq!(parses, 0, "a later handle reparses nothing");
+}
