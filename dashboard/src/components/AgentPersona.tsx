@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import type { Agent } from "../types";
 import AnimatedBotAvatar from "./agent-avatar/AnimatedBotAvatar";
-import { avatarRoster, botAvatarFor, botAvatarStill } from "./agent-avatar/botAvatar";
+import { avatarRoster, botAvatarBlinking, botAvatarFor, botAvatarStill } from "./agent-avatar/botAvatar";
 import { useWorkspaceAgents } from "../contexts/WorkspaceContext";
 
 export type PersonaState = "idle" | "working" | "waiting" | "error" | "offline";
@@ -13,7 +14,11 @@ interface AgentPersonaProps {
   /** Overrides the state derived from `agent.status` (e.g. waiting for review). */
   state?: PersonaState;
   size?: number;
-  /** Live motion for a single prominent avatar (profile headers); lists stay still. */
+  /**
+   * `true` forces the live 3D scene (profile headers); `false` forces a static still.
+   * When omitted, hybrid mode runs: `working` and pointer-hovered avatars mount the live
+   * 3D scene, resting avatars blink via zero-JS SVG CSS, and `offline` stays still.
+   */
   animated?: boolean;
   className?: string;
 }
@@ -41,22 +46,50 @@ export function personaStateFromAgent(status: Agent["status"] | undefined): Pers
 }
 
 /** Circle persona: the agent's bot avatar on a tint of its color, with a status dot. */
-export default function AgentPersona({ agent, state, size = 32, animated = false, className = "" }: AgentPersonaProps) {
+export default function AgentPersona({ agent, state, size = 32, animated, className = "" }: AgentPersonaProps) {
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const [hovered, setHovered] = useState(false);
   const resolvedState = state ?? personaStateFromAgent(agent?.status);
+  const agentKey = agent?.id ?? "agent";
   const displayName = agent?.name_ko || agent?.alias || agent?.name || "Agent";
   const roster = useWorkspaceAgents();
-  const avatar = botAvatarFor(agent?.id ?? "agent", roster ? avatarRoster(roster) : undefined);
+  const avatar = botAvatarFor(agentKey, roster ? avatarRoster(roster) : undefined);
   const tone = avatar.color;
   const face = Math.round(size * 0.8);
   const dotSize = Math.max(6, Math.round(size * 0.2));
   const label = `${displayName} · ${STATE_LABEL_KO[resolvedState]}`;
 
+  useEffect(() => {
+    if (animated !== undefined || resolvedState === "offline") return;
+    const el = rootRef.current;
+    if (!el) return;
+    const target = el.closest<HTMLElement>("button, a, [role='button'], [role='option']") ?? el;
+    const onEnter = (event: PointerEvent) => {
+      if (event.pointerType === "touch" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+      setHovered(true);
+    };
+    const onLeave = () => setHovered(false);
+    target.addEventListener("pointerenter", onEnter);
+    target.addEventListener("pointerleave", onLeave);
+    return () => {
+      setHovered(false);
+      target.removeEventListener("pointerenter", onEnter);
+      target.removeEventListener("pointerleave", onLeave);
+    };
+  }, [animated, resolvedState]);
+
+  const isLive = animated ?? (resolvedState !== "offline" && (resolvedState === "working" || hovered));
+  const isStill = !isLive && (resolvedState === "offline" || animated === false);
+  const motionMode = isLive ? "live" : isStill ? "still" : "blink";
+
   return (
     <span
+      ref={rootRef}
       role="img"
       aria-label={label}
       title={label}
       data-persona-state={resolvedState}
+      data-persona-motion={motionMode}
       data-bot-avatar={avatar.definition.id}
       className={`relative inline-flex shrink-0 items-center justify-center rounded-full border ${className}`.trim()}
       style={{
@@ -67,15 +100,16 @@ export default function AgentPersona({ agent, state, size = 32, animated = false
       }}
     >
       <span aria-hidden className={resolvedState === "offline" ? "opacity-60 grayscale" : undefined}>
-        {animated ? (
+        {isLive ? (
           <AnimatedBotAvatar
             avatar={avatar}
             mood={resolvedState === "working" ? "thinking" : "idle"}
             size={face}
+            followPointer={hovered || animated === true}
           />
         ) : (
           <img
-            src={botAvatarStill(avatar)}
+            src={isStill ? botAvatarStill(avatar) : botAvatarBlinking(avatar, agentKey)}
             alt=""
             width={face}
             height={face}
