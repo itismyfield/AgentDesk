@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 // Injected-prompt classification and input notices, re-imported by `tui_prompt_relay`.
 pub(in crate::services::discord) mod injected_prompt_policy;
-pub(crate) mod input_notice;
+pub(in crate::services) mod input_notice;
 mod input_notice_memo;
 pub(in crate::services::discord) mod observed_prompt_decision;
 

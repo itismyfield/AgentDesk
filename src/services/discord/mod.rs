@@ -126,7 +126,7 @@ pub(crate) mod session_identity;
 mod session_idle_cleanup;
 mod session_runtime;
 mod session_status_hook;
-pub(crate) mod session_transition;
+pub(super) mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
