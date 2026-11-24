@@ -75,27 +75,29 @@ export function campaignTodoSource({ data, failed }: Loaded<HomeCampaigns>): Sou
   return data.detailFailed > 0 || data.detailsCut > 0 ? "partial" : "ok";
 }
 
-// Without a server auth token, detail answers loopback peers only, so tailnet devices get 403 every time.
 let healthDetailForbidden = false;
 
 function toHealth(raw: unknown): HomeHealth {
   const source = (raw ?? {}) as HomeHealth;
-  return { ...source, status: source.status ?? "unhealthy", providers: Array.isArray(source.providers) ? source.providers : [] };
+  return {
+    ...source,
+    status: source.status ?? "unhealthy",
+    providers: Array.isArray(source.providers) ? source.providers : [],
+    degraded_reasons: Array.isArray(source.degraded_reasons) ? source.degraded_reasons : [],
+    startup_degraded_reasons: Array.isArray(source.startup_degraded_reasons) ? source.startup_degraded_reasons : [],
+  };
 }
 
 async function readHealth(path: string): Promise<HomeHealth> {
   try {
     return toHealth(await request<unknown>(path, { suppressErrorToast: true }));
   } catch (error) {
-    // An unhealthy server answers 503 with its status, which home shows instead of a lost connection.
     const body = error instanceof ApiRequestError && error.status === 503 ? error.body : null;
     if (typeof (body as { status?: unknown } | null)?.status === "string") return toHealth(body);
     throw error;
   }
 }
 
-/** Like `getHealthDetail`, but a 503 status body counts as an answer and failures stay quiet; only a read with no
- * status body throws. */
 export async function loadHomeHealth(): Promise<HomeHealth> {
   if (!healthDetailForbidden) {
     try {
@@ -108,6 +110,16 @@ export async function loadHomeHealth(): Promise<HomeHealth> {
   return { ...(await readHealth("/api/health")), publicOnly: "forbidden" };
 }
 
+/** Explicit fresh read of `GET /api/health/detail` when the operator expands degraded server reasons. */
+export async function loadHealthDetailOnDemand(): Promise<HomeHealth> {
+  try {
+    return await readHealth("/api/health/detail");
+  } catch (error) {
+    const forbidden = error instanceof ApiRequestError && error.status === 403;
+    return { ...(await readHealth("/api/health")), publicOnly: forbidden ? "forbidden" : "failed" };
+  }
+}
+
 export async function loadHomeRoutines(): Promise<RoutineRecord[]> {
   const data = await request<{ routines?: RoutineRecord[] }>("/api/routines", { suppressErrorToast: true });
   return data.routines ?? [];
@@ -118,19 +130,47 @@ export async function loadHomeUsage(): Promise<RawUsageProvider[]> {
   return data.providers ?? [];
 }
 
+export interface ReconcileStaleTurnResponse {
+  ok?: boolean;
+  session_key?: string;
+  reconciled?: boolean;
+  status?: string;
+  reason?: string;
+}
+
+export function reconcileStaleSessionTurn(sessionKey: string): Promise<ReconcileStaleTurnResponse> {
+  return request<ReconcileStaleTurnResponse>(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/reconcile-stale-turn`,
+    { method: "POST", maxRetries: 0, suppressErrorToast: true },
+  );
+}
+
+export interface StopAgentTurnResponse {
+  ok?: boolean;
+  agent_id?: string;
+  session_key?: string;
+  status?: string;
+  error?: string;
+}
+
+export function stopAgentTurn(agentId: string): Promise<StopAgentTurnResponse> {
+  return request<StopAgentTurnResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/turn/stop`,
+    { method: "POST", maxRetries: 0, suppressErrorToast: true },
+  );
+}
+
 /** Live turns of the given agents; an agent whose read fails is left out and keeps its plain cell. */
 export async function loadAgentTurns(ids: string[]): Promise<Map<string, HomeTurn>> {
   const reads = await Promise.allSettled(ids.map((id) => request<HomeTurn>(`/api/agents/${encodeURIComponent(id)}/turn`, { suppressErrorToast: true })));
   return new Map(reads.flatMap((read, index) => (read.status === "fulfilled" ? [[ids[index], read.value] as const] : [])));
 }
 
-/** Turns of the working agents, cached per agent: one that starts working is read at once and the rest keep the
- * polling cycle. Each turn read captures tmux on the server, so a change in who works never rereads everyone. */
+/** Turns of the working agents, cached per agent: one that starts working is read at once and the rest keep the polling cycle. */
 export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, HomeTurn> {
   const key = ids.join("|");
   const [turns, setTurns] = useState<Map<string, HomeTurn>>(() => new Map());
   const wanted = useRef<string[]>([]);
-  // Latest read per agent: an answer merges only for the agents whose newest read it still is.
   const generation = useRef(new Map<string, number>());
   const alive = useRef(true);
   const read = useRef((targets: string[]) => {
@@ -158,11 +198,9 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
     const next = key ? key.split("|") : [];
     const started = next.filter((id) => !wanted.current.includes(id));
     wanted.current = next;
-    // An agent that stopped working leaves the cache, so its next turn never opens with the last one's line.
     setTurns((previous) => new Map([...previous].filter(([id]) => next.includes(id))));
     read.current(started);
   }, [key]);
-  // The cycle runs apart from the key, so a working set that changes faster than it still rereads everyone.
   useEffect(() => pollWhileVisible(() => read.current(wanted.current), intervalMs), [intervalMs]);
   return turns;
 }
@@ -170,4 +208,3 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
 export function loadRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request<RuntimeConfigResponse>("/api/settings/runtime-config", { suppressErrorToast: true });
 }
-

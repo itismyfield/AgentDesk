@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useShellWindowFocused } from "./shellFocus";
 
 interface PageFrameProps {
   title: string;
@@ -11,9 +12,10 @@ interface PageFrameProps {
 
 /** v3 page frame: a title block over the content. Phones skip the title because the top bar already shows it. */
 export function PageFrame({ title, description, actions, children, testId }: PageFrameProps) {
+  const windowFocused = useShellWindowFocused();
   return (
     <div data-testid={testId} className="h-full min-w-0 overflow-y-auto bg-[var(--bg)] text-[var(--fg)]">
-      <header className="flex min-w-0 flex-wrap items-end gap-4 px-4 pt-1 sm:px-6 sm:pt-5">
+      <header inert={windowFocused || undefined} className="flex min-w-0 flex-wrap items-end gap-4 px-4 pt-1 sm:px-6 sm:pt-5">
         <div className="hidden min-w-0 flex-[1_1_22.5rem] sm:block">
           <h1 className="m-0 text-2xl leading-8 font-semibold tracking-[-0.01em] text-[var(--fg)]">{title}</h1>
           {description ? (

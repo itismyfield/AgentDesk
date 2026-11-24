@@ -1,39 +1,147 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { getDispatchedSessions } from "../../api/agentActivity";
 import { PageFrame } from "../../app/PageFrame";
+import type { Notification } from "../NotificationCenter";
 import { useKanban } from "../../contexts/KanbanContext";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
-import { isTestAgent } from "../../lib/agentHelpers";
 import type { Agent } from "../../types";
 import { HomeCampaignsCard, HomeRoutinesCard, HomeUsageCard } from "./HomeActivityCards";
 import { HomeAgentsCard, HomeSystemCard, HomeTodoCard } from "./HomeSummaryCards";
-import { buildTodoItems, classifyAgents, type SourceState } from "./homeModel";
-import { campaignTodoSource, loadHomeCampaigns, usePolled } from "./useHomeData";
+import {
+  agentName,
+  autoPauseRule,
+  buildHomeAgents,
+  buildTodoItems,
+  buildTriageAlerts,
+  buildUsageRows,
+  type SourceState,
+} from "./homeModel";
+import {
+  campaignTodoSource,
+  loadHomeCampaigns,
+  loadHomeHealth,
+  loadHomeUsage,
+  loadRuntimeConfig,
+  reconcileStaleSessionTurn,
+  stopAgentTurn,
+  usePolled,
+} from "./useHomeData";
 
-/** v3 home in a fixed order: to-dos, system, agents, campaigns, today's routines, usage. */
-export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAgent }: {
+/** v3 home: 3-second unified triage + collapsed empty banner, agents & unlinked lanes, campaigns, routines, usage. */
+export default function HomePageView({
+  isKo,
+  isMobileViewport,
+  agents,
+  onOpenAgent,
+  onNotify,
+}: {
   isKo: boolean;
   isMobileViewport: boolean;
   agents: Agent[];
   onOpenAgent: (agent: Agent) => void;
+  onNotify?: (message: string, type?: Notification["type"]) => void;
 }) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
-  const { sessions, sessionsFailed } = useWorkspace();
-  // Same open-card list the campaign queue uses, so counts and rows agree.
+  const { sessions, setSessions, sessionsFailed, refreshAgents } = useWorkspace();
   const { kanbanCards, kanbanCardsState } = useKanban();
   const campaigns = usePolled(loadHomeCampaigns, 60_000);
-  // E2E fixture agents stay out of the roster unless they are actually busy.
+  const health = usePolled(loadHomeHealth, 30_000);
+  const usage = usePolled(loadHomeUsage, 60_000);
+  const runtime = usePolled(loadRuntimeConfig, 300_000);
+
+  const [reconciledKeys, setReconciledKeys] = useState<Set<string>>(() => new Set());
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
+
   const entries = useMemo(
-    () => classifyAgents(agents.filter((agent) => !isTestAgent(agent) || agent.status === "working"), sessions, sessionsFailed),
+    () => buildHomeAgents(agents, sessions, sessionsFailed),
     [agents, sessions, sessionsFailed],
   );
   const todo = useMemo(
     () => buildTodoItems({ cards: kanbanCards, campaigns: campaigns.data?.summaries ?? null, documents: campaigns.data?.documents, tr, isKo }),
     [kanbanCards, campaigns.data, tr, isKo],
   );
-  // Each to-do source keeps its own read state, so a slow or failed one never reads as nothing to do.
+  const usageRows = useMemo(() => buildUsageRows(usage.data ?? [], isKo), [usage.data, isKo]);
+  const rule = useMemo(() => autoPauseRule(runtime.data), [runtime.data]);
+  const triageAlerts = useMemo(
+    () =>
+      buildTriageAlerts({
+        usageRows,
+        rule,
+        sessions,
+        reconciledKeys,
+        health: health.failed ? null : health.data,
+        tr,
+        isKo,
+      }),
+    [usageRows, rule, sessions, reconciledKeys, health.failed, health.data, tr, isKo],
+  );
+
+  const handleReconcileSession = useCallback(async (sessionKey: string) => {
+    setBusyKeys((prev) => new Set(prev).add(sessionKey));
+    try {
+      const result = await reconcileStaleSessionTurn(sessionKey);
+      setReconciledKeys((prev) => new Set(prev).add(sessionKey));
+      if (result.reconciled) {
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.session_key === sessionKey
+              ? { ...session, status: "idle", last_seen_at: Date.now() }
+              : session,
+          ),
+        );
+        onNotify?.(tr("멈춘 세션을 정리했어요.", "Reconciled the stale session."), "success");
+      } else {
+        onNotify?.(
+          result.reason
+            ? tr(`세션 상태 확인 완료 (${result.reason})`, `Session checked (${result.reason})`)
+            : tr("멈춘 세션 상태를 정리했어요.", "Session state reconciled."),
+          "info",
+        );
+      }
+      void getDispatchedSessions().then(setSessions).catch(() => {});
+    } catch (error) {
+      onNotify?.(
+        error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
+        "error",
+      );
+    } finally {
+      setBusyKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(sessionKey);
+        return next;
+      });
+    }
+  }, [onNotify, setSessions, tr]);
+
+  const handleStopAgentTurn = useCallback(async (agent: Agent) => {
+    const name = agentName(agent, isKo);
+    const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
+      ? true
+      : window.confirm(tr(`${name}의 실행 중인 턴을 중단할까요? (대기열은 유지돼요)`, `Stop ${name}'s running turn? (Queued items stay)`));
+    if (!confirmed) return;
+    try {
+      const response = await stopAgentTurn(agent.id);
+      if (response.session_key) {
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.session_key === response.session_key ? { ...session, status: "disconnected" } : session,
+          ),
+        );
+      }
+      refreshAgents();
+      onNotify?.(tr(`${name} 턴을 중단했어요.`, `Stopped ${name}'s turn.`), "success");
+    } catch (error) {
+      onNotify?.(
+        error instanceof Error ? error.message : tr(`${name} 턴 중단에 실패했어요.`, `Failed to stop ${name}'s turn.`),
+        "error",
+      );
+    }
+  }, [isKo, onNotify, refreshAgents, setSessions, tr]);
+
   const cardsSource: SourceState = kanbanCardsState === "error" ? "failed" : kanbanCardsState === "ready" ? "ok" : "loading";
   const campaignsSource = campaignTodoSource(campaigns);
   const details = campaigns.data && !campaigns.failed ? { failed: campaigns.data.detailFailed, cut: campaigns.data.detailsCut } : undefined;
+  const todoCollapsed = todo.length === 0 && triageAlerts.length === 0 && cardsSource === "ok" && campaignsSource === "ok";
 
   return (
     <PageFrame
@@ -45,24 +153,52 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
       )}
     >
       <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
-        <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
-          <HomeTodoCard
-            items={todo}
-            agents={agents}
-            cards={cardsSource}
-            campaigns={campaignsSource}
-            details={details}
-            isMobile={isMobileViewport}
-            tr={tr}
-            className="flex-[2_1_32.5rem]"
-          />
-          <HomeSystemCard campaigns={campaigns} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
-        </div>
-        <HomeAgentsCard entries={entries} isMobile={isMobileViewport} tr={tr} isKo={isKo} onOpenAgent={onOpenAgent} />
+        {todoCollapsed ? (
+          <>
+            <HomeTodoCard
+              items={todo}
+              alerts={triageAlerts}
+              agents={agents}
+              cards={cardsSource}
+              campaigns={campaignsSource}
+              details={details}
+              isMobile={isMobileViewport}
+              tr={tr}
+              onReconcileSession={handleReconcileSession}
+              busySessionKeys={busyKeys}
+            />
+            <HomeSystemCard campaigns={campaigns} healthState={health} onlyWhenOff={isMobileViewport} tr={tr} />
+          </>
+        ) : (
+          <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
+            <HomeTodoCard
+              items={todo}
+              alerts={triageAlerts}
+              agents={agents}
+              cards={cardsSource}
+              campaigns={campaignsSource}
+              details={details}
+              isMobile={isMobileViewport}
+              tr={tr}
+              onReconcileSession={handleReconcileSession}
+              busySessionKeys={busyKeys}
+              className="flex-[2_1_32.5rem]"
+            />
+            <HomeSystemCard campaigns={campaigns} healthState={health} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
+          </div>
+        )}
+        <HomeAgentsCard
+          entries={entries}
+          isMobile={isMobileViewport}
+          tr={tr}
+          isKo={isKo}
+          onOpenAgent={onOpenAgent}
+          onStopAgentTurn={handleStopAgentTurn}
+        />
         <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
           <HomeCampaignsCard campaigns={campaigns} tr={tr} className="flex-[3_1_26.25rem]" />
           <HomeRoutinesCard tr={tr} isKo={isKo} className="flex-[2_1_18.75rem]" />
-          <HomeUsageCard tr={tr} isKo={isKo} className="flex-[2_1_16.25rem]" />
+          <HomeUsageCard tr={tr} isKo={isKo} usageState={usage} runtimeState={runtime} className="flex-[2_1_16.25rem]" />
         </div>
       </div>
     </PageFrame>

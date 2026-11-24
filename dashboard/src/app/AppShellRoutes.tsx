@@ -83,6 +83,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
             isKo={isKo}
             agents={agentsWithDispatched}
             onOpenAgent={openDefaultAgentInfo}
+            onNotify={pushNotification}
           />
         }
       />

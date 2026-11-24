@@ -1,3 +1,4 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 "use client";
 // Adapted from affectUI (https://github.com/flohoeller/affectui @ e610c3ba), MIT License, Copyright (c) 2026 Florian Höller (adfects). See LICENSE.affectui.
 // Changes: aui- class prefix; coarse-pointer targets at least 44px; max-width containment for phone, tablet and desktop;
@@ -469,6 +470,7 @@ function CheckIcon() {
 }
 
 const css = /* css */ `
+@layer kit {
 /* Colors and motion as variables – override them on .aui-select-clean (see Theming in the docs) */
 .aui-select-clean {
   --ui-selc-title: var(--aui-ink, rgba(0, 0, 0, 0.88));
@@ -732,5 +734,6 @@ const css = /* css */ `
     min-width: 44px;
     min-height: 44px;
   }
+}
 }
 `;

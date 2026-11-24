@@ -3,8 +3,11 @@ import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView } from "../../api/serverCampaigns";
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { formatRelativeTime } from "../../app/shellFormatting";
-import type { AgentMonitorStepKind } from "../../kit/pro/agent-monitor";
+import type { AgentMonitorStep, AgentMonitorStepKind, AgentMonitorStepStatus } from "../../kit/pro/agent-monitor";
+import type { RunningNowTask } from "../../kit/pro/running-now";
+import { isTestAgent } from "../../lib/agentHelpers";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
+import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
 import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
@@ -19,11 +22,14 @@ export const QUEUE_PATH = `/campaigns${queueLocationQuery(null)}`;
 
 const join = (...parts: Array<string | null | undefined | false>) => parts.filter(Boolean).join(" · ");
 
-// ── Agents ──
+// ── Agents & Unlinked Sessions ──
 
 export type HomeAgentState = "working" | "background" | "resting" | "noSession" | "unknown";
 /** Display and sort order. `unknown` only appears when the session list failed to load. */
 export const AGENT_STATES: HomeAgentState[] = ["working", "background", "resting", "noSession", "unknown"];
+
+export const STALE_SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1_000;
+export const STALE_ACTIVE_TURN_MS = 6 * 60 * 60 * 1_000;
 
 export interface HomeAgent {
   agent: Agent;
@@ -32,51 +38,187 @@ export interface HomeAgent {
   info: string | null;
   /** Newest session signal: the live one for resting agents, the last one for agents without a session. */
   seenAt: number | null;
+  /** Underlying unlinked session when this entry represents a session without `linked_agent_id`. */
+  unlinkedSession?: DispatchedSession;
+  /** True when an unlinked session is stalled (7+ days idle or zombie stale turn). */
+  stalled?: boolean;
+  /** Activity timestamp used for recency sorting within the same state bucket. */
+  activityAt?: number | null;
 }
 
 const TURN_STATUSES = new Set(["turn_active", "working"]);
 const LIVE_STATUSES = new Set(["turn_active", "working", "awaiting_bg", "awaiting_user", "idle"]);
 
+function positiveTimestampMs(raw: unknown): number | null {
+  const ms = coerceTimestampMs(raw as string | number | null | undefined);
+  return ms !== null && ms > 0 ? ms : null;
+}
+
+function sessionLastSeenMs(session: DispatchedSession): number | null {
+  return positiveTimestampMs(session.last_seen_at) ?? positiveTimestampMs(session.connected_at);
+}
+
 function newestSeen(sessions: DispatchedSession[]): number | null {
-  const times = sessions.map((session) => coerceTimestampMs(session.last_seen_at)).filter((time): time is number => time !== null);
+  const times = sessions.map((session) => positiveTimestampMs(session.last_seen_at)).filter((time): time is number => time !== null);
+  return times.length ? Math.max(...times) : null;
+}
+
+function newestActivity(sessions: DispatchedSession[]): number | null {
+  const times = sessions.map(sessionLastSeenMs).filter((time): time is number => time !== null);
   return times.length ? Math.max(...times) : null;
 }
 
 function newestSession(sessions: DispatchedSession[]): DispatchedSession | null {
-  const seen = (session: DispatchedSession) => coerceTimestampMs(session.last_seen_at) ?? 0;
+  const seen = (session: DispatchedSession) => sessionLastSeenMs(session) ?? 0;
   return sessions.reduce<DispatchedSession | null>((best, session) => (best && seen(best) >= seen(session) ? best : session), null);
 }
 
 const firstLine = (text: string | null | undefined) => text?.split("\n")[0]?.trim() || null;
 
-/** One state per agent. Its own sessions set the state and the line together, so a session update replaces both.
- * The agent list's visual status is a snapshot (cleared on the next session change): with sessions known it only adds
- * background children, which no session status shows. A failed session list leaves idle agents unknown. */
+/** Human-friendly label for an unlinked session (`#adk-cc-*`, `#게임-ag`, etc.). */
+export function unlinkedSessionTitle(session: DispatchedSession): string {
+  const [parent] = session.session_key.split(":child:");
+  const normalized = parent.replace(/^([^:]+):tmux:/, "$1:");
+  const channel = parseChannelNameFromSessionKey(normalized);
+  if (channel) return `#${channel}`;
+  if (session.name && session.name !== session.session_key) return session.name;
+  return parent.slice(parent.lastIndexOf("/") + 1) || session.session_key;
+}
+
+/** Stalled unlinked session: 7+ days idle, or an active/waiting turn silent for 6+ hours. */
+export function isStaleUnlinkedSession(session: DispatchedSession, now = Date.now()): boolean {
+  if (session.linked_agent_id || session.status === "disconnected") return false;
+  const last = sessionLastSeenMs(session);
+  if (last === null) return false;
+  if (TURN_STATUSES.has(session.status) || session.status === "awaiting_bg") {
+    return now - last >= STALE_ACTIVE_TURN_MS;
+  }
+  return now - last >= STALE_SESSION_IDLE_MS;
+}
+
+function sortBucket(entry: HomeAgent): number {
+  if (entry.state === "working") return 0;
+  if (entry.state === "background" || entry.stalled) return 1;
+  if (entry.state === "resting") return 2;
+  if (entry.state === "noSession") return 3;
+  return 4;
+}
+
+function compareHomeAgents(left: HomeAgent, right: HomeAgent): number {
+  const bucketDiff = sortBucket(left) - sortBucket(right);
+  if (bucketDiff !== 0) return bucketDiff;
+  if (Boolean(left.stalled) !== Boolean(right.stalled)) return left.stalled ? -1 : 1;
+  const leftTime = left.activityAt ?? left.seenAt;
+  const rightTime = right.activityAt ?? right.seenAt;
+  if (leftTime !== rightTime) {
+    if (leftTime == null) return 1;
+    if (rightTime == null) return -1;
+    return rightTime - leftTime;
+  }
+  return agentName(left.agent, true).localeCompare(agentName(right.agent, true));
+}
+
+/** One state per agent, sorted working -> background/stalled -> recent activity -> name. */
 export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], sessionsFailed: boolean): HomeAgent[] {
   const byAgent = new Map<string, DispatchedSession[]>();
+  const unlinkedById = new Map<string, DispatchedSession>();
   for (const session of sessions) {
-    if (!session.linked_agent_id) continue;
-    byAgent.set(session.linked_agent_id, [...(byAgent.get(session.linked_agent_id) ?? []), session]);
+    if (session.linked_agent_id) {
+      byAgent.set(session.linked_agent_id, [...(byAgent.get(session.linked_agent_id) ?? []), session]);
+    } else if (session.status !== "disconnected") {
+      unlinkedById.set(`dispatched:${session.id}`, session);
+    }
   }
-  const rank = (state: HomeAgentState) => AGENT_STATES.indexOf(state);
   return agents
     .map((agent): HomeAgent => {
+      if (agent.id.startsWith("dispatched:")) {
+        const raw = unlinkedById.get(agent.id);
+        if (raw) {
+          const seenAt = sessionLastSeenMs(raw);
+          const stalled = isStaleUnlinkedSession(raw);
+          const state: HomeAgentState = TURN_STATUSES.has(raw.status)
+            ? "working"
+            : raw.status === "awaiting_bg"
+              ? "background"
+              : "resting";
+          const info = firstLine(raw.session_info) ?? (stalled ? "장기 멈춤" : null);
+          return { agent, state, info, seenAt: state === "resting" ? seenAt : null, unlinkedSession: raw, stalled, activityAt: seenAt };
+        }
+        return { agent, state: agent.status === "working" ? "working" : "resting", info: firstLine(agent.session_info), seenAt: null };
+      }
       const own = byAgent.get(agent.id) ?? [];
       const live = own.filter((session) => LIVE_STATUSES.has(session.status));
       const lead = newestSession(live.filter((session) => TURN_STATUSES.has(session.status)))
         ?? newestSession(live.filter((session) => session.status === "awaiting_bg"));
-      if (lead) return { agent, state: TURN_STATUSES.has(lead.status) ? "working" : "background", info: firstLine(lead.session_info), seenAt: null };
-      const snapshot = (agent as Agent & { visual_status_code?: string }).visual_status_code;
-      if (snapshot === "idle-bg-wait") return { agent, state: "background", info: firstLine(agent.session_info), seenAt: null };
-      if (live.length) return { agent, state: "resting", info: null, seenAt: newestSeen(live) };
-      if (agent.status === "working" || (sessionsFailed && (snapshot === "active" || snapshot === "stuck-suspect"))) {
-        return { agent, state: "working", info: firstLine(agent.session_info), seenAt: null };
+      if (lead) {
+        return {
+          agent,
+          state: TURN_STATUSES.has(lead.status) ? "working" : "background",
+          info: firstLine(lead.session_info),
+          seenAt: null,
+          activityAt: sessionLastSeenMs(lead),
+        };
       }
-      // Unlinked sessions shown as agents are live by construction.
-      if (agent.id.startsWith("dispatched:")) return { agent, state: "resting", info: null, seenAt: null };
-      return { agent, state: own.length || !sessionsFailed ? "noSession" : "unknown", info: null, seenAt: newestSeen(own) };
+      const snapshot = (agent as Agent & { visual_status_code?: string }).visual_status_code;
+      if (snapshot === "idle-bg-wait") {
+        return { agent, state: "background", info: firstLine(agent.session_info), seenAt: null, activityAt: newestActivity(own) };
+      }
+      if (live.length) {
+        const seenAt = newestSeen(live);
+        return { agent, state: "resting", info: null, seenAt, activityAt: seenAt ?? newestActivity(live) };
+      }
+      if (agent.status === "working" || (sessionsFailed && (snapshot === "active" || snapshot === "stuck-suspect"))) {
+        return { agent, state: "working", info: firstLine(agent.session_info), seenAt: null, activityAt: newestActivity(own) };
+      }
+      const seenAt = newestSeen(own);
+      return { agent, state: own.length || !sessionsFailed ? "noSession" : "unknown", info: null, seenAt, activityAt: seenAt };
     })
-    .sort((left, right) => rank(left.state) - rank(right.state) || agentName(left.agent, true).localeCompare(agentName(right.agent, true)));
+    .sort(compareHomeAgents);
+}
+
+/** Full home roster: real agents plus active or stalled unlinked sessions (and department stand-ins). */
+export function buildHomeAgents(
+  agents: Agent[],
+  sessions: DispatchedSession[],
+  sessionsFailed: boolean,
+  now = Date.now(),
+): HomeAgent[] {
+  const realAgents = agents.filter((agent) => !agent.id.startsWith("dispatched:") && (!isTestAgent(agent) || agent.status === "working"));
+  const unlinkedAgents: Agent[] = sessions
+    .filter((session) => {
+      if (session.linked_agent_id || session.status === "disconnected") return false;
+      const activeOrWaiting = TURN_STATUSES.has(session.status) || session.status === "awaiting_bg" || session.status === "awaiting_user";
+      return activeOrWaiting || isStaleUnlinkedSession(session, now) || Boolean(session.department_id);
+    })
+    .map((session) => {
+      const title = unlinkedSessionTitle(session);
+      const working = TURN_STATUSES.has(session.status) || session.status === "awaiting_bg";
+      return {
+        id: `dispatched:${session.id}`,
+        name: title,
+        name_ko: title,
+        department_id: session.department_id,
+        cli_provider: session.provider,
+        avatar_emoji: session.avatar_emoji || "📡",
+        personality: null,
+        status: working ? "working" : "idle",
+        current_task_id: null,
+        stats_tasks_done: 0,
+        stats_tokens: session.tokens || 0,
+        created_at: session.connected_at,
+        session_info: session.session_info,
+        department_name: session.department_name,
+        department_name_ko: session.department_name_ko,
+        department_color: session.department_color,
+      };
+    });
+
+  const combined = classifyAgents([...realAgents, ...unlinkedAgents], sessions, sessionsFailed);
+  return combined.map((entry) => {
+    if (!entry.unlinkedSession) return entry;
+    const stalled = isStaleUnlinkedSession(entry.unlinkedSession, now);
+    return stalled === Boolean(entry.stalled) ? entry : { ...entry, stalled };
+  }).sort(compareHomeAgents);
 }
 
 export function agentName(agent: Agent, isKo: boolean): string {
@@ -93,8 +235,16 @@ export function agentStateLabel(state: HomeAgentState, tr: Tr): string {
   }
 }
 
-export function agentLine({ state, info, seenAt }: HomeAgent, tr: Tr, isKo: boolean): string {
+export function agentLine(entry: HomeAgent, tr: Tr, isKo: boolean): string {
+  const { state, info, seenAt, unlinkedSession, stalled } = entry;
   const when = seenAt === null ? null : formatRelativeTime(seenAt, isKo);
+  if (stalled && unlinkedSession) {
+    const last = sessionLastSeenMs(unlinkedSession);
+    const age = last !== null && Date.now() - last >= STALE_SESSION_IDLE_MS
+      ? tr("7일 넘게 멈춤", "Idle 7+ days")
+      : tr("멈춤 의심", "Suspected stall");
+    return join(age, firstLine(unlinkedSession.session_info) ?? (last !== null ? formatRelativeTime(last, isKo) : null));
+  }
   if (state === "noSession" && when) return tr(`세션 없음 · 마지막 세션 ${when}`, `No session · last session ${when}`);
   return join(agentStateLabel(state, tr), info ?? when);
 }
@@ -106,7 +256,13 @@ export interface HomeTurn {
   updated_at: string | null;
   provider: string | null;
   current_tool_line: string | null;
-  tool_events?: { kind: string; tool_name?: string | null }[];
+  tool_events?: {
+    kind: string;
+    status?: string | null;
+    tool_name?: string | null;
+    summary?: string | null;
+    line?: string | null;
+  }[];
 }
 
 export interface MonitorView {
@@ -114,37 +270,132 @@ export interface MonitorView {
   label: string;
   kind: AgentMonitorStepKind;
   role: string | null;
+  steps?: AgentMonitorStep[];
 }
 
 const TOOL_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
-  [/^(Read|NotebookRead)$/, "read"], [/^(Grep|Glob|LS|WebSearch)$/, "search"], [/^(Edit|MultiEdit|Write|NotebookEdit)$/, "edit"],
-  [/^(Bash|exec_command)$/, "run"], [/^WebFetch$/, "web"],
+  [/^(Read|NotebookRead)$/i, "read"], [/^(Grep|Glob|LS|WebSearch)$/i, "search"], [/^(Edit|MultiEdit|Write|NotebookEdit)$/i, "edit"],
+  [/^(Bash|exec_command)$/i, "run"], [/^WebFetch$/i, "web"],
 ];
+
+function classifyToolKind(toolName: string | null | undefined, rawKind?: string): AgentMonitorStepKind {
+  if (rawKind === "thinking") return "think";
+  const name = toolName ?? "";
+  return TOOL_KINDS.find(([pattern]) => pattern.test(name))?.[1] ?? (rawKind === "tool" ? "run" : "think");
+}
+
+function mapTurnSteps(turn: HomeTurn): AgentMonitorStep[] {
+  const events = turn.tool_events ?? [];
+  if (events.length === 0) return [];
+  return events.map((event, index) => {
+    const kind = classifyToolKind(event.tool_name, event.kind);
+    const isLast = index === events.length - 1;
+    const status: AgentMonitorStepStatus = event.status === "error"
+      ? "failed"
+      : event.status === "running" || (isLast && event.status !== "success")
+        ? "running"
+        : "done";
+    const label = event.summary?.trim() || event.line?.trim() || event.tool_name?.trim() || (kind === "think" ? "생각 중" : "도구 실행");
+    return {
+      id: `step-${index}-${event.tool_name ?? event.kind}`,
+      label,
+      kind,
+      status,
+      tool: event.tool_name ?? undefined,
+    };
+  });
+}
 
 const CLOCK_AHEAD_MS = 60_000;
 const CLOCK_MAX_MS = 12 * 3_600_000;
 
-/** A working agent's live turn for the kit monitor, or null to keep the one-line cell. No steps are passed: the turn
- * reports no step times, and the monitor would show each as zero. */
+/** A working agent's live turn for the kit monitor, including tool_events steps when present. */
 export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
   if (!turn || entry.state !== "working" || turn.status === "idle") return null;
   const tool = turn.current_tool_line ? turn.tool_events?.filter((event) => event.kind === "tool").at(-1)?.tool_name ?? "" : "";
-  // Without an in-flight snapshot the server answers the session's creation time; `updated_at` comes from that snapshot.
   const updated = coerceTimestampMs(turn.updated_at);
   const started = updated === null ? null : coerceTimestampMs(turn.started_at);
-  // In-flight times carry no offset, and a leftover in-flight file keeps an old start: an implausible start hides the clock.
   const plausible = started !== null && updated !== null && started <= updated + CLOCK_AHEAD_MS && now - started <= CLOCK_MAX_MS;
+  const steps = mapTurnSteps(turn);
   return {
     started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
     role: turn.provider,
+    ...(steps.length > 0 ? { steps } : {}),
   };
 }
 
-// ── To do ──
+/** Synthesizes a live monitor view for an unlinked working lane (`#adk-cc-*`, etc.). */
+export function unlinkedMonitorView(entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
+  const session = entry.unlinkedSession;
+  if (!session || entry.state !== "working") return null;
+  const started = coerceTimestampMs(session.connected_at);
+  const last = sessionLastSeenMs(session) ?? now;
+  const plausible = started !== null && started <= last + CLOCK_AHEAD_MS && now - started <= CLOCK_MAX_MS;
+  return {
+    started: plausible ? started : null,
+    label: firstLine(session.session_info) ?? tr("연결되지 않은 레인 실행 중", "Unlinked lane running"),
+    kind: "run",
+    role: session.provider,
+  };
+}
 
-/** What the row's button does: approve (disabled for now), open the decision or deploy, or no button. */
+/** Shared builder for the top-bar `RunningNow` badge across all screens. */
+export function buildRunningNowTasks({
+  agents,
+  sessions,
+  sessionsFailed,
+  turns,
+  tr,
+  isKo,
+}: {
+  agents: Agent[];
+  sessions: DispatchedSession[];
+  sessionsFailed: boolean;
+  turns?: Map<string, HomeTurn>;
+  tr: Tr;
+  isKo: boolean;
+}): RunningNowTask[] {
+  const realEntries = classifyAgents(
+    agents.filter((agent) => !agent.id.startsWith("dispatched:") && (!isTestAgent(agent) || agent.status === "working")),
+    sessions,
+    sessionsFailed,
+  );
+  const tasks: RunningNowTask[] = [];
+
+  for (const entry of realEntries) {
+    if (entry.state !== "working" && entry.state !== "background") continue;
+    const turn = turns?.get(entry.agent.id);
+    const events = turn?.tool_events ?? [];
+    const doneSteps = events.filter((ev) => ev.status === "success").length;
+    tasks.push({
+      id: `agent:${entry.agent.id}`,
+      title: agentName(entry.agent, isKo),
+      step: turn?.current_tool_line ?? entry.info ?? agentStateLabel(entry.state, tr),
+      status: entry.state === "working" ? "running" : "waiting",
+      ...(events.length > 0 ? { done: doneSteps, total: events.length } : {}),
+    });
+  }
+
+  for (const session of sessions) {
+    if (session.linked_agent_id || session.status === "disconnected") continue;
+    const isRunning = TURN_STATUSES.has(session.status);
+    const isWaiting = session.status === "awaiting_bg" || session.status === "awaiting_user";
+    if (!isRunning && !isWaiting) continue;
+    tasks.push({
+      id: `session:${session.session_key}`,
+      title: unlinkedSessionTitle(session),
+      step: firstLine(session.session_info) ?? (isRunning ? tr("미연결 레인 실행 중", "Unlinked lane running") : tr("백그라운드 대기", "Waiting")),
+      status: isRunning ? "running" : "waiting",
+    });
+  }
+
+  return tasks;
+}
+
+// ── To do & 3-Second Triage ──
+
 export type TodoKind = "approve" | "decide" | "deploy" | "other";
 
 export interface TodoItem {
@@ -158,9 +409,21 @@ export interface TodoItem {
   agentId: string | null;
 }
 
+export type TriageAlertKind = "quota" | "stale-session" | "health";
+
+export interface TriageAlert {
+  key: string;
+  kind: TriageAlertKind;
+  tone: "warn" | "err";
+  chip: string;
+  title: string;
+  detail: string;
+  to: string;
+  sessionKey?: string;
+  reasons?: string[];
+}
+
 const FAILED_STATUS = /(^|_)failed$/;
-// `src/manual_intervention.rs`: a dilemma or a blocked reason outside these progress prefixes waits for a person.
-// The queue's shared helper also treats deploy states as benign for its own lanes, so home keeps the server's list.
 const BENIGN_BLOCKED_PREFIXES = ["ci:waiting", "ci:running", "ci:rerunning", "ci:rework", "pr:creating"];
 
 function needsPerson({ review_status, blocked_reason }: KanbanCard): boolean {
@@ -172,8 +435,6 @@ function repoName(repo: string | null): string | null {
   return repo ? repo.split("/").pop() || repo : null;
 }
 
-// `human_status` of server campaign nodes (docs/dashboard-campaign-decisions-api.md). `awaiting_start` stays out:
-// the scheduler assigns that work.
 const HUMAN_TODO = new Map<string, Pick<TodoItem, "kind" | "tone"> & { chip: [string, string] }>([
   ["awaiting_approval", { kind: "approve", tone: "warn", chip: ["승인 대기", "Approval"] }],
   ["decision_required", { kind: "decide", tone: "err", chip: ["판단 필요", "Decide"] }],
@@ -181,10 +442,6 @@ const HUMAN_TODO = new Map<string, Pick<TodoItem, "kind" | "tone"> & { chip: [st
 ]);
 const KIND_ORDER: TodoKind[] = ["approve", "decide", "deploy", "other"];
 
-/** Things the server leaves to a person: server campaign nodes waiting for an approval, a decision or a deploy,
- * manual intervention as `src/manual_intervention.rs` defines it (a dilemma or a non-benign blocked reason), failed
- * cards, and server campaigns that need inspection. Reviews, new requests and stalled work stay out: policies move
- * them, and the timeout policy turns stalled work into manual intervention. */
 export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
   cards: KanbanCard[];
   campaigns: ServerCampaignSummary[] | null;
@@ -247,6 +504,150 @@ export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
   return items.sort((left, right) => KIND_ORDER.indexOf(left.kind) - KIND_ORDER.indexOf(right.kind));
 }
 
+/** Formats epoch ms explicitly in KST (`Asia/Seoul`, +9). */
+export function formatKstReset(resetAtMs: number | null | undefined, tr: Tr): string | null {
+  if (resetAtMs == null || !Number.isFinite(resetAtMs) || resetAtMs <= 0) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(resetAtMs));
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  const text = `${Number(pick("month"))}/${Number(pick("day"))} ${pick("hour")}:${pick("minute")} KST`;
+  return tr(`${text} 초기화`, `Resets ${text}`);
+}
+
+/** Human-readable explanation of why `/api/health/detail` reports degraded or unhealthy. */
+export function describeHealthReasons(health: HomeHealth | null | undefined, tr: Tr): string[] {
+  if (!health) return [];
+  const reasons: string[] = [];
+  if (health.db === false) {
+    reasons.push(tr("PostgreSQL 데이터베이스 연결 실패", "PostgreSQL database disconnected"));
+  }
+  for (const raw of [...(health.degraded_reasons ?? []), ...(health.startup_degraded_reasons ?? [])]) {
+    if (raw === "db_slow") reasons.push(tr("데이터베이스 응답 지연 (db_slow)", "Database response slow (db_slow)"));
+    else if (raw.startsWith("provider:")) {
+      const rest = raw.slice("provider:".length);
+      reasons.push(tr(`프로바이더 이상: ${rest}`, `Provider issue: ${rest}`));
+    } else if (raw.startsWith("relay_verdict_unknown_")) {
+      const rest = raw.slice("relay_verdict_unknown_".length);
+      reasons.push(tr(`릴레이 전달 판정 미확인 (${rest})`, `Unverified relay verdict (${rest})`));
+    } else if (raw) {
+      reasons.push(raw);
+    }
+  }
+  for (const provider of health.providers ?? []) {
+    if (!provider.connected) {
+      reasons.push(tr(`${provider.name} Discord 봇 연결 끊김`, `${provider.name} Discord bot disconnected`));
+    } else if (provider.restart_pending) {
+      reasons.push(tr(`${provider.name} 재시작 대기 중`, `${provider.name} restart pending`));
+    }
+  }
+  if (health.dispatch_outbox) {
+    const { permanent_failures, retrying, pending } = health.dispatch_outbox;
+    if (permanent_failures > 0) {
+      reasons.push(tr(`전달 영구 실패 ${permanent_failures}건`, `${permanent_failures} permanent outbox failures`));
+    }
+    if (retrying > 0) {
+      reasons.push(tr(`전달 재시도 중 ${retrying}건`, `${retrying} outbox deliveries retrying`));
+    } else if (pending > 5) {
+      reasons.push(tr(`전달 대기 ${pending}건`, `${pending} outbox deliveries pending`));
+    }
+  }
+  if ((health.queue_depth ?? 0) >= 3) {
+    reasons.push(tr(`채널 대기열 적체 ${health.queue_depth}건`, `Queue backlog: ${health.queue_depth}`));
+  }
+  if ((health.mailbox_observation_failures?.length ?? 0) > 0) {
+    reasons.push(tr(`메일박스 관측 실패 ${health.mailbox_observation_failures!.length}건`, `${health.mailbox_observation_failures!.length} mailbox observation failures`));
+  }
+  return [...new Set(reasons)];
+}
+
+/** Promoted 3-second triage alerts: quota danger/warning, degraded server, and stalled unlinked sessions. */
+export function buildTriageAlerts({
+  usageRows,
+  rule,
+  sessions,
+  reconciledKeys,
+  health,
+  tr,
+  isKo,
+  now = Date.now(),
+}: {
+  usageRows: UsageRow[];
+  rule: ReturnType<typeof autoPauseRule>;
+  sessions: DispatchedSession[];
+  reconciledKeys?: ReadonlySet<string>;
+  health: HomeHealth | null;
+  tr: Tr;
+  isKo: boolean;
+  now?: number;
+}): TriageAlert[] {
+  const alerts: TriageAlert[] = [];
+  const pauseThreshold = rule?.enabled && rule.pct !== null ? rule.pct : 99;
+
+  for (const row of usageRows) {
+    if (row.pct === null || row.unmeasured || row.pct < 80) continue;
+    const paused = row.pct >= pauseThreshold || row.pct >= 99;
+    const providerTitle = [row.group, row.label].filter(Boolean).join(" ");
+    const resetText = formatKstReset(row.resetAtMs, tr) ?? tr("초기화 시각 미확인", "Reset time unavailable");
+    alerts.push({
+      key: `quota:${row.group ?? ""}:${row.label}`,
+      kind: "quota",
+      tone: paused ? "err" : "warn",
+      chip: paused ? tr("자동 진행 멈춤", "Auto-run paused") : tr("쿼터 주의", "Quota warn"),
+      title: `${providerTitle} ${row.pct}%`,
+      detail: join(
+        paused ? tr("한도 임계치 도달로 새 자동 배치가 멈췄어요", "New auto-dispatches are paused") : tr("한도 소진 임박", "Approaching quota limit"),
+        resetText,
+      ),
+      to: "/stats",
+    });
+  }
+
+  if (health && (health.status === "degraded" || health.status === "unhealthy")) {
+    const reasons = describeHealthReasons(health, tr);
+    const isErr = health.status === "unhealthy";
+    alerts.push({
+      key: `health:${health.status}`,
+      kind: "health",
+      tone: isErr ? "err" : "warn",
+      chip: isErr ? tr("서버 장애", "Server down") : tr("서버 주의", "Server degraded"),
+      title: isErr ? tr("서버가 장애 상태예요", "Server is unhealthy") : tr("서버가 주의 상태예요", "Server is degraded"),
+      detail: reasons[0] ?? tr("원인 보기에서 상세 상태를 확인해요", "Inspect detailed health reasons"),
+      to: "/settings?category=system",
+      reasons,
+    });
+  }
+
+  for (const session of sessions) {
+    if (reconciledKeys?.has(session.session_key)) continue;
+    if (!isStaleUnlinkedSession(session, now)) continue;
+    const last = sessionLastSeenMs(session);
+    const ageLabel = last !== null && now - last >= STALE_SESSION_IDLE_MS
+      ? tr("7일 넘게 멈춤", "Idle 7+ days")
+      : tr("장기 멈춤 턴", "Stale turn");
+    alerts.push({
+      key: `stale:${session.session_key}`,
+      kind: "stale-session",
+      tone: "warn",
+      chip: tr("멈춘 세션", "Stalled"),
+      title: `${unlinkedSessionTitle(session)} · ${ageLabel}`,
+      detail: join(
+        session.provider,
+        last !== null ? tr(`마지막 신호 ${formatRelativeTime(last, isKo)}`, `Last signal ${formatRelativeTime(last, isKo)}`) : null,
+      ),
+      to: "/agents",
+      sessionKey: session.session_key,
+    });
+  }
+
+  return alerts;
+}
+
 /** `partial`: the source answered but left part of its to-dos unread. */
 export type SourceState = "loading" | "ok" | "partial" | "failed";
 
@@ -259,8 +660,10 @@ export function todoStatus(count: number, sources: SourceState[]): "loading" | "
 
 // ── System ──
 
-/** Health as home reads it. `mailbox_observation_failures` lists mailboxes the queue total leaves out. */
-export type HomeHealth = HealthResponse & { mailbox_observation_failures?: unknown[] };
+export type HomeHealth = HealthResponse & {
+  mailbox_observation_failures?: unknown[];
+  startup_degraded_reasons?: string[];
+};
 
 export interface SystemRow {
   key: "server" | "discord" | "memento" | "campaign" | "queue";
@@ -304,7 +707,6 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
         ? { value: tr(`${connected}개 연결`, `${connected} connected`), tone: "ok" }
         : { value: tr(`${connected}/${providers.length}개 연결`, `${connected}/${providers.length} connected`), tone: connected === 0 ? "err" : "warn" };
 
-  // Server campaigns report their executor; ledger campaigns run through auto-run.
   const campaignParts: string[] = [];
   let campaignTone: HomeTone = "neutral";
   if (documents.some(({ view }) => view.execution_readiness === "unavailable")) {
@@ -317,7 +719,6 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
     if (autoRun && campaignTone === "neutral") campaignTone = "ok";
   }
 
-  // The server adds only the mailboxes it could read and lists the rest as observation failures.
   const queueDepth = detail?.mailbox_observation_failures?.length ? null : detail?.queue_depth;
   return [
     { key: "server", label: tr("서버", "Server"), value: server, tone: serverTone },
@@ -333,7 +734,6 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
   ];
 }
 
-/** A line reads off (warn, err) or unknown. Memento is left out: home has no source for it, so it is always unknown. */
 export function systemNeedsAttention(rows: SystemRow[], tr: Tr): boolean {
   const unknown = tr("확인 불가", "Unknown");
   return rows.some((row) => row.key !== "memento" && (row.tone === "warn" || row.tone === "err" || row.value === unknown));
@@ -345,15 +745,12 @@ export type StageSegment = "done" | "now" | "fail" | "todo";
 
 export interface CampaignRow {
   key: string;
-  /** Under way: a server campaign past preparation or an active ledger campaign. */
   live: boolean;
   title: string;
   status: string;
   tone: HomeTone;
   to: string;
-  /** Server campaigns: one segment per stage up to final verification. */
   segments: StageSegment[] | null;
-  /** Ledger campaigns: share of tasks completed, null without tasks. */
   ratio: number | null;
   line: string;
 }
@@ -367,8 +764,6 @@ export function isOpenServerCampaign(summary: ServerCampaignSummary): boolean {
   return !CLOSED_DISPLAYS.has(summary.view.display);
 }
 
-/** A campaign stands at its slowest task's stage, so done segments are stages every task has passed. Without its
- * detail the stages are unknown, never an empty track. */
 function serverCampaignRow(summary: ServerCampaignSummary, document: ServerCampaignDocument | undefined, tr: Tr): CampaignRow {
   const { display, campaign_id, failed_count } = summary.view;
   const nodes = document?.view.nodes ?? [];
@@ -412,8 +807,6 @@ function legacyCampaignRow(campaign: Campaign, tr: Tr): CampaignRow {
   };
 }
 
-/** Campaigns under way first, server then ledger, then prepared, paused and planned ones. `shown` keeps every
- * campaign under way visible and at least `limit` rows; home folds the rest. */
 export function buildCampaignRows({ legacy, summaries, documents, tr, limit }: {
   legacy: Campaign[] | null;
   summaries: ServerCampaignSummary[] | null;
@@ -440,7 +833,6 @@ export interface RoutineRow {
   routine: RoutineRecord;
   chip: string;
   tone: HomeTone;
-  /** A run that already ended today, whatever its result. */
   finished: boolean;
 }
 
@@ -448,8 +840,6 @@ function sameLocalDay(left: number, right: number): boolean {
   return new Date(left).toDateString() === new Date(right).toDateString();
 }
 
-/** Server times only: a run started today and the next due time when it falls later today, as separate rows.
- * No run times are derived from the cron expression. */
 export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: Tr): RoutineRow[] {
   const rows: RoutineRow[] = [];
   for (const routine of routines) {
@@ -481,40 +871,43 @@ export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: T
 export type RawUsageProvider = RawRLProvider & { fetched_at?: number | null };
 
 export interface UsageRow {
-  /** Provider heading, with the profile when it is not the default one; null on a provider without windows. */
   group: string | null;
   label: string;
-  /** Null when the tracker has no measurement for this window. */
   pct: number | null;
-  /** The provider reports a limit but no usage, so there is nothing to measure. */
   unmeasured: boolean;
   stale: boolean;
   measuredAt: number | null;
   note: string | null;
+  resetAtMs?: number | null;
 }
 
-// The server reads Gemini's quota limits but no usage and fills `used: 0` (`build_gemini_rate_limit_buckets`).
 const unmeasuredBucket = (provider: string | undefined, bucket: string) => provider === "gemini" && (bucket === "rpm" || bucket === "rpd");
 
-/** Limit tracker windows grouped by provider; GitHub and hidden buckets stay out, as on the old usage widget. Only
- * measured rows carry a measurement time. */
 export function buildUsageRows(raw: RawUsageProvider[], isKo: boolean): UsageRow[] {
   return raw.flatMap((source) => transformRLProviders([source]).flatMap((provider): UsageRow[] => {
     const fetchedAt = coerceTimestampMs(source.fetched_at ?? null);
     const name = provider.profileId === "default" ? provider.provider : `${provider.provider} ${provider.profileId}`;
     if (provider.unsupported || provider.buckets.length === 0) {
-      return [{ group: null, label: name, pct: null, unmeasured: false, stale: provider.stale, measuredAt: null, note: provider.reason }];
+      return [{ group: null, label: name, pct: null, unmeasured: false, stale: provider.stale, measuredAt: null, note: provider.reason, resetAtMs: null }];
     }
     return provider.buckets.map((bucket) => {
       const unmeasured = unmeasuredBucket(source.provider, bucket.id);
       const pct = unmeasured ? null : bucket.utilization;
       const label = formatRateLimitWindowLabel(bucket.label, isKo);
-      return { group: name, label, pct, unmeasured, stale: provider.stale, measuredAt: pct === null ? null : fetchedAt, note: null };
+      return {
+        group: name,
+        label,
+        pct,
+        unmeasured,
+        stale: provider.stale,
+        measuredAt: pct === null ? null : fetchedAt,
+        note: null,
+        resetAtMs: unmeasured ? null : bucket.resetAtMs,
+      };
     });
   }));
 }
 
-/** The auto-run pause from settings: the dispatch gate's switch and its threshold. */
 export function autoPauseRule(config: RuntimeConfigResponse | null): { enabled: boolean; pct: number | null } | null {
   const enabled = config?.current?.dispatchRateLimitGateEnabled;
   if (typeof enabled !== "boolean") return null;
@@ -522,21 +915,18 @@ export function autoPauseRule(config: RuntimeConfigResponse | null): { enabled: 
   return { enabled, pct: typeof pct === "number" ? pct : null };
 }
 
-/** The pause threshold as the kit meter's danger step. The kit never starts danger below its warning step (0.8), so
- * a lower pause moves that step down; a rule at 100% or more stays out, as the kit would only recolor the limit there. */
 export function pauseMeterScale(rule: ReturnType<typeof autoPauseRule>): { warnAt?: number; dangerAt?: number } {
   if (!rule?.enabled || rule.pct === null || rule.pct >= 100) return {};
   const dangerAt = Math.max(0, rule.pct) / 100;
   return { warnAt: Math.min(0.8, dangerAt), dangerAt };
 }
 
-/** The line under a usage row: why it has no value, how old the value is, and whether it reached the auto-run pause.
- * Below 100% the kit meter marks the pause itself (`dangerAt`), so the line names it only for a rule at 100% or more. */
 export function usageDetail(row: UsageRow, rule: ReturnType<typeof autoPauseRule>, tr: Tr): string | undefined {
   if (row.unmeasured) return tr("측정 안 됨", "Not measured");
   if (row.pct === null) return row.note ?? tr("확인 불가", "Unknown");
   const old = row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : null;
   const shown = pauseMeterScale(rule).dangerAt !== undefined;
   const paused = !shown && rule?.enabled && rule.pct !== null && row.pct >= rule.pct ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : null;
-  return join(old, paused) || undefined;
+  const kstReset = row.pct >= 80 ? formatKstReset(row.resetAtMs, tr) : null;
+  return join(old, paused, kstReset) || undefined;
 }

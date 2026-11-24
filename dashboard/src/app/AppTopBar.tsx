@@ -1,9 +1,10 @@
 import { Bell, Moon, Palette, Search, Sun, WifiOff, X } from "lucide-react";
-import type { CSSProperties, Dispatch, MouseEvent, SetStateAction } from "react";
+import { useMemo, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { Cap, CardNote, CountBadge, Row, StatusDot } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 import { IconButton } from "../kit/free/icon-button-clean";
 import { Kbd } from "../kit/free/kbd-clean";
+import { RunningNow, type RunningNowLabels, type RunningNowTask } from "../kit/pro/running-now";
 import { DashboardLogout } from "./DashboardAuthGate";
 import type { AppRouteEntry } from "./routes";
 import { formatRelativeTime, notificationTone } from "./shellFormatting";
@@ -20,6 +21,10 @@ interface AppTopBarProps {
   popoverZIndex: number;
   recentNotifications: Notification[];
   resolvedTheme: Exclude<ThemePreference, "auto">;
+  runningTasks?: RunningNowTask[];
+  onOpenRunningTask?: (taskId: string) => void;
+  onStopRunningTask?: (taskId: string) => void;
+  onViewAllRunning?: () => void;
   setShowCommandPalette: Dispatch<SetStateAction<boolean>>;
   setShowNotificationPanel: Dispatch<SetStateAction<boolean>>;
   setShowTweaksPanel: Dispatch<SetStateAction<boolean>>;
@@ -29,7 +34,6 @@ interface AppTopBarProps {
 
 const FOCUS_CLASS = "focus-visible:outline-2 focus-visible:outline-[var(--accent)]";
 
-// Desktop: 36px bordered buttons (44px on coarse pointers via kit media rule). Phone: 44px ghost buttons.
 const DESKTOP_ICON_BUTTON_STYLE = {
   "--size": "36px",
   "--icon": "16px",
@@ -76,6 +80,16 @@ const TOPBAR_COUNT_BADGE_STYLE = {
   boxShadow: "0 0 0 2px var(--bg)",
 } as CSSProperties;
 
+const RUNNING_NOW_STYLE = {
+  "--aui-running-now-tray-bg": "var(--bg-2)",
+  "--aui-running-now-tray-hover-bg": "var(--bg-3)",
+  "--aui-running-now-card-bg": "var(--bg-1)",
+  "--aui-running-now-row-hover-bg": "var(--bg-2)",
+  "--aui-running-now-button-hover-bg": "var(--bg-3)",
+  "--aui-running-now-open-button-bg": "var(--bg-2)",
+  "--aui-running-now-focus-ring": "var(--accent)",
+} as CSSProperties;
+
 export function AppTopBar({
   wsConnected,
   currentRoute,
@@ -87,6 +101,10 @@ export function AppTopBar({
   popoverZIndex,
   recentNotifications,
   resolvedTheme,
+  runningTasks = [],
+  onOpenRunningTask,
+  onStopRunningTask,
+  onViewAllRunning,
   setShowCommandPalette,
   setShowNotificationPanel,
   setShowTweaksPanel,
@@ -106,7 +124,26 @@ export function AppTopBar({
       ? tr(`알림 ${notificationBadgeCount}개`, `${notificationBadgeCount} notifications`)
       : tr("알림", "Notifications");
 
-  // Safari does not focus a clicked button; focus it so closing the palette can return here.
+  const runningLabels = useMemo<Partial<RunningNowLabels>>(
+    () => ({
+      title: tr("실시간 실행 중", "Running now"),
+      running: isMobileViewport ? "" : tr("작업 중", "Running"),
+      waitingOne: isMobileViewport ? "" : tr("대기", "Waiting"),
+      waitingMany: isMobileViewport ? "" : tr("대기", "Waiting"),
+      paused: tr("일시정지", "Paused"),
+      done: tr("완료", "Done"),
+      open: tr("열기", "Open"),
+      pause: tr("턴 중단", "Stop turn"),
+      resume: tr("재개", "Resume"),
+      empty: tr("지금 작업 중인 에이전트나 레인이 없어요.", "No agents or lanes are running right now."),
+      idle: isMobileViewport ? "0" : tr("실행 없음", "0 running"),
+      viewAll: tr("홈에서 모두 보기", "See all on Home"),
+      close: tr("닫기", "Close"),
+      steps: (done, total) => tr(`단계 ${done}/${total} 완료`, `Step ${done}/${total} done`),
+    }),
+    [isKo, isMobileViewport],
+  );
+
   const openCommandPalette = (event: MouseEvent<HTMLButtonElement>) => {
     event.currentTarget.focus();
     setShowCommandPalette(true);
@@ -118,7 +155,7 @@ export function AppTopBar({
       className="relative shrink-0 bg-[var(--bg)] sm:border-b sm:border-[var(--line-soft)]"
       style={{ zIndex: headerZIndex }}
     >
-      <div className={`flex h-14 w-full items-center ${isMobileViewport ? "gap-1 pr-2 pl-4" : "gap-3 px-6"}`}>
+      <div className={`flex h-14 w-full items-center ${isMobileViewport ? "gap-1 pr-2 pl-4" : "gap-2.5 px-6"}`}>
         {isMobileViewport ? (
           <h1
             data-testid="topbar-title"
@@ -135,12 +172,17 @@ export function AppTopBar({
           </div>
         )}
 
-        {isMobileViewport && wsConnected ? (
-          <Cap className="mr-1 flex shrink-0 items-center gap-1.5">
-            <StatusDot tone="ok" />
-            {tr("실시간", "Live")}
-          </Cap>
-        ) : null}
+        <div data-testid="topbar-running-now" className="flex shrink-0 items-center">
+          <RunningNow
+            tasks={runningTasks}
+            align="end"
+            labels={runningLabels}
+            onOpenTask={onOpenRunningTask}
+            onPause={onStopRunningTask}
+            onViewAll={onViewAllRunning}
+            style={RUNNING_NOW_STYLE}
+          />
+        </div>
 
         {isMobileViewport ? (
           <IconButton
@@ -158,7 +200,7 @@ export function AppTopBar({
             onClick={openCommandPalette}
             aria-label={tr("찾기", "Search")}
             aria-keyshortcuts="Meta+K Control+K"
-            className={`ml-auto flex h-9 w-[280px] min-w-0 shrink items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--bg-2)] px-3 text-[13px] leading-5 text-[var(--fg-muted)] transition-colors hover:bg-[var(--bg-3)] pointer-coarse:h-11 ${FOCUS_CLASS}`}
+            className={`flex h-9 w-[240px] min-w-0 shrink items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--bg-2)] px-3 text-[13px] leading-5 text-[var(--fg-muted)] transition-colors hover:bg-[var(--bg-3)] lg:w-[280px] pointer-coarse:h-11 ${FOCUS_CLASS}`}
           >
             <Search size={16} aria-hidden className="shrink-0" />
             <span className="min-w-0 flex-1 truncate text-left">{tr("찾기", "Search")}</span>
