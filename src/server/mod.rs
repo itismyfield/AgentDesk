@@ -315,7 +315,12 @@ pub(crate) async fn run(
         };
 
     startup_preflight::run();
-    let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
+    let cluster_runtime = cluster::bootstrap(
+        &config,
+        pg_pool.clone(),
+        crate::services::dispatches::cluster_hooks::HOOKS,
+    )
+    .await;
     let cluster_instance_id = cluster_runtime.instance_id().to_string();
     if modules.hub_services
         && let Some(pool) = pg_pool.clone()

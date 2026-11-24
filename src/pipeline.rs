@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::services::pipeline_override::{PipelineOverride, parse_override, parse_override_strict};
+
 /// Global singleton pipeline config (the default), loaded once at startup.
 static PIPELINE: OnceLock<PipelineConfig> = OnceLock::new();
 const PIPELINE_OVERRIDE_HEALTH_KV_KEY: &str = "pipeline_override_health_report";
@@ -572,12 +574,6 @@ pub async fn resolve_for_card_pg(
 
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
-
-/// `PipelineOverride` and its strict/lenient parsers moved to the write boundary
-/// that owns them (#5718); every reader still names them through `crate::pipeline::`.
-pub use crate::services::pipeline_override::{
-    PipelineOverride, parse_override, parse_override_strict,
-};
 
 // ── Schema ───────────────────────────────────────────────────────
 

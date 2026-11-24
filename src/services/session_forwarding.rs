@@ -5,7 +5,7 @@ use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 mod cancel_lookup;
 pub(crate) mod probe;

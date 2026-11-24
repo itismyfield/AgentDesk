@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgRow;
 
 use super::CancelTurnSessionInfo;
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 pub(crate) async fn load_cancel_turn_session(
     pool: &PgPool,

@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::Row;
 
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 mod catalog;
 use catalog::CONFIG_KEYS;
@@ -833,11 +833,11 @@ pub(crate) mod tests {
         async fn create_with_lifecycle(
             lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         ) -> Self {
-            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let admin_url = crate::db::dispatch_test_db::postgres_admin_database_url();
             let database_name = format!("agentdesk_settings_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!(
                 "{}/{}",
-                crate::dispatch::test_support::postgres_base_database_url(),
+                crate::db::dispatch_test_db::postgres_base_database_url(),
                 database_name
             );
             crate::db::postgres::create_test_database(

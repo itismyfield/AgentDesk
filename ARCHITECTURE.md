@@ -198,6 +198,7 @@ src/
 │   ├── test_env.rs
 │   ├── test_instance.rs
 │   ├── tool_activity_display.rs
+│   ├── transcript_homes.rs
 │   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
@@ -1437,6 +1438,7 @@ src/
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── dispatch_hooks.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── input_fallback.rs
@@ -3987,6 +3989,7 @@ src/
 │   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
+│   │   ├── cluster_hooks.rs
 │   │   ├── dtos.rs
 │   │   ├── http_outbound.rs
 │   │   ├── mod.rs
