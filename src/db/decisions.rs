@@ -151,25 +151,26 @@ impl AttemptState {
     }
 }
 
-/// The node this process runs as; every row it moves names it as the holder of the attempt.
-fn holder() -> String {
-    crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
+/// The node this process runs as, named once by its runtime before it moves any row.
+static HOLDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The holder each moved row gets; until the runtime named one, a row keeps whoever held it.
+fn holder() -> Option<&'static str> {
+    HOLDER.get().map(String::as_str)
 }
 
 /// One run of a node: its identity and its start on the database clock.
 #[derive(Clone, Debug)]
 pub(crate) struct Run {
-    holder: String,
+    holder: &'static str,
     pub(crate) boot: chrono::DateTime<chrono::Utc>,
 }
 
 impl Run {
-    /// This process's run, started at `boot`.
-    pub(crate) fn of_this_node(boot: chrono::DateTime<chrono::Utc>) -> Self {
-        Self {
-            holder: holder(),
-            boot,
-        }
+    /// This process's run as node `instance`, started at `boot`; the first name given stays.
+    pub(crate) fn of(instance: &str, boot: chrono::DateTime<chrono::Utc>) -> Self {
+        let holder = HOLDER.get_or_init(|| instance.to_string()).as_str();
+        Self { holder, boot }
     }
 }
 
@@ -181,8 +182,8 @@ pub(crate) async fn reserve_first_attempt(
 ) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts
-         SET state = 'resolving', workflow_ticket = $2, holder_instance_id = $3,
-             updated_at = NOW()
+         SET state = 'resolving', workflow_ticket = $2,
+             holder_instance_id = COALESCE($3, holder_instance_id), updated_at = NOW()
          WHERE event_id = $1 AND state = 'not_started'",
     )
     .bind(event_id)
@@ -206,7 +207,7 @@ pub(crate) async fn advance(
         "UPDATE decision_delivery_attempts
          SET state = $3, normalization_used = normalization_used OR $4,
              attempt_turn_id = COALESCE($5, attempt_turn_id), detail = COALESCE($6, detail),
-             holder_instance_id = $7, updated_at = NOW()
+             holder_instance_id = COALESCE($7, holder_instance_id), updated_at = NOW()
          WHERE event_id = $1 AND state = $2 AND NOT (normalization_used AND $4)",
     )
     .bind(event_id)
@@ -226,7 +227,8 @@ pub(crate) async fn advance(
 pub(crate) async fn begin_write(pool: &PgPool, event_id: Uuid) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts
-         SET state = 'may_have_sent', holder_instance_id = $2, updated_at = NOW()
+         SET state = 'may_have_sent', holder_instance_id = COALESCE($2, holder_instance_id),
+             updated_at = NOW()
          WHERE event_id = $1 AND state IN ('resolving', 'normal_wait')",
     )
     .bind(event_id)
@@ -245,7 +247,8 @@ pub(crate) async fn close(
 ) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts
-         SET state = 'closing', detail = $2, holder_instance_id = $3, updated_at = NOW()
+         SET state = 'closing', detail = $2,
+             holder_instance_id = COALESCE($3, holder_instance_id), updated_at = NOW()
          WHERE event_id = $1
            AND state IN ('not_started', 'resolving', 'normal_wait', 'normalizing')",
     )
@@ -280,7 +283,7 @@ pub(crate) async fn end_abandoned(
     .bind(from.as_str())
     .bind(to.as_str())
     .bind(detail)
-    .bind(&run.holder)
+    .bind(run.holder)
     .bind(run.boot)
     .execute(pool)
     .await?;
@@ -332,7 +335,7 @@ pub(crate) async fn unsettled(
          ORDER BY e.admission_sequence",
     )
     .bind(channel.map(|channel| channel.to_string()))
-    .bind(run.map(|run| run.holder.as_str()))
+    .bind(run.map(|run| run.holder))
     .bind(run.map(|run| run.boot))
     .fetch_all(pool)
     .await?;

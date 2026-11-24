@@ -145,17 +145,17 @@ message id와 source origin_id로 하며, 그 밖의 id로 들어간 원본은 �
 
 | 모델 전이·변수 | 코드 | 메모 |
 |---|---|---|
-| PeerRecover(신규, `tookLive`) · CloseUnknown · CloseAbandoned의 종결 조건 | `src/db/decisions.rs` `end_abandoned`(:263), 판정 `unsettled`(:317), holder 기록 `holder`(:155)·`Run`(:161). 호출 `src/services/discord/queue_io/decision_drain.rs` `settle_as`(:235)의 `row.stale` 분기 | 행을 옮길 때마다 holder(worker_nodes instance id)를 적는다. 종결 UPDATE가 "같은 노드가 이번 실행 시작 전에 옮긴 행" 또는 "holder 노드가 online이 아님"을 다시 확인한다. 시각만으로는 닫지 않는다 |
-| Crash/Boot의 실행 경계 | `decision_drain.rs` `run`(:54). 묻는 곳: `recover_boot`(:450), `hand_idle`(:304), `decision_target.rs:208`(예약 전), `decision_drain/queued.rs` `begin`(:36) | 실행 시작 시각은 먼저 묻는 쪽이 한 번 고정한다. 이 process가 옮긴 행은 그 뒤 시각이라 자기 부팅 복구가 닫지 않는다 |
-| `kept`(신규) · CloseUnknown·Finalize의 `done` 선택 | `decision_drain.rs` `discard`(:131) — owner가 없거나 snapshot commit이 실패하면 원본이 남는다 | PG 종결(실행권)과 owner 원본 제거(정리)는 두 단계다 |
-| Sweep(신규) | `decision_drain.rs` `settle_channel`(:386) → `queued_head/v2/decision.rs` `decision_tickets`(:56) → `src/db/decisions.rs` `closed_under`(:356) → `discard_decision`(:71) | owner가 아직 든 Decision ticket을 종결 event와 대조해 requeue·안내 전에 그 원본만 지운다. ticket이 없고 승인 event도 만난 적 없으면 PG를 읽지 않는다 |
+| PeerRecover(신규, `tookLive`) · CloseUnknown · CloseAbandoned의 종결 조건 | `src/db/decisions.rs` `end_abandoned`(:265), 판정 `unsettled`(:319), holder 기록 `holder`(:158)·`Run`(:164). 호출 `src/services/discord/queue_io/decision_drain.rs` `settle_as`(:239)의 `row.stale` 분기 | 행을 옮길 때마다 holder(worker_nodes instance id)를 적는다. 종결 UPDATE가 "같은 노드가 이번 실행 시작 전에 옮긴 행" 또는 "holder 노드가 online이 아님"을 다시 확인한다. 시각만으로는 닫지 않는다 |
+| Crash/Boot의 실행 경계 | `decision_drain.rs` `run`(:54). 묻는 곳: `recover_boot`(:450), `hand_idle`(:307), `decision_target.rs:208`(예약 전), `decision_drain/queued.rs` `begin`(:35) | 실행 시작 시각은 먼저 묻는 쪽이 한 번 고정한다. 이 process가 옮긴 행은 그 뒤 시각이라 자기 부팅 복구가 닫지 않는다 |
+| `kept`(신규) · CloseUnknown·Finalize의 `done` 선택 | `decision_drain.rs` `discard`(:136) — owner가 없거나 snapshot commit이 실패하면 원본이 남는다 | PG 종결(실행권)과 owner 원본 제거(정리)는 두 단계다 |
+| Sweep(신규) | `decision_drain.rs` `settle_channel`(:386) → `queued_head/v2/decision.rs` `decision_tickets`(:56) → `src/db/decisions.rs` `closed_under`(:358) → `discard_decision`(:70) | owner가 아직 든 Decision ticket을 종결 event와 대조해 requeue·안내 전에 그 원본만 지운다. ticket이 없고 승인 event도 만난 적 없으면 PG를 읽지 않는다 |
 | Notice(대조) · OtherNotice | `input_owner/notice.rs` `owed`의 `withheld`(:44), 호출 `:16`·`:128` | 정리가 실패한 Decision 원본의 안내만 보류한다. 다른 입력의 안내는 그대로 나간다 |
-| Finalize의 원본 제거(P2-3) | `queued_head/v2/decision.rs` `discard_decision`(:71)의 `gone`(:86) | Unconfirmed·시작 거부·영구 거부로 보관된 Decision 원본을 본문째 지우고 그 시도의 bind를 닫는다. 다른 입력이 섞인 unit과 물리 작업 중인 head는 그대로 둔다 |
-| Journal의 승인 대조(P2-4) · SelfDeclared 대조 | `decision_drain.rs` `claim_of`(:84), `hand_idle`의 `load_event` 대조(:326), `refuse_unapproved`(:103) | origin·channel·actor·본문이 승인 event와 같을 때만 journal. 근거 없는 Decision 주장은 쓰기 0, event 상태 불변 |
-| DrainCurrent(non-owner) → Journal | `router/intake_dispatch/queued.rs:109` → `decision_drain/queued.rs` `begin`(:36) | 수용 경계에서 대조하고 journal을 잡는다. 닫힌·미승인 원본은 실행하지 않고 큐에 돌려놓지 않는다(`ClosedDecision`). 재시작 drain도 같은 경계를 지난다 |
-| ReleaseHeld(non-owner) | `queued.rs:138`·`:201`·`:252`(수용 단계 복귀), `:428`(시작 뒤 큐 복귀) → `decision_drain/queued.rs` `end`(:86) | 아무것도 쓰지 않고 큐로 돌아간 원본만 may_have_sent→normal_wait |
-| CancelClear · CloseUnknown(non-owner) | `queued.rs:429`·`:430` → `end`(:86). kickoff의 재투입 생략 `queue_dispatch/kickoff.rs:288` | clear는 failed(`cleared`), journal 뒤 오류는 unknown_closed(`queue_start_failed`). 실패한 Decision 시작은 큐에 다시 넣지 않는다 |
-| Observe(non-owner) | `queue_dispatch/kickoff.rs:131` → `decision_drain/queued.rs` `settle_started`(:108) | owner 없는 채널은 kickoff의 턴 경계에서 그 턴의 receipt로 정산한다 |
+| Finalize의 원본 제거(P2-3) | `queued_head/v2/decision.rs` `discard_decision`(:70)의 `gone`(:85) | Unconfirmed·시작 거부·영구 거부로 보관된 Decision 원본을 본문째 지우고 그 시도의 bind를 닫는다. 다른 입력이 섞인 unit과 물리 작업 중인 head는 그대로 둔다 |
+| Journal의 승인 대조(P2-4) · SelfDeclared 대조 | `decision_drain.rs` `claim_of`(:89), `hand_idle`의 `load_event` 대조(:329), `refuse_unapproved`(:108) | origin·channel·actor·본문이 승인 event와 같을 때만 journal. 근거 없는 Decision 주장은 쓰기 0, event 상태 불변 |
+| DrainCurrent(non-owner) → Journal | `router/intake_dispatch/queued.rs:109` → `decision_drain/queued.rs` `begin`(:35) | 수용 경계에서 대조하고 journal을 잡는다. 닫힌·미승인 원본은 실행하지 않고 큐에 돌려놓지 않는다(`ClosedDecision`). 재시작 drain도 같은 경계를 지난다 |
+| ReleaseHeld(non-owner) | `queued.rs:138`·`:201`·`:252`(수용 단계 복귀), `:428`(시작 뒤 큐 복귀) → `decision_drain/queued.rs` `end`(:85) | 아무것도 쓰지 않고 큐로 돌아간 원본만 may_have_sent→normal_wait |
+| CancelClear · CloseUnknown(non-owner) | `queued.rs:429`·`:430` → `end`(:85). kickoff의 재투입 생략 `queue_dispatch/kickoff.rs:288` | clear는 failed(`cleared`), journal 뒤 오류는 unknown_closed(`queue_start_failed`). 실패한 Decision 시작은 큐에 다시 넣지 않는다 |
+| Observe(non-owner) | `queue_dispatch/kickoff.rs:131` → `decision_drain/queued.rs` `settle_started`(:107) | owner 없는 채널은 kickoff의 턴 경계에서 그 턴의 receipt로 정산한다 |
 | ResolvePresent(busy) 유지 | `queue_io/queued_head_inject.rs:124` | Decision head는 busy pane 붙여넣기 대상에서 빠진다 |
 
 수정 전 RED / 후 GREEN(2c 모델, TLC 1.7.4):

@@ -56,7 +56,12 @@ pub(crate) async fn run(pool: &PgPool) -> Result<&'static decisions::Run, sqlx::
         return Ok(run);
     }
     let boot = decisions::clock(pool).await?;
-    Ok(RUN.get_or_init(|| decisions::Run::of_this_node(boot)))
+    Ok(RUN.get_or_init(|| decisions::Run::of(&node(), boot)))
+}
+
+/// The node this process runs as in the cluster's registry.
+fn node() -> String {
+    crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
 }
 
 /// Marks that approved events exist, so the owner's drain settles them from now on.
@@ -426,7 +431,7 @@ async fn recover_before(
     boot: chrono::DateTime<chrono::Utc>,
     mailbox_of: impl Fn(u64) -> Option<ChannelMailboxHandle>,
 ) -> Result<usize, sqlx::Error> {
-    let run = decisions::Run::of_this_node(boot);
+    let run = decisions::Run::of(&node(), boot);
     let rows = decisions::unsettled(pool, None, Some(&run)).await?;
     if !rows.is_empty() {
         note_open();
