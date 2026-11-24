@@ -1462,9 +1462,11 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
-    for (const id of ["home", "campaigns", "agents", "audit"]) {
+    for (const id of ["home", "campaigns", "agents", "stats"]) {
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toBeVisible();
     }
+    // Stats took audit's tab (#8379); audit lives behind More.
+    await expect(page.getByTestId("app-mobile-tab-audit")).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더 보기|More/);
     await expect(page.getByTestId("app-mobile-tab-home")).toHaveAttribute("aria-current", "page");
     await expect(page.getByTestId("app-mobile-tab-campaigns")).toHaveAttribute("aria-label", /캠페인, 확인할 일 2건|Campaigns, 2 need attention/);
@@ -1504,9 +1506,10 @@ test.describe("Dashboard smoke tests", () => {
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /더 보기 닫기|Close/ })).toBeFocused();
-    for (const id of ["routines", "stats", "settings"]) {
+    for (const id of ["routines", "audit", "settings"]) {
       await expect(page.getByTestId(`app-mobile-more-${id}`)).toBeVisible();
     }
+    await expect(page.getByTestId("app-mobile-more-stats")).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-theme")).toBeVisible();
     await expect(page.getByTestId("app-mobile-more-tweaks")).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban|운영|Ops/ })).toHaveCount(0);
@@ -1521,8 +1524,8 @@ test.describe("Dashboard smoke tests", () => {
     }));
     expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
 
-    await page.getByTestId("app-mobile-more-stats").click();
-    await expect(page).toHaveURL(/\/stats$/);
+    await page.getByTestId("app-mobile-more-audit").click();
+    await expect(page).toHaveURL(/\/audit$/);
     await expect(moreMenu).toHaveCount(0);
     // Pages behind More light up the More tab instead of an unrelated one.
     await expect(page.getByTestId("app-mobile-more-button")).toHaveAttribute("data-active", "true");
@@ -1537,8 +1540,10 @@ test.describe("Dashboard smoke tests", () => {
   test("responsive: the More sheet closes on back navigation and marks the current page", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
-    await page.getByTestId("app-mobile-tab-audit").click();
-    await expect(page).toHaveURL(/\/audit$/);
+    await page.getByTestId("app-mobile-tab-stats").click();
+    await expect(page).toHaveURL(/\/stats$/);
+    await expect(page.getByTestId("app-mobile-tab-stats")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-button")).not.toHaveAttribute("data-active", "true");
     await page.getByTestId("app-mobile-more-button").click();
     await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
     await page.goBack();
@@ -1548,7 +1553,7 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/routines");
     await page.getByTestId("app-mobile-more-button").click();
     await expect(page.getByTestId("app-mobile-more-routines")).toHaveAttribute("aria-current", "page");
-    await expect(page.getByTestId("app-mobile-more-stats")).not.toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-audit")).not.toHaveAttribute("aria-current", "page");
   });
 
   test("responsive: mobile topbar is a single row with title and search", async ({ page }, testInfo) => {
@@ -1600,14 +1605,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
     await expectNoHorizontalOverflow(page);
 
-    for (const id of ["campaigns", "agents", "audit"]) {
+    for (const id of ["campaigns", "agents", "stats"]) {
       await page.getByTestId(`app-mobile-tab-${id}`).click();
       await expect(page).toHaveURL(new RegExp(`/${id}$`));
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toHaveAttribute("aria-current", "page");
       await expectNoHorizontalOverflow(page);
     }
 
-    for (const id of ["routines", "stats", "settings"]) {
+    for (const id of ["routines", "audit", "settings"]) {
       await page.getByTestId("app-mobile-more-button").click();
       await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
       await page.getByTestId(`app-mobile-more-${id}`).click();
@@ -1730,6 +1735,11 @@ test.describe("Dashboard smoke tests", () => {
     let down = false;
     await page.clock.install();
     await mockHomeSources(page);
+    // Quota and health alerts join the to-dos (#8379), so the empty case keeps both calm.
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "7d", limit: 100, used: 40, remaining: 60, reset: 0 }] },
+    ] } }));
+    await page.route(/\/api\/health(?:\/detail)?$/, (route) => route.fulfill({ json: { status: "healthy", providers: [{ connected: true }] } }));
     await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
     for (const [pattern, body] of [[/\/api\/campaigns\?/, { campaigns: [], live: {}, limit: 100, offset: 0 }], [/\/api\/server-campaigns\?/, { campaigns: [] }]] as const) {
       await page.route(pattern, (route) => (down ? route.fulfill({ status: 503, json: { error: "unavailable" } }) : route.fulfill({ json: body })));
@@ -1738,22 +1748,26 @@ test.describe("Dashboard smoke tests", () => {
 
     const todo = page.getByTestId("home-todo");
     const campaigns = page.getByTestId("home-campaigns");
-    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    const empty = "지금 할 일이나 긴급 경보가 없어요.";
+    await expect(todo).toContainText(empty, { timeout: 15000 });
+    // An empty list folds into a one-line banner.
+    await expect(todo).toHaveAttribute("data-collapsed", "true");
     await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
     down = true;
     await page.clock.runFor(60_000);
     await expect(todo).toContainText("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", { timeout: 15000 });
-    await expect(todo).not.toContainText("지금 할 일이 없어요.");
+    await expect(todo).not.toContainText(empty);
+    await expect(todo).not.toHaveAttribute("data-collapsed", "true");
     await expect(todo.locator("h2")).toHaveText("할 일");
     await expect(campaigns).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.");
     await expect(campaigns.locator("h2")).toHaveText("캠페인");
     down = false;
     await page.clock.runFor(60_000);
-    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    await expect(todo).toContainText(empty, { timeout: 15000 });
     await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
   });
 
-  test("home: server nodes waiting for a person lead the to-dos; approval stays disabled with its reason", async ({ page }, testInfo) => {
+  test("home: server nodes waiting for a person lead the to-dos under the triage alerts; approval stays disabled with its reason", async ({ page }, testInfo) => {
     const isMobile = testInfo.project.name === "mobile";
     const release = structuredClone(serverCampaignFixtures.prepared);
     const statuses = ["decision_required", "awaiting_deploy", "awaiting_approval"];
@@ -1765,11 +1779,17 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     const todo = page.getByTestId("home-todo");
-    await expect(todo.locator("li")).toHaveCount(3, { timeout: 15000 });
-    await expect(todo.locator("li").first()).toContainText("승인 대기");
+    // The shared fixtures carry an 83% quota and a degraded server; those alerts sit above the human to-dos (#8379).
+    await expect(todo.locator("li")).toHaveCount(5, { timeout: 15000 });
+    await expect.poll(() => todo.locator("li").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid"))))
+      .toEqual(["home-triage-quota", "home-triage-health", null, null, null]);
+    await expect(todo.getByTestId("home-triage-quota")).toContainText(/쿼터 주의\s*Claude 7일 83%/);
+    await expect(todo.getByTestId("home-triage-health")).toContainText("서버가 주의 상태예요");
+    const rows = todo.locator("li:not([data-testid^='home-triage-'])");
+    await expect(rows.first()).toContainText("승인 대기");
     await expect(todo).toContainText("결정 포럼에서 승인해요");
     if (isMobile) {
-      await expect(todo.getByRole("button")).toHaveCount(0);
+      await expect(rows.getByRole("button")).toHaveCount(0);
     } else {
       await expect(todo.getByRole("button", { name: "승인" })).toBeDisabled();
       await todo.getByRole("button", { name: "판단하기" }).click();
@@ -1777,37 +1797,56 @@ test.describe("Dashboard smoke tests", () => {
     }
   });
 
-  test("home: a working agent's live turn shows as a kit monitor without controls on desktop, a row on phones", async ({ page }, testInfo) => {
+  test("home: a working agent's live turn shows as a kit monitor with a stop control on desktop, folded on phones", async ({ page }, testInfo) => {
     await mockHomeSources(page);
     await page.route(/\/api\/agents\/agent-ada\/turn$/, (route) => route.fulfill({ json: {
       agent_id: "agent-ada", status: "working", started_at: new Date(Date.now() - 95_000).toISOString(), updated_at: new Date().toISOString(),
       provider: "codex", current_tool_line: "npm run build", tool_events: [{ kind: "tool", status: "running", tool_name: "Bash", summary: "", line: "" }], tool_count: 1,
     } }));
     let turnReads = 0;
-    page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/turn")) turnReads++; });
+    let turnStops = 0;
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname.endsWith("/turn")) turnReads++;
+      if (request.method() === "POST" && pathname.endsWith("/turn/stop")) turnStops++;
+    });
     await page.goto("/home");
 
     const monitor = page.getByTestId("home-agent-monitor-agent-ada");
+    const agentRow = page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" });
     if (testInfo.project.name === "mobile") {
-      await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toBeVisible({ timeout: 15000 });
-      await expect(monitor).toHaveCount(0);
-      // Phones draw no monitor, so they never capture a turn on the server.
-      expect(turnReads).toBe(0);
+      // Phones fold the monitor (#8379), so they read the one working agent's turn like desktop does.
+      await expect(monitor.locator("section[data-folded]")).toBeVisible({ timeout: 15000 });
+      await expect(monitor.getByRole("button", { name: /아다 대시보드.*펼치기/ })).toBeVisible();
+      await expect(agentRow).toHaveCount(0);
+      expect(turnReads).toBe(1);
+      await expectNoHorizontalOverflow(page);
       return;
     }
     await expect(monitor).toContainText("npm run build", { timeout: 15000 });
     await expect(monitor).toContainText(/1:3\d/);
-    // Fold and the log link to the agent detail only; no pause, cancel or approval without a server action behind them.
-    await expect(monitor.getByRole("button")).toHaveCount(2);
+    expect(turnReads).toBe(1);
+    // Fold, stop (POST turn/stop) and the log link; no pause or approval without a server action behind them.
+    await expect(monitor.getByRole("button")).toHaveCount(3);
+    const stop = monitor.getByRole("button", { name: "중단" });
+    await expect(stop).toBeVisible();
+    // Stop asks first; nothing reaches the server until the person confirms.
+    let confirmText = "";
+    page.once("dialog", (dialog) => { confirmText = dialog.message(); void dialog.dismiss(); });
+    await stop.click();
+    await expect.poll(() => confirmText).toContain("중단할까요");
+    expect(turnStops).toBe(0);
     await monitor.getByRole("button", { name: "로그" }).click();
     await expect(page.getByRole("dialog", { name: /에이전트 상세/ })).toBeVisible();
-    await expect(page.getByTestId("home-agents").locator("li button", { hasText: "아다 대시보드" })).toHaveCount(0);
+    await expect(agentRow).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
     // The kit texts follow the English UI.
     await page.route(/\/api\/settings$/, (route) => route.fulfill({ json: { language: "en", theme: "dark" } }));
     await page.reload();
     await expect(monitor.getByRole("button", { name: "Log" })).toBeVisible({ timeout: 15000 });
+    await expect(monitor.getByRole("button", { name: "Stop" })).toBeVisible();
     await expect(monitor).toContainText("Running");
+    expect(turnStops).toBe(0);
     await expect(page.getByTestId("home-usage").getByRole("group", { name: "Limits by provider" })).toBeVisible();
   });
 
