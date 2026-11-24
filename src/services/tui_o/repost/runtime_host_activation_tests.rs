@@ -457,9 +457,9 @@ fn host_run() -> crate::services::tui_o::repost::io::probe::evidence::RunScope {
 
 impl RepostHook<RealWriter> for SendOnce {
     fn turn<'a>(&'a mut self, writer: &'a mut RealWriter) -> Turned<'a, ()> {
+        use crate::services::discord::krx_tui_o_test_host::repost_probe::absent_evidence;
         use crate::services::tui_o::repost::dispatch::Admission;
         use crate::services::tui_o::repost::io::probe::evidence::EvidenceScope;
-        use crate::services::tui_o::repost::io::probe::tests::absent_evidence;
         use crate::services::tui_o::repost::runner::{DispatchIntent, Runner, TurnWriter};
         use crate::services::tui_o::repost::{dispatch, o_piece_attempts, o_piece_delivery};
 

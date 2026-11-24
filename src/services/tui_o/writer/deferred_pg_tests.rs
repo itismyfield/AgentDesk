@@ -1,14 +1,34 @@
 //! Actual Deferred adoption holds intake writes and waits for durable Legacy body delivery.
 
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{FailedPreAcceptSweepOutcome, sweep_failed_pre_accept_once};
 use crate::db::o_channel_activation::{activation_rows, fenced_activation_rows};
+use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::krx_tui_o_test_host::host_start::deferred::*;
 use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_returning_id_with_ttl};
+use crate::services::tui_o::channel_policy::Adoption;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, test_override};
+use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::writer::WriterAlarm;
+use crate::services::tui_o::writer::activation::ActivationFacts;
+use crate::services::tui_o::writer::activation::test_hook::Step;
+use crate::services::tui_o::writer::adoption::LegacyView;
+use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::FencedFacts;
+use crate::services::tui_o::writer::host::{Custody, HostIo, HostParts, start};
+use crate::services::tui_o::writer::tests::actor::host_start::{
+    Raised, TestIo, adoption, init_path, root,
+};
+use crate::services::tui_o::writer::tests::actor::{append, row};
+use crate::services::tui_o::writer::tests::{CHANNEL, FakeLease, FakePort};
+use crate::services::tui_prompt_dedupe::binding_events as p5;
 use sqlx::PgPool;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The real DB fence over the existing channel host fixture, including every observed blocker.
 struct PgIo {

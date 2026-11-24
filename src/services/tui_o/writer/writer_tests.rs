@@ -21,7 +21,7 @@ pub(crate) const BOT: u64 = 42;
 pub(crate) const CHANNEL: u64 = 7;
 
 thread_local! {
-    static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
+    pub(crate) static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -431,7 +431,7 @@ pub(crate) fn piece(native_key: &str, payload: &str) -> Derived {
     })
 }
 
-fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
+pub(crate) fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
     let ledger = writer.store().ledger();
     ledger
         .latest_piece(&unit(native_key), 0)
@@ -1026,9 +1026,6 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
-use crate::services::discord::krx_tui_o_test_host::input_notice_transport as input_notice_transport_tests;
-#[path = "local_retry_tests.rs"]
-mod local_retry_tests;
 #[path = "notice_retry_tests.rs"]
 mod notice_retry_tests;
 #[path = "tool_card_replay_tests.rs"]

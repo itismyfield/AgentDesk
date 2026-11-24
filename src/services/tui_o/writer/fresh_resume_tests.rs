@@ -1,6 +1,8 @@
 use super::*;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 
+#[path = "fresh_resume_tests/authority_contention_tests.rs"]
+mod authority_contention;
 #[path = "fresh_deriver_compat_tests.rs"]
 mod deriver_compat;
 #[path = "fresh_gc_waiting_tests.rs"]

@@ -63,7 +63,7 @@ async fn retried() {
 }
 
 /// A selected channel whose transcript ends in an open turn Legacy has read and delivered.
-struct Open {
+pub(crate) struct Open {
     harness: Harness,
     path: PathBuf,
     io: Arc<TestIo>,
@@ -156,11 +156,11 @@ impl Open {
 }
 
 /// Hooks are process-wide and keyed by channel, so a test that sets one runs in its own process.
-fn isolated(name: &str) -> bool {
+pub(crate) fn isolated(name: &str) -> bool {
     test_override::isolated_binding_case(name)
 }
 
-fn hook_reached(step: Step, then: impl FnOnce() + Send + 'static) -> Arc<AtomicBool> {
+pub(crate) fn hook_reached(step: Step, then: impl FnOnce() + Send + 'static) -> Arc<AtomicBool> {
     let reached = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&reached);
     test_hook::set(CHANNEL, step, move || {
@@ -567,6 +567,3 @@ async fn a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved() {
 
 #[path = "stall_tests.rs"]
 mod stall;
-
-#[path = "deferred_pg_tests.rs"]
-mod pg;

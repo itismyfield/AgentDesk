@@ -1,4 +1,22 @@
-use super::*;
+use crate::services::tui_o::shadow::binding_reader::source_id_for;
+use crate::services::tui_o::shadow::capture::SourceCapture;
+use crate::services::tui_o::shadow::{
+    CaptureOutcome, MAX_READ_BYTES, ShadowProvider, SourceId, UnitKey, UnitKind,
+};
+use crate::services::tui_o::store::InitSource;
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::writer::actor::{run_channel, spawn_if_enabled};
+use crate::services::tui_o::writer::binding::{BindingCause, BindingTarget};
+use crate::services::tui_o::writer::deliver::ChannelWriter;
+use crate::services::tui_o::writer::tests::actor::*;
+use crate::services::tui_o::writer::tests::{Alarms, Harness, unit};
+use crate::services::tui_o::writer::{AlarmSink, WriterAlarm};
+use chrono::Utc;
+use sha2::Sha256;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 #[path = "fresh_resume_tests.rs"]
 pub(crate) mod fresh_resume;

@@ -3,21 +3,38 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::Utc;
 
-use super::*;
+use super::admission_tests::{BOT, CHANNEL, admit_on, sidecar};
+use super::repost_probe::{Fake, absent_evidence};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::repost::admission_tests::{BOT, CHANNEL, admit_on, sidecar};
+use crate::services::tui_o::repost::admission::OriginalGate;
+use crate::services::tui_o::repost::dispatch::{
+    Admission, DispatchPermit, GuardReason, RepostWriter,
+};
 use crate::services::tui_o::repost::identity::{marker, payload_sha256, piece_of};
+use crate::services::tui_o::repost::io::probe::evidence::{EvidenceScope, RunScope};
 use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
+use crate::services::tui_o::repost::io::probe::matcher::AttributionSnapshot;
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
-use crate::services::tui_o::repost::io::probe::tests::{Fake, absent_evidence};
+use crate::services::tui_o::repost::io::probe::{ProbeRead, ProbeSession, Progress};
 use crate::services::tui_o::repost::o_piece_delivery::DeliveryRow;
+use crate::services::tui_o::repost::o_piece_delivery::PieceKey;
+use crate::services::tui_o::repost::provenance::{ProvenanceEntry, ProvenanceLog};
+use crate::services::tui_o::repost::runner::*;
+use crate::services::tui_o::repost::send::BoundedTransport;
 use crate::services::tui_o::repost::send::{
     AttemptGuard, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds, WireOutcome, hand_over,
 };
+use crate::services::tui_o::repost::{dispatch, o_piece_attempts, o_piece_delivery};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::LedgerEntry;
+use crate::services::tui_o::store::ledger::{LedgerState, PieceRecord};
 use crate::services::tui_o::store::{ChannelStore, Initialized, OEra, OStore, StoreConfig};
+use sqlx::postgres::PgPool;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
 #[path = "backlog_tests.rs"]
 mod backlog_tests;

@@ -5,25 +5,25 @@ use std::time::Duration;
 use chrono::Utc;
 use sqlx::PgPool;
 
-use super::admission::{
+use super::repost_probe::{absent_evidence, run};
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::tui_o::repost::admission::{
     AdmittedKeys, Admitter, ApprovedRejected, BacklogReason, Candidate, OriginalGate, PriorBudget,
     classify, posted_receipts, report_backlog,
 };
-use super::identity::{PieceKey, marker, piece_of};
-use super::io::probe::evidence::EvidenceScope;
-use super::io::probe::matcher::{
+use crate::services::tui_o::repost::identity::{PieceKey, marker, piece_of};
+use crate::services::tui_o::repost::io::probe::evidence::EvidenceScope;
+use crate::services::tui_o::repost::io::probe::matcher::{
     Attribution, AttributionSnapshot, ObservedMessage, RecoveryKind, match_observations,
 };
-use super::io::probe::tests::{absent_evidence, run};
-use super::o_piece_attempts::{
+use crate::services::tui_o::repost::o_piece_attempts::{
     AttemptResult, GrantOutcome, GrantRequest, Intent, SlotGrant, attempts, grant, settle,
 };
-use super::o_piece_delivery::{
+use crate::services::tui_o::repost::o_piece_delivery::{
     AdmitOutcome, Receipt, ReceiptMethod, ReceiptOutcome, load, record_receipt,
 };
-use super::provenance::{ProvenanceEntry, ProvenanceLog};
-use super::send::RepostIds;
-use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::tui_o::repost::provenance::{ProvenanceEntry, ProvenanceLog};
+use crate::services::tui_o::repost::send::RepostIds;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 #[cfg(unix)]
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceDisposition};
@@ -538,7 +538,7 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
     let refused = next_grant(&pool, &unknown.key).await;
     assert_eq!(
         refused,
-        GrantOutcome::Failed(super::o_piece_delivery::Failure::CapUnknown)
+        GrantOutcome::Failed(crate::services::tui_o::repost::o_piece_delivery::Failure::CapUnknown)
     );
     pool.close().await;
     db.drop().await;

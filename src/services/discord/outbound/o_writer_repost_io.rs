@@ -432,6 +432,3 @@ impl ProbeRead for RepostHttp {
         Ok(page.into_iter().map(Seen::observed).collect())
     }
 }
-
-#[cfg(test)]
-pub(crate) use crate::services::discord::krx_tui_o_test_host::repost_io as tests;
