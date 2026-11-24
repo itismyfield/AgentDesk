@@ -469,7 +469,7 @@ class Partition(unittest.TestCase):
         p = vistool.load_partition(HERE.parent / "partition.json")
         self.assertRegex(p["base"], r"^[0-9a-f]{40}$")
         self.assertEqual(p["order"], ["KRX", "KE", "DL", "ROOT"])
-        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 87, "KE": 86, "DL": 85, "ROOT": 46})
+        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 88, "KE": 86, "DL": 85, "ROOT": 46})
 
     def test_manifests(self):
         text = '[package]\nname = "agentdesk"\n\n[workspace]\nmembers = ["crates/x"]\n\n[lib]\npath = "src/lib.rs"\n\n' \

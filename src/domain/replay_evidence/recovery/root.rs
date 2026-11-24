@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-#[path = "../../../cli/dcserver/replay_root_issuer.rs"]
+#[path = "../../../services/replay_evidence/root_issuer.rs"]
 pub(crate) mod issuer;
 
 #[derive(Clone, Debug)]
