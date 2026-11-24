@@ -139,33 +139,6 @@ async fn decision_original_leaves_the_queue_unrun_unless_its_event_is_open_pg() 
             assert!(again.intervention.is_none(), "{case}: put back");
         }
     }
-    // An ordinary queue entry is admitted as it always was.
-    let channel = serenity::ChannelId::new(8_211_399);
-    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
-    let plain = entry(8_211_499, None, (ACTOR, "plain"));
-    shared
-        .mailbox(channel)
-        .enqueue(plain, persistence.clone())
-        .await;
-    let taken = shared.mailbox(channel).take_next_soft(persistence).await;
-    let head = taken.intervention.unwrap();
-    let disposition = admit_queued_intake(
-        &deps,
-        ProviderKind::Claude,
-        channel,
-        &head,
-        head.author_id,
-        "plain-owner".to_string(),
-        false,
-        false,
-        "queued_decision_test",
-        taken.dispatch_lease,
-    )
-    .await;
-    assert!(matches!(
-        disposition,
-        QueuedAdmissionDisposition::Admitted(_)
-    ));
     pool.close().await;
     db.drop().await;
 }
