@@ -24,5 +24,9 @@ export const step = (action) => ({
  Journal:"쓰기 직전 may_have_sent 기록 한 번", ReleaseHeld:"입력창 사용 중: 미전송 증명 뒤 같은 원본으로 다시 대기",
  OwnerPending:"owner 수용 응답 불명: 닫고 그 원본만 제거", PreserveApproved:"승인된 의견의 원문 보존 frame",
  PeerRecover:"다른 노드의 부팅 복구: holder 실행이 끝난 시도만 종결", Sweep:"종결된 event의 남은 원본을 requeue·안내 전에 제거",
- Notice:"종결된 Decision 원본의 재전송 안내 대조", OtherNotice:"같은 채널 다른 사용자 원본의 안내"
+ Notice:"종결된 Decision 원본의 재전송 안내 대조", OtherNotice:"같은 채널 다른 사용자 원본의 안내",
+ PostRejected:"게시 확정 거절", Reconcile:"응답 유실 뒤 같은 글 회수", Activate:"선택 처리 배선 뒤 버튼 활성",
+ ThreadMessage:"decision 글의 메시지가 일반 intake로 새는 대조", MarkOffline:"죽은 노드를 offline으로 표시",
+ OfflineSettle:"offline 전환 때 그 노드의 미종결 시도 정산", Bootstrap:"cluster 등록으로 노드 이름 확정",
+ RefuseKept:"만료된 대기 원본 거절: bind는 지워지고 안내 기록만 남음"
 })[action] ?? action;
