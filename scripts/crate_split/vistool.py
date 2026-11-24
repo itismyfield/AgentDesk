@@ -10,7 +10,8 @@ tool builds two throwaway copies of HEAD under `<repo>/target/crate_split_probe/
          Above modules still compile (privately), so a hard cut left in X does not break it. It declares the
          `test-support` feature, which upper turns on, with its dev dependencies joined to the normal ones.
   upper  the whole tree again, depending on `probe_lower`; each below leaf group's `mod x;` line becomes
-         `pub use probe_lower::<path>::x;`, the parent re-export a member split will add.
+         `pub use probe_lower::<path>::x;`, the parent re-export a member split will add. Where the line's cfg
+         opens for upper but lower's build has no such module, an empty `mod x {}` stands in (vistool_gate.py).
 
 Every round runs `cargo check --lib` on lower and `cargo check --lib --tests` on upper, reads the visibility
 diagnostics (E0603 E0624 E0616 E0451 E0364 E0365, lower `private_interfaces`/`private_bounds`), and widens the
@@ -69,8 +70,7 @@ SCOPE = {"cut_residue": "cut", "test_cfg": "T/M test-support", "impl_residue": "
 TOOL_REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOL_REPO / "scripts" / "ci"))
 import rust_test_sources as rts  # noqa: E402
-sys.path.append(str(TOOL_REPO / "scripts"))
-import rust_cfg  # noqa: E402
+sys.path.append(str(TOOL_REPO / "scripts"))  # rust_cfg, for vistool_gate
 
 # Children (vistool_real, vistool_testcfg) import this module; as a script it must be the same object.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -288,6 +288,7 @@ def toml_sections(text):
 
 
 PROBE_FEATURE = "test-support"
+REEXPORT = "pub use probe_lower::"
 # An always-true target table: cargo unions it with `[dependencies]`, so no dependency line has to be merged.
 PROBE_DEV_DEPS = "[target.'cfg(any(unix, not(unix)))'.dependencies"
 
@@ -374,6 +375,7 @@ def transform_lower(root, layout):
 def transform_upper(root, layout):
     manifest = root / "Cargo.toml"
     manifest.write_text(upper_manifest(manifest.read_text("utf-8")), "utf-8")
+    import vistool_gate
     rewired = []
     for group in layout.leaves:
         path = group_path(group)
@@ -391,13 +393,21 @@ def transform_upper(root, layout):
             # An inline `mod x { ... }` (child files under it) goes as a whole block.
             close = i if rx.match(lines[i]).group("end") == ";" else \
                 next(b[1] - 1 for b in inline_blocks("\n".join(lines)) if b[0] == i + 1 and b[2][-1] == path[-1])
-            if rust_cfg.cfg_conditions_gate(rust_cfg.attribute_conditions("\n".join(attrs))) == "strict":
+            verdict, lower_cfg = vistool_gate.lower_gate(attrs)
+            stand_in = f"{indent}mod {path[-1]} {{}}"
+            if verdict == "never":
                 # Lower's own test module: never checked by the probe (T slice), keep an empty stand-in.
                 # A module `test-support` opens is built in lower, so it is re-exported like any other.
-                lines[i:close + 1] = [f"{indent}mod {path[-1]} {{}}"]
+                lines[i:close + 1] = [stand_in]
                 continue
             kept = [a for a in attrs if not re.match(r"^\s*#\[\s*(path|macro_use)\b", a)]
-            lines[start:close + 1] = kept + [f"{indent}pub use probe_lower::{'::'.join(path)};"]
+            new = kept + [f"{indent}{REEXPORT}{'::'.join(path)};"]
+            if verdict == "split":
+                # The gate also opens where lower has no such module (`test` with another feature off):
+                # re-export only where lower has it, and keep the stand-in for the rest.
+                new = kept + [f"{indent}#[cfg({lower_cfg})]", new[-1]] + \
+                    kept + [f"{indent}#[cfg(not({lower_cfg}))]", stand_in]
+            lines[start:close + 1] = new
         write_lines(target, lines)
         rewired.append(f"{parent}:{path[-1]}")
     return rewired
@@ -982,6 +992,12 @@ def classify_residue(diag, restricted):
     return "unclassified"
 
 
+def probe_reexport_error(diag):
+    """An unresolved import on a `pub use probe_lower::..;` line transform_upper wrote."""
+    lines = [t.get("text", "") for t in (primary_span(diag) or {}).get("text") or []]
+    return code_of(diag) == "E0432" and any(line.lstrip().startswith(REEXPORT) for line in lines)
+
+
 def where(diag, resolver):
     span = primary_span(diag)
     if not span:
@@ -1284,6 +1300,9 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
             for d in up:
                 if d.get("level") != "error":
                     continue
+                if probe_reexport_error(d):
+                    # Lower lacks a module upper re-exports; as residue it would hide every edit behind it.
+                    raise VisFail("upper_probe_broken", f"{where(d, resolver)} {d.get('message')}")
                 if is_vis(d):
                     vis.append((d, probe.upper, False))
                 else:
