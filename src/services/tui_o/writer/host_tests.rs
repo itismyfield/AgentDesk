@@ -11,7 +11,36 @@ use crate::services::tui_o::writer::host::{
     Custody, HostIo, HostParts, Readiness, RepostTurn, start,
 };
 
-use super::*;
+use crate::services::tui_o::shadow::binding_reader::source_id_for;
+use crate::services::tui_o::shadow::capture::SourceCapture;
+use crate::services::tui_o::shadow::{
+    CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider, SourceId,
+    UnitKey,
+};
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized};
+use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget,
+};
+use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
+use crate::services::tui_o::writer::pieces::{Derived, PieceWork, UnitDeriver};
+use crate::services::tui_o::writer::tests::actor::*;
+use crate::services::tui_o::writer::tests::{
+    BOT, CHANNEL, FakeLease, FakePort, Harness, RESTART_POLICY_CALLS, Reply, Writer, ledger_path,
+    outcome, piece, unit,
+};
+use crate::services::tui_o::writer::{
+    AlarmSink, DeliveryLease, ReaderConfig, WriterAlarm, WriterConfig, deliver,
+};
+use chrono::Utc;
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 #[path = "host_bo_provider_tests.rs"]
 mod bo_provider;
 #[path = "late_adopt_binding_tests.rs"]
@@ -32,7 +61,7 @@ use chrono::{DateTime, TimeDelta};
 const OTHER: u64 = 8;
 
 #[derive(Clone, Default)]
-struct Raised(
+pub(crate) struct Raised(
     Arc<Mutex<Vec<(u64, WriterAlarm)>>>,
     Resumes,
     Option<Arc<crate::services::tui_o::alarm::AlarmRouter>>,
@@ -101,14 +130,14 @@ enum ProducerObservation {
 }
 
 /// The gateway side as the host sees it; records which channel asked for what.
-struct TestIo {
+pub(crate) struct TestIo {
     port: Arc<FakePort>,
     lease: Arc<FakeLease>,
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
     producer: Mutex<Option<ProducerObservation>>,
-    custody: Mutex<Result<Custody, String>>,
+    pub(crate) custody: Mutex<Result<Custody, String>>,
     queued_bodies: std::sync::atomic::AtomicI64,
     intake_pool: Mutex<Option<sqlx::PgPool>>,
     fence_error: Mutex<Option<String>>,
@@ -338,12 +367,12 @@ impl HostIo for TestIo {
 }
 
 /// This thread's adoption of a selected channel.
-fn adoption(channel: u64) -> Adoption {
+pub(crate) fn adoption(channel: u64) -> Adoption {
     let candidate = |boot: Option<&BootChannels>| boot.unwrap().candidate(channel).unwrap().peek();
     test_override::with_channels(candidate)
 }
 
-fn root(harness: &Harness) -> PathBuf {
+pub(crate) fn root(harness: &Harness) -> PathBuf {
     harness._runtime.path().to_path_buf()
 }
 
@@ -743,7 +772,7 @@ fn a_channel_binding_log_carries_each_production_event_of_its_channel_and_provid
     p5_log(root.path(), CHANNEL, &line);
     p5::forget_channel_for_tests(CHANNEL);
     let mut writer = harness.writer();
-    let mut sources = super::super::rotation::Sources::new(
+    let mut sources = crate::services::tui_o::writer::rotation::Sources::new(
         CHANNEL,
         ShadowProvider::Claude,
         Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude)),
@@ -784,7 +813,7 @@ fn startup(source: SourceId) -> Vec<u8> {
     p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source))
 }
 
-fn init_path(harness: &Harness, channel: u64) -> PathBuf {
+pub(crate) fn init_path(harness: &Harness, channel: u64) -> PathBuf {
     let dir = harness
         ._runtime
         .path()
@@ -1157,8 +1186,8 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
-pub(super) struct ProducerPane {
-    pub(super) tmux: &'static str,
+pub(crate) struct ProducerPane {
+    pub(crate) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
     _root: tempfile::TempDir,
@@ -1170,7 +1199,7 @@ pub(super) struct ProducerPane {
 
 #[cfg(unix)]
 impl ProducerPane {
-    pub(super) fn launch(a: &str, a_path: &Path) -> Self {
+    pub(crate) fn launch(a: &str, a_path: &Path) -> Self {
         use crate::services::tui_prompt_dedupe as dedupe;
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1238,7 +1267,7 @@ impl Drop for ProducerPane {
 }
 
 #[cfg(unix)]
-pub(super) fn session_row(session: &str) -> Vec<u8> {
+pub(crate) fn session_row(session: &str) -> Vec<u8> {
     let row = serde_json::json!({"type": "mode", "sessionId": session});
     let mut line = serde_json::to_vec(&row).unwrap();
     line.push(b'\n');
@@ -1250,7 +1279,7 @@ pub(super) fn session_row(session: &str) -> Vec<u8> {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
-    use super::super::binding::BindingLog;
+    use crate::services::tui_o::writer::binding::BindingLog;
     let [a, b, c, d] = [(); 4].map(|_| uuid::Uuid::new_v4().to_string());
     let mut bound_a = None;
     let harness = Harness::build(|runtime| {
@@ -1322,7 +1351,8 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
     assert_eq!(harness.port.posts(), ["a tail", "d out"], "[O:posts]");
     let stalled = |alarm: &WriterAlarm| matches!(alarm, WriterAlarm::BindingPending { .. });
     assert!(!harness.alarms.taken().iter().any(stalled), "[O:no_wait]");
-    let (bound, _) = super::super::adoption::logged(&events).expect("[O:fresh] adoptable");
+    let (bound, _) =
+        crate::services::tui_o::writer::adoption::logged(&events).expect("[O:fresh] adoptable");
     assert_eq!(bound.last().map(|s| &s.session_id), Some(&d), "[O:fresh]");
 
     // A restart of O and of the log writer reads the same log to the same place.
@@ -1348,7 +1378,7 @@ async fn o_recovers_past_a_superseded_pending_when_a_later_source_is_bound() {
 #[tokio::test(start_paused = true)]
 async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logged_clear_retires_it()
 {
-    use super::super::binding::BindingLog;
+    use crate::services::tui_o::writer::binding::BindingLog;
     let [a, b, d] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
     let mut bound_a = None;
     let harness = Harness::build(|runtime| {
@@ -1396,7 +1426,7 @@ async fn a_resume_the_log_keeps_unchanged_leaves_the_old_source_read_and_a_logge
 }
 
 #[path = "deferred_tests.rs"]
-mod deferred;
+pub(crate) mod deferred;
 
 #[cfg(unix)]
 #[path = "resume_tests.rs"]

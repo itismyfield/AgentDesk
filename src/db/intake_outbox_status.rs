@@ -129,7 +129,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn repo_source(path: &str) -> String {
-        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
+        std::fs::read_to_string(PathBuf::from(crate::runtime_layout::REPO_ROOT).join(path))
             .unwrap_or_else(|error| panic!("read {path}: {error}"))
     }
 

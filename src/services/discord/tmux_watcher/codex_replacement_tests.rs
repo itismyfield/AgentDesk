@@ -215,7 +215,7 @@ async fn run_replacement_case(case: ReplacementCase, name: &str) {
         rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
     )
     .unwrap();
-    crate::services::discord::stamp_spawn_markers(TMUX, None).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(TMUX, None).unwrap();
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
         TMUX,
         RuntimeHandoffKind::CodexTui,

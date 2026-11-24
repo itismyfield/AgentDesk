@@ -28,11 +28,6 @@ src/
 │   │   ├── snapshot_reader_tests.rs
 │   │   └── transport.rs
 │   ├── dcserver/
-│   │   ├── replay_recovery/
-│   │   │   └── issuer_key.rs
-│   │   ├── replay_recovery.rs
-│   │   ├── replay_recovery_tests.rs
-│   │   ├── replay_root_issuer.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── dev_instance/
@@ -1582,6 +1577,9 @@ src/
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
+│   ├── dcserver_singleton/
+│   │   ├── issuer_key.rs
+│   │   └── tests.rs
 │   ├── decision_gate/
 │   │   ├── runtime/
 │   │   │   ├── gemini.rs
@@ -2206,6 +2204,7 @@ src/
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── notification_policy.rs
+│   │   │   ├── notification_policy_tests.rs
 │   │   │   ├── o_delivery_evidence.rs
 │   │   │   ├── o_delivery_evidence_tests.rs
 │   │   │   ├── o_delivery_manifest.rs
@@ -2225,7 +2224,6 @@ src/
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
-│   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_observation_tests.rs
 │   │   │   └── turn_output_controller.rs
@@ -3827,6 +3825,7 @@ src/
 │   │   ├── krx_claude_tests.rs
 │   │   ├── krx_claude_unix_tests.rs
 │   │   ├── krx_config_tests.rs
+│   │   ├── krx_session_host_test_host.rs
 │   │   ├── krx_tui_o_test_host.rs
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
@@ -4102,6 +4101,7 @@ src/
 │   │   ├── history.rs
 │   │   ├── manifest.rs
 │   │   ├── mod.rs
+│   │   ├── request_context.rs
 │   │   ├── review_tests.rs
 │   │   ├── transport.rs
 │   │   ├── window.rs
@@ -4158,7 +4158,8 @@ src/
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
 │   │   ├── routine_incident.rs
-│   │   └── session_notice.rs
+│   │   ├── session_notice.rs
+│   │   └── source_registry.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs
@@ -4304,7 +4305,8 @@ src/
 │   │   └── tests.rs
 │   ├── replay_evidence/
 │   │   ├── live_issuer.rs
-│   │   └── recovery_issuer.rs
+│   │   ├── recovery_issuer.rs
+│   │   └── root_issuer.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -4589,6 +4591,7 @@ src/
 │   │   ├── runtime_activity.rs
 │   │   ├── runtime_hint_fence.rs
 │   │   ├── session_markers.rs
+│   │   ├── spawn_markers.rs
 │   │   └── unified_thread.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs
@@ -5348,6 +5351,7 @@ src/
 │   ├── codex.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
+│   ├── dcserver_singleton.rs
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
@@ -5374,7 +5378,7 @@ src/
 │   ├── krx_config_tests.rs
 │   ├── krx_db_b_tests.rs
 │   ├── krx_db_tests.rs
-│   ├── krx_tui_o_tests.rs
+│   ├── krx_db_unix_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
@@ -5505,6 +5509,7 @@ src/
 ├── krx_db_b_tests.rs
 ├── krx_db_tests.rs
 ├── krx_services_tests.rs
+├── krx_session_host_tests.rs
 ├── krx_tui_o_tests.rs
 ├── krx_tui_o_unix_tests.rs
 ├── launch.rs
@@ -5571,6 +5576,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/krx_db_b_tests.rs` | Test-only host that declares the second slice of KRX db tests calling root-crate items. |
 | `src/krx_db_tests.rs` | Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_services_tests.rs` | Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate. |
+| `src/krx_session_host_tests.rs` | Test-only host that declares KRX session_host tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_tui_o_tests.rs` | Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_tui_o_unix_tests.rs` | Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |

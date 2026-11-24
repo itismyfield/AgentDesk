@@ -28,9 +28,9 @@ pub(crate) use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings
 pub(crate) use crate::services::channel_roles::RegisteredChannelBinding;
 pub(crate) use crate::utils::discord::discord_token_hash;
 pub(super) use content::{
-    channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, is_known_agent,
-    load_review_tuning_guidance, load_role_prompt, load_shared_prompt_for_profile,
-    read_canon_prompt, render_peer_agent_guidance,
+    channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, load_review_tuning_guidance,
+    load_role_prompt, load_shared_prompt_for_profile, read_canon_prompt,
+    render_peer_agent_guidance,
 };
 pub(crate) use memory::{
     memory_settings_for_binding, memory_settings_for_role, resolve_agent_memory_settings,

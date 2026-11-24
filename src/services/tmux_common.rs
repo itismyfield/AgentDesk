@@ -3,6 +3,8 @@ pub(crate) mod host_marker;
 pub(crate) mod runtime_activity;
 pub(crate) mod runtime_hint_fence;
 mod session_markers;
+#[cfg(unix)]
+pub(crate) mod spawn_markers;
 pub mod unified_thread;
 #[cfg(test)]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;

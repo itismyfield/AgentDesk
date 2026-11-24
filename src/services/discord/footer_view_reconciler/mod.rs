@@ -12,10 +12,8 @@ use serenity::{ChannelId, MessageId};
 
 use super::{ProviderKind, SharedData, single_message_panel as smp};
 use crate::services::agent_protocol::StatusEvent;
-use crate::services::discord::outbound::{
-    body_census::{BodyOffer, BodySource, forward},
-    current_census,
-};
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource, forward};
+use crate::services::legacy_body_census::request_context::current_census;
 use crate::services::tui_o::channel_policy::ClaimReason;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
 
@@ -883,7 +881,8 @@ mod tests {
                         .observe(BodySite::WatcherStreaming, BodyOffer::NonBody, create)
                         .await
                 } else {
-                    crate::services::discord::outbound::census_scope(None, create).await
+                    crate::services::legacy_body_census::request_context::census_scope(None, create)
+                        .await
                 };
                 created.unwrap().id
             };
@@ -932,7 +931,7 @@ mod tests {
             }
             // A later trigger belongs to a different source; refresh retains the registered origin.
             for indicator in ["⠼", "⠇"] {
-                assert!(crate::services::discord::outbound::census_scope(Some(serde_json::json!({"site":"unrelated-trigger", "binding_mode":"NON_TUI", "body_owner":"O"})),
+                assert!(crate::services::legacy_body_census::request_context::census_scope(Some(serde_json::json!({"site":"unrelated-trigger", "binding_mode":"NON_TUI", "body_owner":"O"})),
                     note_background_refresh_due(writer, channel, Some(owner), indicator, "recording")).await);
             }
             assert!(note_footer_superseded(writer, channel, owner, "recording").await);

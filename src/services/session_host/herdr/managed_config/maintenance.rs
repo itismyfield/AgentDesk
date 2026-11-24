@@ -19,7 +19,7 @@ pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const STALE_AFTER: Duration = Duration::from_secs(90);
 /// E7 needs a start strictly after the barrier plus one second; Linux reads starts up to 1s early.
 const START_WAIT: Duration = Duration::from_millis(2_100);
-const RESTART: &str = "herdr_config_restart_required";
+pub(crate) const RESTART: &str = "herdr_config_restart_required";
 const JOB_ENV: &str = "herdr_job_env_mismatch";
 
 /// The latest upkeep of one dedicated endpoint's home, as health shows it.
@@ -46,7 +46,7 @@ impl Record {
     }
 }
 
-static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
+pub(crate) static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
 static TASK: OnceLock<()> = OnceLock::new();
 
 pub(crate) fn records() -> BTreeMap<String, Record> {
@@ -167,7 +167,7 @@ pub(crate) struct Fault {
     cause: Option<&'static str>,
     /// Every endpoint read a fresh `Off`: only then does a pass without a cause end the episode.
     cleared: bool,
-    notice: Option<OperatorNotice>,
+    pub(crate) notice: Option<OperatorNotice>,
 }
 
 /// One upkeep pass over the booted dedicated homes. A refused or failing home never blocks
@@ -178,7 +178,7 @@ pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: b
     })
 }
 
-fn pass_with(
+pub(crate) fn pass_with(
     boot: &BootSessionHosts,
     personal: &PersonalPaths,
     read: &dyn Fn(&str) -> Option<RestoreResume>,
@@ -313,7 +313,3 @@ pub(crate) fn spawn(observe: ObserveNotice) -> bool {
     });
     true
 }
-
-#[cfg(test)]
-#[path = "maintenance_tests.rs"]
-pub(crate) mod tests;

@@ -121,8 +121,11 @@ impl DiscordPort for GatewayPort {
                 Some(correlation) => correlation.attach(message),
                 None => message,
             };
-            match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
-                .await
+            match crate::services::legacy_body_census::request_context::census_scope(
+                None,
+                ChannelId::new(channel).send_message(&*http, message),
+            )
+            .await
             {
                 Ok(message)
                     if agy.as_ref().is_some_and(|correlation| {
@@ -318,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn secretary_channel_tool_cards_post_silently_while_replies_push() {
-        use crate::services::tui_o::repost::io::tests::{Mock, reply};
+        use crate::services::discord::krx_tui_o_test_host::repost_io::{Mock, reply};
         use crate::services::tui_o::shadow::UnitKind;
         let _live = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),

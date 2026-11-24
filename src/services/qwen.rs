@@ -60,7 +60,9 @@ use crate::services::{
 pub(super) fn stamp_qwen_spawn_markers(tmux_session_name: &str) {
     // Keep the provider-specific spawn marker contract at the Qwen facade while
     // the Unix lifecycle implementation owns the surrounding process flow.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
+    if let Err(e) =
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(tmux_session_name, None)
+    {
         tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
     }
 }

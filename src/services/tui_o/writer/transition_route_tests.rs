@@ -6,10 +6,24 @@ use axum::Json;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-use super::*;
 use crate::services::claude_tui::source_verify::Left;
 use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::writer::actor::{force_execution_for_tests, transition_hooks as hooks};
 use crate::services::tui_o::writer::host::Readiness;
+use crate::services::tui_o::writer::tests::CHANNEL;
+use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::*;
+use crate::services::tui_o::writer::tests::actor::{halt, polls, row};
+use crate::services::tui_o::writer::transition_cleanup::{Request, Termination};
+use crate::services::tui_o::writer::transition_port::{
+    Context, Operation, ScopeDigest, TransitionPort,
+};
+use chrono::Utc;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::watch;
 
 /// The watches readiness reads, the caller's to move.
 struct Watches {
@@ -692,7 +706,9 @@ mod pg {
     #[test]
     fn transition_route_inspect_reports_the_folded_execution_it_judged_pg() {
         use crate::services::claude_tui::hook_server::adoption_retry::retry_deferred_claude_adoptions;
-        use crate::services::tui_o::writer::tests::actor::host_start::{ProducerPane, session_row};
+        use crate::services::discord::krx_tui_o_test_host::host_start::{
+            ProducerPane, session_row,
+        };
         use crate::services::tui_prompt_dedupe::binding_events::claude_history;
         let threaded = tokio::runtime::Builder::new_current_thread()
             .enable_all()

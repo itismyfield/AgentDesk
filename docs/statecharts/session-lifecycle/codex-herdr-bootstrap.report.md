@@ -99,7 +99,7 @@ a ready edge (`host.rs:893-907` wakes on `ready && !was_ready`). A V2 owner fron
 ## Design1Listing: the retired nonce's listing refuses forever
 
 CAS and `install_herdr_execution` list (n2, false) (`herdr_launch.rs:484-494`); the marker write fails and
-removes its torn file (`tmux_session_files.rs:326-355`); `retire_unsent` returns the row to Retired
+removes its torn file (`tmux_common/spawn_markers.rs:323-352`); `retire_unsent` returns the row to Retired
 (`herdr_launch.rs:508-510,590-632`); nothing removes the listing (`adopt_skip.rs:203-260`). Revision 1's
 condition "listed nonce differs from the row nonce" then refuses every later bootstrap in the process.
 Confirmed.

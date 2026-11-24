@@ -32,10 +32,7 @@ mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;
 mod skill_usage;
-mod stale_resume;
-pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr: &str) -> bool {
-    stale_resume::stream_error_has_stale_resume_error(message, stderr)
-}
+pub(in crate::services::discord) mod stale_resume;
 
 pub(in crate::services::discord) mod native_input;
 mod status_panel;

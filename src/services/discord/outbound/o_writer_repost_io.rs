@@ -212,7 +212,7 @@ impl BoundedTransport for RepostHttp {
                     return WireOutcome::Withheld(error.to_string());
                 }
             };
-            crate::services::discord::outbound::census_scope(
+            crate::services::legacy_body_census::request_context::census_scope(
                 None,
                 hold.run(async move {
                     let started_at = chrono::Utc::now().timestamp_millis();
@@ -432,6 +432,3 @@ impl ProbeRead for RepostHttp {
         Ok(page.into_iter().map(Seen::observed).collect())
     }
 }
-
-#[cfg(test)]
-pub(crate) use crate::services::discord::krx_tui_o_test_host::repost_io as tests;

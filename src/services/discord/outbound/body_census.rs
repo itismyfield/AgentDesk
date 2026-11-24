@@ -1,7 +1,7 @@
 //! Output provenance is observation metadata, never delivery or claim authority.
-use super::{census_scope, current_census};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{InflightTurnState, PersistedHostLocator};
+use crate::services::legacy_body_census::request_context::{census_scope, current_census};
 use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

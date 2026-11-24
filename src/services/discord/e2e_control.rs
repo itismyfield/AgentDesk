@@ -435,5 +435,3 @@ mod tests {
         assert_eq!(sweep_expired(), 0);
     }
 }
-#[cfg(all(test, unix))]
-pub(crate) use super::turn_presence::activity::tests::companion_activity_for_log_for_tests;

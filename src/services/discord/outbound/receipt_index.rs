@@ -44,7 +44,7 @@
 //!   `delivery_record::delivery_record_path`), not re-derived here.
 //! - **Generation distinctness is borrowed, per session, best-effort.**
 //!   `GENERATION_MTIME_BUMP_STEPS_NS` in
-//!   [`crate::services::discord::tmux_session_files`] tries escalating bumps to
+//!   [`crate::services::tmux_common::spawn_markers`] tries escalating bumps to
 //!   stamp a session's own `.generation` marker after that session's previous
 //!   incarnation (#5437, #5439), and gives up rather than fail the respawn:
 //!   `bump_generation_mtime_past_previous` returns the last OBSERVED mtime when

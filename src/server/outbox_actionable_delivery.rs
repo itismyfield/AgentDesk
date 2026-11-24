@@ -11,8 +11,8 @@
 use sqlx::{PgPool, Row};
 
 use super::PendingMessageOutboxRow;
+use crate::domain::outbound::outbox::source::RETIRED_SEND_SOURCES;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
 #[path = "outbox_actionable_delivery/routine_incident.rs"]
 pub(super) mod routine_incident;

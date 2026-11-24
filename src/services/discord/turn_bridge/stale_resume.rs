@@ -129,7 +129,10 @@ pub(super) fn output_file_has_stale_resume_error_after_offset(
         })
 }
 
-pub(super) fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
+pub(in crate::services::discord) fn stream_error_has_stale_resume_error(
+    message: &str,
+    stderr: &str,
+) -> bool {
     contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
 }
 

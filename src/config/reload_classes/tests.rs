@@ -227,7 +227,7 @@ fn every_config_field_is_classified_exactly_once() {
 #[test]
 fn file_rows_name_tracked_files() {
     for file in FILES {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file.path);
+        let path = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join(file.path);
         assert!(path.is_file(), "{}", file.path);
         assert_ne!(file.class, ReloadClass::Live, "{}", file.path);
     }
@@ -238,7 +238,7 @@ fn reader_columns_name_existing_files() {
     for field in FIELDS.iter().chain(FILES) {
         let file = field.reader.split_whitespace().next().unwrap_or("");
         let file = file.trim_matches('`');
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        let path = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join(file);
         assert!(
             path.is_file(),
             "{}: reader {} is not a file",
@@ -293,8 +293,8 @@ fn render_markdown() -> String {
 
 #[test]
 fn generated_doc_matches_the_table() {
-    let doc =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/config-reload-classes.md");
+    let doc = std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+        .join("docs/config-reload-classes.md");
     let rendered = render_markdown();
     if std::env::var_os("ADK_WRITE_RELOAD_CLASSES_DOC").is_some() {
         std::fs::write(&doc, &rendered).unwrap();

@@ -227,10 +227,8 @@ fn a_b_c_chain_links_seq_and_old_and_a_late_b_is_only_audited() {
 #[test]
 fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent_a() {
     let lane = Lane::new();
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/hook_payload/claude-2.1.283.json"
-    );
+    let fixture = Path::new(crate::runtime_layout::REPO_ROOT)
+        .join("tests/fixtures/hook_payload/claude-2.1.283.json");
     let fixture: serde_json::Value = serde_json::from_slice(&fs::read(fixture).unwrap()).unwrap();
     let runs = fixture["runs"].as_array().unwrap();
     let run = runs.iter().find(|run| run["name"] == "print_fork").unwrap();
@@ -301,10 +299,8 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
 #[test]
 fn clear_run_through_the_hook_is_pending_first_and_bound_by_the_next_hook() {
     let lane = Lane::new();
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/hook_payload/claude-2.1.283.json"
-    );
+    let fixture = Path::new(crate::runtime_layout::REPO_ROOT)
+        .join("tests/fixtures/hook_payload/claude-2.1.283.json");
     let fixture: serde_json::Value = serde_json::from_slice(&fs::read(fixture).unwrap()).unwrap();
     let runs = fixture["runs"].as_array().unwrap();
     let run = runs

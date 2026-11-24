@@ -338,14 +338,14 @@ impl Candidate {
 
     /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
     /// released first. A placement is not a Legacy send, so it is not counted.
-    pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
+    pub(in crate::services) fn claim(&self, channel: u64) -> bool {
         self.take(channel).0.owned()
     }
 
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
     #[track_caller]
-    pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
+    pub(in crate::services) fn claim_body(&self, channel: u64) -> BodyClaimed {
         self.claim_body_from(channel, std::panic::Location::caller())
     }
 

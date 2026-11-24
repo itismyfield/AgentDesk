@@ -1,4 +1,4 @@
-use crate::services::discord::outbound::{census_scope, current_census};
+use crate::services::legacy_body_census::request_context::{census_scope, current_census};
 use serde_json::{Value, json};
 use std::time::Instant;
 

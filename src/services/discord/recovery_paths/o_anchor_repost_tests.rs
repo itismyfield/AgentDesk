@@ -56,7 +56,8 @@ fn committed_row(
     let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");
     std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
     std::fs::write(&generation, "g").unwrap();
-    let generation_mtime_ns = crate::services::discord::tmux::read_generation_file_mtime_ns(&tmux);
+    let generation_mtime_ns =
+        crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(&tmux);
     assert_ne!(generation_mtime_ns, 0);
     let mut state = InflightTurnState::new(
         provider.clone(),

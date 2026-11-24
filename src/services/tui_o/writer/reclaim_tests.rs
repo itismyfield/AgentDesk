@@ -14,7 +14,7 @@ use crate::services::tui_o::writer::binding::BindingLog;
 
 impl ProducerPane {
     /// Sends hook `event` through the receiver's binding judgment, published `secs` after launch.
-    pub(in super::super) fn http(
+    pub(crate) fn http(
         &self,
         event: &str,
         source: Option<&str>,

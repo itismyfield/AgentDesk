@@ -27,6 +27,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
 use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
 };
+use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::recovery_engine::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
 };
@@ -38,7 +39,6 @@ use crate::services::herdr_launch::{
     HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -265,7 +265,8 @@ impl Terminating {
             .bind_as(pool, key, pending, "codex", &prepared.path)
             .await;
         dedupe::install_herdr_execution(&logical, herdr::EXECUTION);
-        crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(&logical, Some(&prepared))
+            .unwrap();
         dedupe::register_provider_session("codex", &logical, &logical);
         dedupe::register_codex_herdr_placeholder(&logical, CHANNEL_ID);
         let record = rig.record_as(key, herdr::HostedState::Bound, "codex");

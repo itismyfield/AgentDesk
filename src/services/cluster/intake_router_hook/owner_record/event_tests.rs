@@ -3,10 +3,8 @@ use crate::services::cluster::intake_router_hook::owner_record::event::*;
 use crate::services::cluster::intake_router_hook::owner_record::{
     self, custody, snapshot::tests::Fixture,
 };
-use crate::services::discord::outbound::source_registry::{
-    SendCallerClass, validate_send_source_for,
-};
 use crate::services::message_outbox::OutboxMessage;
+use crate::services::message_outbox::source_registry::{SendCallerClass, validate_send_source_for};
 
 fn description() -> Description<'static> {
     Description {
