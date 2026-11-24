@@ -62,6 +62,7 @@ pub(crate) use provider_dispatch::herdr_tests::exact_close_tests::OldTmux as Pri
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
+mod unverified_thread_resume;
 pub(in crate::services::discord) use crate::services::discord::turn_presence::typing_indicator;
 mod watchdog;
 #[cfg(all(test, unix))]

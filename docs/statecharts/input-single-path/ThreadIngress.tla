@@ -13,6 +13,11 @@ hvars == <<hphase, haccepted, hretained, hdelivered, hreply, hfailure,
            hstarted, hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 vars == <<phase, accepted, retained, delivered, reply, visibleFailure,
           status, session, usedHost, launches, crashes>>
+\* #8372: cold resume of a Claude thread child whose stored provider session has no verified binding.
+VARIABLES rstored, rbinding, rpane, rfate, rposts, rnotice, rprompt, rshown,
+          rfreshPending, rfreshOnBound, rcrashes, rruns, rlaunches
+rvars == <<rstored, rbinding, rpane, rfate, rposts, rnotice, rprompt, rshown,
+           rfreshPending, rfreshOnBound, rcrashes, rruns, rlaunches>>
 Authorized == Target \in {"boundThread", "boundChannel"}
 LiveLocalContract == Mutation \in {"liveLocal", "beforeLiveLocal", "skipLiveCheck"}
 ThreadExecutionUnavailable ==
@@ -27,8 +32,33 @@ HerdrFields ==
     /\ horigin = "externalAPI"
     /\ hnativeChanged = FALSE /\ hjoinedBusy = FALSE /\ hidleWhileBusy = FALSE
     /\ hmachine = (Mutation \in {"herdrMachineBusy", "herdrMachineJoinsBusy"})
+RInputs == {1, 2}
+RNoRoutineRun == Mutation \in {"resumeCurrentNoRun", "resumeFreshNoRun"}
+RFix == CASE Mutation \in {"resumeFresh", "resumeFreshNoRun", "resumeFreshAll", "resumeFreshLate",
+                             "resumeFreshNoRecent", "resumeFreshSilentRestart"} -> "fresh"
+          [] Mutation = "resumeRecord" -> "record"
+          [] Mutation = "resumeRecordLegacy" -> "recordLegacy"
+          [] OTHER -> "current"
+\* Values from the entry table: E1 routine process thread = unboundStored, E4/E6 TUI thread = boundStored,
+\* E5 new thread or cleared session = noneStored.
+RFields ==
+    /\ rstored = CASE InitialSession = "unboundStored" -> "process"
+                    [] InitialSession = "boundStored" -> "tui"
+                    [] OTHER -> "none"
+    /\ rbinding = CASE InitialSession = "boundStored" -> "hook"
+                     [] InitialSession = "unboundStored" /\ RFix = "record" -> "forged"
+                     [] OTHER -> "none"
+    /\ rpane = "cold"
+    /\ rfate = [k \in RInputs |-> "absent"]
+    /\ rposts = [k \in RInputs |-> 0]
+    /\ rnotice = [k \in RInputs |-> "none"]
+    /\ rprompt = [k \in RInputs |-> "none"]
+    /\ rshown = [k \in RInputs |-> FALSE]
+    /\ rfreshPending = FALSE /\ rfreshOnBound = FALSE
+    /\ rcrashes = 0 /\ rruns = 0 /\ rlaunches = 0
 Init ==
     /\ HerdrFields
+    /\ RFields
     /\ phase = "request" /\ accepted = FALSE /\ retained = FALSE
     /\ delivered = 0 /\ reply = 0 /\ visibleFailure = FALSE /\ status = 0
     /\ session = InitialSession /\ usedHost = "none" /\ launches = 0 /\ crashes = 0
@@ -110,7 +140,7 @@ Done == /\ phase \in {"done", "failed", "denied", "dropped"}
         /\ UNCHANGED vars
 BaseNext == Authorize \/ Admit \/ Ready \/ BootFails \/ ColdStart \/ WarmSubmit \/ PublishReply
         \/ StartOrSubmitFails \/ ShowFailure \/ Restart \/ Done
-Next == BaseNext /\ UNCHANGED hvars
+Next == BaseNext /\ UNCHANGED hvars /\ UNCHANGED rvars
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Authorize) /\ WF_vars(Admit) /\ WF_vars(Ready \/ BootFails)
         /\ WF_vars(ColdStart \/ WarmSubmit \/ StartOrSubmitFails)
@@ -255,7 +285,7 @@ HFail ==
                    hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HDone == /\ hphase \in {"done", "failed", "denied"} /\ UNCHANGED hvars
 HNext == (HAuthorize \/ HAdmit \/ HObserve \/ HReturnRead \/ HDriverReserve \/ HReobserve \/ HNativeStart \/ HBegin \/ HReceipt
-          \/ HPost \/ HReady \/ HNativeEnd \/ HRestart \/ HUncertainFailure \/ HFail \/ HDone) /\ UNCHANGED vars
+          \/ HPost \/ HReady \/ HNativeEnd \/ HRestart \/ HUncertainFailure \/ HFail \/ HDone) /\ UNCHANGED vars /\ UNCHANGED rvars
 HerdrSpec == Init /\ [][HNext]_hvars
     /\ WF_hvars(HAuthorize) /\ WF_hvars(HAdmit) /\ WF_hvars(HObserve \/ HFail)
     /\ WF_hvars(HReturnRead) /\ WF_hvars(HDriverReserve) /\ WF_hvars(HReobserve) /\ WF_hvars(HBegin) /\ WF_hvars(HReceipt)
@@ -274,4 +304,142 @@ HerdrSourcePreserved == horigin = "externalAPI"
 HerdrAcceptedStarts == haccepted ~> hstarted
 HerdrAcceptedCompletes == haccepted ~> (hdelivered = 1 \/ hfailure)
 HerdrDeliveredGetsOutcome == hdelivered = 1 ~> (hreply = 1 \/ hfailure)
+\* ---------------------------------------------------------------------------
+\* #8372 resume projection. One thread child under a ClaudeTui parent, writer policy selected
+\* (`claude_thread.rs:14-23`). Inputs arrive one at a time through the thread mailbox.
+\* rstored: the provider session the thread's session row names
+\*   (`session_preparation.rs:48-63` DB restore, or the runtime cache).
+\* rbinding: binding_events evidence for rstored: hook (writer verified), none, forged (written
+\*   by the headless end without a hook, repair b).
+\* rfate: absent | queued | submitted | answered | retained (owner_start_failed, notice says resend)
+\*   | uncertain (submitted when dcserver restarted, failure notice still owed)
+\*   | failed (terminal, no automatic resend). rshown: the failure notice reached the thread.
+\* rnotice "fresh": the input started a fresh session in place of the stored unverified one.
+\* Scope: a late-adopt child still under the reservation policy (Deferred or parked,
+\* `claude_thread.rs` launch_policy). A child whose adoption committed is not reserved and is
+\* outside this projection.
+RFrame == UNCHANGED vars /\ UNCHANGED hvars
+RFresh(k, bound) ==
+    /\ rpane' = "live" /\ rfreshPending' = TRUE /\ rlaunches' = rlaunches + 1
+    /\ rfate' = [rfate EXCEPT ![k] = "submitted"]
+    /\ rprompt' = [rprompt EXCEPT ![k] =
+          IF rstored # "none" /\ Mutation = "resumeFreshNoRecent" THEN @
+          ELSE IF rstored = "none" \/ Mutation # "resumeFreshLate" THEN "withRecent" ELSE "bare"]
+    /\ rnotice' = [rnotice EXCEPT ![k] = IF rstored = "none" THEN "none" ELSE "fresh"]
+    /\ rfreshOnBound' = (rfreshOnBound \/ bound)
+    /\ UNCHANGED <<rstored, rbinding, rposts, rshown, rcrashes, rruns>>
+RResume(k) ==
+    /\ rpane' = "live" /\ rlaunches' = rlaunches + 1
+    /\ rfate' = [rfate EXCEPT ![k] = "submitted"]
+    \* The resumed pane's SessionStart hook records a real verified binding for its tmux.
+    /\ rbinding' = "hook"
+    /\ UNCHANGED <<rstored, rposts, rnotice, rprompt, rshown, rfreshPending, rfreshOnBound, rcrashes, rruns>>
+RRefuse(k) ==
+    \* `claude_fold.rs:595-601` -> `start_failure.rs:234` -> retained notice (`retained_notice.rs:40`).
+    \* Mutant resumeSilentFail ends the input without telling anyone.
+    /\ rfate' = [rfate EXCEPT ![k] = IF Mutation = "resumeSilentFail" THEN "failed" ELSE "retained"]
+    /\ rnotice' = [rnotice EXCEPT ![k] = IF Mutation = "resumeSilentFail" THEN @ ELSE "resend"]
+    /\ UNCHANGED <<rstored, rbinding, rpane, rposts, rprompt, rshown, rfreshPending, rfreshOnBound,
+                   rcrashes, rruns, rlaunches>>
+
+RPersonSend(k) ==
+    /\ RFrame
+    /\ rfate[k] = "absent"
+    /\ IF k = 1 THEN TRUE ELSE rfate[k - 1] \in {"answered", "retained", "failed"}
+    /\ rfate' = [rfate EXCEPT ![k] = "queued"]
+    /\ UNCHANGED <<rstored, rbinding, rpane, rposts, rnotice, rprompt, rshown, rfreshPending,
+                   rfreshOnBound, rcrashes, rruns, rlaunches>>
+\* Cold launch of the thread's pane (`claude.rs:1799` -> `tui_session_launch.rs:78-86`).
+RLaunch(k) ==
+    /\ RFrame
+    /\ rfate[k] = "queued" /\ rpane = "cold"
+    /\ CASE rstored = "none" -> RFresh(k, FALSE)
+         [] rbinding \in {"hook", "forged"} ->
+              IF Mutation = "resumeFreshAll" /\ rbinding = "hook" THEN RFresh(k, TRUE) ELSE RResume(k)
+         [] OTHER -> IF RFix = "fresh" THEN RFresh(k, FALSE) ELSE RRefuse(k)
+RWarm(k) ==
+    /\ RFrame
+    /\ rfate[k] = "queued" /\ rpane = "live"
+    /\ rfate' = [rfate EXCEPT ![k] = "submitted"]
+    /\ UNCHANGED <<rstored, rbinding, rpane, rposts, rnotice, rprompt, rshown, rfreshPending,
+                   rfreshOnBound, rcrashes, rruns, rlaunches>>
+\* Completion posts once and persists the provider session (`completion_postlude.rs:389`).
+RAnswer(k) ==
+    /\ RFrame
+    /\ rfate[k] = "submitted"
+    /\ rfate' = [rfate EXCEPT ![k] = "answered"]
+    /\ rposts' = [rposts EXCEPT ![k] = @ + 1]
+    /\ IF rfreshPending
+       THEN /\ rstored' = "tui" /\ rbinding' = "hook" /\ rfreshPending' = FALSE
+       ELSE UNCHANGED <<rstored, rbinding, rfreshPending>>
+    /\ UNCHANGED <<rpane, rnotice, rprompt, rshown, rfreshOnBound, rcrashes, rruns, rlaunches>>
+RBusy == \E k \in RInputs : rfate[k] \in {"queued", "submitted", "uncertain"}
+\* Idle reclaim / stop-kill of an idle pane keeps the stored session.
+RIdleReap ==
+    /\ RFrame
+    /\ rpane = "live" /\ ~RBusy /\ ~rfreshPending
+    /\ rpane' = "cold"
+    /\ UNCHANGED <<rstored, rbinding, rfate, rposts, rnotice, rprompt, rshown, rfreshPending,
+                   rfreshOnBound, rcrashes, rruns, rlaunches>>
+\* /clear or a cleared provider session: the next start is a plain fresh start.
+RClear ==
+    /\ RFrame
+    /\ ~RBusy /\ rstored # "none" /\ ~rfreshPending
+    /\ rstored' = "none" /\ rbinding' = "none" /\ rpane' = "cold"
+    /\ UNCHANGED <<rfate, rposts, rnotice, rprompt, rshown, rfreshPending, rfreshOnBound, rcrashes,
+                   rruns, rlaunches>>
+\* The routine's next process run in the same thread re-points the thread session at its own
+\* process session (log: tmux=AgentDesk-claude-routine-process-<turn>-...).
+RRoutineNext ==
+    /\ RFrame
+    /\ ~RNoRoutineRun /\ rruns = 0 /\ ~RBusy /\ ~rfreshPending
+    /\ rruns' = 1 /\ rstored' = "process" /\ rpane' = "cold"
+    /\ rbinding' = IF RFix \in {"record", "recordLegacy"} THEN "forged" ELSE "none"
+    /\ UNCHANGED <<rfate, rposts, rnotice, rprompt, rshown, rfreshPending, rfreshOnBound, rcrashes, rlaunches>>
+\* dcserver restart: pane state and the unpersisted fresh session id are lost; the DB row and
+\* binding log survive; a queued input is re-driven; a submitted one is uncertain until its failure
+\* notice is posted (RShowFailure).
+RRestart ==
+    /\ RFrame
+    /\ CanCrash /\ rcrashes = 0
+    /\ rcrashes' = 1 /\ rpane' = "cold" /\ rfreshPending' = FALSE
+    /\ rfate' = [k \in RInputs |-> IF rfate[k] = "submitted" THEN "uncertain" ELSE rfate[k]]
+    /\ UNCHANGED <<rstored, rbinding, rposts, rnotice, rprompt, rshown, rfreshOnBound, rruns, rlaunches>>
+\* The owed failure notice of an uncertain input; mutant resumeFreshSilentRestart posts none.
+RShowFailure(k) ==
+    /\ RFrame
+    /\ rfate[k] = "uncertain"
+    /\ rfate' = [rfate EXCEPT ![k] = "failed"]
+    /\ rshown' = [rshown EXCEPT ![k] = Mutation # "resumeFreshSilentRestart"]
+    /\ UNCHANGED <<rstored, rbinding, rpane, rposts, rnotice, rprompt, rfreshPending,
+                   rfreshOnBound, rcrashes, rruns, rlaunches>>
+RDone ==
+    /\ RFrame
+    /\ \A k \in RInputs : rfate[k] \in {"answered", "retained", "failed"}
+    /\ UNCHANGED rvars
+RNext == \/ \E k \in RInputs : RPersonSend(k)
+         \/ \E k \in RInputs : RLaunch(k)
+         \/ \E k \in RInputs : RWarm(k)
+         \/ \E k \in RInputs : RAnswer(k)
+         \/ \E k \in RInputs : RShowFailure(k)
+         \/ RIdleReap \/ RClear \/ RRoutineNext \/ RRestart \/ RDone
+ResumeSpec == Init /\ [][RNext]_rvars
+    /\ \A k \in RInputs : WF_rvars(RPersonSend(k)) /\ WF_rvars(RLaunch(k))
+                         /\ WF_rvars(RWarm(k)) /\ WF_rvars(RAnswer(k))
+                         /\ WF_rvars(RShowFailure(k))
+
+RNoSilentLoss == \A k \in RInputs :
+    /\ rfate[k] \in {"absent", "queued", "submitted", "answered", "retained", "uncertain", "failed"}
+    /\ (rfate[k] = "retained" => rnotice[k] = "resend")
+\* A person's input ends delivered to the session or with a failure notice the person can see.
+RNoSilentFailure == \A k \in RInputs : rfate[k] = "failed" => rshown[k]
+RAnswerOnce == \A k \in RInputs :
+    rposts[k] <= 1 /\ (rfate[k] = "answered" <=> rposts[k] = 1)
+RVerifiedResumeKept == ~rfreshOnBound
+RVerifiedMeansObserved == rbinding # "forged"
+\* A fresh start that replaces a stored session carries the thread's recent pairs in its first prompt.
+RFreshCarriesRecent == \A k \in RInputs :
+    rprompt[k] # "bare" /\ (rnotice[k] = "fresh" => rprompt[k] = "withRecent")
+RPersonServed == \A k \in RInputs :
+    (rfate[k] = "queued") ~> (rfate[k] = "answered" \/ (rfate[k] = "failed" /\ rshown[k]))
 =============================================================================

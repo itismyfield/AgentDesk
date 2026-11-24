@@ -1,0 +1,426 @@
+---
+title: "검증 바인딩 없는 Claude 스레드 cold resume (ﬂ°°35¶ß8372)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the RPersonServed bug
+    lg1: Repeats forever, so RPersonServed breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: process/none pane=cold 입력1=미도착 입력2=미도착 루틴=0 재시작=0
+  s1: none/none pane=cold 입력1=미도착 입력2=미도착 루틴=0 재시작=0
+  s2: process/none pane=cold 입력1=미도착 입력2=미도착 루틴=0 재시작=1
+  s3: process/none pane=cold 입력1=미도착 입력2=미도착 루틴=1 재시작=0
+  s4: process/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=0 재시작=0
+  s5: none/none pane=cold 입력1=미도착 입력2=미도착 루틴=0 재시작=1
+  s6: none/none pane=cold 입력1=미도착 입력2=미도착 루틴=1 재시작=0
+  s7: none/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=0 재시작=0
+  s8: process/none pane=cold 입력1=미도착 입력2=미도착 루틴=1 재시작=1
+  s9: process/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=0 재시작=1
+  s10: process/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=1 재시작=0
+  s11: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=0 재시작=0
+  s12: none/none pane=cold 입력1=미도착 입력2=미도착 루틴=1 재시작=1
+  s13: none/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=0 재시작=1
+  s14: none/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=1 재시작=0
+  s15: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=0 재시작=0
+  s16: none/none pane=live fresh미저장 입력1=세션에 입력 입력2=미도착 루틴=0 재시작=0
+  s17: process/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=1 재시작=1
+  s18: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=0 재시작=1
+  s19: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=1 재시작=0
+  s20: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=0 재시작=0
+  s21: none/none pane=cold 입력1=보관 대기 입력2=미도착 루틴=1 재시작=1
+  s22: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=0 재시작=1
+  s23: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=1 재시작=0
+  s24: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=0 재시작=0
+  s25: none/none pane=live fresh미저장 입력1=세션에 입력 입력2=미도착 루틴=0 재시작=1
+  s26: none/none pane=live fresh미저장 입력1=세션에 입력 입력2=미도착 루틴=1 재시작=0
+  s27: none/none pane=cold 입력1=재시작으로 불확실(실패 알림 대기) 입력2=미도착 루틴=0 재시작=1
+  s28: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=1 재시작=1
+  s29: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=0 재시작=1
+  s30: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=1 재시작=0
+  s31: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=0 재시작=0
+  s32: tui/hook pane=live 입력1=답 게시 입력2=미도착 루틴=0 재시작=0
+  s33: none/none pane=cold 입력1=답 게시 입력2=미도착 루틴=0 재시작=0
+  s34: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=미도착 루틴=0 재시작=1
+  s35: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=미도착 루틴=1 재시작=1
+  s36: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=0 재시작=1
+  s37: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=1 재시작=0
+  s38: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=0 재시작=0
+  s39: none/none pane=live fresh미저장 입력1=원문 보관(다시 보내라는 알림) 입력2=세션에 입력 루틴=0 재시작=0
+  s40: none/none pane=live fresh미저장 입력1=세션에 입력 입력2=미도착 루틴=1 재시작=1
+  s41: none/none pane=cold 입력1=재시작으로 불확실(실패 알림 대기) 입력2=미도착 루틴=1 재시작=1
+  s42: process/none pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=0
+  s43: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=1 재시작=1
+  s44: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=0 재시작=1
+  s45: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=0
+  s46: tui/hook pane=cold 입력1=답 게시 입력2=미도착 루틴=0 재시작=0
+  s47: tui/hook pane=cold 입력1=답 게시 입력2=미도착 루틴=0 재시작=1
+  s48: tui/hook pane=live 입력1=답 게시 입력2=미도착 루틴=0 재시작=1
+  s49: tui/hook pane=live 입력1=답 게시 입력2=미도착 루틴=1 재시작=0
+  s50: tui/hook pane=live 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=0
+  s51: none/none pane=cold 입력1=답 게시 입력2=미도착 루틴=0 재시작=1
+  s52: none/none pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=0
+  s53: none/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=0
+  s54: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=미도착 루틴=1 재시작=1
+  s55: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=보관 대기 루틴=0 재시작=1
+  s56: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=보관 대기 루틴=1 재시작=1
+  s57: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=0 재시작=1
+  s58: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=0
+  s59: none/none pane=live fresh미저장 입력1=원문 보관(다시 보내라는 알림) 입력2=세션에 입력 루틴=0 재시작=1
+  s60: none/none pane=live fresh미저장 입력1=원문 보관(다시 보내라는 알림) 입력2=세션에 입력 루틴=1 재시작=0
+  s61: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=재시작으로 불확실(실패 알림 대기) 루틴=0 재시작=1
+  s62: process/none pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=1
+  s63: process/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=0
+  s64: process/none pane=cold 입력1=실패 종결(알림 보임) 입력2=미도착 루틴=1 재시작=1
+  s65: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s66: tui/hook pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=0
+  s67: tui/hook pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=1
+  s68: tui/hook pane=live 입력1=답 게시 입력2=미도착 루틴=1 재시작=1
+  s69: tui/hook pane=cold 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=0
+  s70: tui/hook pane=cold 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=1
+  s71: tui/hook pane=live 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=1
+  s72: tui/hook pane=live 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=0
+  s73: tui/hook pane=live 입력1=답 게시 입력2=세션에 입력 루틴=0 재시작=0
+  s74: tui/hook pane=live 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=0
+  s75: none/none pane=cold 입력1=답 게시 입력2=미도착 루틴=1 재시작=1
+  s76: none/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=0 재시작=1
+  s77: none/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=0
+  s78: none/none pane=live fresh미저장 입력1=답 게시 입력2=세션에 입력 루틴=0 재시작=0
+  s79: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=보관 대기 루틴=1 재시작=1
+  s80: none/none pane=live fresh미저장 입력1=실패 종결(알림 보임) 입력2=세션에 입력 루틴=0 재시작=1
+  s81: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=0
+  s82: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=실패 종결(알림 보임) 루틴=0 재시작=1
+  s83: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s84: none/none pane=live fresh미저장 입력1=원문 보관(다시 보내라는 알림) 입력2=세션에 입력 루틴=1 재시작=1
+  s85: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=재시작으로 불확실(실패 알림 대기) 루틴=1 재시작=1
+  s86: process/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=1
+  s87: process/none pane=cold 입력1=답 게시 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=0
+  s88: process/none pane=cold 입력1=실패 종결(알림 보임) 입력2=보관 대기 루틴=1 재시작=1
+  s89: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=0
+  s90: tui/hook pane=live 입력1=답 게시 입력2=답 게시 루틴=0 재시작=0
+  s91: tui/hook pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=0
+  s92: tui/hook pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=1
+  s93: tui/hook pane=live 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=1
+  s94: tui/hook pane=live 입력1=답 게시 입력2=세션에 입력 루틴=0 재시작=1
+  s95: tui/hook pane=live 입력1=답 게시 입력2=세션에 입력 루틴=1 재시작=0
+  s96: tui/hook pane=cold 입력1=답 게시 입력2=재시작으로 불확실(실패 알림 대기) 루틴=0 재시작=1
+  s97: tui/hook pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=0
+  s98: tui/hook pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=1
+  s99: tui/hook pane=live 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=1
+  s100: tui/hook pane=live 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=0
+  s101: none/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=0 재시작=0
+  s102: none/none pane=cold 입력1=답 게시 입력2=보관 대기 루틴=1 재시작=1
+  s103: none/none pane=cold 입력1=답 게시 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=0
+  s104: none/none pane=live fresh미저장 입력1=답 게시 입력2=세션에 입력 루틴=0 재시작=1
+  s105: none/none pane=live fresh미저장 입력1=답 게시 입력2=세션에 입력 루틴=1 재시작=0
+  s106: none/none pane=cold 입력1=답 게시 입력2=재시작으로 불확실(실패 알림 대기) 루틴=0 재시작=1
+  s107: none/none pane=live fresh미저장 입력1=실패 종결(알림 보임) 입력2=세션에 입력 루틴=1 재시작=1
+  s108: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=0 재시작=1
+  s109: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=0
+  s110: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=실패 종결(알림 보임) 루틴=1 재시작=1
+  s111: process/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=0
+  s112: process/none pane=cold 입력1=답 게시 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s113: process/none pane=cold 입력1=실패 종결(알림 보임) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s114: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=1
+  s115: process/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=실패 종결(알림 보임) 루틴=1 재시작=1
+  s116: tui/hook pane=cold 입력1=답 게시 입력2=답 게시 루틴=0 재시작=0
+  s117: tui/hook pane=cold 입력1=답 게시 입력2=답 게시 루틴=0 재시작=1
+  s118: tui/hook pane=live 입력1=답 게시 입력2=답 게시 루틴=0 재시작=1
+  s119: tui/hook pane=live 입력1=답 게시 입력2=답 게시 루틴=1 재시작=0
+  s120: tui/hook pane=cold 입력1=답 게시 입력2=실패 종결(알림 보임) 루틴=0 재시작=1
+  s121: tui/hook pane=live 입력1=답 게시 입력2=세션에 입력 루틴=1 재시작=1
+  s122: tui/hook pane=cold 입력1=답 게시 입력2=재시작으로 불확실(실패 알림 대기) 루틴=1 재시작=1
+  s123: tui/hook pane=live 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=0 재시작=1
+  s124: tui/hook pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=0
+  s125: tui/hook pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=1
+  s126: tui/hook pane=live 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=1
+  s127: none/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=0 재시작=1
+  s128: none/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=0
+  s129: none/none pane=cold 입력1=답 게시 입력2=실패 종결(알림 보임) 루틴=0 재시작=1
+  s130: none/none pane=cold 입력1=답 게시 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s131: none/none pane=live fresh미저장 입력1=답 게시 입력2=세션에 입력 루틴=1 재시작=1
+  s132: none/none pane=cold 입력1=답 게시 입력2=재시작으로 불확실(실패 알림 대기) 루틴=1 재시작=1
+  s133: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=0 재시작=1
+  s134: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=원문 보관(다시 보내라는 알림) 루틴=1 재시작=1
+  s135: none/none pane=cold 입력1=원문 보관(다시 보내라는 알림) 입력2=답 게시 루틴=1 재시작=1
+  s136: process/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=1
+  s137: process/none pane=cold 입력1=답 게시 입력2=실패 종결(알림 보임) 루틴=1 재시작=1
+  s138: process/none pane=cold 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=1 재시작=1
+  s139: tui/hook pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=0
+  s140: tui/hook pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=1
+  s141: tui/hook pane=live 입력1=답 게시 입력2=답 게시 루틴=1 재시작=1
+  s142: tui/hook pane=cold 입력1=답 게시 입력2=실패 종결(알림 보임) 루틴=1 재시작=1
+  s143: tui/hook pane=cold 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=0 재시작=1
+  s144: tui/hook pane=live 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=1 재시작=1
+  s145: none/none pane=cold 입력1=답 게시 입력2=답 게시 루틴=1 재시작=1
+  s146: none/none pane=cold 입력1=답 게시 입력2=실패 종결(알림 보임) 루틴=1 재시작=1
+  s147: none/none pane=cold 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=1 재시작=1
+  s148: tui/hook pane=cold 입력1=실패 종결(알림 보임) 입력2=답 게시 루틴=1 재시작=1
+  [*] --> s0
+  s0 --> s1: /clear
+  s0 --> s2: dcserver 재시작
+  s0 --> s3: 루틴 다음 실행이 스레드 세션을 바꿈
+  s0 --> s4: 사람 입력(또는 다시 보냄)
+  s1 --> s3: 루틴 다음 실행이 스레드 세션을 바꿈
+  s1 --> s5: dcserver 재시작
+  s1 --> s7: 사람 입력(또는 다시 보냄)
+  s2 --> s5: /clear
+  s2 --> s8: 루틴 다음 실행이 스레드 세션을 바꿈
+  s2 --> s9: 사람 입력(또는 다시 보냄)
+  s3 --> s6: /clear
+  s3 --> s8: dcserver 재시작
+  s3 --> s10: 사람 입력(또는 다시 보냄)
+  s4 --> s9: dcserver 재시작
+  s4 --> s11: 스레드 pane cold 실행
+  s5 --> s8: 루틴 다음 실행이 스레드 세션을 바꿈
+  s5 --> s13: 사람 입력(또는 다시 보냄)
+  s6 --> s12: dcserver 재시작
+  s6 --> s14: 사람 입력(또는 다시 보냄)
+  s7 --> s13: dcserver 재시작
+  s7 --> s16: 스레드 pane cold 실행
+  s8 --> s12: /clear
+  s8 --> s17: 사람 입력(또는 다시 보냄)
+  s9 --> s18: 스레드 pane cold 실행
+  s10 --> s17: dcserver 재시작
+  s10 --> s19: 스레드 pane cold 실행
+  s11 --> s15: /clear
+  s11 --> s18: dcserver 재시작
+  s11 --> s19: 루틴 다음 실행이 스레드 세션을 바꿈
+  s11 --> s20: 사람 입력(또는 다시 보냄)
+  s12 --> s21: 사람 입력(또는 다시 보냄)
+  s13 --> s25: 스레드 pane cold 실행
+  s14 --> s21: dcserver 재시작
+  s14 --> s26: 스레드 pane cold 실행
+  s15 --> s19: 루틴 다음 실행이 스레드 세션을 바꿈
+  s15 --> s22: dcserver 재시작
+  s15 --> s24: 사람 입력(또는 다시 보냄)
+  s16 --> s27: dcserver 재시작
+  s16 --> s32: 같은 스레드에 답 게시#183;세션 저장
+  s17 --> s28: 스레드 pane cold 실행
+  s18 --> s22: /clear
+  s18 --> s28: 루틴 다음 실행이 스레드 세션을 바꿈
+  s18 --> s29: 사람 입력(또는 다시 보냄)
+  s19 --> s23: /clear
+  s19 --> s28: dcserver 재시작
+  s19 --> s30: 사람 입력(또는 다시 보냄)
+  s20 --> s29: dcserver 재시작
+  s20 --> s31: 스레드 pane cold 실행
+  s21 --> s40: 스레드 pane cold 실행
+  s22 --> s28: 루틴 다음 실행이 스레드 세션을 바꿈
+  s22 --> s36: 사람 입력(또는 다시 보냄)
+  s23 --> s35: dcserver 재시작
+  s23 --> s37: 사람 입력(또는 다시 보냄)
+  s24 --> s36: dcserver 재시작
+  s24 --> s39: 스레드 pane cold 실행
+  s25 --> s48: 같은 스레드에 답 게시#183;세션 저장
+  s26 --> s41: dcserver 재시작
+  s26 --> s49: 같은 스레드에 답 게시#183;세션 저장
+  s27 --> s34: 불확실한 입력의 실패 알림 게시
+  s28 --> s35: /clear
+  s28 --> s43: 사람 입력(또는 다시 보냄)
+  s29 --> s44: 스레드 pane cold 실행
+  s30 --> s43: dcserver 재시작
+  s30 --> s45: 스레드 pane cold 실행
+  s31 --> s38: /clear
+  s31 --> s44: dcserver 재시작
+  s31 --> s45: 루틴 다음 실행이 스레드 세션을 바꿈
+  s32 --> s33: /clear
+  s32 --> s42: 루틴 다음 실행이 스레드 세션을 바꿈
+  s32 --> s46: idle 회수
+  s32 --> s47: dcserver 재시작
+  s32 --> s50: 사람 입력(또는 다시 보냄)
+  s33 --> s42: 루틴 다음 실행이 스레드 세션을 바꿈
+  s33 --> s51: dcserver 재시작
+  s33 --> s53: 사람 입력(또는 다시 보냄)
+  s34 --> s55: 사람 입력(또는 다시 보냄)
+  s34 --> s64: 루틴 다음 실행이 스레드 세션을 바꿈
+  s35 --> s56: 사람 입력(또는 다시 보냄)
+  s36 --> s59: 스레드 pane cold 실행
+  s37 --> s56: dcserver 재시작
+  s37 --> s60: 스레드 pane cold 실행
+  s38 --> s45: 루틴 다음 실행이 스레드 세션을 바꿈
+  s38 --> s57: dcserver 재시작
+  s39 --> s61: dcserver 재시작
+  s39 --> s74: 같은 스레드에 답 게시#183;세션 저장
+  s40 --> s68: 같은 스레드에 답 게시#183;세션 저장
+  s41 --> s54: 불확실한 입력의 실패 알림 게시
+  s42 --> s52: /clear
+  s42 --> s62: dcserver 재시작
+  s42 --> s63: 사람 입력(또는 다시 보냄)
+  s43 --> s65: 스레드 pane cold 실행
+  s44 --> s57: /clear
+  s44 --> s65: 루틴 다음 실행이 스레드 세션을 바꿈
+  s45 --> s58: /clear
+  s45 --> s65: dcserver 재시작
+  s46 --> s33: /clear
+  s46 --> s42: 루틴 다음 실행이 스레드 세션을 바꿈
+  s46 --> s47: dcserver 재시작
+  s46 --> s69: 사람 입력(또는 다시 보냄)
+  s47 --> s51: /clear
+  s47 --> s62: 루틴 다음 실행이 스레드 세션을 바꿈
+  s47 --> s70: 사람 입력(또는 다시 보냄)
+  s48 --> s47: idle 회수
+  s48 --> s51: /clear
+  s48 --> s62: 루틴 다음 실행이 스레드 세션을 바꿈
+  s48 --> s71: 사람 입력(또는 다시 보냄)
+  s49 --> s52: /clear
+  s49 --> s66: idle 회수
+  s49 --> s67: dcserver 재시작
+  s49 --> s72: 사람 입력(또는 다시 보냄)
+  s50 --> s70: dcserver 재시작
+  s50 --> s73: 살아 있는 pane에 입력
+  s51 --> s62: 루틴 다음 실행이 스레드 세션을 바꿈
+  s51 --> s76: 사람 입력(또는 다시 보냄)
+  s52 --> s75: dcserver 재시작
+  s52 --> s77: 사람 입력(또는 다시 보냄)
+  s53 --> s76: dcserver 재시작
+  s53 --> s78: 스레드 pane cold 실행
+  s54 --> s79: 사람 입력(또는 다시 보냄)
+  s55 --> s80: 스레드 pane cold 실행
+  s56 --> s84: 스레드 pane cold 실행
+  s57 --> s65: 루틴 다음 실행이 스레드 세션을 바꿈
+  s58 --> s83: dcserver 재시작
+  s59 --> s99: 같은 스레드에 답 게시#183;세션 저장
+  s60 --> s85: dcserver 재시작
+  s60 --> s100: 같은 스레드에 답 게시#183;세션 저장
+  s61 --> s82: 불확실한 입력의 실패 알림 게시
+  s62 --> s75: /clear
+  s62 --> s86: 사람 입력(또는 다시 보냄)
+  s63 --> s86: dcserver 재시작
+  s63 --> s87: 스레드 pane cold 실행
+  s64 --> s54: /clear
+  s64 --> s88: 사람 입력(또는 다시 보냄)
+  s65 --> s83: /clear
+  s66 --> s52: /clear
+  s66 --> s67: dcserver 재시작
+  s66 --> s91: 사람 입력(또는 다시 보냄)
+  s67 --> s75: /clear
+  s67 --> s92: 사람 입력(또는 다시 보냄)
+  s68 --> s67: idle 회수
+  s68 --> s75: /clear
+  s68 --> s93: 사람 입력(또는 다시 보냄)
+  s69 --> s70: dcserver 재시작
+  s69 --> s73: 스레드 pane cold 실행
+  s70 --> s94: 스레드 pane cold 실행
+  s71 --> s94: 살아 있는 pane에 입력
+  s72 --> s92: dcserver 재시작
+  s72 --> s95: 살아 있는 pane에 입력
+  s73 --> s90: 같은 스레드에 답 게시#183;세션 저장
+  s73 --> s96: dcserver 재시작
+  s74 --> s81: /clear
+  s74 --> s89: 루틴 다음 실행이 스레드 세션을 바꿈
+  s74 --> s97: idle 회수
+  s74 --> s98: dcserver 재시작
+  s75 --> s102: 사람 입력(또는 다시 보냄)
+  s76 --> s104: 스레드 pane cold 실행
+  s77 --> s102: dcserver 재시작
+  s77 --> s105: 스레드 pane cold 실행
+  s78 --> s106: dcserver 재시작
+  s78 --> s90: 같은 스레드에 답 게시#183;세션 저장
+  s79 --> s107: 스레드 pane cold 실행
+  s80 --> s123: 같은 스레드에 답 게시#183;세션 저장
+  s81 --> s89: 루틴 다음 실행이 스레드 세션을 바꿈
+  s81 --> s108: dcserver 재시작
+  s82 --> s115: 루틴 다음 실행이 스레드 세션을 바꿈
+  s84 --> s126: 같은 스레드에 답 게시#183;세션 저장
+  s85 --> s110: 불확실한 입력의 실패 알림 게시
+  s86 --> s112: 스레드 pane cold 실행
+  s87 --> s103: /clear
+  s87 --> s112: dcserver 재시작
+  s88 --> s113: 스레드 pane cold 실행
+  s89 --> s109: /clear
+  s89 --> s114: dcserver 재시작
+  s90 --> s101: /clear
+  s90 --> s111: 루틴 다음 실행이 스레드 세션을 바꿈
+  s90 --> s116: idle 회수
+  s90 --> s117: dcserver 재시작
+  s91 --> s92: dcserver 재시작
+  s91 --> s95: 스레드 pane cold 실행
+  s92 --> s121: 스레드 pane cold 실행
+  s93 --> s121: 살아 있는 pane에 입력
+  s94 --> s118: 같은 스레드에 답 게시#183;세션 저장
+  s95 --> s119: 같은 스레드에 답 게시#183;세션 저장
+  s95 --> s122: dcserver 재시작
+  s96 --> s120: 불확실한 입력의 실패 알림 게시
+  s97 --> s81: /clear
+  s97 --> s89: 루틴 다음 실행이 스레드 세션을 바꿈
+  s97 --> s98: dcserver 재시작
+  s98 --> s108: /clear
+  s98 --> s114: 루틴 다음 실행이 스레드 세션을 바꿈
+  s99 --> s98: idle 회수
+  s99 --> s108: /clear
+  s99 --> s114: 루틴 다음 실행이 스레드 세션을 바꿈
+  s100 --> s109: /clear
+  s100 --> s124: idle 회수
+  s100 --> s125: dcserver 재시작
+  s101 --> s111: 루틴 다음 실행이 스레드 세션을 바꿈
+  s101 --> s127: dcserver 재시작
+  s102 --> s131: 스레드 pane cold 실행
+  s103 --> s130: dcserver 재시작
+  s104 --> s118: 같은 스레드에 답 게시#183;세션 저장
+  s105 --> s132: dcserver 재시작
+  s105 --> s119: 같은 스레드에 답 게시#183;세션 저장
+  s106 --> s129: 불확실한 입력의 실패 알림 게시
+  s107 --> s144: 같은 스레드에 답 게시#183;세션 저장
+  s108 --> s114: 루틴 다음 실행이 스레드 세션을 바꿈
+  s109 --> s135: dcserver 재시작
+  s111 --> s128: /clear
+  s111 --> s136: dcserver 재시작
+  s112 --> s130: /clear
+  s113 --> s134: /clear
+  s114 --> s135: /clear
+  s115 --> s110: /clear
+  s116 --> s101: /clear
+  s116 --> s111: 루틴 다음 실행이 스레드 세션을 바꿈
+  s116 --> s117: dcserver 재시작
+  s117 --> s127: /clear
+  s117 --> s136: 루틴 다음 실행이 스레드 세션을 바꿈
+  s118 --> s117: idle 회수
+  s118 --> s127: /clear
+  s118 --> s136: 루틴 다음 실행이 스레드 세션을 바꿈
+  s119 --> s128: /clear
+  s119 --> s139: idle 회수
+  s119 --> s140: dcserver 재시작
+  s120 --> s129: /clear
+  s120 --> s137: 루틴 다음 실행이 스레드 세션을 바꿈
+  s121 --> s141: 같은 스레드에 답 게시#183;세션 저장
+  s122 --> s142: 불확실한 입력의 실패 알림 게시
+  s123 --> s133: /clear
+  s123 --> s138: 루틴 다음 실행이 스레드 세션을 바꿈
+  s123 --> s143: idle 회수
+  s124 --> s109: /clear
+  s124 --> s125: dcserver 재시작
+  s125 --> s135: /clear
+  s126 --> s125: idle 회수
+  s126 --> s135: /clear
+  s127 --> s136: 루틴 다음 실행이 스레드 세션을 바꿈
+  s128 --> s145: dcserver 재시작
+  s129 --> s137: 루틴 다음 실행이 스레드 세션을 바꿈
+  s131 --> s141: 같은 스레드에 답 게시#183;세션 저장
+  s132 --> s146: 불확실한 입력의 실패 알림 게시
+  s133 --> s138: 루틴 다음 실행이 스레드 세션을 바꿈
+  s136 --> s145: /clear
+  s137 --> s146: /clear
+  s138 --> s147: /clear
+  s139 --> s128: /clear
+  s139 --> s140: dcserver 재시작
+  s140 --> s145: /clear
+  s141 --> s140: idle 회수
+  s141 --> s145: /clear
+  s142 --> s146: /clear
+  s143 --> s133: /clear
+  s143 --> s138: 루틴 다음 실행이 스레드 세션을 바꿈
+  s144 --> s147: /clear
+  s144 --> s148: idle 회수
+  s148 --> s147: /clear
+  class s0 bugPath
+  class s2 bugPath
+  class s8 bugPath
+  class s17 bugPath
+  class s28 bugPath
+  class s35 bugPath
+  class s56 bugPath
+  class s84 bugPath
+  class s126 bugPath
+  class s135 repeats

@@ -22,6 +22,14 @@ pub(crate) fn launch_policy(channel: u64) -> Option<String> {
     })
 }
 
+/// Whether a cold tmux resume of `native` in this thread is one the reservation refuses for want
+/// of a hook-verified binding. A history that cannot be read answers false, so the refusal stands.
+#[cfg(unix)]
+pub(crate) fn cold_resume_unverified(channel: u64, native: &str) -> bool {
+    launch_policy(channel).is_some()
+        && matches!(claude_fold::names_session(channel, native), Ok(false))
+}
+
 #[cfg(unix)]
 pub(crate) fn reserve_resume(
     channel: u64,

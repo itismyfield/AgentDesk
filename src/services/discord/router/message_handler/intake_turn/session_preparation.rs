@@ -97,6 +97,14 @@ pub(in crate::services::discord) async fn restore(
             *state.reason = "claude_session_rotation_followed";
         }
     }
+    let selected = super::super::unverified_thread_resume::Selected {
+        session_id: state.session_id,
+        memento_context_loaded: state.memento_context_loaded,
+        reason: state.reason,
+    };
+    let target = (state.tmux, state.session_key);
+    super::super::unverified_thread_resume::apply(shared, provider, channel_id, target, selected)
+        .await;
 }
 
 #[cfg(test)]

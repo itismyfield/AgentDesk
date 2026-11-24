@@ -49,7 +49,7 @@ fn stdin_epoch_limits_render_percentages_and_kst_resets() {
                 ..Footer::default()
             },
         ),
-        "-# ⏱️ 1초 (09:00)\n-# 5h 24% (11:30) · 7d 61% (10/27 16:00)"
+        "-# ⏱️ 1초 (09:00)\n-# 5h 24% (2h 30m, 11:30) · 7d 61% (4d 7h, 10/27 16:00)"
     );
 }
 
