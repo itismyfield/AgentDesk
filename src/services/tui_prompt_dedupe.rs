@@ -395,10 +395,10 @@ pub(crate) use runtime_binding::{
     codex_restore_observation_for_tests, codex_restore_settled_for_tests,
 };
 #[cfg(test)]
-pub(crate) use state::{
-    assert_marker_publication_unlocked_for_tests, expired_session_mapping_stamp_for_tests,
-    with_tmux_entries_for_tests,
-};
+pub(crate) use state::assert_marker_publication_unlocked_for_tests;
+// Only the unix-gated codex_verified tests in the discord layer call these.
+#[cfg(all(test, unix))]
+pub(crate) use state::{expired_session_mapping_stamp_for_tests, with_tmux_entries_for_tests};
 
 #[cfg(test)]
 mod injected_steer_tests;
