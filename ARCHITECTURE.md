@@ -3563,6 +3563,7 @@ src/
 │   │   │   ├── session_row_writer.rs
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── skill_usage.rs
+│   │   │   ├── stale_resume.rs
 │   │   │   ├── status_panel.rs
 │   │   │   ├── status_panel_tests.rs
 │   │   │   ├── stream_loop.rs
@@ -4565,8 +4566,7 @@ src/
 │   │   ├── policy.rs
 │   │   ├── request.rs
 │   │   ├── runner.rs
-│   │   ├── session.rs
-│   │   └── stale_resume.rs
+│   │   └── session.rs
 │   ├── termination_audit/
 │   │   ├── host_terminate/
 │   │   │   ├── herdr_terminate/

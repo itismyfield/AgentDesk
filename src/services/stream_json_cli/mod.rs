@@ -6,7 +6,6 @@ pub mod policy;
 pub mod request;
 pub mod runner;
 pub mod session;
-pub(crate) mod stale_resume;
 
 use std::sync::mpsc::Sender;
 

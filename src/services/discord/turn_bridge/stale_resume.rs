@@ -18,7 +18,7 @@
 /// `is_valid_session_id` already rejects malformed ids before launch, so we
 /// do NOT match `"invalid session"`-shaped strings — those belong to the
 /// pre-flight format validator, not this post-flight resume-failure detector.
-pub(crate) fn contains_stale_resume_error_text(text: &str) -> bool {
+pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // Phrase set audited against the actual codex CLI binary
     // (`@openai/codex` 0.130.0). Several seemingly-relevant fragments
@@ -64,7 +64,9 @@ pub(crate) fn contains_stale_resume_error_text(text: &str) -> bool {
     STALE_PHRASES.iter().any(|p| lower.contains(p))
 }
 
-pub(crate) fn result_event_has_stale_resume_error(value: &serde_json::Value) -> bool {
+pub(in crate::services::discord) fn result_event_has_stale_resume_error(
+    value: &serde_json::Value,
+) -> bool {
     if value.get("type").and_then(|v| v.as_str()) != Some("result") {
         return false;
     }
@@ -101,7 +103,7 @@ pub(crate) fn result_event_has_stale_resume_error(value: &serde_json::Value) -> 
         .unwrap_or(false)
 }
 
-pub(crate) fn output_file_has_stale_resume_error_after_offset(
+pub(super) fn output_file_has_stale_resume_error_after_offset(
     output_path: &str,
     start_offset: u64,
 ) -> bool {
@@ -127,11 +129,14 @@ pub(crate) fn output_file_has_stale_resume_error_after_offset(
         })
 }
 
-pub(crate) fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
+pub(in crate::services::discord) fn stream_error_has_stale_resume_error(
+    message: &str,
+    stderr: &str,
+) -> bool {
     contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
 }
 
-pub(crate) fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
+pub(super) fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
     let lower = format!("{} {}", message, stderr).to_ascii_lowercase();
     // A StreamJson process that produced no output cannot safely be resumed.
     // Its persisted selector is the only repeatable input across attempts, so
