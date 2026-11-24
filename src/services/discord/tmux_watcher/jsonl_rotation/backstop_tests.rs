@@ -366,7 +366,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
     let path = std::path::PathBuf::from(tc::session_temp_path(session, "jsonl"));
     let bytes = b"{\"type\":\"assistant\"}\n".repeat(40);
     std::fs::write(&path, &bytes).expect("owned source");
-    crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(session)
+    crate::services::tmux_common::spawn_markers::stamp_session_generation_marker(session)
         .expect("generation");
     let generation =
         crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(session);
