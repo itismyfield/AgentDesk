@@ -18,9 +18,8 @@ pub(in crate::services::discord) struct Selected<'a> {
 /// The turn's pane name and session key, as its caller resolved them.
 pub(in crate::services::discord) type Target<'a> = (Option<&'a str>, Option<&'a str>);
 
-/// Whether this turn would cold-launch a Claude tmux pane resuming `native` only to be refused: the
-/// turn runs Claude, no verified binding names `native` in the thread, its host reads as tmux and
-/// its pane is observed gone.
+/// Whether this Claude turn would cold-launch a tmux pane resuming `native` only to be refused:
+/// no verified binding names `native`, the host reads as tmux and the pane is observed gone.
 #[cfg(unix)]
 async fn replaces(
     shared: &SharedData,
