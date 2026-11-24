@@ -299,51 +299,29 @@ test("routines: the row switch pauses and resumes through the server, and revert
   await expectNoHorizontalOverflow(page);
 });
 
-test("routines: timeline marks last and next runs, and close markers open one list", async ({ page }, testInfo) => {
-  await openRoutines(page);
-  const timeline = page.getByTestId("routines-run-timeline");
-  await expect(timeline.getByTestId("routines-timeline-readout")).toContainText("토큰 사용량과 비용");
-  await expect(timeline.getByTestId("routines-timeline-readout")).toContainText("실행 중");
+test("routines: ScheduledRuns board maps upcoming slots and run-now triggers immediate execution", async ({ page }) => {
+  let runNowCount = 0;
+  await page.clock.install({ time: NOW });
+  await mockApi(page);
+  await page.route(/\/api\/routines\/rt-queue\/run-now$/, async (route) => {
+    runNowCount += 1;
+    return route.fulfill({ json: { outcome: { status: "completed" } } });
+  });
+  await page.goto("/routines");
+  await expect(page.getByTestId("routine-row-rt-queue")).toBeVisible({ timeout: 15_000 });
 
-  // Every target is 44x44 and none overlap.
-  const targets = timeline.locator("[data-testid^='routine-marker']");
-  const boxes = await targets.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON() as DOMRect));
-  expect(boxes.length).toBeGreaterThanOrEqual(3);
-  for (const box of boxes) {
-    expect(box.width).toBeGreaterThanOrEqual(44);
-    expect(box.height).toBeGreaterThanOrEqual(44);
-  }
-  const sorted = [...boxes].sort((a, b) => a.x - b.x);
-  for (let index = 1; index < sorted.length; index += 1) expect(sorted[index].x).toBeGreaterThanOrEqual(sorted[index - 1].x + 44 - 0.5);
+  const board = page.getByTestId("routines-scheduled-runs");
+  await expect(board.locator(".aui-scheduled-runs")).toBeVisible();
+  await expect(board.locator(".aui-scheduled-runs-modes")).toBeHidden();
+  await expect(board).toContainText("큐 안정성 신호");
 
-  await expect(timeline.getByRole("button", { name: /^relay gap audit.*, 오늘 08:40, 실패$/ })).toBeVisible();
-  await expect(timeline.getByRole("button", { name: /^큐 안정성 신호.*, 오늘 10:00, 지난 실행 · 2시간 전$/ })).toBeVisible();
-  await expect(timeline.getByRole("button", { name: /^토큰 사용량과 비용.*, 오늘 11:48, 실행 중$/ })).toBeVisible();
+  // In-flight and paused routines cannot be triggered via run-now.
+  await expect(page.getByTestId("routine-run-now-rt-token")).toBeDisabled();
+  await expect(page.getByTestId("routine-run-now-rt-briefing")).toBeDisabled();
 
-  // Two routines due at the same 14:00 share one target that opens a list.
-  const cluster = timeline.getByRole("button", { name: /가까운 실행 \d+개 목록 열기/ }).first();
-  await expect(cluster).toBeVisible();
-  await cluster.click();
-  const list = page.getByTestId("routine-overlap-list").last();
-  await expect(list).toBeVisible();
-  await expect(list.getByRole("button")).toHaveCount(2);
-  const memory = list.getByRole("button", { name: /에이전트 메모리 파일/ });
-  await expect(memory).toBeVisible();
-  await memory.click();
-
-  if (testInfo.project.name === "desktop") {
-    const pane = page.getByTestId("routine-detail-pane");
-    await expect(pane.getByRole("heading", { level: 2 })).toContainText("에이전트 메모리 파일");
-    await expect(page.getByTestId("routine-row-rt-memory")).toHaveAttribute("aria-current", "true");
-    await pane.getByRole("button", { name: "상세 닫기" }).click();
-  } else {
-    const sheet = page.getByRole("dialog");
-    await expect(sheet).toContainText("에이전트 메모리 파일");
-    await expect(sheet.getByTestId("routine-detail")).toBeVisible();
-    await sheet.getByRole("button", { name: "Close" }).click();
-    await expect(sheet).toHaveCount(0);
-  }
-  await expect(cluster).toBeFocused();
+  await page.getByTestId("routine-run-now-rt-queue").click();
+  await expect.poll(() => runNowCount).toBe(1);
+  await expect(page.getByText("queue-stability-check 루틴을 바로 실행했어요.")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -457,14 +435,6 @@ test("routines: screenshots at 390, 820 and 1440 in light and dark", async ({ pa
       await expect(page.getByTestId("routine-detail")).toBeVisible();
       await page.waitForTimeout(400);
       await page.screenshot({ path: `${SHOTS}/routines-${width}x${height}-${theme}-detail.png` });
-      if (width !== 820) {
-        // Overlap list: popover on wide screens, inside the sheet below 900px.
-        await page.goto("/routines");
-        await page.getByRole("button", { name: /가까운 실행 \d+개 목록 열기/ }).click();
-        await expect(page.getByTestId("routine-overlap-list").last()).toBeVisible();
-        await page.waitForTimeout(400);
-        await page.screenshot({ path: `${SHOTS}/routines-${width}x${height}-${theme}-overlap.png` });
-      }
     }
     // Home has its own today's-routines card.
     for (const [width, height] of [[390, 844], [1440, 900]] as const) {

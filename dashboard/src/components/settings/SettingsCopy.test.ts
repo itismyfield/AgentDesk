@@ -8,8 +8,9 @@ describe("settings copy", () => {
   it("spells out usage windows instead of 5h / 7d shorthand", () => {
     expect(usageBucketLabel("5h", ko)).toBe("5시간 한도");
     expect(usageBucketLabel("7d", ko)).toBe("7일 한도");
-    expect(usageBucketLabel("7d Fable", ko)).toBe("7일 한도 · Fable 모델");
-    expect(usageBucketLabel("7d Fable", en)).toBe("7-day limit · Fable model");
+    expect(usageBucketLabel("7d Fable", ko)).toBe("7일 한도 · 상위 모델 (Fable)");
+    expect(usageBucketLabel("7일 Fable", ko)).toBe("7일 한도 · 상위 모델 (Fable)");
+    expect(usageBucketLabel("7d Fable", en)).toBe("7-day limit · frontier model (Fable)");
     expect(usageBucketLabel("monthly", ko)).toBe("monthly");
   });
 

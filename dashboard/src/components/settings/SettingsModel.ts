@@ -105,6 +105,25 @@ export interface CatalogFilter {
 
 export const SETTINGS_CATEGORY_QUERY_KEY = "category";
 
+/** Core ~10 operational settings surfaced in the primary tier; remaining internal runtime/connector keys live in the collapsible advanced tier. */
+export const ESSENTIAL_SETTING_KEYS = new Set([
+  "language",
+  "theme",
+  "requested_timeout_min",
+  "in_progress_stale_min",
+  "review_enabled",
+  "max_review_rounds",
+  "dispatchRateLimitGateEnabled",
+  "dispatchRateLimitGateDangerPct",
+  "context_compact_percent",
+  "health.status",
+  "health.providers",
+]);
+
+export function isEssentialSetting(item: CatalogItem): boolean {
+  return ESSENTIAL_SETTING_KEYS.has(item.key);
+}
+
 // Tab ids from the previous settings page still arrive through bookmarks.
 const LEGACY_PANEL_CATEGORY: Record<string, SettingsCategory> = {
   workflow: "workflow", pipeline: "workflow", runtime: "workflow", ai: "usage", providers: "usage",

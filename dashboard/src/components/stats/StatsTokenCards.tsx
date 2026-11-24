@@ -5,7 +5,7 @@ import type { TokenAnalyticsDailyPoint } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { Cap, SectionCard } from "../common/KitPrimitives";
 import { msg, type DailySeriesDescriptor } from "./statsModel";
-import { NUMERIC_STYLE, StatsEmpty, StatsSwatch } from "./StatsCardPrimitives";
+import { StatsEmpty } from "./StatsCardPrimitives";
 
 const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionChart"));
 
@@ -22,7 +22,7 @@ function ChartPlaceholder() {
   );
 }
 
-/** Daily stacked token chart with its legend and fixed readout in a v3 section card (kit palette tokens). */
+/** Daily stacked token breakdown using the vendored kit BreakdownChart inside a v3 SectionCard. */
 export function DailyTokenCompositionCard({
   t,
   localeTag,
@@ -47,25 +47,15 @@ export function DailyTokenCompositionCard({
       title={t(msg("일별 토큰 구성", "Daily Token Composition", "日次トークン構成", "每日 Token 构成"))}
       testId="stats-daily-token-chart"
       className={className}
-      aside={
-        <ul className="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-[11px] text-[var(--fg-muted)]" style={NUMERIC_STYLE} aria-label={t(msg("범례", "Legend"))}>
-          {series.map((item) => (
-            <li key={item.key} className="inline-flex items-center gap-1.5">
-              <StatsSwatch color={item.color} />
-              <span>{item.label}</span>
-            </li>
-          ))}
-        </ul>
-      }
     >
       <div className="px-3 pb-3 sm:px-4 sm:pb-4">
         <Cap className="mb-3 block">
           {t(
             msg(
-              "input · output · cache read / write · 막대를 눌러 날짜별로 읽기",
-              "input · output · cache read / write · tap a bar to read a day",
-              "input · output · cache read / write · バーをタップして日別に表示",
-              "input · output · cache read / write · 点按柱状图查看每日数据",
+              "날짜·토큰 종류 기준과 토큰·비용 지표를 전환하며 비교해요",
+              "Switch dimensions and measures to compare daily tokens and cost",
+              "日付・トークン種別と指標を切り替えて比較します",
+              "切换日期、Token 类型与指标进行对比",
             ),
           )}
         </Cap>

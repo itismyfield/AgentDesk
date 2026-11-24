@@ -95,6 +95,7 @@ export function StatsSummaryGrid({
               value={summary ? formatTokens(summary.total_tokens) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
+              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: daily.map((day) => day.total_tokens), color: "var(--aui-accent)" }]}
               format={formatTokens}
               emptyLabel={notice}
@@ -113,6 +114,7 @@ export function StatsSummaryGrid({
               value={summary ? formatCurrency(summary.total_cost) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
+              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "cost", label: t(msg("비용", "Cost", "コスト", "成本")), values: daily.map((day) => day.cost), color: "var(--aui-info)" }]}
               format={formatAxisCurrency}
               emptyLabel={notice}

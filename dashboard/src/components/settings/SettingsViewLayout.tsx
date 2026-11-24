@@ -1,7 +1,7 @@
-import { RotateCcw, SearchX } from "lucide-react";
+import { ChevronDown, ChevronRight, RotateCcw, SearchX } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 import { EmptyState } from "../../kit/free/empty-state-clean";
-import { Cap, CardSkeleton, Eyebrow, InspSection, KitCard, ROW_HOVER_CLASS, Row } from "../common/KitPrimitives";
+import { Cap, CardSkeleton, Chip, Eyebrow, InspSection, KitCard, ROW_HOVER_CLASS, Row } from "../common/KitPrimitives";
 import type { SettingsCategory } from "./SettingsCopy";
 import { baselineText, isResetValue, type CatalogItem, type CategoryFilter } from "./SettingsModel";
 import { InlineControl, ItemChip, ItemFacts, ItemHeading, RelatedSettings, currentValue, editableItem, hasRelatedSettings, resetLabel } from "./SettingsPanels";
@@ -17,11 +17,9 @@ export interface CatalogGroup {
 
 interface CatalogActions {
   onSelect: (key: string) => void;
-  /** Opens a "함께 보는 설정" target even when the search, a filter or the category hides it. */
   onRelated: (key: string) => void;
   onChange: (item: CatalogItem, value: string) => void;
   onReset: (item: CatalogItem) => void;
-  /** True while this row's save is in flight; its control and reset stay disabled until it ends. */
   locked: (item: CatalogItem) => boolean;
   problemFor: (key: string) => string | null;
   allItems: CatalogItem[];
@@ -36,9 +34,14 @@ interface SettingsDesktopCatalogProps extends CatalogActions {
   filters: { differs: boolean; restart: boolean; differsCount: number; restartCount: number };
   onFilter: (name: "differs" | "restart", on: boolean) => void;
   groups: CatalogGroup[];
+  essentialItems?: CatalogItem[];
+  advancedGroups?: CatalogGroup[];
+  advancedCount?: number;
+  twoTier?: boolean;
+  advancedOpen?: boolean;
+  onToggleAdvanced?: () => void;
   caption: string;
   selected: CatalogItem | null;
-  /** Inspector beside the list (>=1280px); narrower desktops open details under the selected row. */
   wide: boolean;
   loading: boolean;
   notice: ReactNode;
@@ -46,14 +49,59 @@ interface SettingsDesktopCatalogProps extends CatalogActions {
   blocks: ReactNode;
 }
 
-/** Whether a row can go back to its default (or to inheriting) from here. */
 export function resettable(item: CatalogItem): boolean {
   return editableItem(item) && item.resetTo != null && !isResetValue(item, currentValue(item));
 }
 
-/** Desktop catalog: categories and filters, the grouped list with the pending bar, and the selected row's details. */
+function GroupCard({ group, selected, wide, props }: { group: CatalogGroup; selected: CatalogItem | null; wide: boolean; props: SettingsDesktopCatalogProps }) {
+  return (
+    <KitCard as="section" aria-label={group.label} data-testid={`settings-group-${group.id}`}>
+      <Eyebrow className="border-b border-[var(--line-soft)] px-4 py-2.5">
+        <h3 className="m-0 text-inherit font-inherit">{group.label}</h3>
+      </Eyebrow>
+      <div>
+        {group.items.map((item) => {
+          const isSelected = item.key === selected?.key;
+          return (
+            <Fragment key={item.key}>
+              <CatalogRow {...props} item={item} selected={isSelected} />
+              {!wide && isSelected ? (
+                <div className="border-t border-[var(--line-soft)] bg-[var(--bg-1)]" data-testid="settings-inline-details">
+                  <Inspector {...props} item={item} />
+                </div>
+              ) : null}
+            </Fragment>
+          );
+        })}
+      </div>
+    </KitCard>
+  );
+}
+
 export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
-  const { categories, category, onCategory, filters, onFilter, groups, caption, selected, wide, loading, notice, saveBar, blocks, tr } = props;
+  const {
+    categories,
+    category,
+    onCategory,
+    filters,
+    onFilter,
+    groups,
+    essentialItems = [],
+    advancedGroups = [],
+    advancedCount = 0,
+    twoTier = false,
+    advancedOpen = false,
+    onToggleAdvanced,
+    caption,
+    selected,
+    wide,
+    loading,
+    notice,
+    saveBar,
+    blocks,
+    tr,
+  } = props;
+
   return (
     <div className="flex min-w-0 items-start gap-5" data-testid="settings-catalog">
       <nav aria-label={tr("분류", "Categories")} className="sticky top-4 flex w-[200px] shrink-0 flex-col gap-0.5">
@@ -114,28 +162,67 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
                 title={tr("맞는 설정이 없어요", "No matching settings")}
                 text={tr("검색어나 필터를 바꿔 보세요.", "Try another search or filter.")}
               />
+            ) : twoTier ? (
+              <>
+                {essentialItems.length > 0 ? (
+                  <KitCard as="section" aria-label={tr("필수 운영 설정", "Essential operational settings")} data-testid="settings-tier-essential">
+                    <Eyebrow className="flex items-center justify-between gap-2 border-b border-[var(--line-soft)] px-4 py-2.5">
+                      <h3 className="m-0 text-inherit font-inherit">{tr("필수 운영 설정", "Essential settings")}</h3>
+                      <Chip tone="accent">{essentialItems.length}</Chip>
+                    </Eyebrow>
+                    <div>
+                      {essentialItems.map((item) => {
+                        const isSelected = item.key === selected?.key;
+                        return (
+                          <Fragment key={item.key}>
+                            <CatalogRow {...props} item={item} selected={isSelected} />
+                            {!wide && isSelected ? (
+                              <div className="border-t border-[var(--line-soft)] bg-[var(--bg-1)]" data-testid="settings-inline-details">
+                                <Inspector {...props} item={item} />
+                              </div>
+                            ) : null}
+                          </Fragment>
+                        );
+                      })}
+                    </div>
+                  </KitCard>
+                ) : null}
+
+                {advancedCount > 0 ? (
+                  <section className="flex min-w-0 flex-col gap-3" data-testid="settings-tier-advanced">
+                    <KitCard>
+                      <button
+                        type="button"
+                        aria-expanded={advancedOpen}
+                        data-testid="settings-advanced-toggle"
+                        onClick={onToggleAdvanced}
+                        className={`flex min-h-12 w-full items-center justify-between gap-3 border-0 bg-transparent px-4 py-3 text-left ${ROW_HOVER_CLASS}`}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="text-sm leading-5 font-semibold text-[var(--fg)]">
+                            {tr("고급 런타임 설정", "Advanced runtime settings")}
+                          </span>
+                          <Cap className="[word-break:keep-all]">
+                            {tr("세부 타임아웃·복구 정책·알림 채널·내부 키를 펼쳐서 조정해요.", "Expand granular recovery policies, alert channels, and internal runtime keys.")}
+                          </Cap>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <Chip tone="neutral">{advancedCount}</Chip>
+                          {advancedOpen ? <ChevronDown size={16} aria-hidden className="text-[var(--fg-muted)]" /> : <ChevronRight size={16} aria-hidden className="text-[var(--fg-muted)]" />}
+                        </span>
+                      </button>
+                    </KitCard>
+                    <div className={advancedOpen ? "flex min-w-0 flex-col gap-3" : "hidden"} hidden={!advancedOpen}>
+                      {advancedGroups.map((group) => (
+                        <GroupCard key={group.id} group={group} selected={selected} wide={wide} props={props} />
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+              </>
             ) : (
               groups.map((group) => (
-                <KitCard key={group.id} as="section" aria-label={group.label} data-testid={`settings-group-${group.id}`}>
-                  <Eyebrow className="border-b border-[var(--line-soft)] px-4 py-2.5">
-                    <h3 className="m-0 text-inherit font-inherit">{group.label}</h3>
-                  </Eyebrow>
-                  <div>
-                    {group.items.map((item) => {
-                      const isSelected = item.key === selected?.key;
-                      return (
-                        <Fragment key={item.key}>
-                          <CatalogRow {...props} item={item} selected={isSelected} />
-                          {!wide && isSelected ? (
-                            <div className="border-t border-[var(--line-soft)] bg-[var(--bg-1)]" data-testid="settings-inline-details">
-                              <Inspector {...props} item={item} />
-                            </div>
-                          ) : null}
-                        </Fragment>
-                      );
-                    })}
-                  </div>
-                </KitCard>
+                <GroupCard key={group.id} group={group} selected={selected} wide={wide} props={props} />
               ))
             )}
             {saveBar}
@@ -160,25 +247,26 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
 
 function CatalogRow({ item, selected, onSelect, onChange, locked, problemFor, tr }: CatalogActions & { item: CatalogItem; selected: boolean }) {
   return (
-    // Clicking anywhere or focusing the control selects the row; the name button is the keyboard way in.
     <Row
       selected={selected}
       data-testid={`setting-row-${item.key}`}
       data-selected={selected || undefined}
       onClick={() => onSelect(item.key)}
       onFocusCapture={() => onSelect(item.key)}
-      className="min-h-[60px] flex-wrap gap-y-1.5"
+      className="min-h-[60px] flex-wrap gap-x-3 gap-y-1.5"
     >
       <button
         type="button"
         aria-current={selected ? "true" : undefined}
-        className="min-w-0 flex-1 text-left focus-visible:rounded-[var(--r-sm)]"
+        className="min-w-[12rem] flex-1 text-left focus-visible:rounded-[var(--r-sm)]"
         onClick={() => onSelect(item.key)}
       >
         <span className="block text-sm leading-5 font-medium break-keep text-[var(--fg)]">{item.label}</span>
-        <Cap className="block font-mono leading-[18px] [overflow-wrap:anywhere]">{item.key}</Cap>
+        <Cap title={item.key} className="block max-w-full truncate font-mono text-[11.5px] leading-[18px]">
+          {item.key}
+        </Cap>
       </button>
-      <div className="flex shrink-0 justify-end">
+      <div className="ml-auto flex shrink-0 justify-end">
         <InlineControl
           item={item}
           label={item.label}
@@ -188,10 +276,9 @@ function CatalogRow({ item, selected, onSelect, onChange, locked, problemFor, tr
           tr={tr}
         />
       </div>
-      {/* A narrow list moves the default and chips to a second line instead of hiding them. */}
-      <div className="flex w-full min-w-0 items-center gap-3 @min-[34rem]:w-auto" data-testid={`setting-meta-${item.key}`}>
-        <Cap className="min-w-0 flex-1 break-keep @min-[34rem]:w-28 @min-[34rem]:flex-none">{baselineText(item, tr)}</Cap>
-        <span className="flex shrink-0 flex-wrap justify-end gap-1 @min-[34rem]:w-[84px] @min-[34rem]:flex-col @min-[34rem]:items-end">
+      <div className="flex w-full min-w-0 items-center justify-between gap-2 @min-[48rem]:w-auto @min-[48rem]:justify-end" data-testid={`setting-meta-${item.key}`}>
+        <Cap className="min-w-0 truncate break-keep">{baselineText(item, tr)}</Cap>
+        <span className="inline-flex shrink-0 flex-nowrap items-center justify-end gap-1" data-testid={`setting-chips-${item.key}`}>
           <ItemChip item={item} tr={tr} all />
         </span>
       </div>

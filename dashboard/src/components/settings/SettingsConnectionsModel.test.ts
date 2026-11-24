@@ -9,17 +9,23 @@ const bot = (name: string, connected: boolean) => ({
 });
 
 describe("connection status rows", () => {
-  it("reports the onboarding setup as read-only status", () => {
-    const rows = connectionStatusRows(
+  it("reports onboarding setup or live runtime health without false disconnected warnings", () => {
+    const onboarded = connectionStatusRows(
       ready<OnboardingConnectionStatus>({ guild_id: "1", owner_id: "2", bot_providers: { command: "claude", command2: "codex" } }),
       ready<HealthResponse>({ status: "healthy", providers: [bot("claude", true), bot("codex", true)] }),
       tr,
     );
-    expect(rows.map((row) => [row.key, row.value, row.tone])).toEqual([
-      ["bot", "연결됨", "ok"],
-      ["server", "연결됨", "ok"],
-      ["owner", "설정됨", "ok"],
-      ["ai", "Claude, Codex 사용 중", "ok"],
+    expect(onboarded.map((row) => [row.key, row.value, row.tone])).toEqual([
+      ["bot", "연결됨", "ok"], ["server", "연결됨", "ok"], ["owner", "설정됨", "ok"], ["ai", "Claude, Codex 사용 중", "ok"],
+    ]);
+
+    const runtimeLive = connectionStatusRows(
+      ready<OnboardingConnectionStatus>({ guild_id: null, owner_id: null, bot_providers: {} }),
+      ready<HealthResponse>({ status: "healthy", providers: [bot("claude", true), bot("codex", true)] }),
+      tr,
+    );
+    expect(runtimeLive.map((row) => [row.key, row.value, row.tone])).toEqual([
+      ["bot", "연결됨", "ok"], ["server", "연결됨 · 봇 2개 가동", "ok"], ["owner", "서버 설정 기준 운영 중", "ok"], ["ai", "Claude, Codex 사용 중", "ok"],
     ]);
   });
 
@@ -32,19 +38,11 @@ describe("connection status rows", () => {
     expect(rows.map((row) => row.tone)).toEqual(["warn", "warn", "warn", "warn"]);
     expect(rows[0].value).toBe("연결 끊김: Codex");
 
-    const unknown = connectionStatusRows(
-      { data: undefined, isError: true, isPending: false },
-      { data: undefined, isError: false, isPending: true },
-      tr,
-    );
+    const unknown = connectionStatusRows({ data: undefined, isError: true, isPending: false }, { data: undefined, isError: false, isPending: true }, tr);
     const limited = connectionStatusRows(ready<OnboardingConnectionStatus>({ guild_id: "1", owner_id: "2", bot_providers: {} }), ready<HealthResponse>({ status: "healthy", publicOnly: "forbidden" }), tr);
     expect([limited[0].value, limited[0].tone]).toEqual(["이 기기에서는 확인할 수 없어요", "unknown"]);
-
     expect(unknown.map((row) => [row.value, row.tone])).toEqual([
-      ["확인 중…", "unknown"],
-      ["확인하지 못했어요", "unknown"],
-      ["확인하지 못했어요", "unknown"],
-      ["확인하지 못했어요", "unknown"],
+      ["확인 중…", "unknown"], ["확인하지 못했어요", "unknown"], ["확인하지 못했어요", "unknown"], ["확인하지 못했어요", "unknown"],
     ]);
   });
 });

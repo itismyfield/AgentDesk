@@ -228,16 +228,21 @@ export function providerDisplayName(id: string): string {
   return PROVIDER_NAMES[id.toLowerCase()] ?? id;
 }
 
-/** "5h" → "5시간 한도", "7d Fable" → "7일 한도 · Fable 모델". */
+/** "5h" → "5시간 한도", "7d Fable" / "7일 Fable" → "7일 한도 · 상위 모델 (Fable)". */
 export function usageBucketLabel(name: string, tr: Tr): string {
-  const match = /^(\d+)\s*([hd])\b\s*(.*)$/i.exec(name.trim());
+  const match = /^(\d+)\s*(?:([hd])\b|(시간|일))\s*(.*)$/i.exec(name.trim());
   if (!match) return name;
-  const [, amount, unit, model] = match;
-  const window = unit.toLowerCase() === "h"
+  const [, amount, unitEn, unitKo, model] = match;
+  const isHour = unitEn ? unitEn.toLowerCase() === "h" : unitKo === "시간";
+  const window = isHour
     ? tr(`${amount}시간 한도`, `${amount}-hour limit`)
     : tr(`${amount}일 한도`, `${amount}-day limit`);
   const modelName = model.trim();
-  return modelName ? tr(`${window} · ${modelName} 모델`, `${window} · ${modelName} model`) : window;
+  if (!modelName) return window;
+  if (/^fable\b/i.test(modelName)) {
+    return tr(`${window} · 상위 모델 (Fable)`, `${window} · frontier model (Fable)`);
+  }
+  return tr(`${window} · ${modelName} 모델`, `${window} · ${modelName} model`);
 }
 
 const CONNECTOR_REASONS: Record<string, [string, string]> = {
