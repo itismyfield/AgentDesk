@@ -183,12 +183,13 @@ composer::when_idle 루프 (기존)
 | `tools-used` | 33 | 누적 도구 목록 |
 | `data-flow-records` | 12(파일 끝) | Claude 2.1.330+가 턴 끝 뒤에 쓰는 응답·도구 단위 데이터 흐름 기록. 다음 턴은 늘 자기 `user` 레코드로 시작했다 |
 | `system/away_summary` | 26(모두 `turn_duration → data-flow-records` 바로 뒤), 2(파일 끝) | 오래 쉰 세션의 턴 밖 recap. 턴을 진행하지 않는다 |
+| `derived-from` | 11-22 #8335 꼬리(압축 직전 메타 블록) | 세션의 파생 출처 기록. 턴을 진행하지 않는다 |
 | `permission-mode` | 411 | **무시하지 않는다.** `End`·terminal은 그대로 두고 `barrier`만 옮긴다 |
 
 - 뒤 두 행은 11-24 조사(최근 transcript 300개, Claude 2.1.330·2.1.331)에서 더했다. 이 둘을 모를 때 쉬는 세션의 hard terminal이 지워져 11-21(2건)·11-23(2건)·11-24(1건) 입력 다섯 건이 Retained·Refused로 끝났다. 허용 목록은 `tui_turn_state/claude_meta.rs` `idle_metadata` 하나이고, `evidence.rs`의 system 하위형 갈래도 그 목록을 따른다.
-- 위 13종은 `End`·terminal·activity를 바꾸지 않는다(`evidence.rs` 메타 갈래). 블록 다음 레코드는 `user`(2,377)·`api-request*`(3,281)·예약 실행(510)·compact(24)·EOF(68)였고, 블록 안에 턴 진행 레코드가 섞인 경우는 없었다.
+- 위 14종은 `End`·terminal·activity를 바꾸지 않는다(`evidence.rs` 메타 갈래). 블록 다음 레코드는 `user`(2,377)·`api-request*`(3,281)·예약 실행(510)·compact(24)·EOF(68)였고, 블록 안에 턴 진행 레코드가 섞인 경우는 없었다.
 - `permission-mode`는 블록 안에 411번 나왔다. 하지만 resume 경로는 이것을 턴 시작 표지로 읽는다(`readiness_tests.rs` resume 사례). 그래서 `mode` 바로 다음일 때만 hard terminal을 지우지 않되 `barrier = offset`을 남긴다(`evidence.rs` permission-mode 갈래). `mode` 없이 혼자 나오면 실제 Claude가 쓰는 모양이 아니므로(최근 300개 transcript의 22,242개가 모두 `mode` 바로 다음) base처럼 terminal을 지우고 판독 불가로 남긴다. herdr busy late 경로(`host_input/busy/herdr.rs` `idle_ready`)가 이 판정으로 Unknown 소스를 hold한다(시험 `busy_entry_tests::late_tests`). 공유 observer(`tui_turn_state.rs:610`)가 `permission-mode`를 Unknown으로 읽는 것은 바꾸지 않고, readiness 쪽 `idle_reading`(`mod.rs:103`)이 "Unknown이고 hard terminal 뒤의 barrier뿐"이면 Idle로 본다.
-- `attachment`, `api-request*`, 모르는 새 type은 지금처럼 `End::None`이다. 새 레코드 종류가 생기면 보수적으로 막는다.
+- `idle_metadata`의 attachment 목록(압축·resume이 다시 붙이는 `file`·`compact_file_reference`·`invoked_skills` 포함) 밖의 `attachment`, `api-request*`, 모르는 새 type은 지금처럼 `End::None`이다. 새 레코드 종류가 생기면 보수적으로 막는다.
 - 반례 검토: 블록이 다음 턴의 시작에 붙는다면 무시가 실행 중 턴을 숨긴다. `last-prompt` 값이 다음 프롬프트와 맞는 경우가 0이고, 블록 뒤의 다음 턴은 항상 자기 `user`/`api-request` 레코드로 시작했다. 이 레코드들은 지금처럼 `End::None`을 만든다(시험 `turn_records_after_the_metadata_still_run`).
 - hard terminal의 의미는 바꾸지 않으므로 상태 차트는 고치지 않는다(모델의 `tail="hard"`는 "마지막 의미 레코드가 terminal"이고, 메타 레코드는 의미 레코드가 아니다).
 

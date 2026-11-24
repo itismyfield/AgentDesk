@@ -71,7 +71,8 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "pr-link"
             | "frame-link"
             | "repl-mode"
-            | "data-flow-records",
+            | "data-flow-records"
+            | "derived-from",
         ) => true,
         // An away recap is Claude's out-of-turn summary of a long idle, not a turn record.
         Some("system") => matches!(
@@ -92,6 +93,7 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                                 .as_str()
                                 .is_some_and(|context| !context.is_empty())
                     });
+            // Files and skills a compaction or resume re-attaches carry no turn of their own.
             !continues
                 && matches!(
                     attachment["type"].as_str(),
@@ -105,6 +107,9 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                             | "hook_success"
                             | "todo_reminder"
                             | "queued_command"
+                            | "file"
+                            | "compact_file_reference"
+                            | "invoked_skills"
                     )
                 )
         }
