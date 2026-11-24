@@ -695,8 +695,8 @@ async fn start_reserved_headless_turn_admitted(
         memento_context_loaded: &mut memento_context_loaded,
         reason: &mut session_strategy_reason,
     };
-    let pane = tmux_session_name.as_deref();
-    super::unverified_thread_resume::apply(shared, &provider, channel_id, pane, selected).await;
+    let target = (tmux_session_name.as_deref(), adk_session_key.as_deref());
+    super::unverified_thread_resume::apply(shared, &provider, channel_id, target, selected).await;
 
     cleanup_terminal_delivery_marker_after_turn_start(
         shared,

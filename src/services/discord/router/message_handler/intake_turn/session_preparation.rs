@@ -102,10 +102,9 @@ pub(in crate::services::discord) async fn restore(
         memento_context_loaded: state.memento_context_loaded,
         reason: state.reason,
     };
-    super::super::unverified_thread_resume::apply(
-        shared, provider, channel_id, state.tmux, selected,
-    )
-    .await;
+    let target = (state.tmux, state.session_key);
+    super::super::unverified_thread_resume::apply(shared, provider, channel_id, target, selected)
+        .await;
 }
 
 #[cfg(test)]
