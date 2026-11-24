@@ -93,7 +93,7 @@ fn discord_control_endpoints_require_bearer_for_non_loopback_when_auth_token_is_
 
 #[test]
 fn discord_send_caller_class_uses_header_when_present() {
-    use crate::services::discord::health::SendCallerClass;
+    use crate::services::message_outbox::source_registry::SendCallerClass;
 
     let loopback = "127.0.0.1:8791".parse().unwrap();
     let remote = "10.0.0.5:8791".parse().unwrap();
@@ -118,7 +118,7 @@ fn discord_send_caller_class_uses_header_when_present() {
 
 #[test]
 fn discord_send_caller_class_keeps_headerless_loopback_compatibility() {
-    use crate::services::discord::health::SendCallerClass;
+    use crate::services::message_outbox::source_registry::SendCallerClass;
 
     assert_eq!(
         discord_send_caller_class("127.0.0.1:8791".parse().unwrap(), &empty_headers()),

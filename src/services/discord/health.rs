@@ -116,13 +116,11 @@ pub(crate) use super::turn_presence::supervisor::{
 };
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
+#[allow(unused_imports)]
+pub use crate::services::discord::outbound::send_gate::is_allowed_send_source_for;
 pub(crate) use crate::services::discord::outbound::send_gate::{
     ManualOutboundOptions, send_message_with_backends,
     send_message_with_backends_and_delivery_options,
-};
-#[allow(unused_imports)]
-pub use crate::services::discord::outbound::send_gate::{
-    SendCallerClass, is_allowed_send_source_for,
 };
 #[allow(unused_imports)]
 pub use headless_turn::HeadlessAgentTurnReservation;

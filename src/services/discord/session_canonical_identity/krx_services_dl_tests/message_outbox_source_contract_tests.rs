@@ -43,10 +43,11 @@ async fn enqueue_acceptance_matches_worker_loopback_source_gate_pg() {
             reason_code: None,
             session_key: None,
         };
-        let worker_allows = crate::services::discord::outbound::send_gate::is_allowed_send_source_for(
-            source,
-            crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
-        );
+        let worker_allows =
+            crate::services::discord::outbound::send_gate::is_allowed_send_source_for(
+                source,
+                crate::services::message_outbox::source_registry::SendCallerClass::LoopbackInternal,
+            );
         let enqueue_result = enqueue_outbox_pg_returning_id_with_ttl(&pool, message, 0).await;
         assert_eq!(
             enqueue_result.is_ok(),

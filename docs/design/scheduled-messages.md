@@ -29,7 +29,7 @@ outbox를 거치지 않고 기존 headless turn relay로 Discord에 게시된다
 | `services/scheduling.rs` | routines와 scheduled messages가 함께 사용하는 `@every`/5-field cron 파싱 및 slot-anchor 다음 시각 계산 |
 | `worker_registry` + `message_outbox_loop` 패턴 | `scheduled_message_loop` 워커를 기존 등록 패턴으로 추가. adaptive backoff(500ms–5s) 폴링 패턴 동일 적용 |
 | agent channel bindings | agent 모드는 명시적 `target_channel_id` 유무와 무관하게 primary Discord 채널을 필수로 한다. primary는 turn owner/session 컨텍스트이고, target 미지정 시 delivery 채널로도 사용 |
-| `outbound/source_registry.rs` | push/강등 outbox enqueue 소스 `scheduled_message`를 `LoopbackInternal`로만 허용 |
+| `services/message_outbox/source_registry.rs` | push/강등 outbox enqueue 소스 `scheduled_message`를 `LoopbackInternal`로만 허용 |
 
 ### 검토했으나 채택하지 않은 대안 (재사용 극대화 관점)
 
@@ -497,7 +497,7 @@ API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정
 | `src/server/worker_registry.rs` | 워커 등록 항목 추가 (`ScheduledMessages`, leader-only) |
 | `src/services/message_outbox.rs` (`gc_stale_outbox_rows`), `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
 | `src/services/scheduling.rs` | routines와 scheduled messages 양쪽이 의존하는 공용 스케줄 문법 + slot-anchor 계산 |
-| `src/services/discord/outbound/source_registry.rs` | `scheduled_message`를 LoopbackInternal source로 등록 |
+| `src/services/message_outbox/source_registry.rs` | `scheduled_message`를 LoopbackInternal source로 등록 |
 
 구현 노트 (설계와의 차이):
 - agent 모드 실행은 `RoutineAgentExecutor::start_agent_run` 직접 호출 대신 그 아래

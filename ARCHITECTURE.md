@@ -2225,7 +2225,6 @@ src/
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
-│   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_observation_tests.rs
 │   │   │   └── turn_output_controller.rs
@@ -4158,7 +4157,8 @@ src/
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
 │   │   ├── routine_incident.rs
-│   │   └── session_notice.rs
+│   │   ├── session_notice.rs
+│   │   └── source_registry.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs

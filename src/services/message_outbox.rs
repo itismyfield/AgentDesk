@@ -12,6 +12,7 @@ mod plain;
 pub(crate) mod routine_incident;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
 mod session_notice;
+pub(crate) mod source_registry;
 pub(crate) use attachments::{OutboxAttachment, StoredOutboxAttachment, decode_claimed_attachment};
 pub(crate) use session_notice::enqueue_session_notice_pg_on_tx;
 
@@ -56,9 +57,9 @@ pub(crate) fn fold_outbox_outcome_to_legacy_id(outcome: OutboxEnqueueOutcome) ->
 }
 
 pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
-    crate::services::discord::outbound::source_registry::validate_send_source_for(
+    source_registry::validate_send_source_for(
         source,
-        crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
+        source_registry::SendCallerClass::LoopbackInternal,
     )
     .map_err(|_| OutboxEnqueueError::SourceNotAllowed {
         source: source.to_string(),

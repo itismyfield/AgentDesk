@@ -436,7 +436,7 @@ mod retirement_tests {
         assert!(resolve_role_binding(channel, None).is_none());
         assert!(resolve_workspace(channel, None).is_none());
         assert!(list_registered_channel_bindings().is_empty());
-        assert!(!super::super::content::is_known_agent("legacy-agent"));
+        assert!(!crate::services::message_outbox::source_registry::is_known_agent("legacy-agent"));
         assert!(super::super::content::load_shared_prompt_for_profile("claude").is_none());
 
         let org = crate::runtime_layout::org_schema_path(root.path());
