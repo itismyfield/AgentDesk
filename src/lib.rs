@@ -310,7 +310,7 @@ mod krx_tui_o_tests;
 mod krx_tui_o_unix_tests;
 #[cfg(test)]
 use crate::config::test_env::panic_probe as test_env_panic_probe;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use adk_test_support::test_support;
 
 /// Managed writer lifetime contracts; hosting and ownership admission remain internal.

@@ -165,6 +165,7 @@ pub(super) fn options_match(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn config_base_is_representable(parsed_base: &ParsedFixtureUrl) -> Result<(), String> {
     if parsed_base.options.get_socket().is_some() {
         return Err("Config fixture base uses a Unix socket".to_string());
