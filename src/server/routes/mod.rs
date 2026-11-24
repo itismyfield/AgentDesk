@@ -18,6 +18,7 @@ pub mod campaigns;
 pub mod claude_accounts_api;
 pub mod cluster;
 pub mod cron_api;
+mod decisions;
 #[cfg(test)]
 mod decisions_tests;
 pub mod departments;

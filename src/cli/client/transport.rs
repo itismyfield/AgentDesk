@@ -101,6 +101,17 @@ pub(crate) fn post_local(
     body: &Value,
     read_timeout: std::time::Duration,
 ) -> Result<(u16, Value), LocalPostError> {
+    post_local_with(base, path, body, read_timeout, None)
+}
+
+/// `post_local` with one extra request header, for a secret that must stay on this host.
+pub(crate) fn post_local_with(
+    base: &str,
+    path: &str,
+    body: &Value,
+    read_timeout: std::time::Duration,
+    header: Option<(&str, &str)>,
+) -> Result<(u16, Value), LocalPostError> {
     config::test_instance::environment::validate_api_target(base)
         .map_err(LocalPostError::Transport)?;
     let url = format!("{base}{path}");
@@ -116,6 +127,9 @@ pub(crate) fn post_local(
     let mut request = agent.post(&url).set("Content-Type", "application/json");
     if let Some(token) = auth_token().filter(|token| !token.is_empty()) {
         request = request.set("Authorization", &format!("Bearer {token}"));
+    }
+    if let Some((name, value)) = header {
+        request = request.set(name, value);
     }
     let response = match request.send_string(&body.to_string()) {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,

@@ -227,6 +227,12 @@ pub(in crate::services::discord) async fn handle_event(
                 // Check if this arrival is from a thread context
                 let thread_parent = resolve_thread_parent(&ctx.http, new_message.channel_id).await;
                 let is_thread_context = thread_parent.is_some();
+                // A message under a Decision forum is not agent intake's, before any dedup.
+                let (pool, forum) = (data.shared.pg_pool.as_ref(), thread_parent.as_ref());
+                let forum = forum.map(|(parent, _)| *parent);
+                if super::super::decisions::ingress::consumes(ctx, pool, new_message, forum).await {
+                    return Ok(());
+                }
                 // The best-effort parent only picks the checked read that records an O thread.
                 if let Some((parent, _)) = &thread_parent {
                     let channel = new_message.channel_id.get();
