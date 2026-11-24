@@ -36,7 +36,8 @@ def production_code(text):
     code = '\n'.join(strip_line(line, state).ljust(len(line)) for line in marked.split('\n'))
     blanked = list(code)
     for match in CFG.finditer(code):
-        if match[1] is not None and not cfg_requires_test(match[1]):
+        # The predicate comes from the source: blanking empties the feature name the test-support alias needs.
+        if match[1] is not None and not cfg_requires_test(text[match.start(1):match.end(1)]):
             continue
         end = cfg_item_end(code, match.end(), scan_balanced)
         blanked[match.start():end] = ['\n' if c == '\n' else ' ' for c in code[match.start():end]]

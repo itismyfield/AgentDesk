@@ -134,6 +134,8 @@ class SourceTreeStabilityTests(unittest.TestCase):
             pub(crate) async fn helper() { env_flag("ADK_TEST_HELPER", false); }
             #[cfg(test)] const NAME: &str = "ADK_TEST_CONST";
             #[cfg(test)] static VALUE: &str = "ADK_TEST_STATIC";
+            #[cfg(any(test, feature = "test-support"))]
+            fn fixture() { env_flag("ADK_TEST_SUPPORT", false); }
             #[cfg(not(test))]
             fn prod() { env_flag("AGENTDESK_ITEM_PROD", false); }
             #[cfg(any(test, unix))]
@@ -145,7 +147,7 @@ class SourceTreeStabilityTests(unittest.TestCase):
         self.assertIn("AGENTDESK_ITEM_PROD", output)
         self.assertIn("AGENTDESK_ITEM_SHARED", output)
         self.assertIn("AGENTDESK_AFTER_FIELD", output)
-        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC"):
+        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC", "ADK_TEST_SUPPORT"):
             self.assertNotIn(name, output)
 
     def test_named_helper_argument_records_the_reader_file(self) -> None:

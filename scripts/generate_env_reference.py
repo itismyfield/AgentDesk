@@ -162,7 +162,8 @@ def blank_test_modules(text: str) -> str:
     for match in _CFG_ITEM_RE.finditer(code):
         if match.start() < cursor:
             continue
-        if not cfg_requires_test(match.group("predicate")):
+        # The predicate comes from the source: blanking empties the feature name the test-support alias needs.
+        if not cfg_requires_test(text[match.start("predicate"):match.end("predicate")]):
             continue
         try:
             index = cfg_item_end(code, match.end(), scan_balanced)
