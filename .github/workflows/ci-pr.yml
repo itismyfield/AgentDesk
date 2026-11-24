@@ -1161,7 +1161,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py c19a273c124eb7869a0e5dc489b99379974b9632d35224ccb613a6af00f78d6f
-          pin scripts/check-ci-runner-hardening.sh 6720be128f71b5ab58ff4099cc8671e98a99eac961f4142f24b0fe0fe33e9c00
+          pin scripts/check-ci-runner-hardening.sh 363f3ec3b2e5f4c177865cad23a59e1344ecb3168a5e05015dd741fc7f97e7fe
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1819,7 +1819,7 @@ jobs:
       RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
       RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "7"
       # A lost runner skips the always() upload, so the sampler uploads copies at these build-step minutes.
-      RUNNER_MEMORY_EXPORT_MINUTES: "15 45 55"
+      RUNNER_MEMORY_EXPORT_MINUTES: "15 30 45 50 55 58 60"
       RUNNER_MEMORY_EXPORT_NAME: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
     strategy:
       fail-fast: false
