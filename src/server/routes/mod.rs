@@ -18,6 +18,8 @@ pub mod campaigns;
 pub mod claude_accounts_api;
 pub mod cluster;
 pub mod cron_api;
+#[cfg(test)]
+mod decisions_tests;
 pub mod departments;
 pub mod discord;
 pub mod dispatched_sessions;
