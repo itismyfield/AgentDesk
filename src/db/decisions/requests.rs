@@ -105,7 +105,7 @@ pub(crate) async fn create_once(
     Ok(Stored::Created(request_id))
 }
 
-/// A stored request as a read may show it: no capability and no hash of one.
+/// A stored request as its requester may read it: no capability and no hash of one.
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct RequestRow {
     pub request_id: Uuid,
@@ -120,9 +120,12 @@ pub(crate) struct RequestRow {
     pub options: Vec<OptionRow>,
 }
 
-pub(crate) async fn load(
+/// The request only when `capability_sha256` is the hash it was asked under; a request of
+/// another requester reads exactly like one that does not exist.
+pub(crate) async fn load_owned(
     pool: &PgPool,
     request_id: Uuid,
+    capability_sha256: &str,
 ) -> Result<Option<RequestRow>, sqlx::Error> {
     type Head = (
         String,
@@ -136,9 +139,10 @@ pub(crate) async fn load(
     let head: Option<Head> = sqlx::query_as(
         "SELECT requester_agent_id, logical_channel_id, target_channel_id, request_ref, title,
                 context, created_at
-         FROM decision_requests WHERE request_id = $1",
+         FROM decision_requests WHERE request_id = $1 AND capability_sha256 = $2",
     )
     .bind(request_id)
+    .bind(capability_sha256)
     .fetch_optional(pool)
     .await?;
     let Some((agent_id, logical_channel_id, target_channel_id, request_ref, title, context, at)) =

@@ -49,7 +49,41 @@ impl Scope {
 /// The capability of `scope`: the cached one when this ask was prepared before, otherwise a new
 /// one that is on disk, readable by this user only, before it is returned.
 pub(super) fn prepare(root: &Path, scope: &Scope) -> Result<String, String> {
-    let path = scope.path(root);
+    let fresh = hex::encode(rand::random::<[u8; 32]>());
+    install(&scope.path(root), &fresh)
+}
+
+fn by_request(root: &Path, request_id: uuid::Uuid) -> PathBuf {
+    let name = format!("{request_id}.cap");
+    root.join("decision-owner").join("requests").join(name)
+}
+
+/// Links the request the server answered to the capability it was asked under.
+pub(super) fn remember(
+    root: &Path,
+    request_id: uuid::Uuid,
+    capability: &str,
+) -> Result<(), String> {
+    install(&by_request(root, request_id), capability).map(drop)
+}
+
+/// The capability this host asked `request_id` under; without one the request is not ours.
+pub(super) fn of_request(root: &Path, request_id: uuid::Uuid) -> Result<String, String> {
+    let unknown = |_| "decision get: this host did not ask that request".to_string();
+    let saved = std::fs::read_to_string(by_request(root, request_id)).map_err(unknown)?;
+    checked(saved.trim())
+}
+
+fn checked(saved: &str) -> Result<String, String> {
+    match well_formed(saved) {
+        true => Ok(saved.to_string()),
+        false => Err("decision owner cache: the cached file is not a capability".into()),
+    }
+}
+
+/// Puts `capability` at `path` in a private directory unless a file is already there, and
+/// answers the capability the file holds.
+fn install(path: &Path, capability: &str) -> Result<String, String> {
     let failed =
         |what: &str, error: std::io::Error| format!("decision owner cache: {what}: {error}");
     let dir = path.parent().ok_or("decision owner cache: no directory")?;
@@ -57,26 +91,21 @@ pub(super) fn prepare(root: &Path, scope: &Scope) -> Result<String, String> {
     for private_dir in [dir.parent().unwrap_or(dir), dir] {
         private(private_dir, 0o700).map_err(|error| failed("protect", error))?;
     }
-    let fresh = hex::encode(rand::random::<[u8; 32]>());
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(&path) {
+    match options.open(path) {
         Ok(mut file) => {
             let written = file
-                .write_all(fresh.as_bytes())
+                .write_all(capability.as_bytes())
                 .and_then(|()| file.sync_all());
             written.map_err(|error| failed("write", error))?;
-            Ok(fresh)
+            Ok(capability.to_string())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let saved = std::fs::read_to_string(&path).map_err(|error| failed("read", error))?;
-            let saved = saved.trim();
-            match well_formed(saved) {
-                true => Ok(saved.to_string()),
-                false => Err("decision owner cache: the cached file is not a capability".into()),
-            }
+            let saved = std::fs::read_to_string(path).map_err(|error| failed("read", error))?;
+            checked(saved.trim())
         }
         Err(error) => Err(failed("create", error)),
     }

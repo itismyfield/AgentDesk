@@ -86,7 +86,7 @@
 | `POST` | `/api/cluster/test-phase-runs/upsert` | `cluster::upsert_test_phase_run` | `src/server/routes/cluster.rs:365` | `src/server/routes/domains/ops.rs:68` |
 | `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:156` | `src/server/routes/domains/ops.rs:157` |
 | `POST` | `/api/decisions` | `decisions::ask` | `src/server/routes/decisions.rs:24` | `src/server/routes/domains/runtime.rs:146` |
-| `GET` | `/api/decisions/{id}` | `decisions::show` | `src/server/routes/decisions.rs:65` | `src/server/routes/domains/runtime.rs:147` |
+| `GET` | `/api/decisions/{id}` | `decisions::show` | `src/server/routes/decisions.rs:66` | `src/server/routes/domains/runtime.rs:147` |
 | `GET` | `/api/departments` | `departments::list_departments` | `src/server/routes/departments.rs:61` | `src/server/routes/domains/admin.rs:89` |
 | `POST` | `/api/departments` | `departments::create_department` | `src/server/routes/departments.rs:70` | `src/server/routes/domains/admin.rs:89` |
 | `PATCH` | `/api/departments/reorder` | `departments::reorder_departments` | `src/server/routes/departments.rs:166` | `src/server/routes/domains/admin.rs:93` |

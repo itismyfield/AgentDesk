@@ -58,7 +58,7 @@
 
 ### 5. API·CLI·requester capability
 
-- `POST /api/decisions`, `GET /api/decisions/{id}`는 기존 HumanInputCaller 인증을 쓴다. body는 agent_id, target.channel_id, provider_hint, ref/idempotency_key, title/context, options 2~5개, recommendation이다. category·forum·operator·선택 결과는 body가 정하지 못한다.
+- `POST /api/decisions`, `GET /api/decisions/{id}`는 기존 HumanInputCaller 인증을 쓴다. GET은 그 요청을 물은 cap도 요구한다: cap이 없거나 다른 requester의 것이면 403이고 요청 본문을 돌려주지 않는다(없는 id도 같은 403). CLI `get`은 사설 cache에서 그 요청의 cap을 찾아 자동으로 붙인다. body는 agent_id, target.channel_id, provider_hint, ref/idempotency_key, title/context, options 2~5개, recommendation이다. category·forum·operator·선택 결과는 body가 정하지 못한다.
 - ask CLI는 요청 전에 256-bit requester capability를 만들어 현재 agent/logical channel 사설 cache(디렉터리 0700, 파일 0600)에 저장하고 `X-AgentDesk-Decision-Owner` 헤더로 보낸다. 서버는 hash와 scope만 저장한다. 같은 idempotency key는 같은 cap hash를 요구한다. GET·표시·오류·기본 출력·로그에는 cap을 내보내지 않는다.
 - `POST /api/decisions/{id}/reply`({text, idempotency_key}), `POST /api/decisions/{id}/close`({conclusion, idempotency_key})는 HumanInputCaller와 그 요청의 cap이 모두 필요하다. 다른 agent·다른 요청의 cap이나 cap 없음은 403이고 게시·수명 변경은 0이다.
 - CLI: `agentdesk decision ask --json-file <path|->`, `get <id>`, `reply <ref> "<답>" [--request-id]`, `close <ref> "<결론>" [--request-id]`. ref는 현재 requester scope에서만 해석하고 모호하면 `ambiguous_ref`다.

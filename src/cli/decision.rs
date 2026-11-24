@@ -31,27 +31,37 @@ pub(crate) enum DecisionCommand {
 }
 
 pub(crate) fn run(args: DecisionArgs) -> Result<(), String> {
+    let root = crate::config::runtime_root().ok_or("decision: no runtime root")?;
+    let (base, read) = (super::client::api_base(), super::client::LOCAL_POST_READ);
+    let unanswered = |error| format!("decision: no answer from {base}: {error:?}");
     match args.command {
         DecisionCommand::Ask { json_file } => {
             let body = read_body(&json_file)?;
-            let root = crate::config::runtime_root().ok_or("decision ask: no runtime root")?;
-            let base = super::client::api_base();
+            let mut presented = None;
             let (status, reply) = ask(&root, &body, |capability| {
-                let (read, owner) = (super::client::LOCAL_POST_READ, Some((HEADER, capability)));
+                presented = Some(capability.to_string());
+                let owner = Some((HEADER, capability));
                 super::client::post_local_with(&base, "/api/decisions", &body, read, owner)
-                    .map_err(|error| format!("decision ask: no answer from {base}: {error:?}"))
+                    .map_err(unanswered)
             })?;
             print(&reply);
-            match status {
-                202 => Ok(()),
-                status => Err(format!("decision ask: HTTP {status}")),
+            if status != 202 {
+                return Err(format!("decision ask: HTTP {status}"));
             }
+            remember(&root, &reply, presented.as_deref())
         }
         DecisionCommand::Get { id } => {
             let id = uuid::Uuid::parse_str(id.trim())
                 .map_err(|_| "decision get: the id is not a request id".to_string())?;
-            print(&super::client::get_json(&format!("/api/decisions/{id}"))?);
-            Ok(())
+            let (status, reply) = get(&root, id, |path, capability| {
+                super::client::get_local_with(&base, path, read, (HEADER, capability))
+                    .map_err(unanswered)
+            })?;
+            print(&reply);
+            match status {
+                200 => Ok(()),
+                status => Err(format!("decision get: HTTP {status}")),
+            }
         }
     }
 }
@@ -66,6 +76,26 @@ fn ask<T>(
     let scope = owner_cache::Scope::of(body)?;
     let capability = owner_cache::prepare(root, &scope)?;
     send(&capability)
+}
+
+/// Links the request an ask's answer names to the capability it was asked under.
+fn remember(root: &std::path::Path, reply: &Value, capability: Option<&str>) -> Result<(), String> {
+    let id = reply["request_id"].as_str().map(uuid::Uuid::parse_str);
+    match (id, capability) {
+        (Some(Ok(id)), Some(capability)) => owner_cache::remember(root, id, capability),
+        _ => Err("decision ask: the answer names no request".into()),
+    }
+}
+
+/// Reads a request this host asked: its capability comes from the private cache and goes in the
+/// request header, never on the command line or in the output.
+fn get<T>(
+    root: &std::path::Path,
+    id: uuid::Uuid,
+    send: impl FnOnce(&str, &str) -> Result<T, String>,
+) -> Result<T, String> {
+    let capability = owner_cache::of_request(root, id)?;
+    send(&format!("/api/decisions/{id}"), &capability)
 }
 
 fn read_body(path: &str) -> Result<Value, String> {

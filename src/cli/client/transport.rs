@@ -112,6 +112,27 @@ pub(crate) fn post_local_with(
     read_timeout: std::time::Duration,
     header: Option<(&str, &str)>,
 ) -> Result<(u16, Value), LocalPostError> {
+    local_request(base, path, Some(body), read_timeout, header)
+}
+
+/// A GET under the same loopback-only rules, carrying one request header.
+pub(crate) fn get_local_with(
+    base: &str,
+    path: &str,
+    read_timeout: std::time::Duration,
+    header: (&str, &str),
+) -> Result<(u16, Value), LocalPostError> {
+    local_request(base, path, None, read_timeout, Some(header))
+}
+
+/// One loopback-only request: a POST of `body`, or a GET without one.
+fn local_request(
+    base: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: std::time::Duration,
+    header: Option<(&str, &str)>,
+) -> Result<(u16, Value), LocalPostError> {
     config::test_instance::environment::validate_api_target(base)
         .map_err(LocalPostError::Transport)?;
     let url = format!("{base}{path}");
@@ -124,14 +145,21 @@ pub(crate) fn post_local_with(
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(read_timeout)
         .build();
-    let mut request = agent.post(&url).set("Content-Type", "application/json");
+    let mut request = match body {
+        Some(_) => agent.post(&url).set("Content-Type", "application/json"),
+        None => agent.get(&url),
+    };
     if let Some(token) = auth_token().filter(|token| !token.is_empty()) {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
     if let Some((name, value)) = header {
         request = request.set(name, value);
     }
-    let response = match request.send_string(&body.to_string()) {
+    let sent = match body {
+        Some(body) => request.send_string(&body.to_string()),
+        None => request.call(),
+    };
+    let response = match sent {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(ureq::Error::Transport(error)) => {
             let hint = format!("Request failed: {error}");

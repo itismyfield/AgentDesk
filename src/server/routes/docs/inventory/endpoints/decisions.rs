@@ -49,12 +49,23 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/decisions/{id}",
             "agents",
-            "Read a stored Decision request: its agent, channels, ref, title, context and options, with publication=pending while nothing is posted. The requester capability and its hash are never returned. 404 decision_not_found, 400 invalid_request_id, 503 decision_store_unavailable. Only a non-browser process on this host or a holder of the server auth_token as Bearer may call it.",
+            "Read a stored Decision request as its requester: its agent, channels, ref, title, context and options, with publication=pending while nothing is posted. The caller must present the capability the request was asked under; without it, with another requester's, or for an id nobody asked, the answer is 403 not_request_owner and carries nothing of the request. The capability and its hash are never returned. 400 invalid_request_id, 503 decision_store_unavailable. Only a non-browser process on this host or a holder of the server auth_token as Bearer may call it.",
         )
-        .with_params([("id", path_param("Request id (UUID) the ask answered"))])
+        .with_params([
+            ("id", path_param("Request id (UUID) the ask answered")),
+            (
+                "X-AgentDesk-Decision-Owner",
+                header_param("string", true, "The capability this request was asked under"),
+            ),
+        ])
         .with_example(
-            json!({"path": {"id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}}),
+            json!({"path": {"id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}, "header": {"X-AgentDesk-Decision-Owner": "<64 hex>"}}),
             json!({"ok": true, "request_id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e", "agent_id": "family-counsel", "logical_channel_id": "1473922824350601297", "target_channel_id": "1473922824350601297", "ref": "deploy-window", "title": "오늘 배포할까요?", "context": "검증은 끝났고 트래픽이 낮습니다.", "created_at": "2026-11-25T04:00:00Z", "options": [{"label": "진행", "key": null, "detail": "지금 배포", "recommendation_percent": 70}, {"label": "보류", "key": null, "detail": "내일 오전", "recommendation_percent": 30}], "publication": "pending"}),
+        )
+        .with_error_example(
+            403,
+            json!({"path": {"id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}}),
+            json!({"ok": false, "error": "not_request_owner"}),
         ),
     ]
 }

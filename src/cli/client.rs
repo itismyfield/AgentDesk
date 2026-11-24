@@ -7,7 +7,7 @@ mod transport;
 pub(crate) use transport::get_json_at;
 pub(crate) use transport::post_json_local_at;
 use transport::request_json;
-pub(crate) use transport::{LOCAL_POST_READ, post_local_with};
+pub(crate) use transport::{LOCAL_POST_READ, get_local_with, post_local_with};
 #[cfg(test)]
 pub(crate) use transport::{LocalPostError, post_local};
 mod runtime_config;

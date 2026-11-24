@@ -85,3 +85,27 @@ fn decision_ask_caches_its_capability_before_it_sends() {
         "no capability without a scope"
     );
 }
+
+/// A read presents the capability its request was asked under, taken from the private cache; a
+/// request this host never asked is not sent at all.
+#[test]
+fn decision_get_presents_the_capability_its_request_was_asked_under() {
+    let root = tempfile::tempdir().unwrap();
+    let body = json!({"agent_id": "asker", "target": {"channel_id": "7"}, "ref": "r1"});
+    let asked = ask(root.path(), &body, |capability| Ok(capability.to_string())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    remember(root.path(), &json!({"request_id": id}), Some(&asked)).unwrap();
+    let sent = get(root.path(), id, |path, capability| {
+        Ok((path.to_string(), capability.to_string()))
+    });
+    assert_eq!(
+        sent.unwrap(),
+        (format!("/api/decisions/{id}"), asked.clone())
+    );
+    let stranger = get(root.path(), uuid::Uuid::new_v4(), |_, _| Ok(()));
+    assert!(
+        stranger.is_err(),
+        "a request this host did not ask is not read"
+    );
+    assert!(remember(root.path(), &json!({"ok": false}), Some(&asked)).is_err());
+}

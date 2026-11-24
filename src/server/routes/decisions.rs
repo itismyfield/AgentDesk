@@ -1,5 +1,5 @@
 //! `POST /api/decisions` stores an agent's Decision request under the hash of its requester's
-//! capability; `GET /api/decisions/{id}` reads it back. Nothing is posted to Discord yet.
+//! capability; `GET /api/decisions/{id}` reads it back to that requester only. Nothing is posted.
 
 use axum::{
     Json,
@@ -61,10 +61,12 @@ pub async fn ask(
     }
 }
 
-/// The stored question and options; the capability and its hash are never part of a read.
+/// The stored question and options, for the capability that asked them. No capability, another
+/// requester's and an unknown id answer alike, and no capability or hash is part of a read.
 pub async fn show(
     _caller: HumanInputCaller,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> RouteResponse {
     let Some(pool) = state.pg_pool_ref() else {
@@ -73,14 +75,18 @@ pub async fn show(
     let Ok(id) = uuid::Uuid::parse_str(id.trim()) else {
         return failure(StatusCode::BAD_REQUEST, "invalid_request_id");
     };
-    match crate::db::decisions::requests::load(pool, id).await {
+    let presented = headers.get(requester::HEADER).and_then(|v| v.to_str().ok());
+    let Some(capability) = presented.and_then(requester::hash) else {
+        return failure(StatusCode::FORBIDDEN, "not_request_owner");
+    };
+    match crate::db::decisions::requests::load_owned(pool, id, &capability).await {
         Ok(Some(request)) => {
             let mut body = json!(request);
             body["ok"] = true.into();
             body["publication"] = "pending".into();
             (StatusCode::OK, Json(body))
         }
-        Ok(None) => failure(StatusCode::NOT_FOUND, "decision_not_found"),
+        Ok(None) => failure(StatusCode::FORBIDDEN, "not_request_owner"),
         Err(error) => {
             tracing::warn!(%error, "decision read failed");
             failure(
