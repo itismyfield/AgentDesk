@@ -448,6 +448,18 @@ async fn decision_failure_discards_its_original_and_keeps_other_inputs_pg() {
         "no resend notice for a decision input"
     );
     assert_eq!(rig.queued_ids().await, [0u64; 0]);
+    // Its kept original left the owner, body included, and stays gone after a restart; the other
+    // user's unconfirmed original is still kept.
+    for owner in [rig.mailbox.clone(), Rig::adopt(&rig.file).await] {
+        assert_eq!(drain(&rig.pool, &owner, "claude", CHANNEL).await, Ok(0));
+        let queue = owner.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let queue = queue.await.unwrap();
+        let kept: Vec<u64> = (queue["retained_inputs"].as_array().unwrap().iter())
+            .map(|entry| entry["input"]["original"]["message_id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(kept, [other], "only the decision original left: {queue}");
+        assert!(!queue.to_string().contains(TEXT), "{queue}");
+    }
     // The crash window: the fence is written and the process dies before the removal.
     let fenced = rig.event("normal_wait", true).await;
     assert!(
