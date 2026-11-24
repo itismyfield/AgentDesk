@@ -15,6 +15,8 @@ use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, ChannelMailboxRegistry, DecisionHeld as Held,
 };
 
+pub(crate) mod queued;
+
 /// Whether a request body claims the Decision source, in its source or its input metadata.
 pub(crate) fn self_declared(source: Option<&str>, metadata: Option<&serde_json::Value>) -> bool {
     let named = |value: &str| value.trim().eq_ignore_ascii_case(SOURCE);

@@ -5,6 +5,7 @@ use super::{
     finish_admitted_local,
 };
 use crate::services::discord::Intervention;
+use crate::services::discord::decision_drain::queued as decision_queue;
 use crate::services::imsg_reply::agy_input::{self, ClaimedInput};
 use crate::services::provider::ProviderKind;
 
@@ -19,6 +20,8 @@ pub(crate) enum QueuedAdmissionDisposition {
     RejectedRestore,
     /// Every source already started under a held request; that request keeps the original.
     ConsumedToHold,
+    /// A Decision original whose event is closed or never approved it: dropped unrun.
+    ClosedDecision,
 }
 
 pub(crate) struct AdmittedQueuedIntake {
@@ -26,6 +29,8 @@ pub(crate) struct AdmittedQueuedIntake {
     local_permit: Option<LocalAdmissionPermit>,
     restore_owner: Option<QueuedRestoreOwner>,
     agy_input: Option<ClaimedInput>,
+    /// The Decision event this start is journaled under, when the original is one.
+    decision: Option<uuid::Uuid>,
 }
 #[cfg(test)]
 impl AdmittedQueuedIntake {
@@ -98,13 +103,29 @@ pub(crate) async fn admit_queued_intake(
 ) -> QueuedAdmissionDisposition {
     let owner = (request_owner, request_owner_name);
     let flags = (defer_watcher_resume, wait_for_completion);
+    // A Decision original runs once, as PG approved it and while its event is open; the journal
+    // is taken here, before any node can start it, and every return to the queue gives it back.
+    let pool = deps.shared.pg_pool.as_ref();
+    let decision = decision_queue::begin(pool, channel_id.get(), intervention).await;
+    if decision == decision_queue::Dequeued::Closed {
+        let abandon = super::super::super::mailbox_abandon_pending_dispatch;
+        let _ = abandon(deps.shared, &provider, channel_id, intervention.message_id).await;
+        return QueuedAdmissionDisposition::ClosedDecision;
+    }
+    let journaled = match decision {
+        decision_queue::Dequeued::Journaled(event) => Some(event),
+        _ => None,
+    };
     let submission = queued_submission(provider, channel_id, intervention, owner, flags);
-    let agy = queued_agy_input(deps, &submission, intervention).await;
+    let agy = match decision {
+        decision_queue::Dequeued::Unread => Err("decision event unread".to_string()),
+        _ => queued_agy_input(deps, &submission, intervention).await,
+    };
     let admission = match &agy {
         Ok(_) => admit_text_intake(deps, &submission).await,
         Err(reason) => {
             tracing::warn!(channel_id = channel_id.get(), user_msg_id = intervention.message_id.get(), %reason,
-                "agy iMessage queue custody held");
+                "queued input custody held");
             IntakeAdmission::ReplayDeferred(
                 super::replay_admission::ReplayDefer::UnknownDisposition,
             )
@@ -114,6 +135,7 @@ pub(crate) async fn admit_queued_intake(
     let local_permit = match admission {
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
+            decision_queue::end(pool, journaled, decision_queue::Ended::WaitsAgain).await;
             let Some(dispatch_lease) = dispatch_lease else {
                 return QueuedAdmissionDisposition::RejectedRestore;
             };
@@ -176,6 +198,7 @@ pub(crate) async fn admit_queued_intake(
         | IntakeAdmission::DeferredTurnMode(_)
         | IntakeAdmission::ReplayDeferred(_)
         | IntakeAdmission::Blocked { .. } => {
+            decision_queue::end(pool, journaled, decision_queue::Ended::WaitsAgain).await;
             let Some(dispatch_lease) = dispatch_lease else {
                 tracing::error!(
                     provider = submission.provider.as_str(),
@@ -226,6 +249,7 @@ pub(crate) async fn admit_queued_intake(
                 channel_id = channel_id.get(),
                 "local queued intake is missing its dispatch lease"
             );
+            decision_queue::end(pool, journaled, decision_queue::Ended::WaitsAgain).await;
             return QueuedAdmissionDisposition::RejectedRestore;
         };
         Some(QueuedRestoreOwner {
@@ -242,6 +266,7 @@ pub(crate) async fn admit_queued_intake(
         local_permit,
         restore_owner,
         agy_input: agy.ok().flatten(),
+        decision: journaled,
     })
 }
 
@@ -389,7 +414,26 @@ fn queued_submission(
     }
 }
 
+/// Finishes an admitted queue start. A Decision start then records what it proved: a return to
+/// the queue waits again, a clear fails it, and an error after its journal closes it unknown.
 pub(crate) async fn finish_admitted_queued_intake(
+    deps: &super::super::message_handler::IntakeDeps<'_>,
+    admitted: AdmittedQueuedIntake,
+) -> Result<super::super::IntakeExecution, super::super::super::Error> {
+    use super::super::IntakeExecution::{ConsumedProtected, Deferred, Executed};
+    let decision = admitted.decision;
+    let result = finish_admitted(deps, admitted).await;
+    let ended = match &result {
+        Ok(Executed) => decision_queue::Ended::Started,
+        Ok(Deferred) => decision_queue::Ended::WaitsAgain,
+        Ok(ConsumedProtected) => decision_queue::Ended::Cleared,
+        Err(_) => decision_queue::Ended::Unknown,
+    };
+    decision_queue::end(deps.shared.pg_pool.as_ref(), decision, ended).await;
+    result
+}
+
+async fn finish_admitted(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
