@@ -53,20 +53,20 @@ RED configuration rather than describing the fixed production path.
 Paths below are relative to `src/services/`. Raw `git grep` output is retained in
 `/home/adk/adk/lane-runs/i8091/logs/entrypoints-3.txt`. Calls inside test modules
 are omitted: `foreign_row.rs:90`, `catch_up.rs:631`, `queue_effects.rs:320` and
-`discord/mod.rs:2251` begin relevant test modules.
+`discord/mod.rs:848` begin relevant test modules.
 
 | Production code coordinate | Model action / role |
 |---|---|
 | `discord/catch_up/phase1_sweep.rs:689`, `phase2_sweep.rs:458` | Replay through the catch-up API. |
 | `discord/catch_up/api.rs:95` | Replay with the classifying snapshot's claim observation. |
 | `discord/health/turn_deliver.rs:373` | Ordinary receipt through the shared adapter. |
-| `discord/mod.rs:2049` | Replay of the same original id for internal history recovery. |
+| `discord/queue_exit.rs:308` | Replay of the same original id for internal history recovery. |
 | `discord/router/intake_dispatch.rs:930` | Deferred live input, including absorbed sources; refusal leaves checkpoint unread. |
 | `discord/router/intake_gate/queue_effects.rs:121` | Replay of a soft intake input. |
 | `discord/router/message_handler/intake_turn/race_loss.rs:51,62` | Ordinary receipt; refusal no longer abandons the pending owner. |
 | `discord/router/message_handler/intake_turn.rs:1081` | A legacy queued claim loser hands uploads to its existing restore owner. |
 | `discord/router/intake_dispatch/queued.rs:361`, `queued/race_loss.rs:30` | Authorized owner return; reuse original and lease, then existing race-loss wake. |
-| `discord/mod.rs:1613`, `queue_io/turn_admission.rs:312` | Shared adapters preserving the refusal reason. |
+| `discord/mailbox_ops.rs:224`, `queue_io/turn_admission.rs:312` | Shared adapters preserving the refusal reason. |
 | `turn_orchestrator/registry_purge.rs:260,270` | Enqueue through resolved actor; retry only a closed actor. |
 | `turn_orchestrator/claim_observation.rs:214` | Send the actor Enqueue command. |
 | `turn_orchestrator.rs:2093,2100`, `claim_observation.rs:176` | Replay guard before hydrate; refuse a reserved primary or absorbed id. |

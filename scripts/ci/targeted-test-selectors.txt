@@ -66,7 +66,7 @@ services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::
 services::tui_o::writer::binding::terminal_tests::
 services::tui_o::writer::adoption::terminal_tests::
-services::tui_o::writer::source_read_tests::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost
+services::discord::krx_tui_o_test_host::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost
 services::tui_o::writer::tests::actor::host_start::first_init::
 services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation
 services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
@@ -116,4 +116,4 @@ engine::sql_guard::tests::
 
 [Fast targeted tests: Phase gate owner]
 engine::ops::phase_gate_owner_tests::
-db::auto_queue::phase_gate_verdict::tests::
+services::krx_db_b_tests::auto_queue_phase_gate_verdict_tests::

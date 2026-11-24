@@ -109,7 +109,7 @@ pub struct NoticeState {
     pub reserved_ids: BTreeSet<u64>,
 }
 
-fn record_id(record: &SourceRange) -> RecordId {
+pub(crate) fn record_id(record: &SourceRange) -> RecordId {
     (record.source.clone(), record.start, record.end)
 }
 
@@ -188,7 +188,7 @@ impl NoticeEvidence {
         }
     }
 
-    fn complete(&self) -> bool {
+    pub(crate) fn complete(&self) -> bool {
         self.prompt.is_some()
             && self.prompt_sha256.is_some()
             && self.unit_key.is_some()
@@ -198,7 +198,7 @@ impl NoticeEvidence {
 }
 
 impl MigrationSnapshot {
-    fn contains(&self, record: &SourceRange) -> bool {
+    pub(crate) fn contains(&self, record: &SourceRange) -> bool {
         self.sources.iter().any(|source| {
             source.source == record.source
                 && source.lower <= record.start
@@ -212,7 +212,7 @@ impl MigrationSnapshot {
 }
 
 impl NoticeState {
-    pub(super) fn apply(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
+    pub(crate) fn apply(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
         match entry {
             NoticeEntry::Settled { record, settlement } => return self.settle(record, *settlement),
             NoticeEntry::MigrationStarted { snapshot } => {
@@ -346,6 +346,3 @@ impl NoticeState {
         Ok(None)
     }
 }
-
-#[cfg(test)]
-mod tests;

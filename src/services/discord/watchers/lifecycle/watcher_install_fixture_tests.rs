@@ -159,6 +159,7 @@ pub(in crate::services::discord) fn root() -> PathBuf {
 
 pub(in crate::services::discord) fn isolated(module: &str, name: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
+        crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
         return true;
     }
     use std::os::unix::fs::PermissionsExt;

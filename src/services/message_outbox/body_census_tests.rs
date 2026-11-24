@@ -6,7 +6,7 @@ use serde_json::json;
 /// transaction, so the enqueue must fail rather than commit a lost row.
 #[tokio::test]
 async fn failed_census_savepoint_fails_the_enqueue_instead_of_committing_a_lost_row_pg() {
-    let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+    let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
         "agentdesk_body_census_savepoint",
         "body census savepoint tests",
     )

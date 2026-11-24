@@ -1,15 +1,17 @@
-use super::*;
+use crate::config::test_instance::*;
+use serde_json::Value;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn child(test: &str) -> bool {
     if std::env::var_os(MARKER).is_some() {
         return true;
     }
-    let (_temporary, root) = super::tests::fixture();
-    let output = super::tests::command(&root)
+    let (_temporary, root) = crate::config::test_instance::tests::fixture();
+    let output = crate::config::test_instance::tests::command(&root)
         .args([
             "--exact",
             test.strip_prefix("agentdesk::").unwrap(),

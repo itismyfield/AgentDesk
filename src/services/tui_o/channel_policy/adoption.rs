@@ -356,7 +356,7 @@ impl Candidate {
     ) -> BodyClaimed {
         let (state, reason) = self.take(channel);
         let owned = state.owned();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !owned {
             crate::services::tui_o::writer::activation::test_hook::run(
                 channel,

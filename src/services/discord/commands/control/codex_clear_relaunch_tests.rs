@@ -158,6 +158,7 @@ impl CanaryFixture {
         process_mode: CodexSourceMode,
         host: Option<&str>,
     ) -> Self {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
         let host_env = Some(

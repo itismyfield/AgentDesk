@@ -1,4 +1,4 @@
-use super::super::environment_tests::claude_login_fixture;
+use super::super::login_test_support::claude_login_fixture;
 use super::super::tests as fixture;
 use super::super::*;
 use serde_json::json;
@@ -8,7 +8,7 @@ const CHILD: &str = "ADK_AGY_CELL_CHILD";
 
 /// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI
 /// that appends `ADK_CHILD <first arg>` and its env for every launch.
-pub(in crate::config::test_instance) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub(crate) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, root, home) = claude_login_fixture(false);
     let login = home.join(".adk/dev/agy-login");
     let cli = home.join("agy-bin/agy");

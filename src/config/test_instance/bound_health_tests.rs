@@ -1,4 +1,4 @@
-use super::{current, initialize, lifecycle};
+use crate::config::test_instance::{current, initialize, lifecycle};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::os::unix::fs::OpenOptionsExt;
@@ -41,15 +41,15 @@ fn b2a_native_bound_health_child() {
     let Some(mode) = std::env::var_os(MODE) else {
         let selector = concat!(module_path!(), "::b2a_native_bound_health_child");
         let selector = selector.strip_prefix("agentdesk::").unwrap_or(selector);
-        let (_temporary, root) = super::tests::fixture();
-        let output = super::tests::command(&root)
+        let (_temporary, root) = crate::config::test_instance::tests::fixture();
+        let output = crate::config::test_instance::tests::command(&root)
             .args(["--exact", selector, "--nocapture"])
             .env(MODE, "reject-unadmitted")
             .env_remove("AGENTDESK_TEST_LEASE")
             .env_remove("AGENTDESK_TEST_RUN")
             .output()
             .expect("isolated unadmitted native child");
-        super::tests::assert_single_test_passed(&output, selector);
+        crate::config::test_instance::tests::assert_single_test_passed(&output, selector);
         return;
     };
     if mode == "reject-unadmitted" {

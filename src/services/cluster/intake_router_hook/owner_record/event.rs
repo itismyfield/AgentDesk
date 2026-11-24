@@ -289,7 +289,3 @@ pub(crate) async fn record_sent(
     Ok(sqlx::query("UPDATE intake_session_owners SET routing_notice_delivery_state='sent',routing_notice_message_id=$3 WHERE routing_notice_outbox_id=$1 AND routing_notice->>'nonce'=$2 AND routing_notice_delivery_state='posting' AND btrim($3)<>''")
         .bind(outbox_id).bind(nonce).bind(message_id).execute(pool).await?.rows_affected() == 1)
 }
-
-#[cfg(test)]
-#[path = "event_tests.rs"]
-mod tests;

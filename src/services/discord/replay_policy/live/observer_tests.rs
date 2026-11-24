@@ -1,7 +1,10 @@
-use super::*;
 use crate::config::TestEnvVarGuard as Guard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
+use crate::db::replay_disposition::write::{
+    self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt,
+};
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::discord::replay_policy::live::*;
 use crate::services::provider::{CancelToken, ProviderKind};
 use serde_json::{Value, json};
 use std::sync::{Arc, mpsc};
@@ -342,7 +345,7 @@ async fn p2_ordinary_completion_defers_a_stale_error_pg() {
         );
     }
     assert!(
-        !super::super::ordinary_outcome(Some(&pool), &tok, &state).await,
+        !crate::services::discord::replay_policy::ordinary_outcome(Some(&pool), &tok, &state).await,
         "ordinary completion cannot classify a pending stale provider Error"
     );
     let stored: String =
@@ -352,14 +355,22 @@ async fn p2_ordinary_completion_defers_a_stale_error_pg() {
             .await
             .unwrap();
     assert_eq!(stored, "started_unclassified");
-    assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &state, true).await);
+    assert!(
+        !crate::services::discord::replay_policy::error_is_ordinary(
+            Some(&pool),
+            &tok,
+            &state,
+            true
+        )
+        .await
+    );
     assert!(matches!(
-        super::super::stale_resume(Some(&pool), &tok, &state).await,
-        super::super::StaleResume::Exact(_)
+        crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &state).await,
+        crate::services::discord::replay_policy::StaleResume::Exact(_)
     ));
     assert!(matches!(
-        super::super::stale_resume(Some(&pool), &tok, &state).await,
-        super::super::StaleResume::Hold
+        crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &state).await,
+        crate::services::discord::replay_policy::StaleResume::Hold
     ));
     pool.close().await;
     db.drop().await;
@@ -464,8 +475,9 @@ async fn p2_actual_output_and_tool_before_stale_never_get_retry_pg() {
             );
             let inflight = inflight(&live);
             assert!(matches!(
-                super::super::stale_resume(Some(&pool), &tok, &inflight).await,
-                super::super::StaleResume::Hold
+                crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &inflight)
+                    .await,
+                crate::services::discord::replay_policy::StaleResume::Hold
             ));
             let state: String =
                 sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1")
@@ -628,14 +640,14 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
             &["stdout_go", "exit_go", "stderr_go"],
             Arc::clone(&first),
         );
-        let super::super::StaleResume::Exact(permit) =
-            super::super::stale_resume(Some(&pool), &tok, &state).await
+        let crate::services::discord::replay_policy::StaleResume::Exact(permit) =
+            crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &state).await
         else {
             panic!("one exact startup retry required");
         };
         assert!(matches!(
-            super::super::stale_resume(Some(&pool), &tok, &state).await,
-            super::super::StaleResume::Hold
+            crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &state).await,
+            crate::services::discord::replay_policy::StaleResume::Hold
         ));
         let binding = json!({});
         let (attempt, _, _) = write::begin(
@@ -669,7 +681,14 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
             invoke("codex", host.dir.path().to_str().unwrap(), tx, token(&next)).unwrap();
             assert_eq!(case.starts().len(), 1);
             assert_eq!(counts(&rx.try_iter().collect::<Vec<_>>())["done"], 1);
-            assert!(super::super::ordinary_outcome(Some(&pool), &next_token, &next_state).await);
+            assert!(
+                crate::services::discord::replay_policy::ordinary_outcome(
+                    Some(&pool),
+                    &next_token,
+                    &next_state
+                )
+                .await
+            );
         } else {
             direct(
                 &host,
@@ -679,8 +698,13 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
                 Arc::clone(&next),
             );
             assert!(matches!(
-                super::super::stale_resume(Some(&pool), &next_token, &next_state).await,
-                super::super::StaleResume::Hold
+                crate::services::discord::replay_policy::stale_resume(
+                    Some(&pool),
+                    &next_token,
+                    &next_state
+                )
+                .await,
+                crate::services::discord::replay_policy::StaleResume::Hold
             ));
             let reason: String =
                 sqlx::query_scalar("SELECT replay_hold_reason FROM intake_outbox WHERE id=$1")
@@ -730,7 +754,8 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
                 "raw output before terminal wait",
             );
         }
-        let normal = super::super::ordinary_outcome(Some(&pool), &tok, &state);
+        let normal =
+            crate::services::discord::replay_policy::ordinary_outcome(Some(&pool), &tok, &state);
         tokio::pin!(normal);
         assert!(
             futures::poll!(&mut normal).is_pending(),
@@ -754,8 +779,8 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
             "raw stale wins before ordinary classification"
         );
         assert!(matches!(
-            super::super::stale_resume(Some(&pool), &tok, &state).await,
-            super::super::StaleResume::Hold
+            crate::services::discord::replay_policy::stale_resume(Some(&pool), &tok, &state).await,
+            crate::services::discord::replay_policy::StaleResume::Hold
         ));
     }
     pool.close().await;
@@ -794,7 +819,13 @@ async fn p3_unconsumed_stderr_cannot_stall_terminal_classification_pg() {
         let messages: Vec<_> = rx.try_iter().collect();
         assert!(!messages.is_empty(), "actual bridge input must exist");
         assert!(
-            super::super::error_is_ordinary(Some(&pool), &tok, &state, false).await,
+            crate::services::discord::replay_policy::error_is_ordinary(
+                Some(&pool),
+                &tok,
+                &state,
+                false
+            )
+            .await,
             "stderr absent from the consumed Error cannot defer the decision: {label}"
         );
         let stored: String =
@@ -819,7 +850,14 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
     tap.file_activity();
     tap.finish(true, Seen::StderrDrained);
     assert!(!live.stale(), "assistant text is not a bridge Error");
-    assert!(!super::super::ordinary_outcome(Some(&pool), &tok, &inflight(&live)).await);
+    assert!(
+        !crate::services::discord::replay_policy::ordinary_outcome(
+            Some(&pool),
+            &tok,
+            &inflight(&live)
+        )
+        .await
+    );
     assert_eq!(live.verdict(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
@@ -884,7 +922,15 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
         !rx.try_iter().collect::<Vec<_>>().is_empty(),
         "bridge Error must be delivered"
     );
-    assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &inflight(&live), false).await);
+    assert!(
+        !crate::services::discord::replay_policy::error_is_ordinary(
+            Some(&pool),
+            &tok,
+            &inflight(&live),
+            false
+        )
+        .await
+    );
     assert_eq!(live.verdict(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
@@ -899,7 +945,15 @@ async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
     let state = inflight(&live);
     live.record(Seen::Broken);
     live.mark_stale();
-    assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &state, false).await);
+    assert!(
+        !crate::services::discord::replay_policy::error_is_ordinary(
+            Some(&pool),
+            &tok,
+            &state,
+            false
+        )
+        .await
+    );
     let stored: String =
         sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1")
             .bind(state.replay_receipt_id)

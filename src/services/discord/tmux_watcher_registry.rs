@@ -12,8 +12,6 @@ mod owner_observation;
 mod session_binding;
 
 use owner_observation::bump_owner_observation_epoch;
-#[cfg(test)]
-pub(crate) use owner_observation::owner_publication_fence_held_for_tests;
 pub(in crate::services::discord) use owner_observation::{
     owner_observation_epoch, with_owner_publication,
 };

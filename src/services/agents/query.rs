@@ -552,7 +552,8 @@ mod tests {
 mod blocked_signal_pg_tests {
     use super::block_active_card_for_agent_pg;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::db::kanban_cards::{CardDeleteOutcome, soft_delete_card_pg};
+    use crate::db::kanban_cards::CardDeleteOutcome;
+    use crate::services::kanban_cards::entry_transactions::soft_delete_card_pg;
 
     /// Contract: the blocked signal lands on the agent's live card, never on a deleted one.
     #[tokio::test]

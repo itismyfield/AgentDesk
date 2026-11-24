@@ -1,10 +1,11 @@
 //! Replay authority remains in PostgreSQL when a worker or its in-memory runtime is replaced.
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{
     FailedPreAcceptSweepOutcome, InsertPendingPayload, insert_pending, sweep_failed_pre_accept_once,
 };
+use crate::services::cluster::intake_worker::*;
 use crate::services::discord::health::owner_runtime_for_tests;
+use sqlx::PgPool;
 use test_executor::Checkpoint;
 
 const WORKER: &str = "replay-worker";
@@ -139,7 +140,7 @@ async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
                 "claude",
                 "old-owner",
                 &|| false,
-                super::test_executor::PORT
+                crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT
             )
             .await
             .unwrap(),
@@ -158,7 +159,7 @@ async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
                     "claude",
                     owner,
                     &|| false,
-                    super::test_executor::PORT
+                    crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT
                 )
                 .await
                 .unwrap(),
@@ -220,7 +221,7 @@ async fn replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg(
         "claude",
         "race-owner",
         &|| false,
-        super::test_executor::PORT,
+        crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
     )
     .await;
     assert_eq!(
@@ -306,7 +307,7 @@ async fn replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_bu
             "claude",
             "normal-owner",
             &|| false,
-            super::test_executor::PORT
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT
         )
         .await
         .unwrap(),
@@ -346,7 +347,7 @@ async fn replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_bu
                 "claude",
                 "retry-owner",
                 &|| false,
-                super::test_executor::PORT
+                crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT
             )
             .await
             .unwrap(),

@@ -8,7 +8,7 @@ use super::ReplaySummary;
 use crate::services::tui_o::shadow::ShadowProvider;
 
 #[derive(Clone)]
-pub(super) struct Trace(Arc<Run>);
+pub(crate) struct Trace(Arc<Run>);
 
 struct Run {
     channel: u64,
@@ -23,7 +23,7 @@ struct Run {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct Details {
+pub(crate) struct Details {
     pub records: u64,
     pub done: u64,
     pub prepared: u64,
@@ -79,7 +79,7 @@ impl Trace {
         self.0.done.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(super) fn done(&self) -> u64 {
+    pub(crate) fn done(&self) -> u64 {
         self.0.done.load(Ordering::Relaxed)
     }
 
@@ -225,7 +225,7 @@ impl Drop for Phase {
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
-pub(super) struct Event {
+pub(crate) struct Event {
     pub channel: u64,
     pub stage: &'static str,
     pub status: &'static str,
@@ -238,11 +238,11 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn capture() {
+pub(crate) fn capture() {
     EVENTS.with_borrow_mut(|events| *events = Some(Vec::new()));
 }
 
 #[cfg(test)]
-pub(super) fn events() -> Vec<Event> {
+pub(crate) fn events() -> Vec<Event> {
     EVENTS.with_borrow(|events| events.clone().unwrap_or_default())
 }

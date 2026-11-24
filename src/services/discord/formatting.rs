@@ -216,9 +216,6 @@ pub(super) use self::delivery::{
     send_long_message_raw, split_message,
 };
 
-#[cfg(test)]
-pub(in crate::services) use crate::domain::message_split::split_for_shadow;
-
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,

@@ -1,5 +1,5 @@
-use super::tests::{Harness, applied, envelope, execute, send, stop};
-use super::*;
+use crate::db::server_campaigns::*;
+use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence::{EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission},
@@ -12,7 +12,11 @@ use crate::services::campaign_execution::{
         digest_of, plan_scope, tests as a1,
     },
 };
+use crate::services::krx_db_tests::server_campaigns_storage::{
+    Harness, applied, envelope, execute, send, stop,
+};
 use evidence_store::StoredEvidence;
+use sqlx::PgPool;
 
 const LAUNCH: &str = "launch-work-a";
 

@@ -1670,15 +1670,16 @@ mod tests {
         .expect("complete scope-assessment");
 
             let mut tx = pool.begin().await.expect("begin tx");
-            let changed = crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
-                &mut tx,
-                "dispatch-scope",
-                crate::db::auto_queue::ENTRY_STATUS_DONE,
-                "test_scope_assessment_completion",
-                false,
-            )
-            .await
-            .expect("terminal sync");
+            let changed =
+                crate::services::auto_queue::transactions::sync_dispatch_terminal_entries_on_pg_tx(
+                    &mut tx,
+                    "dispatch-scope",
+                    crate::db::auto_queue::ENTRY_STATUS_DONE,
+                    "test_scope_assessment_completion",
+                    false,
+                )
+                .await
+                .expect("terminal sync");
             tx.commit().await.expect("commit tx");
 
             assert_eq!(
@@ -1811,7 +1812,7 @@ mod tests {
         }
 
         async fn set_run_status(pool: &PgPool, status: &str) {
-            crate::db::status_check_migration_tests::execute_with_status_check_lifted(
+            crate::services::krx_db_b_tests::status_check_migration::execute_with_status_check_lifted(
                 pool,
                 "auto_queue_runs",
                 &format!(

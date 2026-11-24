@@ -4,7 +4,7 @@
 This gate does not prove that a write goes through the guard. It reports raw owner
 writes outside `src/db/auto_queue/run_owner_guard/writes.rs` and the pinned exceptions
 below; what the guard does is proven by the PG contention tests in
-`db::auto_queue::run_owner_guard_pg_tests`.
+`krx_db_tests::run_owner_guard_pg_tests`.
 
 An owner write is SQL that can make a live dispatch belong to a run: inserting a
 dispatch or a phase-gate row, setting a phase-gate row's `dispatch_id`/`run_id`, setting a

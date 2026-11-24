@@ -1,7 +1,9 @@
-use super::{BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_session_canonical_identity::upsert_hook_session_with_identity_pg;
 use crate::db::dispatched_sessions::HookSessionUpsert;
+use crate::db::session_observability::{
+    BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
+};
 use crate::db::session_status::{AWAITING_BG, IDLE, normalize_session_status};
 use crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied;
 use sqlx::{AssertSqlSafe, PgPool, Row};
@@ -393,7 +395,9 @@ async fn tool_use_never_reopens_a_retired_inactive_row_pg() {
         let set = sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1");
         set.bind(&key).bind(raw).execute(&pool).await.unwrap();
         assert_eq!(
-            super::mark_session_tool_use_pg(&pool, &key).await.unwrap(),
+            crate::db::session_observability::mark_session_tool_use_pg(&pool, &key)
+                .await
+                .unwrap(),
             marked,
             "{key}"
         );

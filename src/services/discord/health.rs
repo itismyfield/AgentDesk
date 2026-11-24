@@ -91,8 +91,6 @@ pub(crate) use thread_turn::ThreadTurnRuntime;
 mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
-#[cfg(test)]
-pub(crate) use super::tmux_watcher_registry::owner_publication_fence_held_for_tests;
 pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
 pub(in crate::services::discord) mod watcher_respawn;
 #[cfg(all(test, unix))]

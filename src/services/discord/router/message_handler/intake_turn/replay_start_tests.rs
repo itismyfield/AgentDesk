@@ -1302,7 +1302,7 @@ mod worker_entry_tests {
                 "claude",
                 owner,
                 &|| false,
-                crate::services::cluster::intake_worker::test_executor::PORT,
+                crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
             ),
         )
         .await;
@@ -1615,7 +1615,7 @@ mod worker_entry_tests {
             let receipt = registered(&host,channel,&[message+1]).await;
             sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld',replay_hold_reason='between forward and claim' WHERE id=$1")
                 .bind(receipt).execute(&host.pool).await.unwrap();
-            let (result,provider) = start(channel,run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","claim-owner",&|| false, crate::services::cluster::intake_worker::test_executor::PORT)).await;
+            let (result,provider) = start(channel,run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","claim-owner",&|| false, crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT)).await;
             if let Some((_,release)) = provider { let _=release.send(()); panic!("the SQL claim fence must prevent the absorbed source from reaching a provider"); }
             assert_eq!(result.unwrap(),TickOutcome::QueueEmpty);
             let pending: (String,bool,bool,bool) = sqlx::query_as("SELECT status::TEXT,claimed_at IS NULL,accepted_at IS NULL,spawned_at IS NULL FROM intake_outbox WHERE id=$1")
@@ -1812,7 +1812,7 @@ mod worker_entry_tests {
             *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE.lock().unwrap()
                 = Some((channel,completed));
 
-            let worker = Box::pin(run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","race-worker",&|| false, crate::services::cluster::intake_worker::test_executor::PORT));
+            let worker = Box::pin(run_intake_worker_tick(&host.pool,&host.shared,WORKER,"claude","race-worker",&|| false, crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT));
             let leader_entry = Box::pin(async {
                 at_spawn.await.unwrap();
                 let admitted = admit_text_intake(&deps,&submission).await;

@@ -93,7 +93,7 @@ fn activate_as(
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
     (origin, proof): (InitOrigin, Option<&FirstProof>),
 ) -> Result<(), String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hook::run(channel, test_hook::Step::BeforeLock)?;
     let asked = Instant::now();
     let _serial = ACTIVATING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -257,14 +257,14 @@ fn adopt(
         }
     };
     // From here the store may change and an error may follow a published write.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hook::run(channel, test_hook::Step::BeforeWrite)?;
     let at = Instant::now();
     let created = candidate.init_scope(channel).and_then(|scope| {
         let child = candidate.child_surface();
         create(store, (channel, child), sources, origin, &scope)
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let created = created.and_then(|()| test_hook::run(channel, test_hook::Step::AfterWrite));
     spent.write = since(at);
     let Err(detail) = created else {
@@ -381,7 +381,7 @@ pub(super) fn still_empty(source: &SourceId) -> Result<(), String> {
 }
 
 /// Pauses a first activation at a step or fails it there; the write steps run under the adoption lock.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_hook {
     use std::sync::Mutex;
 

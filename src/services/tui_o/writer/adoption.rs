@@ -543,7 +543,7 @@ fn pin_at_mode(
     at: At,
     late: bool,
 ) -> Result<Snapshot, Refused> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::activation::test_hook::run(channel, super::activation::test_hook::Step::Snapshot)
         .map_err(Refused::retry)?;
     let (bound, named) = logged(events)?;
@@ -834,10 +834,10 @@ impl Snapshot {
 }
 
 /// Fails closed at once: Legacy has started but holds no cursor.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct NoLegacy;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl LegacyView for NoLegacy {
     fn started(&self) -> bool {
         true

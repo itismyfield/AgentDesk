@@ -201,7 +201,7 @@ fn admitted(
     gate: &OwnershipGate,
     activate: impl FnOnce() -> Result<(), String>,
 ) -> Option<Result<(), String>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         use activation::test_hook::{Step, note_refused, run};
         if let Err(detail) = run(_channel, Step::BeforeAdmit) {
@@ -213,7 +213,7 @@ fn admitted(
         }
         admitted
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     gate.admit(|_| activate())
 }
 

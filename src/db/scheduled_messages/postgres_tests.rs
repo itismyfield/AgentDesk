@@ -9,11 +9,8 @@ type OptionalTimestamp = Option<DateTime<Utc>>;
 async fn create_test_pool(
     prefix: &str,
     label: &str,
-) -> (
-    crate::dispatch::test_support::DispatchPostgresTestDb,
-    PgPool,
-) {
-    let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(prefix, label).await;
+) -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
+    let pg_db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(prefix, label).await;
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     (pg_db, pool)
 }

@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn launch_env_panic_restores_present_environment() {
-        crate::test_env_panic_probe::assert_restores_after_panic(
+        crate::config::test_env::panic_probe::assert_restores_after_panic(
             concat!(
                 module_path!(),
                 "::launch_env_panic_restores_present_environment"
@@ -1065,7 +1065,7 @@ mod tests {
 
     #[test]
     fn launch_env_panic_restores_absent_environment() {
-        crate::test_env_panic_probe::assert_restores_after_panic(
+        crate::config::test_env::panic_probe::assert_restores_after_panic(
             concat!(
                 module_path!(),
                 "::launch_env_panic_restores_absent_environment"
@@ -1090,7 +1090,7 @@ mod tests {
             "HOSTNAME",
             std::ffi::OsStr::new("issue-2143-host"),
         );
-        crate::test_env_panic_probe::checkpoint(&[
+        crate::config::test_env::panic_probe::checkpoint(&[
             ("AGENTDESK_ROOT_DIR", root.path().as_os_str()),
             ("HOSTNAME", std::ffi::OsStr::new("issue-2143-host")),
             (

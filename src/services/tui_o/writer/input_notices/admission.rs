@@ -288,5 +288,4 @@ fn exclude<R>(
 }
 
 #[cfg(all(test, unix))]
-#[path = "admission_tests.rs"]
-pub(crate) mod tests;
+pub(crate) use crate::services::discord::krx_tui_o_test_host::admission as tests;
