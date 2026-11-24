@@ -24,6 +24,9 @@ esac
 
 WAIT_SECONDS="${AGENTDESK_RESTART_WAIT:-20}"
 LIVE_TURN_WAIT_SECONDS="${AGENTDESK_RESTART_LIVE_TURN_WAIT:-120}"
+BOOTOUT_WAIT_SECONDS="${AGENTDESK_RESTART_BOOTOUT_WAIT:-30}"
+BOOTSTRAP_ATTEMPTS="${AGENTDESK_RESTART_BOOTSTRAP_ATTEMPTS:-5}"
+BOOTSTRAP_RETRY_DELAY="${AGENTDESK_RESTART_BOOTSTRAP_RETRY_DELAY:-2}"
 REPO_DIR="${AGENTDESK_REPO_DIR:-$HOME/.adk/release/workspaces/agentdesk}"
 DEFAULTS_SH="$REPO_DIR/scripts/_defaults.sh"
 MARKER_ARMED=0
@@ -90,14 +93,26 @@ if [[ "$ENV" == "preview" ]]; then
   }
 else
   launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-  sleep 1
+  # #8351: bootout returns while the old dcserver is still exiting; bootstrap in
+  # that window fails with "5: Input/output error". Wait for the unload, then retry.
+  unload_deadline=$(( $(date +%s) + BOOTOUT_WAIT_SECONDS ))
+  while launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1 \
+    && (( $(date +%s) < unload_deadline )); do
+    sleep 1
+  done
   clear_restart_drain_mode "$RUNTIME_ROOT"
   MARKER_ARMED=0
 
-  if ! launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/${LABEL}.plist"; then
-    echo "AGENTDESK_RESTART_BOOTSTRAP_FAILED env=${ENV} label=${LABEL}" >&2
-    exit 1
-  fi
+  bootstrap_attempt=1
+  until launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/${LABEL}.plist"; do
+    if (( bootstrap_attempt >= BOOTSTRAP_ATTEMPTS )); then
+      echo "AGENTDESK_RESTART_BOOTSTRAP_FAILED env=${ENV} label=${LABEL} attempts=${bootstrap_attempt}" >&2
+      exit 1
+    fi
+    echo "launchd bootstrap attempt ${bootstrap_attempt}/${BOOTSTRAP_ATTEMPTS} failed — retrying" >&2
+    bootstrap_attempt=$(( bootstrap_attempt + 1 ))
+    sleep "$BOOTSTRAP_RETRY_DELAY"
+  done
   _kickstart_launchd_job_if_needed "$LABEL" >/dev/null 2>&1 || true
 fi
 

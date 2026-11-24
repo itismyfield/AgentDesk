@@ -48,14 +48,17 @@ pub(crate) async fn inspect_at_boot(
     published.extend(issues);
 }
 
+/// Boot-time provider reasons: channel home seed issues, then runtimes held before registration.
 pub(super) async fn health_reasons(registry: &HealthRegistry) -> Vec<String> {
-    registry
+    let mut reasons: Vec<String> = registry
         .channel_home_seed_issues
         .lock()
         .await
         .iter()
         .map(|issue| format!("{}:{}:{}", issue.reason, issue.provider, issue.channel))
-        .collect()
+        .collect();
+    reasons.extend(super::boot_hold::health_reasons());
+    reasons
 }
 
 #[cfg(test)]
