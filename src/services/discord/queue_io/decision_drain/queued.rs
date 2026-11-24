@@ -87,16 +87,16 @@ pub(crate) async fn end(pool: Option<&PgPool>, event_id: Option<Uuid>, ended: En
     let (Some(pool), Some(event_id)) = (pool, event_id) else {
         return;
     };
-    let step = |states, detail| decisions::advance(pool, event_id, states, None, detail);
-    let moved = match ended {
+    let (states, detail) = match ended {
         Ended::Started => return,
-        Ended::WaitsAgain => step((MayHaveSent, NormalWait), None).await,
-        Ended::Unknown => step((MayHaveSent, UnknownClosed), Some("queue_start_failed")).await,
-        Ended::Cleared => match step((MayHaveSent, Closing), Some("cleared")).await {
-            Ok(true) => step((Closing, Failed), None).await,
-            other => other,
-        },
+        Ended::WaitsAgain => ((MayHaveSent, NormalWait), None),
+        Ended::Unknown => ((MayHaveSent, UnknownClosed), Some("queue_start_failed")),
+        Ended::Cleared => ((MayHaveSent, Closing), Some("cleared")),
     };
+    let mut moved = decisions::advance(pool, event_id, states, None, detail).await;
+    if matches!(moved, Ok(true)) && states.1 == Closing {
+        moved = decisions::advance(pool, event_id, (Closing, Failed), None, None).await;
+    }
     if let Err(error) = moved {
         tracing::warn!(%event_id, %error, "decision queue start left for its next settlement");
     }

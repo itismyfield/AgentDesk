@@ -661,14 +661,15 @@ async fn decision_original_closed_before_its_owner_adopted_leaves_at_adoption_pg
 async fn decision_cleanup_that_failed_after_its_close_is_found_again_pg() {
     let mut rig = Rig::new().await;
     let drain = crate::services::discord::queue_io::input_owner::notice::drain;
-    let fail_commits = |owner: &ChannelMailboxHandle| {
-        owner.v2_request(|slot| {
+    async fn fail_commits(owner: &ChannelMailboxHandle) -> Result<(), String> {
+        let set = owner.v2_request(|slot| {
             slot.as_mut()
                 .ok_or("no owner")?
                 .cancel_fault_for_tests(true);
             Ok(())
-        })
-    };
+        });
+        set.await
+    }
     let unknown = rig.event("may_have_sent", true).await;
     rig.attempt_front("decision", true).await;
     let other = rig.other_input(1).await;
@@ -722,22 +723,27 @@ async fn decision_boot_recovery_leaves_a_live_nodes_attempts_alone_pg() {
     .execute(&rig.pool)
     .await
     .unwrap();
-    let read = || async {
-        sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>, Option<String>)>(
+    type Row = (String, chrono::DateTime<chrono::Utc>, Option<String>);
+    async fn read(pool: &PgPool) -> Vec<Row> {
+        sqlx::query_as(
             "SELECT state, updated_at, detail FROM decision_delivery_attempts ORDER BY event_id",
         )
-        .fetch_all(&rig.pool)
+        .fetch_all(pool)
         .await
         .unwrap()
-    };
-    let before = read().await;
+    }
+    let before = read(&rig.pool).await;
     // Node B boots: its own mailbox registry holds none of A's originals.
     recover_boot(&rig.pool).await.unwrap();
     let boot = decisions::clock(&rig.pool).await.unwrap();
     for _ in 0..2 {
         recover_before(&rig.pool, boot, |_| None).await.unwrap();
     }
-    assert_eq!(read().await, before, "a live node's attempts were ended");
+    assert_eq!(
+        read(&rig.pool).await,
+        before,
+        "a live node's attempts were ended"
+    );
     // A row read as abandoned just before its holder moved it is not ended either.
     for row in &rows {
         let judged = Unsettled {
@@ -747,7 +753,7 @@ async fn decision_boot_recovery_leaves_a_live_nodes_attempts_alone_pg() {
         settle(&rig.pool, None, &judged, None).await.unwrap();
     }
     assert_eq!(
-        read().await,
+        read(&rig.pool).await,
         before,
         "the closing update ignored the holder"
     );
