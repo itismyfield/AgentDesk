@@ -11,15 +11,15 @@
 \*                       attempt (so the default action is gone); a failed lease still does a
 \*                       raw fetch_sub.
 \* Mode = "b":           round 4 - nothing registers early; O's handler sets a process mark, the
-\*                       gate stops on it, a slot released at boot exits when it was the last
+\*                       gate stops on it, a slot the gate gives up exits when it was the last
 \*                       after SIGTERM, and a later handler also takes the mark.
 \* Mutations of "b": "b_nomark" (gate ignores the mark), "b_nohandoff" (C's handler hears
-\* only its own stream), "b_rawfail" (failed lease keeps the raw fetch_sub), "b_noexit" (a
-\* boot-time release never exits).
+\* only its own stream), "b_noexit" (a slot the gate gives up never exits).
+\* A failed lease keeps run_bot's raw fetch_sub in every mode (its body is census-pinned).
 \* LeaseEnds: preferred-poll eventually ends (acquired, standby or failed). FALSE models a
 \* peer whose handback stays suppressed (gateway_handback_breaker.rs:23-25).
 EXTENDS Naturals
-CONSTANTS Mode, Providers, LeaseEnds, Refusable
+CONSTANTS Mode, Providers, LeaseEnds, LeaseCanFail, Refusable
 VARIABLES term, done, busy, c, cHeard, cCounted, oCounted, mark, termAtGate
 vars == <<term, done, busy, c, cHeard, cCounted, oCounted, mark, termAtGate>>
 
@@ -31,10 +31,10 @@ TypeOK == /\ term \in BOOLEAN /\ done \in {"no", "exit", "killed"} /\ busy \in B
 Init == /\ term = FALSE /\ done = "no" /\ busy \in BOOLEAN /\ c = "gate" /\ cHeard = FALSE
         /\ cCounted = FALSE /\ oCounted = FALSE /\ mark = FALSE /\ termAtGate = FALSE
 
-B == Mode \in {"b", "b_nomark", "b_nohandoff", "b_rawfail", "b_noexit"}
+B == Mode \in {"b", "b_nomark", "b_nohandoff", "b_noexit"}
 \* Some tokio SIGTERM listener exists: a live handler, or the r3 latch from gate entry on.
 Registered == Providers = 2 \/ c = "started" \/ Mode = "r3"
-GateSees == mark /\ Mode \in {"r3", "b", "b_nohandoff", "b_rawfail", "b_noexit"}
+GateSees == mark /\ Mode \in {"r3", "b", "b_nohandoff", "b_noexit"}
 Live == done = "no"
 \* C gives up its slot once; with `exits` it ends the process when that was the last slot.
 Take(exits) == /\ cCounted' = TRUE
@@ -75,10 +75,8 @@ CReady == /\ c = "ready" /\ Live /\ c' = "lease"
 \* Lease acquired or standby: the runtime and its handler start (runtime_bootstrap.rs:334/:410/:455).
 CLeaseStart == /\ c = "lease" /\ Live /\ c' = "started"
                /\ UNCHANGED <<term, done, busy, cHeard, cCounted, oCounted, mark, termAtGate>>
-\* Lease failed: run_bot gives up the slot and returns (runtime_bootstrap.rs:367-371).
-CLeaseFail == /\ c = "lease" /\ Live /\ c' = "failed"
-              /\ IF Mode \in {"b", "b_nomark", "b_nohandoff"}
-                 THEN Take(mark) ELSE Take(FALSE)
+\* Lease failed: run_bot gives up the slot and returns (runtime_bootstrap.rs:368-372).
+CLeaseFail == /\ LeaseCanFail /\ c = "lease" /\ Live /\ c' = "failed" /\ Take(FALSE)
               /\ UNCHANGED <<term, busy, cHeard, oCounted, mark, termAtGate>>
 CLeaseEnd == CLeaseStart \/ CLeaseFail
 \* C's handler: its own stream, plus the mark when it takes over (shutdown.rs:94-104).

@@ -55,18 +55,18 @@ Rules:
 - `NoStartAfterTerm` (INVARIANT): a gate that decides after the shutdown request starts no runtime.
 - `BarrierEnds` (PROPERTY): `term ~> (done # "no")`. After SIGTERM, the last slot holder exits or the default action ends the process.
 
-| cfg | Mode / Providers / LeaseEnds | result |
+| cfg | Mode / Providers / LeaseEnds / LeaseCanFail | result |
 |---|---|---|
-| GatewayBootShutdownSingleBefore | `r3` (2b93d60 latch) / 1 / FALSE | RED: `BarrierEnds`. The latch removes the default action: after a failed lease, or in an endless preferred wait, nothing exits |
-| GatewayBootShutdownSingleAfter | `b` (round 4) / 1 / FALSE | GREEN |
-| GatewayBootShutdownMultiBefore | `r2` (53de918) / 2 / TRUE | RED: `NoStartAfterTerm`, `BarrierEnds` |
-| GatewayBootShutdownMultiR3 | `r3` / 2 / TRUE | RED: `BarrierEnds`. The failed lease keeps the raw `fetch_sub` after O already took its slot |
-| GatewayBootShutdownMultiAfter | `b` / 2 / TRUE | GREEN |
+| GatewayBootShutdownSingleBefore | `r3` (2b93d60 latch) / 1 / FALSE / TRUE | RED: `BarrierEnds`. The latch removes the default action: after a failed lease, or in an endless preferred wait, nothing exits |
+| GatewayBootShutdownSingleAfter | `b` (round 4) / 1 / FALSE / TRUE | GREEN |
+| GatewayBootShutdownMultiBefore | `r2` (53de918) / 2 / TRUE / FALSE | RED: `NoStartAfterTerm`, `BarrierEnds` |
+| GatewayBootShutdownMultiAfter | `b` / 2 / TRUE / FALSE | GREEN |
 | GatewayBootShutdownMultiNoMark | mutation: the gate ignores the mark | RED: `NoStartAfterTerm` |
 | GatewayBootShutdownMultiNoHandoff | mutation: C's handler hears only its own stream | RED: `BarrierEnds` |
-| GatewayBootShutdownMultiRawFail | mutation: the failed lease keeps the raw `fetch_sub` | RED: `BarrierEnds` |
-| GatewayBootShutdownMultiNoExit | mutation: a boot-time slot release never exits | RED: `BarrierEnds` |
-| GatewayBootShutdownMultiStuckLease | `b` / 2 / FALSE | RED: `BarrierEnds`. Known gap, present since b012692: with a peer handler, preferred-poll does not read the mark and can wait forever behind a suppressed handback |
+| GatewayBootShutdownMultiNoExit | mutation: a slot the gate gives up never exits | RED: `BarrierEnds` |
+| GatewayBootShutdownMultiLeaseFailBefore | `r2` / 2 / TRUE / TRUE | RED: `NoStartAfterTerm`, `BarrierEnds` |
+| GatewayBootShutdownMultiLeaseFail | `b` / 2 / TRUE / TRUE | RED: `BarrierEnds`. Known gap, present since b012692: O takes its slot first, then C's failed lease does run_bot's raw `fetch_sub` on the last slot without exiting. `run_bot` is census-pinned, so this round leaves it |
+| GatewayBootShutdownMultiStuckLease | `b` / 2 / FALSE / FALSE | RED: `BarrierEnds`. Known gap, present since b012692: with a peer handler, preferred-poll does not read the mark and can wait forever behind a suppressed handback |
 
 `Refusable = TRUE` in every config.
 
@@ -74,15 +74,15 @@ Rules:
 
 | Entry point | Code | Model |
 |---|---|---|
-| native gate | `runtime_bootstrap.rs:300-302` → `native_input.rs:33` reads the mark (`boot_sigterm::watch`), checked after each attempt `:101-104`, sleep raced `:137-144` | CAttempt / CWaitEnd / CRetry |
-| gate stop | `boot_sigterm.rs:53-56` `stop_before_start` → `release_boot_slot` `:34-50` (CAS once; exit only for the last slot after SIGTERM) | Take |
+| native gate | `runtime_bootstrap.rs:301-303` → `native_input.rs:33` reads the mark (`boot_sigterm::watch`), checked after each attempt `:101-104`, sleep raced `:137-144` | CAttempt / CWaitEnd / CRetry |
+| gate stop | `boot_sigterm.rs:45-48` `stop_before_start` → `release_boot_slot` `:27-43` (CAS once; exit only for the last slot after SIGTERM) | Take |
 | refused runtime | `native_input.rs:119` → `release_boot_slot` | CAttempt refused branch |
-| failed gateway lease | `runtime_bootstrap.rs:367-371` → `release_boot_slot(&shared, seen())` | CLeaseFail |
-| utility bot skip | `runtime_bootstrap.rs:191` raw `fetch_sub` before any SharedData (unchanged) | not modeled |
+| failed gateway lease | `runtime_bootstrap.rs:368-372` raw `fetch_sub` (unchanged; `run_bot` is pinned by `check_legacy_supervision_census.py`) | CLeaseFail |
+| utility bot skip | `runtime_bootstrap.rs:192` raw `fetch_sub` before any SharedData (unchanged) | not modeled |
 | preferred-poll wait | `gateway_lease.rs:229-319` (reads only its own `shutting_down` `:297` and the restart file) | CLeaseStart / CLeaseEnd fairness |
-| SIGTERM handler install | `runtime_bootstrap.rs:333` (worker), `:409` (gateway), `:454` (standby) | CLeaseStart → started |
+| SIGTERM handler install | `runtime_bootstrap.rs:334` (worker), `:410` (gateway), `:455` (standby) | CLeaseStart → started |
 | SIGTERM handler | `shutdown.rs:14-54`: `legacy_sigterm` `:21`, mark `:22`, CAS + last `exit(0)` `:37-56`; signal stream registered when the handler is spawned (`:10` → `:93-96`), then raced with the mark `:109-117` | OHandle / CHandle |
-| process mark | `boot_sigterm.rs:7-22` (static `watch`; registers no signal) | `mark` |
+| process mark | `boot_sigterm.rs:7-16` (static `watch`; registers no signal) | `mark` |
 | deferred restart slot | `deferred_restart.rs:94` CAS, `:121-131` `fetch_sub`, `:195-208` rollback `fetch_add`; final `exit(0)` `spawns.rs:366-395` | not modeled (no SIGTERM) |
 | per-runtime flag / shared barrier | `shared_data.rs:163-180`, `shared_state.rs:617-621`, flag writers `:728-774` | model premise |
 | startup sigaction | `cli/dcserver_decision_boot.rs:68-87` (installed and restored during decision boot, before run_bot) | not modeled |

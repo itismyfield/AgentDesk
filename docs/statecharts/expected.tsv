@@ -287,11 +287,11 @@ execution-authority/ExecutionChildViewFixed.cfg	ExecutionChildView	-	-
 execution-authority/ExecutionChildViewRest.cfg	ExecutionChildView	ChildRecordedNoRest	-
 gateway-lease/GatewayBootShutdownMultiAfter.cfg	GatewayBootShutdown	-	-
 gateway-lease/GatewayBootShutdownMultiBefore.cfg	GatewayBootShutdown	NoStartAfterTerm	BarrierEnds
+gateway-lease/GatewayBootShutdownMultiLeaseFail.cfg	GatewayBootShutdown	-	BarrierEnds
+gateway-lease/GatewayBootShutdownMultiLeaseFailBefore.cfg	GatewayBootShutdown	NoStartAfterTerm	BarrierEnds
 gateway-lease/GatewayBootShutdownMultiNoExit.cfg	GatewayBootShutdown	-	BarrierEnds
 gateway-lease/GatewayBootShutdownMultiNoHandoff.cfg	GatewayBootShutdown	-	BarrierEnds
 gateway-lease/GatewayBootShutdownMultiNoMark.cfg	GatewayBootShutdown	NoStartAfterTerm	-
-gateway-lease/GatewayBootShutdownMultiR3.cfg	GatewayBootShutdown	-	BarrierEnds
-gateway-lease/GatewayBootShutdownMultiRawFail.cfg	GatewayBootShutdown	-	BarrierEnds
 gateway-lease/GatewayBootShutdownMultiStuckLease.cfg	GatewayBootShutdown	-	BarrierEnds
 gateway-lease/GatewayBootShutdownSingleAfter.cfg	GatewayBootShutdown	-	-
 gateway-lease/GatewayBootShutdownSingleBefore.cfg	GatewayBootShutdown	-	BarrierEnds

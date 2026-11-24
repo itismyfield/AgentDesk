@@ -288,10 +288,8 @@ fn sigterm_child(dir: std::path::PathBuf, mode: Child) {
         };
         match mode {
             Child::AloneLeaseFailed => {
-                super::super::super::boot_sigterm::release_boot_slot(
-                    &claude,
-                    super::super::super::boot_sigterm::seen(),
-                );
+                // run_bot's failed-lease return (runtime_bootstrap.rs:367-371).
+                claude.restart.shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
                 println!("LEASE_FAILED remaining={}", slots.load(Ordering::SeqCst));
             }
             Child::AlonePreferred => {
