@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Agent } from "../types";
 import AnimatedBotAvatar from "./agent-avatar/AnimatedBotAvatar";
 import { avatarRoster, botAvatarBlinking, botAvatarFor, botAvatarStill } from "./agent-avatar/botAvatar";
@@ -16,11 +16,24 @@ interface AgentPersonaProps {
   size?: number;
   /**
    * `true` forces the live 3D scene (profile headers); `false` forces a static still.
-   * When omitted, hybrid mode runs: `working` and pointer-hovered avatars mount the live
-   * 3D scene, resting avatars blink via zero-JS SVG CSS, and `offline` stays still.
+   * When omitted, hybrid mode runs: visible `working` and pointer-hovered avatars mount the
+   * live 3D scene, resting avatars blink via zero-JS SVG CSS, and `offline`/reduced-motion stays still.
    */
   animated?: boolean;
   className?: string;
+}
+
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+function subscribeReducedMotion(onStoreChange: () => void): () => void {
+  const mql = typeof window !== "undefined" ? window.matchMedia?.(REDUCED_MOTION_QUERY) : undefined;
+  if (!mql?.addEventListener) return () => {};
+  mql.addEventListener("change", onStoreChange);
+  return () => mql.removeEventListener("change", onStoreChange);
+}
+
+function getReducedMotionSnapshot(): boolean {
+  return typeof window !== "undefined" && Boolean(window.matchMedia?.(REDUCED_MOTION_QUERY).matches);
 }
 
 const STATE_DOT: Record<PersonaState, string> = {
@@ -49,6 +62,8 @@ export function personaStateFromAgent(status: Agent["status"] | undefined): Pers
 export default function AgentPersona({ agent, state, size = 32, animated, className = "" }: AgentPersonaProps) {
   const rootRef = useRef<HTMLSpanElement>(null);
   const [hovered, setHovered] = useState(false);
+  const [inView, setInView] = useState(true);
+  const reducedMotion = useSyncExternalStore(subscribeReducedMotion, getReducedMotionSnapshot, () => false);
   const resolvedState = state ?? personaStateFromAgent(agent?.status);
   const agentKey = agent?.id ?? "agent";
   const displayName = agent?.name_ko || agent?.alias || agent?.name || "Agent";
@@ -60,26 +75,73 @@ export default function AgentPersona({ agent, state, size = 32, animated, classN
   const label = `${displayName} · ${STATE_LABEL_KO[resolvedState]}`;
 
   useEffect(() => {
-    if (animated !== undefined || resolvedState === "offline") return;
+    if (animated === false || resolvedState === "offline" || reducedMotion) return;
     const el = rootRef.current;
     if (!el) return;
-    const target = el.closest<HTMLElement>("button, a, [role='button'], [role='option']") ?? el;
-    const onEnter = (event: PointerEvent) => {
-      if (event.pointerType === "touch" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const ancestor = el.closest<HTMLElement>("button, a, [role='button'], [role='option']");
+    // Multi-avatar buttons (department stacks, fold rows) only wake the hovered avatar itself.
+    const singleInAncestor = () => Boolean(ancestor && ancestor.querySelectorAll("[data-bot-avatar]").length <= 1);
+    const onSelfEnter = (event: PointerEvent) => {
+      if (event.pointerType === "touch") return;
       setHovered(true);
     };
-    const onLeave = () => setHovered(false);
-    target.addEventListener("pointerenter", onEnter);
-    target.addEventListener("pointerleave", onLeave);
+    const onSelfLeave = (event: PointerEvent) => {
+      if (singleInAncestor() && event.relatedTarget instanceof Node && ancestor!.contains(event.relatedTarget)) return;
+      setHovered(false);
+    };
+    const onAncestorEnter = (event: PointerEvent) => {
+      if (event.pointerType === "touch" || !singleInAncestor()) return;
+      setHovered(true);
+    };
+    const clear = () => setHovered(false);
+
+    el.addEventListener("pointerenter", onSelfEnter);
+    el.addEventListener("pointerleave", onSelfLeave);
+    el.addEventListener("pointercancel", clear);
+    if (ancestor && ancestor !== el) {
+      ancestor.addEventListener("pointerenter", onAncestorEnter);
+      ancestor.addEventListener("pointerleave", clear);
+      ancestor.addEventListener("pointercancel", clear);
+    }
     return () => {
       setHovered(false);
-      target.removeEventListener("pointerenter", onEnter);
-      target.removeEventListener("pointerleave", onLeave);
+      el.removeEventListener("pointerenter", onSelfEnter);
+      el.removeEventListener("pointerleave", onSelfLeave);
+      el.removeEventListener("pointercancel", clear);
+      if (ancestor && ancestor !== el) {
+        ancestor.removeEventListener("pointerenter", onAncestorEnter);
+        ancestor.removeEventListener("pointerleave", clear);
+        ancestor.removeEventListener("pointercancel", clear);
+      }
     };
-  }, [animated, resolvedState]);
+  }, [animated, resolvedState, reducedMotion]);
 
-  const isLive = animated ?? (resolvedState !== "offline" && (resolvedState === "working" || hovered));
-  const isStill = !isLive && (resolvedState === "offline" || animated === false);
+  useEffect(() => {
+    if (!hovered) return;
+    const clear = () => setHovered(false);
+    window.addEventListener("blur", clear);
+    return () => window.removeEventListener("blur", clear);
+  }, [hovered]);
+
+  useEffect(() => {
+    if (animated !== undefined || resolvedState !== "working" || reducedMotion) {
+      setInView(true);
+      return;
+    }
+    const el = rootRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry) setInView(entry.isIntersecting);
+    });
+    observer.observe(el);
+    return () => {
+      setInView(true);
+      observer.disconnect();
+    };
+  }, [animated, resolvedState, reducedMotion]);
+
+  const isLive = animated ?? (!reducedMotion && resolvedState !== "offline" && ((resolvedState === "working" && inView) || hovered));
+  const isStill = !isLive && (resolvedState === "offline" || animated === false || reducedMotion);
   const motionMode = isLive ? "live" : isStill ? "still" : "blink";
 
   return (
@@ -105,7 +167,7 @@ export default function AgentPersona({ agent, state, size = 32, animated, classN
             avatar={avatar}
             mood={resolvedState === "working" ? "thinking" : "idle"}
             size={face}
-            followPointer={hovered || animated === true}
+            followPointer={hovered && !reducedMotion}
           />
         ) : (
           <img

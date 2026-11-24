@@ -167,12 +167,12 @@ export function botAvatarBlinking({ definition, color, eyeColor }: BotAvatar, se
     .map((d) => `<path id="${d.id}" d="${d.d}"${d.evenOdd ? ' fill-rule="evenodd"' : ""}/>`)
     .join("");
 
-  let closedScale = 0.22;
+  let closedScale: number | undefined;
   const body = frame.shapes
     .map((s) => {
       if (s.kind === "slice") return `<use href="#${s.path}" transform="${matSvg(s.matrix)}"/>`;
       const eye = blinkingEyeMarkup(s.mark, frame.ink);
-      closedScale = eye.closedScale;
+      if (s.mark.shape === "pill") closedScale ??= eye.closedScale;
       return `<g transform="${matSvg(s.matrix)}">${eye.markup}</g>`;
     })
     .join("");
@@ -180,10 +180,10 @@ export function botAvatarBlinking({ definition, color, eyeColor }: BotAvatar, se
   const seed = hash(`blink:${seedKey}`);
   const durationMs = 3800 + (seed % 2001);
   const delayMs = (seed >>> 11) % durationMs;
-  const closed = f2(closedScale);
+  const closed = f2(closedScale ?? 0.22);
   const doubleBlink = ((seed >>> 22) % 100) < 22;
   const keyframes = doubleBlink
-    ? `0%,46%,50.2%,57.6%,100%{transform:scaleY(1)}48.1%,55.5%{transform:scaleY(${closed})}51.8%{transform:scaleY(0.92)}`
+    ? `0%,46%,50.6%,53.2%,57.8%,100%{transform:scaleY(1)}48.3%,55.5%{transform:scaleY(${closed})}`
     : `0%,47.8%,52.2%,100%{transform:scaleY(1)}50%{transform:scaleY(${closed})}`;
   const style =
     `<style>` +
