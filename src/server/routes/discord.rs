@@ -667,12 +667,10 @@ mod tests {
                 "case {index}"
             );
         }
-        // A refused connection stays a plain transport failure.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", closed.local_addr().unwrap());
-        drop(closed);
-        let refused = read_status(&base, 22, 300).await;
-        assert_eq!(refused, Some((StatusCode::BAD_GATEWAY, ErrorCode::Discord)));
+        // A dropped connection stays a plain transport failure. No deadline races it:
+        // Windows retries a refused loopback connect for seconds, past any short deadline.
+        let dropped = read_status(&serve_routes(&[]).await, 22, u64::MAX).await;
+        assert_eq!(dropped, Some((StatusCode::BAD_GATEWAY, ErrorCode::Discord)));
     }
     #[tokio::test]
     async fn channel_messages_outcome_keeps_rate_limit_status_for_non_json_body() {
