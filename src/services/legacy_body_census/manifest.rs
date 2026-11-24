@@ -13,7 +13,7 @@ pub(super) fn snapshot() -> Value {
     SNAPSHOT.clone()
 }
 
-pub(super) fn packaged(
+pub(crate) fn packaged(
     root: &std::path::Path,
     raw: &str,
     binary: &std::path::Path,
@@ -87,11 +87,11 @@ pub(super) fn snapshot_for_build(root: &std::path::Path, head: &Value) -> Value 
     )
 }
 
-pub(super) fn inspect(raw: &str) -> Value {
+pub(crate) fn inspect(raw: &str) -> Value {
     inspect_with_evidence(raw, None, None)
 }
 
-pub(super) fn inspect_with_evidence(
+pub(crate) fn inspect_with_evidence(
     raw: &str,
     proof: Option<&Value>,
     identity: Option<&Value>,

@@ -8,17 +8,17 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-pub(super) type Hook = Arc<dyn Fn() + Send + Sync>;
-pub(super) type SyncParent = fn(&Path) -> std::io::Result<()>;
+pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type SyncParent = fn(&Path) -> std::io::Result<()>;
 
-pub(super) struct Options {
-    pub(super) doctor: Option<String>,
-    pub(super) host: Option<String>,
-    pub(super) timeout: Duration,
-    pub(super) before_write: Hook,
-    #[cfg(test)]
-    pub(super) after_ack: Hook,
-    pub(super) sync_parent: Option<SyncParent>,
+pub(crate) struct Options {
+    pub(crate) doctor: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) timeout: Duration,
+    pub(crate) before_write: Hook,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) after_ack: Hook,
+    pub(crate) sync_parent: Option<SyncParent>,
 }
 
 impl Default for Options {
@@ -28,7 +28,7 @@ impl Default for Options {
             host: None,
             timeout: Duration::from_secs(2),
             before_write: Arc::new(|| {}),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             after_ack: Arc::new(|| {}),
             sync_parent: None,
         }
@@ -42,9 +42,9 @@ struct Message {
     host: Option<Option<String>>,
 }
 
-pub(super) struct Writer {
+pub(crate) struct Writer {
     sender: mpsc::SyncSender<Message>,
-    pub(super) state: Shared,
+    pub(crate) state: Shared,
     timeout: Duration,
     pub(super) projection: Arc<ProjectionCache>,
 }
@@ -88,7 +88,7 @@ fn write_drain(file: &mut Option<std::fs::File>, state: &Shared, cut: u64, close
 }
 
 impl Writer {
-    pub(super) fn spawn(root: Option<PathBuf>, boot: Boot, mut options: Options) -> Self {
+    pub(crate) fn spawn(root: Option<PathBuf>, boot: Boot, mut options: Options) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Message>(64);
         let state = Arc::new(Mutex::new(State::new(&boot, options.host.clone())));
         let shared = state.clone();
@@ -173,7 +173,7 @@ impl Writer {
                     let drained =
                         gate.is_some() && write_drain(&mut file, &shared, message.cut, false);
                     last_cut = message.cut;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     let acknowledged = message.ack.is_some();
                     if let Some(ack) = message.ack
                         && ack.send(written && drained).is_err()
@@ -183,7 +183,7 @@ impl Writer {
                             persist_invalid(file, &shared, &mut persisted);
                         }
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if acknowledged {
                         (options.after_ack)();
                     }
@@ -229,7 +229,7 @@ impl Writer {
         self.queue(record, Some(ack), None).then_some(received)
     }
 
-    pub(super) fn try_append(&self, record: Value) {
+    pub(crate) fn try_append(&self, record: Value) {
         self.queue(record, None, None);
     }
 

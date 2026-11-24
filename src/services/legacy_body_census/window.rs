@@ -1,15 +1,15 @@
 use serde_json::{Value, json};
 
-pub(super) struct Window {
+pub(crate) struct Window {
     pub(super) boot_id: String,
-    pub(super) cut: u64,
-    pub(super) drained: Option<u64>,
-    pub(super) closed: bool,
+    pub(crate) cut: u64,
+    pub(crate) drained: Option<u64>,
+    pub(crate) closed: bool,
     pub(super) invalid: bool,
 }
 
 impl Window {
-    pub(super) fn new(boot_id: String) -> Self {
+    pub(crate) fn new(boot_id: String) -> Self {
         Self {
             boot_id,
             cut: 0,
@@ -24,7 +24,7 @@ impl Window {
             "closed":closed,"invalid":self.invalid})
     }
 
-    pub(super) fn observe(&mut self, record: &Value) {
+    pub(crate) fn observe(&mut self, record: &Value) {
         if record["kind"] == "drain" {
             if record["boot_id"] != self.boot_id
                 || record["cut"].as_u64() != Some(self.cut)
@@ -48,7 +48,7 @@ impl Window {
         }
     }
 
-    pub(super) fn verdict(&self, live_boot: Option<&str>, candidate: &'static str) -> &'static str {
+    pub(crate) fn verdict(&self, live_boot: Option<&str>, candidate: &'static str) -> &'static str {
         if !self.invalid
             && self.drained == Some(self.cut)
             && (self.closed || live_boot == Some(self.boot_id.as_str()))
@@ -67,7 +67,7 @@ impl Window {
 }
 
 // Structural evidence only; the collector must also reconcile independent boot inventory.
-pub(super) fn valid_chain(
+pub(crate) fn valid_chain(
     headers: &std::collections::BTreeMap<String, Value>,
     anchor: &Value,
     end_ms: i64,

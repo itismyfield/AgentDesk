@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-pub(super) fn append_line(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
+pub(crate) fn append_line(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     file.write_all(&bytes)
@@ -125,7 +125,7 @@ pub(super) fn prepare(
     )
 }
 
-pub(super) fn prepare_with_sync(
+pub(crate) fn prepare_with_sync(
     root: &Path,
     boot: &Boot,
     doctor: Option<String>,
