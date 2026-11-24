@@ -615,22 +615,24 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
 /// One process starts one upkeep task, and that task runs a pass on its first tick.
 #[test]
 fn the_process_starts_one_upkeep_task() {
-    const TEST: &str =
-        "krx_session_host_tests::managed_config_maintenance::the_process_starts_one_upkeep_task";
     let Some(user) = std::env::var_os("ADK_UPKEEP_TASK_USER") else {
         let root = tempfile::tempdir().unwrap();
+        let test = format!(
+            "{}::the_process_starts_one_upkeep_task",
+            module_path!().split_once("::").unwrap().1
+        );
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+            .args(["--exact", &test, "--nocapture"])
             .env("ADK_UPKEEP_TASK_USER", root.path())
             .env("HOME", root.path())
             .env("AGENTDESK_ROOT_DIR", root.path().join("runtime"))
             .env_remove("XDG_CONFIG_HOME")
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         return;
