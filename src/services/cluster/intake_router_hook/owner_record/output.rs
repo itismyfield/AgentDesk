@@ -11,19 +11,19 @@ use std::future::Future;
 pub(crate) struct Origin {
     pub(super) delivery: i64,
     pub(super) provider: String,
-    pub(crate) channel: String,
+    pub(super) channel: String,
     pub(super) executor: String,
-    pub(crate) generation: i64,
-    pub(crate) receipt: i64,
+    pub(super) generation: i64,
+    pub(super) receipt: i64,
     pub(super) nonce: String,
     pub(super) incarnation: String,
-    pub(crate) binding: serde_json::Value,
+    pub(super) binding: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
-    pub(crate) origin: Box<Origin>,
+    origin: Box<Origin>,
     payload_hash: String,
 }
 
@@ -228,6 +228,28 @@ pub(crate) async fn acquire_unstamped(
         Err(AcquireError::Withheld("managed output has no origin stamp"))
     } else {
         Ok(EffectGuard(Some(tx)))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Origin {
+    pub(crate) fn channel_for_test(&self) -> &str {
+        &self.channel
+    }
+
+    pub(crate) fn receipt_for_test(&self) -> i64 {
+        self.receipt
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Artifact {
+    pub(crate) fn origin_generation_mut_for_test(&mut self) -> &mut i64 {
+        &mut self.origin.generation
+    }
+
+    pub(crate) fn origin_binding_mut_for_test(&mut self) -> &mut serde_json::Value {
+        &mut self.origin.binding
     }
 }
 

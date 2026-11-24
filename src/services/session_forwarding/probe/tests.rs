@@ -1,6 +1,8 @@
 use crate::services::session_forwarding::ForwardCallerContext;
-use crate::services::session_forwarding::probe::{probe, probe_target};
-use crate::services::session_forwarding::trusted_target::TrustedForwardTarget;
+use crate::services::session_forwarding::probe::{
+    TrustedForwardTargetForTest as TrustedForwardTarget, probe_for_test as probe,
+    probe_target_for_test as probe_target,
+};
 use axum::Router;
 use axum::extract::{ConnectInfo, Request};
 use axum::http::header;

@@ -2,14 +2,14 @@ use serde_json::{Value, json};
 
 pub(crate) struct Window {
     pub(super) boot_id: String,
-    pub(crate) cut: u64,
-    pub(crate) drained: Option<u64>,
-    pub(crate) closed: bool,
+    pub(super) cut: u64,
+    pub(super) drained: Option<u64>,
+    pub(super) closed: bool,
     pub(super) invalid: bool,
 }
 
 impl Window {
-    pub(crate) fn new(boot_id: String) -> Self {
+    pub(super) fn new(boot_id: String) -> Self {
         Self {
             boot_id,
             cut: 0,
@@ -24,7 +24,7 @@ impl Window {
             "closed":closed,"invalid":self.invalid})
     }
 
-    pub(crate) fn observe(&mut self, record: &Value) {
+    pub(super) fn observe(&mut self, record: &Value) {
         if record["kind"] == "drain" {
             if record["boot_id"] != self.boot_id
                 || record["cut"].as_u64() != Some(self.cut)
@@ -48,7 +48,7 @@ impl Window {
         }
     }
 
-    pub(crate) fn verdict(&self, live_boot: Option<&str>, candidate: &'static str) -> &'static str {
+    pub(super) fn verdict(&self, live_boot: Option<&str>, candidate: &'static str) -> &'static str {
         if !self.invalid
             && self.drained == Some(self.cut)
             && (self.closed || live_boot == Some(self.boot_id.as_str()))
@@ -67,7 +67,7 @@ impl Window {
 }
 
 // Structural evidence only; the collector must also reconcile independent boot inventory.
-pub(crate) fn valid_chain(
+pub(super) fn valid_chain(
     headers: &std::collections::BTreeMap<String, Value>,
     anchor: &Value,
     end_ms: i64,
@@ -151,4 +151,46 @@ pub(crate) fn valid_chain(
         complete.extend(path);
     }
     true
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Window {
+    pub(crate) fn new_for_test(boot_id: String) -> Self {
+        Self::new(boot_id)
+    }
+
+    pub(crate) fn observe_for_test(&mut self, record: &Value) {
+        self.observe(record);
+    }
+
+    pub(crate) fn verdict_for_test(
+        &self,
+        live_boot: Option<&str>,
+        candidate: &'static str,
+    ) -> &'static str {
+        self.verdict(live_boot, candidate)
+    }
+
+    pub(crate) fn cut_for_test(&self) -> u64 {
+        self.cut
+    }
+
+    pub(crate) fn drained_for_test(&self) -> Option<u64> {
+        self.drained
+    }
+
+    pub(crate) fn closed_for_test(&self) -> bool {
+        self.closed
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn valid_chain_for_test(
+    headers: &std::collections::BTreeMap<String, Value>,
+    anchor: &Value,
+    end_ms: i64,
+    boundary: Option<&Value>,
+    visits: &mut usize,
+) -> bool {
+    valid_chain(headers, anchor, end_ms, boundary, visits)
 }

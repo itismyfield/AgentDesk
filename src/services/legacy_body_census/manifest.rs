@@ -13,7 +13,7 @@ pub(super) fn snapshot() -> Value {
     SNAPSHOT.clone()
 }
 
-pub(crate) fn packaged(
+pub(super) fn packaged(
     root: &std::path::Path,
     raw: &str,
     binary: &std::path::Path,
@@ -87,11 +87,11 @@ pub(super) fn snapshot_for_build(root: &std::path::Path, head: &Value) -> Value 
     )
 }
 
-pub(crate) fn inspect(raw: &str) -> Value {
+pub(super) fn inspect(raw: &str) -> Value {
     inspect_with_evidence(raw, None, None)
 }
 
-pub(crate) fn inspect_with_evidence(
+pub(super) fn inspect_with_evidence(
     raw: &str,
     proof: Option<&Value>,
     identity: Option<&Value>,
@@ -219,4 +219,28 @@ pub(crate) fn inspect_with_evidence(
         "evidence_error":if proof.is_none() { json!("execution_evidence_missing") } else if !evidence_linked { json!("execution_evidence_invalid_or_unlinked") } else { Value::Null },
         "pending":pending.unwrap_or(0),
         "error":if pending.is_some() { Value::Null } else { json!("manifest_invalid") }})
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn packaged_for_test(
+    root: &std::path::Path,
+    raw: &str,
+    binary: &std::path::Path,
+    head: &Value,
+) -> Value {
+    packaged(root, raw, binary, head)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn inspect_for_test(raw: &str) -> Value {
+    inspect(raw)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn inspect_with_evidence_for_test(
+    raw: &str,
+    proof: Option<&Value>,
+    identity: Option<&Value>,
+) -> Value {
+    inspect_with_evidence(raw, proof, identity)
 }
