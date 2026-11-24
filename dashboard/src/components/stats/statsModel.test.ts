@@ -9,16 +9,12 @@ import {
   buildSkillRows,
   buildWindowDelta,
   computeCacheHitRate,
-  dailyChartMinWidth,
   dailySeries,
-  dailyColumn,
-  dailyIndexAt,
   formatCurrency,
   formatTokens,
   periodDayCount,
   resolveLocaleTag,
   skillsForAgent,
-  stepDailySelection,
 } from "./statsModel";
 
 function analyticsFixture(): TokenAnalyticsResponse {
@@ -166,29 +162,6 @@ describe("statsModel", () => {
     expect(skillsForAgent(rows, "pm").map((row) => row.skillName)).toEqual(["plan"]);
     expect(skillsForAgent(rows, "QA").map((row) => row.skillName)).toEqual(["test"]);
     expect(skillsForAgent(rows, "nobody")).toEqual([]);
-  });
-
-  it("maps chart offsets to day columns and only scrolls long series", () => {
-    // 7 days across a 158px plot (46px axis + 12px right margin).
-    expect(dailyIndexAt(0, 216, 7)).toBe(0);
-    expect(dailyIndexAt(46 + 158 / 7 + 1, 216, 7)).toBe(1);
-    expect(dailyIndexAt(500, 216, 7)).toBe(6);
-    expect(dailyIndexAt(10, 216, 0)).toBe(-1);
-    expect(dailyColumn(2, 216, 7).left).toBeCloseTo(46 + (2 * 158) / 7);
-    expect(dailyChartMinWidth(7)).toBe(0);
-    expect(dailyChartMinWidth(30)).toBe(30 * 11 + 58);
-  });
-
-  it("steps the daily readout from the latest day and clamps at both ends", () => {
-    expect(stepDailySelection(null, "next", 7)).toBe(6);
-    expect(stepDailySelection(null, "prev", 7)).toBe(5);
-    expect(stepDailySelection(0, "prev", 7)).toBe(0);
-    expect(stepDailySelection(6, "next", 7)).toBe(6);
-    expect(stepDailySelection(3, "first", 7)).toBe(0);
-    expect(stepDailySelection(3, "last", 7)).toBe(6);
-    expect(stepDailySelection(3, "clear", 7)).toBeNull();
-    expect(stepDailySelection(12, "prev", 7)).toBe(5);
-    expect(stepDailySelection(null, "next", 0)).toBeNull();
   });
 
   it("prefers catalog descriptions for skill rows", () => {

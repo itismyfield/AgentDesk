@@ -1,223 +1,95 @@
 import { useEffect, useMemo, useState } from "react";
 import { onCredentialChange } from "../../api/authState";
 import { request, SLOW_AGGREGATE_GET } from "../../api/httpClient";
-import type { TFunction } from "./model";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceMetricPill,
-  SurfaceNotice,
-  SurfaceSection,
-  SurfaceSegmentButton,
-} from "../common/SurfacePrimitives";
+import { Button } from "../../kit/free/button-clean";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
+import { Cap, CardNote, Chip, InspSection, KeyValue, Num, Row, SectionCard } from "../common/KitPrimitives";
+import type { TFunction } from "./model";
 
-interface ModelLineItem {
-  model: string;
-  display_name: string;
-  total_tokens: number;
-  cost: number;
-  provider: string;
-}
-
-interface ProviderShare {
-  provider: string;
-  tokens: number;
-  percentage: number;
-}
-
-interface ReceiptStats {
-  total_messages: number;
-  total_sessions: number;
-}
-
-interface AgentShare {
-  agent: string;
-  tokens: number;
-  cost: number;
-  percentage: number;
-}
-
+interface ModelLineItem { model: string; display_name: string; total_tokens: number; cost: number; provider: string }
+interface ProviderShare { provider: string; tokens: number; percentage: number }
+interface AgentShare { agent: string; tokens: number; cost: number; percentage: number }
 interface ReceiptData {
-  period_label: string;
-  period_start: string;
-  period_end: string;
-  models: ModelLineItem[];
-  subtotal: number;
-  cache_discount: number;
-  total: number;
-  stats: ReceiptStats;
-  providers: ProviderShare[];
-  agents: AgentShare[];
+  period_label: string; period_start: string; period_end: string; models: ModelLineItem[];
+  subtotal: number; cache_discount: number; total: number;
+  stats: { total_messages: number; total_sessions: number }; providers: ProviderShare[]; agents: AgentShare[];
 }
-
 type Period = "today" | "week" | "month" | "all";
 
-interface ReceiptWidgetProps {
-  t: TFunction;
-}
-
-interface CachedReceiptEntry {
-  data: ReceiptData;
-  fetchedAt: number;
-}
-
-const receiptCache = new Map<Period, CachedReceiptEntry>();
-// A failed load may leave the server still aggregating; polls wait out its longest run first.
+const receiptCache = new Map<Period, { data: ReceiptData; fetchedAt: number }>();
 const receiptFailedAt = new Map<Period, number>();
 const RECEIPT_RETRY_AFTER_FAILURE_MS = 3 * 60_000;
-// Receipts fetched under a previous credential must not render after re-login.
-onCredentialChange(() => {
-  receiptCache.clear();
-  receiptFailedAt.clear();
-});
-const RECEIPT_CACHE_TTL: Record<Period, number> = {
-  today: 30 * 60_000,
-  week: 210 * 60_000,
-  month: 15 * 60 * 60_000,
-  all: 24 * 60 * 60_000,
-};
+onCredentialChange(() => { receiptCache.clear(); receiptFailedAt.clear(); });
+const RECEIPT_CACHE_TTL: Record<Period, number> = { today: 30 * 60_000, week: 210 * 60_000, month: 15 * 60 * 60_000, all: 24 * 60 * 60_000 };
 
-function formatTokens(value: number): string {
-  if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
-  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
-  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
-  return String(value);
-}
-
-function formatCost(value: number): string {
-  if (value >= 100) return `$${Math.round(value).toLocaleString("en-US")}`;
-  if (value >= 1) return `$${value.toFixed(2)}`;
-  if (value >= 0.01) return `$${value.toFixed(3)}`;
-  return `$${value.toFixed(4)}`;
-}
-
-function providerKey(value: string): string {
-  return value.trim().toLowerCase();
-}
+const formatTokens = (v: number) => (v >= 1e9 ? `${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : String(v));
+const formatCost = (v: number) => (v >= 100 ? `$${Math.round(v).toLocaleString("en-US")}` : v >= 1 ? `$${v.toFixed(2)}` : v >= 0.01 ? `$${v.toFixed(3)}` : `$${v.toFixed(4)}`);
+const providerKey = (v: string) => v.trim().toLowerCase();
 
 function buildProviderOptions(data: ReceiptData | null): string[] {
   if (!data) return [];
-
-  const seen = new Set<string>();
-  const providers: string[] = [];
-  for (const provider of data.providers.map((item) => item.provider).concat(data.models.map((item) => item.provider))) {
-    const key = providerKey(provider);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    providers.push(provider);
+  const seen = new Set<string>(), out: string[] = [];
+  for (const p of data.providers.map((x) => x.provider).concat(data.models.map((x) => x.provider))) {
+    const k = providerKey(p);
+    if (k && !seen.has(k)) { seen.add(k); out.push(p); }
   }
-  return providers;
+  return out;
 }
 
 function deriveReceiptView(data: ReceiptData | null, selectedProvider: string): ReceiptData | null {
-  if (!data) return null;
-  if (selectedProvider === "all") return data;
-
-  const filteredModels = data.models.filter((model) => providerKey(model.provider) === providerKey(selectedProvider));
-  if (filteredModels.length === 0) return null;
-
-  const filteredSubtotal = filteredModels.reduce((sum, model) => sum + model.cost, 0);
-  const discountRatio = data.subtotal > 0 ? filteredSubtotal / data.subtotal : 0;
-  const filteredDiscount = data.cache_discount * discountRatio;
-  const filteredTokens = filteredModels.reduce((sum, model) => sum + model.total_tokens, 0);
-  const providerLabel = filteredModels[0]?.provider ?? selectedProvider;
-
-  return {
-    ...data,
-    models: filteredModels,
-    subtotal: filteredSubtotal,
-    cache_discount: filteredDiscount,
-    total: Math.max(filteredSubtotal - filteredDiscount, 0),
-    providers: [
-      {
-        provider: providerLabel,
-        tokens: filteredTokens,
-        percentage: 100,
-      },
-    ],
-    agents: [],
-  };
+  if (!data || selectedProvider === "all") return data;
+  const models = data.models.filter((m) => providerKey(m.provider) === providerKey(selectedProvider));
+  if (!models.length) return null;
+  const subtotal = models.reduce((s, m) => s + m.cost, 0);
+  const cache_discount = data.subtotal > 0 ? data.cache_discount * (subtotal / data.subtotal) : 0;
+  const tokens = models.reduce((s, m) => s + m.total_tokens, 0);
+  return { ...data, models, subtotal, cache_discount, total: Math.max(subtotal - cache_discount, 0), providers: [{ provider: models[0]?.provider ?? selectedProvider, tokens, percentage: 100 }], agents: [] };
 }
 
-// Seconds since the load named by `key` started (null: none), so a minute-long aggregation reads as progress.
-function useElapsedSeconds(key: string | null): number {
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    setElapsed(0);
-    if (key === null) return;
-    const startedAt = Date.now();
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
-    return () => clearInterval(timer);
-  }, [key]);
-  return elapsed;
-}
-
-export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
+export default function ReceiptWidget({ t }: { t: TFunction }) {
   const [data, setData] = useState<ReceiptData | null>(null);
   const [period, setPeriod] = useState<Period>("month");
   const [selectedProvider, setSelectedProvider] = useState("all");
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
-  const loadingSeconds = useElapsedSeconds(loading ? period : null);
+  const [loadingSeconds, setLoadingSeconds] = useState(0);
+
+  useEffect(() => {
+    setLoadingSeconds(0);
+    if (!loading) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => setLoadingSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [loading, period]);
 
   useEffect(() => {
     let mounted = true;
-
     const load = async () => {
       const cached = receiptCache.get(period);
-      const ttl = RECEIPT_CACHE_TTL[period];
-      const fresh = cached ? Date.now() - cached.fetchedAt < ttl : false;
-
-      if (cached && mounted) {
-        setData(cached.data);
-      }
+      if (cached && mounted) setData(cached.data);
+      const fresh = cached ? Date.now() - cached.fetchedAt < RECEIPT_CACHE_TTL[period] : false;
       const failedAt = receiptFailedAt.get(period);
-      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) {
-        if (mounted) setLoading(false);
-        return;
-      }
-
+      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) { if (mounted) setLoading(false); return; }
       if (mounted) setLoading(true);
       try {
-        const json = await request<ReceiptData>(`/api/receipt?period=${period}`, {
-          ...SLOW_AGGREGATE_GET,
-          suppressErrorToast: true,
-        });
+        const json = await request<ReceiptData>(`/api/receipt?period=${period}`, { ...SLOW_AGGREGATE_GET, suppressErrorToast: true });
         receiptCache.set(period, { data: json, fetchedAt: Date.now() });
         receiptFailedAt.delete(period);
         if (mounted) setData(json);
       } catch (error) {
-        // request() hands 401 to the shared re-login flow; keep cached data on other failures.
-        // A credential change aborts the request; that is no server failure to wait out.
         if (!(error instanceof Error && error.name === "AbortError")) receiptFailedAt.set(period, Date.now());
-      } finally {
-        if (mounted) setLoading(false);
-      }
+      } finally { if (mounted) setLoading(false); }
     };
-
     void load();
-    const stopPolling = pollWhileVisible(() => void load(), 60_000);
-    return () => {
-      mounted = false;
-      stopPolling();
-    };
+    const stop = pollWhileVisible(() => void load(), 60_000);
+    return () => { mounted = false; stop(); };
   }, [period]);
 
   const providerOptions = useMemo(() => buildProviderOptions(data), [data]);
   const viewData = useMemo(() => deriveReceiptView(data, selectedProvider), [data, selectedProvider]);
-  const totalTokens = useMemo(
-    () => viewData?.models.reduce((sum, model) => sum + model.total_tokens, 0) ?? 0,
-    [viewData],
-  );
-  const selectedProviderLabel = selectedProvider === "all"
-    ? null
-    : (viewData?.providers[0]?.provider ?? selectedProvider);
-
+  const totalTokens = useMemo(() => viewData?.models.reduce((s, m) => s + m.total_tokens, 0) ?? 0, [viewData]);
   useEffect(() => {
-    if (selectedProvider === "all") return;
-    const exists = providerOptions.some((provider) => providerKey(provider) === providerKey(selectedProvider));
-    if (!exists) setSelectedProvider("all");
+    if (selectedProvider !== "all" && !providerOptions.some((p) => providerKey(p) === providerKey(selectedProvider))) setSelectedProvider("all");
   }, [providerOptions, selectedProvider]);
 
   const periods: { id: Period; label: string }[] = [
@@ -226,275 +98,67 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     { id: "month", label: t({ ko: "이번 달", en: "This Month", ja: "今月", zh: "本月" }) },
     { id: "all", label: t({ ko: "전체", en: "All", ja: "全期間", zh: "全部" }) },
   ];
+  const title = t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" });
 
   if (!viewData) {
     return (
-      <SurfaceSection
-        title={t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" })}
-        className="relative overflow-hidden"
-        style={{
-          borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-amber-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)",
-        }}
-      >
-        <div className="mt-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+      <SectionCard title={title}>
+        <CardNote>
           {loading
-            ? `${t({
-              ko: "서버가 영수증을 집계하는 중이에요. 1분 넘게 걸릴 수 있어요",
-              en: "The server is aggregating the receipt; this can take over a minute",
-              ja: "サーバーがレシートを集計中です。1分以上かかる場合があります",
-              zh: "服务器正在汇总收据，可能需要一分钟以上",
-            })} · ${loadingSeconds}s`
+            ? `${t({ ko: "서버가 영수증을 집계하는 중이에요. 1분 넘게 걸릴 수 있어요", en: "The server is aggregating the receipt; this can take over a minute", ja: "サーバーがレシートを集計中です。1分以上かかる場合があります", zh: "服务器正在汇总收据，可能需要一分钟以上" })} · ${loadingSeconds}s`
             : t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
-        </div>
-      </SurfaceSection>
+        </CardNote>
+      </SectionCard>
     );
   }
 
   return (
-    <SurfaceSection
-      title={t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" })}
-      badge={viewData.period_label}
-      actions={(
-        <div className="flex items-center gap-2">
-          {loading && (
-            <span
-              className="rounded-full border px-2 py-1 text-xs font-medium"
-              style={{
-                color: "var(--th-accent-warn)",
-                background: "color-mix(in srgb, var(--th-badge-amber-bg) 82%, transparent)",
-                borderColor: "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)",
-              }}
-            >
-              {t({ ko: "갱신 중", en: "Syncing", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s
-            </span>
-          )}
-          <SurfaceActionButton
-            tone={expanded ? "neutral" : "warn"}
-            compact
-            onClick={() => setExpanded((prev) => !prev)}
-          >
-            {expanded
-              ? t({ ko: "접기", en: "Collapse", ja: "閉じる", zh: "收起" })
-              : t({ ko: "영수증 펼치기", en: "Expand Receipt", ja: "レシートを開く", zh: "展开收据" })}
-          </SurfaceActionButton>
-        </div>
-      )}
-      className="relative overflow-hidden"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
-        background: "var(--th-bg-surface)",
-      }}
-    >
-      <div className="mt-4 flex flex-wrap gap-2">
-        {periods.map((item) => (
-          <SurfaceSegmentButton
-            key={item.id}
-            tone="warn"
-            active={period === item.id}
-            onClick={() => setPeriod(item.id)}
-          >
-            {item.label}
-          </SurfaceSegmentButton>
-        ))}
+    <SectionCard title={title} aside={
+      <div className="ml-auto flex flex-wrap items-center gap-2">
+        <Chip tone="neutral">{viewData.period_label}</Chip>
+        {loading ? <Chip tone="warn">{t({ ko: "갱신 중", en: "Syncing", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s</Chip> : null}
+        <Button variant="secondary" size="sm" onClick={() => setExpanded((prev) => !prev)}>
+          {expanded ? t({ ko: "접기", en: "Collapse", ja: "閉じる", zh: "收起" }) : t({ ko: "영수증 펼치기", en: "Expand Receipt", ja: "レシートを開く", zh: "展开收据" })}
+        </Button>
       </div>
-
-      {providerOptions.length > 1 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <SurfaceSegmentButton
-            tone="warn"
-            active={selectedProvider === "all"}
-            onClick={() => setSelectedProvider("all")}
-          >
-            {t({ ko: "전체 프로바이더", en: "All providers", ja: "全プロバイダー", zh: "全部提供方" })}
-          </SurfaceSegmentButton>
-          {providerOptions.map((provider) => {
-            const active = providerKey(selectedProvider) === providerKey(provider);
-            return (
-              <SurfaceSegmentButton
-                key={provider}
-                tone="warn"
-                active={active}
-                onClick={() => setSelectedProvider(provider)}
-              >
-                {provider}
-              </SurfaceSegmentButton>
-            );
-          })}
+    }>
+      <InspSection className="gap-3">
+        <div className="flex flex-wrap gap-1.5">
+          {periods.map((item) => <Button key={item.id} size="sm" variant={period === item.id ? "primary" : "secondary"} onClick={() => setPeriod(item.id)}>{item.label}</Button>)}
         </div>
-      )}
-
-      <div className="mt-4 flex flex-wrap gap-3">
-        <SurfaceMetricPill
-          label={t({ ko: "총 비용", en: "Total Cost", ja: "総コスト", zh: "总成本" })}
-          value={(
-            <span className="inline-flex items-center gap-2">
-              <span style={{ color: "var(--th-accent-warn)" }}>{formatCost(viewData.total)}</span>
-              {viewData.cache_discount > 0.001 && (
-                <span className="text-[11px]" style={{ color: "var(--th-accent-primary)" }}>
-                  {t({
-                    ko: `캐시로 ${formatCost(viewData.cache_discount)} 절약`,
-                    en: `${formatCost(viewData.cache_discount)} saved by cache`,
-                    ja: `キャッシュで ${formatCost(viewData.cache_discount)} 節約`,
-                    zh: `缓存节省 ${formatCost(viewData.cache_discount)}`,
-                  })}
-                </span>
-              )}
-            </span>
-          )}
-          tone="warn"
-        />
-        <SurfaceMetricPill
-          label={t({ ko: "토큰 사용량", en: "Token Usage", ja: "トークン使用量", zh: "代币用量" })}
-          value={t({
-            ko: `${formatTokens(totalTokens)} 토큰 · 모델 ${viewData.models.length}개`,
-            en: `${formatTokens(totalTokens)} tokens · ${viewData.models.length} models`,
-            ja: `${formatTokens(totalTokens)} トークン · モデル ${viewData.models.length}個`,
-            zh: `${formatTokens(totalTokens)} 代币 · ${viewData.models.length} 个模型`,
-          })}
-          tone="info"
-        />
-        {selectedProvider === "all" ? (
-          <SurfaceMetricPill
-            label={t({ ko: "활동량", en: "Activity", ja: "アクティビティ", zh: "活动量" })}
-            value={t({
-              ko: `메시지 ${viewData.stats.total_messages.toLocaleString()}개 · 세션 ${viewData.stats.total_sessions}개`,
-              en: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
-              ja: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
-              zh: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
-            })}
-            tone="neutral"
-          />
-        ) : (
-          <SurfaceMetricPill
-            label={t({ ko: "프로바이더", en: "Provider", ja: "プロバイダー", zh: "提供方" })}
-            value={selectedProviderLabel ?? selectedProvider}
-            tone="accent"
-          />
-        )}
-      </div>
-
-      {selectedProviderLabel && (
-        <SurfaceNotice className="mt-4" tone="info" compact>
-          {t({
-            ko: `${selectedProviderLabel} 사용분만 골라 본 비용과 토큰이에요.`,
-            en: `This view is filtered to the ${selectedProviderLabel} provider slice.`,
-            ja: `${selectedProviderLabel} provider に絞った slice です。`,
-            zh: `当前视图是 ${selectedProviderLabel} provider 的 slice。`,
-          })}
-        </SurfaceNotice>
-      )}
-
-      {expanded && (
-        <SurfaceCard
-          className="mt-4 rounded-lg p-2 sm:p-3"
-          style={{
-            background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-            borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-          }}
-        >
-          <div
-            className="mx-auto w-full min-w-0 p-2 text-xs leading-5 sm:p-3"
-            style={{
-              background: "var(--th-bg-surface)",
-              color: "var(--th-text-primary)",
-            }}
-          >
-            <div className="text-center font-semibold text-[13px] tracking-normal mb-0.5">{t({ko:"비용 명세",en:"Cost breakdown",ja:"費用明細",zh:"费用明细"})}</div>
-            <div className="text-center text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {viewData.period_start} ~ {viewData.period_end}
-            </div>
-            {selectedProvider !== "all" && (
-              <div className="text-center text-xs mt-0.5" style={{ color: "var(--th-badge-amber-text)" }}>
-                {viewData.providers[0]?.provider ?? selectedProvider}
-              </div>
-            )}
-            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
-
-            <div className="grid grid-cols-[minmax(0,1fr)_4rem_4.5rem] gap-2 text-xs font-medium mb-1" style={{ color: "var(--th-text-muted)", letterSpacing: 1 }}>
-              <span className="flex-1">MODEL</span>
-              <span style={{ width: 60, textAlign: "right" }}>TOKENS</span>
-              <span style={{ width: 70, textAlign: "right" }}>COST</span>
-            </div>
-
-            {viewData.models.map((model) => (
-              <div key={`${model.provider}-${model.model}`} className="grid min-w-0 grid-cols-[minmax(0,1fr)_4rem_4.5rem] items-start gap-2 border-b border-th-border-subtle py-2">
-                <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{model.display_name}</span>
-                <span className="shrink-0 text-xs" style={{ width: 60, textAlign: "right", color: "var(--th-text-secondary)" }}>
-                  {formatTokens(model.total_tokens)}
-                </span>
-                <span className="shrink-0 font-semibold" style={{ width: 70, textAlign: "right" }}>
-                  {formatCost(model.cost)}
-                </span>
-              </div>
-            ))}
-
-            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
-
-            <div className="flex justify-between font-semibold">
-              <span>SUBTOTAL</span>
-              <span>{formatCost(viewData.subtotal)}</span>
-            </div>
-            {viewData.cache_discount > 0.001 && (
-              <div className="flex justify-between font-semibold" style={{ color: "var(--th-badge-emerald-text)" }}>
-                <span>CACHE DISCOUNT</span>
-                <span>-{formatCost(viewData.cache_discount)}</span>
-              </div>
-            )}
-
-            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
-
-            <div className="flex justify-between font-semibold text-[14px]">
-              <span>TOTAL</span>
-              <span>{formatCost(viewData.total)}</span>
-            </div>
-
-            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
-
-            <div className="text-xs font-semibold mb-1" style={{ color: "var(--th-text-secondary)" }}>STATISTICS</div>
-            <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
-              <span>Tokens</span>
-              <span>{formatTokens(totalTokens)}</span>
-            </div>
-            {selectedProvider === "all" && (
-              <>
-                <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                  <span>Messages</span>
-                  <span>{viewData.stats.total_messages.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                  <span>Sessions</span>
-                  <span>{viewData.stats.total_sessions.toLocaleString()}</span>
-                </div>
-              </>
-            )}
-
-            {selectedProvider === "all" && viewData.agents.length > 0 && (
-              <>
-                <div className="text-xs font-semibold mt-2 mb-0.5" style={{ color: "var(--th-text-muted)" }}>AGENT USAGE</div>
-                {viewData.agents.filter((agent) => agent.percentage >= 0.1).map((agent) => (
-                  <div key={agent.agent} className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                    <span>{agent.agent}</span>
-                    <span>{agent.percentage.toFixed(0)}%</span>
-                  </div>
-                ))}
-              </>
-            )}
-
-            <div className="text-xs font-semibold mt-2 mb-0.5" style={{ color: "var(--th-text-muted)" }}>PROVIDER USAGE</div>
-            {viewData.providers.map((provider) => (
-              <div key={provider.provider} className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                <span>{provider.provider}</span>
-                <span>{provider.percentage.toFixed(0)}%</span>
-              </div>
-            ))}
-
-            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
-
+        {providerOptions.length > 1 ? (
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant={selectedProvider === "all" ? "primary" : "ghost"} onClick={() => setSelectedProvider("all")}>{t({ ko: "전체 프로바이더", en: "All providers", ja: "全プロバイダー", zh: "全部提供方" })}</Button>
+            {providerOptions.map((p) => <Button key={p} size="sm" variant={providerKey(selectedProvider) === providerKey(p) ? "primary" : "ghost"} onClick={() => setSelectedProvider(p)}>{p}</Button>)}
           </div>
-        </SurfaceCard>
-      )}
-    </SurfaceSection>
+        ) : null}
+        <dl className="m-0 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <KeyValue dl label={t({ ko: "총 비용", en: "Total Cost", ja: "総コスト", zh: "总成本" })} num>
+            <strong>{formatCost(viewData.total)}</strong>
+            {viewData.cache_discount > 0.001 ? <Cap className="ml-1.5">-{formatCost(viewData.cache_discount)}</Cap> : null}
+          </KeyValue>
+          <KeyValue dl label={t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "代币" })} num>{formatTokens(totalTokens)} · {viewData.models.length}</KeyValue>
+          <KeyValue dl label={t({ ko: "활동", en: "Activity", ja: "稼働", zh: "活动" })} num>
+            {selectedProvider === "all" ? `${viewData.stats.total_messages.toLocaleString()} / ${viewData.stats.total_sessions}` : (viewData.providers[0]?.provider ?? selectedProvider)}
+          </KeyValue>
+        </dl>
+      </InspSection>
+      {expanded ? (
+        <div>
+          <Row density="sm">
+            <Cap className="flex-1">{viewData.period_start} ~ {viewData.period_end}</Cap>
+            <Cap>{t({ ko: "소계", en: "Subtotal", ja: "小計", zh: "小计" })} {formatCost(viewData.subtotal)}</Cap>
+          </Row>
+          {viewData.models.map((m) => (
+            <Row key={`${m.provider}-${m.model}`} density="sm">
+              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--fg)]">{m.display_name}</span>
+              <Chip tone="neutral">{m.provider}</Chip>
+              <Num className="w-16 text-right text-xs text-[var(--fg-muted)]">{formatTokens(m.total_tokens)}</Num>
+              <Num className="w-20 text-right text-[13px] font-semibold text-[var(--fg)]">{formatCost(m.cost)}</Num>
+            </Row>
+          ))}
+        </div>
+      ) : null}
+    </SectionCard>
   );
 }

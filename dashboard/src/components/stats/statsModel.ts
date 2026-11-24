@@ -377,58 +377,6 @@ export function skillsForAgent(rows: AgentSkillRow[], agent: string): AgentSkill
   return rows.filter((row) => row.agentId === agent || row.agentName === agent);
 }
 
-// Daily chart geometry: the plot sits between the y-axis and the right margin.
-export const DAILY_CHART_Y_AXIS = 46;
-export const DAILY_CHART_RIGHT = 12;
-/** Narrowest day column before the chart scrolls sideways. */
-export const DAILY_CHART_MIN_DAY = 11;
-
-export function dailyChartMinWidth(count: number): number {
-  return count > 7
-    ? count * DAILY_CHART_MIN_DAY + DAILY_CHART_Y_AXIS + DAILY_CHART_RIGHT
-    : 0;
-}
-
-/** Day index under an x offset inside the chart, clamped to the plot. */
-export function dailyIndexAt(x: number, width: number, count: number): number {
-  if (count <= 0) return -1;
-  const plot = Math.max(1, width - DAILY_CHART_Y_AXIS - DAILY_CHART_RIGHT);
-  const index = Math.floor(((x - DAILY_CHART_Y_AXIS) / plot) * count);
-  return Math.min(count - 1, Math.max(0, index));
-}
-
-/** Left edge and width of a day column, for scrolling it into view. */
-export function dailyColumn(index: number, width: number, count: number) {
-  const plot = Math.max(1, width - DAILY_CHART_Y_AXIS - DAILY_CHART_RIGHT);
-  const band = plot / Math.max(1, count);
-  return { left: DAILY_CHART_Y_AXIS + index * band, width: band };
-}
-
-export type DailyStep = "prev" | "next" | "first" | "last" | "clear";
-
-/** Readout stepping: with nothing picked, both directions start from the latest day. */
-export function stepDailySelection(
-  selected: number | null,
-  step: DailyStep,
-  count: number,
-): number | null {
-  if (count <= 0) return null;
-  const last = count - 1;
-  const base = selected === null ? last : Math.min(selected, last);
-  switch (step) {
-    case "prev":
-      return selected === null ? Math.max(0, last - 1) : Math.max(0, base - 1);
-    case "next":
-      return selected === null ? last : Math.min(last, base + 1);
-    case "first":
-      return 0;
-    case "last":
-      return last;
-    default:
-      return null;
-  }
-}
-
 export function dailySeries(t: TFunction): DailySeriesDescriptor[] {
   return [
     {

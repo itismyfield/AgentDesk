@@ -166,7 +166,7 @@ const RUNTIME_CONFIG = {
 
 const CONNECTORS = {
   connectors: [
-    { id: "obsidian_agent_prompts", name: "Obsidian agent prompts", state: "ready", optional: true, env_var: "AGENTDESK_OBSIDIAN_AGENTS_SRC", source: "/Users/me/ObsidianVault/RemoteVault/adk-config/agents", reason: null, detail: "state=ready", setup_actions: [], capabilities: ["obsidian_agent_prompts"] },
+    { id: "obsidian_agent_prompts", name: "Obsidian agent prompts", state: "ready", optional: true, env_var: "AGENTDESK_OBSIDIAN_AGENTS_SRC", source: "/srv/vault/adk-config/agents", reason: null, detail: "state=ready", setup_actions: [], capabilities: ["obsidian_agent_prompts"] },
     { id: "kakao_scheduled_delivery", name: "Kakao default-account delivery", state: "skipped", optional: true, env_var: "AGENTDESK_KAKAO_ENABLED", source: null, reason: "disabled", detail: "state=skipped reason=disabled", setup_actions: ["Set AGENTDESK_KAKAO_ENABLED=true after configuring Kakao credentials."], capabilities: ["kakao_friend_message"] },
   ],
   summary: { ready: 1, skipped: 1, missing_config: 0, missing_path: 0, missing_provider: 0, invalid_config: 0, invalid: 0, total: 2, core_runtime_blocking: false },
@@ -203,11 +203,11 @@ const RETENTION = {
 const PROVIDER_PROFILES = {
   providers: [{
     id: "claude",
-    default_home: "/Users/me/.claude",
+    default_home: "/srv/home/.claude",
     primary_profile_id: "default",
     accounts: [{
       id: "default",
-      home: "/Users/me/.claude",
+      home: "/srv/home/.claude",
       usage: { buckets: [{ name: "7d Fable", limit: 100, used: 97, utilization: 97, reset: NOW_SECONDS + 86_400 }], stale: false, unsupported: false, reason: null },
     }],
   }],
@@ -426,6 +426,8 @@ test.describe("settings catalog", () => {
       await openSettings(page);
       const rounds = page.getByTestId("setting-meta-max_review_rounds");
       for (const text of ["기본 3 · 코드", "덮어씀", "바로 적용"]) await expect(rounds.getByText(text, { exact: true })).toBeVisible();
+      await expect(page.getByTestId("setting-meta-maxEntryRetries")).toBeHidden();
+      await page.getByTestId("settings-advanced-toggle").click();
       await expect(page.getByTestId("setting-meta-maxEntryRetries").getByText("기본 3 · 서버 기본값", { exact: true })).toBeVisible();
     });
   }
@@ -443,6 +445,7 @@ test.describe("settings catalog", () => {
     await expect(bar).toBeInViewport();
     await expect(bar).toContainText("최대 리뷰 라운드 30 → 10 · 저장하면 바로 적용돼요");
     await expect(inspector).toContainText("고칠 값10");
+    await page.getByTestId("settings-advanced-toggle").click();
     await row(page, "maxEntryRetries").locator("input").fill("");
     await expect(bar.getByRole("button", { name: "저장" })).toBeDisabled();
     await row(page, "maxEntryRetries").locator("input").fill("5");
@@ -460,6 +463,7 @@ test.describe("settings catalog", () => {
     expect(server.writes.at(-1)?.body).toMatchObject({ maxEntryRetries: 5, __runtimeConfigExplicitKeys: ["maxEntryRetries"] });
     await page.reload();
     await expect(row(page, "max_review_rounds").locator("input")).toHaveValue("10");
+    await page.getByTestId("settings-advanced-toggle").click();
     await expect(row(page, "maxEntryRetries").locator("input")).toHaveValue("5");
   });
 
@@ -634,7 +638,7 @@ test.describe("settings catalog", () => {
     if (isPhone(testInfo)) await page.keyboard.press("Escape");
 
     await row(page, "kakao_scheduled_delivery").click();
-    await expect(page.getByText("Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요.")).toBeVisible();
+    await expect(page.getByTestId("settings-facts-kakao_scheduled_delivery").getByText("Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요.")).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 
@@ -807,7 +811,7 @@ test.describe("settings catalog", () => {
     await mockSettings(page);
     await openSettings(page, "?category=usage");
     await expect(row(page, "rateLimitWarningPct")).toContainText("사용량 주의 표시 (%)");
-    await expect(page.getByTestId("settings-providers-panel").getByText("7일 한도 · Fable 모델")).toBeVisible();
+    await expect(page.getByTestId("settings-providers-panel").getByText("7일 한도 · 상위 모델 (Fable)")).toBeVisible();
     await expect(page.getByTestId("settings-provider-usage-bar").first()).toHaveAttribute("data-level", "danger");
   });
 

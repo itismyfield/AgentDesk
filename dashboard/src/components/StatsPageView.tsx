@@ -391,7 +391,13 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
             series={series}
             className="min-w-0 flex-[2_1_32rem]"
           />
-          <StatsAccountLimits t={t} locale={localeTag} className="min-w-0 flex-[1_1_18rem]" />
+          <StatsAccountLimits
+            t={t}
+            locale={localeTag}
+            allowSwitch
+            defaultMasked
+            className="min-w-0 flex-[1_1_18rem]"
+          />
         </div>
 
         <StatsBreakdown

@@ -3,10 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useSearchParams } from "react-router";
 import { PageFrame } from "../app/PageFrame";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "../app/breakpoints";
+import { IntegrationSettings } from "../kit/pro/integration-settings";
 import ClusterNodesPanel from "./cluster/ClusterNodesPanel";
 import { Cap, Well } from "./common/KitPrimitives";
 import { Modal } from "./common/overlay/Modal";
-import { connectionItems, connectionStatusRows } from "./settings/SettingsConnectionsModel";
+import { buildIntegrationCards, connectionItems, connectionStatusRows } from "./settings/SettingsConnectionsModel";
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings/SettingsCopy";
 import { SettingsMachinePanel } from "./settings/SettingsMachinePanel";
 import {
@@ -17,6 +18,7 @@ import {
   configValue,
   draftProblem,
   filterCatalog,
+  isEssentialSetting,
   matchesQuery,
   resetsOnRestart,
   resolveCategory,
@@ -41,7 +43,6 @@ import { useConnectionStatus, useOperatorConnectors, usePromptRetention, useProv
 
 interface SettingsViewProps {
   isKo: boolean;
-  /** Saved language and default theme, and the shell's /api/settings save path. */
   language: string;
   theme: string;
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
@@ -62,7 +63,6 @@ function useMediaQuery(query: string): boolean {
   );
 }
 
-/** "/" jumps to the search field unless the operator is already typing somewhere. */
 function useSlashFocus(target: React.RefObject<HTMLInputElement | null>) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -77,7 +77,6 @@ function useSlashFocus(target: React.RefObject<HTMLInputElement | null>) {
   }, [target]);
 }
 
-/** Settings catalog: config, runtime-config and connection status in one searchable list (v3 stage 2). */
 export default function SettingsView({ isKo, language, theme, onSaveSettings, onNotify }: SettingsViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const notify = useCallback(
@@ -105,6 +104,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
 
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState({ differs: false, restart: false });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [sheetKey, setSheetKey] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -125,6 +125,10 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     () => connectionStatusRows(connection.onboarding, connection.health, tr),
     [connection.health, connection.onboarding, tr],
   );
+  const integrationCards = useMemo(
+    () => buildIntegrationCards(connection.onboarding, connection.health, connectors, tr, isKo),
+    [connection.health, connection.onboarding, connectors, isKo, tr],
+  );
   const items = useMemo(() => sortCatalog([
     ...appItems({ language, theme }, appDrafts, isKo),
     ...configItems(config.entries, config.edits, isKo),
@@ -136,6 +140,14 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
 
   const counts = useMemo(() => catalogCounts(items), [items]);
   const filtered = useMemo(() => filterCatalog(items, { category, query, ...filters }), [category, filters, items, query]);
+  const narrowed = filters.differs || filters.restart || query.trim() !== "";
+  const twoTier = category === "all" && !narrowed;
+  const essentialItems = useMemo(() => filtered.filter(isEssentialSetting), [filtered]);
+  const advancedItems = useMemo(() => filtered.filter((item) => !isEssentialSetting(item)), [filtered]);
+  const advancedGroups = useMemo<CatalogGroup[]>(() => SETTINGS_CATEGORIES
+    .map((entry) => ({ id: entry.id, label: tr(entry.ko, entry.en), items: advancedItems.filter((item) => item.category === entry.id) }))
+    .filter((group) => group.items.length > 0), [advancedItems, tr]);
+
   const changes = useMemo(() => items.filter((item) => item.draft !== null), [items]);
   const problems = useMemo(
     () => new Map(changes.map((item) => [item.key, draftProblem(item, item.draft ?? "", tr)])),
@@ -144,7 +156,8 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
   const problemFor = useCallback((key: string) => problems.get(key) ?? null, [problems]);
   const firstProblem = changes.find((item) => problems.get(item.key));
   const blockedReason = firstProblem ? `${firstProblem.label}: ${problems.get(firstProblem.key)}` : null;
-  const selected = filtered.find((item) => item.key === selectedKey) ?? (wide ? filtered[0] ?? null : null);
+  const defaultSelected = twoTier ? (essentialItems[0] ?? filtered[0] ?? null) : (filtered[0] ?? null);
+  const selected = filtered.find((item) => item.key === selectedKey) ?? (wide ? defaultSelected : null);
   const sheetItem = sheetKey ? items.find((item) => item.key === sheetKey) ?? null : null;
   const loading = !config.loaded || !runtime.loaded;
   const categoryLabel = useCallback((id: SettingsCategory) => {
@@ -158,7 +171,6 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     const { [item.key]: _dropped, ...rest } = current;
     return value === item.saved ? rest : { ...rest, [item.key]: value };
   }), []);
-  // Language and theme lock while /api/settings saves; clearing their drafts afterwards cannot drop a newer pick.
   const locked = useCallback((item: CatalogItem) => appSaving && item.source === "app", [appSaving]);
   const handleChange = useCallback((item: CatalogItem, value: string) => {
     if (locked(item)) return;
@@ -177,18 +189,17 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     try { await onSaveSettings(patch); } finally { setAppSaving(false); }
   };
 
-  // A related row may be hidden: lift only the search, filter or category that hides it, then select it.
   const openRelated = useCallback((key: string) => {
     const target = items.find((item) => item.key === key);
     if (!target) return;
     if (!matchesQuery(target, query)) setQuery("");
+    if (!isEssentialSetting(target)) setAdvancedOpen(true);
     setFilters((current) => ({ differs: current.differs && target.overridden, restart: current.restart && target.restartNeeded }));
     if (category !== "all" && target.category !== category) setCategory(target.category);
     if (phone) setSheetKey(key);
     else setSelectedKey(key);
   }, [category, items, phone, query, setCategory]);
 
-  // Dangerous config keys (review gate, context clearing) wait for a confirmation before any save path runs.
   const guarded = (keys: string[], run: () => void) => {
     if (keys.length > 0) setPendingDangerous({ keys, run });
     else run();
@@ -241,7 +252,6 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
   const categoryEntries = SETTINGS_CATEGORIES
     .filter((entry) => entry.id !== "other" || counts.byCategory.other)
     .map((entry) => ({ id: entry.id, label: tr(entry.ko, entry.en), count: counts.byCategory[entry.id] ?? 0 }));
-  const narrowed = filters.differs || filters.restart || query.trim() !== "";
   const filterWords = [filters.differs ? tr("기본값과 다른 것만", "differing only") : null, filters.restart ? tr("재시작이 필요한 것만", "restart needed only") : null].filter(Boolean);
   const caption = narrowed
     ? [tr(`${counts.total}개 중 ${filtered.length}개`, `${filtered.length} of ${counts.total}`), ...filterWords].join(" · ")
@@ -254,7 +264,28 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     </SettingsNotice>
   ) : null;
 
-  // Tools that are not key-value rows stay with their category: the open category shows them under its list.
+  const integrationsBlock = (
+    <section className="min-w-0 space-y-3" data-testid="settings-integrations-section">
+      <SettingsSectionHead
+        title={tr("런타임 연결 및 커넥터", "Runtime connections & connectors")}
+        description={tr("실시간 서버 상태(GET /api/health)와 외부 연동 커넥터의 연결 여부를 보여 줘요.", "Live connection status from server health and operator connectors.")}
+      />
+      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 [&_.aui-integration-settings]:max-w-none! [&_.aui-integration-settings-collapse]:hidden!" data-testid="settings-integrations-grid">
+        {integrationCards.map((card) => (
+          <IntegrationSettings
+            key={`${card.id}:${card.enabled}`}
+            name={card.name}
+            count={card.count}
+            meta={card.meta}
+            defaultValues={{ enabled: card.enabled }}
+            actionDisabledReason={card.disabledReason}
+            labels={{ paused: card.pausedLabel }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+
   const blocks: Partial<Record<SettingsCategory, ReactNode>> = {
     workflow: <SettingsPipelineEditorSection tr={tr} isKo={isKo} open={editorOpen} onToggle={() => setEditorOpen((open) => !open)} notify={notify} />,
     usage: (
@@ -274,6 +305,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     system: <SettingsMachinePanel tr={tr} />,
     connections: (
       <div className="flex min-w-0 flex-col gap-4">
+        {integrationsBlock}
         <div className="flex flex-wrap gap-2">
           <SettingsAction
             icon={<RefreshCw className={connection.health.isFetching ? "animate-spin motion-reduce:animate-none" : undefined} />}
@@ -293,7 +325,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
       </div>
     ),
   };
-  const openBlock = category !== "all" && !narrowed ? blocks[category] ?? null : null;
+  const openBlock = narrowed ? null : category === "all" ? integrationsBlock : blocks[category] ?? null;
 
   const saveBar = (
     <SettingsSaveBar
@@ -338,7 +370,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
 
   const description = loading
     ? tr("서버·런타임·연결 설정이에요. 값마다 기본값·출처·적용 시점을 함께 보여 줘요.", "Server, runtime, and connection settings, each with its default, source, and when it applies.")
-    : tr(`서버·런타임·연결 설정 ${counts.total}개예요. 값마다 기본값·출처·적용 시점을 함께 보여 줘요.`, `${counts.total} server, runtime, and connection settings, each with its default, source, and when it applies.`);
+    : tr(`서버·런타임·연결 설정 ${counts.total}개예요. 핵심 항목을 먼저 보여 주고 세부 런타임 키는 접어 둬요.`, `${counts.total} server, runtime, and connection settings, organized into essential and advanced tiers.`);
 
   return (
     <PageFrame
@@ -353,6 +385,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
             categories={categoryEntries}
             category={category}
             onCategory={setCategory}
+            essential={essentialItems}
             differing={items.filter((item) => item.overridden)}
             rows={filtered}
             selectedKey={sheetKey}
@@ -373,6 +406,12 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
           filters={{ ...filters, differsCount: counts.differs, restartCount: counts.restart }}
           onFilter={(name, on) => setFilters((current) => ({ ...current, [name]: on }))}
           groups={groups}
+          essentialItems={essentialItems}
+          advancedGroups={advancedGroups}
+          advancedCount={advancedItems.length}
+          twoTier={twoTier}
+          advancedOpen={advancedOpen || narrowed}
+          onToggleAdvanced={() => setAdvancedOpen((prev) => !prev)}
           caption={caption}
           selected={selected}
           wide={wide}

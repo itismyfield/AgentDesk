@@ -143,76 +143,31 @@ async function expectNoHorizontalOverflow(page: Page) {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
 }
 
-const readout = (page: Page) => page.getByTestId("stats-daily-readout-text");
-
 test.describe("stats page", () => {
-  test("daily chart reads one day at a time with the step buttons, keys and pointer", async ({ page }) => {
+  test("daily BreakdownChart slices daily tokens and switches measures without overflow", async ({ page }) => {
     await mockApi(page, { analytics: (period) => buildAnalytics(period === "7d" ? "30d" : period) });
     await page.goto("/stats");
     const chart = page.getByTestId("stats-daily-token-scroll");
-    await expect(chart.locator("svg.recharts-surface")).toBeVisible({ timeout: 15_000 });
-    await expect(readout(page)).toContainText("막대를 누르거나");
-
-    for (const id of ["stats-daily-prev", "stats-daily-next"]) {
-      const box = await page.getByTestId(id).boundingBox();
-      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    const breakdown = chart.locator(".aui-breakdown-chart");
+    await expect(breakdown).toBeVisible({ timeout: 15_000 });
+    for (const label of ["cache R", "cache W", "input", "output"]) {
+      await expect(breakdown).toContainText(label);
     }
 
-    // Next starts from the latest day, previous walks back one day.
-    await page.getByTestId("stats-daily-next").click();
-    await expect(readout(page)).toContainText("11. 18.");
-    await page.getByTestId("stats-daily-prev").click();
-    await expect(readout(page)).toContainText("11. 17.");
-    await expect(readout(page)).toContainText("cache R");
-
-    await chart.focus();
-    await page.keyboard.press("Home");
-    await expect(readout(page)).toContainText("10. 20.");
-    await page.keyboard.press("ArrowRight");
-    await expect(readout(page)).toContainText("10. 21.");
-    await page.keyboard.press("End");
-    await expect(readout(page)).toContainText("11. 18.");
-    await expect.poll(() => chart.evaluate((el) => el.scrollLeft + el.clientWidth >= el.scrollWidth - 2)).toBe(true);
+    const firstTarget = breakdown.locator("[data-breakdown-target]").first();
+    await expect(firstTarget).toBeVisible();
+    await firstTarget.click();
     await page.keyboard.press("Escape");
-    await expect(readout(page)).toContainText("막대를 누르거나");
-
-    // Pointer: a press on the first day column picks it.
-    await chart.evaluate((el) => { el.scrollLeft = 0; });
-    const plot = chart.locator('[role="img"]');
-    const box = (await plot.boundingBox())!;
-    await page.mouse.click(box.x + 46 + 4, box.y + box.height / 2);
-    await expect(readout(page)).toContainText("10. 20.");
     await expectNoHorizontalOverflow(page);
   });
 
-  test("touch: tap toggles a day and a sideways scrub follows the finger", async ({ page }, testInfo) => {
+  test("touch: BreakdownChart renders cleanly on mobile without sideways overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "Touch reading is checked on the phone viewport");
     await mockApi(page);
     await page.goto("/stats");
-    const plot = page.getByTestId("stats-daily-token-scroll").locator('[role="img"]');
-    await expect(plot.locator("svg.recharts-surface")).toBeVisible({ timeout: 15_000 });
-    await expect(plot).toHaveCSS("touch-action", "pan-y");
-    const box = (await plot.boundingBox())!;
-    const plotWidth = box.width - 46 - 12;
-    const columnX = (index: number) => box.x + 46 + (index + 0.5) * (plotWidth / 7);
-    const y = box.y + box.height / 2;
-    const fire = (type: string, x: number) =>
-      plot.dispatchEvent(type, { pointerType: "touch", pointerId: 7, isPrimary: true, clientX: x, clientY: y, bubbles: true });
-
-    await fire("pointerdown", columnX(2));
-    await fire("pointerup", columnX(2));
-    await expect(readout(page)).toContainText("10. 22.");
-    await fire("pointerdown", columnX(2));
-    await fire("pointerup", columnX(2));
-    await expect(readout(page)).toContainText("막대를 누르거나");
-
-    await fire("pointerdown", columnX(1));
-    await fire("pointermove", columnX(3));
-    await fire("pointermove", columnX(5));
-    await expect(readout(page)).toContainText("10. 25.");
-    await fire("pointerup", columnX(5));
-    await expect(readout(page)).toContainText("10. 25.");
+    const breakdown = page.getByTestId("stats-daily-token-scroll").locator(".aui-breakdown-chart");
+    await expect(breakdown).toBeVisible({ timeout: 15_000 });
+    await expectNoHorizontalOverflow(page);
   });
 
   test("a model or agent row opens its detail beside the list on desktop and as a sheet on mobile", async ({ page }, testInfo) => {
@@ -318,8 +273,7 @@ test.describe("stats page", () => {
     await page.getByTestId("stats-range-30d").click();
     await expect(page.getByTestId("stats-daily-zero")).toBeVisible();
     await expect(page.getByTestId("stats-summary-total-tokens")).toContainText("0");
-    await page.getByTestId("stats-daily-next").click();
-    await expect(readout(page)).toContainText("0 tokens");
+    await expect(page.getByTestId("stats-daily-token-scroll").locator(".aui-breakdown-chart")).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 
@@ -329,7 +283,7 @@ test.describe("stats page", () => {
     const page = await context.newPage();
     await mockApi(page);
     await page.goto("/stats");
-    await expect(page.getByTestId("stats-daily-token-scroll").locator("svg.recharts-surface")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("stats-daily-token-scroll").locator(".aui-breakdown-chart")).toBeVisible({ timeout: 15_000 });
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     await expectNoHorizontalOverflow(page);
     const small = await page.evaluate(() => {
@@ -347,21 +301,21 @@ test.describe("stats page", () => {
     await context.close();
   });
 
-  test("account limits mark the auto-run pause from the runtime config", async ({ page }) => {
+  test("account limits mask emails by default, toggle full email, and mark the auto-run pause", async ({ page }) => {
     await mockApi(page);
     await page.goto("/stats");
     const limits = page.getByTestId("stats-claude-accounts");
-    // The gate reads provider usage, so an account row names only the line's value and the card says so.
-    await expect(limits.getByRole("meter", { name: "backup@example.com · #2 5시간" })).toHaveAttribute("aria-valuetext", /멈춤 기준 90% 이상$/, { timeout: 15_000 });
+    await expect(limits.getByRole("meter", { name: "back***@example.com · #2 5시간" })).toHaveAttribute("aria-valuetext", /멈춤 기준 90% 이상$/, { timeout: 15_000 });
     await expect(limits.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1);
     await expect(limits).toContainText("자동 진행 멈춤은 공급자 사용량으로 판정해요");
+    await page.getByTestId("stats-claude-mask-toggle").click();
+    await expect(limits.getByRole("meter", { name: "backup@example.com · #2 5시간" })).toBeVisible();
   });
 
   test("English: the kit charts, share list and account limits show and speak no Korean", async ({ page }, testInfo) => {
     await mockApi(page, { language: "en" });
     await page.goto("/stats");
-    // Only the narrow chart shows its reading hint; the pause line marks the 92% account row.
-    if (testInfo.project.name === "mobile") await expect(page.locator(".aui-kpi-chart-reading-hint").first()).toBeVisible({ timeout: 15_000 });
+    if (testInfo.project.name === "mobile") await expect(page.locator('.aui-kpi-chart-reading[data-visible="true"]').first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.aui-usage-meter-mini-row[data-state="danger"]')).toHaveCount(1, { timeout: 15_000 });
     const text = await page.locator(".aui-kpi-chart, .aui-compact-breakdown, .aui-usage-meter").evaluateAll((nodes) => nodes.flatMap((node) => [
       (node as HTMLElement).innerText,
@@ -380,8 +334,7 @@ test.describe("stats page", () => {
         const page = await context.newPage();
         await mockApi(page, { theme, analytics: (period) => buildAnalytics(period === "7d" ? "30d" : period) });
         await page.goto("/stats");
-        await expect(page.getByTestId("stats-daily-token-scroll").locator("svg.recharts-surface")).toBeVisible({ timeout: 15_000 });
-        await page.getByTestId("stats-daily-prev").click();
+        await expect(page.getByTestId("stats-daily-token-scroll").locator(".aui-breakdown-chart")).toBeVisible({ timeout: 15_000 });
         const name = `stats-${width}x${height}-${theme}`;
         await page.getByTestId("stats-page").evaluate((el) => el.scrollTo(0, 0));
         await page.screenshot({ path: `${SHOTS}/${name}.png` });
