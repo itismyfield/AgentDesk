@@ -2609,7 +2609,8 @@ src/
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_origin_tests.rs
 │   │   │   │   │   ├── replay_start_tests.rs
-│   │   │   │   │   └── routine_metadata.rs
+│   │   │   │   │   ├── routine_metadata.rs
+│   │   │   │   │   └── unverified_thread_tests.rs
 │   │   │   │   ├── input_payload/
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── pg_tests.rs
@@ -2790,6 +2791,8 @@ src/
 │   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── turn_mark_admission_tests.rs
+│   │   │   │   ├── unverified_thread_resume.rs
+│   │   │   │   ├── unverified_thread_resume_tests.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── response_format/

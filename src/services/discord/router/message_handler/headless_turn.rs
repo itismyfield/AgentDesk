@@ -690,6 +690,13 @@ async fn start_reserved_headless_turn_admitted(
             session_strategy_reason = "session_key_unavailable";
         }
     }
+    let selected = super::unverified_thread_resume::Selected {
+        session_id: &mut session_id,
+        memento_context_loaded: &mut memento_context_loaded,
+        reason: &mut session_strategy_reason,
+    };
+    let target = (tmux_session_name.as_deref(), adk_session_key.as_deref());
+    super::unverified_thread_resume::apply(shared, &provider, channel_id, target, selected).await;
 
     cleanup_terminal_delivery_marker_after_turn_start(
         shared,

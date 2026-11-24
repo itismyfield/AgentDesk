@@ -225,6 +225,20 @@ pub(crate) fn verified_claude_sources(channel: u64) -> io::Result<Vec<BindingEve
         .collect())
 }
 
+/// Whether a hook-verified record or a published resume frontier of this channel names `native`.
+#[cfg(unix)]
+pub(crate) fn names_session(channel: u64, native: &str) -> io::Result<bool> {
+    let bound = |event: &BindingEvent| {
+        matches!(&event.new,
+            BindingTarget::Source(source) | BindingTarget::Resolved { source, .. }
+            if source.session_id == native)
+    };
+    Ok(read_thread_resumes(channel)?
+        .iter()
+        .any(|entry| entry.source.session_id == native)
+        || verified_claude_sources(channel)?.iter().any(bound))
+}
+
 pub(crate) fn names_source(event: &BindingEvent, session: &str, source: &SourceId) -> bool {
     event.tmux_session == session
         && matches!(&event.new,
