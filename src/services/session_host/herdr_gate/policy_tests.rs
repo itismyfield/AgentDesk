@@ -3,8 +3,8 @@ use std::cell::Cell;
 
 use super::*;
 use crate::config::session_hosts::EndpointMode;
-use crate::services::session_host::herdr::policy::Unverified;
-use crate::services::session_host::herdr::policy::permit::{
+use crate::services::session_host::herdr_for_test::policy::Unverified;
+use crate::services::session_host::herdr_for_test::policy::permit::{
     ExistingMutationEvidence, grant_for_test,
 };
 

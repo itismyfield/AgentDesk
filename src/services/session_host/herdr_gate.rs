@@ -103,7 +103,7 @@ const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
 /// Herdr's name for an executor key; Herdr writes `enter` as a carriage return.
-pub(crate) fn herdr_key(key: HostKey) -> &'static str {
+fn herdr_key(key: HostKey) -> &'static str {
     match key {
         HostKey::Enter => "enter",
         HostKey::Escape => "esc",
@@ -116,12 +116,18 @@ pub(crate) fn herdr_key(key: HostKey) -> &'static str {
     }
 }
 
+/// Test seam: Herdr's key name for `key`.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn herdr_key_for_test(key: HostKey) -> &'static str {
+    herdr_key(key)
+}
+
 #[derive(Default)]
-pub(crate) struct ExecutionFence {
+struct ExecutionFence {
     state: Mutex<(bool, bool)>, // active permit, closing
 }
 
-pub(crate) struct MutationPermit {
+struct MutationPermit {
     fence: Arc<ExecutionFence>,
 }
 impl Drop for MutationPermit {
@@ -187,10 +193,7 @@ pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
 }
 
 impl ExecutionFence {
-    pub(crate) fn acquire(
-        self: &Arc<Self>,
-        mutation: Mutation,
-    ) -> Result<MutationPermit, HerdrGateRefusal> {
+    fn acquire(self: &Arc<Self>, mutation: Mutation) -> Result<MutationPermit, HerdrGateRefusal> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.0 {
             return Err(HerdrGateRefusal::MutationBusy);
@@ -273,7 +276,7 @@ struct Judged {
     _permit: Option<MutationPermit>,
 }
 
-pub(crate) struct PaneGate {
+struct PaneGate {
     endpoint: HerdrEndpoint,
     transport: Arc<dyn HerdrTransport>,
     pane: String,
@@ -288,7 +291,7 @@ pub(crate) struct PaneGate {
     pinned: Mutex<Option<Judged>>,
     /// How many writes were sent, and the server the latest one went to.
     last_sent: Mutex<(u64, Option<ServerWitness>)>,
-    pub(crate) fence: Arc<ExecutionFence>,
+    fence: Arc<ExecutionFence>,
     /// An operator asked a terminate to stand on the exact pane proof when the marker is absent.
     marker_absent_by_pane: bool,
 }
@@ -296,7 +299,7 @@ pub(crate) struct PaneGate {
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
 /// Its calls block on the socket, so callers stay off the async runtime.
 #[derive(Clone)]
-pub(crate) struct HerdrTarget(pub(crate) Arc<PaneGate>);
+pub(crate) struct HerdrTarget(Arc<PaneGate>);
 
 impl std::fmt::Debug for HerdrTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -413,6 +416,24 @@ impl HerdrTarget {
             os,
             ..gate
         }))
+    }
+
+    /// Test seam: holds this pane's execution fence for `mutation` until the guard drops.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn acquire_for_test(
+        &self,
+        mutation: Mutation,
+    ) -> Result<impl Sized + use<>, HerdrGateRefusal> {
+        self.0.fence.acquire(mutation)
+    }
+
+    /// Test seam: sends `request` on the pinned judgment, as the input executor does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn send_pinned_for_test(
+        &self,
+        request: HerdrRequest,
+    ) -> Result<HostMutation, HostError> {
+        self.send_pinned(request)
     }
 
     /// Keeps this nonce closed and excludes all pane writes through settlement.
@@ -626,7 +647,7 @@ impl HerdrTarget {
 
     /// Sends `request` to the server the pinned judgment named, consuming it; without one
     /// nothing is written.
-    pub(crate) fn send_pinned(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
+    fn send_pinned(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let judged = self
             .0
             .pinned
