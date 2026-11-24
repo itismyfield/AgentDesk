@@ -145,8 +145,16 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
     Ok((Some(prepared), resume_root))
 }
 
+/// The TUI argv up to its prompt, for tests outside this module.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
+    codex_tui_option_args(options)
+}
+
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.
-pub(crate) fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub(in crate::services::codex) fn codex_tui_option_args(
+    options: &CodexLaunchOptions,
+) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());
@@ -238,10 +246,22 @@ fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// The Herdr pane command of one prepared incarnation, for tests outside this module.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn prepare_codex_herdr_launch_for_test(
+    prepared: &PreparedIncarnation,
+    launchable: &CodexHerdrLaunchable,
+    launch_options: &CodexLaunchOptions,
+    auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    home: &std::path::Path,
+) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
+    prepare_codex_herdr_launch(prepared, launchable, launch_options, auth_overlay, home)
+}
+
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
-pub(crate) fn prepare_codex_herdr_launch(
+pub(in crate::services::codex) fn prepare_codex_herdr_launch(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,

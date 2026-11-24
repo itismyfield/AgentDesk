@@ -28,10 +28,43 @@ pub(crate) fn install_thread_writer_policy(
     let _ = THREAD_WRITER_POLICY.set((launch, reserve));
 }
 
+/// A cold launch with default settings for `channel_id`, for tests outside this module.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn prepare_and_create_claude_tui_session_for_test(
+    tmux_session_name: &str,
+    working_dir: &str,
+    working_dir_path: &std::path::Path,
+    resolved_session_id: &str,
+    channel_id: u64,
+) -> Result<
+    (
+        String,
+        PreparedIncarnation,
+        crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
+    ),
+    String,
+> {
+    prepare_and_create_claude_tui_session(
+        tmux_session_name,
+        working_dir,
+        working_dir_path,
+        (resolved_session_id, None),
+        None,
+        Default::default(),
+        String::new(),
+        false,
+        "",
+        None,
+        Some(channel_id),
+        false,
+        None,
+    )
+}
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_and_create_claude_tui_session(
+pub(super) fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
     working_dir: &str,
     working_dir_path: &std::path::Path,

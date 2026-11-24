@@ -1,11 +1,20 @@
 //! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
-pub(crate) mod first_input;
-pub(crate) mod handoff;
+mod first_input;
+mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
+#[cfg(test)]
+pub(crate) use first_input::regression_tests::regression_attached;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use first_input::{
+    Notice, held_record_for_test, record_outcome_for_test, submit_for_test, submit_owned_for_test,
+    write_for_test,
+};
 use handoff::launched_source;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use handoff::launched_source_for_test;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -205,14 +214,50 @@ pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + 
 
 /// The source a prompt goes to.
 pub(crate) struct Attached {
-    pub(crate) nonce: String,
-    pub(crate) session_id: String,
-    pub(crate) transcript: PathBuf,
-    pub(crate) target: HerdrTarget,
-    pub(crate) bound: bool,
-    pub(crate) awaiting_clear: bool,
+    nonce: String,
+    session_id: String,
+    transcript: PathBuf,
+    target: HerdrTarget,
+    bound: bool,
+    awaiting_clear: bool,
     /// The record's socket and pane, which the gate fences as `socket#pane`.
-    pub(crate) physical: Option<(String, String)>,
+    physical: Option<(String, String)>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Attached {
+    /// An attached source built field by field, for tests outside this module.
+    pub(crate) fn for_test(
+        nonce: String,
+        session_id: String,
+        transcript: PathBuf,
+        target: HerdrTarget,
+        bound: bool,
+        awaiting_clear: bool,
+        physical: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            nonce,
+            session_id,
+            transcript,
+            target,
+            bound,
+            awaiting_clear,
+            physical,
+        }
+    }
+
+    pub(crate) fn nonce_for_test(&self) -> &str {
+        &self.nonce
+    }
+
+    pub(crate) fn session_id_for_test(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+        &self.target
+    }
 }
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.

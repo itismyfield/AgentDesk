@@ -5,14 +5,22 @@ use crate::services::claude_tui::guarded_outcome::{self, SubmissionError};
 pub(crate) struct Submitted {
     attached: Attached,
     transcript: String,
-    pub(crate) before: u64,
+    before: u64,
     started_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    /// The transcript length before the write, for tests outside this module.
+    pub(crate) fn before_for_test(&self) -> u64 {
+        self.before
+    }
 }
 
 /// Posts the hold's one notice row; keyed by execution and hold, so a repeat returns the row.
 pub(crate) type Notice = dyn Fn(&str) -> Result<i64, String> + Send + Sync;
 
-pub(crate) fn submit(
+pub(super) fn submit(
     turn: &HerdrTurn<'_>,
     attached: Attached,
     sender: &Sender<StreamMessage>,
@@ -24,7 +32,7 @@ pub(crate) fn submit(
 
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
 /// the driver observed, binds its pane, and runs this write as its effect; its settlement is final.
-pub(crate) fn submit_owned(
+pub(super) fn submit_owned(
     turn: &HerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     (lineage, post): (
@@ -86,7 +94,63 @@ pub(crate) fn submit_owned(
     submitted.ok_or_else(|| "herdr turn: the owner submitted without a ticket".into())
 }
 
-pub(crate) fn write(
+/// The direct submit, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_for_test(
+    turn: &HerdrTurn<'_>,
+    attached: Attached,
+    sender: &Sender<StreamMessage>,
+) -> Result<Option<Submitted>, String> {
+    submit(turn, attached, sender)
+}
+
+/// The owned submit, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_owned_for_test(
+    turn: &HerdrTurn<'_>,
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    lineage: (
+        crate::services::claude_tui::owner_input::Lineage,
+        Option<Arc<HoldNotice>>,
+    ),
+    attached: Attached,
+    sender: &Sender<StreamMessage>,
+) -> Result<Submitted, String> {
+    submit_owned(turn, hook, lineage, attached, sender)
+}
+
+/// The gated content write, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn write_for_test(
+    logical: &str,
+    cancel: Option<&CancelToken>,
+    attached: Attached,
+    prompt: &str,
+    sender: &Sender<StreamMessage>,
+    notice: Option<&Notice>,
+) -> Result<Option<Submitted>, SubmissionError> {
+    write(logical, cancel, attached, prompt, sender, notice)
+}
+
+/// The v2 hold record a write leaves before its first key, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn held_record_for_test(
+    logical: &str,
+    attached: &Attached,
+    prompt: &str,
+    before: u64,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> hold_record::HoldRecord {
+    held_record(logical, attached, prompt, before, started_at)
+}
+
+/// The hold's final outcome write, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn record_outcome_for_test(record: hold_record::HoldRecord, run: &InputRun) {
+    record_outcome(record, run)
+}
+
+fn write(
     logical: &str,
     cancel: Option<&CancelToken>,
     attached: Attached,
@@ -287,7 +351,7 @@ pub(crate) fn write(
 }
 
 /// The v2 hold this write records before its first key: `in_flight`, no proof, no text.
-pub(crate) fn held_record(
+fn held_record(
     logical: &str,
     attached: &Attached,
     prompt: &str,
@@ -323,7 +387,7 @@ pub(crate) fn held_record(
 
 /// Ends the hold of an untouched or submitted composer; otherwise rewrites `in_flight` once with
 /// the final outcome and entrusts the touched reservation to the hold.
-pub(crate) fn record_outcome(mut record: hold_record::HoldRecord, run: &InputRun) {
+fn record_outcome(mut record: hold_record::HoldRecord, run: &InputRun) {
     let touched = composer::take_touched();
     let Some((outcome, proof)) = hold_record::outcome(run) else {
         if let super::HoldRelease::Kept(error) = super::release_hold(&record.execution_nonce) {

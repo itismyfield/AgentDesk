@@ -2,9 +2,10 @@
 mod native_tests;
 
 use crate::config::TestEnvVarGuard as Guard;
-use crate::services::codex::tui_session_launch::first_input::*;
 use crate::services::codex::{
-    CodexLaunchOptions, CodexSourceMode, SOURCE_MODE_TEST, resolve_codex_binary,
+    CodexHerdrLaunchable, CodexLaunchOptions, CodexSourceMode, Create, SOURCE_MODE_TEST,
+    create_for_test, prepare_codex_herdr_launch_for_test, prepare_codex_tui_launch_script,
+    resolve_codex_binary_for_test,
 };
 use crate::services::process::shell_escape;
 use crate::services::provider::ProviderKind;
@@ -45,7 +46,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
             ProviderKind::Codex,
         );
-        let launch = crate::services::codex::tui_session_launch::prepare_codex_tui_launch_script(
+        let launch = prepare_codex_tui_launch_script(
             name,
             None,
             prompt,
@@ -55,8 +56,8 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             &overlay,
         )
         .unwrap();
-        let script_path = launch.script_path.clone();
-        let owner_path = launch.owner_path.clone();
+        let script_path = launch.script_path_for_test().to_owned();
+        let owner_path = launch.owner_path_for_test().to_owned();
         let script = std::fs::read_to_string(&script_path).unwrap();
         assert_eq!(
             script.matches(shell_escape(prompt).as_str()).count(),
@@ -76,7 +77,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             crate::services::codex_tui::execution_end::producer::LaunchObservation::new(None, name);
         let channel = 727396 + u64::from(failed);
         let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
-        runtime.block_on(mailbox.v2_cold_fixture(root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared.context.owner_runtime_root,"execution_nonce":launch.prepared.context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
+        runtime.block_on(mailbox.v2_cold_fixture(root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared_for_test().context.owner_runtime_root,"execution_nonce":launch.prepared_for_test().context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
         let working = root.path().display().to_string();
         let profile = overlay.profile_id.clone();
         let (_, result) = runtime
@@ -91,7 +92,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                         crate::services::claude_tui::owner_input::active(),
                         "actual Codex create requires owner scope"
                     );
-                    create(Create {
+                    create_for_test(Create {
                         turn_nonce: None,
                         tmux_session_name: name,
                         working_dir: &working,
@@ -176,17 +177,16 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
             let name = format!("{}-codex-native-env", instance.tmux.prefix);
             let prompt = "instance native argv 한글";
             let options = CodexLaunchOptions::new(prompt).with_cwd(instance.root.to_str());
-            let launch =
-                crate::services::codex::tui_session_launch::prepare_codex_tui_launch_script(
-                    &name,
-                    None,
-                    prompt,
-                    &options,
-                    (None, None),
-                    false,
-                    &overlay,
-                )
-                .unwrap();
+            let launch = prepare_codex_tui_launch_script(
+                &name,
+                None,
+                prompt,
+                &options,
+                (None, None),
+                false,
+                &overlay,
+            )
+            .unwrap();
             let run = |script: &str| {
                 let output = std::process::Command::new("/bin/bash")
                     .arg(script)
@@ -196,7 +196,7 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
                     .unwrap();
                 scope::assert_child_environment(output, &instance.root, "native-capture");
             };
-            run(&launch.script_path);
+            run(launch.script_path_for_test());
             let argv = std::fs::read_to_string(instance.root.join("codex.argv")).unwrap();
             assert_eq!(argv.lines().last(), Some(prompt));
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -207,13 +207,13 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
             let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
                 "http://127.0.0.1:9".into(),
             );
-            let launchable = crate::services::codex::tui_session_launch::CodexHerdrLaunchable {
-                codex_bin: binary.to_string_lossy().into_owned(),
-                resolution: resolve_codex_binary(),
-                policy: "legacy",
-            };
-            let herdr = crate::services::codex::tui_session_launch::prepare_codex_herdr_launch(
-                &launch.prepared,
+            let launchable = CodexHerdrLaunchable::from_parts_for_test(
+                binary.to_string_lossy().into_owned(),
+                resolve_codex_binary_for_test(),
+                "legacy",
+            );
+            let herdr = prepare_codex_herdr_launch_for_test(
+                launch.prepared_for_test(),
                 &launchable,
                 &options,
                 &overlay,

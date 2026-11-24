@@ -82,7 +82,7 @@ use crate::services::{
 };
 
 #[cfg(unix)]
-pub(crate) const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -1892,9 +1892,40 @@ pub(crate) fn tmux_tui_turn_for_tests(
         endpoint,
     )
 }
+/// The fresh prompt readiness attempt limit, for tests outside this module.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn claude_tui_fresh_prompt_max_ready_attempts_for_test() -> usize {
+    CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+}
+
+/// A fresh Claude TUI turn through finalize, for tests outside this module.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn run_claude_tui_fresh_turn_and_finalize_for_test(
+    (transcript_path, transcript_path_string): (&std::path::Path, &str),
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    (tmux_session_name, resolved_session_id): (&str, &str),
+    teardown: Option<&TeardownClearance>,
+    report_channel_id: Option<u64>,
+    (prompt, owner_path): (&str, &str),
+) -> Result<(), String> {
+    run_claude_tui_fresh_turn_and_finalize(
+        transcript_path,
+        transcript_path_string,
+        sender,
+        cancel_token,
+        tmux_session_name,
+        teardown,
+        resolved_session_id,
+        report_channel_id,
+        prompt,
+        owner_path,
+    )
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_claude_tui_fresh_turn_and_finalize(
+fn run_claude_tui_fresh_turn_and_finalize(
     transcript_path: &std::path::Path,
     transcript_path_string: &str,
     sender: Sender<StreamMessage>,

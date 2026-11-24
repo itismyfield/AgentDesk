@@ -2,9 +2,17 @@
 use super::*;
 
 pub(crate) struct Submitted {
-    pub(crate) start_offset: u64,
+    start_offset: u64,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    /// The transcript offset the response is read from, for tests outside this module.
+    pub(crate) fn start_offset_for_test(&self) -> u64 {
+        self.start_offset
+    }
 }
 
 pub(crate) fn submit(
@@ -60,7 +68,7 @@ pub(crate) fn submit_created(
 
 /// The created execution's first prompt through the owner waiting for it: the owner reserves its
 /// frame on the target read from the created pane, and the observer keeps the submit's ticket.
-pub(crate) fn submit_owned(
+pub(super) fn submit_owned(
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
@@ -99,7 +107,7 @@ pub(crate) fn submit_owned(
     })
 }
 
-pub(crate) fn submit_using(
+fn submit_using(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     mut ready: impl FnMut() -> Result<(), SubmissionError>,
@@ -157,7 +165,7 @@ pub(crate) fn submit_using(
     Err(exhausted(None).into())
 }
 
-pub(crate) fn exhausted(detail: Option<&str>) -> String {
+fn exhausted(detail: Option<&str>) -> String {
     match detail {
         Some(error) => format!(
             "{error}; fresh prompt readiness attempts exhausted ({} attempts)",
@@ -168,6 +176,50 @@ pub(crate) fn exhausted(detail: Option<&str>) -> String {
             CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
         ),
     }
+}
+
+/// The owned first prompt, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_owned_for_test(
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    transcript_path_string: &str,
+    fresh_turn_start_offset: u64,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    resolved_session_id: &str,
+) -> Result<Submitted, crate::services::claude_tui::owner_input::OwnedLaunch> {
+    submit_owned(
+        hook,
+        transcript_path_string,
+        fresh_turn_start_offset,
+        cancel_token,
+        tmux_session_name,
+        resolved_session_id,
+    )
+}
+
+/// The readiness retry loop with injected readiness and sleep, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_using_for_test(
+    transcript_path_string: &str,
+    fresh_turn_start_offset: u64,
+    ready: impl FnMut() -> Result<(), SubmissionError>,
+    sleep: impl FnMut(std::time::Duration),
+    tmux_session_name: &str,
+) -> Result<Submitted, SubmissionError> {
+    submit_using(
+        transcript_path_string,
+        fresh_turn_start_offset,
+        ready,
+        sleep,
+        tmux_session_name,
+    )
+}
+
+/// The readiness exhaustion message, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn exhausted_for_test(detail: Option<&str>) -> String {
+    exhausted(detail)
 }
 
 pub(super) fn observe(

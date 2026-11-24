@@ -20,7 +20,19 @@ pub(crate) struct Submitted {
     pub handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
-pub(crate) fn create(input: Create<'_>) -> Result<Submitted, String> {
+/// The argv-bearing create, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn create_for_test(input: Create<'_>) -> Result<Submitted, String> {
+    create(input)
+}
+
+/// The response observation after a create, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn observe_for_test(input: Observe<'_>) -> Result<(), String> {
+    observe(input)
+}
+
+pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted, String> {
     let Create {
         tmux_session_name,
         working_dir,
@@ -157,7 +169,7 @@ pub(crate) struct Observe<'a> {
     pub prompt: &'a str,
 }
 
-pub(crate) fn observe(input: Observe<'_>) -> Result<(), String> {
+pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), String> {
     let Observe {
         submitted,
         working_dir,

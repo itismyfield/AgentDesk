@@ -66,17 +66,14 @@ fn a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker() {
             ..SpyState::default()
         });
         let (tx, _) = std::sync::mpsc::channel();
-        let result = run_claude_tui_fresh_turn_and_finalize(
-            &transcript,
-            transcript.to_str().unwrap(),
+        let result = run_claude_tui_fresh_turn_and_finalize_for_test(
+            (&transcript, transcript.to_str().unwrap()),
             tx,
             Some(std::sync::Arc::new(CancelToken::new())),
-            name,
+            (name, "held-sid"),
             Some(&TeardownClearance::Unkeyed),
-            "held-sid",
             None,
-            "own",
-            owner.to_str().unwrap(),
+            ("own", owner.to_str().unwrap()),
         );
         assert!(result.is_err());
         assert!(
@@ -199,17 +196,14 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         serde_json::json!({"type":"user","uuid":"recreated-a","sessionId":sid,"message":{"role":"user","content":frame}})));
     let owner = dir.path().join("owner");
     let result = crate::services::claude_tui::guarded_outcome::with_owner(None, || {
-        run_claude_tui_fresh_turn_and_finalize(
-            &new,
-            new.to_str().unwrap(),
+        run_claude_tui_fresh_turn_and_finalize_for_test(
+            (&new, new.to_str().unwrap()),
             sender,
             Some(token.clone()),
-            session,
+            (session, sid),
             Some(&TeardownClearance::Unkeyed),
-            sid,
             None,
-            frame,
-            owner.to_str().unwrap(),
+            (frame, owner.to_str().unwrap()),
         )
     });
     assert!(result.is_ok(), "fresh lifecycle succeeds: {result:?}");

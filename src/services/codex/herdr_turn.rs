@@ -187,7 +187,7 @@ pub(crate) fn execute(
     result
 }
 
-pub(crate) fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     let tools = Some(turn.allowed_tools);
     let instructions = super::compose_codex_developer_instructions(turn.system_prompt, tools);
     CodexLaunchOptions::new("")
@@ -201,7 +201,7 @@ pub(crate) fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
         .with_cwd(Some(turn.working_dir))
 }
 
-pub(crate) fn launch_of(
+fn launch_of(
     turn: &CodexHerdrTurn<'_>,
     provider_root: Option<&Path>,
     ports: &dyn CodexHerdrPorts,
@@ -261,7 +261,7 @@ fn fresh_launch(
 
 /// The pane command of `prepared`: a resume names the exact thread its incarnation expects, a
 /// fresh launch names none. Its options are kept before the Pending row, for each later prompt.
-pub(crate) fn pane_command(
+fn pane_command(
     turn: &CodexHerdrTurn<'_>,
     prepared: &PreparedIncarnation,
     (launchable, overlay, home): (
@@ -432,12 +432,55 @@ fn owned_composer(
 }
 
 /// What execution `nonce` keeps of the options it was launched with.
-pub(crate) fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
+fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
     format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
 }
 
+/// The launch options of `turn`, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn launch_options_for_test(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+    launch_options(turn)
+}
+
+/// The launch of `turn`, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn launch_of_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    provider_root: Option<&Path>,
+    ports: &dyn CodexHerdrPorts,
+    owner_port: OwnerPort,
+) -> Result<HerdrLaunch, String> {
+    launch_of(turn, provider_root, ports, owner_port)
+}
+
+/// The pane command of `prepared`, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn pane_command_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    prepared: &PreparedIncarnation,
+    launch: (
+        &CodexHerdrLaunchable,
+        &crate::services::provider_auth_profile::ProviderAuthOverlay,
+        &Path,
+    ),
+) -> Result<HerdrLaunchCommand, String> {
+    pane_command(turn, prepared, launch)
+}
+
+/// What execution `nonce` keeps of `options`, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn kept_options_for_test(nonce: &str, options: &CodexLaunchOptions) -> String {
+    kept_options(nonce, options)
+}
+
+/// The launch-options check of a later prompt, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn options_kept_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+    options_kept(turn, nonce)
+}
+
 /// Refuses a prompt whose launch options are not the ones execution `nonce` was launched with.
-pub(crate) fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
     let logical = turn.owner.logical_key.as_str();
     let expected = kept_options(nonce, &launch_options(turn));
     match read_codex_tui_launch_options_fingerprint(logical) {
