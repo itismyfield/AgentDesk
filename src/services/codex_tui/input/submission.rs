@@ -34,7 +34,7 @@ fn one_paste(plan: Vec<TuiInputAction>) -> Result<Vec<TuiInputAction>, String> {
 
 const DRAFT_NOTICE_KIND: &str = "codex.draft_preservation_unconfirmed";
 
-pub(crate) fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
+fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
     let (primary, generation) = original?;
     Some(format!(
         "{DRAFT_NOTICE_KIND}:{channel}:{primary}:{generation}"
@@ -62,7 +62,7 @@ pub(crate) fn notify_owned_draft(channel: u64) {
     }
 }
 
-pub(crate) async fn enqueue_draft_notice(
+async fn enqueue_draft_notice(
     pool: &sqlx::PgPool,
     channel: u64,
     event: &str,
@@ -88,6 +88,24 @@ pub(crate) async fn enqueue_draft_notice(
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+// Test seams for the draft-notice test mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn draft_notice_event_for_test(
+    channel: u64,
+    original: Option<(u64, u64)>,
+) -> Option<String> {
+    draft_notice_event(channel, original)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn enqueue_draft_notice_for_test(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    event: &str,
+) -> Result<i64, String> {
+    enqueue_draft_notice(pool, channel, event).await
 }
 
 /// A conservative screen budget; the core checks frame bytes before this payload callback.

@@ -18,8 +18,8 @@ pub(in crate::services) use turn_identity::CompactTurnIdentity;
 /// channel's flag for a recreated pane name (launch/teardown hygiene).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CompactPaneKey {
-    pub(crate) channel_id: u64,
-    pub(crate) tmux_session_name: String,
+    channel_id: u64,
+    tmux_session_name: String,
 }
 
 /// Per-pane once-per-fill-cycle state.
@@ -169,7 +169,7 @@ fn observe_and_decide_with_source(
 ///     (F3 occupancy re-read; a bare `Some(false)` bool cannot express a drop
 ///     into the hysteresis band).
 /// The leaf lock is read and released here; it is NEVER held across the send.
-pub(crate) fn pane_still_disarmed_for_send(
+fn pane_still_disarmed_for_send(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -228,7 +228,7 @@ fn invalidate_after_authority_rejection(
 /// never carries the leaf state lock into `submit`. `None` means the pre-send
 /// recheck bailed (stale/torn-down/below-threshold) and no mutation was
 /// attempted.
-pub(crate) fn submit_under_composer_lock<T>(
+fn submit_under_composer_lock<T>(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -483,6 +483,50 @@ fn reset_for_test() {
         .unwrap_or_else(|error| error.into_inner());
     guard.panes.clear();
     guard.next_generation = 0;
+}
+
+// Test seams for the compact tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+impl CompactPaneKey {
+    pub(crate) fn channel_id_for_test(&self) -> u64 {
+        self.channel_id
+    }
+
+    pub(crate) fn tmux_session_name_for_test(&self) -> &str {
+        &self.tmux_session_name
+    }
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn pane_still_disarmed_for_send_for_test(
+    pane: &CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+) -> bool {
+    pane_still_disarmed_for_send(pane, generation, threshold)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn submit_under_composer_lock_for_test<T>(
+    pane: &CompactPaneKey,
+    generation: u64,
+    threshold: CompactThreshold,
+    expected_turn: &T,
+    completing: bool,
+    live_turn_matches: impl FnOnce(&T) -> Result<bool, String>,
+    submit: impl for<'a> FnOnce(
+        crate::services::claude_tui::composer_lock::ComposerPermit<'a>,
+    ) -> Outcome,
+) -> Option<Outcome> {
+    submit_under_composer_lock(
+        pane,
+        generation,
+        threshold,
+        expected_turn,
+        completing,
+        live_turn_matches,
+        submit,
+    )
 }
 
 /// The armed flag is process-global test state. Keep every stateful test

@@ -1,10 +1,10 @@
-use crate::services::observability::emit::tests::{
+use crate::services::observability::emit_fixtures::{
     ROOT_CAUSE_ACTIONS, every_emit_surface_records_one_recent_event_scenario as surfaces,
     invariant_severity_routes_to_exact_log_level_and_suffix_4422 as foreign_invariants,
     relay_root_cause_metric_wrappers_record_persistent_events_scenario as root_metrics,
 };
 use crate::services::observability::events::{
-    EventLog, GLOBAL_EVENT_LOG, MAX_EVENTS, StructuredEvent, global, record, record_simple,
+    EventLog, MAX_EVENTS, StructuredEvent, global, install_global_for_test, record, record_simple,
     test_capture::*,
 };
 use crate::services::turn_lifecycle::policy_observability_tests::{
@@ -37,9 +37,7 @@ fn assert_global_append(seed: bool) {
             json!({"id": 0}),
         ));
     }
-    GLOBAL_EVENT_LOG
-        .set(log)
-        .expect("fresh child must not have initialized global log");
+    install_global_for_test(log).expect("fresh child must not have initialized global log");
     let before = global().recent(MAX_EVENTS);
     assert_eq!(before.len(), usize::from(seed), "seed setup must be real");
     if seed {
@@ -111,7 +109,7 @@ fn interference(case: &str) {
             let log = global();
             assert!(
                 std::panic::catch_unwind(|| {
-                    let _lock = log.inner.lock().unwrap();
+                    let _lock = log.hold_lock_for_test();
                     panic!("intentional failed append");
                 })
                 .is_err()
