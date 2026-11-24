@@ -60,7 +60,9 @@ impl RawTap {
 
     fn stale(&self, message: &str, stderr: &str) {
         if let Some(live) = &self.0
-            && crate::services::discord::turn_bridge::is_stale_resume_error(message, stderr)
+            && crate::services::stream_json_cli::stale_resume::stream_error_has_stale_resume_error(
+                message, stderr,
+            )
         {
             live.mark_stale();
         }

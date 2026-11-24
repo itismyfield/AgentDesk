@@ -32,7 +32,7 @@
 | Hook (Claude) | `src/services/claude_tui/hook_server.rs:1-80`, `hook_relay.rs:23-80` | Stop/SubagentStop → PROMPT_READY_NOTIFY |
 | Dedupe | `src/services/tui_prompt_dedupe.rs:9-12` | TTL 10s/24h/30m, channel anchor |
 | Explicit turn-finished (#2625) | `TurnFinishedSignal`, `mark_turn_finished_signal_done`, `ChannelMailboxRegistry::turn_finished` @ `turn_orchestrator.rs:1419,1481,1556`; 이벤트명 `turn_finished` @ `observability/emit.rs:91` | inflight cleanup |
-| Stale resume / draft (#2635) | `src/services/discord/turn_bridge/stale_resume.rs:21-62` | unknown transcript recovery |
+| Stale resume / draft (#2635) | `src/services/stream_json_cli/stale_resume.rs:21-62` | unknown transcript recovery |
 | tmux watcher | `src/services/discord/tmux_watcher.rs:11-42` | dead marker, ready sentinel |
 | Discord I/O | API release 8791 | `POST /api/discord/send`, `GET .../messages` |
 

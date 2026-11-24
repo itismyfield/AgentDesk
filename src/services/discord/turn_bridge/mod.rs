@@ -32,10 +32,6 @@ mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;
 mod skill_usage;
-mod stale_resume;
-pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr: &str) -> bool {
-    stale_resume::stream_error_has_stale_resume_error(message, stderr)
-}
 
 pub(in crate::services::discord) mod native_input;
 mod status_panel;
@@ -112,7 +108,6 @@ pub(super) use recovery_text::{
     auto_retry_with_history, release_retry_pending, take_session_retry_context_for_turn_with_audit,
 };
 use single_message_footer::*;
-pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(in crate::services::discord) use status_panel::{
     complete_status_panel_v2_with_http, normalize_status_panel_message_id,
 };
@@ -162,6 +157,10 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 // Items used by spawn_turn_bridge from submodules
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
+use crate::services::stream_json_cli::stale_resume::{
+    output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
+    stream_error_requires_terminal_session_reset,
+};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
 pub(in crate::services::discord) use completion_guard::complete_work_dispatch_on_turn_end;
@@ -201,10 +200,6 @@ use retry_state::{
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use sqlx::Row;
-use stale_resume::{
-    output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
-    stream_error_requires_terminal_session_reset,
-};
 use status_panel::{
     bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
     record_status_panel_events, status_panel_completion_ready_after_terminal_body,

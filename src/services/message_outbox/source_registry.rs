@@ -1,22 +1,15 @@
 //! Authorization combines static source policy with the live agent registry.
 
-use crate::domain::outbound::outbox::source::is_allowed_static_source;
-pub(crate) fn is_static_notice_kind(source: &str) -> bool {
-    crate::domain::outbound::outbox::source::is_static_notice_kind(source)
-}
+use crate::domain::outbound::outbox::source::{is_allowed_static_source, is_static_notice_kind};
+use crate::services::discord::org_schema;
 
 pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
-
-pub(crate) use crate::domain::outbound::outbox::source::RETIRED_SEND_SOURCES;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {
     LoopbackInternal,
-    #[allow(dead_code)]
     Cli,
-    #[allow(dead_code)]
     Dashboard,
-    #[allow(dead_code)]
     Unknown,
 }
 
@@ -27,7 +20,6 @@ impl Default for SendCallerClass {
 }
 
 impl SendCallerClass {
-    #[allow(dead_code)]
     pub fn from_header(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "loopback" | "dcserver" | "internal" => Some(Self::LoopbackInternal),
@@ -61,6 +53,24 @@ pub(crate) fn is_registered_nonbody_source(source: &str) -> bool {
         && is_static_notice_kind(source)
 }
 
+fn config_knows_agent(role_id: &str) -> Option<bool> {
+    let config = crate::config::runtime_config_optional()?;
+    Some(config.agents.iter().any(|agent| agent.id == role_id))
+}
+
+/// The runtime config answers when it is loaded; the org schema answers only without one.
+pub(crate) fn is_known_agent(role_id: &str) -> bool {
+    if let Some(known) = config_knows_agent(role_id) {
+        return known;
+    }
+    if org_schema::org_schema_exists()
+        && let Some(known) = org_schema::is_known_agent(role_id)
+    {
+        return known;
+    }
+    false
+}
+
 /// Exact, case-sensitive and fail-closed source authorization.
 pub fn validate_send_source_for(
     source: &str,
@@ -68,7 +78,7 @@ pub fn validate_send_source_for(
 ) -> Result<(), SendSourcePolicyError> {
     let exact = !source.is_empty() && source.trim() == source;
     let static_allowed = exact && is_allowed_static_source(source, caller.mask());
-    let known_agent = exact && crate::services::discord::settings::is_known_agent(source);
+    let known_agent = exact && is_known_agent(source);
     if static_allowed || known_agent {
         Ok(())
     } else {

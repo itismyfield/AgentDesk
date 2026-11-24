@@ -8,12 +8,13 @@ use super::manual_delivery::{
     ManualDeliveryOutcome, SerenityManualOutboundClient, deliver_manual_dm_notification,
 };
 use super::send_gate::{
-    ManualOutboundOptions, SendCallerClass, send_message_with_backends_and_delivery_id_for_caller,
+    ManualOutboundOptions, send_message_with_backends_and_delivery_id_for_caller,
 };
 use crate::domain::outbound::key::ManualOutboundDeliveryId;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
+use crate::services::message_outbox::source_registry::SendCallerClass;
 
 pub async fn handle_send<'a>(
     registry: &HealthRegistry,
@@ -430,7 +431,8 @@ mod handle_send_contract_tests {
     //! directory decomposition. All expectations capture current behavior
     //! as-is (no seam; empty `HealthRegistry`).
 
-    use crate::services::discord::health::{HealthRegistry, SendCallerClass};
+    use crate::services::discord::health::HealthRegistry;
+    use crate::services::message_outbox::source_registry::SendCallerClass;
 
     use super::{handle_send, handle_send_with_caller, parse_transcript_options};
 

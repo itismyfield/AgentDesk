@@ -473,7 +473,7 @@ fn scan_watcher_lines_for_turn(
                 }
                 "result" => {
                     outcome.stale_resume_detected = outcome.stale_resume_detected
-                        || crate::services::discord::turn_bridge::result_event_has_stale_resume_error(&val);
+                        || crate::services::stream_json_cli::stale_resume::result_event_has_stale_resume_error(&val);
                     if let Some(session_id) = val.get("session_id").and_then(|value| value.as_str())
                     {
                         state.last_session_id = Some(session_id.to_string());
