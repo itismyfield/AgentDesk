@@ -566,6 +566,32 @@ where
     }
 }
 
+// Test seams for the re-post turn tests mounted in the discord-layer test host.
 #[cfg(test)]
-#[path = "runner_activation_tests.rs"]
-mod activation_tests;
+impl Runner {
+    pub(in crate::services) fn probes_mut(
+        &mut self,
+    ) -> &mut BTreeMap<PieceKey, (EvidenceScope, ProbeSession)> {
+        &mut self.probes
+    }
+}
+
+#[cfg(test)]
+impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
+    pub(in crate::services) fn runner_mut(&mut self) -> &mut Runner {
+        &mut self.runner
+    }
+
+    pub(in crate::services) fn sidecar_mut(&mut self) -> &mut PathBuf {
+        &mut self.sidecar
+    }
+
+    pub(in crate::services) fn log_slot(&mut self) -> &mut Option<ProvenanceLog> {
+        &mut self.log
+    }
+
+    /// Opens and activates the sidecar as a turn would, then fails its writes after `cut`.
+    pub(in crate::services) fn fail_log_after(&mut self, frontier: u64, cut: Option<usize>) {
+        self.log(frontier).expect("sidecar opens").fail_after = cut;
+    }
+}

@@ -168,19 +168,17 @@ async fn d4act3_backlog_append_failure_blocks_ready_repost_and_retries_after_reo
     let opened = Arc::new(AtomicUsize::new(0));
     let path = dir.path().join("backlog-provenance.jsonl");
     let mut turn = turn_with(pool.clone(), &io, &path, &opened);
-    turn.runner
-        .probes
+    turn.runner_mut()
+        .probes_mut()
         .insert(ready.clone(), ready_probe(&pool, &ready, &io).await);
-    turn.log(writer.store.ledger().next_serial())
-        .unwrap()
-        .fail_after = Some(20);
+    turn.fail_log_after(writer.store.ledger().next_serial(), Some(20));
     let reports = Reports::default();
     let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(reports.clone()));
     turn.turn(&mut writer)
         .with_subscriber(subscriber.clone())
         .await;
     assert!(
-        turn.log.is_none(),
+        turn.log_slot().is_none(),
         "failed report append drops the poisoned sidecar"
     );
     assert!(!writer.live.load(Ordering::SeqCst));
