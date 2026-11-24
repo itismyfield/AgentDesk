@@ -1,6 +1,6 @@
 # 검증 바인딩 없는 Claude 스레드 cold resume 상태 차트 — #8372
 
-코드 기준: **main `4c3ff0b0b7` + 구현 커밋 `44be986d8e`**(`wt/i8372`). `ThreadIngress.tla`에 `ResumeSpec` 하위 명세를 붙였다. 기존 `Spec`·`HerdrSpec`에는 `UNCHANGED rvars`만 더했고 새 CONSTANT는 없다. 모델 GREEN은 구현·운영 수용 완료가 아니다.
+코드 기준: **main `4c3ff0b0b7` + 구현 커밋 `44be986d8e`·`c36873023a`·`42f266b870`**(`wt/i8372`). `ThreadIngress.tla`에 `ResumeSpec` 하위 명세를 붙였다. 기존 `Spec`·`HerdrSpec`에는 `UNCHANGED rvars`만 더했고 새 CONSTANT는 없다. 모델 GREEN은 구현·운영 수용 완료가 아니다.
 
 범위: 예약 정책 아래에 있는 late-adopt Claude 스레드 child(`claude_thread.rs` `launch_policy`: Deferred 또는 parked) 하나와 사람 입력 2건. adoption이 Committed로 넘어간 child는 예약 대상이 아니라 이 투영 밖이다. 답 게시·세션 저장·훅 검증 기록은 `RAnswer` 한 전이로 묶여 있어, 재시작 중 중복 게시 부재까지는 이 모델이 보이지 않는다.
 
