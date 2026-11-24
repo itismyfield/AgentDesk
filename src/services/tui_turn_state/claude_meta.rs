@@ -70,9 +70,14 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "tools-used"
             | "pr-link"
             | "frame-link"
-            | "repl-mode",
+            | "repl-mode"
+            | "data-flow-records",
         ) => true,
-        Some("system") => record["subtype"] == "informational",
+        // An away recap is Claude's out-of-turn summary of a long idle, not a turn record.
+        Some("system") => matches!(
+            record["subtype"].as_str(),
+            Some("informational" | "away_summary")
+        ),
         Some("attachment") => {
             let attachment = &record["attachment"];
             // Stop can persist added context before its next user record reaches the log.
