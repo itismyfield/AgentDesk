@@ -561,7 +561,7 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
-        cache.refresh(&self.path, std::time::SystemTime::now(), || ())?;
+        cache.refresh(&self.path, std::time::SystemTime::now(), read_stamp::fstat)?;
         apply(&mut cache)
     }
     pub(crate) fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {

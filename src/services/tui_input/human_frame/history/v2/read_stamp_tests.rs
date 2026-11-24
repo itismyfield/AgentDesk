@@ -28,7 +28,7 @@ fn kept(dir: &Path, channel: u64) -> (PathBuf, Cache, String) {
     Fixture::at(path.clone(), channel, true);
     let mut cache = Cache::default();
     for _ in 0..2 {
-        cache.refresh(&path, later(), || ()).unwrap();
+        cache.refresh(&path, later(), fstat).unwrap();
     }
     assert_eq!(cache.reads, 1, "a settled stamp is kept");
     let raw = cache.raw().unwrap().to_string();
@@ -126,7 +126,7 @@ fn a_stamp_settles_on_both_times_and_stands_only_on_every_field() {
     ];
     for (at, differ) in fields.into_iter().enumerate() {
         differ(cache.kept.as_mut().unwrap().stamp.as_mut().unwrap());
-        cache.refresh(&path, later(), || ()).unwrap();
+        cache.refresh(&path, later(), fstat).unwrap();
         assert_eq!(cache.reads, 2 + at, "a stamp differing in field {at} alone");
     }
 }
@@ -139,12 +139,12 @@ fn history_is_read_until_it_settles_and_then_not_again() {
     let written = std::fs::metadata(&path).unwrap().modified().unwrap();
     let mut cache = Cache::default();
     for _ in 0..3 {
-        cache.refresh(&path, written, || ()).unwrap();
+        cache.refresh(&path, written, fstat).unwrap();
     }
     assert_eq!(cache.reads, 3, "a write this fresh could repeat its stamp");
-    cache.refresh(&path, later(), || ()).unwrap();
+    cache.refresh(&path, later(), fstat).unwrap();
     for _ in 0..100 {
-        cache.refresh(&path, written, || ()).unwrap();
+        cache.refresh(&path, written, fstat).unwrap();
         assert_eq!(cache.evidence(true).unwrap().len(), 1);
         assert_eq!(cache.evidence(false).unwrap().len(), 1);
         assert!(cache.state().is_some());
@@ -178,7 +178,7 @@ fn every_change_under_a_kept_stamp_is_read_again() {
         let new = raw.replace(NS, namespace);
         tick_past(&path);
         change(&path, &new);
-        cache.refresh(&path, later(), || ()).unwrap();
+        cache.refresh(&path, later(), fstat).unwrap();
         assert_eq!(
             (cache.reads, cache.raw()),
             (2, Some(new.as_str())),
@@ -193,21 +193,54 @@ fn every_change_under_a_kept_stamp_is_read_again() {
 }
 
 #[test]
-fn a_rename_during_the_read_is_not_kept_as_the_new_file() {
+fn a_change_during_the_read_is_not_kept_under_the_new_stamp() {
+    type Change = fn(&Path, &str);
+    let cases: [(&str, Change); 2] = [
+        ("renamed over", |path, new| swapped(path, new, false)),
+        ("rewritten in place, mtime restored", |path, new| {
+            tick_past(path);
+            rewritten(path, new)
+        }),
+    ];
     let (_runtime, dir) = scratch();
-    let (path, _, raw) = kept(dir.path(), 83850003);
-    let new = raw.replace(NS, "native-fixturX");
-    let mut cache = Cache::default();
-    cache
-        .refresh(&path, later(), || swapped(&path, &new, false))
-        .unwrap();
-    assert_eq!(
-        cache.raw(),
-        Some(raw.as_str()),
-        "the bytes came from the old file"
-    );
-    cache.refresh(&path, later(), || ()).unwrap();
-    assert_eq!(cache.raw(), Some(new.as_str()));
+    for (at, (case, change)) in cases.into_iter().enumerate() {
+        let (path, _, raw) = kept(dir.path(), 83850030 + at as u64);
+        let new = raw.replace(NS, "native-fixturX");
+        let (mut cache, mut stamps) = (Cache::default(), 0);
+        let changing = |file: &std::fs::File| {
+            stamps += 1;
+            if stamps == 2 {
+                change(&path, &new);
+            }
+            fstat(file)
+        };
+        cache.refresh(&path, later(), changing).unwrap();
+        assert_eq!(cache.raw(), Some(raw.as_str()), "{case}: the old bytes");
+        cache.refresh(&path, later(), fstat).unwrap();
+        assert_eq!(cache.raw(), Some(new.as_str()), "{case}");
+    }
+}
+
+#[test]
+fn a_stamp_that_cannot_be_taken_still_yields_the_history_and_is_not_kept() {
+    let (_runtime, dir) = scratch();
+    let (path, _, raw) = kept(dir.path(), 83850040);
+    for failing in [1, 2] {
+        let (mut cache, mut stamps) = (Cache::default(), 0);
+        let failed = |file: &std::fs::File| {
+            stamps += 1;
+            match stamps == failing {
+                true => Err(std::io::Error::other("no stamp")),
+                false => fstat(file),
+            }
+        };
+        cache.refresh(&path, later(), failed).unwrap();
+        assert_eq!((cache.reads, cache.raw()), (1, Some(raw.as_str())));
+        for _ in 0..2 {
+            cache.refresh(&path, later(), fstat).unwrap();
+        }
+        assert_eq!(cache.reads, 2, "stamp {failing} failed: read once more");
+    }
 }
 
 #[test]

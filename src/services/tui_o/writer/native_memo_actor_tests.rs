@@ -37,46 +37,47 @@ impl EvidencePort for Unregistered {
     }
 }
 
+fn spawn_on(harness: &Harness, port: &Arc<Unregistered>) -> (watch::Sender<bool>, Actor) {
+    let mut writer = harness.writer();
+    let bindings = startup_log(&mut writer);
+    let (stop, stopped) = watch::channel(false);
+    let config = crate::services::tui_o::writer::WriterConfig {
+        enabled: true,
+        producer_absent: false,
+    };
+    let projections = (
+        stopped,
+        watch::channel(false).0,
+        watch::channel(None).0,
+        crate::services::tui_o::writer::actor::Owing::default(),
+    );
+    let inner = port.clone() as Arc<dyn EvidencePort>;
+    let native = Some(NativePort { inner });
+    let provider = ShadowProvider::Claude;
+    let task = spawn_native(
+        &config,
+        None,
+        writer,
+        provider,
+        bindings,
+        projections,
+        native,
+    );
+    (stop, task.unwrap())
+}
+
 #[tokio::test(start_paused = true)]
 async fn memo_hits_keep_every_post_exactly_once() {
     let (harness, path, _) = switched_over(&row("m0", "before the switch"));
     harness.gate.acquired();
     let port = Arc::new(Unregistered::default());
-    let spawn = || {
-        let mut writer = harness.writer();
-        let bindings = startup_log(&mut writer);
-        let (stop, stopped) = watch::channel(false);
-        let config = crate::services::tui_o::writer::WriterConfig {
-            enabled: true,
-            producer_absent: false,
-        };
-        let projections = (
-            stopped,
-            watch::channel(false).0,
-            watch::channel(None).0,
-            crate::services::tui_o::writer::actor::Owing::default(),
-        );
-        let inner = port.clone() as Arc<dyn EvidencePort>;
-        let native = Some(NativePort { inner });
-        let provider = ShadowProvider::Claude;
-        let task = spawn_native(
-            &config,
-            None,
-            writer,
-            provider,
-            bindings,
-            projections,
-            native,
-        );
-        (stop, task.unwrap())
-    };
-    let (stop, task) = spawn();
+    let (stop, task) = spawn_on(&harness, &port);
     append(&path, &row("m1", "first"));
     polls(6).await;
     append(&path, &row("m2", "second"));
     polls(6).await;
     halt(stop, task).await;
-    let (stop, task) = spawn();
+    let (stop, task) = spawn_on(&harness, &port);
     append(&path, &row("m3", "third"));
     polls(6).await;
     halt(stop, task).await;
@@ -84,4 +85,20 @@ async fn memo_hits_keep_every_post_exactly_once() {
     assert!(port.0.load(Ordering::SeqCst) > 9);
     assert_eq!(harness.port.posts(), ["first", "second", "third"]);
     assert_eq!(harness.alarms.taken(), []);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cut_source_is_not_observed_on_the_poll_that_halts_its_actor() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let port = Arc::new(Unregistered::default());
+    let (_stop, task) = spawn_on(&harness, &port);
+    append(&path, &row("m1", "first"));
+    polls(6).await;
+    let observed = port.0.load(Ordering::SeqCst);
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_len(1).unwrap();
+    polls(3).await;
+    assert!(task.is_finished(), "the cut halts the actor");
+    assert_eq!(port.0.load(Ordering::SeqCst), observed);
 }

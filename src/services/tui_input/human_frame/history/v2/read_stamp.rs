@@ -77,12 +77,12 @@ impl Cache {
     }
 
     /// Holds the file's current V2 history afterwards, reading it unless the kept stamp still
-    /// names the path. The caller holds the history lock; `between` runs after the bytes are read.
+    /// names the path. The caller holds the history lock; `stat` stamps the file it was read from.
     pub(super) fn refresh(
         &mut self,
         path: &Path,
         now: SystemTime,
-        between: impl FnOnce(),
+        stat: impl FnMut(&std::fs::File) -> std::io::Result<Fingerprint>,
     ) -> Result<(), String> {
         let stamp = self.kept.as_ref().and_then(|kept| kept.stamp.as_ref());
         if let Some(stamp) = stamp
@@ -95,7 +95,7 @@ impl Cache {
         {
             self.reads += 1;
         }
-        let (raw, stamp) = read(path, now, between).map_err(|e| e.to_string())?;
+        let (raw, stamp) = read(path, now, stat).map_err(|e| e.to_string())?;
         if self.raw() != Some(raw.as_str()) {
             let migration::Decoded::V2(snapshot) = migration::decode(&raw)? else {
                 return Err("V2 registration missing".into());
@@ -109,23 +109,25 @@ impl Cache {
     }
 }
 
-/// The file's bytes and the stamp of the descriptor they came from: no stamp when it changed
-/// during the read, or while a time is too fresh to tell a same-length rewrite apart.
+/// The stamp of an open history file.
+pub(super) fn fstat(file: &std::fs::File) -> std::io::Result<Fingerprint> {
+    Fingerprint::of(&file.metadata()?)
+}
+
+/// The file's bytes and the stamp of the descriptor they came from: no stamp when it could not be
+/// taken or changed during the read, or while a time is too fresh to tell a rewrite apart.
 fn read(
     path: &Path,
     now: SystemTime,
-    between: impl FnOnce(),
+    mut stat: impl FnMut(&std::fs::File) -> std::io::Result<Fingerprint>,
 ) -> std::io::Result<(String, Option<Fingerprint>)> {
     let mut file = std::fs::File::open(path)?;
-    let before = Fingerprint::of(&file.metadata()?)?;
+    let before = stat(&file).ok();
     let mut raw = String::new();
     file.read_to_string(&mut raw)?;
-    between();
-    let after = Fingerprint::of(&file.metadata()?)?;
-    Ok((
-        raw,
-        (before == after && settled(&after, now)).then_some(after),
-    ))
+    let after = stat(&file).ok();
+    let stamp = after.filter(|after| before.as_ref() == Some(after) && settled(after, now));
+    Ok((raw, stamp))
 }
 
 /// Only Unix stamps carry the inode and change time that tell a rewrite with a restored mtime

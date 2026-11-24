@@ -321,6 +321,16 @@ pub(super) fn reopen_native(
     })
 }
 
+impl NativeSources {
+    /// Ends a source's seed, so nothing is observed from it until the source is opened again.
+    pub(super) fn end(&mut self, source: &SourceId) {
+        #[cfg(unix)]
+        self.seeds.remove(source);
+        #[cfg(not(unix))]
+        let _ = source;
+    }
+}
+
 #[cfg(unix)]
 impl NativeSources {
     fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
