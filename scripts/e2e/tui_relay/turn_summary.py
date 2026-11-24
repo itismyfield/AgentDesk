@@ -14,9 +14,17 @@ _MODEL_OR_EFFORT = rf" · (?:{_MODEL}(?: \({_EFFORT}\))?|{_EFFORT})"
 _METADATA = rf"(?:{_MODEL_OR_EFFORT}(?:{_CONTEXT})?|{_CONTEXT})"
 _FIVE_HOUR = rf"5h {_PERCENT}% \({_TIME}\)"
 _WEEKLY = rf"7d {_PERCENT}% \({_DAY_TIME}\)"
-_FABLE = rf"Fable 7d {_PERCENT}% \({_DAY_TIME}\)"
-_QUOTA_LINE = rf"\n-# (?:{_FIVE_HOUR}(?: · {_WEEKLY})?(?: · {_FABLE})?|{_WEEKLY}(?: · {_FABLE})?|{_FABLE})"
 _OLD_QUOTA = rf"(?: · {_FIVE_HOUR})?(?: · {_WEEKLY})?"
+# Each reset reads (remaining, absolute); neighbours sharing a reset minute keep only the last one,
+# so the lookbehind requires the line to end on a reset.
+_LEFT = r"(?:[1-9]\d*d (?:1?\d|2[0-3])h|(?:1?\d|2[0-3])h [1-5]?\dm)"
+_FIVE_WINDOW = rf"5h {_PERCENT}%(?: \({_LEFT}, {_TIME}\))?"
+_WEEKLY_WINDOW = rf"7d {_PERCENT}%(?: \({_LEFT}, {_DAY_TIME}\))?"
+_FABLE_WINDOW = f"Fable {_WEEKLY_WINDOW}"
+_QUOTA_LINE = (
+    rf"\n-# (?:{_FIVE_WINDOW}(?: · {_WEEKLY_WINDOW})?(?: · {_FABLE_WINDOW})?"
+    rf"|{_WEEKLY_WINDOW}(?: · {_FABLE_WINDOW})?|{_FABLE_WINDOW})(?<=\))"
+)
 
 # Retained Discord history may still have one-line summaries with inline quota.
 _OLD = (

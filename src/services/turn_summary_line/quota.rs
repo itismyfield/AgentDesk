@@ -21,6 +21,8 @@ pub(crate) struct Quota {
     five_hour: Option<Window>,
     seven_day: Option<Window>,
     fable_seven_day: Option<Window>,
+    /// When the windows were last checked as current; remaining time is counted from it.
+    as_of: DateTime<Utc>,
 }
 
 // Native starts follow launch selection; Legacy intake timestamps precede it.
@@ -51,19 +53,30 @@ impl Quota {
             ("5h", self.five_hour, "%H:%M"),
             ("7d", self.seven_day, "%m/%d %H:%M"),
             ("Fable 7d", self.fable_seven_day, "%m/%d %H:%M"),
-        ];
-        for (index, (label, window, format)) in windows
-            .into_iter()
-            .filter_map(|(label, window, format)| Some((label, window?, format)))
-            .enumerate()
-        {
-            let reset = window.reset.with_timezone(&chrono_tz::Asia::Seoul);
+        ]
+        .into_iter()
+        .filter_map(|(label, window, format)| Some((label, window?, format)))
+        .collect::<Vec<_>>();
+        // KST is a whole-hour offset, so equal UTC minutes are equal KST minutes.
+        let minute = |window: &Window| window.reset.timestamp().div_euclid(60);
+        for (index, (label, window, format)) in windows.iter().enumerate() {
             line.push_str(if index == 0 { "\n-# " } else { " · " });
-            line.push_str(&format!(
-                "{label} {}% ({})",
-                window.percent,
-                reset.format(format)
-            ));
+            line.push_str(&format!("{label} {}%", window.percent));
+            // Neighbours resetting in the same minute share one reset after the last of them.
+            if windows
+                .get(index + 1)
+                .is_some_and(|(_, next, _)| minute(next) == minute(window))
+            {
+                continue;
+            }
+            let left = (window.reset - self.as_of).num_minutes();
+            let left = if left >= 24 * 60 {
+                format!("{}d {}h", left / (24 * 60), left % (24 * 60) / 60)
+            } else {
+                format!("{}h {}m", left / 60, left % 60)
+            };
+            let reset = window.reset.with_timezone(&chrono_tz::Asia::Seoul);
+            line.push_str(&format!(" ({left}, {})", reset.format(format)));
         }
     }
 
@@ -71,6 +84,7 @@ impl Quota {
         self.five_hour = self.five_hour.filter(|window| window.reset > now);
         self.seven_day = self.seven_day.filter(|window| window.reset > now);
         self.fable_seven_day = self.fable_seven_day.filter(|window| window.reset > now);
+        self.as_of = now;
         (self.five_hour.is_some() || self.seven_day.is_some() || self.fable_seven_day.is_some())
             .then_some(self)
     }
@@ -126,6 +140,7 @@ fn claude(response: &ClaudeAccountsResponse, now: DateTime<Utc>) -> Option<Quota
             .extra
             .get("scoped")
             .and_then(|scoped| fable_scoped(scoped, now)),
+        as_of: now,
     }
     .current(now)
 }
@@ -167,6 +182,7 @@ fn buckets(data: &str, now: DateTime<Utc>, claude: bool) -> Option<Quota> {
         five_hour: window("5h"),
         seven_day: window("7d"),
         fable_seven_day: if claude { window("7d Fable") } else { None },
+        as_of: now,
     }
     .current(now)
 }
