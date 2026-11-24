@@ -12,6 +12,9 @@ use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
 use crate::services::tui_o::store::rotation::SourceLink;
 use crate::services::tui_o::store::spool::source_key;
 
+#[cfg(unix)]
+mod observe_memo;
+
 /// Receives every owed record with its stored source, even when derivation yields nothing.
 pub trait Owe {
     fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>);
@@ -270,10 +273,7 @@ impl Reader {
 #[derive(Default)]
 pub(super) struct NativeSources {
     #[cfg(unix)]
-    seeds: std::collections::HashMap<
-        SourceId,
-        Result<super::super::input_facts::native::Projection, String>,
-    >,
+    seeds: std::collections::HashMap<SourceId, observe_memo::Seed>,
     #[cfg(unix)]
     revision: u64,
 }
@@ -296,7 +296,9 @@ pub(super) fn open_native(
             cursor.captured_through,
             &cursor.prefix_hash,
         )?;
-        native.seeds.insert(cursor.source.clone(), seed);
+        native
+            .seeds
+            .insert(cursor.source.clone(), observe_memo::Seed::new(seed));
         return Ok(capture);
     }
     let _ = (native, channel, provider);
@@ -323,11 +325,7 @@ pub(super) fn reopen_native(
 impl NativeSources {
     fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
         if let Some(seed) = self.seeds.get_mut(source) {
-            if let Ok(projection) = seed
-                && let Err(error) = projection.append(record)
-            {
-                *seed = Err(error);
-            }
+            seed.append(record);
         }
     }
 
@@ -346,12 +344,8 @@ impl NativeSources {
         String,
     > {
         use super::super::input_facts::native::{Observation, registrations_fingerprint};
-        let projection = self
-            .seeds
-            .get(source)
-            .ok_or("native prefix absent")?
-            .as_ref()
-            .map_err(Clone::clone)?;
+        let seed = self.seeds.get(source).ok_or("native prefix absent")?;
+        let projection = seed.projection()?;
         let binding = crate::services::tui_o::shadow::SourceBinding {
             channel_id: channel,
             provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
@@ -364,7 +358,7 @@ impl NativeSources {
                 r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
             })
             .collect();
-        let analysis = projection.analyze_closed(&registrations, raw)?;
+        let (evidence, barriers, receipts) = seed.analyzed(&registrations, raw)?;
         Ok((
             Observation {
                 binding,
@@ -374,10 +368,10 @@ impl NativeSources {
                 through: projection.through(),
                 registrations_fingerprint: registrations_fingerprint(&registrations)?,
                 terminal: raw.cloned(),
-                evidence: analysis.evidence,
-                receipts: projection.receipts(&registrations),
+                evidence,
+                receipts,
             },
-            analysis.barriers,
+            barriers,
         ))
     }
 }
@@ -395,6 +389,13 @@ impl<B: BindingEvents> Sources<B> {
         cursor: &crate::services::tui_o::store::spool::Cursor,
     ) -> Result<SourceCapture, super::Reopen> {
         reopen_native(&mut self.native, self.channel, self.provider, cursor)
+    }
+
+    /// Inputs reduced by every native seed of this channel, for the cost tests.
+    #[cfg(all(test, unix))]
+    pub(crate) fn native_reductions(&self) -> usize {
+        let seeds = self.native.iter().flat_map(|native| native.seeds.values());
+        seeds.map(observe_memo::Seed::reduced).sum()
     }
 
     #[cfg(unix)]
@@ -446,7 +447,7 @@ impl<B: BindingEvents> Sources<B> {
                             .as_ref()
                             .and_then(|n| n.seeds.get(source))
                             .is_some_and(|seed| {
-                                seed.as_ref().is_ok_and(|seed| {
+                                seed.projection().is_ok_and(|seed| {
                                     seed.idle()
                                         && seed.through() == capture.captured_through()
                                         && capture.read_through() == seed.through()
@@ -468,7 +469,7 @@ impl<B: BindingEvents> Sources<B> {
             .capture
             .as_ref()
             .filter(|_| reader.pending.is_none())?;
-        let seed = self.native.as_ref()?.seeds.get(source)?.as_ref().ok()?;
+        let seed = self.native.as_ref()?.seeds.get(source)?.projection().ok()?;
         let fingerprint = capture.fingerprint().ok()?;
         let buffered = !capture.tail().is_empty() && fingerprint.len == capture.read_through();
         (buffered && seed.through() == capture.captured_through()).then(|| {
@@ -557,7 +558,7 @@ impl<B: BindingEvents> Sources<B> {
                 return;
             };
             native.revision = native.revision.saturating_add(1);
-            let through = match native.seeds.get(&source) {
+            let through = match native.seeds.get(&source).map(|seed| seed.projection()) {
                 Some(Ok(seed)) => seed.through(),
                 _ => continue,
             };

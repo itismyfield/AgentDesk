@@ -5683,3 +5683,6 @@ mod terminal;
 
 #[path = "native_receipt_tests.rs"]
 mod native_receipt_tests;
+
+#[path = "native_memo_port_tests.rs"]
+mod memo_port;
