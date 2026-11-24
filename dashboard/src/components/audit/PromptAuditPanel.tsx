@@ -1,29 +1,24 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { Check, ChevronRight, Copy } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { getPromptAudit, type AuditOrigin, type AuditProvider, type PromptSection, type PromptSource } from "../../api/promptAudit";
 import { Button } from "../../kit/free/button-clean";
+import { CodeBlock } from "../../kit/free/code-block-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
+import { TreeView, type TreeNode } from "../../kit/free/tree-view-clean";
 import type { Agent } from "../../types";
-import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RowButton, RuleItem, Well } from "../common/KitPrimitives";
+import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RowButton, RuleItem } from "../common/KitPrimitives";
 import { auditState, fullPromptText, sectionLabels, sourceLabel, sourceShares } from "./auditModel";
-import {
-  AUDIT_PRE_CLASS, AuditSummaryCard, counter, FULL_TOUCH_BUTTON_STYLE, sessionMeta, ShareBar, useCachedCaptions, useCopyFeedback,
-  type AuditDetailProps,
-} from "./AuditDetailFrame";
+import { AuditSummaryCard, counter, FULL_TOUCH_BUTTON_STYLE, sessionMeta, ShareBar, useCachedCaptions, useCopyFeedback, type AuditDetailProps } from "./AuditDetailFrame";
 import { AuditRequestState } from "./AuditWorkspace";
 
 type Tr = (ko: string, en: string) => string;
 
 const PHONE_SECTION_LIMIT = 5;
 const SOURCE_CSS_COLOR: Record<PromptSource, string> = {
-  canon_file: "var(--accent)",
-  memento: "var(--info)",
-  runtime: "var(--fg-faint)",
-  conditional: "var(--warn)",
+  canon_file: "var(--accent)", memento: "var(--info)", runtime: "var(--fg-faint)", conditional: "var(--warn)",
 };
 
-// Keyed by agent and provider, so a late answer lands in its own slot and never replaces the open selection.
 const promptAuditQuery = (agentId: string, provider: AuditProvider) => queryOptions({
   queryKey: ["audit", "prompt", agentId, provider],
   queryFn: ({ signal }) => getPromptAudit(agentId, provider, signal),
@@ -40,14 +35,35 @@ export function usePromptCaptions(list: Agent[], isKo: boolean, tr: Tr): (agent:
   });
 }
 
-/** Right-hand desktop inspector summarizing source shares, canon logical paths and origin semantics. */
-function PromptSourceInspector({ sections, labels, origin, maskedCount, isKo, tr }: {
-  sections: PromptSection[];
-  labels: string[];
-  origin: AuditOrigin;
-  maskedCount: number;
-  isKo: boolean;
-  tr: Tr;
+const trimSectionEdges = (text: string) => text.replace(/^\n+|\n+$/g, "");
+
+function buildSectionTree(sections: PromptSection[], labels: string[], charsFmt: (n: number) => string): TreeNode[] {
+  return sections.map((section, index) => {
+    const headings: TreeNode[] = [];
+    let inFence = false;
+    trimSectionEdges(section.text).split("\n").forEach((raw, lineIdx) => {
+      const trimmed = raw.trimStart();
+      if (/^(`{3,}|~{3,})/.test(trimmed)) inFence = !inFence;
+      else if (!inFence) {
+        const m = /^(#{1,2})\s+(.+?)\s*#*$/.exec(trimmed);
+        if (m) headings.push({ id: `sec-${index}-line-${lineIdx + 1}`, label: `${m[1]} ${m[2].trim()}`, meta: `L${lineIdx + 1}` });
+      }
+    });
+    return {
+      id: `sec-${index}`,
+      label: labels[index] ?? section.name,
+      meta: charsFmt(section.chars),
+      icon: <i aria-hidden className="block size-2 rounded-[2px]" style={{ background: SOURCE_CSS_COLOR[section.source] }} />,
+      children: headings.length > 0 ? headings : undefined,
+    };
+  });
+}
+
+/** Right-hand desktop inspector summarizing section TOC (`TreeView`), source shares, canon logical paths and origin semantics. */
+function PromptSourceInspector({ sections, labels, treeItems, selectedNode, onSelectNode, origin, maskedCount, isKo, tr }: {
+  sections: PromptSection[]; labels: string[]; treeItems: TreeNode[];
+  selectedNode: string | null; onSelectNode: (id: string) => void;
+  origin: AuditOrigin; maskedCount: number; isKo: boolean; tr: Tr;
 }) {
   const count = counter(isKo);
   const chars = (value: number) => tr(`${count(value)}자`, `${count(value)} chars`);
@@ -58,14 +74,15 @@ function PromptSourceInspector({ sections, labels, origin, maskedCount, isKo, tr
     <aside aria-label={tr("출처 요약", "Source summary")} data-testid="audit-source-summary" className="w-full xl:w-[288px] xl:shrink-0">
       <KitCard>
         <div className="px-4 py-3.5 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("출처 요약", "Source summary")}</div>
+        {treeItems.length > 0 ? (
+          <InspSection data-testid="audit-prompt-toc">
+            <Eyebrow>{tr("섹션 목차", "Section outline")}</Eyebrow>
+            <TreeView aria-label={tr("프롬프트 섹션 목차", "Prompt section outline")} items={treeItems} selected={selectedNode} onSelect={onSelectNode} />
+          </InspSection>
+        ) : null}
         <InspSection>
           {shares.map((share) => (
-            <KeyValue
-              key={share.source}
-              leading={<i aria-hidden className="block size-2 shrink-0 rounded-[2px]" style={{ background: SOURCE_CSS_COLOR[share.source] }} />}
-              label={sourceLabel(share.source, tr)}
-              num
-            >
+            <KeyValue key={share.source} leading={<i aria-hidden className="block size-2 shrink-0 rounded-[2px]" style={{ background: SOURCE_CSS_COLOR[share.source] }} />} label={sourceLabel(share.source, tr)} num>
               {chars(share.chars)} · {share.percent}%
             </KeyValue>
           ))}
@@ -85,9 +102,7 @@ function PromptSourceInspector({ sections, labels, origin, maskedCount, isKo, tr
           <Eyebrow>{tr("이 화면이 쓰는 값", "What this screen shows")}</Eyebrow>
           <RuleItem tone={origin === "current_session" ? "ok" : "neutral"}>
             <Desc className="text-[var(--fg-dim)]">
-              {origin === "current_session"
-                ? tr("지금 열려 있는 세션의 시스템 프롬프트예요.", "System prompt from the live session.")
-                : tr("열린 세션이 없어 최근 저장본을 보여 줘요.", "No live session; showing the latest saved copy.")}
+              {origin === "current_session" ? tr("지금 열려 있는 세션의 시스템 프롬프트예요.", "System prompt from the live session.") : tr("열린 세션이 없어 최근 저장본을 보여 줘요.", "No live session; showing the latest saved copy.")}
             </Desc>
           </RuleItem>
           {maskedCount > 0 ? (
@@ -104,7 +119,7 @@ function PromptSourceInspector({ sections, labels, origin, maskedCount, isKo, tr
   );
 }
 
-/** One agent's system prompt: head, totals, share by source and the sections in prompt order. */
+/** One agent's system prompt: head, totals, share by source, `TreeView` outline and `CodeBlock` section inspection. */
 export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps & { onOpenAnchors: () => void }) {
   const { agent, provider, phone, isKo, tr } = detail;
   const query = useQuery(promptAuditQuery(agent.id, provider));
@@ -113,11 +128,15 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
   const sections = useMemo(() => data?.sections ?? [], [data]);
   const labels = useMemo(() => sectionLabels(sections, tr), [sections, tr]);
   const [open, setOpen] = useState<ReadonlySet<number>>(() => new Set());
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [highlightedLine, setHighlightedLine] = useState<{ sec: number; line: number } | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const sectionRefs = useRef(new Map<number, HTMLDivElement>());
   const copied = useCopyFeedback<"all">(tr);
   const listId = useId();
   const count = counter(isKo);
   const chars = (value: number) => tr(`${count(value)}자`, `${count(value)} chars`);
+  const treeItems = useMemo(() => buildSectionTree(sections, labels, chars), [sections, labels, isKo]);
 
   const copyLabel = copied.label("all", tr("전문 복사", "Copy all"));
   const copyIcon = copied.done("all") ? <Check aria-hidden /> : <Copy aria-hidden />;
@@ -133,6 +152,17 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
     return next;
   });
 
+  const jumpToNode = (id: string) => {
+    setSelectedNode(id);
+    const m = /^sec-(\d+)(?:-line-(\d+))?$/.exec(id);
+    if (!m) return;
+    const secIdx = Number(m[1]), lineNum = m[2] ? Number(m[2]) : null;
+    if (phone && secIdx >= PHONE_SECTION_LIMIT) setShowAll(true);
+    setOpen((cur) => new Set(cur).add(secIdx));
+    setHighlightedLine(lineNum ? { sec: secIdx, line: lineNum } : null);
+    requestAnimationFrame(() => sectionRefs.current.get(secIdx)?.scrollIntoView({ block: "nearest" }));
+  };
+
   const mainContent = (
     <>
       <AuditSummaryCard
@@ -146,23 +176,14 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
         ) : (
           <Button variant="secondary" size="sm" icon={copyIcon} disabled={!sections.length} onClick={copyAll} data-testid="audit-copy">{copyLabel}</Button>
         )}
-        stats={data ? [
-          { value: total, label: tr("자", "chars") },
-          { value: sections.length, label: tr("섹션", "sections") },
-          { value: data.masked_count, label: tr("가림", "masked") },
-        ] : null}
+        stats={data ? [{ value: total, label: tr("자", "chars") }, { value: sections.length, label: tr("섹션", "sections") }, { value: data.masked_count, label: tr("가림", "masked") }] : null}
       >
         {data ? (
           <ShareBar
             compact={phone}
             testId="audit-share-bar"
-            ariaLabel={`${tr("출처별 비율", "Share by source")}: ${shares.map((share) => `${sourceLabel(share.source, tr)} ${share.percent}%`).join(", ")}`}
-            segments={shares.map((share) => ({
-              key: share.source,
-              value: share.chars,
-              color: SOURCE_CSS_COLOR[share.source],
-              label: `${sourceLabel(share.source, tr)} ${chars(share.chars)}`,
-            }))}
+            ariaLabel={`${tr("출처별 비율", "Share by source")}: ${shares.map((s) => `${sourceLabel(s.source, tr)} ${s.percent}%`).join(", ")}`}
+            segments={shares.map((s) => ({ key: s.source, value: s.chars, color: SOURCE_CSS_COLOR[s.source], label: `${sourceLabel(s.source, tr)} ${chars(s.chars)}` }))}
           />
         ) : null}
       </AuditSummaryCard>
@@ -174,21 +195,10 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
           {visible.map((section, index) => {
             const expanded = open.has(index);
             return (
-              <div key={index} data-testid="audit-section" className="border-t border-[var(--line-soft)] first:border-t-0">
+              <div key={index} ref={(el) => { if (el) sectionRefs.current.set(index, el); else sectionRefs.current.delete(index); }} data-testid="audit-section" className="border-t border-[var(--line-soft)] first:border-t-0">
                 <div className="flex min-w-0 items-center">
-                  <RowButton
-                    aria-expanded={expanded}
-                    aria-controls={expanded ? `${listId}-${index}` : undefined}
-                    selected={expanded}
-                    aria-current={undefined}
-                    onClick={() => toggle(index)}
-                    className="min-h-14 flex-1 py-2.5"
-                  >
-                    <i
-                      aria-hidden
-                      className={`block shrink-0 ${phone ? "size-2 rounded-full" : "h-7 w-1 rounded-[2px]"}`}
-                      style={{ background: SOURCE_CSS_COLOR[section.source] }}
-                    />
+                  <RowButton aria-expanded={expanded} aria-controls={expanded ? `${listId}-${index}` : undefined} selected={expanded} aria-current={undefined} onClick={() => toggle(index)} className="min-h-14 flex-1 py-2.5">
+                    <i aria-hidden className={`block shrink-0 ${phone ? "size-2 rounded-full" : "h-7 w-1 rounded-[2px]"}`} style={{ background: SOURCE_CSS_COLOR[section.source] }} />
                     <span className="min-w-0 flex-1">
                       <span className="flex flex-wrap items-center gap-2 text-sm leading-5 font-medium break-keep text-[var(--fg)]">
                         {labels[index]}
@@ -200,28 +210,18 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
                       </Cap>
                     </span>
                     <Cap className="shrink-0 font-display tabular-nums">{chars(section.chars)}</Cap>
-                    <ChevronRight
-                      size={16}
-                      aria-hidden
-                      className={`shrink-0 text-[var(--fg-muted)] transition-transform motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`}
-                    />
+                    <ChevronRight size={16} aria-hidden className={`shrink-0 text-[var(--fg-muted)] transition-transform motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
                   </RowButton>
-                  {/* A sibling of the row button: the same agent and provider open on the anchor tab. */}
                   {section.source === "memento" ? (
-                    <button
-                      type="button"
-                      onClick={onOpenAnchors}
-                      data-testid="audit-open-anchors"
-                      className="mr-2 inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--r-sm)] px-2.5 text-xs leading-4 font-medium text-[var(--accent-fg)] hover:underline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
-                    >
+                    <button type="button" onClick={onOpenAnchors} data-testid="audit-open-anchors" className="mr-2 inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--r-sm)] px-2.5 text-xs leading-4 font-medium text-[var(--accent-fg)] hover:underline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]">
                       {tr("앵커 감사", "Audit anchors")}
                     </button>
                   ) : null}
                 </div>
                 {expanded ? (
-                  <Well className="mx-3 mb-3 p-3 sm:mx-4">
-                    <pre id={`${listId}-${index}`} className={AUDIT_PRE_CLASS}>{section.text.replace(/^\n+|\n+$/g, "")}</pre>
-                  </Well>
+                  <div id={`${listId}-${index}`} className="mx-3 mb-3 sm:mx-4">
+                    <CodeBlock code={trimSectionEdges(section.text)} filename={section.path || labels[index]} showLineNumbers wrap maxHeight={420} highlightLines={highlightedLine?.sec === index ? [highlightedLine.line] : undefined} />
+                  </div>
                 ) : null}
               </div>
             );
@@ -238,29 +238,12 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
     </>
   );
 
-  if (phone) {
-    return (
-      <div className="flex min-w-0 flex-col gap-3" data-testid="audit-prompt-detail" data-state={state}>
-        {mainContent}
-      </div>
-    );
-  }
+  if (phone) return <div className="flex min-w-0 flex-col gap-3" data-testid="audit-prompt-detail" data-state={state}>{mainContent}</div>;
 
   return (
     <div className="flex min-w-0 flex-col gap-5 xl:flex-row xl:items-start" data-testid="audit-prompt-detail" data-state={state}>
-      <div className="flex min-w-0 flex-1 flex-col gap-3">
-        {mainContent}
-      </div>
-      {data ? (
-        <PromptSourceInspector
-          sections={sections}
-          labels={labels}
-          origin={data.origin}
-          maskedCount={data.masked_count}
-          isKo={isKo}
-          tr={tr}
-        />
-      ) : null}
+      <div className="flex min-w-0 flex-1 flex-col gap-3">{mainContent}</div>
+      {data ? <PromptSourceInspector sections={sections} labels={labels} treeItems={treeItems} selectedNode={selectedNode} onSelectNode={jumpToNode} origin={data.origin} maskedCount={data.masked_count} isKo={isKo} tr={tr} /> : null}
     </div>
   );
 }

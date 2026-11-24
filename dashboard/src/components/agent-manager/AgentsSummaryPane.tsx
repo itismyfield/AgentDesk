@@ -1,11 +1,10 @@
 import { useMemo } from "react";
-import { localeName } from "../../i18n";
 import { CompactBreakdown } from "../../kit/pro/compact-breakdown";
 import type { Department, DispatchedSession } from "../../types";
 import { Cap, StatusDot, type DotTone } from "../common/KitPrimitives";
 import { AGENT_STATES, agentStateLabel, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 import { UnlinkedSessions } from "../session-panel/SessionPanel";
-import { NO_DEPARTMENT, hasDepartment } from "./agent-list-controls";
+import { NO_DEPARTMENT, departmentLabels, hasDepartment } from "./agent-list-controls";
 import type { Translator } from "./types";
 
 // Home's legend tones: a session opens when a message arrives, so agents without one are gray, not an error.
@@ -13,7 +12,7 @@ const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background
 
 /** Right pane while no agent is picked: counts per state, agents per department (a row filters the list), and the
  * sessions not linked to an agent, which open in a sheet. */
-export function AgentsSummaryPane({ counted, entries, departments, locale, tr, isKo, deptTab, onSelectDept, unlinkedSessions }: {
+export function AgentsSummaryPane({ counted, entries, departments, locale, tr, isKo, deptTab, onSelectDept, unlinkedSessions, onSessionsChange }: {
   /** Home's counted set for the state counts; `entries` are the real agents. */
   counted: HomeAgent[];
   entries: HomeAgent[];
@@ -24,13 +23,15 @@ export function AgentsSummaryPane({ counted, entries, departments, locale, tr, i
   deptTab: string;
   onSelectDept: (deptId: string) => void;
   unlinkedSessions: DispatchedSession[];
+  onSessionsChange?: () => void;
 }) {
   const counts = AGENT_STATES.map((state) => [state, counted.filter((entry) => entry.state === state).length] as const)
     .filter(([state, count]) => count > 0 || state !== "unknown");
   const byDept = useMemo(() => {
+    const labels = departmentLabels(departments, locale);
     const rows = departments.map((department) => ({
       id: department.id,
-      label: localeName(locale, department),
+      label: labels.get(department.id) ?? department.name,
       value: entries.filter((entry) => entry.agent.department_id === department.id).length,
     }));
     const known = new Set(departments.map((department) => department.id));
@@ -53,25 +54,26 @@ export function AgentsSummaryPane({ counted, entries, departments, locale, tr, i
           ))}
         </p>
       </section>
-      {byDept.length > 0 ? (
-        <CompactBreakdown
-          items={byDept}
-          title={tr("부서별 인원", "Agents by department")}
-          totalLabel={tr("전체 에이전트", "All agents")}
-          format={(value) => value.toLocaleString()}
-          onSelect={onSelectDept}
-          selectedId={deptTab === "all" ? null : deptTab}
-          hideFooter
-          labels={{
-            list: tr("부서별 인원과 비중", "Agents and share by department"),
-            row: (label, value, share) => tr(`${label}, ${value}명, 전체의 ${share}`, `${label}, ${value}, ${share} of all`),
-            summary: (total, amount) => `${total}: ${amount}`,
-            empty: tr("에이전트가 없어요.", "No agents yet."),
-            selectHint: tr("누르면 이 부서만 목록에 보여요.", "Shows only this department in the list."),
-          }}
-        />
-      ) : null}
-      <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} className="border-t border-(--line-soft) pt-4" />
+      {byDept.length 
+        ? (
+          <CompactBreakdown
+            items={byDept}
+            title={tr("부서별 인원", "Agents by department")}
+            totalLabel={tr("전체 에이전트", "All agents")}
+            format={(value) => Math.round(value).toLocaleString()}
+            onSelect={onSelectDept}
+            selectedId={deptTab === "all" ? null : deptTab}
+            hideFooter
+            labels={{
+              list: tr("부서별 인원과 비중", "Agents and share by department"),
+              row: (label, value, share) => tr(`${label}, ${value}명, 전체의 ${share}`, `${label}, ${value}, ${share} of all`),
+              summary: (total, amount) => `${total}: ${amount}`,
+              empty: tr("에이전트가 없어요.", "No agents yet."),
+              selectHint: tr("누르면 이 부서만 목록에 보여요.", "Shows only this department in the list."),
+            }}
+          />
+        ) : null}
+      <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onSessionsChange} className="border-t border-(--line-soft) pt-4" />
     </div>
   );
 }

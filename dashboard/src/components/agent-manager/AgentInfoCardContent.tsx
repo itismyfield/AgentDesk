@@ -20,7 +20,7 @@ import { AgentActivitySection, AgentCronSection, AgentSkillsSection } from "./Ag
 import { AgentInfoTurnsSection } from "./AgentInfoTurnsSection";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
 import type { DetailFold } from "./AgentInfoCardSections";
-import { agentSkillCalls, inferBindingSource, isTurnSession } from "./AgentInfoCardModel";
+import { agentSkillCalls, inferBindingSource, isTurnSession, stopAgentTurn, turnMonitorSteps } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
 import { agentSecondaryLine } from "./AgentRow";
 import { useAgentDetailData, useAgentDetailShared, useDiscordChannels, useReadWhenOpen, type AgentDetailShared } from "./useAgentDetailData";
@@ -72,7 +72,7 @@ export function AgentInfoCardContent({
   const isMobile = useIsMobile();
   const ownShared = useAgentDetailShared(!pageShared);
   const shared = pageShared ?? ownShared;
-  const { sessions, skills } = useAgentDetailData(agent.id);
+  const { sessions, skills, retrySessions, retrySkills } = useAgentDetailData(agent.id);
   const root = useRef<HTMLDivElement>(null);
   const [opened, setOpened] = useState<Set<FoldKey>>(() => new Set());
   const fold = (key: FoldKey): DetailFold => {
@@ -203,9 +203,9 @@ export function AgentInfoCardContent({
 
   const cronFold = fold("cron");
   const activityFold = fold("activity");
-  const cron = useReadWhenOpen(cronFold.open, agent.id, readCron);
-  const timeline = useReadWhenOpen(activityFold.open, agent.id, readTimeline);
-  const audit = useReadWhenOpen(activityFold.open, agent.id, readAudit);
+  const cronRead = useReadWhenOpen(cronFold.open, agent.id, readCron);
+  const timelineRead = useReadWhenOpen(activityFold.open, agent.id, readTimeline);
+  const auditRead = useReadWhenOpen(activityFold.open, agent.id, readAudit);
   const calls = useMemo(() => (shared.skillCalls ? agentSkillCalls(shared.skillCalls, agent.id) : shared.skillCalls), [shared.skillCalls, agent.id]);
 
   const { kanbanCards } = useKanban();
@@ -214,11 +214,33 @@ export function AgentInfoCardContent({
     [pageReasons, agent, kanbanCards, tr, isKo],
   );
 
+  const [stoppingTurn, setStoppingTurn] = useState(false);
+  const [stopFeedback, setStopFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    setStopFeedback(null);
+  }, [agent.id, state, agent.status]);
+
   // Phones read no turns (as home); a caller that already polls the list's working agents hands its map over.
   const working = state ? state === "working" : agent.status === "working";
   const ownTurns = useAgentTurns(turns || isMobile || !working ? [] : [agent.id]);
+  const liveTurn = (turns ?? ownTurns).get(agent.id);
   const summary = getAgentWorkSummary(agent, { linkedSessions: workingSessions });
-  const monitor = isMobile ? null : monitorView((turns ?? ownTurns).get(agent.id), { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
+  const monitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
+  const monitorSteps = useMemo(() => turnMonitorSteps(liveTurn, tr), [liveTurn, tr]);
+  const handleStopTurn = async () => {
+    if (window.confirm?.(tr("지금 진행 중인 턴을 중단할까요?", "Stop the running turn now?")) === false) return;
+    setStoppingTurn(true);
+    setStopFeedback(null);
+    const res = await stopAgentTurn(agent.id);
+    setStoppingTurn(false);
+    if (res.ok) {
+      setStopFeedback({ ok: true, text: tr("턴 중단 요청을 보냈어요.", "Turn stop requested.") });
+      retrySessions();
+      onAgentUpdated?.();
+    } else {
+      setStopFeedback({ ok: false, text: tr(`턴을 중단하지 못했어요 (${res.message})`, `Could not stop turn (${res.message})`) });
+    }
+  };
   const openTurns = () => {
     setOpened((previous) => new Set(previous).add("turns"));
     requestAnimationFrame(() => root.current?.querySelector('[data-testid="agent-detail-turns"]')?.scrollIntoView({ block: "nearest" }));
@@ -292,7 +314,11 @@ export function AgentInfoCardContent({
         isKo={isKo}
         summary={summary}
         monitor={monitor}
+        steps={monitorSteps}
         onOpenLog={openTurns}
+        onStopTurn={working ? () => void handleStopTurn() : undefined}
+        stoppingTurn={stoppingTurn}
+        stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}
         warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions })}
       />
@@ -335,11 +361,27 @@ export function AgentInfoCardContent({
         sessions={sessions}
         resolveChannel={resolveChannel}
         resolveParent={resolveParent}
+        onRetrySessions={retrySessions}
       />
       <AgentInfoTurnsSection agentId={agent.id} tr={tr} isKo={isKo} fold={fold("turns")} />
-      <AgentSkillsSection tr={tr} fold={fold("skills")} calls={calls} skills={skills} />
-      <AgentActivitySection tr={tr} isKo={isKo} fold={activityFold} timeline={timeline} audit={audit} />
-      <AgentCronSection tr={tr} isKo={isKo} fold={cronFold} jobs={cron} />
+      <AgentSkillsSection
+        tr={tr}
+        fold={fold("skills")}
+        calls={calls}
+        skills={skills}
+        onRetryCalls={shared.retrySkillCalls}
+        onRetrySkills={retrySkills}
+      />
+      <AgentActivitySection
+        tr={tr}
+        isKo={isKo}
+        fold={activityFold}
+        timeline={timelineRead.value}
+        audit={auditRead.value}
+        onRetryTimeline={timelineRead.retry}
+        onRetryAudit={auditRead.retry}
+      />
+      <AgentCronSection tr={tr} isKo={isKo} fold={cronFold} jobs={cronRead.value} onRetry={cronRead.retry} />
       <AgentSourceSection agent={agent} tr={tr} fold={fold("source")} roleMap={bindings.some((binding) => inferBindingSource(binding) === "role-map")} />
     </div>
   );

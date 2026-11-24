@@ -1,4 +1,5 @@
-import type { Agent, DispatchedSession } from "../../types";
+import type { Agent, Department, DispatchedSession } from "../../types";
+import { localeName } from "../../i18n";
 import { deriveDispatchedAsAgents } from "../../contexts/session-overlay";
 import { isTestAgent } from "../../lib/agentHelpers";
 import { AGENT_STATES, agentName, classifyAgents, type HomeAgent, type HomeAgentState } from "../home/homeModel";
@@ -26,6 +27,24 @@ export interface AgentListFilter {
 
 export function hasDepartment(agent: Agent, departments?: ReadonlySet<string>): boolean {
   return Boolean(agent.department_id) && (!departments || departments.has(agent.department_id!));
+}
+
+/** Disambiguates departments that share the same localized name (e.g. two `아트팀` rows) with their English name or slug id. */
+export function departmentLabels(departments: Department[], locale: string): Map<string, string> {
+  const base = departments.map((dept) => ({ dept, name: localeName(locale, dept).trim() || dept.id }));
+  const counts = new Map<string, number>();
+  for (const { name } of base) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const disambiguated = base.map(({ dept, name }) => {
+    if ((counts.get(name) ?? 0) < 2) return { id: dept.id, baseName: name, label: name };
+    const alt = dept.name.trim() && dept.name.trim() !== name ? dept.name.trim() : dept.id;
+    return { id: dept.id, baseName: name, label: `${name} (${alt})` };
+  });
+  const labelCounts = new Map<string, number>();
+  for (const { label } of disambiguated) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  return new Map(disambiguated.map(({ id, baseName, label }) => [
+    id,
+    (labelCounts.get(label) ?? 0) > 1 ? `${baseName} (${id})` : label,
+  ]));
 }
 
 /** Sessions attached to a department only, which home counts as agents (`dispatched:<id>`); they have no detail. */

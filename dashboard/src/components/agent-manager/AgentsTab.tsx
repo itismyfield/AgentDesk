@@ -22,7 +22,7 @@ import { AgentInfoCardContent } from "./AgentInfoCardContent";
 import AgentRow from "./AgentRow";
 import { AgentsAttentionCard, useAgentsAttention } from "./AgentsAttentionCard";
 import { AgentsSummaryPane } from "./AgentsSummaryPane";
-import { NO_DEPARTMENT, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
+import { NO_DEPARTMENT, departmentLabels, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
 import { useAgentDetailShared } from "./useAgentDetailData";
@@ -111,6 +111,7 @@ export default function AgentsTab({
   // Phones show no tool line, so they read no turns either (as home).
   const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
   const departmentById = useMemo(() => new Map(departments.map((department) => [department.id, department])), [departments]);
+  const deptLabelById = useMemo(() => departmentLabels(departments, locale), [departments, locale]);
   const known = useMemo(() => new Set(departmentById.keys()), [departmentById]);
 
   // Tab counts follow the other filters, so each number is what that tab would show.
@@ -288,7 +289,7 @@ export default function AgentsTab({
                     { value: "all", label: tr(`전체 부서 · ${listed.length}명`, `All departments · ${listed.length}`) },
                     ...departments.map((department) => ({
                       value: department.id,
-                      label: `${localeName(locale, department)} · ${listed.filter((entry) => entry.agent.department_id === department.id).length}`,
+                      label: `${deptLabelById.get(department.id) ?? localeName(locale, department)} · ${listed.filter((entry) => entry.agent.department_id === department.id).length}`,
                     })),
                     ...(unassigned ? [{ value: NO_DEPARTMENT, label: tr(`미배정 · ${unassigned}`, `Unassigned · ${unassigned}`) }] : []),
                   ]}
@@ -351,7 +352,7 @@ export default function AgentsTab({
           </SectionCard>
           {isMobile && unlinkedSessions.length > 0 ? (
             <KitCard pad="sm">
-              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} />
+              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onAgentUpdated} />
             </KitCard>
           ) : null}
         </div>
@@ -392,6 +393,7 @@ export default function AgentsTab({
                 deptTab={deptTab}
                 onSelectDept={setDeptTab}
                 unlinkedSessions={unlinkedSessions}
+                onSessionsChange={onAgentUpdated}
               />
             )}
           </section>
