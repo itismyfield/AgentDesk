@@ -212,8 +212,7 @@ impl<'a> PipelineOverrideService<'a> {
         &self,
         agent_id: &str,
         config: Option<&Value>,
-    ) -> Result<(Option<String>, Option<crate::pipeline::PipelineOverride>), PipelineOverrideError>
-    {
+    ) -> Result<(Option<String>, Option<PipelineOverride>), PipelineOverrideError> {
         let (config_str, agent_override) = parse_pipeline_override_config(config)?;
         self.ensure_agent_exists(agent_id).await?;
         crate::pipeline::ensure_loaded();
@@ -266,7 +265,7 @@ impl<'a> PipelineOverrideService<'a> {
     async fn validate_against_existing_agent_overrides(
         &self,
         repo_id: &str,
-        new_repo_override: Option<&crate::pipeline::PipelineOverride>,
+        new_repo_override: Option<&PipelineOverride>,
     ) -> Result<(), PipelineOverrideError> {
         let rows = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT DISTINCT a.id, a.pipeline_config::text \
@@ -319,7 +318,7 @@ impl<'a> PipelineOverrideService<'a> {
     async fn validate_against_existing_repo_overrides(
         &self,
         agent_id: &str,
-        new_agent_override: Option<&crate::pipeline::PipelineOverride>,
+        new_agent_override: Option<&PipelineOverride>,
     ) -> Result<(), PipelineOverrideError> {
         let rows = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT DISTINCT r.id, r.pipeline_config::text \
@@ -419,7 +418,7 @@ impl<'a> PipelineOverrideService<'a> {
 
 fn parse_stored_config(config: Option<&str>) -> Value {
     config
-        .and_then(|raw| serde_json::to_value(crate::pipeline::parse_override(raw).ok()).ok())
+        .and_then(|raw| serde_json::to_value(parse_override(raw).ok()).ok())
         .unwrap_or(Value::Null)
 }
 
@@ -438,8 +437,8 @@ fn existing_override_for_cross_check(
     layer: &str,
     target_id: &str,
     raw: &str,
-) -> Result<Option<crate::pipeline::PipelineOverride>, PipelineOverrideError> {
-    match crate::pipeline::parse_override(raw) {
+) -> Result<Option<PipelineOverride>, PipelineOverrideError> {
+    match parse_override(raw) {
         Ok(parsed) => Ok(parsed),
         Err(error) => {
             tracing::warn!(
@@ -452,11 +451,11 @@ fn existing_override_for_cross_check(
 
 fn parse_pipeline_override_config(
     config: Option<&Value>,
-) -> Result<(Option<String>, Option<crate::pipeline::PipelineOverride>), PipelineOverrideError> {
+) -> Result<(Option<String>, Option<PipelineOverride>), PipelineOverrideError> {
     match config {
         Some(value) if !value.is_null() => {
             let config = value.to_string();
-            match crate::pipeline::parse_override_strict(&config) {
+            match parse_override_strict(&config) {
                 Ok(parsed) => Ok((Some(config), parsed)),
                 Err(error) => Err(PipelineOverrideError::BadRequest(format!(
                     "invalid pipeline config: {error}"
@@ -468,8 +467,8 @@ fn parse_pipeline_override_config(
 }
 
 fn validate_pipeline_override(
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
-    agent_override: Option<&crate::pipeline::PipelineOverride>,
+    repo_override: Option<&PipelineOverride>,
+    agent_override: Option<&PipelineOverride>,
 ) -> Result<(), PipelineOverrideError> {
     let effective = crate::pipeline::resolve(repo_override, agent_override);
     effective.validate().map_err(|error| {
