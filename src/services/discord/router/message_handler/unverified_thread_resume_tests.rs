@@ -125,8 +125,11 @@ async fn unverified_thread_cold_resume_starts_fresh() {
         core.sessions.get_mut(&channel).unwrap().session_id = stored();
         drop(core);
         let (mut session, mut memento, mut reason) = (stored(), true, "before");
-        // The second preparation is the same person sending again.
-        for _send in 0..2 {
+        // The same person sends again, and the session row still names the session.
+        for send in 0..2 {
+            if send == 1 {
+                session = stored();
+            }
             let state = prep::Restore {
                 session_id: &mut session,
                 memento_context_loaded: &mut memento,
@@ -164,6 +167,7 @@ async fn unverified_thread_cold_resume_starts_fresh() {
         };
         assert_eq!(recent.await.unwrap().audit_reason, gate, "{name}");
         if fresh {
+            crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
             let cold = ResumePane::Cold;
             let refused = claude_thread::reserve_resume(id, TMUX, NATIVE, &transcript, cold);
             assert!(refused.unwrap_err().contains("has no verified binding"));
