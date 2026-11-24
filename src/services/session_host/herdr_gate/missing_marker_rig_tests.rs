@@ -1,11 +1,13 @@
 //! Isolated real Herdr/OS/PG fixture shared with the marker-loss recovery tests.
+use std::path::Path;
+
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{self, HostedObservation};
+use crate::krx_session_host_tests::herdr_terminate_real_tests as real;
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced::{self as recovery, CAS_ATTEMPTS};
 use crate::services::session_host::herdr::model::HerdrRequest;
 use crate::services::session_host::herdr::wire::LineJsonFraming;
-use crate::services::session_host::herdr_terminate_real_tests as real;
 use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 use crate::services::tui_prompt_dedupe as dedupe;
 pub(crate) const CHANNEL: u64 = 78_780_031;

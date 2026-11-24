@@ -103,7 +103,7 @@ const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
 /// Herdr's name for an executor key; Herdr writes `enter` as a carriage return.
-fn herdr_key(key: HostKey) -> &'static str {
+pub(crate) fn herdr_key(key: HostKey) -> &'static str {
     match key {
         HostKey::Enter => "enter",
         HostKey::Escape => "esc",
@@ -117,11 +117,11 @@ fn herdr_key(key: HostKey) -> &'static str {
 }
 
 #[derive(Default)]
-struct ExecutionFence {
+pub(crate) struct ExecutionFence {
     state: Mutex<(bool, bool)>, // active permit, closing
 }
 
-struct MutationPermit {
+pub(crate) struct MutationPermit {
     fence: Arc<ExecutionFence>,
 }
 impl Drop for MutationPermit {
@@ -187,7 +187,10 @@ pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
 }
 
 impl ExecutionFence {
-    fn acquire(self: &Arc<Self>, mutation: Mutation) -> Result<MutationPermit, HerdrGateRefusal> {
+    pub(crate) fn acquire(
+        self: &Arc<Self>,
+        mutation: Mutation,
+    ) -> Result<MutationPermit, HerdrGateRefusal> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.0 {
             return Err(HerdrGateRefusal::MutationBusy);
@@ -270,7 +273,7 @@ struct Judged {
     _permit: Option<MutationPermit>,
 }
 
-struct PaneGate {
+pub(crate) struct PaneGate {
     endpoint: HerdrEndpoint,
     transport: Arc<dyn HerdrTransport>,
     pane: String,
@@ -285,7 +288,7 @@ struct PaneGate {
     pinned: Mutex<Option<Judged>>,
     /// How many writes were sent, and the server the latest one went to.
     last_sent: Mutex<(u64, Option<ServerWitness>)>,
-    fence: Arc<ExecutionFence>,
+    pub(crate) fence: Arc<ExecutionFence>,
     /// An operator asked a terminate to stand on the exact pane proof when the marker is absent.
     marker_absent_by_pane: bool,
 }
@@ -293,7 +296,7 @@ struct PaneGate {
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
 /// Its calls block on the socket, so callers stay off the async runtime.
 #[derive(Clone)]
-pub(crate) struct HerdrTarget(Arc<PaneGate>);
+pub(crate) struct HerdrTarget(pub(crate) Arc<PaneGate>);
 
 impl std::fmt::Debug for HerdrTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -623,7 +626,7 @@ impl HerdrTarget {
 
     /// Sends `request` to the server the pinned judgment named, consuming it; without one
     /// nothing is written.
-    fn send_pinned(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
+    pub(crate) fn send_pinned(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let judged = self
             .0
             .pinned
@@ -1220,7 +1223,3 @@ pub(crate) mod residue {
             })
     }
 }
-
-#[cfg(test)]
-#[path = "herdr_gate_tests.rs"]
-pub(super) mod tests;

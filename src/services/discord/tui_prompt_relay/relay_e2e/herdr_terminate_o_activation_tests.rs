@@ -11,10 +11,12 @@ use super::{
     root, segments_of,
 };
 use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, HostedOwner};
+use crate::krx_session_host_tests::herdr_terminate_real_tests::legacy_row;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, ProceedReason, observe_binding_hook,
 };
+use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_launched_herdr_source,
 };
@@ -22,8 +24,6 @@ use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchOutcome, launch_herdr_session,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_terminate_real_tests::legacy_row;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::store::OStore;

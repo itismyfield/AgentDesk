@@ -14,10 +14,10 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::admin_host_guard::tests::Recorder;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::{probe_before_postlude, root_replaced, test_turn};
+use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{Data, SharedData, inflight, queue_persistence_context};
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, load_channel_pending_queue_for_tests,
 };

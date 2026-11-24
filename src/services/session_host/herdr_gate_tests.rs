@@ -18,7 +18,6 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, ProcessStamp, SourceRef};
 use crate::services::claude_tui::host_input::{
@@ -35,7 +34,22 @@ use crate::services::session_host::herdr::transport::{
     HerdrSocketConfig, HerdrSocketTransport, PeerReader,
 };
 use crate::services::session_host::herdr::wire::{LineJsonFraming, MAX_FRAME_BYTES};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
+
+use crate::db::dispatched_sessions::hosted_execution::{
+    ExpectedExecution, HostedExecution, HostedLocation, HostedState,
+};
+use crate::services::session_host::herdr::contract::{
+    self, CloseEffect, HerdrTransport, ServerWitness,
+};
+use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
+use crate::services::session_host::herdr::observe::{RestoreResume, RestoreUnverified};
+use crate::services::session_host::herdr::pane_probe::ProcessOs;
+use crate::services::session_host::herdr_gate::*;
 use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
+use crate::services::session_host::{HostKey, HostMutation, HostPresence, HostRefusal};
 use crate::services::session_host::{
     HostKind, HostSessionRef, ResolvedSessionTarget, SessionTargetInput, TargetHost, TargetSource,
     host_for,
@@ -806,7 +820,7 @@ const TERMINATE_TEST_CHILD: &str = "ADK_HERDR_TERMINATE_TEST_CHILD";
 
 // Isolate the live config snapshot from parallel tests that install their own config.
 fn run_terminate_child(name: &str) -> bool {
-    let name = format!("services::session_host::herdr_gate::tests::{name}");
+    let name = format!("services::discord::krx_session_host_tests::herdr_gate::{name}");
     if let Some(child) = std::env::var_os(TERMINATE_TEST_CHILD) {
         assert_eq!(child, name.as_str());
         return false;
@@ -2613,5 +2627,5 @@ mod policy;
 /// Claude's stash reaches a Herdr pane under the gate's own `ctrl+s` key name.
 #[test]
 fn ctrl_s_is_the_herdr_stash_key() {
-    assert_eq!(super::herdr_key(super::HostKey::CtrlS), "ctrl+s");
+    assert_eq!(herdr_key(HostKey::CtrlS), "ctrl+s");
 }

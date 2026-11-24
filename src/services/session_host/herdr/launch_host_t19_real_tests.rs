@@ -9,8 +9,16 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::*;
 use crate::services::herdr_launch::{HERDR_PANE_ENV, unset_herdr_env_before_exec};
+use crate::services::herdr_launch::{
+    HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
+};
+use crate::services::session_host::herdr::contract::{HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr::launch_host::*;
+use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
+use crate::services::session_host::herdr::observe;
+use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
+use crate::services::session_host::herdr::wire::LineJsonFraming;
 
 #[path = "launch_host_restore_evidence_tests.rs"]
 mod restore_evidence;

@@ -4,16 +4,18 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::super::path::PersonalPaths;
-use super::super::publication::STATE_FILE;
-use super::*;
 use crate::config::session_hosts::{
     BootSessionHosts, EndpointConfig, EndpointMode, SessionHostsConfig,
 };
 use crate::services::discord::health::{
     observe_operator_notice, restart_operator_notice_for_test, send_operator_notices_on_this_thread,
 };
+use crate::services::session_host::herdr::managed_config::ManagedHome;
+use crate::services::session_host::herdr::managed_config::maintenance::*;
+use crate::services::session_host::herdr::managed_config::path::PersonalPaths;
+use crate::services::session_host::herdr::managed_config::publication::STATE_FILE;
 use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
+use crate::services::session_host::herdr::observe::{RestoreResume, RestoreUnverified};
 use crate::services::session_host::herdr_socket_rig_tests::{
     NativeHerdrRig, native_registry_on_this_thread, native_server_child,
 };
@@ -343,7 +345,7 @@ fn unreadable_records_and_unsafe_homes_get_their_own_stable_reasons() {
 /// server on every later tick, and the server only ever receives read-only pings.
 #[test]
 fn a_running_server_on_the_old_config_stays_refused_and_is_never_restarted() {
-    const TEST: &str = "services::session_host::herdr::managed_config::maintenance::tests::a_running_server_on_the_old_config_stays_refused_and_is_never_restarted";
+    const TEST: &str = "krx_session_host_tests::managed_config_maintenance::a_running_server_on_the_old_config_stays_refused_and_is_never_restarted";
     if native_server_child() {
         return;
     }
@@ -613,7 +615,8 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
 /// One process starts one upkeep task, and that task runs a pass on its first tick.
 #[test]
 fn the_process_starts_one_upkeep_task() {
-    const TEST: &str = "services::session_host::herdr::managed_config::maintenance::tests::the_process_starts_one_upkeep_task";
+    const TEST: &str =
+        "krx_session_host_tests::managed_config_maintenance::the_process_starts_one_upkeep_task";
     let Some(user) = std::env::var_os("ADK_UPKEEP_TASK_USER") else {
         let root = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())

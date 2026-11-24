@@ -428,8 +428,8 @@ fn m2t_u9_manual_retire_inside_the_terminate_cas_window_pg() {
     use crate::services::discord::herdr_terminate::{
         OperatorTerminate, TerminationResult, terminate_explicit_herdr_for_test, test_turn,
     };
+    use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
     use crate::services::discord::turn_lease;
-    use crate::services::session_host::herdr_termination_rig as herdr;
     let path = concat!(
         module_path!(),
         "::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg"

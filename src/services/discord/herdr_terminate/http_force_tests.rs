@@ -22,9 +22,9 @@ use super::super::{
 use super::terminate_for_http;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::krx_session_host_tests::herdr_termination_rig as herdr;
 use crate::services::discord::{ChannelId, SharedData, inflight, runtime_store};
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
 const CHANNEL: u64 = 6_772_101;
