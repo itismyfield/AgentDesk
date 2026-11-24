@@ -1,12 +1,12 @@
 //! Submit owns the physical mutation; Source binding and the reply belong to observation.
 use super::*;
 
-pub(super) struct Submitted {
+pub(crate) struct Submitted {
     target: HerdrTarget,
-    logged: tokio::sync::watch::Receiver<u64>,
+    pub(crate) logged: tokio::sync::watch::Receiver<u64>,
 }
 
-pub(super) fn submit(
+pub(crate) fn submit(
     turn: &CodexHerdrTurn<'_>,
     runtime: &Handle,
     nonce: &str,
@@ -25,7 +25,7 @@ pub(super) fn submit(
 
 /// The first prompt through the owner waiting on this thread: it reserves the frame on the
 /// execution the launch recorded, binds its pane, and runs this write as its effect.
-pub(super) fn submit_owned(
+pub(crate) fn submit_owned(
     turn: &CodexHerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     lineage: crate::services::claude_tui::owner_input::Lineage,
@@ -117,8 +117,8 @@ fn restore_pending(
 }
 
 fn read_pending(pool: &PgPool, owner: &HostedOwner, runtime: &Handle) -> HostedLookup {
-    #[cfg(test)]
-    pg_tests::before_pending_lookup(&owner.logical_key);
+    #[cfg(any(test, feature = "test-support"))]
+    pending_lookup_probe::before_pending_lookup(&owner.logical_key);
     runtime.block_on(load(pool, owner))
 }
 
@@ -292,5 +292,5 @@ pub(super) fn observe(
     )
 }
 
-#[cfg(test)]
-mod pg_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod pending_lookup_probe;
