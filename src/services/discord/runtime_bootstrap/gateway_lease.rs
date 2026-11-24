@@ -226,7 +226,7 @@ async fn yield_to_preferred_gateway(
 
 /// Wait indefinitely while advertising intent, then pass the guard to the backend.
 /// Cancellation, acquisition failure, and backend exit all clear the same intent.
-async fn acquire_as_preferred_gateway(
+pub(super) async fn acquire_as_preferred_gateway(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,

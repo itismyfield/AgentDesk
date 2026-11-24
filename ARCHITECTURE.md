@@ -1945,6 +1945,7 @@ src/
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   └── live_bridge_guard_tests.rs
+│   │   │   ├── boot_hold.rs
 │   │   │   ├── channel_home_seed.rs
 │   │   │   ├── consumer_ports.rs
 │   │   │   ├── headless_turn.rs
@@ -2866,6 +2867,7 @@ src/
 │   │   │   │   └── agy_shadow.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
+│   │   │   ├── boot_sigterm.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
@@ -2883,6 +2885,7 @@ src/
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── native_input.rs
+│   │   │   ├── native_input_tests.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
