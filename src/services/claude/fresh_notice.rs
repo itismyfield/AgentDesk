@@ -66,10 +66,13 @@ pub(crate) async fn announce_unverified(
     let content = format!(
         "♻️ 이전 세션({short})은 이 스레드에서 이어받을 수 없어 새 세션으로 시작했습니다. 스레드의 최근 대화만 전달됩니다."
     );
-    let session_key = format!("claude_resume_unverified:{requested}");
+    let (target, session_key) = (
+        format!("channel:{channel}"),
+        format!("claude_resume_unverified:{requested}"),
+    );
     let queued = crate::services::message_outbox::enqueue_lifecycle_notification_pg(
         pool,
-        &format!("channel:{channel}"),
+        &target,
         Some(&session_key),
         REASON,
         &content,
