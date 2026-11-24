@@ -122,8 +122,12 @@ Rules:
 ## Counterexamples against the code
 
 ### Split writer (5b1)
-`Split*` are GREEN from a missing, V1 or V2 file. A V1 file stays V1 until the owner's restore, and the
-out-of-scope register is never refused, so path A/B no longer hands back with `load_failed` on V2.
+`Split*` are GREEN from a missing, V1 or V2 file. A V1 file stays V1 until the owner's restore. The
+out-of-scope register is no longer refused solely because the ledger is V2/V3. In the model,
+`XAccepts(f) = TRUE` covers the envelope only. The model makes no claim about the transaction's own
+refusals, such as an ambiguous identity, a keyed change, a contested first native event, capacity or an
+unconfirmed publication. Those can still end in NotSent/handback, and they are covered by 5b1's
+implementation tests (for example `keyless_reconcile_refuses_a_duplicate_id_path_instead_of_folding`).
 `SplitUnlocked` (`XRead` → `OwnerPrepare` → `XWrite`) shows why the format check and the write must stay
 in one locked step, as 5b1's `locked(true, …)` does (R1).
 
