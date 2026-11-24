@@ -288,6 +288,3 @@ fn exclude<R>(
         None => Err(withheld(reason)),
     }
 }
-
-#[cfg(all(test, unix))]
-pub(crate) use crate::services::discord::krx_tui_o_test_host::admission as tests;

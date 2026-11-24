@@ -64,7 +64,7 @@ pub(crate) struct FakePort {
     posts: Mutex<Vec<String>>,
     prepared_before_post: Mutex<Vec<bool>>,
     ledger: Mutex<Option<PathBuf>>,
-    unreadable: AtomicBool,
+    pub(crate) unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
     lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
@@ -79,7 +79,7 @@ pub(crate) struct FakePort {
 }
 
 impl FakePort {
-    fn say(&self, author_id: u64, content: &str) -> SeenMessage {
+    pub(crate) fn say(&self, author_id: u64, content: &str) -> SeenMessage {
         let mut history = self.history.lock().unwrap();
         let id = 1000 + history.len() as u64;
         let content = content.to_string();
@@ -221,7 +221,7 @@ pub(crate) struct FakeLease {
     released: Arc<AtomicUsize>,
     on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
-    unavailable: Mutex<Vec<u64>>,
+    pub(crate) unavailable: Mutex<Vec<u64>>,
 }
 
 pub(crate) struct Held(Arc<AtomicUsize>);
@@ -251,8 +251,8 @@ impl DeliveryLease for Arc<FakeLease> {
 #[derive(Clone)]
 pub(crate) struct Alarms {
     channel: u64,
-    raised: Arc<Mutex<Vec<WriterAlarm>>>,
-    cleared: Arc<AtomicUsize>,
+    pub(crate) raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    pub(crate) cleared: Arc<AtomicUsize>,
     /// The reader count the writer last reported.
     readers: Arc<Mutex<Option<usize>>>,
 }
@@ -287,9 +287,9 @@ impl Alarms {
 pub(crate) type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
 
 pub(crate) struct Harness {
-    channel_id: u64,
+    pub(crate) channel_id: u64,
     pub(crate) _runtime: tempfile::TempDir,
-    store: OStore,
+    pub(crate) store: OStore,
     pub(crate) gate: Arc<OwnershipGate>,
     pub(crate) port: Arc<FakePort>,
     pub(crate) lease: Arc<FakeLease>,
@@ -302,7 +302,7 @@ impl Harness {
     }
 
     /// `sources` may create transcripts under the runtime root before the era begins.
-    fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
+    pub(crate) fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
         Self::build_channel(CHANNEL, sources)
     }
 

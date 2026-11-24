@@ -31,8 +31,8 @@ use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 #[cfg(unix)]
 use crate::services::tui_o::store::{Initialized, OStore, STORE_DIR_NAME, StoreConfig};
 
-pub(super) const CHANNEL: u64 = 6325;
-pub(super) const BOT: u64 = 900;
+pub(crate) const CHANNEL: u64 = 6325;
+pub(crate) const BOT: u64 = 900;
 
 fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
     UnitKey {
@@ -58,7 +58,7 @@ fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> Pie
     }
 }
 
-pub(super) fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
+pub(crate) fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
     ProvenanceLog::open(&dir.path().join("repost-provenance.jsonl")).unwrap()
 }
 
@@ -545,7 +545,7 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
 }
 
 /// Admits each `(serial, native_key)` as an on original of `payload` that went uncertain.
-pub(super) async fn admit_on(
+pub(crate) async fn admit_on(
     pool: &PgPool,
     log: &mut ProvenanceLog,
     pieces: &[(u64, &str)],

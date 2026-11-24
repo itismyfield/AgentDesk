@@ -7,6 +7,9 @@ use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::krx_tui_o_test_host::host_start::deferred::*;
+use crate::services::discord::krx_tui_o_test_host::host_start::{
+    Raised, TestIo, adoption, init_path, root,
+};
 use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_returning_id_with_ttl};
 use crate::services::tui_o::channel_policy::Adoption;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, test_override};
@@ -18,9 +21,6 @@ use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::FencedFacts;
 use crate::services::tui_o::writer::host::{Custody, HostIo, HostParts, start};
-use crate::services::tui_o::writer::tests::actor::host_start::{
-    Raised, TestIo, adoption, init_path, root,
-};
 use crate::services::tui_o::writer::tests::actor::{append, row};
 use crate::services::tui_o::writer::tests::{CHANNEL, FakeLease, FakePort};
 use crate::services::tui_prompt_dedupe::binding_events as p5;

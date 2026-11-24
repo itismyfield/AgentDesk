@@ -12,7 +12,7 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
 pub(super) mod child_run;
-pub(super) mod claude;
+pub(in crate::services) mod claude;
 pub(super) mod codex;
 
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
@@ -45,7 +45,7 @@ impl Wake {
     }
 }
 
-pub(super) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
+pub(in crate::services) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
     events.iter().find_map(|event| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -57,7 +57,10 @@ pub(super) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
 }
 
 /// The source last bound at or before `boundary`, else the first bound after it, with its seq.
-pub(super) fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
+pub(in crate::services) fn baseline(
+    events: &[BindingEvent],
+    boundary: u64,
+) -> Option<(SourceId, u64)> {
     let binds = events.iter().filter_map(|event| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),

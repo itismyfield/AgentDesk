@@ -16,7 +16,7 @@ struct Case {
     logical: String,
     o: OStore,
     port: Arc<Port>,
-    _binding: crate::services::tui_o::writer::input_notices::admission::tests::BindingRoot,
+    _binding: crate::services::discord::krx_tui_o_test_host::admission::BindingRoot,
     _runtime: tempfile::TempDir,
     _guard: crate::config::TestRuntimeRootGuard,
 }

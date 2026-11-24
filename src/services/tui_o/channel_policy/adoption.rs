@@ -345,7 +345,7 @@ impl Candidate {
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
     #[track_caller]
-    pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
+    pub(in crate::services) fn claim_body(&self, channel: u64) -> BodyClaimed {
         self.claim_body_from(channel, std::panic::Location::caller())
     }
 

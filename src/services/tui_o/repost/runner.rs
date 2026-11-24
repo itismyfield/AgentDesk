@@ -565,3 +565,7 @@ where
         Box::pin(self.receipt_overlay())
     }
 }
+
+#[cfg(test)]
+#[path = "runner_activation_tests.rs"]
+mod activation_tests;

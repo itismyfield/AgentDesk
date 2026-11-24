@@ -14,13 +14,14 @@ use crate::services::tui_o::writer::host::{
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{
-    CaptureOutcome, CapturedRecord, MAX_READ_BYTES, ShadowProvider, SourceId, UnitKey,
+    CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider, SourceId,
+    UnitKey,
 };
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized};
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::binding::{
-    BindingCause, BindingEvent, BindingRecord, BindingTarget,
+    BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget,
 };
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork, UnitDeriver};
@@ -31,7 +32,7 @@ use crate::services::tui_o::writer::tests::{
 };
 use crate::services::tui_o::writer::{AlarmSink, ReaderConfig, WriterAlarm, WriterConfig, deliver};
 use chrono::Utc;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1182,7 +1183,7 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
-pub(super) struct ProducerPane {
+pub(crate) struct ProducerPane {
     pub(super) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
@@ -1263,7 +1264,7 @@ impl Drop for ProducerPane {
 }
 
 #[cfg(unix)]
-pub(super) fn session_row(session: &str) -> Vec<u8> {
+pub(crate) fn session_row(session: &str) -> Vec<u8> {
     let row = serde_json::json!({"type": "mode", "sessionId": session});
     let mut line = serde_json::to_vec(&row).unwrap();
     line.push(b'\n');

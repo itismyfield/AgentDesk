@@ -6,7 +6,7 @@
 pub(crate) mod admission;
 #[cfg(test)]
 #[path = "../tui_o/repost/admission_tests.rs"]
-mod admission_tests;
+pub(crate) mod admission_tests;
 #[cfg(test)]
 #[cfg(unix)]
 #[path = "../tui_o/writer/canary_policy_tests.rs"]
@@ -46,9 +46,6 @@ pub(crate) mod repost_probe;
 #[cfg(unix)]
 #[path = "../tui_o/writer/repost_turn_tests.rs"]
 mod repost_turn;
-#[cfg(test)]
-#[path = "../tui_o/repost/runner_activation_tests.rs"]
-mod runner_activation;
 #[cfg(test)]
 #[path = "../tui_o/repost/runner_tests.rs"]
 mod runner_tests;

@@ -190,8 +190,6 @@ mod krx_db_b_tests;
 #[cfg(test)]
 mod krx_db_tests;
 #[cfg(test)]
-mod krx_tui_o_tests;
-#[cfg(test)]
 mod provider_output_guard_tests;
 
 pub(crate) mod session_identity_metadata;

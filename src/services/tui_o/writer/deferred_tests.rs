@@ -64,11 +64,11 @@ async fn retried() {
 
 /// A selected channel whose transcript ends in an open turn Legacy has read and delivered.
 pub(crate) struct Open {
-    harness: Harness,
-    path: PathBuf,
+    pub(crate) harness: Harness,
+    pub(crate) path: PathBuf,
     io: Arc<TestIo>,
     legacy: Arc<Moving>,
-    ready: Arc<Readiness>,
+    pub(crate) ready: Arc<Readiness>,
     _selected: ChannelsGuard,
 }
 
@@ -106,7 +106,7 @@ impl Open {
     }
 
     /// The TUI closes the turn and Legacy delivers it.
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         append(&self.path, &closed());
         self.legacy.caught_up(&self.path);
     }
@@ -124,11 +124,11 @@ impl Open {
         init.sources.first().map(|source| source.delivery_start)
     }
 
-    fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         std::fs::metadata(&self.path).unwrap().len()
     }
 
-    fn alarms(&self) -> Vec<(u64, WriterAlarm)> {
+    pub(crate) fn alarms(&self) -> Vec<(u64, WriterAlarm)> {
         self.io.alarms.0.lock().unwrap().clone()
     }
 
