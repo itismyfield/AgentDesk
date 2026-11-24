@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_inventory_docs import test_line_numbers  # noqa: E402
 from check_comment_only_change import normalize  # noqa: E402
-from rust_lex import CODE, COMMENT, LITERAL, StripState, lex_segments, strip_line  # noqa: E402
+from rust_lex import CODE, COMMENT, LITERAL, StripState, lex_segments  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKING_TREE = "<working tree>"
@@ -79,8 +79,7 @@ def is_test_path(path: str) -> bool:
 
 
 def line_kinds(text: str) -> list[str | None]:
-    state = StripState()
-    skipped = test_line_numbers("\n".join(strip_line(row, state) for row in text.splitlines()))
+    skipped = test_line_numbers(text)
     state = StripState()
     result: list[str | None] = []
     for lineno, line in enumerate(text.splitlines(), start=1):

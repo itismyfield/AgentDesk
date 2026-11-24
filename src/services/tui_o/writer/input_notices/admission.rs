@@ -2,11 +2,12 @@
 
 use super::super::pieces::PieceWork;
 use super::NoticeOrigin;
+use crate::services::discord::session_notice::input_notice;
 use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
 use crate::services::tui_o::shadow::{SourceId, UnitKind};
 use crate::services::tui_o::store::{ChannelStore, ledger::LedgerEntry};
 use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingEvent, BindingTarget};
-use crate::services::{discord, session_host, tmux_common as tc};
+use crate::services::{session_host, tmux_common as tc};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NoticeRefusal {
@@ -102,7 +103,8 @@ pub(crate) fn admit_notice<R>(
         if cleared(&events, origin, store)? {
             return exclude(piece, store, "input_notice_clear");
         }
-        if super::legacy_discord_input(&prompt) || discord::input_notice_content(&prompt).is_none()
+        if super::legacy_discord_input(&prompt)
+            || input_notice::input_notice_content(&prompt).is_none()
         {
             return exclude(piece, store, "input_notice_source");
         }

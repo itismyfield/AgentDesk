@@ -115,7 +115,7 @@ fn enabled_from_env() -> bool {
     crate::utils::env_flag("ADK_IMSG_OBLIGATIONS", false)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn parse_enabled(raw: Option<&str>) -> bool {
     crate::utils::parse_env_flag_for_test("ADK_IMSG_OBLIGATIONS", raw, false)
 }

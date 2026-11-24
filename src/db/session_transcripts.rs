@@ -996,11 +996,9 @@ pub(crate) mod clear_fence_pg_tests {
     use super::*;
     use std::sync::Arc;
 
-    pub(crate) async fn create_pool() -> (
-        crate::dispatch::test_support::DispatchPostgresTestDb,
-        PgPool,
-    ) {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+    pub(crate) async fn create_pool()
+    -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
+        let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_transcript_clear_fence_4533",
             "session transcript clear fence",
         )

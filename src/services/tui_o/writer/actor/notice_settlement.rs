@@ -1,5 +1,6 @@
 //! Record settlement removes only proven non-notice debt, independently of current pane liveness.
 use super::*;
+use crate::services::discord::session_notice::input_notice;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::ledger::LedgerEntry;
 use crate::services::tui_o::store::ledger::input_notices::{
@@ -110,8 +111,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return false;
         };
         let digest = hex::encode(sha2::Sha256::digest(prompt.as_bytes()));
-        let (proof, expired_after) = if crate::services::discord::input_notice_content(prompt)
-            .is_none()
+        let (proof, expired_after) = if input_notice::input_notice_content(prompt).is_none()
             && crate::services::tui_o::store::ledger::input_notices::policy_proven(prompt)
         {
             (

@@ -300,3 +300,26 @@ def lex_segments(line: str, state: StripState) -> list[tuple[str, str]]:
         segments.append((CODE, line[i:end]))
         i = end
     return segments
+
+
+def blank_segments(text: str, *kind_sets: frozenset[str] | set[str]) -> tuple[str, ...]:
+    """One copy of ``text`` per set of comment/literal kinds, those ``lex_segments`` runs blanked; offsets kept."""
+
+    if any(kinds - {COMMENT, LITERAL} for kinds in kind_sets):
+        raise ValueError("only comment and literal runs can be blanked")
+    state = StripState()
+    views: list[list[str]] = [[] for _ in kind_sets]
+    for line in text.splitlines(keepends=True):
+        if not (state.block_depth or state.in_string or state.raw_hashes is not None or _LEX_MARK.search(line)):
+            for view in views:
+                view.append(line)  # no comment or literal can start or continue here
+            continue
+        for kind, run in lex_segments(line, state):
+            blank = re.sub(r"[^\n]", " ", run)
+            for kinds, view in zip(kind_sets, views):
+                view.append(blank if kind in kinds else run)
+    return tuple("".join(view) for view in views)
+
+
+# Every comment and literal opener contains one of these.
+_LEX_MARK = re.compile(r"[/\"']")

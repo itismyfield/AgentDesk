@@ -4,19 +4,19 @@ use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::provider_choice::AgentProviderChannels;
 use crate::services::routines::store::RoutineStore;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlPause {
     BeforeEffect,
     AfterCommit,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     pub(crate) static CONTROL_TEST_PAUSE: (ControlPause, Arc<tokio::sync::Barrier>);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn pause_control_for_test(stage: ControlPause) {
     let barrier = CONTROL_TEST_PAUSE
         .try_with(|(at, barrier)| (*at == stage).then(|| barrier.clone()))
@@ -69,7 +69,7 @@ impl RoutineSessionController {
         let (target, controlled_turn) = self
             .resolve_control_target(routine, &mut control_guard)
             .await?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pause_control_for_test(ControlPause::BeforeEffect).await;
         let provider_clear_behavior = provider_clear_behavior(&target.provider);
 
@@ -152,7 +152,7 @@ impl RoutineSessionController {
             None
         };
         control_guard.commit().await?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pause_control_for_test(ControlPause::AfterCommit).await;
         Ok(RoutineSessionControlResult {
             controlled_run_id: controlled_turn.map(|turn| turn.run_id),
@@ -370,7 +370,7 @@ impl RoutineSessionController {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn seed_started_control_session(
     pool: &PgPool,
     routine: &RoutineRecord,

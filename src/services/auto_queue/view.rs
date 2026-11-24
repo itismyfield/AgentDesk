@@ -361,7 +361,7 @@ pub(super) async fn resolve_activate_pipeline_pg(
         .await
         .map_err(|error| format!("load repo pipeline override for {repo_id}: {error}"))?
         .flatten()
-        .map(|json| crate::pipeline::parse_override(&json))
+        .map(|json| crate::services::pipeline_override::parse_override(&json))
         .transpose()
         .map_err(|error| format!("parse repo pipeline override for {repo_id}: {error}"))?
         .flatten()
@@ -378,7 +378,7 @@ pub(super) async fn resolve_activate_pipeline_pg(
         .await
         .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
         .flatten()
-        .map(|json| crate::pipeline::parse_override(&json))
+        .map(|json| crate::services::pipeline_override::parse_override(&json))
         .transpose()
         .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
         .flatten()

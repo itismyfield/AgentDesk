@@ -20,7 +20,7 @@
 
 use serde_json::Value;
 
-use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
+use crate::domain::message_split::{byte_index_at_discord_message_units, discord_message_units};
 
 #[cfg(test)]
 #[path = "tui_task_card/completion_card_tests.rs"]
@@ -35,7 +35,7 @@ const RESULT_PREVIEW_BUDGET: usize = 1400;
 /// for a free-form Markdown completion report.
 const RESULT_PREVIEW_LINES: usize = 10;
 
-const DISCORD_MESSAGE_LIMIT_UNITS: usize = super::DISCORD_MSG_LIMIT;
+const DISCORD_MESSAGE_LIMIT_UNITS: usize = crate::domain::message_split::DISCORD_MSG_LIMIT;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 
 /// Structured fields extracted from a `<task-notification>` payload (#3075).

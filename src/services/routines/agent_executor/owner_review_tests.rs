@@ -38,7 +38,7 @@ async fn accepted_fixture() -> (
     OWNER
         .scope(
             handle.clone(),
-            STARTS.scope(RefCell::new(VecDeque::from([true])), async {
+            STARTS.scope(starts([true]), async {
                 let result = executor
                     .start_agent_run(
                         &store,
@@ -306,7 +306,10 @@ async fn retry_leaf(
     handle: &ChannelMailboxHandle,
     nonce: &str,
 ) -> (serde_json::Value, Vec<String>) {
-    crate::services::claude_tui::input::submission::tests::owner_retry_leaf(handle, nonce).await
+    crate::ke_routines_tests::scheduled_messages_postgres::owner_input_tests::retry_leaf(
+        handle, nonce,
+    )
+    .await
 }
 
 /// Reserves the head as `nonce` and arms it in its bootstrap window, runs `poll` there, then a

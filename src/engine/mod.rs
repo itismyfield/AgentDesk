@@ -1046,7 +1046,7 @@ impl PolicyEngine {
 
     /// Evaluate arbitrary JS in the engine context (test-only helper that does
     /// not depend on the legacy SQLite fixture path).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn eval_js<T: for<'js> rquickjs::FromJs<'js> + Send>(
         &self,
         code: &str,

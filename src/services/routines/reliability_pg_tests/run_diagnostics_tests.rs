@@ -297,7 +297,7 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
     }
     insert_boot_agent(&pool).await;
     let claimed = claim_boot_agent_run(&store).await;
-    super::super::run_diagnostics::started(&store, &claimed).await;
+    crate::services::routines::run_diagnostics::started(&store, &claimed).await;
     let run_id = claimed.run_id.clone();
     let routine_id = claimed.routine_id.clone();
     let executor = RoutineAgentExecutor::new(
@@ -320,7 +320,7 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
         .unwrap();
     assert_eq!(deferred.status, "deferred");
     retry_deferred_start(&pool, &run_id, Utc::now() - Duration::minutes(11)).await;
-    let outcomes = super::super::poll_agent_turns(&store, &executor, 10, false)
+    let outcomes = crate::services::routines::poll_agent_turns(&store, &executor, 10, false)
         .await
         .unwrap();
     assert_eq!(outcomes.len(), 1);

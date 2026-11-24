@@ -6,7 +6,7 @@ mod boot;
 mod policy;
 
 pub(crate) use boot::recover_on_boot;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use boot::recover_once;
 pub(crate) use policy::maintain_policy;
 

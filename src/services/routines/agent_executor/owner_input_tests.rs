@@ -1,43 +1,37 @@
-use super::super::store::NewRoutine;
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::reserve_headless_agent_turn;
+use crate::services::routines::agent_executor::owner_hook_tests::{
+    LEGACY_TEARDOWNS, OWNER, ReservedStart, STARTS,
+};
+use crate::services::routines::agent_executor::*;
+use crate::services::routines::agent_executor::{attempts_include_fallback, owner_input};
+use crate::services::routines::store::{NewRoutine, RoutineStore, RunningAgentRoutineRun};
+use chrono::{DateTime, Duration, Utc};
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
-tokio::task_local! {
-    static STARTS: RefCell<VecDeque<bool>>;
-    pub(super) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle;
-    pub(super) static LEGACY_TEARDOWNS: std::cell::Cell<usize>;
-}
-
-pub(super) async fn inject(
-    executor: &RoutineAgentExecutor,
-    store: &RoutineStore,
-    start: &start_deferral::PendingAgentStart<'_>,
-) -> Option<Result<StartedAgentTurn>> {
-    let step = STARTS
-        .try_with(|steps| {
-            steps
-                .borrow_mut()
-                .pop_front()
-                .expect("unexpected readmission")
-        })
-        .ok()?;
-    if !step {
-        return Some(Err(anyhow!("pre-admission refusal")));
-    }
-    settled_generation();
-    let reservation = reserve_headless_agent_turn(poise::serenity_prelude::ChannelId::new(7272));
-    let turn_id = reservation.turn_id();
-    let claimed = start.claimed;
-    let planned = json!({"status":"started","turn_id":turn_id,"run_id":claimed.run_id,"routine_id":claimed.routine_id,
-        "agent_id":start.agent_id,"attempt_kind":start.attempt_kind,"provider":"claude","execution_mode":start.execution_mode.as_str(),
-        "channel_id":"7272","parent_channel_id":"7272","discord_thread_id":claimed.discord_thread_id,"dm_user_id":start.dm_user_id,
-        "is_dm":start.dm_user_id.is_some(),"prompt":start.prompt,"checkpoint":start.checkpoint,
-        "next_due_at":start.next_due_at,"script_ref":claimed.script_ref,"fresh_context_guaranteed":false});
-    let owned = owner_input::custody::owned(executor, store, start, &planned).await;
-    Some(owned.and_then(|started| started.ok_or_else(|| anyhow!("owner left the start"))))
+/// The executor's scripted starts: `false` refuses before admission, `true` hands the owner a
+/// turn reserved here on channel 7272.
+pub(super) fn starts(
+    script: impl IntoIterator<Item = bool>,
+) -> RefCell<VecDeque<Option<ReservedStart>>> {
+    let reserved = || {
+        settled_generation();
+        let channel = poise::serenity_prelude::ChannelId::new(7272);
+        let turn_id = reserve_headless_agent_turn(channel).turn_id().to_string();
+        ReservedStart {
+            turn_id,
+            channel: channel.get(),
+        }
+    };
+    RefCell::new(
+        script
+            .into_iter()
+            .map(|admit| admit.then(reserved))
+            .collect(),
+    )
 }
 
 /// The isolated runtime root's process generation, so a synthetic original is admissible.
@@ -101,7 +95,7 @@ async fn scenario(retry: bool, fallback: bool) {
     OWNER
         .scope(
             handle,
-            STARTS.scope(RefCell::new(steps), async {
+            STARTS.scope(starts(steps), async {
                 if retry {
                     store.schedule_agent_retry(&run_id, Utc::now()-Duration::seconds(1),
                 Some(json!({"status":"retry_scheduled","prompt":"work","checkpoint":{"new":true}})),
@@ -213,7 +207,7 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
     OWNER
         .scope(
             handle.clone(),
-            STARTS.scope(RefCell::new(VecDeque::from([true])), async {
+            STARTS.scope(starts([true]), async {
                 let result = executor
                     .start_agent_run(
                         &store,

@@ -436,7 +436,7 @@ class Partition(unittest.TestCase):
         p = vistool.load_partition(HERE.parent / "partition.json")
         self.assertRegex(p["base"], r"^[0-9a-f]{40}$")
         self.assertEqual(p["order"], ["KRX", "KE", "DL", "ROOT"])
-        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 82, "KE": 88, "DL": 85, "ROOT": 46})
+        self.assertEqual({k: len(v) for k, v in p["crates"].items()}, {"KRX": 85, "KE": 86, "DL": 85, "ROOT": 46})
 
     def test_manifests(self):
         text = '[package]\nname = "agentdesk"\n\n[workspace]\nmembers = ["crates/x"]\n\n[lib]\npath = "src/lib.rs"\n\n' \
@@ -574,7 +574,7 @@ class TestCfgList(unittest.TestCase):
 
     def test_gated_declarations_by_scan(self):
         src = ["pub(crate) fn plain() {}", "#[cfg(all(test, unix))]", "mod tests {", "    pub(crate) fn h() {}", "}",
-               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"x\"))]",
+               "#[cfg(test)]", "impl Store {", "    pub(crate) fn for_test() {}", "}", "#[cfg(any(test, feature = \"test-support\"))]",
                "pub(crate) fn either() {}", "#[cfg(test)]", "pub(crate) fn h() {}"]
         layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set(), module_at=lambda rel, line: ("a",))
         defs = vistool_testcfg.gated_defs(layout, lambda rel: src)

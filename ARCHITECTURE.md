@@ -198,6 +198,7 @@ src/
 │   ├── test_env.rs
 │   ├── test_instance.rs
 │   ├── tool_activity_display.rs
+│   ├── transcript_homes.rs
 │   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
@@ -1437,6 +1438,7 @@ src/
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── dispatch_hooks.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── input_fallback.rs
@@ -3990,6 +3992,7 @@ src/
 │   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
+│   │   ├── cluster_hooks.rs
 │   │   ├── dtos.rs
 │   │   ├── http_outbound.rs
 │   │   ├── mod.rs
@@ -4318,15 +4321,18 @@ src/
 │   │   │   ├── owned_session/
 │   │   │   │   └── tests.rs
 │   │   │   ├── execution.rs
+│   │   │   ├── execution_pg_tests.rs
 │   │   │   ├── launch.rs
 │   │   │   ├── owned_session.rs
 │   │   │   ├── owner_custody_tests.rs
+│   │   │   ├── owner_hook_tests.rs
 │   │   │   ├── owner_input.rs
 │   │   │   ├── owner_input_tests.rs
 │   │   │   ├── owner_launch_tests.rs
 │   │   │   ├── owner_review_tests.rs
 │   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
+│   │   │   ├── reliability_probe_pg_tests.rs
 │   │   │   ├── run_policy.rs
 │   │   │   ├── settlement.rs
 │   │   │   ├── start_deferral.rs
@@ -4386,6 +4392,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
+│   │   ├── start_target_hook_tests.rs
 │   │   ├── timing.rs
 │   │   ├── turn_completion.rs
 │   │   └── turn_completion_tests.rs
@@ -5491,6 +5498,7 @@ src/
 ├── eventbus.rs
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
+├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
 ├── krx_config_tests.rs
 ├── krx_config_unix_tests.rs
@@ -5556,6 +5564,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
+| `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_unix_tests.rs` | Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items. |

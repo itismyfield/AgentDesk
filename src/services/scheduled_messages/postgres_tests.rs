@@ -1,14 +1,17 @@
-use super::*;
+use crate::db::scheduled_messages as db;
+use crate::db::scheduled_messages::{ClaimedFire, ScheduledMessageRow};
 use crate::services::discord::health::HealthRegistry;
+use crate::services::scheduled_messages::evidence::{TurnEvidence, find_turn_delivery_evidence};
+use crate::services::scheduled_messages::start_target_hook_tests::START_TARGET;
+use crate::services::scheduled_messages::timing::MAX_FIRE_RETRIES;
+use crate::services::scheduled_messages::*;
 use chrono::Duration;
+use chrono::{DateTime, Utc};
 use serde_json::json;
+use sqlx::PgPool;
 use sqlx::Row;
 
 type OptionalTimestamp = Option<DateTime<Utc>>;
-
-tokio::task_local! {
-    pub(super) static START_TARGET: std::cell::RefCell<Option<(crate::services::provider::ProviderKind, u64, u64)>>;
-}
 
 #[tokio::test]
 async fn postgres_bound_cc_target_uses_claude_and_cc_owner_channel() {
@@ -1821,4 +1824,4 @@ async fn postgres_recorded_turn_outcome_settles_without_transcript_evidence() {
 }
 
 #[path = "owner_input_tests.rs"]
-mod owner_input_tests;
+pub(super) mod owner_input_tests;

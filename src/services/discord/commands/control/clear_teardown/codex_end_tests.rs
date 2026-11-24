@@ -752,7 +752,7 @@ fn late_group_child_inside_wait_can_finish_but_surviving_group_is_unknown_and_di
 }
 
 fn remote_dispatch(channel: Option<u64>, pane: Option<&str>) -> Result<(), String> {
-    use crate::services::remote::{RemoteAuth, RemoteProfile};
+    use crate::services::remote_stub::{RemoteAuth, RemoteProfile};
     let _remote_tmux = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_CODEX_REMOTE_TMUX",
         std::ffi::OsStr::new("true"),

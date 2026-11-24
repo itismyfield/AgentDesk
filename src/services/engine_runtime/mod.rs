@@ -60,7 +60,7 @@ impl EngineRuntime {
             pg_pool,
             policy,
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ALLOCATIONS.with(|slot| {
             if let Some(records) = slot.borrow().as_ref() {
                 records.borrow_mut().push(Arc::downgrade(&runtime));
@@ -69,7 +69,7 @@ impl EngineRuntime {
         runtime
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) fn record_allocations_for_tests() -> AllocationRecorder {
         let records: AllocationLog = Default::default();
         ALLOCATIONS.with(|slot| {
@@ -89,27 +89,27 @@ impl Deref for EngineRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type AllocationLog = std::rc::Rc<std::cell::RefCell<Vec<std::sync::Weak<EngineRuntime>>>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static ALLOCATIONS: std::cell::RefCell<Option<AllocationLog>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) struct AllocationRecorder {
     records: AllocationLog,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl AllocationRecorder {
     pub(in crate::services) fn finish(self) -> Vec<std::sync::Weak<EngineRuntime>> {
         self.records.take()
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for AllocationRecorder {
     fn drop(&mut self) {
         ALLOCATIONS.with(|slot| drop(slot.take()));
@@ -238,7 +238,7 @@ pub(in crate::services) mod lease {
             self.channel_id
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn is_degenerate_legacy(&self) -> bool {
             self.user_msg_id == 0
                 && self.turn_started_at.is_none()
@@ -280,7 +280,7 @@ pub(in crate::services) mod lease {
             deadline_ms: u64,
             start: u64,
             end: u64,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             exact_token: Option<LeaseToken>,
         },
 
@@ -290,7 +290,7 @@ pub(in crate::services) mod lease {
             start: u64,
             end: u64,
             outcome: LeaseOutcome,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             exact_token: Option<LeaseToken>,
         },
     }
@@ -379,7 +379,7 @@ pub(in crate::services) mod lease {
     impl PayloadLockMarker {
         fn enter() -> Self {
             PAYLOAD_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             PAYLOAD_LOCK_ENTRIES.with(|entries| entries.set(entries.get() + 1));
             Self
         }
@@ -566,7 +566,7 @@ pub(in crate::services) mod lease {
                 deadline_ms,
                 start,
                 end,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 exact_token: None,
             };
             true
@@ -592,7 +592,7 @@ pub(in crate::services) mod lease {
                     key: cur_key,
                     start: cur_start,
                     end: cur_end,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                         exact_token: None,
                     ..
                 } if *cur_holder == holder
@@ -606,7 +606,7 @@ pub(in crate::services) mod lease {
                         start,
                         end,
                         outcome,
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         exact_token: None,
                     };
                     self.state_tag.store(TAG_COMMITTED, Ordering::Release);
@@ -636,7 +636,7 @@ pub(in crate::services) mod lease {
                     key: cur_key,
                     start: cur_start,
                     end: cur_end,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                         exact_token: None,
                     ..
                 }
@@ -645,12 +645,12 @@ pub(in crate::services) mod lease {
                     key: cur_key,
                     start: cur_start,
                     end: cur_end,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                         exact_token: None,
                     ..
                 } => *cur == holder && cur_key == &key && *cur_start == start && *cur_end == end,
                 LeaseState::Unleased => false,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 LeaseState::Leased {
                     exact_token: Some(_),
                     ..
@@ -683,7 +683,7 @@ pub(in crate::services) mod lease {
                 holder: cur_holder,
                 key: cur_key,
                 deadline_ms,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                     exact_token: None,
                 ..
             } = &mut guard.lease
@@ -705,7 +705,7 @@ pub(in crate::services) mod lease {
             let _payload_lock_marker = PayloadLockMarker::enter();
             if let LeaseState::Leased {
                 deadline_ms,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                     exact_token: None,
                 ..
             } = &guard.lease
@@ -735,25 +735,25 @@ pub(in crate::services) mod lease {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) fn payload_lock_entries_for_test() -> usize {
         PAYLOAD_LOCK_ENTRIES.with(std::cell::Cell::get)
     }
 
     thread_local! {
         static PAYLOAD_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         static PAYLOAD_LOCK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(in crate::services) struct LeaseToken(NonZeroU64);
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl LeaseToken {
         pub(in crate::services) fn next() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -766,16 +766,16 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     use std::marker::PhantomData;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     use std::num::NonZeroU64;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) struct ConsumedCoordinate(NonZeroU64);
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl ConsumedCoordinate {
         pub(in crate::services) fn new(value: u64) -> Option<Self> {
             NonZeroU64::new(value).map(Self)
@@ -786,31 +786,31 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) struct Acquired;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) struct Committed;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) struct Released;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) trait GuardState {
         const RELEASE_ON_DROP: bool;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl GuardState for Acquired {
         const RELEASE_ON_DROP: bool = true;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl GuardState for Committed {
         const RELEASE_ON_DROP: bool = true;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl GuardState for Released {
         const RELEASE_ON_DROP: bool = false;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) struct PinnedLeaseCell<S: GuardState> {
         cell: Arc<DeliveryLeaseCell>,
         key: DeliveryLeaseKey,
@@ -820,7 +820,7 @@ pub(in crate::services) mod lease {
         state: PhantomData<S>,
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl PinnedLeaseCell<Acquired> {
         pub(in crate::services) fn acquire(
             cell: Arc<DeliveryLeaseCell>,
@@ -903,7 +903,7 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl PinnedLeaseCell<Committed> {
         pub(in crate::services) fn release(mut self) -> Result<PinnedLeaseCell<Released>, Self> {
             if !self.release_owned_state() {
@@ -915,7 +915,7 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl<S: GuardState> PinnedLeaseCell<S> {
         pub(in crate::services) fn key_for_tests(&self) -> &DeliveryLeaseKey {
             &self.key
@@ -941,7 +941,7 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl<S: GuardState> Drop for PinnedLeaseCell<S> {
         fn drop(&mut self) {
             if self.armed && S::RELEASE_ON_DROP {
@@ -950,7 +950,7 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl DeliveryLeaseCell {
         pub(in crate::services) fn try_acquire_exact(
             &self,
@@ -1124,7 +1124,7 @@ pub(in crate::services) mod lease {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn exact_matches(
         state: &LeaseState,
         key: &DeliveryLeaseKey,

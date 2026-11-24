@@ -1,4 +1,5 @@
-use super::{ChannelId, SharedData};
+use super::SharedData;
+use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 
 pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =

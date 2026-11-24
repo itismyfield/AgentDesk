@@ -54,7 +54,7 @@ fn input_file_path_in_root(
         .join(format!("{user_msg_id}.json"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_CLOCK_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static RELEASE_FAULTS: std::cell::RefCell<std::collections::VecDeque<bool>> =
@@ -63,36 +63,36 @@ thread_local! {
 }
 
 /// Pins this thread's store clock; `None` returns it to the wall clock.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn set_clock_for_tests(now_ms: Option<u64>) {
     TEST_CLOCK_MS.with(|clock| clock.set(now_ms));
 }
 
 /// The fallible steps of this thread's next releases, in order (listing, then each save): `true`
 /// fails that step once.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn fail_release_steps_for_tests(steps: &[bool]) {
     RELEASE_FAULTS.with(|faults| faults.borrow_mut().extend(steps));
 }
 
 /// Fails every retry-record write on this thread while set.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn fail_saves_for_tests(fail: bool) {
     SAVE_FAULT.with(|fault| fault.set(fail));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn injected_release_fault() -> bool {
     RELEASE_FAULTS.with(|faults| faults.borrow_mut().pop_front().unwrap_or(false))
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn injected_release_fault() -> bool {
     false
 }
 
 fn now_ms() -> u64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(now) = TEST_CLOCK_MS.with(std::cell::Cell::get) {
         return now;
     }
@@ -225,7 +225,7 @@ fn save_in_root(
     if channel_id == 0 || user_msg_id == 0 || (state.notice_bound && state.notice_message_id == 0) {
         return Err("busy follow-up retry ids must be non-zero".to_string());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if SAVE_FAULT.with(std::cell::Cell::get) {
         return Err("injected retry save failure".to_string());
     }
@@ -384,12 +384,12 @@ pub(crate) fn carries_retry_budget(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn state_is_capped(state: Option<BusyFollowupRetryState>) -> bool {
     state.is_some_and(|state| state.exhausted())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn is_capped(
     provider: &ProviderKind,
     channel_id: u64,
@@ -454,7 +454,7 @@ pub(in crate::services::discord) fn record_attempt(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn record_busy_retry(
     provider: &ProviderKind,
     channel_id: u64,

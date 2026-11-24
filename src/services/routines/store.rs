@@ -8,7 +8,7 @@ mod thread_choices;
 #[macro_use]
 mod failure_escalation;
 use chrono::{DateTime, Utc};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use failure_escalation::incident_content;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -2092,14 +2092,14 @@ impl RoutineStore {
         Ok(inventory)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn attach_routine(&self, new_routine: NewRoutine) -> Result<RoutineRecord> {
         self.attach_routine_with_execution(new_routine, None, DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT)
             .await
     }
 
     /// `None` keeps the legacy null-mode contract; an explicit definition stores a fresh routine.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn attach_routine_with_execution(
         &self,
         new_routine: NewRoutine,
