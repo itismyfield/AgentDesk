@@ -1,13 +1,19 @@
 """Resource-only sampler behavior with Linux counter fixtures on any POSIX host."""
+import base64
+import hashlib
+import http.server
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import zipfile
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci/runner-memory.sh"
 MIB = 1048576
@@ -115,6 +121,59 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertNotEqual((self.root / "runner-memory/samples.jsonl").read_bytes(), before)
         self.assertFalse((self.root / "runner-memory/stop").exists())
         self.assertNotIn(self.env["MEMORY_TEST_SECRET"], "".join(p.read_text() for p in checkpoint.iterdir()))
+
+    def test_begin_uploads_a_copy_while_the_build_step_still_runs(self):
+        requests, refusals, finalized = [], [500], threading.Event()
+
+        class Artifacts(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                status = refusals.pop() if refusals else 200
+                self.send_response(status)
+                self.end_headers()
+                if status != 200:
+                    return
+                requests.append((self.command + " " + self.path, self.headers.get("Authorization"), body))
+                self.wfile.write(json.dumps({"ok": True, "signed_upload_url": origin + "/blob?sig=signed"}).encode())
+                if self.path.endswith("/FinalizeArtifact"):
+                    finalized.set()
+
+            do_PUT = do_POST
+            log_message = lambda *_: None
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Artifacts)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        origin = f"http://127.0.0.1:{server.server_port}"
+        state = self.root / "runner-memory"
+        self.run_probe("start")
+        self.run_probe("begin", "setup")
+        self.run_probe("end")
+        # Jobs that do not opt in start no exporter.
+        self.assertFalse((state / "export.log").exists())
+        claims = base64.urlsafe_b64encode(b'{"scp": "Actions.Other Actions.Results:run-1:job-2"}').decode().rstrip("=")
+        token = f"header.{claims}.signature"
+        self.env.update(RUNNER_MEMORY_EXPORT_MINUTES="0 0.02", RUNNER_MEMORY_EXPORT_NAME="runner-memory-job-3-attempt-1",
+                        ACTIONS_RESULTS_URL=origin + "/results/", ACTIONS_RUNTIME_TOKEN=token, no_proxy="*")
+        self.run_probe("begin", "build")
+        self.assertTrue(finalized.wait(20))
+        # A refused upload is logged by type and status only, and the next copy still leaves.
+        self.assertIn("-at-0m failed (HTTPError 500)", (state / "export.log").read_text())
+        (create_call, create_auth, create), (blob_call, blob_auth, blob), (final_call, final_auth, final) = requests
+        prefix = "POST /twirp/github.actions.results.api.v1.ArtifactService/"
+        self.assertEqual((create_call, blob_call, final_call), (prefix + "CreateArtifact", "PUT /blob?sig=signed", prefix + "FinalizeArtifact"))
+        self.assertEqual((create_auth, blob_auth, final_auth), ("Bearer " + token, None, "Bearer " + token))
+        ids = {"workflow_run_backend_id": "run-1", "workflow_job_run_backend_id": "job-2", "name": "runner-memory-job-3-attempt-1-at-0.02m"}
+        created = json.loads(create)
+        self.assertRegex(created.pop("expires_at"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(created, {**ids, "version": 4})
+        self.assertEqual(json.loads(final), {**ids, "size": str(len(blob)), "hash": "sha256:" + hashlib.sha256(blob).hexdigest()})
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            self.assertEqual(sorted(archive.namelist()), ["metadata.json", "phase.json", "samples.jsonl"])
+            self.assertEqual(json.loads(archive.read("samples.jsonl").splitlines()[-1])["phase"], "build")
+        self.assertFalse((state / "stop").exists())
+        self.assertNotIn(token, "".join(path.read_text() for path in state.iterdir() if path.is_file()))
 
     def test_detached_sampler_does_not_hold_capture_pipes_and_stops_before_interval(self):
         self.env["RUNNER_MEMORY_INTERVAL_SECONDS"] = "60"

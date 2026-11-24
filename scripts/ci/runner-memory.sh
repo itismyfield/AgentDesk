@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Samples memory and peak process names; the workflow keeps observation failures separate from build results.
 exec python3 - "$0" "$@" <<'PY'
+import base64
 import contextlib
 import datetime
 import fcntl
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +15,9 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
+import zipfile
 
 SCRIPT = Path(sys.argv[1]).resolve()
 COMMAND = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -25,6 +31,8 @@ METRICS = (
     "largest_rss_bytes", "largest_hwm_bytes", "rustc_processes",
 )
 CRATE_TYPES = {"bin", "lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+COPIED = ("metadata.json", "phase.json", "samples.jsonl")
+ARTIFACT_API = "/twirp/github.actions.results.api.v1.ArtifactService/"
 
 
 def write_json(path, value):
@@ -177,6 +185,59 @@ def sample(phase=None):
         stream.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def upload(name):
+    # The calls actions/upload-artifact@v4 makes; no workflow step can run while the build step does.
+    token = os.environ["ACTIONS_RUNTIME_TOKEN"]
+    claims = token.split(".")[1]
+    scopes = json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4)))["scp"].split()
+    run, job = next(scope.split(":")[1:] for scope in scopes if scope.startswith("Actions.Results:"))
+    archive = io.BytesIO()
+    with locked(), zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for item in COPIED:
+            bundle.write(STATE / item, item)
+    body = archive.getvalue()
+
+    def call(method, **fields):
+        fields.update(workflow_run_backend_id=run, workflow_job_run_backend_id=job, name=name)
+        request = urllib.request.Request(
+            urllib.parse.urljoin(os.environ["ACTIONS_RESULTS_URL"], ARTIFACT_API + method), json.dumps(fields).encode(),
+            {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            reply = json.load(response)
+        if not reply.get("ok"):
+            raise RuntimeError(method)
+        return reply
+
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
+    target = call("CreateArtifact", version=4, expires_at=expires.strftime("%Y-%m-%dT%H:%M:%SZ"))["signed_upload_url"]
+    blob = urllib.request.Request(target, body, {"x-ms-blob-type": "BlockBlob", "x-ms-blob-content-type": "zip"}, method="PUT")
+    urllib.request.urlopen(blob, timeout=60).close()
+    call("FinalizeArtifact", size=str(len(body)), hash="sha256:" + hashlib.sha256(body).hexdigest())
+
+
+def export(phase):
+    # A lost runner never reaches the always() upload, so copies leave while the phase still runs.
+    started = time.monotonic()
+    for minutes in sorted(float(value) for value in os.environ["RUNNER_MEMORY_EXPORT_MINUTES"].split()):
+        while time.monotonic() - started < minutes * 60:
+            if (STATE / "stop").exists() or json.loads((STATE / "phase.json").read_text())["phase"] != phase:
+                return
+            time.sleep(1)
+        name = f"{os.environ.get('RUNNER_MEMORY_EXPORT_NAME', 'runner-memory')}-at-{minutes:g}m"
+        try:
+            upload(name)
+            print(f"runner memory: exported {name}", flush=True)
+        except Exception as error:
+            # Only the error type and HTTP status are logged; messages can carry a signed URL.
+            print(f"runner memory: export {name} failed ({type(error).__name__} {getattr(error, 'code', '')})", flush=True)
+
+
+def detach(command, log_name):
+    with (STATE / log_name).open("a") as log:
+        subprocess.Popen(["bash", str(SCRIPT), *command], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True, close_fds=True)
+
+
 def runner_scope():
     environment = os.environ.get("RUNNER_ENVIRONMENT")
     if environment not in {"github-hosted", "self-hosted"}:
@@ -267,9 +328,7 @@ def main():
             write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count(),
                                                 "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS"), **runner_scope()})
             sample()
-        with (STATE / "sampler.log").open("a") as log:
-            subprocess.Popen(["bash", str(SCRIPT), "_sample"], stdin=subprocess.DEVNULL,
-                             stdout=log, stderr=log, start_new_session=True, close_fds=True)
+        detach(["_sample"], "sampler.log")
     elif COMMAND == "_sample":
         status = "error"
         try:
@@ -291,7 +350,7 @@ def main():
             sample()
             checkpoint = STATE.parent / "runner-memory-checkpoint"
             checkpoint.mkdir()
-            for name in ("metadata.json", "phase.json", "samples.jsonl"):
+            for name in COPIED:
                 shutil.copy2(STATE / name, checkpoint / name)
     elif COMMAND in ("begin", "end"):
         with locked():
@@ -303,6 +362,10 @@ def main():
             else:
                 sample()
                 write_json(STATE / "phase.json", {"phase": IDLE})
+        if COMMAND == "begin" and os.environ.get("RUNNER_MEMORY_EXPORT_MINUTES"):
+            detach(["_export", sys.argv[3]], "export.log")
+    elif COMMAND == "_export":
+        export(sys.argv[3])
     elif COMMAND == "finish":
         finish()
     else:

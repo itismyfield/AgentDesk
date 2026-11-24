@@ -36,7 +36,7 @@ require "json"
 specs = JSON.parse(ARGV.shift)
 pr_path, main_path, nightly_path = ARGV
 phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"], "relay_authority_mutations" => ["Require relay-authority mutations to be killed"]}
-targets = {pr_path => phases, main_path => phases.slice("rust_build", "lint", "scripts").merge("lint" => ["just lint", "Non-lib tests and doctests"]), nightly_path => phases.slice("rust_build")}
+targets = {pr_path => phases, main_path => phases.slice("rust_build", "lint", "scripts").merge("lint" => ["just lint", "Non-lib tests and doctests"]), nightly_path => phases.slice("rust_build").merge("relay_authority_mutations_full" => phases.fetch("relay_authority_mutations"))}
 errors = []
 targets.each do |path, jobs_with_memory|
   jobs = YAML.load_file(path).fetch("jobs", {})
@@ -823,7 +823,7 @@ targets = PrNextestWiring.targets(ARGV.fetch(2)).merge({
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "43f825fce69126f9bcd8b368d40b7da8d3e3038caa5aa4b791fd981fd9bebac0",
+    "job_sha256" => "8afa7413118bdcee7b2228ea3f5c99ca32e0769d50ff476accd37f466fdbd3f2",
     "job_timeout_minutes" => 80,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
