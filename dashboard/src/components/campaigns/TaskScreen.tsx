@@ -98,7 +98,7 @@ export function StepList({ steps, tr }: { steps: Step[]; tr: Tr }) {
     <StageTrack segments={segments} />
     <ol className="!m-0 grid !list-none !p-0 !text-sm">
       {rows.map((step) => <li key={step.key} aria-current={step.state === "now" ? "step" : undefined}
-        className={`flex min-h-8 min-w-0 items-center gap-2.5 !whitespace-normal ${step.state === "next" ? "text-[var(--fg-faint)]" : "text-[var(--fg)]"}`}>
+        className={`flex min-h-8 max-[899px]:min-h-11 min-w-0 items-center gap-2.5 !whitespace-normal ${step.state === "next" ? "text-[var(--fg-faint)]" : "text-[var(--fg)]"}`}>
         <StatusDot tone={STEP_DOT[step.tone ?? step.state]} />
         <span className="sr-only">{words[step.state]}</span>
         <span className={`min-w-0 flex-1 ${step.state === "now" ? "font-semibold" : ""}`}>{step.label}</span>

@@ -1,16 +1,18 @@
-import { ChevronDown } from "lucide-react";
-import { useId, useState, type CSSProperties } from "react";
+import { ChevronDown, Search } from "lucide-react";
+import { useId, useMemo, useState, type CSSProperties } from "react";
 import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
 import { Button } from "../../kit/free/button-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
+import { Select } from "../../kit/free/select-clean";
 import { Switch } from "../../kit/free/switch-clean";
+import { TextField } from "../../kit/free/text-field-clean";
 import type { Agent } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { Cap, Chip, CountBadge, KitCard, Num, RowButton, Well, cn, type ChipTone } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import type { BoardCard, BoardColumn } from "./campaignBoardModel";
 import type { TaskView } from "./CampaignOverview";
-import { findAgent, taskCounts } from "./campaignOverviewModel";
+import { findAgent, findTasks, taskCounts } from "./campaignOverviewModel";
 import { LABELS, LiveChip, type Tr } from "./campaignPresentation";
 import { DISPOSITION_LABELS, rejectionText } from "./serverCampaignModel";
 
@@ -74,7 +76,9 @@ function Card({ card, selected, controls, onOpen, roster, retry, tr }: {
   </KitCard>;
 }
 
-/** The 단계 보드 tab: one column per server-given stage or ledger status; the server moves cards, nobody drags them. */
+const UNGROUPED_KEY = "__ungrouped__";
+
+/** The 단계 보드 tab: instant search + group/status filters at top; finished columns (`완료` · `건너뜀`) start folded as compact summaries so active columns get full width even at 1032px tablet width. */
 export default function CampaignBoard({ columns, tasks, selectedId, controls, onOpen, retry, tr }: {
   columns: BoardColumn[]; tasks: TaskView[]; selectedId: string | null; controls?: string; onOpen: (id: string) => void; retry?: BoardRetry; tr: Tr;
 }) {
@@ -84,6 +88,41 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
   const [hideDone, setHideDone] = useState(true);
   const [shown, setShown] = useState<Record<string, number>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [query, setQuery] = useState("");
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  const availableGroups = useMemo(() => {
+    const named = new Set<string>();
+    let hasUngrouped = false;
+    for (const task of tasks) {
+      if (task.group?.trim()) named.add(task.group.trim());
+      else hasUngrouped = true;
+    }
+    return { list: [...named].sort((a, b) => a.localeCompare(b)), hasUngrouped };
+  }, [tasks]);
+
+  const matchingIds = useMemo(() => {
+    const base = query.trim() ? findTasks(tasks, query) : tasks;
+    return new Set(
+      base.filter((task) => {
+        if (groupFilter !== "all") {
+          const g = task.group?.trim() || UNGROUPED_KEY;
+          if (g !== groupFilter) return false;
+        }
+        if (statusFilter === "attention") return Boolean(task.attention || task.gate);
+        if (statusFilter !== "all" && task.status !== statusFilter) return false;
+        return true;
+      }).map((task) => task.id),
+    );
+  }, [tasks, query, groupFilter, statusFilter]);
+
+  const isFiltered = Boolean(query.trim() || groupFilter !== "all" || statusFilter !== "all");
+  const filteredColumns = useMemo(
+    () => isFiltered ? columns.map((col) => ({ ...col, cards: col.cards.filter(({ task }) => matchingIds.has(task.id)) })) : columns,
+    [columns, isFiltered, matchingIds],
+  );
+
   const counts = taskCounts(tasks);
   const pending = tasks.filter((task) => task.status === "pending").length;
   const limit = (column: BoardColumn) => shown[column.key] ?? (column.done && hideDone ? 0 : PAGE);
@@ -91,7 +130,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
   const urgent = (column: BoardColumn) => !column.done && column.cards.some(({ task }) => task.status === "running" || task.attention || task.gate);
   const isOpen = (column: BoardColumn) => open[column.key] ?? (urgent(column) || (column.done && !hideDone));
   // Phones also list those columns first, each group keeping its order; wide screens keep the pipeline order.
-  const groups = [...columns.filter(urgent), ...columns.filter((column) => !urgent(column))];
+  const groups = [...filteredColumns.filter(urgent), ...filteredColumns.filter((column) => !urgent(column))];
   const toggle = (column: BoardColumn) => {
     if (!isOpen(column) && limit(column) === 0) setShown((current) => ({ ...current, [column.key]: PAGE }));
     setOpen((current) => ({ ...current, [column.key]: !isOpen(column) }));
@@ -113,13 +152,65 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
     </>;
   };
 
-  return <div className="campaign-board grid min-w-0 gap-3">
-    <Well className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 text-[13px]">
-      <span className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
-        {stat(tasks.length, tr("작업", "tasks"))}{stat(counts.running, tr("진행 중", "running"))}{stat(pending, tr("대기", "waiting"))}
-        {stat(counts.approvals, tr("승인 대기", "awaiting approval"), "text-[var(--warn)]")}{stat(counts.failed, tr("실패", "failed"), "text-[var(--err)]")}{stat(counts.blocked, tr("막힘", "blocked"), "text-[var(--warn)]")}
-      </span>
-      <Switch className="ml-auto" size="sm" label={tr("완료 숨기기", "Hide done")} checked={hideDone} onChange={(event) => { setHideDone(event.target.checked); setShown({}); setOpen({}); }} />
+  const resetFilters = () => { setQuery(""); setGroupFilter("all"); setStatusFilter("all"); };
+
+  return <div className="campaign-board @container/board grid min-w-0 gap-3">
+    <Well className="grid min-w-0 gap-2.5 px-4 py-2.5 text-[13px]">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+          {stat(tasks.length, tr("작업", "tasks"))}{stat(counts.running, tr("진행 중", "running"))}{stat(pending, tr("대기", "waiting"))}
+          {stat(counts.approvals, tr("승인 대기", "awaiting approval"), "text-[var(--warn)]")}{stat(counts.failed, tr("실패", "failed"), "text-[var(--err)]")}{stat(counts.blocked, tr("막힘", "blocked"), "text-[var(--warn)]")}
+          {isFiltered && <Cap className="text-[var(--accent)]"><Num>{tr(`검색 결과 ${matchingIds.size}건`, `${matchingIds.size} matched`)}</Num></Cap>}
+        </span>
+        <Switch className="ml-auto" size="sm" label={tr("완료 숨기기", "Hide done")} checked={hideDone} onChange={(event) => { setHideDone(event.target.checked); setShown({}); setOpen({}); }} />
+      </div>
+      <div className="grid min-w-0 grid-cols-2 items-center gap-2 @[40rem]/board:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+        <div className="col-span-2 @[40rem]/board:col-span-1">
+          <TextField
+            type="search"
+            size="sm"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            aria-label={tr("보드 작업 검색", "Search board tasks")}
+            placeholder={tr("제목, #번호, ID, 담당 검색…", "Search title, #number, ID, assignee…")}
+            prefix={<Search aria-hidden />}
+          />
+        </div>
+        {availableGroups.list.length > 0 && (
+          <div className="min-w-[9.5rem]">
+            <Select
+              aria-label={tr("그룹 필터", "Filter by group")}
+              size="sm"
+              value={groupFilter}
+              onChange={setGroupFilter}
+              options={[
+                { value: "all", label: tr("모든 그룹", "All groups") },
+                ...availableGroups.list.map((g) => ({ value: g, label: g })),
+                ...(availableGroups.hasUngrouped ? [{ value: UNGROUPED_KEY, label: tr("미분류", "Ungrouped") }] : []),
+              ]}
+            />
+          </div>
+        )}
+        <div className="min-w-[9rem]">
+          <Select
+            aria-label={tr("상태 필터", "Filter by status")}
+            size="sm"
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { value: "all", label: tr("모든 상태", "All statuses") },
+              { value: "running", label: tr("진행 중", "Running") },
+              { value: "attention", label: tr("막힘 · 실패 · 승인", "Needs attention") },
+              { value: "pending", label: tr("대기", "Pending") },
+              { value: "completed", label: tr("완료", "Completed") },
+              { value: "skipped", label: tr("건너뜀", "Skipped") },
+            ]}
+          />
+        </div>
+        {isFiltered && (
+          <Button variant="ghost" size="sm" onClick={resetFilters}>{tr("초기화", "Reset")}</Button>
+        )}
+      </div>
     </Well>
     {phone ? <div className="grid min-w-0 gap-2">
       {groups.map((column) => <Well as="section" key={column.key} aria-label={tr(...column.label)} className="overflow-hidden">
@@ -130,14 +221,50 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
         </RowButton>
         {isOpen(column) && <div id={`${id}-${column.key}`} className="grid min-w-0 gap-2 px-2 pb-2">{body(column)}</div>}
       </Well>)}
-    </div> : <div className="flex min-w-0 items-start gap-2 overflow-x-auto pb-2">
-      {columns.map((column) => <Well as="section" key={column.key} aria-label={tr(...column.label)}
-        className={cn("flex min-h-[24rem] flex-col gap-2 p-2", column.done && limit(column) === 0 ? "flex-[0_0_8.5rem]" : "flex-[1_0_11rem]")}>
-        <h3 className="m-0 flex items-center justify-between gap-2 px-1 pt-1 !text-[13px] !font-semibold text-[var(--fg)]">
-          <span className="min-w-0 truncate">{tr(...column.label)}</span><CountBadge count={column.cards.length} max={9999} />
-        </h3>
-        <div className="grid max-h-[min(70dvh,46rem)] min-w-0 content-start gap-2 overflow-y-auto">{body(column)}</div>
-      </Well>)}
+    </div> : <div className="flex min-w-0 flex-wrap items-start gap-2 pb-2 min-[1360px]:flex-nowrap min-[1360px]:overflow-x-auto">
+      {filteredColumns.map((column) => {
+        const foldedDone = column.done && limit(column) === 0;
+        const step = Math.min(PAGE, column.cards.length);
+        const recent = column.done && column.cards.some(({ task }) => task.updatedAt);
+        return <Well as="section" key={column.key} aria-label={tr(...column.label)}
+          data-folded-column={foldedDone || undefined}
+          className={cn(
+            "flex flex-col gap-2 p-2",
+            foldedDone
+              ? "w-auto min-w-[6.75rem] max-w-[8.5rem] shrink-0 @max-[46rem]/board:order-first @max-[46rem]/board:max-w-none @max-[46rem]/board:flex-row @max-[46rem]/board:items-center @max-[46rem]/board:py-1.5"
+              : "min-h-[20rem] min-w-[11rem] flex-[1_1_12rem]",
+          )}>
+          <h3 className="m-0 flex items-center justify-between gap-2 px-1 pt-1 !text-[13px] !font-semibold text-[var(--fg)]">
+            <span className="min-w-0 truncate">{tr(...column.label)}</span>
+            <span className="flex shrink-0 items-center gap-1">
+              <CountBadge count={column.cards.length} max={9999} />
+              {column.done && !foldedDone && (
+                <Button variant="ghost" size="sm" className="!h-6 !min-h-6 !px-1.5 !text-[11px]" onClick={() => setShown((current) => ({ ...current, [column.key]: 0 }))}>
+                  {tr("접기", "Fold")}
+                </Button>
+              )}
+            </span>
+          </h3>
+          {foldedDone ? (
+            <div className="grid min-w-0 gap-1">
+              {column.cards.length === 0 ? (
+                <Cap className="block px-1 py-1 text-center">{tr("비어 있어요", "Empty")}</Cap>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={false}
+                  onClick={() => setShown((current) => ({ ...current, [column.key]: step }))}
+                >
+                  {recent ? tr(`최근 ${step}개 보기`, `Show latest ${step}`) : tr(`${step}개 보기`, `Show ${step}`)}
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="grid max-h-[min(70dvh,46rem)] min-w-0 content-start gap-2 overflow-y-auto">{body(column)}</div>
+          )}
+        </Well>;
+      })}
     </div>}
   </div>;
 }
