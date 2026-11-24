@@ -109,7 +109,7 @@ R2의 두 번째 지적 — *"assistant 블록이 있다"와 "라이브 턴이 �
 
 `.generation`이 스폰 후 절대 재기록되지 않고(그래서 mtime이 wrapper 인스턴스를 유일하게
 식별하고 #1270 rotation 대응), adoption이 내용을 고칠 때조차 **mtime을 보존**한다는 것도
-확인했다 [확인 `tmux_common/spawn_markers.rs:140-149`]. 화신 identity로 쓰기에 적합하다.
+확인했다 [확인 `discord/tmux_session_files.rs:136`(보존 함수 `preserve_session_generation_mtime_after_write`), `:227–228`(mtime 복원 `set_times`)]. 화신 identity로 쓰기에 적합하다.
 
 **단, 코디네이터 단서 중 하나는 범주 오류다 [확인]:**
 `born_generation`(=50)은 `.generation` 파일의 **내용**(=49)과 비교 대상이 아니다.

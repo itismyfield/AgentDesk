@@ -232,8 +232,8 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |관측 지점|입력/관측 시점과 tx 관계|값/단락 평가|
 |---|---|---|
 |`source_registry.rs:81`→`source_registry.rs:62`|V 각 호출 시점(위 경로마다 전/안이 다름); raw source, 상위 producer/명령 입력|빈 문자열·padded는 exact=false로 live 읽기 없음. static_allowed여도 exact=true이면 known-agent를 계산. 등록 agent id의 정확한 대소문자 일치/부재|
-|`discord/agentdesk_config.rs:601~603`, loader :120~121|설정 snapshot 관측; SQL connection과 무관|runtime config 존재하면 Some(true/false) 우선; Some(false)에서 org fallback하지 않음|
-|`settings/content.rs:497~500`→`discord/org_schema.rs:591~598`|runtime config None 뒤 org 경로 exists/load; SQL tx로 잠기지 않음|org map 포함/부재 또는 unavailable→false. 이 레인은 실제 파일/설정값을 열지 않음|
+|`message_outbox/source_registry.rs:56~59`(`config_knows_agent`), loader `config.rs:61`(`runtime_config_optional`)|설정 snapshot 관측; SQL connection과 무관|runtime config 존재하면 Some(true/false) 우선; Some(false)에서 org fallback하지 않음|
+|`message_outbox/source_registry.rs:62~71`(`is_known_agent`)→`discord/org_schema.rs:422~424`(`org_schema_exists`), `:427~430`(`is_known_agent`)|runtime config None 뒤 org 경로 exists/load; SQL tx로 잠기지 않음|org map 포함/부재 또는 unavailable→false. 이 레인은 실제 파일/설정값을 열지 않음|
 |`message_outbox/session_notice.rs:78~99`|D: 같은 전달 connection으로 agents SELECT; exact만 pool acquire로 tx 전|raw bindings 0/1/복수; empty rows면 locator fallback :87; 존재하나 ambiguous/unknown인 row는 None이며 locator fallback하지 않음; 첫 실패에서 루프 중단|
 |`services/agent_channels.rs:36~59`→:18~20→`provider/runtime.rs:46~51`|D: primary fallback이 필요한 각 row에서만 live reload current(); 쿼리 뒤, INSERT 전|explicit cc/cdx/alt wins; 양쪽 match→None; configured provider가 있으면 default 미관측. legacy primary마다 default를 별도 관측, 복수 row의 서로 다른 provider→None (:102~106)|
 |`body_census.rs:8`→`source_registry.rs:50~54`|C: INSERT 결과가 실제 새 row인 뒤; 같은 task/tx 안; raw source|config::snapshot Some이며 같은 source id agent가 없고 static notice kind일 때만 NonBody. config 없음/agent 충돌이면 None. live known-agent 검사와 별도 snapshot/시점|
@@ -253,7 +253,7 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/discord/footer_view_reconciler/mod.rs:332`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/footer_view_reconciler/mod.rs:333`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/footer_view_reconciler/mod.rs:525`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
-|`src/services/discord/org_schema.rs:596`|관측 leaf/경로: 위 표 참조|
+|`src/services/discord/org_schema.rs:427`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/outbound/body_census.rs:21`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/body_census.rs:188`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/body_census.rs:234`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
@@ -263,11 +263,11 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/discord/outbound/raw_output.rs:29`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/outbound/raw_output.rs:144`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/message_outbox/source_registry.rs:50`|관측 leaf/경로: 위 표 참조|
+|`src/services/message_outbox/source_registry.rs:63`|관측 leaf/경로: 위 표 참조|
+|`src/services/message_outbox/source_registry.rs:66`|관측 leaf/경로: 위 표 참조|
+|`src/services/message_outbox/source_registry.rs:67`|관측 leaf/경로: 위 표 참조|
 |`src/services/message_outbox/source_registry.rs:81`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/session_relay_sink.rs:292`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
-|`src/services/discord/settings/content.rs:493`|관측 leaf/경로: 위 표 참조|
-|`src/services/discord/settings/content.rs:494`|관측 leaf/경로: 위 표 참조|
-|`src/services/discord/settings/content.rs:498`|관측 leaf/경로: 위 표 참조|
 |`src/services/discord/settings/validation.rs:459`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/tmux_watcher/terminal_direct_fallback_edit.rs:75`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|
 |`src/services/discord/turn_bridge/terminal_controller_cutover.rs:1306`|공유 reader/정의/시험; outbox INSERT tx 밖의 기존 send/relay/task context. 대상 서비스 인수 또는 test fixture|

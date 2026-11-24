@@ -4,11 +4,11 @@ use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 #[derive(Clone, Default)]
-pub(crate) struct Context {
-    pub(crate) scope: Option<Scope>,
-    pub(crate) artifact: Option<Artifact>,
-    pub(crate) body: Arc<str>,
-    pub(crate) census: Option<Value>,
+pub(in crate::services) struct Context {
+    pub(in crate::services) scope: Option<Scope>,
+    pub(in crate::services) artifact: Option<Artifact>,
+    pub(in crate::services) body: Arc<str>,
+    pub(in crate::services) census: Option<Value>,
 }
 
 tokio::task_local! {
@@ -16,7 +16,7 @@ tokio::task_local! {
 }
 
 /// The raw request boundary's read; `None` outside every scope.
-pub(crate) fn current() -> Option<Context> {
+pub(in crate::services) fn current() -> Option<Context> {
     CONTEXT.try_with(Clone::clone).ok()
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn census_scope<T>(
 }
 
 /// Contains provenance only, never an open transaction or a composite request deadline.
-pub(crate) fn scope<T>(
+pub(in crate::services) fn scope<T>(
     scope: Option<Scope>,
     artifact: Option<&Artifact>,
     body: &str,
