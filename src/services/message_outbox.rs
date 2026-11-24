@@ -1029,7 +1029,7 @@ mod postgres_source_contract_tests {
 
     #[tokio::test]
     async fn every_enqueue_variant_rejects_forbidden_source_with_zero_rows_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_message_outbox_source_contract",
             "message_outbox source contract tests",
         )
@@ -1071,7 +1071,7 @@ mod postgres_source_contract_tests {
 
     #[tokio::test]
     async fn fixed_lifecycle_enqueue_uses_registered_source_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_message_outbox_lifecycle_source",
             "message_outbox lifecycle source tests",
         )
@@ -1096,7 +1096,7 @@ mod postgres_source_contract_tests {
 
     #[tokio::test]
     async fn persistent_dedupe_returns_old_row_and_distinct_slot_inserts_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_message_outbox_persistent_dedupe",
             "message_outbox persistent dedupe tests",
         )
@@ -1166,7 +1166,7 @@ mod postgres_held_gc_tests {
 
     #[tokio::test]
     async fn gc_prunes_only_expired_held_rows_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_message_outbox_held_gc",
             "message_outbox held-row gc tests",
         )
@@ -1214,7 +1214,7 @@ mod postgres_held_gc_tests {
 
     #[tokio::test]
     async fn gc_preserves_persistent_dedupe_sentinels_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+        let Some(pg_db) = crate::db::dispatch_test_db::DispatchPostgresTestDb::try_create(
             "agentdesk_message_outbox_gc_persistent_dedupe",
             "message_outbox persistent dedupe GC contract",
         )

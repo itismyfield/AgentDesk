@@ -1,12 +1,13 @@
 //! Shared single-line rendering and channel-runtime credentials for status notices.
 
-use super::{ProviderKind, tui_task_card};
+use super::tui_task_card;
+use crate::domain::provider::ProviderKind;
 use poise::serenity_prelude::{ChannelId, Http};
 use std::sync::Arc;
 
 // Injected-prompt classification and input notices, re-imported by `tui_prompt_relay`.
 pub(in crate::services::discord) mod injected_prompt_policy;
-pub(in crate::services::discord) mod input_notice;
+pub(crate) mod input_notice;
 mod input_notice_memo;
 pub(in crate::services::discord) mod observed_prompt_decision;
 
