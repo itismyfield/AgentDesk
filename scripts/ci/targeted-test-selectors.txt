@@ -67,7 +67,7 @@ services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::
 services::tui_o::writer::binding::terminal_tests::
 services::tui_o::writer::adoption::terminal_tests::
 services::discord::krx_tui_o_test_host::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost
-services::tui_o::writer::tests::actor::host_start::first_init::
+services::discord::krx_tui_o_test_host::host_start::first_init::
 services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation
 services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
 services::tui_o::writer::tests::actor::rotation::retire_tests::codex_end_proof_tests::
@@ -106,7 +106,7 @@ db::timestamps::tests::
 =db::turns::timestamp_tests::utc_session_preserves_turn_instants_pg
 
 [High-risk recovery: O writer restart replay]
-services::tui_o::writer::tests::actor::host_start::managed::restart_replay::
+services::discord::krx_tui_o_test_host::host_start::managed::restart_replay::
 services::tui_o::writer::owed::tests::verified::tool_card_provenance::replay_metadata::
 
 [Fast targeted tests: PR tracking owner]

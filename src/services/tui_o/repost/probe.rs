@@ -5,8 +5,6 @@
 pub(crate) mod evidence;
 #[path = "matcher.rs"]
 pub(crate) mod matcher;
-#[cfg(test)]
-pub(crate) use crate::services::discord::krx_tui_o_test_host::repost_probe as tests;
 
 use std::collections::BTreeMap;
 use std::future::Future;

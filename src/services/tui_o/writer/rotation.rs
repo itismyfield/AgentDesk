@@ -243,7 +243,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub(in crate::services) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),

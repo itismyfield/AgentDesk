@@ -5,12 +5,14 @@ use chrono::Utc;
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::krx_tui_o_test_host::admission_tests::{
+    BOT, CHANNEL, admit_on, sidecar,
+};
+use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, absent_evidence};
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::repost::admission_tests::{BOT, CHANNEL, admit_on, sidecar};
 use crate::services::tui_o::repost::identity::{marker, payload_sha256, piece_of};
 use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
-use crate::services::tui_o::repost::io::probe::tests::{Fake, absent_evidence};
 use crate::services::tui_o::repost::o_piece_delivery::DeliveryRow;
 use crate::services::tui_o::repost::send::{
     AttemptGuard, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds, WireOutcome, hand_over,

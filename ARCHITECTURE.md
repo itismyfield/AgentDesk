@@ -5374,7 +5374,6 @@ src/
 │   ├── krx_config_tests.rs
 │   ├── krx_db_b_tests.rs
 │   ├── krx_db_tests.rs
-│   ├── krx_tui_o_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs

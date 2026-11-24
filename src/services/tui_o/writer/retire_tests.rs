@@ -27,7 +27,7 @@ fn session_start() -> String {
 }
 
 /// A bind of `new` in pane `tmux`, named by hook `hook` (empty for a record no hook made).
-fn hop_at(
+pub(crate) fn hop_at(
     seq: u64,
     tmux: &str,
     old: Option<&SourceId>,

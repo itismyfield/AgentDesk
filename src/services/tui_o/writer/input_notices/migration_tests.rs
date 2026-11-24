@@ -801,7 +801,8 @@ async fn a_frozen_scheduled_fire_the_hook_announced_under_either_header_is_not_p
     let prompt = "hourly briefing";
     let headers = [
         scheduled_notice(prompt),
-        crate::services::discord::input_notice_content(prompt).unwrap(),
+        crate::services::discord::session_notice::input_notice::input_notice_content(prompt)
+            .unwrap(),
     ];
     assert_ne!(headers[0], headers[1]);
     assert_eq!(

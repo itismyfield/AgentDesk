@@ -10,10 +10,10 @@ use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 
 /// Legacy's relay as it moves: cursor and delivered frontier on `path`, and how often a pin read them.
-struct Moving {
+pub(crate) struct Moving {
     path: Mutex<PathBuf>,
     cursor: AtomicU64,
-    frontier: AtomicU64,
+    pub(crate) frontier: AtomicU64,
     reads: AtomicUsize,
 }
 
@@ -63,17 +63,17 @@ async fn retried() {
 }
 
 /// A selected channel whose transcript ends in an open turn Legacy has read and delivered.
-struct Open {
-    harness: Harness,
-    path: PathBuf,
-    io: Arc<TestIo>,
-    legacy: Arc<Moving>,
-    ready: Arc<Readiness>,
+pub(crate) struct Open {
+    pub(crate) harness: Harness,
+    pub(crate) path: PathBuf,
+    pub(crate) io: Arc<TestIo>,
+    pub(crate) legacy: Arc<Moving>,
+    pub(crate) ready: Arc<Readiness>,
     _selected: ChannelsGuard,
 }
 
 impl Open {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (harness, path) = fresh(startup);
         append(&path, &row("m0", "asked"));
         harness.gate.acquired();
@@ -106,7 +106,7 @@ impl Open {
     }
 
     /// The TUI closes the turn and Legacy delivers it.
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         append(&self.path, &closed());
         self.legacy.caught_up(&self.path);
     }
@@ -124,11 +124,11 @@ impl Open {
         init.sources.first().map(|source| source.delivery_start)
     }
 
-    fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         std::fs::metadata(&self.path).unwrap().len()
     }
 
-    fn alarms(&self) -> Vec<(u64, WriterAlarm)> {
+    pub(crate) fn alarms(&self) -> Vec<(u64, WriterAlarm)> {
         self.io.alarms.0.lock().unwrap().clone()
     }
 
@@ -156,11 +156,11 @@ impl Open {
 }
 
 /// Hooks are process-wide and keyed by channel, so a test that sets one runs in its own process.
-fn isolated(name: &str) -> bool {
+pub(crate) fn isolated(name: &str) -> bool {
     test_override::isolated_binding_case(name)
 }
 
-fn hook_reached(step: Step, then: impl FnOnce() + Send + 'static) -> Arc<AtomicBool> {
+pub(crate) fn hook_reached(step: Step, then: impl FnOnce() + Send + 'static) -> Arc<AtomicBool> {
     let reached = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&reached);
     test_hook::set(CHANNEL, step, move || {
@@ -567,6 +567,3 @@ async fn a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved() {
 
 #[path = "stall_tests.rs"]
 mod stall;
-
-#[path = "deferred_pg_tests.rs"]
-mod pg;

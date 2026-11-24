@@ -20,7 +20,7 @@ pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod progress;
-mod replay;
+pub(in crate::services) mod replay;
 pub(crate) mod restart_end;
 pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;

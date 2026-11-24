@@ -8,22 +8,30 @@ use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use super::admission::{ApprovedRejected, PriorBudget};
 use super::admission_tests::{BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar};
-use super::dispatch::{Admission, DispatchEnd, DispatchPermit, GuardReason, RepostWriter, start};
-use super::identity::{PieceKey, marker};
-use super::io::probe::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
-use super::io::probe::matcher::ObservedMessage;
-use super::io::probe::tests::{Fake, absent_evidence};
-use super::o_piece_attempts::{AttemptResult, GrantOutcome, Intent, attempts};
-use super::o_piece_delivery::{Failure, load};
-use super::runner::{ApprovalCheck, DispatchIntent, Runner, Tick, TurnStep, turn_step};
-use super::send::{
+use super::repost_probe::{Fake, absent_evidence};
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::repost::admission::{ApprovedRejected, PriorBudget};
+use crate::services::tui_o::repost::dispatch::{
+    Admission, DispatchEnd, DispatchPermit, GuardReason, RepostWriter, start,
+};
+use crate::services::tui_o::repost::identity::{PieceKey, marker};
+use crate::services::tui_o::repost::io::probe::evidence::{
+    EvidenceScope, NotFoundEvidence, RunScope,
+};
+use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
+use crate::services::tui_o::repost::o_piece_attempts::{
+    AttemptResult, GrantOutcome, Intent, attempts,
+};
+use crate::services::tui_o::repost::o_piece_delivery::{Failure, load};
+use crate::services::tui_o::repost::runner::{
+    ApprovalCheck, DispatchIntent, Runner, Tick, TurnStep, turn_step,
+};
+use crate::services::tui_o::repost::send::{
     AttemptGuard, BoundedTransport, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds,
     WireOutcome, hand_over,
 };
-use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 
 /// Holds the lease while alive; the writer's `held` counts live holds.
@@ -216,7 +224,7 @@ impl BoundedTransport for Wire {
 fn message(id: u64, author: u64, content: &str) -> ObservedMessage {
     ObservedMessage {
         channel_id: CHANNEL,
-        ..super::io::probe::tests::message(id, author, content)
+        ..super::repost_probe::message(id, author, content)
     }
 }
 
@@ -764,7 +772,7 @@ fn live() -> Arc<dyn Fn() -> bool + Send + Sync> {
 }
 
 fn envelope() -> RepostEnvelope {
-    let key = super::io::probe::tests::key("handed");
+    let key = super::repost_probe::key("handed");
     RepostEnvelope::additional(
         CHANNEL,
         "p".into(),
@@ -821,9 +829,9 @@ async fn f5_aborting_the_owning_task_ends_the_request_without_a_retry() {
 async fn auto_missing_row_is_observe_only_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let run = super::io::probe::tests::run("run-1");
+    let run = super::repost_probe::run("run-1");
     let mut writer = TestWriter::new();
-    let gone = absent_evidence(super::io::probe::tests::scope(&[0]), run.clone());
+    let gone = absent_evidence(super::repost_probe::scope(&[0]), run.clone());
     let key = gone.scope().key.clone();
     let mut runner = Runner::new(pool.clone(), BOT, run.clone());
     assert!(load(&pool, &key).await.unwrap().is_none());

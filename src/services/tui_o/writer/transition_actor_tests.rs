@@ -30,7 +30,7 @@ use crate::services::tui_o::writer::transition_port::{
 };
 use crate::services::tui_o::writer::{ReaderConfig, WriterConfig};
 
-const JOB: &str = "hrot-job";
+pub(crate) const JOB: &str = "hrot-job";
 /// A well-formed digest of no scope.
 const UNSCOPED: &str =
     "hrot-scope-v1:0000000000000000000000000000000000000000000000000000000000000000";
@@ -46,7 +46,7 @@ pub(crate) struct Chain {
     _hosts: Option<ForcedSessionHosts>,
 }
 
-fn chain(hops: usize) -> Chain {
+pub(crate) fn chain(hops: usize) -> Chain {
     chain_on(hops, true)
 }
 
@@ -194,12 +194,12 @@ impl Chain {
         source_key(&self.sources[n])
     }
 
-    fn dir(&self) -> PathBuf {
+    pub(crate) fn dir(&self) -> PathBuf {
         let runtime = self.paths[0].parent().unwrap();
         runtime.join("o_store").join(CHANNEL.to_string())
     }
 
-    fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
+    pub(crate) fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
         let name = format!("{}.json", self.key(n));
         std::fs::read(self.dir().join(CURSOR_DIR).join(name)).ok()
     }
@@ -211,7 +211,7 @@ impl Chain {
 }
 
 /// Every file of the store directory `dir`, by path.
-fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut found = BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -245,7 +245,7 @@ pub(crate) fn execution(
 }
 
 pub(crate) struct Run {
-    port: TransitionPort,
+    pub(crate) port: TransitionPort,
     pub(crate) stop: watch::Sender<bool>,
     /// The host's stop, which the actor's own stop follows only later.
     host: watch::Sender<bool>,
@@ -323,7 +323,7 @@ pub(crate) async fn settle(chain: &Chain) {
 
 type Asked = tokio::task::JoinHandle<Result<Reply, String>>;
 
-fn send(run: &Run, operation: Operation, context: Context) -> Asked {
+pub(crate) fn send(run: &Run, operation: Operation, context: Context) -> Asked {
     let port = run.port.clone();
     tokio::spawn(async move { port.request(operation, context).await })
 }
@@ -338,7 +338,7 @@ async fn answered(asked: Asked) -> Reply {
 
 /// Runs the actor until it answers `asked`, letting each probe worker finish, and calls `between`
 /// once `at` workers of the job have sent their probes.
-async fn answered_after(
+pub(crate) async fn answered_after(
     asked: Asked,
     at: usize,
     mut between: impl FnMut(),
@@ -359,7 +359,7 @@ async fn answered_after(
     asked.await.unwrap()
 }
 
-fn outcomes(reply: &Reply) -> BTreeMap<String, Outcome> {
+pub(crate) fn outcomes(reply: &Reply) -> BTreeMap<String, Outcome> {
     let outcome = |hop: &transition_port::Hop| (hop.judged.key.clone(), hop.outcome.clone());
     reply.hops.iter().map(outcome).collect()
 }
@@ -472,7 +472,7 @@ async fn transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_h
 
 /// Writes the boundary record of each old source in `legacy` as a store from before hop fields
 /// were kept: only its successor's identity.
-fn strip_hop_fields(chain: &Chain, legacy: &[usize]) {
+pub(crate) fn strip_hop_fields(chain: &Chain, legacy: &[usize]) {
     use crate::services::tui_o::store::rotation::BOUNDARY_FILE;
     let file = chain.dir().join(BOUNDARY_FILE);
     let mut written: serde_json::Value =
@@ -1245,12 +1245,6 @@ async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retireme
         }
     }
 }
-
-#[path = "transition_route_tests.rs"]
-mod route_tests;
-
-#[path = "transition_apply_tests.rs"]
-mod apply_tests;
 
 #[tokio::test(start_paused = true)]
 async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_restore() {

@@ -1,3 +1,4 @@
+use crate::services::discord::krx_tui_o_test_host::admission::{BindingRoot, bind};
 use crate::services::tui_o::shadow::{SourceId, SourceRange};
 use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::fault::{self, Keep, Step as At};
@@ -6,10 +7,7 @@ use crate::services::tui_o::store::ledger::input_notices::{
 };
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::Step;
-use crate::services::tui_o::writer::input_notices::{
-    NoticeOrigin,
-    admission::tests::{BindingRoot, bind},
-};
+use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
 use crate::services::tui_o::writer::tests::*;
 use chrono::Utc;

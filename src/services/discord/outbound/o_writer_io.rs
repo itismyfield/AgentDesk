@@ -318,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn secretary_channel_tool_cards_post_silently_while_replies_push() {
-        use crate::services::tui_o::repost::io::tests::{Mock, reply};
+        use crate::services::discord::krx_tui_o_test_host::repost_io::{Mock, reply};
         use crate::services::tui_o::shadow::UnitKind;
         let _live = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
