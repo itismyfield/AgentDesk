@@ -115,7 +115,10 @@ pub(crate) fn instance_child(test_name: &str, marker: &str) -> bool {
     if std::env::var_os(marker).is_some() {
         return true;
     }
-    let selector = test_name.strip_prefix("agentdesk::").unwrap_or(test_name);
+    // Callers in more than one crate pass their own `module_path!()`, so drop whichever crate segment leads.
+    let selector = test_name
+        .split_once("::")
+        .map_or(test_name, |(_, rest)| rest);
     let (_temporary, root) = fixture();
     let output = command(&root)
         .args(["--exact", selector, "--nocapture"])
@@ -310,7 +313,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
                     module_path!(),
                     "::initialized_test_scope_names_sessions_and_refuses_herdr_runtime"
                 )
-                .strip_prefix("agentdesk::")
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
                 .unwrap(),
                 "--nocapture",
             ])

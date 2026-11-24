@@ -375,6 +375,10 @@ class SourceTextGuardAuditTests(AuditRepoCase):
                 '    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));\n'
                 '    let text = std::fs::read_dir(root.join("src"));\n'
             ),
+            "root-constant tree walk": (
+                "    let root = std::path::Path::new(crate::runtime_layout::REPO_ROOT);\n"
+                '    let text = std::fs::read_dir(root.join("src"));\n'
+            ),
             "cwd-relative read": '    let text = std::fs::read_to_string("src/lib.rs");\n',
             "split concat source path": (
                 '    let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/", "lib.rs"));\n'

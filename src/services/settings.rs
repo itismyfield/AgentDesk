@@ -460,7 +460,7 @@ pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec
 
     actions.push(KvSeedAction::PutIfAbsent {
         key: "workspace_root".to_string(),
-        value: env!("CARGO_MANIFEST_DIR").to_string(),
+        value: crate::runtime_layout::REPO_ROOT.to_string(),
     });
 
     for key in RETIRED_CONFIG_KEYS {

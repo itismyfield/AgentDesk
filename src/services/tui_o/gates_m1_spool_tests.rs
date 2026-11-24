@@ -80,7 +80,7 @@ impl Fixture {
     fn load(name: &str) -> Self {
         // The pinned v2 capture/spool/UnitDeriver/Prepared/Posted APIs froze these bytes (fixture README).
         // Only source path/dev/ino and their filenames are rebound to the disposable directory.
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let base = Path::new(crate::runtime_layout::REPO_ROOT)
             .join("tests/fixtures/gates_m1_v2")
             .join(name);
         let expected: Expected =

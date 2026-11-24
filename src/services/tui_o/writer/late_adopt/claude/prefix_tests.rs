@@ -2,10 +2,9 @@ use super::*;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 
 /// Redacted records of a Claude 2.1.316 run under the production launch shape, keyed by case.
-const FIXTURE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl"
-));
+const FIXTURE: &str = include_str!(
+    "../../../../../../tests/fixtures/hook_payload/claude-2.1.316.transcript-prefix.jsonl"
+);
 const SESSION: &str = "00000000-0000-4000-8000-000000000316";
 
 fn records(case: &str) -> Vec<u8> {

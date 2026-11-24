@@ -47,6 +47,8 @@ class EnvFlagGuardTests(unittest.TestCase):
         #[cfg(all(unix, test))]
         fn test_helper() { let _ = std::env::var("FLAG").as_deref() == Ok("1"); }
         #[cfg(test)] mod tests { fn test() { let _ = std::env::var("FLAG") == Ok("1"); } }
+        #[cfg(any(test, feature = "test-support"))]
+        fn fixture() { let _ = std::env::var("FLAG").as_deref() == Ok("1"); }
         fn credential() { std::env::var("TOKEN").is_ok_and(|v| !v.is_empty()); }
         fn url() { std::env::var("URL").unwrap_or_default() == "https://example.com"; }
         #[test] fn standalone() { std::env::var("FLAG") == Ok("1"); }

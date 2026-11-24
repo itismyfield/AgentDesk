@@ -432,7 +432,7 @@ fn render_precedence_table() -> String {
 
 #[test]
 fn precedence_tables_in_readme_and_adr_match_the_key_table() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = std::path::Path::new(crate::runtime_layout::REPO_ROOT);
     let rendered = render_precedence_table();
     let write = std::env::var_os("ADK_WRITE_SETTINGS_PRECEDENCE_DOC").is_some();
     for doc in ["README.md", "docs/adr-settings-precedence.md"] {
