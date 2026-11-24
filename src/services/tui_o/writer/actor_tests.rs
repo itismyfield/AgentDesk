@@ -141,7 +141,7 @@ impl FakeBindings {
             failing,
         }
     }
-    fn fail(&self, error: Option<&str>) {
+    pub(crate) fn fail(&self, error: Option<&str>) {
         *self.failing.lock().unwrap() = error.map(str::to_string);
     }
     /// Commits `event` and moves the notice to its seq.

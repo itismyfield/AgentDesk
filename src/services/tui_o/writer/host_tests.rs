@@ -30,10 +30,13 @@ use crate::services::tui_o::writer::tests::{
     BOT, CHANNEL, FakeLease, FakePort, Harness, RESTART_POLICY_CALLS, Reply, Writer, ledger_path,
     outcome, piece, unit,
 };
-use crate::services::tui_o::writer::{AlarmSink, ReaderConfig, WriterAlarm, WriterConfig, deliver};
+use crate::services::tui_o::writer::{
+    AlarmSink, DeliveryLease, ReaderConfig, WriterAlarm, WriterConfig, deliver,
+};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -134,7 +137,7 @@ pub(crate) struct TestIo {
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
     producer: Mutex<Option<ProducerObservation>>,
-    custody: Mutex<Result<Custody, String>>,
+    pub(crate) custody: Mutex<Result<Custody, String>>,
     queued_bodies: std::sync::atomic::AtomicI64,
     intake_pool: Mutex<Option<sqlx::PgPool>>,
     fence_error: Mutex<Option<String>>,
@@ -1184,7 +1187,7 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
 pub(crate) struct ProducerPane {
-    pub(super) tmux: &'static str,
+    pub(crate) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
     _root: tempfile::TempDir,
@@ -1196,7 +1199,7 @@ pub(crate) struct ProducerPane {
 
 #[cfg(unix)]
 impl ProducerPane {
-    pub(super) fn launch(a: &str, a_path: &Path) -> Self {
+    pub(crate) fn launch(a: &str, a_path: &Path) -> Self {
         use crate::services::tui_prompt_dedupe as dedupe;
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());

@@ -21,7 +21,7 @@ use crate::services::tui_o::writer::{
     DiscordPort, PostOutcome, SeenMessage, WriterAlarm, deliver, pieces,
 };
 use chrono::Utc;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 #[path = "bo_post_tests.rs"]
 mod bo_post;

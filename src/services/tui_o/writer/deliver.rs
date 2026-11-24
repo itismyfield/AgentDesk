@@ -351,7 +351,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     #[cfg(test)]
-    pub(super) fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
+    pub(in crate::services) fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
         let channel = self.channel;
         self.posts
             .get_or_insert_with(|| {
@@ -381,7 +381,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// The ledger's approved retries less those a shared receipt already settled.
-    pub(super) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
+    pub(in crate::services) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
         let ledger = self.store.ledger();
         let open = |piece: &PieceRecord| {
             let at = (&piece.unit_key, piece.piece_index);

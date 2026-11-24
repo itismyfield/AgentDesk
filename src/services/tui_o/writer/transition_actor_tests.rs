@@ -194,12 +194,12 @@ impl Chain {
         source_key(&self.sources[n])
     }
 
-    fn dir(&self) -> PathBuf {
+    pub(crate) fn dir(&self) -> PathBuf {
         let runtime = self.paths[0].parent().unwrap();
         runtime.join("o_store").join(CHANNEL.to_string())
     }
 
-    fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
+    pub(crate) fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
         let name = format!("{}.json", self.key(n));
         std::fs::read(self.dir().join(CURSOR_DIR).join(name)).ok()
     }
@@ -245,7 +245,7 @@ pub(crate) fn execution(
 }
 
 pub(crate) struct Run {
-    port: TransitionPort,
+    pub(crate) port: TransitionPort,
     pub(crate) stop: watch::Sender<bool>,
     /// The host's stop, which the actor's own stop follows only later.
     host: watch::Sender<bool>,

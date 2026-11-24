@@ -63,17 +63,17 @@ pub(crate) struct FakePort {
     pub(crate) replies: Mutex<VecDeque<Reply>>,
     posts: Mutex<Vec<String>>,
     prepared_before_post: Mutex<Vec<bool>>,
-    ledger: Mutex<Option<PathBuf>>,
+    pub(crate) ledger: Mutex<Option<PathBuf>>,
     pub(crate) unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
-    lazy: AtomicBool,
+    pub(crate) lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
-    started: Arc<Mutex<Vec<&'static str>>>,
+    pub(crate) started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
-    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub(crate) on_post: PostHook,
     pub(crate) history_reads: AtomicUsize,
-    on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
@@ -218,8 +218,8 @@ impl DiscordPort for FakePort {
 #[derive(Default)]
 pub(crate) struct FakeLease {
     pub(crate) busy: AtomicBool,
-    released: Arc<AtomicUsize>,
-    on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub(crate) released: Arc<AtomicUsize>,
+    pub(crate) on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
     pub(crate) unavailable: Mutex<Vec<u64>>,
 }

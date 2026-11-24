@@ -10,10 +10,10 @@ use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 
 /// Legacy's relay as it moves: cursor and delivered frontier on `path`, and how often a pin read them.
-struct Moving {
+pub(crate) struct Moving {
     path: Mutex<PathBuf>,
     cursor: AtomicU64,
-    frontier: AtomicU64,
+    pub(crate) frontier: AtomicU64,
     reads: AtomicUsize,
 }
 
@@ -66,14 +66,14 @@ async fn retried() {
 pub(crate) struct Open {
     pub(crate) harness: Harness,
     pub(crate) path: PathBuf,
-    io: Arc<TestIo>,
-    legacy: Arc<Moving>,
+    pub(crate) io: Arc<TestIo>,
+    pub(crate) legacy: Arc<Moving>,
     pub(crate) ready: Arc<Readiness>,
     _selected: ChannelsGuard,
 }
 
 impl Open {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (harness, path) = fresh(startup);
         append(&path, &row("m0", "asked"));
         harness.gate.acquired();
