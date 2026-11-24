@@ -291,6 +291,7 @@ class EnsureSwapBehavior(unittest.TestCase):
             echo "Swap:         {swap_mib}           0        {swap_mib}"
         """)
         write_tool(bin_dir, "df", FAKE_DF_H + f"""\
+            [ "$1" = "-PT" ] && {{ echo "Filesystem Type 1024-blocks Used Available Capacity Mounted on"; echo "/dev/sdb1 ext4 1 1 1 7% /mnt"; exit 0; }}
             echo "Filesystem 1048576-blocks Used Available Capacity Mounted on"
             echo "/dev/sdb1 75000 5000 {avail_mib} 7% /mnt"
         """)
@@ -322,16 +323,16 @@ class EnsureSwapBehavior(unittest.TestCase):
         return proc, calls, swap_path
 
     def test_short_swap_gets_a_swapfile_of_the_requested_size(self) -> None:
-        proc, calls, path = self.run_swap(swap_mib=4096)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls, [
-            f"fallocate -l 16G {path}",
-            f"chmod 600 {path}",
-            f"mkswap {path}",
-            f"swapon {path}",
-        ])
-        self.assertIn("Swap:", proc.stdout)
-        self.assertNotIn("::warning", proc.stdout)
+        # A runner image without default swap gets 8G more than the request.
+        cases = ((4096, 70000, "16", "16G"), (3071, 70000, "24", "24G"), (0, 70000, "24", "32G"), (0, 30000, "24", "24G"))
+        for swap_mib, avail_mib, request, size in cases:
+            with self.subTest(swap_mib=swap_mib, avail_mib=avail_mib):
+                proc, calls, path = self.run_swap(swap_mib=swap_mib, avail_mib=avail_mib, size_gb=request)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(calls, [f"fallocate -l {size} {path}", f"chmod 600 {path}", f"mkswap {path}", f"swapon {path}"])
+                self.assertIn("Swap:", proc.stdout)
+                self.assertEqual("::warning" in proc.stdout, avail_mib < 34816)
+                self.assertIn(f"ensure-swap: start_swap_mib={swap_mib} final_swap_mib={swap_mib} swapfile_fs=/dev/sdb1 ext4 /mnt", proc.stdout)
 
     def test_enough_swap_is_left_alone(self) -> None:
         proc, calls, path = self.run_swap(swap_mib=16384)
