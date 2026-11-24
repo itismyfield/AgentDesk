@@ -449,6 +449,8 @@ pub(crate) async fn finish_admitted_queued_intake(
 #[cfg(test)]
 mod clear_discard_tests;
 #[cfg(test)]
+mod decision_tests;
+#[cfg(test)]
 pub(in crate::services::discord::router) mod transition_busy_tests;
 
 #[cfg(test)]
