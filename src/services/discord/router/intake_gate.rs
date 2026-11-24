@@ -11,6 +11,8 @@ mod busy_duplicate_notice;
 pub(super) mod busy_inject;
 mod busy_queue;
 mod component_events;
+#[cfg(all(test, unix))]
+mod decision_guard_tests;
 mod gate;
 #[cfg(all(test, unix))]
 mod live_entry_tests;

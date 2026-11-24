@@ -109,3 +109,47 @@ fn decision_get_presents_the_capability_its_request_was_asked_under() {
     );
     assert!(remember(root.path(), &json!({"ok": false}), Some(&asked)).is_err());
 }
+
+/// One channel is one scope however its id is spelled, and a name that is no id is refused
+/// before any capability exists.
+#[test]
+fn decision_ask_scope_is_the_channel_id_not_its_spelling() {
+    let root = tempfile::tempdir().unwrap();
+    let body = |channel: &str| json!({"agent_id": "asker", "target": {"channel_id": channel}, "ref": "r1"});
+    let send = |capability: &str| Ok::<_, String>(capability.to_string());
+    let plain = ask(root.path(), &body("101"), send).unwrap();
+    assert_eq!(ask(root.path(), &body("00101"), send).unwrap(), plain);
+    assert!(ask(root.path(), &body("general"), send).is_err());
+    assert_eq!(cached(root.path()).len(), 1);
+}
+
+/// Asks that start together for one new request all present the same capability: nobody reads
+/// a capability file that is still being written.
+#[test]
+fn decision_asks_that_race_for_a_new_capability_agree_on_one() {
+    let root = tempfile::tempdir().unwrap();
+    for round in 0..64 {
+        let key = format!("race-{round}");
+        let body = json!({"agent_id": "asker", "target": {"channel_id": "7"}, "ref": key});
+        let start = std::sync::Barrier::new(8);
+        let sent: Vec<Result<String, String>> = std::thread::scope(|scope| {
+            let racers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        ask(root.path(), &body, |capability| Ok(capability.to_string()))
+                    })
+                })
+                .collect();
+            racers
+                .into_iter()
+                .map(|racer| racer.join().unwrap())
+                .collect()
+        });
+        let first = sent[0].clone().expect("the first asker got a capability");
+        assert!(
+            sent.iter().all(|one| one.as_ref() == Ok(&first)),
+            "{round}: {sent:?}"
+        );
+    }
+}

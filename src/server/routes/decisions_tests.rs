@@ -126,6 +126,12 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
         (again["request_id"].as_str(), &again["created"]),
         (Some(id.as_str()), &json!(false))
     );
+    // The same channel spelled another way is still the same request.
+    let mut spelled = ask_body("질문");
+    spelled["target"]["channel_id"] = json!(format!("00{CHANNEL}"));
+    let (status, again) = call(&app, post, Some(&mine), &spelled).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{again}");
+    assert_eq!(again["request_id"].as_str(), Some(id.as_str()));
     // Another capability, or another payload, cannot take the key.
     for (capability, title) in [(&other, "질문"), (&mine, "다른 질문")] {
         let (status, refused) = call(&app, post, Some(capability), &ask_body(title)).await;

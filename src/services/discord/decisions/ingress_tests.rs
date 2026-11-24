@@ -59,3 +59,26 @@ async fn decision_forum_guard_knows_ready_and_configured_forums_pg() {
     assert!(!unread.contains(Some(&pool), &config, 8_211_001).await);
     db.drop().await;
 }
+
+/// A forum added to the configuration is guarded at once, inside the refresh window and while
+/// PG is away, and the forums already read stay guarded.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_forum_guard_takes_a_newly_configured_forum_at_once_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let ready = ForumState::Ready("8211001".into());
+    store(&pool, 1, 10, "decision", &ready).await.unwrap();
+    let forums = Forums::default();
+    let before = DecisionsConfig::default();
+    assert!(!forums.contains(Some(&pool), &before, 8_211_004).await);
+    let mut after = before.clone();
+    after
+        .forums_by_category
+        .insert("15".into(), "8211004".into());
+    assert!(forums.contains(Some(&pool), &after, 8_211_004).await);
+    pool.close().await;
+    age(&forums);
+    assert!(forums.contains(Some(&pool), &after, 8_211_004).await);
+    assert!(forums.contains(Some(&pool), &after, 8_211_001).await);
+    db.drop().await;
+}
