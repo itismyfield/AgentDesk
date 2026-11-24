@@ -531,7 +531,6 @@ mod child_exit_tests {
     fn actual_quiet_provider_observes_exact_token_manual_cancel() {
         let fixture = ProviderFixture::new("grok", "cancel");
         let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-        let cancel = fixture.cancel_after_accept(token.clone());
         let (tx, _rx) = std::sync::mpsc::channel();
         let prepared = PreparedCommand {
             executable: fixture.cli.clone(),
@@ -543,8 +542,9 @@ mod child_exit_tests {
             unset_env: vec![],
             codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
         };
-        run_prepared(prepared, tx, Duration::ZERO, Some(token.clone())).unwrap();
-        cancel.join().unwrap();
+        fixture.run_with_cancel_after_accept(token.clone(), || {
+            run_prepared(prepared, tx, Duration::ZERO, Some(token.clone())).unwrap();
+        });
         assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
         assert_eq!(token.child_pid_value(), None);
         fixture.verify_return("cancel");
