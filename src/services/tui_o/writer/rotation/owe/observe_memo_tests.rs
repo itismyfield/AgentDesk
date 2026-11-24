@@ -237,6 +237,8 @@ fn a_reopened_or_replaced_source_never_answers_from_an_older_memo() {
     // The same prefix authenticated again starts over, before any new record.
     open(&mut native, &old);
     assert_eq!(observe(&native, &old), (first.clone(), 1));
+    // A second link keeps the old inode allocated, so no replacement can be given its number.
+    std::fs::hard_link(path, path.with_extension("held")).unwrap();
     for grown in [false, true] {
         let next = path.with_extension("next");
         let mut body = std::fs::read(path).unwrap();
@@ -249,6 +251,7 @@ fn a_reopened_or_replaced_source_never_answers_from_an_older_memo() {
             ino,
             ..old.clone()
         };
+        assert_ne!((new.dev, new.ino), (old.dev, old.ino), "grown={grown}");
         open(&mut native, &new);
         assert_eq!(observe(&native, &new), (Vec::new(), 1), "grown={grown}");
         assert_eq!(observe(&native, &old), (first.clone(), 1), "grown={grown}");
