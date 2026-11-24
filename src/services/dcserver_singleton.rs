@@ -1,4 +1,5 @@
-//! A recovery root retains the real singleton lock, never a PID-file assertion.
+//! The dcserver singleton lock. Any caller may ask for it, but a recovery root exists only
+//! for a root whose lock file this process really holds by flock, never from a PID file.
 #[cfg(unix)]
 use std::{
     fs::File,
@@ -6,21 +7,28 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) use crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot;
 #[cfg(unix)]
-use crate::domain::replay_evidence::recovery::root::issuer;
+use crate::domain::replay_evidence::recovery::root::{OwnedRuntimeRoot, issuer};
 #[cfg(unix)]
 pub(crate) mod issuer_key;
 
 #[cfg(unix)]
-pub(super) struct Singleton {
+pub(crate) struct Singleton {
     file: Arc<File>,
     root: Option<PathBuf>,
 }
 
 #[cfg(unix)]
+fn write_dcserver_lock_pid(mut file: &File) -> std::io::Result<()> {
+    use std::io::Write;
+    // Clear the previous PID only after flock succeeds so shorter PIDs leave no suffix.
+    file.set_len(0)?;
+    file.write_all(std::process::id().to_string().as_bytes())
+}
+
+#[cfg(unix)]
 impl Singleton {
-    pub(super) fn acquire(root: Option<&Path>) -> Result<Self, String> {
+    pub(crate) fn acquire(root: Option<&Path>) -> Result<Self, String> {
         use std::os::fd::AsRawFd;
         let path = root
             .map(|root| root.join("runtime/dcserver.lock"))
@@ -36,14 +44,14 @@ impl Singleton {
                 "Another dcserver is already running (lock held on {path:?}). Exiting."
             ));
         }
-        let _ = super::write_dcserver_lock_pid(&file);
+        let _ = write_dcserver_lock_pid(&file);
         Ok(Self {
             file: Arc::new(file),
             root: root.and_then(|root| root.canonicalize().ok()),
         })
     }
 
-    pub(super) fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
+    pub(crate) fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
         Some(issuer::owned(
             issuer_key::SingletonRootKey(()),
             self.root.clone()?,
@@ -60,5 +68,4 @@ pub(crate) fn acquire_for_tests(root: &Path) -> Result<OwnedRuntimeRoot, String>
 }
 
 #[cfg(all(test, unix))]
-#[path = "replay_recovery_tests.rs"]
 mod tests;

@@ -72,7 +72,7 @@ RecoverHold의 withheld guard만 제거하면 root/proof/current-owner guard가 
 
 | 모델 변수·전이 | 실제 소유와 가드 |
 |---|---|
-| rootHeld / ObserveLocal | CLI `replay_recovery::Singleton::acquire`의 기존 open/flock/PID/canonicalize. adapter `recovery::root::OwnedRuntimeRoot::covers`와 service loader의 guard |
+| rootHeld / ObserveLocal | `services::dcserver_singleton::Singleton::acquire`의 기존 open/flock/PID/canonicalize. adapter `recovery::root::OwnedRuntimeRoot::covers`와 service loader의 guard |
 | PrivateRecoveryKey / IssueLocalProof | 원래 recovery loader가 `LoadedSnapshotKey`를 만들고 `recovery::snapshot::issuer::loaded`를 호출. 파일 관측은 계속 service에 있음 |
 | rootRetained / DropBootHandle | adapter root의 실제 `Arc<File>`과 `LocalSnapshot::_root`. boot/loader handle을 내려도 sealed snapshot이 같은 lock을 보유 |
 | understood / sameIdentity | snapshot의 원문 owned identity와 version/unknown/native metadata. DB의 기존 row-lock 안 identity/projection/turn nonce 비교 |

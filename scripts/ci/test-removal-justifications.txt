@@ -4,6 +4,8 @@
 # Scoped rows cover only that platform; after landing they require its absence and coverage elsewhere.
 # Unscoped rows keep the existing whole-test rules; a loss with no matching reason fails.
 # Unscoped rows absent from base and head only warn after landing; clear them in any later PR.
+agentdesk cli::dcserver::replay_recovery::tests::p5_singleton_requires_exclusive_ownership_across_processes | removed | relocated to services::dcserver_singleton::tests::p5_singleton_requires_exclusive_ownership_across_processes
+agentdesk cli::dcserver::tests::lock_pid_write_removes_stale_suffix | removed | relocated to services::dcserver_singleton::tests::lock_pid_write_removes_stale_suffix
 agentdesk config::config_path::tests::bypass_scan_skips_test_items_and_follows_test_modules | removed | #7867 S7e: config 경로 우회 스캐너의 자기시험이다(정책 8 tests of tests). 운영 동작을 보지 않는다. 스캐너를 쓰는 가드 config_file_paths_are_built_only_by_the_resolver는 허용 목록에 남는다.
 agentdesk config::remote_settings_tests::settings_load_exposes_no_remote_profiles | removed | Settings remote-profile shim deleted; no session or config carries a remote profile any more
 agentdesk config::runtime_validation::tests::final_boot_boundary_rejects_retired_before_installing_mirrors | removed | relocated to krx_config_tests::runtime_validation_tests::final_boot_boundary_rejects_retired_before_installing_mirrors
