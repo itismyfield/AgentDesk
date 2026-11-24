@@ -203,14 +203,24 @@ impl HostedRecord {
 /// One row's record as read; the raw value is the CAS expectation for the next write.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostedObservation {
-    pub(crate) session_id: i64,
-    pub(crate) raw: Option<Value>,
+    session_id: i64,
+    raw: Option<Value>,
     pub(crate) record: HostedRecord,
 }
 
 impl HostedObservation {
     pub(crate) fn session_id(&self) -> i64 {
         self.session_id
+    }
+
+    /// Test seam: an observation as a row read would produce it, CAS value included.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_test(session_id: i64, raw: Option<Value>, record: HostedRecord) -> Self {
+        Self {
+            session_id,
+            raw,
+            record,
+        }
     }
 }
 

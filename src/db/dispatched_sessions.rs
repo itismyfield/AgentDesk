@@ -286,7 +286,7 @@ struct RetryOwnerCandidate {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-pub(crate) struct RetryAutoQueueOwner {
+struct RetryAutoQueueOwner {
     entry_id: String,
     run_id: String,
     entry_status: String,
@@ -355,7 +355,7 @@ async fn select_retry_owner_on_pg_tx(
     }
 }
 
-pub(crate) async fn prepare_retry_owner_on_pg_tx(
+async fn prepare_retry_owner_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
 ) -> Result<Option<RetryAutoQueueOwner>, String> {
@@ -401,6 +401,17 @@ pub(crate) async fn prepare_retry_owner_on_pg_tx(
     load_retry_owner_on_pg_tx(tx, &candidate.entry_id, &candidate.run_id, meta)
         .await
         .map(Some)
+}
+
+/// Test seam: takes the retry owner locks in `tx`; the owner row itself stays private.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn prepare_retry_owner_on_pg_tx_for_test(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    meta: &RetryDispatchMeta,
+) -> Result<Option<()>, String> {
+    prepare_retry_owner_on_pg_tx(tx, meta)
+        .await
+        .map(|owner| owner.map(|_| ()))
 }
 
 async fn load_retry_owner_on_pg_tx(

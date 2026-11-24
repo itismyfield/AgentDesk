@@ -24,11 +24,7 @@ async fn setup() -> (TestPostgresDb, PgPool, HostedObservation, HostedExecution)
         .fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO session_key_aliases (session_id, session_key) VALUES ($1, 'legacy-return-alias')")
         .bind(id).execute(&pool).await.unwrap();
-    let observed = HostedObservation {
-        session_id: id,
-        raw: Some(wire(&r)),
-        record: HostedRecord::Known(r.clone()),
-    };
+    let observed = HostedObservation::for_test(id, Some(wire(&r)), HostedRecord::Known(r.clone()));
     (db, pool, observed, r)
 }
 
@@ -43,7 +39,7 @@ async fn snapshot(pool: &PgPool, id: i64) -> Value {
 #[tokio::test]
 async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     let (db, pool, observed, r) = setup().await;
-    let before = snapshot(&pool, observed.session_id).await;
+    let before = snapshot(&pool, observed.session_id()).await;
     assert_eq!(
         return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
             .await
@@ -90,7 +86,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
             .await
             .unwrap();
     assert!(disconnected_gone);
-    let after = snapshot(&pool, observed.session_id).await;
+    let after = snapshot(&pool, observed.session_id()).await;
     for field in [
         "id",
         "session_key",
@@ -110,7 +106,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     let fresh: bool = sqlx::query_scalar(
         "SELECT last_heartbeat > NOW() - INTERVAL '1 minute' FROM sessions WHERE id = $1",
     )
-    .bind(observed.session_id)
+    .bind(observed.session_id())
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -121,26 +117,22 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(alias, observed.session_id);
+    assert_eq!(alias, observed.session_id());
     assert_eq!(
         return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
             .await
             .unwrap(),
         HostedCasOutcome::Stale
     );
-    assert_eq!(snapshot(&pool, observed.session_id).await, after);
-    let legacy = HostedObservation {
-        raw: None,
-        record: HostedRecord::Legacy,
-        ..observed
-    };
+    assert_eq!(snapshot(&pool, observed.session_id()).await, after);
+    let legacy = HostedObservation::for_test(observed.session_id(), None, HostedRecord::Legacy);
     let next = crate::db::dispatched_sessions::hosted_execution::tests::pending(&r.owner, "n-new");
     assert_eq!(
         install_pending_pg(&pool, &legacy, next).await.unwrap(),
         HostedCasOutcome::Written
     );
     assert_eq!(
-        snapshot(&pool, legacy.session_id).await["returned_hosted_execution"],
+        snapshot(&pool, legacy.session_id()).await["returned_hosted_execution"],
         wire(&r)
     );
     pool.close().await;
@@ -151,12 +143,12 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
 async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
     let (db, pool, observed, r) = setup().await;
     let proof = ended(&r);
-    let before = snapshot(&pool, observed.session_id).await;
+    let before = snapshot(&pool, observed.session_id()).await;
     assert!(matches!(
         provider_alive(&r),
         Err(crate::services::session_host::legacy_return::ReturnEndRefusal::ProviderUnverified(_))
     ));
-    assert_eq!(snapshot(&pool, observed.session_id).await, before);
+    assert_eq!(snapshot(&pool, observed.session_id()).await, before);
     let mut other = r.owner.clone();
     other.logical_key = "other".into();
     assert_eq!(
@@ -190,18 +182,18 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
         wire(&record(&r.owner, "n-old", HostedState::Bound)),
         json!({"schema": 99}),
     ] {
-        let obs = HostedObservation {
-            raw: Some(raw.clone()),
-            record: HostedRecord::decode(Some(&raw)),
-            ..observed.clone()
-        };
+        let obs = HostedObservation::for_test(
+            observed.session_id(),
+            Some(raw.clone()),
+            HostedRecord::decode(Some(&raw)),
+        );
         assert!(
             return_legacy_pg(&pool, &obs, &r.owner, &r.execution_nonce, &proof)
                 .await
                 .is_err()
         );
     }
-    assert_eq!(snapshot(&pool, observed.session_id).await, before);
+    assert_eq!(snapshot(&pool, observed.session_id()).await, before);
     // Every stale DB mutation must leave all columns, including the archive and heartbeat, unchanged.
     for assignment in [
         "hosted_execution = jsonb_set(hosted_execution, '{source_ref,baseline_event_seq}', '42')",
@@ -215,12 +207,12 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE sessions SET {assignment} WHERE id = $1"
         )))
-        .bind(observed.session_id)
+        .bind(observed.session_id())
         .execute(&mut *tx)
         .await
         .unwrap();
         tx.commit().await.unwrap();
-        let changed = snapshot(&pool, observed.session_id).await;
+        let changed = snapshot(&pool, observed.session_id()).await;
         assert_eq!(
             return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &proof)
                 .await
@@ -228,9 +220,9 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
             HostedCasOutcome::Stale,
             "{assignment}"
         );
-        assert_eq!(snapshot(&pool, observed.session_id).await, changed);
+        assert_eq!(snapshot(&pool, observed.session_id()).await, changed);
         sqlx::query("UPDATE sessions SET hosted_execution = $2, discord_token_hash = $3, active_dispatch_id = NULL, returned_hosted_execution = NULL WHERE id = $1")
-            .bind(observed.session_id).bind(wire(&r)).bind(&r.owner.discord_token_hash).execute(&pool).await.unwrap();
+            .bind(observed.session_id()).bind(wire(&r)).bind(&r.owner.discord_token_hash).execute(&pool).await.unwrap();
     }
     pool.close().await;
     db.drop().await;
@@ -241,7 +233,7 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     let (db, pool, observed, r) = setup().await;
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE id = $1")
-        .bind(observed.session_id)
+        .bind(observed.session_id())
         .bind(wire(
             &crate::db::dispatched_sessions::hosted_execution::tests::pending(
                 &r.owner,
@@ -266,9 +258,9 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     });
     wait_for_row_lock(&pool).await;
     tx.commit().await.unwrap();
-    let changed = snapshot(&pool, observed.session_id).await;
+    let changed = snapshot(&pool, observed.session_id()).await;
     assert_eq!(worker.await.unwrap().unwrap(), HostedCasOutcome::Stale);
-    assert_eq!(snapshot(&pool, observed.session_id).await, changed);
+    assert_eq!(snapshot(&pool, observed.session_id()).await, changed);
     pool.close().await;
     db.drop().await;
 }
@@ -289,7 +281,7 @@ async fn legacy_return_heartbeat_is_measured_after_row_lock_pg() {
     let (db, pool, observed, r) = setup().await;
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SELECT id FROM sessions WHERE id = $1 FOR UPDATE")
-        .bind(observed.session_id)
+        .bind(observed.session_id())
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -314,7 +306,7 @@ async fn legacy_return_heartbeat_is_measured_after_row_lock_pg() {
     tx.commit().await.unwrap();
     assert_eq!(worker.await.unwrap().unwrap(), HostedCasOutcome::Written);
     let fresh: bool = sqlx::query_scalar("SELECT last_heartbeat >= $2 FROM sessions WHERE id = $1")
-        .bind(observed.session_id)
+        .bind(observed.session_id())
         .bind(released_after)
         .fetch_one(&pool)
         .await
