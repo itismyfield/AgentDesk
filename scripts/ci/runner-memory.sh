@@ -48,6 +48,10 @@ def locked():
         yield
 
 
+def mib(value):
+    return "unavailable" if value is None else f"{value / 1048576:.1f}"
+
+
 def read_number(path):
     try:
         value = path.read_text().strip()
@@ -183,6 +187,7 @@ def sample(phase=None):
     row.update(phase=phase, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
     with (STATE / "samples.jsonl").open("a") as stream:
         stream.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
 
 
 def upload(name):
@@ -193,7 +198,8 @@ def upload(name):
     run, job = next(scope.split(":")[1:] for scope in scopes if scope.startswith("Actions.Results:"))
     archive = io.BytesIO()
     with locked(), zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for item in COPIED:
+        # export.log carries the earlier results, so the last copy a lost runner left shows them.
+        for item in (*COPIED, "export.log"):
             bundle.write(STATE / item, item)
     body = archive.getvalue()
 
@@ -224,12 +230,19 @@ def export(phase):
                 return
             time.sleep(1)
         name = f"{os.environ.get('RUNNER_MEMORY_EXPORT_NAME', 'runner-memory')}-at-{minutes:g}m"
+        outcome = "exported " + name
         try:
             upload(name)
-            print(f"runner memory: exported {name}", flush=True)
         except Exception as error:
             # Only the error type and HTTP status are logged; messages can carry a signed URL.
-            print(f"runner memory: export {name} failed ({type(error).__name__} {getattr(error, 'code', '')})", flush=True)
+            outcome = f"failed {name} ({type(error).__name__} {getattr(error, 'code', '')})"
+        try:
+            with locked():
+                latest = json.loads((STATE / "samples.jsonl").read_text().splitlines()[-1])
+        except (OSError, ValueError, IndexError):
+            latest = {}
+        print(f"runner memory: {outcome} scheduled={minutes:g} elapsed={(time.monotonic() - started) / 60:.1f}"
+              f" host_used={mib(latest.get('host_used_bytes'))} swap_used={mib(latest.get('swap_used_bytes'))}", flush=True)
 
 
 def detach(command, log_name):
@@ -286,8 +299,6 @@ def finish():
             "lifetime_cgroup_peak_bytes": maximum("cgroup_peak_bytes"), "phases": phases,
         }
         write_json(STATE / "summary.json", summary)
-    def mib(value):
-        return "unavailable" if value is None else f"{value / 1048576:.1f}"
     limit = "unlimited" if summary["cgroup_limit_state"] == "unlimited" else mib(summary["cgroup_limit_bytes"]) + " MiB"
     lines = ["### Runner memory observation", "", f"Status: {summary['status']}; sampler: {sampler_status}; samples: {len(rows)}.",
              f"Runner environment: {scope['runner_environment'] or 'unavailable'}."
@@ -325,9 +336,12 @@ def main():
             if (STATE / "metadata.json").exists():
                 raise ValueError("already_started")
             write_json(STATE / "phase.json", {"phase": IDLE})
+            first = sample()
             write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count(),
-                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS"), **runner_scope()})
-            sample()
+                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS"), **runner_scope(),
+                                                "image_os": os.environ.get("ImageOS"), "image_version": os.environ.get("ImageVersion"),
+                                                "runner_name": os.environ.get("RUNNER_NAME"),
+                                                "swap_total_bytes_at_start": first["swap_total_bytes"]})
         detach(["_sample"], "sampler.log")
     elif COMMAND == "_sample":
         status = "error"

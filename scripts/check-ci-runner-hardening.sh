@@ -823,7 +823,7 @@ targets = PrNextestWiring.targets(ARGV.fetch(2)).merge({
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "8afa7413118bdcee7b2228ea3f5c99ca32e0769d50ff476accd37f466fdbd3f2",
+    "job_sha256" => "9fca840bff4131995e9c834a78280a86d36236e6780d80ca500eb59d36342085",
     "job_timeout_minutes" => 80,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {

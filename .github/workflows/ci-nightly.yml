@@ -781,7 +781,7 @@ jobs:
       RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
       RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "7"
       # A lost runner skips the always() upload, so the sampler uploads copies at these build-step minutes.
-      RUNNER_MEMORY_EXPORT_MINUTES: "15 45 55"
+      RUNNER_MEMORY_EXPORT_MINUTES: "15 30 45 50 55 58 60"
       RUNNER_MEMORY_EXPORT_NAME: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
     strategy:
       fail-fast: false
