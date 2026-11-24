@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -422,7 +423,36 @@ class GlobSafety(unittest.TestCase):
             self.assertFalse(any(r["fail"] for r in self.risks("struct Error;")))
 
 
+def split(low, high):
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "p").write_text(json.dumps(dict(base="", order=["LOW", "HIGH"], crates={"LOW": low, "HIGH": high})))
+        return vistool.load_partition(Path(tmp) / "p")
+
+
 class Partition(unittest.TestCase):
+    def test_deep_key_wins_over_its_ancestor_group(self):
+        keys = {"discord::out", "discord::out::deep", "config::a", "config::a::b"}
+        self.assertEqual([vistool.group_path(k) for k in ("discord::o::d", "c::a::b")], [("services", "discord", "o", "d"), ("c", "a", "b")])
+        # The longest key wins, by whole segments: a sibling named like the deep key stays where it was.
+        of = lambda path: vistool.group_of(tuple(path.split("::")), keys)
+        got = [of("config::a::b::c")] + [of("services::discord::" + t) for t in ("out::deep::x", "out::deep_x", "out_x::deep")]
+        self.assertEqual(got, ["config::a::b", "discord::out::deep", "discord::out", "discord::out_x"])
+        high = ["(root)", "app", "services", "services::web"]
+        cut = split(["core::util", "services::store"], high + ["core"])
+        low, top = vistool.Layout(MINI, cut, "LOW"), vistool.Layout(MINI, cut, "HIGH")
+        self.assertEqual((low.crate_of_file["src/core/util.rs"], low.crate_of_file["src/core.rs"]), ("LOW", "HIGH"))
+        self.assertEqual((low.side_of("src/core/util.rs", 1), low.leaves), ("x", ["core::util", "services::store"]))
+        # Once the ancestor is below too it goes to upper whole, the deep key inside it.
+        self.assertEqual(top.leaves, ["app", "core", "services::store", "services::web"])
+        both = vistool.Layout(MINI, split(["core", "core::util", "services::store"], high), "LOW")
+        self.assertEqual((both.leaves, both.crate_of_file), (Mini.get().leaves, Mini.get().crate_of_file))
+
+    def test_conflicting_keys_are_rejected(self):
+        for low, high, why in ((["core::util"], ["core::util"], "bad_partition: core::util in LOW and HIGH"),
+                               (["services::discord::outbound"], ["discord::outbound"], "is not a group key"),
+                               (["core"], ["core::util"], "under core of the earlier crate LOW")):
+            self.assertRaisesRegex(vistool.VisFail, why, split, low, high)
+
     def test_group_keys(self):
         self.assertEqual(vistool.group_of(("services", "discord")), "discord::(mod.rs)")
         self.assertEqual(vistool.group_of(("services", "discord", "inflight", "x")), "discord::inflight")
@@ -440,16 +470,24 @@ class Partition(unittest.TestCase):
 
     def test_manifests(self):
         text = '[package]\nname = "agentdesk"\n\n[workspace]\nmembers = ["crates/x"]\n\n[lib]\npath = "src/lib.rs"\n\n' \
-               '[[bin]]\nname = "agentdesk"\npath = "src/main.rs"\n\n[dependencies]\nx = { path = "crates/x" }\n'
+               '[[bin]]\nname = "agentdesk"\npath = "src/main.rs"\n\n[dependencies]\nx = { path = "crates/x" }\n\n' \
+               '[dev-dependencies]\nx = { path = "crates/x", features = ["test-support"] }\ntower = "0.5"\n'
         low = vistool.lower_manifest(text, "src/probe_lower_lib.rs")
         self.assertIn('name = "probe_lower"', low)
         self.assertNotIn("[[bin]]", low)
         self.assertIn('path = "src/probe_lower_lib.rs"', low)
         up = vistool.upper_manifest(text)
-        self.assertIn('probe_lower = { path = "../lower" }', up)
         self.assertIn('x = { path = "../lower/crates/x" }', up)
         self.assertIn("members = []", up)
         self.assertIn("[[bin]]", up)
+        low, up = tomllib.loads(low), tomllib.loads(up)
+        self.assertEqual((low["features"], low["dependencies"], "dev-dependencies" in low),
+                         ({"test-support": []}, {"x": {"path": "crates/x"}}, False))
+        self.assertEqual(low["target"]["cfg(any(unix, not(unix)))"]["dependencies"],
+                         {"x": {"path": "crates/x", "features": ["test-support"]}, "tower": "0.5"})
+        self.assertEqual(up["dependencies"]["probe_lower"], {"path": "../lower", "features": ["test-support"]})
+        kept = vistool.lower_manifest('[package]\nname = "a"\n\n[features]\ntest-support = ["dep:x"]\n', "l.rs")
+        self.assertEqual(tomllib.loads(kept)["features"], {"test-support": ["dep:x"]})
 
     def test_multiline_members_are_emptied(self):
         # VT1 review P2-4 (1): a wrapped `members = [...]` must not keep the members in upper.
@@ -489,6 +527,14 @@ class Probe(unittest.TestCase):
             self.assertIn("pub use probe_lower::services::store;",
                           (probe / "upper/src/services/mod.rs").read_text("utf-8"))
             self.assertEqual(rewired, ["src/lib.rs:core", "src/services/mod.rs:store"])
+            self.assertIn("[features]\ntest-support = []", (probe / "lower/Cargo.toml").read_text("utf-8"))
+            deep = vistool.Layout(repo, split(["core::util"], ["(root)", "app", "core", "services"]), "LOW")
+            for side in ("lower", "upper"):
+                vistool.extract_head(repo, probe / "deep" / side)
+            vistool.transform_lower(probe / "deep/lower", deep)
+            self.assertEqual(vistool.transform_upper(probe / "deep/upper", deep), ["src/core.rs:util"])
+            self.assertIn("pub mod util;", (probe / "deep/lower/src/core.rs").read_text("utf-8"))
+            self.assertIn("pub use probe_lower::core::util;", (probe / "deep/upper/src/core.rs").read_text("utf-8"))
             status = subprocess.run(git[:3] + ["status", "--porcelain", "--ignored=no", "--", "src", "Cargo.toml"],
                                     capture_output=True, text=True, check=True).stdout
             self.assertEqual(status, "")
@@ -770,6 +816,27 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual((repo / "src/app.rs").read_text(), app)
             self.assertNotIn("src/app.rs", {e["file"] for e in manifest["final_edits"]})
             self.assertEqual(manifest["residue"]["cut_residue"]["count"], 1, line)
+
+    def test_gated_item_behind_a_dev_dependency_is_widened(self):
+        # Lower builds with `test-support` on, so a gated item an upper test reads is a visibility edit.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git = fixture_repo(Path(tmp))
+            for rel, text in (("dd/Cargo.toml", '[package]\nname = "dd"\nversion = "0.1.0"\nedition = "2024"\n'),
+                              ("dd/src/lib.rs", "pub const SEVEN: u32 = 7;\n"),
+                              ("Cargo.toml", '\n[dev-dependencies]\ndd = { path = "dd" }\n'),
+                              ("src/core.rs", '\n#[cfg(any(test, feature = "test-support"))]\n'
+                                              "pub(crate) fn gated() -> u32 {\n    dd::SEVEN\n}\n"),
+                              ("src/app.rs", "\n#[cfg(test)]\nmod gated_tests {\n    #[test]\n    fn reads_gated() {\n"
+                                             "        assert_eq!(crate::core::gated(), 7);\n    }\n}\n")):
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                with open(repo / rel, "a") as f:
+                    f.write(text)
+            subprocess.run(git[:3] + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", "gated"], check=True)
+            ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
+                                                 apply=True, log=lambda *a, **k: None)
+            self.assertTrue(ok and " test_cfg=0 " in line, (line, manifest.get("fail")))
+            self.assertIn("pub fn gated() -> u32 {", (repo / "src/core.rs").read_text())
 
     def test_fixture_shadow_run(self):
         # Outside the repository on purpose: a throwaway fixture crate, not an agentdesk build.
