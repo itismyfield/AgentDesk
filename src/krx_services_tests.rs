@@ -12,23 +12,53 @@ mod cluster_intake_worker_replay_hold;
 #[path = "services/cluster/intake_router_hook/owner_record/event_tests.rs"]
 mod cluster_owner_record_event;
 
-/// A hook relay worker handoff is served before argument parsing: the worker's own error returns.
+/// A hook relay worker handoff is served before argument parsing: each worker's own error returns.
+/// Each handoff runs in a child of this test, so the env change never reaches the test process.
 #[test]
 fn run_from_args_serves_a_hook_relay_worker_handoff_before_parsing_arguments() {
-    use crate::config::TestEnvVarGuard as Guard;
-    use crate::services::claude_tui::hook_relay::FAILURE_MARKER_WORKER_ENV;
-    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    // A regression that reaches the server path must not find the real runtime root.
+    use crate::services::claude_tui::hook_relay::{
+        FAILURE_MARKER_WORKER_ENV, NON_WAIT_RELAY_WORKER_ENV,
+    };
+    const CELL: &str = "ADK_KRX_WORKER_HANDOFF_PROBE";
+    const TEST: &str = "krx_services_tests::run_from_args_serves_a_hook_relay_worker_handoff_before_parsing_arguments";
+    const WORKERS: [(&str, &str); 2] = [
+        (
+            FAILURE_MARKER_WORKER_ENV,
+            "parse hook relay failure marker handoff",
+        ),
+        (
+            NON_WAIT_RELAY_WORKER_ENV,
+            "parse non-wait hook relay handoff",
+        ),
+    ];
+    if let Some(cell) = std::env::var_os(CELL) {
+        let (worker, parse_error) = WORKERS
+            .iter()
+            .find(|(worker, _)| cell == *worker)
+            .expect("the cell names a worker env");
+        let error = crate::run_from_args().expect_err("an unreadable handoff fails in the worker");
+        let error = error.to_string();
+        assert!(error.starts_with(parse_error), "{worker}: {error}");
+        return;
+    }
+    // A regression that reaches the server path must not find the real runtime root or config.
     let root = tempfile::tempdir().unwrap();
-    let _root = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-    let _handoff = Guard::set_value_after_shared_test_env_lock(
-        FAILURE_MARKER_WORKER_ENV,
-        "not a handoff".as_ref(),
-    );
-    let error = crate::run_from_args().expect_err("an unreadable handoff fails in the worker");
-    let error = error.to_string();
-    assert!(
-        error.starts_with("parse hook relay failure marker handoff"),
-        "{error}"
-    );
+    for (worker, _) in WORKERS {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CELL, worker)
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .env("AGENTDESK_CONFIG", root.path().join("agentdesk.yaml"));
+        // Only this worker's env is set, so the error names the branch `run_from_args` took.
+        for (other, _) in WORKERS {
+            child.env_remove(other);
+        }
+        let output = child.env(worker, "not a handoff").output().unwrap();
+        assert!(output.status.success(), "{worker}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "{worker}: {output:?}"
+        );
+    }
 }
