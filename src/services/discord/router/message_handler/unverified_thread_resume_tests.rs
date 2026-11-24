@@ -4,10 +4,8 @@ use super::REASON;
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::claude::{fresh_notice, tui_session_launch::ResumePane};
 use crate::services::discord::prompt_builder::{DispatchProfile, load_channel_recent_context};
-use crate::services::discord::router::message_handler::intake_turn::session_preparation::{
-    Restore, restore,
-};
-use crate::services::platform::tmux::PaneLiveness::{self, DeadOrAbsent, Live};
+use crate::services::discord::router::message_handler::intake_turn::session_preparation as prep;
+use crate::services::platform::tmux::PaneLiveness::{self, DeadOrAbsent, Live, ProbeError};
 use crate::services::provider::ProviderKind::{self, Claude, Codex};
 use crate::services::session_host::surface_policy::VerifiedSurface;
 use crate::services::tmux_diagnostics::PaneLivenessOverrideGuard as Pane;
@@ -20,204 +18,116 @@ use serde_json::json;
 
 const NATIVE: &str = "8372aaaa-0000-4000-8000-000000000001";
 const TMUX: &str = "AgentDesk-claude-routine-process-8372";
+const PARENT: u64 = 8_372_100;
 
 /// `thread` as boot leaves a thread found under a late-adopt Claude TUI `parent`.
 pub(in crate::services::discord) fn thread_child(
     thread: u64,
     parent: u64,
 ) -> test_override::ChannelsGuard {
+    let channels = json!({"claude": {"id": parent.to_string(), "runtime": "tui"}});
+    let writer = json!({"channels": [parent], "late_adopt": true});
     let config: crate::config::Config = serde_json::from_value(json!({
-        "server": {},
-        "agents": [{"id": "c", "name": "C",
-            "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}],
-        "tui_o": {"writer": {"channels": [parent], "late_adopt": true},
-            "turn": {"channels": [parent]}}
+        "server": {}, "agents": [{"id": "c", "name": "C", "channels": channels}],
+        "tui_o": {"writer": writer, "turn": {"channels": [parent]}}
     }))
     .unwrap();
-    let pending = |_: &_, _| Ok(std::collections::BTreeMap::from([(parent, Adoption::Pending)]));
+    let pending = |_: &_, _| {
+        Ok(std::collections::BTreeMap::from([(
+            parent,
+            Adoption::Pending,
+        )]))
+    };
     let boot = BootChannels::validate(&config).unwrap();
     let boot = boot.seeded(&config, pending).unwrap();
-    let surface = serde_json::from_value(json!({
-        "id": thread.to_string(), "parent_id": parent.to_string(), "type": 11, "name": "t"
-    }))
-    .unwrap();
+    let ids = (thread.to_string(), parent.to_string());
+    let surface = json!({"id": ids.0, "parent_id": ids.1, "type": 11, "name": "t"});
+    let surface = serde_json::from_value(surface).unwrap();
     boot.reserve_boot_children(&[(thread, parent)]);
     let surface = VerifiedSurface::from_discord(&surface, ClaudeTui).unwrap();
     assert!(boot.resolve_child(thread, surface, false));
     test_override::force_boot(boot)
 }
 
-/// What the thread's durable files say about `NATIVE` before the turn.
-#[derive(Clone, Copy, Debug)]
-enum History {
-    Unbound,
-    Verified,
-    Reserved,
-    Unreadable,
+/// One way a turn differs from a person's reply to a routine's process session on a gone pane.
+enum Turn {
+    Reply,
+    By(ProviderKind),
+    Pane(Option<PaneLiveness>),
+    /// What the thread's durable files say about `NATIVE`.
+    History(&'static str),
+    Herdr,
+    NoThread,
 }
 
-fn write_history(root: &std::path::Path, channel: u64, parent: u64, history: History) {
+fn write_history(root: &std::path::Path, channel: u64, history: &str) -> std::path::PathBuf {
     let transcript = root.join(format!("{channel}.jsonl"));
     std::fs::write(&transcript, "{}\n").unwrap();
     let source = source_id_for(NATIVE, &transcript).unwrap();
-    let line = match history {
-        History::Unbound => return,
-        History::Reserved => {
-            let resume = json!([{"parent": parent, "tmux": TMUX, "source": source,
-                "offset": 0, "sha256": ""}]);
-            let dir = root.join("runtime/claude_thread_resumes");
-            std::fs::create_dir_all(&dir).unwrap();
-            return std::fs::write(dir.join(format!("{channel}.json")), resume.to_string())
-                .unwrap();
-        }
-        History::Unreadable => "not a binding record".to_string(),
-        History::Verified => {
-            let at = chrono::Utc::now();
-            json!({"seq": 1, "channel_id": channel, "provider": "claude", "tmux_session": TMUX,
-                "execution_nonce": "n", "old": null, "new": {"source": source},
-                "cause": "same_session_verified", "parent_hint": null, "committed_at": at,
-                "evidence": {"hook_event": "UserPromptSubmit", "received_at": at},
-                "verified": true})
-            .to_string()
-        }
+    let evidence = json!({"hook_event": "UserPromptSubmit", "received_at": chrono::Utc::now()});
+    let verified = json!({"seq": 1, "channel_id": channel, "provider": "claude",
+        "tmux_session": TMUX, "execution_nonce": "n", "old": null, "new": {"source": source},
+        "cause": "same_session_verified", "parent_hint": null, "evidence": evidence,
+        "committed_at": chrono::Utc::now(), "verified": true});
+    let resume =
+        json!({"parent": PARENT, "tmux": TMUX, "source": source, "offset": 0, "sha256": ""});
+    let (dir, file, body) = match history {
+        "verified" => (p5::BINDING_EVENTS_DIR, "log", verified),
+        "unreadable" => (p5::BINDING_EVENTS_DIR, "log", json!("not a binding record")),
+        "reserved" => ("runtime/claude_thread_resumes", "json", json!([resume])),
+        _ => return transcript,
     };
-    let dir = root.join(p5::BINDING_EVENTS_DIR);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(format!("{channel}.log")), line + "\n").unwrap();
+    std::fs::create_dir_all(root.join(dir)).unwrap();
+    let path = root.join(dir).join(format!("{channel}.{file}"));
+    std::fs::write(path, format!("{body}\n")).unwrap();
+    transcript
 }
 
-// Only a Claude turn headed for a cold pane in a reserved thread, whose stored session nothing
+// Only a Claude turn headed for a gone pane in a reserved thread, whose stored session nothing
 // verified, is started fresh; it then carries recent messages and is no longer a refused resume.
 #[tokio::test]
 async fn unverified_thread_cold_resume_starts_fresh() {
-    const PARENT: u64 = 8_372_100;
-    use History::*;
-    let cases: [(
-        &str,
-        ProviderKind,
-        Option<PaneLiveness>,
-        History,
-        bool,
-        bool,
-        bool,
-    ); 9] = [
-        (
-            "process session left by a routine",
-            Claude,
-            Some(DeadOrAbsent),
-            Unbound,
-            true,
-            false,
-            true,
-        ),
-        (
-            "input joining a live pane",
-            Claude,
-            Some(Live),
-            Unbound,
-            true,
-            false,
-            false,
-        ),
-        (
-            "pane that could not be read",
-            Claude,
-            Some(PaneLiveness::ProbeError),
-            Unbound,
-            true,
-            false,
-            false,
-        ),
-        (
-            "Codex turn in a Claude thread",
-            Codex,
-            Some(DeadOrAbsent),
-            Unbound,
-            true,
-            false,
-            false,
-        ),
-        (
-            "hook-verified session",
-            Claude,
-            Some(DeadOrAbsent),
-            Verified,
-            true,
-            false,
-            false,
-        ),
-        (
-            "session with a resume frontier",
-            Claude,
-            Some(DeadOrAbsent),
-            Reserved,
-            true,
-            false,
-            false,
-        ),
-        (
-            "unreadable binding history",
-            Claude,
-            Some(DeadOrAbsent),
-            Unreadable,
-            true,
-            false,
-            false,
-        ),
-        (
-            "turn without a pane",
-            Claude,
-            None,
-            Unbound,
-            true,
-            false,
-            false,
-        ),
-        (
-            "channel that is no reserved thread",
-            Claude,
-            Some(DeadOrAbsent),
-            Unbound,
-            false,
-            false,
-            false,
-        ),
+    let cases = [
+        ("reply to a routine's process session", Turn::Reply),
+        ("input joining a live pane", Turn::Pane(Some(Live))),
+        ("pane that could not be read", Turn::Pane(Some(ProbeError))),
+        ("turn without a pane", Turn::Pane(None)),
+        ("Codex turn in a Claude thread", Turn::By(Codex)),
+        ("hook-verified session", Turn::History("verified")),
+        ("session with a resume frontier", Turn::History("reserved")),
+        ("unreadable binding history", Turn::History("unreadable")),
+        ("Herdr-hosted thread", Turn::Herdr),
+        ("channel that is no reserved thread", Turn::NoThread),
     ];
-    let herdr = (
-        "Herdr-hosted thread",
-        Claude,
-        Some(DeadOrAbsent),
-        Unbound,
-        true,
-        true,
-        false,
-    );
     let root = crate::config::TestRuntimeRootGuard::new();
     p5::set_test_root(Some(root.path()));
     let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
-    for (index, (name, provider, pane, history, child, herdr, fresh)) in
-        cases.into_iter().chain([herdr]).enumerate()
-    {
-        let id = 8_372_200 + index as u64;
+    for (index, (name, turn)) in cases.into_iter().enumerate() {
+        let (fresh, id) = (matches!(turn, Turn::Reply), 8_372_200 + index as u64);
+        let (mut provider, mut pane, mut history) = (Claude, Some(DeadOrAbsent), "");
+        let (child, herdr) = (!matches!(turn, Turn::NoThread), matches!(turn, Turn::Herdr));
+        match turn {
+            Turn::By(other) => provider = other,
+            Turn::Pane(other) => pane = other,
+            Turn::History(other) => history = other,
+            Turn::Reply | Turn::Herdr | Turn::NoThread => {}
+        }
         let channel = ChannelId::new(id);
         let _policy = child.then(|| thread_child(id, PARENT));
-        let _hosts = herdr
-            .then(|| crate::config::session_hosts::force_for_test(Some("node"), &[(id, "node")]));
+        let hosts = || crate::config::session_hosts::force_for_test(Some("node"), &[(id, "node")]);
+        let _hosts = herdr.then(hosts);
         let _pane = pane.map(|liveness| Pane::set(TMUX, liveness));
-        write_history(root.path(), id, PARENT, history);
+        let transcript = write_history(root.path(), id, history);
         assert_eq!(claude_thread::launch_policy(id).is_some(), child, "{name}");
         crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, "t").await;
-        shared
-            .core
-            .lock()
-            .await
-            .sessions
-            .get_mut(&channel)
-            .unwrap()
-            .session_id = Some(NATIVE.into());
-        let (mut session, mut memento, mut reason) = (Some(NATIVE.to_string()), true, "before");
-        for _again in 0..2 {
-            let state = Restore {
+        let stored = || Some(NATIVE.to_string());
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&channel).unwrap().session_id = stored();
+        drop(core);
+        let (mut session, mut memento, mut reason) = (stored(), true, "before");
+        // The second preparation is the same person sending again.
+        for _send in 0..2 {
+            let state = prep::Restore {
                 session_id: &mut session,
                 memento_context_loaded: &mut memento,
                 reason: &mut reason,
@@ -228,28 +138,24 @@ async fn unverified_thread_cold_resume_starts_fresh() {
                 session_key: None,
                 tmux: pane.map(|_| TMUX),
             };
-            restore(&shared, &provider, channel, state).await;
+            prep::restore(&shared, &provider, channel, state).await;
         }
         let kept = (!fresh).then_some(NATIVE);
+        let code = if fresh { REASON } else { "before" };
         assert_eq!(
-            (session.as_deref(), reason),
-            (kept, if fresh { REASON } else { "before" }),
+            (session.as_deref(), reason, memento),
+            (kept, code, !fresh),
             "{name}"
         );
         let cached = shared.core.lock().await.sessions[&channel]
             .session_id
             .clone();
-        assert_eq!((cached.as_deref(), memento), (kept, !fresh), "{name}");
+        assert_eq!(cached.as_deref(), kept, "{name}");
+        let profile = DispatchProfile::Full;
+        let selected = session.as_deref();
+        let none = None::<&()>;
         let recent = load_channel_recent_context(
-            None,
-            channel,
-            session.as_deref(),
-            false,
-            false,
-            false,
-            DispatchProfile::Full,
-            None,
-            None::<&()>,
+            None, channel, selected, false, false, false, profile, None, none,
         );
         let gate = if fresh {
             "postgres_unavailable;pairs=0"
@@ -258,25 +164,14 @@ async fn unverified_thread_cold_resume_starts_fresh() {
         };
         assert_eq!(recent.await.unwrap().audit_reason, gate, "{name}");
         if fresh {
-            let launch = |native: Option<&str>| {
-                let path = root.path().join(format!("{id}.jsonl"));
-                native.map_or(Ok(()), |native| {
-                    claude_thread::reserve_resume(id, TMUX, native, &path, ResumePane::Cold)
-                })
-            };
-            let refused = launch(Some(NATIVE)).unwrap_err();
-            assert!(refused.contains("has no verified binding"), "{refused}");
-            assert_eq!(launch(session.as_deref()), Ok(()));
-            assert_eq!(
-                fresh_notice::posted_for_tests(NATIVE),
-                1,
-                "one notice per session"
-            );
+            let cold = ResumePane::Cold;
+            let refused = claude_thread::reserve_resume(id, TMUX, NATIVE, &transcript, cold);
+            assert!(refused.unwrap_err().contains("has no verified binding"));
         }
+        let notices = fresh_notice::posted_for_tests(NATIVE);
+        assert_eq!(
+            notices, 1,
+            "one notice for the replaced session, none for {name}"
+        );
     }
-    assert_eq!(
-        fresh_notice::posted_for_tests(NATIVE),
-        1,
-        "kept sessions post no notice"
-    );
 }
