@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { examples, validateAvatar } from "open-bot-avatar";
-import { AVATAR_PALETTE, AVATAR_SHAPES, avatarRoster, botAvatarFor, botAvatarStill } from "./botAvatar";
+import { AVATAR_PALETTE, AVATAR_SHAPES, avatarRoster, botAvatarBlinking, botAvatarFor, botAvatarStill } from "./botAvatar";
 import { GALLERY_AVATARS } from "./galleryAvatars";
 
 const lookOf = (avatar: ReturnType<typeof botAvatarFor>) => `${avatar.definition.id}|${avatar.color}`;
@@ -42,5 +42,21 @@ describe("bot avatars", () => {
     expect(decodeURIComponent(url)).toContain('fill="#2563eb"');
     expect(decodeURIComponent(url)).toContain("#ffffff");
     expect(botAvatarStill(avatar)).toBe(url);
+  });
+
+  it("renders a cached CSS-blinking SVG with staggered per-agent timing and reduced-motion guard", () => {
+    const avatar = { definition: AVATAR_SHAPES[0], color: "#2563eb", eyeColor: "#ffffff" };
+    const urlA = botAvatarBlinking(avatar, "agent-alpha");
+    const urlB = botAvatarBlinking(avatar, "agent-beta");
+    expect(urlA.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
+    expect(botAvatarBlinking(avatar, "agent-alpha")).toBe(urlA);
+    expect(urlA).not.toBe(urlB);
+
+    const svgA = decodeURIComponent(urlA);
+    expect(svgA).toContain('fill="#2563eb"');
+    expect(svgA).toContain('fill="#ffffff"');
+    expect(svgA).toContain("@keyframes oba-blink");
+    expect(svgA).toContain("prefers-reduced-motion:reduce");
+    expect(svgA).toContain('class="oba-eye"');
   });
 });
