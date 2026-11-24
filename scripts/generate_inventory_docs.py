@@ -11,18 +11,20 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 from pathlib import Path
 
 try:
     from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
     from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+    from rust_lex import COMMENT, LITERAL, blank_segments
 except ModuleNotFoundError:  # loaded by path from another cwd
     sys.path.append(str(Path(__file__).resolve().parent))
     from rust_cfg import attribute_conditions, cfg_conditions_gate, demote_uncomposed_feature_mounts
     from rust_cfg import feature_gates_under_negated_mounts as rust_cfg_feature_gates_under_negated_mounts
     from rust_cfg import cfg_requires_test as _shared_cfg_requires_test
+    from rust_lex import COMMENT, LITERAL, blank_segments
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -68,7 +70,8 @@ GIANT_FILE_ISSUE_RATCHET_WRITER = (
 # The predicate stays inside a single attribute (`[^]]`), and only further
 # attributes or whitespace may sit between the cfg and the `mod` keyword — so an
 # inline `#[cfg(test)]` guarding a function does not spuriously bind to a later
-# `mod`.
+# `mod`. Callers match on comment- and literal-blanked code (`_active_views`),
+# so a comment there counts as whitespace and a commented-out cfg as nothing.
 _CFG_MOD_RE = re.compile(
     r"#\[cfg\((?P<predicate>[^]]*?)\)\]"
     r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
@@ -101,6 +104,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
+    "ke_routines_tests.rs": "Test-only host that declares KE routine and scheduled-message tests calling root-crate items.",
     "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
     "krx_config_tests.rs": "Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate.",
@@ -233,10 +237,13 @@ def test_line_numbers(text: str) -> set[int]:
 
     total = line_count(text)
     test_lines: set[int] = set()
-    for match in _CFG_MOD_RE.finditer(text):
-        if not cfg_requires_test(match.group("predicate")):
+    if "#[cfg(" not in text or "mod" not in text:
+        return test_lines  # `_CFG_MOD_RE` cannot match the blanked view either
+    code, view = _active_views(text)
+    for match in _CFG_MOD_RE.finditer(code):
+        if not cfg_requires_test(view[match.start("predicate") : match.end("predicate")]):
             continue
-        brace = text.rindex("{", match.start(), match.end())
+        brace = code.rindex("{", match.start(), match.end())
         try:
             _body, end = scan_balanced(text, brace, "{", "}")
         except ParseError:
@@ -698,8 +705,9 @@ def resolve_function_source(
 # attributes in any order. The test-only module graph uses this for `#[cfg]`,
 # `#[path]`, and inline test-module context; the older `_MOD_DECL_RE` name is
 # kept as an alias for callers/tests that intentionally inspect this parser.
+# Attributes start at `#`, so a whitespace run (blanked prose) is not rescanned at every offset.
 _MOD_DECL_RE = re.compile(
-    r"(?P<attrs>(?:\s*#\[[^\]]*\]\s*)*)"
+    r"(?P<attrs>(?:#\[[^\]]*\]\s*)*)"
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
     r"(?P<kind>[{;])",
@@ -716,8 +724,22 @@ class _InlineModuleContext:
     conditions: tuple[str, ...] = ()
 
 
-def _path_attr(attrs: str) -> str | None:
-    match = _PATH_ATTR_RE.search(attrs)
+def _active_views(text: str) -> tuple[str, str]:
+    """(comments and literals blanked, comments blanked) at ``text``'s offsets.
+
+    Matching on the first keeps commented-out or quoted attributes inactive;
+    reading the same span from the second keeps the real literals.
+    """
+    return blank_segments(text, {COMMENT, LITERAL}, {COMMENT})
+
+
+def _active_attrs(pattern: re.Pattern[str], code: str, view: str) -> Iterator[re.Match[str]]:
+    """Matches of ``pattern`` in ``view`` that start at real code in ``code``."""
+    return (match for match in pattern.finditer(view) if code[match.start()] == "#")
+
+
+def _path_attr(code: str, view: str) -> str | None:
+    match = next(_active_attrs(_PATH_ATTR_RE, code, view), None)
     return match.group("path") if match else None
 
 
@@ -751,10 +773,14 @@ def _module_file_declarations(
 ) -> list[ModuleFileDeclaration]:
     declarations: list[ModuleFileDeclaration] = []
     contexts: list[_InlineModuleContext] = []
-    for match in _MOD_DECL_RE.finditer(text):
+    if "mod" not in text:
+        return declarations
+    code, view = _active_views(text)
+    for match in _MOD_DECL_RE.finditer(code):
         start = match.start()
         contexts = [context for context in contexts if start < context.end]
-        attrs = match.group("attrs") or ""
+        attrs_code = match.group("attrs") or ""
+        attrs = view[match.start("attrs") : match.end("attrs")] if attrs_code else ""
         conditions = (contexts[-1].conditions if contexts else ()) + attribute_conditions(attrs)
         gate = cfg_conditions_gate(conditions)
         requires_test = parent_requires_test or gate is not None
@@ -785,7 +811,7 @@ def _module_file_declarations(
                     parent,
                     name,
                     base=base,
-                    path_attr=_path_attr(attrs),
+                    path_attr=_path_attr(attrs_code, attrs),
                 ),
                 requires_test=requires_test,
                 conditions=conditions,

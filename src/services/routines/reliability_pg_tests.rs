@@ -6,14 +6,14 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use super::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
-use super::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
-use super::{
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
+use crate::services::routines::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
+use crate::services::routines::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
+use crate::services::routines::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, after_startup_grace,
     run_due_tick, runtime::RoutineRunOutcome,
 };
-use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 
 fn store(pool: &PgPool) -> RoutineStore {
     RoutineStore::new_with_timezone_and_checkpoint_limit(
@@ -722,4 +722,5 @@ async fn latest_runs_return_each_routines_newest_run_pg() {
     db.drop().await;
 }
 
+#[path = "reliability_pg_tests/run_diagnostics_tests.rs"]
 mod run_diagnostics_tests;

@@ -7,7 +7,7 @@ pub(in crate::services) use registry::RegistryState;
 
 pub(in crate::services) mod registry {
     use self::fences::commit_under_delivery_fence;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) use self::fences::set_delivery_fence_permitted_hook_for_tests;
     pub(in crate::services) use self::fences::{TerminalDeliveryFence, WatcherIdentityFence};
     use super::lease::DeliveryLeaseCell;
@@ -102,7 +102,7 @@ pub(in crate::services) mod registry {
                 && record.cell.watcher_reservation_matches(expected_cancel)
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn paired_reservation_matches_for_test(
             &self,
             tmux_session_name: &str,
@@ -112,7 +112,7 @@ pub(in crate::services) mod registry {
             self.watcher_reservation_matches(tmux_session_name, owner_channel_id, expected_cancel)
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn replace_paired_cancel_for_test(
             &self,
             tmux_session_name: &str,
@@ -124,7 +124,7 @@ pub(in crate::services) mod registry {
                 .cancel = cancel;
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn remove_pair_without_payload_for_test(
             &self,
             observers: RegistryObservers,
@@ -135,7 +135,7 @@ pub(in crate::services) mod registry {
                 .reservation
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn clear_reservation_for_test(
             &self,
             guard: &TmuxWatcherRegistryGuard,
@@ -576,7 +576,7 @@ pub(in crate::services) mod registry {
     }
     pub(in crate::services) use bindings::{AuthoritativeSessionBinding, TmuxWatcherBinding};
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl RegistryState {
         pub(in crate::services) fn has_restored_owner_for_tests(&self, name: &str) -> bool {
             self.restored_owner_by_tmux_session.contains_key(name)
@@ -730,7 +730,7 @@ pub(in crate::services) mod registry {
                 );
                 return None;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             run_delivery_fence_permitted_hook_for_tests(self.site);
             Some(commit())
         })
@@ -747,15 +747,15 @@ pub(in crate::services) mod registry {
             }
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         type DeliveryFencePermittedHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         static DELIVERY_FENCE_PERMITTED_HOOK: std::sync::LazyLock<
             std::sync::Mutex<Option<DeliveryFencePermittedHook>>,
         > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fn run_delivery_fence_permitted_hook_for_tests(site: &'static str) {
             let hook = DELIVERY_FENCE_PERMITTED_HOOK
                 .lock()
@@ -766,10 +766,10 @@ pub(in crate::services) mod registry {
             }
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) struct DeliveryFencePermittedHookGuard;
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         impl Drop for DeliveryFencePermittedHookGuard {
             fn drop(&mut self) {
                 *DELIVERY_FENCE_PERMITTED_HOOK
@@ -778,7 +778,7 @@ pub(in crate::services) mod registry {
             }
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(in crate::services) fn set_delivery_fence_permitted_hook_for_tests(
             hook: DeliveryFencePermittedHook,
         ) -> DeliveryFencePermittedHookGuard {
@@ -803,7 +803,7 @@ pub(in crate::services) struct RelayFrontierToken {
     pub(in crate::services) reset_incarnation: u64,
     pub(in crate::services) committed_offset: u64,
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FrontierPublication {
     Published,
@@ -906,7 +906,7 @@ impl FrontierResetState {
         reset
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(in crate::services) fn publish_confirmed_for_tests(
         &mut self,
         end: u64,
@@ -948,7 +948,7 @@ impl FrontierResetState {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(in crate::services) fn frontier_tuple_for_tests(
         &self,
         confirmed_end_offset: &AtomicU64,
@@ -961,7 +961,7 @@ impl FrontierResetState {
             self.certificate.is_some(),
         )
     }
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(in crate::services) fn certificate_for_tests(&self) -> Option<SourceCertificate> {
         self.certificate.clone()
     }

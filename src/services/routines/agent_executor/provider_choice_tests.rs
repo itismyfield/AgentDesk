@@ -1,12 +1,17 @@
 //! A routine's pinned provider and model through the real start: the chosen channel, never
 //! another provider's, and a mid-run PATCH that waits for the next claim.
-use super::owner_input_tests::{OWNER, settled_generation};
-use super::*;
+use super::agent_executor_owner_input::settled_generation;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
+use crate::services::routines::agent_executor::owner_hook_tests::OWNER;
+use crate::services::routines::agent_executor::*;
 use crate::services::routines::provider_choice::ProviderChoice;
+use crate::services::routines::runtime::RoutineRunOutcome;
+use crate::services::routines::store::RoutineStore;
 use crate::services::routines::store::{NewRoutine, RoutinePatch};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// Agents as (id, provider, primary, cc, cdx) channel columns.
 type Agent<'a> = (

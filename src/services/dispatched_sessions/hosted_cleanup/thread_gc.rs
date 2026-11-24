@@ -35,7 +35,7 @@ async fn probe_locally_owned_tmux(key: String) -> SessionPresence {
     .unwrap_or(SessionPresence::ProbeFailed)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn gc_stale_thread_sessions_with_probe_pg<F, Fut>(
     pool: &PgPool,
     probe: F,

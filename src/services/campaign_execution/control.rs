@@ -968,6 +968,6 @@ pub(super) fn observe_action(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "control_tests.rs"]
 pub(crate) mod tests;

@@ -78,6 +78,11 @@ class LineClassificationTests(unittest.TestCase):
             """)
         self.assertEqual((result.comment_lines, result.code_lines), (0, 1))
 
+    def test_test_support_gated_module_lines_leave_the_measurement(self) -> None:
+        for cfg, lines in (('any(test, feature = "test-support")', (0, 1)), ('not(any(test, feature = "test-support"))', (1, 5))):
+            result = measure(f"fn a() {{}}\n#[cfg({cfg})]\nmod tests {{\n    // prose\n    fn t() {{}}\n}}\n")
+            self.assertEqual((result.comment_lines, result.code_lines), lines, cfg)
+
     def test_a_file_that_is_only_a_cfg_test_module_measures_nothing(self) -> None:
         result = measure("""\
             #[cfg(test)]

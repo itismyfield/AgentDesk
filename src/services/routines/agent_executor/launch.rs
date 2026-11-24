@@ -8,8 +8,8 @@ impl RoutineAgentExecutor {
         store: &RoutineStore,
         start: start_deferral::PendingAgentStart<'_>,
     ) -> Result<StartedAgentTurn> {
-        #[cfg(test)]
-        if let Some(result) = super::owner_input_tests::inject(self, store, &start).await {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(result) = super::owner_hook_tests::scripted_start(self, store, &start).await {
             return result;
         }
         let start_deferral::PendingAgentStart {

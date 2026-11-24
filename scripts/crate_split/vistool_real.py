@@ -63,8 +63,8 @@ class RealLayout(vt.Layout):
             module = min(tuple(x for x in m if x != "crate") for m in modules)
             self.module_of[rel] = module
             self.file_of.setdefault(module, rel)
-            chains = inv.file_cfgs.get(path, set())
-            if chains and all(any(vt.rts._cfg_requires_test(p) for p in chain) for chain in chains):
+            chains = inv.file_cfg_texts.get(path, set())
+            if chains and all(any(vt.rts._cfg_requires_test_text(cfg, strict=True) for cfg in chain) for chain in chains):
                 self.test_only.add(rel)
         self.file_of[()] = self.root_file
         self.module_of[self.root_file] = ()

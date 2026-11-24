@@ -269,6 +269,17 @@ class WriterGateVerdictTests(TempRoot):
             self.assertFalse(ok, "a formerly test-only helper must enter the writer scan")
             self.assertIn("pin-only (no longer skipped): src/helper.rs", message)
 
+    def test_a_test_support_gated_helper_stays_skipped_and_its_negation_does_not(self) -> None:
+        pinned, gate = ["src/helper.rs"], 'any(test, feature = "test-support")'
+        for cfg in (gate, f"all({gate}, unix)"):
+            write(self.root, "src/main.rs", f"mod prod;\n#[cfg({cfg})]\nmod helper;\nfn main() {{}}\n")
+            self.assertTrue(all(ok for ok, _ in self.verdicts(pinned)), cfg)
+        for cfg in (f"not({gate})", 'any(test, feature = "other")'):
+            write(self.root, "src/main.rs", f"mod prod;\n#[cfg({cfg})]\nmod helper;\nfn main() {{}}\n")
+            for ok, message in self.verdicts(pinned):
+                self.assertFalse(ok, cfg)
+                self.assertIn("pin-only (no longer skipped): src/helper.rs", message)
+
 
 class SyncWriterTests(TempRoot):
     def setUp(self) -> None:
