@@ -1,15 +1,18 @@
 import { Inbox, RefreshCw, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Campaign } from "../../api/campaigns";
+import { bulkKanbanAction } from "../../api/kanban";
 import { useKanban } from "../../contexts/KanbanContext";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import { Button } from "../../kit/free/button-clean";
+import { Checkbox } from "../../kit/free/checkbox-clean";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { Select } from "../../kit/free/select-clean";
 import { Loading, Skeleton } from "../../kit/free/skeleton-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import type { KanbanCard, UiLanguage } from "../../types";
 import { labelForStatus } from "../agent-manager/kanban-utils";
+import { Cap, Num, Well } from "../common/KitPrimitives";
 import { DrawerDockContext } from "../common/overlay/DrawerDock";
 import { WidgetState } from "../common/WidgetState";
 import type { Tr } from "./campaignPresentation";
@@ -26,7 +29,9 @@ const SORTS: Array<[QueueSort, [string, string]]> = [
   ["oldest", ["오래된 순", "Oldest first"]],
   ["number", ["이슈 번호순", "By issue number"]],
 ];
-/** Open cards no campaign holds yet: hand them to ready, or put them into a campaign. */
+const BULK_TARGETS: readonly string[] = ["ready", "backlog", "in_progress", "done"];
+
+/** Open cards no campaign holds yet: full-width list until a card is opened, plus multi-select bulk status transitions. */
 export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoaded, campaignsError, onRetryCampaigns, heldIssueUrls, serverHoldsIncomplete, selectedCardId, onSelectCard, onCampaignSaved }: {
   language: string; tr: Tr; campaigns: Campaign[]; campaignsLoaded: boolean; campaignsError: string | null; onRetryCampaigns: () => void;
   /** Issue links server campaigns hold; incomplete when a server campaign could not be read. */
@@ -42,6 +47,11 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
   const [needsAssignee, setNeedsAssignee] = useState<KanbanCard | null>(null);
   const [busyCard, setBusyCard] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [bulkTarget, setBulkTarget] = useState<string>("ready");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+
   const agents = useMemo(() => new Map(allAgents.map((agent) => [agent.id, agent])), [allAgents]);
   const queued = useMemo(() => queueCards(kanbanCards, campaigns, heldIssueUrls), [kanbanCards, campaigns, heldIssueUrls]);
   const shown = useMemo(() => filterQueueCards(queued, filters), [queued, filters]);
@@ -55,9 +65,58 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
     return next;
   });
 
-  // Wide viewports keep the card detail docked beside the list; phones and tablets open it as a bottom sheet.
+  const activeChecked = useMemo(() => shown.filter((card) => checkedIds.has(card.id)).map((card) => card.id), [shown, checkedIds]);
+  const allShownChecked = shown.length > 0 && activeChecked.length === shown.length;
+  const someShownChecked = activeChecked.length > 0 && !allShownChecked;
+
+  const toggleCardCheck = (id: string, nextChecked: boolean) => {
+    setBulkNotice(null);
+    setCheckedIds((current) => {
+      const next = new Set(current);
+      if (nextChecked) next.add(id); else next.delete(id);
+      return next;
+    });
+  };
+  const toggleAllShown = (nextChecked: boolean) => {
+    setBulkNotice(null);
+    setCheckedIds((current) => {
+      const next = new Set(current);
+      for (const card of shown) {
+        if (nextChecked) next.add(card.id); else next.delete(card.id);
+      }
+      return next;
+    });
+  };
+
+  const runBulkTransition = async () => {
+    if (!activeChecked.length || bulkBusy) return;
+    setBulkBusy(true); setError(null); setBulkNotice(null);
+    try {
+      const { results } = await bulkKanbanAction("transition", activeChecked, bulkTarget);
+      const succeeded = new Set(results.filter((r) => r.ok).map((r) => r.id));
+      const failed = results.filter((r) => !r.ok);
+      setCheckedIds((current) => {
+        const next = new Set(current);
+        for (const id of succeeded) next.delete(id);
+        return next;
+      });
+      await reloadKanbanCards();
+      if (failed.length > 0) {
+        setError(tr(`${failed.length}장 전이 실패: ${failed[0].error ?? "오류"}`, `${failed.length} failed to transition: ${failed[0].error ?? "error"}`));
+      } else {
+        setBulkNotice(tr(`${succeeded.size}장을 '${labelForStatus(bulkTarget, tr)}' 상태로 전이했어요.`, `Transitioned ${succeeded.size} cards to ${labelForStatus(bulkTarget, tr)}.`));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : tr("일괄 상태 전이에 실패했습니다.", "Bulk transition failed."));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  // Wide viewports dock the card detail beside the list ONLY while a card is selected so the queue list gets 100% width otherwise.
   const detailDock = useDetailDock();
   const { dock, id: dockId } = detailDock;
+  const hasSelection = Boolean(selectedCardId);
 
   const moveToReady = async (card: KanbanCard, assignee: string | null) => {
     setBusyCard(card.id); setError(null);
@@ -75,7 +134,7 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
   const loading = kanbanCardsState === "idle" || kanbanCardsState === "loading" || (!campaignsLoaded && !campaignsError);
   const refreshLabel = tr("새로고침", "Refresh");
   const repoName = (repo: string) => repo ? repo.split("/").pop() ?? repo : tr("저장소 없음", "No repository");
-  return <div ref={detailDock.root} className="@container/tasks grid min-w-0 gap-3" style={detailDock.rootStyle}>
+  return <div ref={detailDock.root} className="@container/tasks grid min-w-0 gap-3" style={hasSelection ? detailDock.rootStyle : undefined}>
     {/* Search and refresh share the first row, the three filters the second; a wide list puts all on one row. */}
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 @3xl/tasks:grid-cols-[minmax(0,1fr)_repeat(3,9rem)_auto]">
       <TextField type="search" value={filters.query} onChange={(event) => patch({ query: event.target.value })}
@@ -94,9 +153,44 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
           options={SORTS.map(([key, label]) => ({ value: key, label: tr(...label) }))} />
       </div>
     </div>
-    <p role="status" className="text-xs text-[var(--fg-muted)]">{loading ? tr("카드를 불러오는 중…", "Loading cards…")
-      : shown.length === queued.length ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
-        : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+      <p role="status" className="m-0 text-xs text-[var(--fg-muted)]">{loading ? tr("카드를 불러오는 중…", "Loading cards…")
+        : shown.length === queued.length ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
+          : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
+      {shown.length > 0 && !loading && (
+        <Checkbox
+          checked={allShownChecked}
+          indeterminate={someShownChecked}
+          disabled={bulkBusy}
+          label={tr("표시된 카드 모두 선택", "Select all shown")}
+          onChange={(event) => toggleAllShown(event.target.checked)}
+        />
+      )}
+    </div>
+    {activeChecked.length > 0 && (
+      <Well role="region" aria-label={tr("일괄 상태 전이", "Bulk status transition")} className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-3.5 py-2">
+        <Cap className="font-medium text-[var(--fg)]"><Num>{tr(`${activeChecked.length}장 선택됨`, `${activeChecked.length} selected`)}</Num></Cap>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="min-w-[8.5rem]">
+            <Select
+              aria-label={tr("목표 상태", "Target status")}
+              size="sm"
+              disabled={bulkBusy}
+              value={bulkTarget}
+              onChange={setBulkTarget}
+              options={BULK_TARGETS.map((status) => ({ value: status, label: labelForStatus(status, tr) }))}
+            />
+          </div>
+          <Button variant="primary" size="sm" loading={bulkBusy} disabled={bulkBusy} onClick={() => void runBulkTransition()}>
+            {tr("일괄 상태 전이", "Transition selected")}
+          </Button>
+          <Button variant="ghost" size="sm" disabled={bulkBusy} onClick={() => setCheckedIds(new Set())}>
+            {tr("선택 해제", "Clear selection")}
+          </Button>
+        </div>
+      </Well>
+    )}
+    {bulkNotice && <p className="m-0 text-xs text-[var(--ok)]">{bulkNotice}</p>}
     {error && <p role="alert" className="campaign-filter-note">{error}</p>}
     {serverHoldsIncomplete && !loading && <WidgetState kind="stale" title={tr("서버 캠페인 일부를 읽지 못했습니다.", "Some server campaigns did not load.")}
       description={tr("여기 보이는 카드 가운데 서버 캠페인이 이미 맡은 것이 있을 수 있습니다.", "Some cards shown here may already belong to a server campaign.")}
@@ -123,15 +217,15 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
                 <TaskGroupHeading open={open} controls={listId} label={repoName(repo)} title={repo || undefined} count={cards.length} onToggle={() => toggleGroup(repo)} />
                 {open && <ul id={listId} aria-label={repoName(repo)} className="grid min-w-0 gap-0.5">
                   {cards.map((card) => <QueueCardRow key={card.id} card={card} agent={card.assignee_agent_id ? agents.get(card.assignee_agent_id) : undefined} locale={locale}
-                    selected={card.id === selectedCardId} busy={busyCard === card.id} controls={dock ? dockId : undefined} tr={tr} onOpen={() => onSelectCard(card.id)} onReady={() => requestReady(card)} />)}
+                    selected={card.id === selectedCardId} checked={checkedIds.has(card.id)} busy={busyCard === card.id || bulkBusy}
+                    controls={hasSelection && dock ? dockId : undefined} tr={tr}
+                    onToggleCheck={(checked) => toggleCardCheck(card.id, checked)}
+                    onOpen={() => onSelectCard(card.id)} onReady={() => requestReady(card)} />)}
                 </ul>}
               </li>;
             })}
           </ul>}
-    <DetailDockPane dock={detailDock} label={tr("카드 상세", "Card details")} empty={selectedCardId ? null : {
-      title: tr("고른 카드가 없습니다", "No card selected"),
-      text: tr("목록에서 카드를 열면 내용과 활동, 캠페인 넣기를 여기서 봅니다.", "Open a card from the list to read it, follow its activity and put it into a campaign here."),
-    }} />
+    {hasSelection && <DetailDockPane dock={detailDock} label={tr("카드 상세", "Card details")} empty={null} />}
     <DrawerDockContext.Provider value={dock}>
       {selectedCardId && <QueueCardDetail key={selectedCardId} cardId={selectedCardId} card={kanbanCards.find((card) => card.id === selectedCardId)} agents={allAgents} campaigns={campaigns}
         locale={locale} tr={tr} actions={actions} onClose={() => onSelectCard(null)} onNeedsAssignee={setNeedsAssignee} onCampaignSaved={onCampaignSaved} />}

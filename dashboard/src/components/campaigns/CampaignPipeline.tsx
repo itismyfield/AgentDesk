@@ -44,6 +44,7 @@ export default function CampaignPipeline({ source, title, dispositions, approval
   const [chosen, setChosen] = useState<string | null>(null);
   const [reads, setReads] = useState(0);
   const [reveal, setReveal] = useState<{ id: string; n: number } | null>(null);
+  const [templatePreviewOpen, setTemplatePreviewOpen] = useState(false);
   const serverId = source.kind === "server" ? source.id : null, stamp = source.kind === "server" ? source.stamp : null, sequence = source.kind === "server" ? source.sequence : null;
   useEffect(() => {
     const abort = new AbortController();
@@ -145,11 +146,14 @@ export default function CampaignPipeline({ source, title, dispositions, approval
           <Cap className="truncate"><Num>{[tr("파이프라인 편집", "Editing the pipeline"), template && tr(`템플릿 ${template.id} v${template.version}`, `Template ${template.id} v${template.version}`), tr(`정의 rev ${edit.revision}`, `Definition rev ${edit.revision}`)].filter(Boolean).join(" · ")}</Num></Cap>
         </div>
         {tools}
-      </header> : <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--line-soft)] px-4 py-2">
+      </header> : <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--line-soft)] px-4 py-2.5">
         <strong className="text-[15px] text-[var(--fg)]">{tr("파이프라인", "Pipeline")}</strong>
         {template && <Chip className="font-mono">{tr(`템플릿 ${template.id} v${template.version}`, `Template ${template.id} v${template.version}`)}</Chip>}
         {detail?.source === "saved" && <Chip tone="info">{tr("저장됨", "Saved")}</Chip>}
         {!edit && <Cap className="ml-auto max-[899px]:hidden"><Num>{tr(`상태 ${graph.states.size} · 전환 ${transitions}`, `${graph.states.size} states · ${transitions} transitions`)}</Num></Cap>}
+        {!detail && <Button variant="secondary" size="sm" className={edit ? "" : "max-[899px]:ml-auto"} aria-expanded={templatePreviewOpen} onClick={() => setTemplatePreviewOpen((v) => !v)}>
+          {templatePreviewOpen ? tr("템플릿 미리보기 접기", "Hide template preview") : tr("기본 9단계 템플릿 미리보기", "Preview built-in 9-stage template")}
+        </Button>}
         {tools}
         {note && <Desc className="w-full">{note}</Desc>}
         {editor.waiting && detail && !edit && <Desc role="status" className="w-full">{[tr("저장하지 않은 초안이 있어요.", "An unsaved draft is waiting."),
@@ -158,7 +162,9 @@ export default function CampaignPipeline({ source, title, dispositions, approval
       </header>}
       {status}
       {error && <WidgetState kind="stale" title={tr("파이프라인을 갱신하지 못했어요.", "Could not refresh the pipeline.")} description={error} />}
-      {phone ? <div className="grid gap-3 p-3">
+      {!detail && !templatePreviewOpen ? <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-[var(--fg-muted)]">
+        <span>{tr("원장 캠페인은 작업별 상태·선행 DAG로 진행되며 서버 파이프라인 런타임을 실행하지 않아요. 필요할 때 위 버튼으로 기본 9단계 템플릿 구조를 펼쳐 볼 수 있어요.", "Ledger campaigns run on the task DAG rather than the server pipeline runtime. Expand the preview above to inspect the built-in 9-stage template.")}</span>
+      </div> : phone ? <div className="grid gap-3 p-3">
         <p className="m-0 flex items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--bg-2)] px-3 py-2 text-[13px] text-[var(--fg-dim)]"><Monitor aria-hidden className="size-4 shrink-0" />{detail ? tr("상태와 전환은 넓은 화면에서 고쳐요. 폰에서는 보기만 해요.", "States and transitions are edited on wider screens. Phones only show them.")
           : tr("폰에서는 보기만 해요. 넓은 화면에서 그래프로 볼 수 있어요.", "Phones only show the list. Wider screens draw the graph.")}</p>
         <PipelineStateList graph={graph} chosen={chosen} onChoose={setChosen} tr={tr} />
@@ -180,7 +186,7 @@ export default function CampaignPipeline({ source, title, dispositions, approval
       title={tr("저장하지 않은 변경이 있어요", "You have unsaved changes")}
       description={tr(`${changes ? changesText(changes, tr) : ""}. 나가면 이 변경은 사라져요.`, `${changes ? changesText(changes, tr) : ""}. Leaving drops them.`)}
       footer={<>
-        <Button variant="secondary" onClick={() => editor.decide(true)}>{tr("버리고 나가기", "Discard and leave")}</Button>
+        <Button variant="secondary" disabled={editor.saving} onClick={() => editor.decide(true)}>{tr("버리고 나가기", "Discard and leave")}</Button>
         <Button variant="primary" onClick={() => editor.decide(false)}>{tr("계속 편집", "Keep editing")}</Button>
       </>} />
   </div>;

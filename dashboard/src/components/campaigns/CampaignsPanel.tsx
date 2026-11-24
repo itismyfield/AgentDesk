@@ -16,6 +16,7 @@ import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { WidgetState } from "../common/WidgetState";
 import CampaignAutoQueueToggle, { useAutoQueueRequests } from "./CampaignAutoQueueToggle";
+import { CampaignBatchTracker } from "./CampaignApprovalBanner";
 import CampaignBoard from "./CampaignBoard";
 import { legacyBoard, serverBoard } from "./campaignBoardModel";
 import CampaignDetail from "./CampaignDetail";
@@ -39,6 +40,7 @@ import {
   type CampaignLocation, type StopIntent,
 } from "./serverCampaignModel";
 import { queueLocationQuery, parseQueueLocation } from "./campaignQueueModel";
+import { currentEditorToken, isOrphanedEditorEntry, useEditorHistory } from "./useEditorHistory";
 import { useLegacyCampaigns } from "./useLegacyCampaigns";
 import { useServerCampaignHolds } from "./useServerCampaignHolds";
 import { useServerCampaignReads } from "./useServerCampaignReads";
@@ -51,7 +53,6 @@ type CampaignTab = "campaigns" | "queue";
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
 const POLL_MS = 15_000;
-const EDITOR_ENTRY = "campaignRelationsEditor";
 // Both campaign lists are re-read on this slower beat; a failed list read is retried on the next poll.
 const LIST_POLL_MS = 60_000;
 // Route paths match without regard to a trailing slash or case.
@@ -88,9 +89,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
-  // The ledger relations editor's scope while it is open, tied to the campaign it opened on, so picking another campaign
-  // never opens that one on this scope; `leave` is set by that editor or the pipeline editor while it has unsaved changes.
-  const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(linked?.mode === "legacy" && linked.edit ? { campaign: linked.campaign, scope: linked.edit } : null);
+  // The ledger relations editor's scope while it is open, tied to the campaign it opened on; an orphaned entry reached via
+  // browser Back after navigating away stays closed (draft preserved in memory) so Back does not spin in place (P2-4).
+  const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(() =>
+    linked?.mode === "legacy" && linked.edit && !isOrphanedEditorEntry() ? { campaign: linked.campaign, scope: linked.edit } : null,
+  );
   const editing = mode === "legacy" && edit?.campaign === selectedId ? edit.scope : null;
   const setEditing = (scope: EditScope | null) => setEdit(scope && selectedId ? { campaign: selectedId, scope } : null);
   const leave = useRef<((proceed: () => void) => void) | null>(null);
@@ -160,37 +163,37 @@ export default function CampaignsPanel({ language }: { language: string }) {
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
     : selectedId ? { mode, campaign: selectedId, node, ...editing ? { edit: editing } : {} } : null;
   const query = tab === "queue" ? queueLocationQuery(queueCard) : location ? campaignLocationQuery(location) : null;
+  const phone = useIsMobile();
+  const targetEditorUrl = editing && selectedId
+    ? `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, edit: editing })}`
+    : undefined;
+  const restoreRelationsRef = useRef<() => void>(() => {});
+  const relationsHistory = useEditorHistory({
+    active: !!editing,
+    enabled: !phone,
+    editorUrl: targetEditorUrl,
+    onBack: () => {
+      if (leave.current) restoreRelationsRef.current();
+      leaveEditor(() => setEditing(null));
+    },
+  });
+  restoreRelationsRef.current = relationsHistory.restoreEntry;
+  const closeRelationsEditor = () => {
+    relationsHistory.releaseEntry();
+    setEditing(null);
+  };
+  const startEdit = (scope: EditScope) => {
+    if (selectedId) setEditing(scope);
+  };
   // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
   // once the address shows another page, the query is not this panel's to write.
   const [home] = useState(() => window.location.pathname);
-  // The editor's own history entry carries a mark; while the editor is open no other entry is rewritten, so an entry
-  // the browser's back button reached keeps its address even when an effect from before the move runs late.
-  const editorEntry = (mark: boolean) => ({ ...window.history.state, [EDITOR_ENTRY]: mark || undefined });
-  useEffect(() => { if (editing) window.history.replaceState(editorEntry(true), ""); }, []); // eslint-disable-line react-hooks/exhaustive-deps -- a linked editor marks its entry once
   useEffect(() => {
     const { pathname, search, hash } = window.location;
-    const onEditorEntry = !!window.history.state?.[EDITOR_ENTRY];
-    if (!query || !samePage(pathname, home) || (editing && !onEditorEntry)) return;
-    if (search !== query || onEditorEntry !== !!editing) window.history.replaceState(editorEntry(!!editing), "", `${pathname}${query}${hash}`);
+    const onEditorEntry = currentEditorToken() !== null;
+    if (!query || !samePage(pathname, home) || (editing && !phone && !onEditorEntry) || isOrphanedEditorEntry()) return;
+    if (search !== query) window.history.replaceState(window.history.state, "", `${pathname}${query}${hash}`);
   });
-  // Opening the editor adds a history entry, so the browser's back button leaves the editor first; with unsaved
-  // changes the editor's entry goes back on and the editor asks.
-  const startEdit = (scope: EditScope) => {
-    if (!selectedId) return;
-    window.history.pushState(editorEntry(true), "", `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, edit: scope })}`);
-    setEditing(scope);
-  };
-  const editorAddress = useRef("");
-  editorAddress.current = editing && query ? `${window.location.pathname}${query}` : "";
-  useEffect(() => {
-    const onBack = () => {
-      if (!editorAddress.current || window.history.state?.[EDITOR_ENTRY]) return;
-      if (leave.current) window.history.pushState(editorEntry(true), "", editorAddress.current);
-      leaveEditor(() => setEditing(null));
-    };
-    window.addEventListener("popstate", onBack, true);
-    return () => window.removeEventListener("popstate", onBack, true);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- reads the editor's address and guard through refs
 
   const selectServer = (id: string) => { setMode("server"); setServerSelected(id); setNode(null); };
   const runCommand = async (doc: ServerCampaignDocument, name: ControlCommand, nodeId?: string) => {
@@ -272,7 +275,6 @@ export default function CampaignsPanel({ language }: { language: string }) {
     }} />;
 
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
-  const phone = useIsMobile();
   const [picking, setPicking] = useState(false);
   const [pipelineEditing, setPipelineEditing] = useState(false);
   const autoRuns = useAutoQueueRequests();
@@ -287,6 +289,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const selectedEntry = entries.find((entry) => entry.key === selectedKey);
   const select = (entry: CampaignEntry) => leaveEditor(() => {
     setPicking(false);
+    if (editing) relationsHistory.releaseEntry();
     if (entry.kind === "server") selectServer(entry.id);
     else { setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null); }
   });
@@ -304,6 +307,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       <Num>{tr("라운드", "Round")} {campaign.round}</Num>
     </span>}
     sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
+    tracker={<CampaignBatchTracker campaign={campaign} tasks={legacyTasks} onOpenTask={setNode} tr={tr} />}
     notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
     description={campaign.description && <details className="group min-w-0 text-xs text-[var(--fg-muted)]">
       <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] px-1 hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
@@ -348,14 +352,14 @@ export default function CampaignsPanel({ language }: { language: string }) {
       overview={(controls) => <CampaignOverview tasks={serverTaskViews} limit={profile?.limits.concurrent_tasks ?? null} showPr={false} asOf={view.as_of}
         recent={{ title: tr("최근 이벤트", "Recent events"), entries: shown?.events ? recentServerEvents(shown.events) : null, note: shown && shown.failedAfter !== null ? tr("이벤트를 갱신하지 못했습니다", "Could not refresh events") : null }}
         footer={<>{phone && commands}<ServerCampaignSections document={serverDoc} link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} /></>}
-        selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
+        selectedId={node} controls={controls} onOpen={setNode} campaignId={id} connection={connection} onApproved={() => refreshServer(id)} language={language} tr={tr} />}
       board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
       pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of, sequence: view.last_event_sequence }} title={definition.title} dispositions={Object.fromEntries(view.nodes.map((value) => [value.id, value.runtime.disposition]))}
         approvals={definition.workflow_options ?? DEFAULT_WORKFLOW_OPTIONS} leave={leave} onEditing={setPipelineEditing} tr={tr} />}
       leave={leaveEditor} focus={!phone && pipelineEditing}
       task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
-        gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
+        gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} onApproved={() => refreshServer(id)} tr={tr} /> } : null}
       onCloseTask={() => setNode(null)} />;
   })();
 
@@ -366,7 +370,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   if (fullEditor) return <section data-testid="campaigns-page" className={`${CAMPAIGN_SCOPE} h-full min-w-0 text-sm`}>
     <div className="flex h-full min-h-0 flex-col">
       {legacyError}
-      <CampaignRelationsEditor key={fullEditor.id} campaign={fullEditor} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
+      <CampaignRelationsEditor key={fullEditor.id} campaign={fullEditor} scope={editing} onScope={setEditing} onExit={closeRelationsEditor} onSaved={onSaved} leave={leave} tr={tr} />
     </div>
   </section>;
 
@@ -375,7 +379,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const wideEditor = !phone && pipelineEditing;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
   return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={!wideEditor && <div className="w-full sm:w-56">
-    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => leaveEditor(() => { if (editing) setEditing(null); setTab(next); })}
+    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => leaveEditor(() => { if (editing) closeRelationsEditor(); setTab(next); })}
       options={[{ value: "campaigns", label: tr("캠페인", "Campaigns"), controls: "campaign-panel-campaigns" }, { value: "queue", label: tr("대기열", "Queue"), controls: "campaign-panel-queue" }]} />
   </div>}>
   <section className={`${CAMPAIGN_SCOPE} min-w-0 text-sm`}>

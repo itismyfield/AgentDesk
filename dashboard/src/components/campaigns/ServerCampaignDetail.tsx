@@ -2,10 +2,11 @@ import { useState } from "react";
 import { SERVER_CAMPAIGN_STAGES, serverCampaignProfile, type ServerCampaignDocument } from "../../api/serverCampaigns";
 import { Button } from "../../kit/free/button-clean";
 import { TextArea } from "../../kit/free/text-area-clean";
-import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RuleItem, Well } from "../common/KitPrimitives";
+import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, RuleItem } from "../common/KitPrimitives";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
+import { CampaignGateApprovalCard } from "./CampaignApprovalBanner";
 import { safeCampaignLink } from "./campaignModel";
 import { GATE_LABELS, type PendingGate } from "./campaignOverviewModel";
 import { Badge, formatCampaignTime, type Tr } from "./campaignPresentation";
@@ -62,7 +63,7 @@ type Runtime = ServerCampaignDocument["view"]["nodes"][number]["runtime"];
 function serverSteps(runtime: Runtime, gate: PendingGate | null, tr: Tr): Step[] {
   const at = SERVER_CAMPAIGN_STAGES.indexOf(runtime.stage);
   const countsOn = at >= SERVER_CAMPAIGN_STAGES.indexOf("review") ? "review" : runtime.stage;
-  const minutes = gate ? Math.max(0, Math.floor((Date.now() - Date.parse(gate.openedAt)) / 60_000)) : 0;
+  const minutes = gate?.openedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(gate.openedAt)) / 60_000)) : 0;
   const waited = minutes < 60 ? tr(`승인 대기 ${minutes}분`, `Awaiting approval ${minutes} min`) : tr(`승인 대기 ${Math.floor(minutes / 60)}시간`, `Awaiting approval ${Math.floor(minutes / 60)} h`);
   return SERVER_CAMPAIGN_STAGES.map((stage, index) => {
     const state = index < at || (index === at && runtime.disposition === "complete") ? "done" : index === at ? "now" : "next";
@@ -71,7 +72,7 @@ function serverSteps(runtime: Runtime, gate: PendingGate | null, tr: Tr): Step[]
       stage === "main_verification" && runtime.main_integrated ? tr("main 반영", "In main") : null,
       stage === "final_verification" && runtime.acceptance_complete ? tr("수용 완료", "Accepted") : null,
       state === "now" && runtime.quality_failures ? tr(`품질 실패 ${runtime.quality_failures}회`, `${runtime.quality_failures} quality failures`) : null,
-      state === "now" ? gate ? waited : tr(...DISPOSITION_LABELS[runtime.disposition]) : null,
+      state === "now" ? gate ? (gate.openedAt ? waited : tr("승인 대기", "Awaiting approval")) : tr(...DISPOSITION_LABELS[runtime.disposition]) : null,
     ].filter(Boolean).join(" · ");
     const tone = state !== "now" ? undefined : gate || runtime.disposition === "blocked" ? "warn" : runtime.disposition === "failed" ? "err" : undefined;
     return { key: stage, label: tr(...STAGE_LABELS[stage]), state, value, tone };
@@ -79,9 +80,9 @@ function serverSteps(runtime: Runtime, gate: PendingGate | null, tr: Tr): Step[]
 }
 
 /** A server task in TaskPhone order: a status card, the stages, its acceptance and link, then sessions and successors. */
-export function ServerTaskDetails({ document, nodeId, gate, connection, busy, onCommand, tr }: {
+export function ServerTaskDetails({ document, nodeId, gate, connection, busy, onCommand, onApproved, tr }: {
   document: ServerCampaignDocument; nodeId: string; gate: PendingGate | null; connection: Connection; busy: boolean;
-  onCommand: (command: ControlCommand, nodeId?: string) => void; tr: Tr;
+  onCommand: (command: ControlCommand, nodeId?: string) => void; onApproved?: () => void; tr: Tr;
 }) {
   const { definition, view } = document;
   const [approving, setApproving] = useState(false);
@@ -95,26 +96,26 @@ export function ServerTaskDetails({ document, nodeId, gate, connection, busy, on
   const gateName = gate && tr(...GATE_LABELS[gate.gate]);
   const reasons = nodeView ? nodeReasons(nodeView, view.reasons).map((code) => tr(...REASON_LABELS[code])) : [];
   const stuck = runtime?.disposition === "blocked" || runtime?.disposition === "failed";
-  // The sheet only shows what the server gave; approving waits for the approval API (#8249).
-  const facts: Array<[string, string]> = gate ? [
-    ...runtime ? [[tr("단계", "Stage"), tr(...STAGE_LABELS[runtime.stage])], [tr("리뷰 · 수리", "Reviews · repairs"), tr(`${runtime.review_rounds}회 · ${runtime.repair_cycles}회`, `${runtime.review_rounds} · ${runtime.repair_cycles}`)]] as Array<[string, string]> : [],
-    [tr("수용조건", "Acceptance"), String(node.acceptance.length)], [tr("요청 시각", "Requested"), formatCampaignTime(gate.openedAt, tr)],
-  ] : [];
-  const sheet = gate && <div className="grid gap-3 text-sm text-[var(--fg)]">
-    <Desc>{tr(`${node.title}의 ${gateName} 승인을 기다려요.`, `${node.title} is waiting for ${gateName} approval.`)}</Desc>
-    <Well className="overflow-hidden">
-      <ul className="m-0 list-none p-0">
-        {facts.map(([label, value]) => <Row as="li" key={label} density="sm" className="min-h-11">
-          <span className="min-w-0 flex-1">{label}</span>
-          <Cap className="shrink-0 font-display tabular-nums">{value}</Cap>
-        </Row>)}
-      </ul>
-    </Well>
-    <div className="grid grid-cols-[1fr_2fr] gap-2">
-      <Button variant="secondary" className="!min-h-12 w-full" onClick={() => setApproving(false)}>{tr("나중에", "Later")}</Button>
-      <Button variant="primary" className="!min-h-12 w-full" disabled>{tr("승인", "Approve")}</Button>
-    </div>
-    <Cap>{tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}</Cap>
+  const stageLabel = runtime ? tr(...STAGE_LABELS[runtime.stage]) : null;
+  const enrichedGate: PendingGate | null = gate ? {
+    ...gate,
+    reviewRounds: gate.reviewRounds ?? runtime?.review_rounds,
+    repairCycles: gate.repairCycles ?? runtime?.repair_cycles,
+    evidenceNote: gate.evidenceNote ?? tr(`수용조건 ${node.acceptance.length}개`, `${node.acceptance.length} acceptance items`),
+  } : null;
+  const sheet = enrichedGate && <div className="grid gap-3 text-sm text-[var(--fg)]">
+    <CampaignGateApprovalCard
+      taskId={node.id}
+      taskTitle={node.title}
+      taskNumber={issue ? `#${issue}` : null}
+      gate={enrichedGate}
+      stageText={stageLabel}
+      campaignId={view.campaign_id}
+      connection={connection}
+      onApproved={() => { setApproving(false); onApproved?.(); }}
+      tr={tr}
+    />
+    <Button variant="secondary" className="!min-h-11 w-full" onClick={() => setApproving(false)}>{tr("나중에", "Later")}</Button>
   </div>;
   return <>
     {!inScreen && <div className="campaign-row"><h4>{node.title}</h4></div>}
@@ -123,7 +124,7 @@ export function ServerTaskDetails({ document, nodeId, gate, connection, busy, on
         : runtime && <Badge status={runtime.disposition} label={tr(...DISPOSITION_LABELS[runtime.disposition])} tr={tr} />}
       <p className="text-[var(--fg)]">{runtime ? `${tr(...STAGE_LABELS[runtime.stage])} · ${tr(`계열 ${runtime.series}`, `series ${runtime.series}`)}` : tr("서버 상태 없음", "No server state")}</p>
       {reasons.length > 0 && <p className={stuck ? "text-[var(--warn)]" : ""}>{stuck ? tr("막힘", "Blocked") : tr("대기 사유", "Waiting on")}: {reasons.join(" · ")}</p>}
-      {gate && <Button variant="secondary" size="sm" onClick={() => setApproving(true)}>{tr("승인 검토", "Review approval")}</Button>}
+      {gate && <Button variant="secondary" size="sm" className="max-[899px]:!min-h-11" onClick={() => setApproving(true)}>{tr("승인 검토", "Review approval")}</Button>}
       {runtime?.disposition === "failed" && <CommandButton view={view} command="prepare_retry" connection={connection} busy={busy} onCommand={() => onCommand("prepare_retry", node.id)} tr={tr} />}
     </StatusCard>
     {gate && approving && (phone

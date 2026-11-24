@@ -85,13 +85,37 @@ const GATES = ["start", "implementation", "review", "landing", "merge", "deploy"
 export const GATE_LABELS: Record<(typeof GATES)[number], Label> = {
   start: ["착수", "Start"], implementation: ["구현", "Implementation"], review: ["리뷰", "Review"], landing: ["착지", "Landing"], merge: ["머지", "Merge"], deploy: ["배포", "Deploy"],
 };
+const gateTargetSchema = z.discriminatedUnion("kind", [
+  z.looseObject({ kind: z.literal("candidate"), base_sha: z.string(), head_sha: z.string() }),
+  z.looseObject({ kind: z.literal("pull_request"), number: z.number(), head_sha: z.string() }),
+  z.looseObject({ kind: z.literal("main"), sha: z.string() }),
+]);
+const gateBindingSchema = z.looseObject({
+  run_id: z.string(), node_id: z.string(), gate: z.enum(GATES),
+  definition_revision: z.number(), target: gateTargetSchema, policy_hash: z.string(),
+});
+const runtimeGateSchema = z.looseObject({
+  human_status: z.string().nullable().optional(),
+  wait_started_at: z.string().nullable().optional(),
+  evidence_url: z.string().nullable().optional(),
+  pending_gate: z.looseObject({ gate: z.enum(GATES), binding: gateBindingSchema.nullable().optional() }).nullable().optional(),
+});
 const gateEventSchema = z.looseObject({
   event: z.enum(["approval_gate_opened", "approval_gate_approved"]),
   binding: z.looseObject({ run_id: z.string(), node_id: z.string(), gate: z.enum(GATES) }),
 });
-export interface PendingGate { gate: (typeof GATES)[number]; openedAt: string }
+export type GateBinding = z.infer<typeof gateBindingSchema>;
+export interface PendingGate {
+  gate: (typeof GATES)[number];
+  openedAt: string | null;
+  binding?: GateBinding | null;
+  evidenceUrl?: string | null;
+  reviewRounds?: number;
+  repairCycles?: number;
+  evidenceNote?: string | null;
+}
 
-/** Gates the shown run opened and has not approved, by node. Only the read events count, so an older opening is missed. */
+/** Gates the shown run opened and has not approved, by node. Used as fallback when `runtime.pending_gate` is absent. */
 export function openGates(events: ServerCampaignEvent[], runId: string | null): Map<string, PendingGate> {
   const open = new Map<string, PendingGate & { node: string }>();
   for (const event of events) {
@@ -127,18 +151,25 @@ export interface OverviewTask {
 /** A session as a card's foot shows it: a dot, the state words and when it was last seen. */
 export interface SessionNow { tone: DotTone; text: string; seenAt: string | null }
 
+const LEDGER_APPROVAL_RE = /\bLAND_READY\b|착지\s*승인\s*대기|사용자\s*승인\s*대기|awaiting\s+landing\s+approval/i;
+
 /** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
   const status = node.status !== "completed" && node.status !== "skipped" && liveIsWorking(live) ? "running" : node.status;
   const blocker = cleanBlocker(node.blocker);
   const step = campaignStageStep(node.stage).index;
   const title = campaignTaskTitle(node);
+  const canAwaitApproval = status === "running" || status === "pending";
+  const textBlob = [node.stage, node.next_action].filter(Boolean).join(" ");
+  const gate: PendingGate | null = canAwaitApproval && LEDGER_APPROVAL_RE.test(textBlob)
+    ? { gate: "landing", openedAt: node.updated_at, evidenceNote: node.evidence.at(-1) ?? (node.summary?.trim() || null) }
+    : null;
   return {
     id: node.id, title, number: campaignTaskNumber(node), status, marker: nodeMarker(status, node.stage),
     stage: node.stage.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
     summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker, group: node.group,
     updatedAt: node.updated_at, session: node.session_id, agent: node.assignee, prUrl: safeCampaignLink(node.pr_url) ?? null,
-    attention: needsSomeone(status, blocker), gate: null, progress: null, sessionNow: null,
+    attention: needsSomeone(status, blocker), gate, progress: null, sessionNow: null,
   };
 }
 
@@ -163,13 +194,28 @@ export function serverTasks({ definition, view }: ServerCampaignDocument, events
     const stage = runtime ? [tr(...DISPOSITION_LABELS[runtime.disposition]), tr(...STAGE_LABELS[runtime.stage]), tr(`계열 ${runtime.series}`, `series ${runtime.series}`)].join(" · ") : tr("서버 상태 없음", "No server state");
     const sessionText = session ? `${tr(...SESSION_STATES[session.observation.state])} · ${session.identity.gate.host}` : null;
     const observation = session?.observation;
+    const parsedGate = runtime ? runtimeGateSchema.safeParse(runtime).data : undefined;
+    const eventGate = gates.get(node.id) ?? null;
+    const gate: PendingGate | null = parsedGate?.human_status === "awaiting_approval" && parsedGate.pending_gate
+      ? {
+          gate: parsedGate.pending_gate.gate,
+          openedAt: parsedGate.wait_started_at ?? eventGate?.openedAt ?? view.as_of,
+          binding: parsedGate.pending_gate.binding ?? null,
+          evidenceUrl: parsedGate.evidence_url ?? null,
+          reviewRounds: runtime?.review_rounds,
+          repairCycles: runtime?.repair_cycles,
+          evidenceNote: runtime?.evidence_current ? tr("검증 근거 최신", "Evidence current") : null,
+        }
+      : eventGate
+        ? { ...eventGate, reviewRounds: runtime?.review_rounds, repairCycles: runtime?.repair_cycles }
+        : null;
     return {
       id: node.id, title: node.title, number: issue ? `#${issue}` : null, status,
       marker: !runtime ? { tone: "plan", ratio: 0 } : status === "running" ? { tone: "progress", ratio: (SERVER_STAGES.indexOf(runtime.stage) + 1) / (SERVER_STAGES.length + 1) } : nodeMarker(status),
       stage, step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
       blocker, group: null,
       updatedAt: null, session: sessionText,
-      agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate: gates.get(node.id) ?? null, progress: runtime ? stage : null,
+      agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate, progress: runtime ? stage : null,
       sessionNow: observation && sessionText ? { tone: SESSION_TONES[observation.state], text: sessionText, seenAt: observation.state === "unknown" ? observation.last_observed_at : observation.observed_at } : null,
     };
   });

@@ -7,6 +7,7 @@ import type { Tr } from "./campaignPresentation";
 import { diagnosticPlace, draftChanges } from "./pipelineEdit";
 import { warnBeforeUnload } from "./relationsEditorModel";
 import { newIdempotencyKey, rejectionText } from "./serverCampaignModel";
+import { useEditorHistory } from "./useEditorHistory";
 
 type Edit = { base: PipelineDefinition; revision: number; draft: PipelineDefinition };
 type Sent = { body: string; key: string };
@@ -28,9 +29,6 @@ const store = (id: string, value: Edit & { sent: { current: Sent | null } } | nu
 /** Saves that landed after their page left, by campaign: the page showing it next reads it again and says so. */
 const landed = new Map<string, number>();
 const watch = (watcher: () => void) => { watchers.add(watcher); return () => { watchers.delete(watcher); }; };
-/** The history entry a full-window editor adds, so the browser's back button leaves the editor first. */
-const ENTRY = "adkPipelineEditor";
-const onEntry = () => !!window.history.state?.[ENTRY];
 
 /** A draft of a server campaign's pipeline over the revision it was read at: the server checks it shortly after each
  * change and again, quietly, whenever the run moves (`runtime`), and a save replaces the pipeline only if the definition has not moved since. */
@@ -64,18 +62,21 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
     return () => { window.clearTimeout(timer); abort.abort(); };
   }, [id, draft, runtime]);
 
-  // Leaving with unsaved changes: the page asks through `leave` (tabs, another campaign), a reload or close through beforeunload.
+  // While a save is out the draft holds still, whatever asks to change it: what it sends is what closes.
+  const busy = useRef(false);
+
+  // Leaving with unsaved changes (or while saving): the page asks through `leave` (tabs, another campaign), a reload or close through beforeunload.
   const ask = useCallback((proceed: () => void) => setLeaving(() => proceed), []);
   useEffect(() => {
-    if (!leave || !dirty) return;
+    if (!leave || (!dirty && !saving)) return;
     leave.current = ask;
     return () => { leave.current = null; };
-  }, [leave, dirty, ask]);
+  }, [leave, dirty, saving, ask]);
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !saving) return;
     window.addEventListener("beforeunload", warnBeforeUnload);
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [dirty]);
+  }, [dirty, saving]);
 
   // Leaving any other way keeps the draft to pick up later; a decision (save, discard, close) clears `keep` first.
   const keep = useRef<Edit | null>(null);
@@ -84,28 +85,28 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
   const forget = () => { if (id) store(id, null); };
   useEffect(() => { if (!id || arrived === null) return; landed.delete(id); setNotice({ kind: "saved", revision: arrived }); reload(); }, [id, arrived]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Closing takes the editor's history entry off once, unless the page has gone (a save that landed after leaving).
-  const live = useRef(true), shown = useRef(false);
+  const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+  const releaseRef = useRef<() => void>(() => {});
+  const restoreRef = useRef<() => void>(() => {});
   const stop = () => {
     keep.current = null; checked.current = null; setEdit(null); setChecks(null); sent.current = null;
-    if (shown.current && live.current && onEntry()) window.history.back();
-    shown.current = false;
+    releaseRef.current();
   };
-  const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); shown.current = true; if (entry && !onEntry()) window.history.pushState({ ...window.history.state, [ENTRY]: true }, ""); };
-  // The back button closes the editor; with unsaved changes its entry goes back on and the editor asks.
-  const close = useRef(() => {});
-  close.current = () => { if (!keep.current) return stop(); window.history.pushState({ ...window.history.state, [ENTRY]: true }, ""); setLeaving(() => stop); };
-  const opened = !!edit;
-  useEffect(() => {
-    if (!opened || !entry) return;
-    const back = () => { if (!onEntry()) close.current(); };
-    window.addEventListener("popstate", back);
-    return () => window.removeEventListener("popstate", back);
-  }, [opened, entry]);
+  const history = useEditorHistory({
+    active: !!edit,
+    enabled: entry,
+    onBack: () => {
+      if (!keep.current && !busy.current) { stop(); return; }
+      restoreRef.current();
+      setLeaving(() => stop);
+    },
+  });
+  releaseRef.current = history.releaseEntry;
+  restoreRef.current = history.restoreEntry;
+
+  const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); };
   const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline });
-  // While a save is out the draft holds still, whatever asks to change it: what it sends is what closes.
-  const busy = useRef(false);
   const save = async (over?: Detail) => {
     if (!edit || !id || saving) return;
     const revision = over?.definition_revision ?? edit.revision;
@@ -122,16 +123,17 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
       if (!live.current) { landed.set(id, result.definition_revision); tell(); }
       setLeaving(null);
       stop();
-      setNotice({ kind: "saved", revision: result.definition_revision });
+      if (live.current) setNotice({ kind: "saved", revision: result.definition_revision });
       reload();
     } catch (cause) {
       const refusal = pipelineRefusal(cause);
-      if (!refusal || refusal.status >= 500) return setNotice({ kind: "lost" });
+      if (!refusal || refusal.status >= 500) { if (live.current) setNotice({ kind: "lost" }); return; }
       sent.current = null;
+      if (!live.current) return;
       if (refusal.rejection === "stale_definition") {
         // The newer graph shows beside the draft; the draft itself is never overwritten.
         const latest = await getServerCampaignPipeline(id).catch(() => null);
-        setNotice(latest ? { kind: "conflict", latest } : { kind: "error", text: tr("다른 곳에서 파이프라인이 바뀌었어요. 초안은 그대로 둬요.", "The pipeline changed elsewhere. Your draft is kept.") });
+        if (live.current) setNotice(latest ? { kind: "conflict", latest } : { kind: "error", text: tr("다른 곳에서 파이프라인이 바뀌었어요. 초안은 그대로 둬요.", "The pipeline changed elsewhere. Your draft is kept.") });
         return reload();
       }
       if (refusal.diagnostics.length) setChecks({ errors: refusal.diagnostics, warnings: [], pending: false, failed: null });
@@ -151,8 +153,8 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
     resume: () => { if (waiting) { const { sent: last, ...next } = waiting; open(next); sent.current = last.current; } },
     update: (change: (draft: PipelineDefinition) => PipelineDefinition) => { if (!busy.current) setEdit((current) => current && { ...current, draft: change(current.draft) }); },
     revert: () => { if (!busy.current) setEdit((current) => current && { ...current, draft: current.base }); },
-    close: () => dirty ? setLeaving(() => stop) : stop(),
-    decide: (discard: boolean) => { const proceed = leaving; setLeaving(null); if (discard) { stop(); proceed?.(); } },
+    close: () => { if (busy.current) return; if (dirty) setLeaving(() => stop); else stop(); },
+    decide: (discard: boolean) => { if (discard && busy.current) return; const proceed = leaving; setLeaving(null); if (discard) { stop(); proceed?.(); } },
   };
 }
 export type PipelineEditor = ReturnType<typeof usePipelineEditor>;
