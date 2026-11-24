@@ -55,11 +55,49 @@ pub(crate) fn note_open() {
 const INTERRUPTED: &str = "interrupted_before_delivery";
 #[cfg(unix)]
 const CLOSED: &str = "NotSent(\"decision_closed\")";
+#[cfg(unix)]
+const UNAPPROVED: &str = "NotSent(\"decision_not_approved\")";
 
-/// The origin a queued original's kept context names, when it is a Decision input.
-fn origin_of(context: Option<&serde_json::Value>) -> Option<&str> {
-    let context = context.filter(|context| ChannelMailboxHandle::decision_input(context))?;
-    context.pointer("/metadata/human_input/origin_id")?.as_str()
+/// How a queued original's kept context relates to the Decision source.
+#[cfg(unix)]
+enum Claim<'a> {
+    /// Another source: the owner's ordinary handoff takes it.
+    Other,
+    /// The Decision source without an origin that names an event: it is never written.
+    Unfounded,
+    Event(Uuid, &'a str),
+}
+
+#[cfg(unix)]
+fn claim_of(context: Option<&serde_json::Value>) -> Claim<'_> {
+    let Some(context) = context else {
+        return Claim::Other;
+    };
+    let origin = (context.pointer("/metadata/human_input/origin_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|_| ChannelMailboxHandle::decision_input(context));
+    match origin.and_then(|origin| Some((decisions::event_of_origin(origin)?, origin))) {
+        Some((event, origin)) => Claim::Event(event, origin),
+        None if self_declared(context["source"].as_str(), context.get("metadata")) => {
+            Claim::Unfounded
+        }
+        None => Claim::Other,
+    }
+}
+
+/// Removes a front that claims the Decision source without its event's approval: nothing of it
+/// is written and no event moves. The id alone names it, since its origin proves nothing.
+#[cfg(unix)]
+async fn refuse_unapproved(mailbox: &ChannelMailboxHandle, front: &Front) -> Result<(), String> {
+    let message = front.1.message_id;
+    let removed = mailbox.v2_request(move |slot| match slot.as_mut() {
+        Some(owner) => owner.discard_decision(message, "decision:"),
+        None => Ok(()),
+    });
+    if let Err(error) = removed.await {
+        tracing::warn!(message_id = message, %error, "unapproved decision front left queued");
+    }
+    Err(UNAPPROVED.into())
 }
 
 /// The message id the event's original is admitted under on its channel.
@@ -206,8 +244,9 @@ async fn settle(
     }
 }
 
-/// Runs the owner's idle handoff of `front`. A Decision front is journaled in PG first: a closed
-/// event's original is removed unrun, and the handoff's result settles the event.
+/// Runs the owner's idle handoff of `front`. A Decision front is first checked against the event
+/// PG approved and journaled there: an unapproved or closed one is removed unrun, and the
+/// handoff's result settles the event.
 #[cfg(unix)]
 pub(crate) async fn hand_idle(
     pool: Option<&PgPool>,
@@ -217,19 +256,34 @@ pub(crate) async fn hand_idle(
     idle: &Handoff,
 ) -> Result<(), String> {
     use AttemptState::{Closing, Delivered, Failed, MayHaveSent, UnknownClosed};
-    let Some(origin) = origin_of(context) else {
-        return idle(front).await;
+    let (event_id, origin) = match claim_of(context) {
+        Claim::Other => return idle(front).await,
+        Claim::Unfounded => return refuse_unapproved(mailbox, &front).await,
+        Claim::Event(event_id, origin) => (event_id, origin),
     };
     note_open();
     let unavailable = || "NotSent(\"decision_store_unavailable\")".to_string();
-    let (Some(pool), Some(event_id)) = (pool, decisions::event_of_origin(origin)) else {
+    let Some(pool) = pool else {
         return Err(unavailable());
+    };
+    // The journal below is taken only for the input PG approved under this very origin.
+    let approved = match decisions::load_event(pool, event_id).await {
+        Ok(event) => event.filter(|event| {
+            event.origin() == origin
+                && front.1.channel_id == Some(event.channel_id())
+                && front.1.author_id == event.actor_id()
+                && event.approves(&front.1.text)
+        }),
+        Err(_) => return Err(unavailable()),
+    };
+    let Some(approved) = approved else {
+        return refuse_unapproved(mailbox, &front).await;
     };
     let mut row = Unsettled {
         event_id,
         origin: origin.to_string(),
         agent_id: String::new(),
-        channel_id: front.1.channel_id.unwrap_or_default(),
+        channel_id: approved.channel_id(),
         state: MayHaveSent,
         stale: false,
     };
