@@ -20,15 +20,24 @@ mod writer;
 
 type Shared = Arc<Mutex<State>>;
 
-pub(crate) struct State {
-    header: Value,
-    ready: bool,
-    invalid: bool,
-    own_reasons: Vec<String>,
-    history_problems: Vec<Value>,
-    window: window::Window,
-    predecessor_window: Value,
+// Defined in a private child so default builds name it only inside this module, as before.
+mod state {
+    use serde_json::Value;
+
+    pub(crate) struct State {
+        pub(super) header: Value,
+        pub(super) ready: bool,
+        pub(super) invalid: bool,
+        pub(super) own_reasons: Vec<String>,
+        pub(super) history_problems: Vec<Value>,
+        pub(super) window: super::window::Window,
+        pub(super) predecessor_window: Value,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+use state::State;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use state::State;
 
 impl State {
     fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {

@@ -1,10 +1,19 @@
 //! Submit owns the physical mutation; Source binding and the reply belong to observation.
 use super::*;
 
-pub(crate) struct Submitted {
-    target: HerdrTarget,
-    logged: tokio::sync::watch::Receiver<u64>,
+// Defined in a private child so default builds name it only inside `herdr_turn`, as before.
+mod submitted {
+    use crate::services::session_host::HerdrTarget;
+
+    pub(crate) struct Submitted {
+        pub(super) target: HerdrTarget,
+        pub(super) logged: tokio::sync::watch::Receiver<u64>,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) use submitted::Submitted;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use submitted::Submitted;
 
 pub(super) fn submit(
     turn: &CodexHerdrTurn<'_>,
