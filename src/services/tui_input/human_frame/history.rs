@@ -856,7 +856,8 @@ pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;
     }
-    let store = read(&path().ok()?).ok()?;
+    // A V2 history's owned entries hold what a non-scoped writer recorded there.
+    let store = readable(&path().ok()?).ok()?;
     store
         .entries
         .iter()
