@@ -41,14 +41,18 @@ pub(crate) async fn load_forums(
 }
 
 impl Forums {
-    /// Whether `parent` is a Decision forum. A read that fails keeps the last known set, so a
-    /// forum already seen stays closed to intake while PG is away.
+    /// Whether `parent` is a Decision forum. A configured forum is one whatever was read before;
+    /// a read that fails keeps the last known set, so a forum already seen stays closed.
     pub(crate) async fn contains(
         &self,
         pool: Option<&PgPool>,
         config: &DecisionsConfig,
         parent: u64,
     ) -> bool {
+        let configured = |id: &String| id.parse::<u64>().ok() == Some(parent);
+        if config.forums_by_category.values().any(configured) {
+            return true;
+        }
         let known = |fresh_only: bool| {
             let read = self.0.lock().unwrap_or_else(PoisonError::into_inner);
             (read.as_ref())
@@ -67,8 +71,7 @@ impl Forums {
             }
             Err(error) => {
                 tracing::warn!(%error, "decision forum set unread; the last known set stays");
-                let configured = |id: &String| id.parse::<u64>().ok() == Some(parent);
-                known(false).unwrap_or_else(|| config.forums_by_category.values().any(configured))
+                known(false).unwrap_or(false)
             }
         }
     }

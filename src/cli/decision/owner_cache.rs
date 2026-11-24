@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::services::discord::decisions::requester::well_formed;
 
-/// What one capability belongs to: the asking agent, its target channel and the ask's key.
+/// What one capability belongs to: the asking agent, its target channel id and the ask's key.
 pub(super) struct Scope {
     agent: String,
     channel: String,
@@ -30,9 +30,13 @@ impl Scope {
             value.map(str::to_string).ok_or_else(missing)
         }
         let key = text(&body["idempotency_key"]).or_else(|| text(&body["ref"]));
+        // The server reads the channel as a number, so one channel is one scope however spelled.
+        let channel = field("target.channel_id", text(&body["target"]["channel_id"]))?;
+        let channel: u64 = (channel.parse())
+            .map_err(|_| "decision ask: target.channel_id must be a numeric channel id")?;
         Ok(Self {
             agent: field("agent_id", text(&body["agent_id"]))?,
-            channel: field("target.channel_id", text(&body["target"]["channel_id"]))?,
+            channel: channel.to_string(),
             key: field("ref", key)?,
         })
     }
@@ -82,7 +86,7 @@ fn checked(saved: &str) -> Result<String, String> {
 }
 
 /// Puts `capability` at `path` in a private directory unless a file is already there, and
-/// answers the capability the file holds.
+/// answers the capability the file holds. The file appears complete or not at all.
 fn install(path: &Path, capability: &str) -> Result<String, String> {
     let failed =
         |what: &str, error: std::io::Error| format!("decision owner cache: {what}: {error}");
@@ -91,23 +95,26 @@ fn install(path: &Path, capability: &str) -> Result<String, String> {
     for private_dir in [dir.parent().unwrap_or(dir), dir] {
         private(private_dir, 0o700).map_err(|error| failed("protect", error))?;
     }
+    // Written and synced under a name of its own, then linked into place: a link never replaces
+    // a file another asker installed first.
+    let draft = dir.join(format!(".{}.draft", hex::encode(rand::random::<[u8; 8]>())));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(path) {
-        Ok(mut file) => {
-            let written = file
-                .write_all(capability.as_bytes())
-                .and_then(|()| file.sync_all());
-            written.map_err(|error| failed("write", error))?;
-            Ok(capability.to_string())
-        }
+    let written = options.open(&draft).and_then(|mut file| {
+        file.write_all(capability.as_bytes())?;
+        file.sync_all()
+    });
+    let installed = written.and_then(|()| std::fs::hard_link(&draft, path));
+    let _ = std::fs::remove_file(&draft);
+    match installed {
+        Ok(()) => Ok(capability.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let saved = std::fs::read_to_string(path).map_err(|error| failed("read", error))?;
             checked(saved.trim())
         }
-        Err(error) => Err(failed("create", error)),
+        Err(error) => Err(failed("write", error)),
     }
 }
 
