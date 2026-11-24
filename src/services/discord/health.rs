@@ -20,6 +20,7 @@ use crate::services::provider::ProviderKind;
 //   * `headless_turn` — headless agent-turn reserve/start API
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
+pub(in crate::services::discord) mod boot_hold;
 mod consumer_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
