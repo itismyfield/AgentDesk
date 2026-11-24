@@ -216,11 +216,9 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+pub(crate) use session_notice::input_notice::input_notice_line;
 #[cfg(test)]
-pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
-pub(crate) use session_notice::input_notice::{
-    input_notice_content, input_notice_line, scheduled_input_notice_content,
-};
+pub(crate) use session_notice::input_notice::{INPUT_NOTICE_RUNS, input_notice_content};
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
