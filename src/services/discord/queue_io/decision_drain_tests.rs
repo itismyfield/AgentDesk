@@ -350,6 +350,74 @@ async fn decision_front_is_journaled_before_its_one_write_pg() {
     rig.close().await;
 }
 
+/// The owner writes a Decision front only as PG approved it: the event's own origin, channel,
+/// actor and body. Any other claim of the source writes nothing and moves no event.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn decision_front_is_written_only_as_its_event_approved_it_pg() {
+    use crate::services::turn_orchestrator::PendingQueueItem;
+    let rig = Rig::new().await;
+    let row = rig.event("normal_wait", true).await;
+    let genuine = rig.front().await;
+    let claim = |origin: String| {
+        json!({"origin":"headless","source":"decision",
+            "metadata":{"human_input":{"origin_id":origin}}})
+    };
+    let altered = |edit: fn(&mut PendingQueueItem)| {
+        let mut front = genuine.clone();
+        edit(&mut front.1);
+        front
+    };
+    let unregistered = format!("decision:{}", uuid::Uuid::new_v4());
+    let cases: Vec<(&str, serde_json::Value, Front)> = vec![
+        ("unregistered event", claim(unregistered), genuine.clone()),
+        (
+            "no origin",
+            json!({"origin":"headless","source":"decision","metadata":{}}),
+            genuine.clone(),
+        ),
+        (
+            "malformed origin",
+            claim("decision:not-an-event".into()),
+            genuine.clone(),
+        ),
+        (
+            "another opinion of the event",
+            claim(format!("{}:opinion:5", row.origin)),
+            genuine.clone(),
+        ),
+        (
+            "another body",
+            context(&row),
+            altered(|item| item.text.push('!')),
+        ),
+        (
+            "another channel",
+            context(&row),
+            altered(|item| item.channel_id = Some(CHANNEL + 1)),
+        ),
+        (
+            "another actor",
+            context(&row),
+            altered(|item| item.author_id = 8),
+        ),
+    ];
+    for (name, kept, front) in cases {
+        let (runs, calls, _) = idle(&rig.pool, &row, Ok(()));
+        let refused = hand_idle(Some(&rig.pool), &rig.mailbox, Some(&kept), front, &runs).await;
+        assert!(refused.is_err(), "{name}: {refused:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{name}: wrote");
+        assert_eq!(rig.state(&row).await.0, "normal_wait", "{name}: moved");
+    }
+    let (runs, calls, _) = idle(&rig.pool, &row, Ok(()));
+    let kept = context(&row);
+    let sent = hand_idle(Some(&rig.pool), &rig.mailbox, Some(&kept), genuine, &runs).await;
+    assert_eq!(sent, Ok(()));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.state(&row).await.0, "delivered");
+    rig.close().await;
+}
+
 /// A closed event's original never runs: whichever closed state PG holds, the front is removed
 /// unrun, another user's input behind it stays, and no notice asks anyone to send it again.
 #[cfg(unix)]
