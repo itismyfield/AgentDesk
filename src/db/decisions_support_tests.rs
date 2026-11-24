@@ -31,12 +31,19 @@ pub(crate) async fn insert_event(
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO decision_delivery_attempts (event_id, state) VALUES ($1, $2)")
-        .bind(event_id)
-        .bind(state)
-        .execute(pool)
-        .await
-        .unwrap();
+    // A started workflow is held by the node whose run moved it: here, this one.
+    let holder = (state != "not_started")
+        .then(crate::services::cluster::node_registry::resolve_self_instance_id_without_config);
+    sqlx::query(
+        "INSERT INTO decision_delivery_attempts (event_id, state, holder_instance_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(event_id)
+    .bind(state)
+    .bind(holder)
+    .execute(pool)
+    .await
+    .unwrap();
     event_id
 }
 

@@ -47,7 +47,7 @@
 | decision_choices | request_id PK, actor/time, winning source, canonical selection_event_id. 최초 INSERT 승자만 선택 |
 | decision_messages | UNIQUE(thread_id, message_id), actor/bot/webhook, content hash, raw_content nullable, kind, 결과·사유, input_event_id |
 | decision_input_events | event_id PK, selection/opinion, source key UNIQUE, 승인 actor/text hash, admission_sequence, origin UNIQUE |
-| decision_delivery_attempts | event_id PK, workflow ticket, not_started/resolving/normal_wait/normalizing/may_have_sent/closing/delivered/failed/unknown_closed, normalization_used, 시도 session 증거. retry_at 없음 |
+| decision_delivery_attempts | event_id PK, workflow ticket, not_started/resolving/normal_wait/normalizing/may_have_sent/closing/delivered/failed/unknown_closed, normalization_used, 시도 session 증거, holder_instance_id(행을 마지막으로 옮긴 노드). retry_at 없음 |
 | decision_scan_cursors | thread PK, covered_through, scan_anchor_high/next_before, version, scan error |
 | decision_followups | request+idempotency key UNIQUE, reply/close/opinion_notice, post_state, nonce/message ID |
 

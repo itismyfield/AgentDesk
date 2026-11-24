@@ -970,6 +970,11 @@
       "path": "migrations/postgres/0200_decision_input_events.sql",
       "sha256": "bd69a08d9e50267753953a46888f22d279598e7f4c7161785dc8d399bf2880dc",
       "version": 200
+    },
+    {
+      "path": "migrations/postgres/0201_decision_attempt_holder.sql",
+      "sha256": "de0c99920ff33173bc897321a896a047a06b74da2a05708c41fec53a04d26e4c",
+      "version": 201
     }
   ],
   "version": 1
