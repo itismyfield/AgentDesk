@@ -131,21 +131,20 @@ fn decision_asks_that_race_for_a_new_capability_agree_on_one() {
     for round in 0..64 {
         let key = format!("race-{round}");
         let body = json!({"agent_id": "asker", "target": {"channel_id": "7"}, "ref": key});
-        let start = std::sync::Barrier::new(8);
-        let sent: Vec<Result<String, String>> = std::thread::scope(|scope| {
-            let racers: Vec<_> = (0..8)
-                .map(|_| {
-                    scope.spawn(|| {
-                        start.wait();
-                        ask(root.path(), &body, |capability| Ok(capability.to_string()))
-                    })
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let (start, root, body) = (start.clone(), root.path().to_path_buf(), body.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    ask(&root, &body, |capability| Ok(capability.to_string()))
                 })
-                .collect();
-            racers
-                .into_iter()
-                .map(|racer| racer.join().unwrap())
-                .collect()
-        });
+            })
+            .collect();
+        let cap = std::time::Duration::from_secs(30);
+        let sent: Vec<Result<String, String>> = (racers.into_iter())
+            .map(|racer| crate::test_support::wait::join_within(racer, cap))
+            .collect();
         let first = sent[0].clone().expect("the first asker got a capability");
         assert!(
             sent.iter().all(|one| one.as_ref() == Ok(&first)),
