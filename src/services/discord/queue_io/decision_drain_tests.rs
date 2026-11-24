@@ -131,6 +131,15 @@ impl Rig {
             let original = json!({"author_id":7,"message_id":message,"channel_id":CHANNEL,
                 "source_message_ids":[message],"queued_generation":5,"text":TEXT});
             let original = serde_json::from_value(original).unwrap();
+            // The first attempt stored this ticket when it reserved the event.
+            sqlx::query(
+                "UPDATE decision_delivery_attempts SET workflow_ticket = $2 WHERE event_id = $1",
+            )
+            .bind(event_id)
+            .bind(&ticket)
+            .execute(&self.pool)
+            .await
+            .unwrap();
             self.mailbox
                 .v2_admit_ticket(original, ticket)
                 .await
@@ -232,6 +241,16 @@ impl Rig {
         crate::db::turns::record_turn_receipt(&self.pool, &done)
             .await
             .unwrap();
+    }
+
+    /// The ids of the originals `owner` keeps, and whether its file still stores the Decision text.
+    async fn kept(owner: &ChannelMailboxHandle) -> (Vec<u64>, bool) {
+        let queue = owner.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let queue = queue.await.unwrap();
+        let kept = (queue["retained_inputs"].as_array().unwrap().iter())
+            .map(|entry| entry["input"]["original"]["message_id"].as_u64().unwrap())
+            .collect();
+        (kept, queue.to_string().contains(TEXT))
     }
 
     async fn close(self) {
@@ -605,6 +624,73 @@ async fn decision_boot_recovery_settles_each_interrupted_event_exactly_once_pg()
         queue["head_injection"].is_null(),
         "recovery reserves nothing"
     );
+    rig.close().await;
+}
+
+/// Boot recovery closed the event before any owner held the channel. The owner that adopts the
+/// queue file later still removes the closed event's kept original, before any notice.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_original_closed_before_its_owner_adopted_leaves_at_adoption_pg() {
+    let rig = Rig::new().await;
+    let drain = crate::services::discord::queue_io::input_owner::notice::drain;
+    // The earlier process journaled a write it never confirmed, and another user's as well.
+    let unknown = rig.event("may_have_sent", true).await;
+    rig.attempt_front("decision", true).await;
+    let other = rig.other_input(1).await;
+    rig.attempt_front("other", true).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let boot = decisions::clock(&rig.pool).await.unwrap();
+    assert_eq!(recover_before(&rig.pool, boot, |_| None).await.unwrap(), 1);
+    assert_eq!(rig.state(&unknown).await.0, "unknown_closed");
+    let adopted = Rig::adopt(&rig.file).await;
+    for owed in [1, 0] {
+        assert_eq!(
+            drain(&rig.pool, &adopted, "claude", CHANNEL).await,
+            Ok(owed)
+        );
+        assert_eq!(rig.notices().await, 1, "only the other user's notice");
+        assert_eq!(Rig::kept(&adopted).await, (vec![other], false));
+    }
+    rig.close().await;
+}
+
+/// The close is recorded and the removal of the original fails. The next drains find the closed
+/// event's original again: its notice waits meanwhile and another user's is still posted.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn decision_cleanup_that_failed_after_its_close_is_found_again_pg() {
+    let mut rig = Rig::new().await;
+    let drain = crate::services::discord::queue_io::input_owner::notice::drain;
+    let fail_commits = |owner: &ChannelMailboxHandle| {
+        owner.v2_request(|slot| {
+            slot.as_mut()
+                .ok_or("no owner")?
+                .cancel_fault_for_tests(true);
+            Ok(())
+        })
+    };
+    let unknown = rig.event("may_have_sent", true).await;
+    rig.attempt_front("decision", true).await;
+    let other = rig.other_input(1).await;
+    note_open();
+    fail_commits(&rig.mailbox).await.unwrap();
+    let first = drain(&rig.pool, &rig.mailbox, "claude", CHANNEL).await;
+    assert_eq!(rig.state(&unknown).await.0, "unknown_closed");
+    assert_eq!(rig.notices().await, 0, "its notice did not wait: {first:?}");
+    // Another user's write goes unconfirmed while the removal still fails.
+    rig.mailbox = Rig::adopt(&rig.file).await;
+    rig.attempt_front("other", true).await;
+    fail_commits(&rig.mailbox).await.unwrap();
+    let _ = drain(&rig.pool, &rig.mailbox, "claude", CHANNEL).await;
+    assert_eq!(rig.notices().await, 1, "the other user's notice is posted");
+    // The storage works again.
+    rig.mailbox = Rig::adopt(&rig.file).await;
+    for owed in [1, 0] {
+        let drained = drain(&rig.pool, &rig.mailbox, "claude", CHANNEL).await;
+        assert_eq!(drained, Ok(owed));
+        assert_eq!(rig.notices().await, 1, "no notice for the closed decision");
+        assert_eq!(Rig::kept(&rig.mailbox).await, (vec![other], false));
+    }
     rig.close().await;
 }
 
