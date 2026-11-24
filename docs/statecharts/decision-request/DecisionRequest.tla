@@ -254,17 +254,17 @@ Crash == /\ alive /\ crashes = 1
     /\ choice' = (IF Mode = "Volatile" THEN 0 ELSE choice)
     /\ phase' = (IF phase \in {"sending", "claimed", "normalizing", "prepared"} THEN "unknown" ELSE phase)
     /\ kept' = (kept \/ phase = "sending")
-    /\ \E forever \in BOOLEAN: gone' = (forever)
+    /\ gone' = (Mode \in {"Gone", "NoOfflineSettle"})
     /\ UNCHANGED <<first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, listed, bound>>
 Boot == /\ ~alive /\ ~gone
     /\ alive' = (TRUE)
     /\ listed' = ("online")
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, gone, bound>>
-Archive == /\ archiveMoves = 1 /\ view # "none"
+Archive == /\ archiveMoves = 1 /\ view # "none" /\ phase # "disabled"
     /\ archived' = (TRUE)
     /\ archiveMoves' = (0)
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, locked, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, listed, gone, bound>>
-ArchiveLocked == /\ archiveMoves = 1 /\ view # "none"
+ArchiveLocked == /\ archiveMoves = 1 /\ view # "none" /\ phase # "disabled"
     /\ archived' = (TRUE)
     /\ locked' = (TRUE)
     /\ archiveMoves' = (0)
@@ -330,7 +330,7 @@ PeerRecover == /\ Mode # "NoRecovery"
     /\ PeerClose
 \* The registry lists a dead node offline, and that event settles what it still held: without it a
 \* row a peer kept at its own boot, while the node was still listed online, is never looked at again.
-MarkOffline == /\ ~alive /\ listed = "online"
+MarkOffline == /\ ~alive /\ listed = "online" /\ phase = "unknown"
     /\ listed' = ("offline")
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, gone, bound>>
 OfflineSettle == /\ Mode \notin {"NoRecovery", "NoOfflineSettle"} /\ listed = "offline" /\ phase = "unknown"
@@ -341,7 +341,7 @@ Bootstrap == /\ alive /\ ~bootstrapped /\ phase = "selected"
     /\ bootstrapped' = (TRUE)
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, tempHeld, listed, gone, bound>>
 \* The owner refuses a kept original whose wait ran out: its bind goes, its refusal notice stays.
-RefuseKept == /\ alive /\ kept /\ bound /\ phase \in {"failed", "unknown_closed"}
+RefuseKept == /\ Mode = "BindOnlySweep" /\ alive /\ kept /\ bound /\ phase \in {"failed", "unknown_closed"}
     /\ bound' = (FALSE)
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, listed, gone>>
 Progress == Claim \/ ResolvePresent \/ NormalizeAbsent \/ AbsentAfterNormalize \/ NormalizeSuccess \/ NormalizeFailure \/ RefusalNormalize \/ RefusalFinal \/ DrainCurrent \/ Journal \/ BeginSend \/ RemoteEffect \/ Observe \/ Uncertain \/ CloseUnknown \/ CloseAbandoned \/ Finalize \/ Sweep \/ OtherNotice \/ Bootstrap \/ Reconcile
@@ -368,7 +368,7 @@ JournalBeforeWrite == writes > 0 => journal
 LiveHolderKeeps == ~tookLive
 NoDecisionNotice == ~noticed
 OthersKept == otherKept
-\* A node that never returns keeps its own queue file and screen; only the shared rows still settle.
+\* A node that never returns (Gone) keeps its own queue file and screen; only the shared rows settle.
 ClosedLeavesNothing == (phase \in {"failed", "unknown_closed"}) ~> (~kept \/ gone)
 OthersTold == <>(otherNoticed \/ gone)
 AbandonedEnds == (gone /\ phase = "unknown") ~> (phase # "unknown")

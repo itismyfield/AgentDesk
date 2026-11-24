@@ -191,6 +191,7 @@ decision-request/ForumFixed.cfg	DecisionForum	-	-
 decision-request/ForumRace.cfg	DecisionForum	NoDuplicateForum	-
 decision-request/ForumReuse.cfg	DecisionForum	-	-
 decision-request/ForumUnknown.cfg	DecisionForum	NoDuplicateForum	-
+decision-request/Gone.cfg	DecisionRequest	-	-
 decision-request/GuardByThread.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/Handoff.cfg	DecisionRequest	ExecutionAuthorized	-
 decision-request/Lost.cfg	DecisionRequest	ChoiceRecorded	-
