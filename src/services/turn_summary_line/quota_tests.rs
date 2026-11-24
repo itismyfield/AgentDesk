@@ -101,7 +101,7 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
         })
         .collect::<Vec<_>>();
     let expected = format!(
-        "-# ⏱️ 2초 ({})\n-# 5h 24% ({}) · 7d 61% ({})",
+        "-# ⏱️ 2초 ({})\n-# 5h 24% (4h 59m, {}) · 7d 61% (6d 23h, {})",
         (started + chrono::Duration::seconds(2))
             .with_timezone(&chrono_tz::Asia::Seoul)
             .format(
@@ -222,7 +222,7 @@ fn restarted_named_claude_does_not_borrow_default_fable() {
             "{}",
             footer.payload
         );
-        assert!(footer.payload.contains(" · 7d 61% ("), "{}", footer.payload);
+        assert!(footer.payload.contains(" · 7d 61%"), "{}", footer.payload);
         footer.payload.clone()
     };
     let unknown = summarize("unknown-owner");
@@ -232,7 +232,10 @@ fn restarted_named_claude_does_not_borrow_default_fable() {
     assert!(!summarize("different-session").contains("Fable"));
     write_claude_session_auth(&logical, &session, "named-a").unwrap();
     let restored = summarize("restored-owner");
-    assert!(restored.contains(" · Fable 7d 22% ("), "{restored}");
+    assert!(
+        restored.contains(" · 7d 61% · Fable 7d 22% (6d 23h, "),
+        "{restored}"
+    );
 }
 
 #[cfg(unix)]
@@ -336,7 +339,7 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
     let line = render(Outcome::Completed, Some(150_000), Some(45), Some(quota));
     assert_eq!(
         line,
-        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (2h 30m, 11:30) · 7d 38% (4d 7h, 10/27 16:00)"
     );
     assert!(line.lines().all(|part| !part.chars().any(char::is_control)));
     assert_eq!(line.lines().count(), 2);
@@ -356,7 +359,7 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
             Some(45),
             claude(&rollover, now())
         ),
-        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 08:45)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (2h 30m, 11:30) · 7d 38% (3d 23h, 10/27 08:45)"
     );
 }
 
@@ -452,7 +455,7 @@ fn quota_windows_need_valid_percent_and_a_future_reset() {
         None,
         claude(&response, now()),
     );
-    assert_eq!(line, "-# ⏱️ 1초\n-# 7d 38% (10/27 16:00)");
+    assert_eq!(line, "-# ⏱️ 1초\n-# 7d 38% (4d 7h, 10/27 16:00)");
 }
 
 fn cache() -> RwLock<Cache> {
@@ -583,7 +586,7 @@ fn codex_incomplete_duplicate_and_unrelated_windows_are_not_zero_percent() {
     );
     assert_eq!(
         render(Outcome::Completed, Some(1000), None, quota),
-        "-# ⏱️ 1초\n-# 5h 0% (11:30)"
+        "-# ⏱️ 1초\n-# 5h 0% (2h 30m, 11:30)"
     );
 }
 
@@ -715,7 +718,7 @@ fn claude_fable_scoped_window_supplements_the_fresh_session_quota() {
             None,
             merge_claude(session, account)
         ),
-        "-# ⏱️ 1초\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00) · Fable 7d 48% (10/28 08:45)"
+        "-# ⏱️ 1초\n-# 5h 15% (2h 30m, 11:30) · 7d 38% (4d 7h, 10/27 16:00) · Fable 7d 48% (4d 23h, 10/28 08:45)"
     );
     response.usage_data_stale = true;
     assert_eq!(merge_claude(session, claude(&response, now())), session);
@@ -737,7 +740,27 @@ fn fable_bucket_is_available_for_claude_profiles_and_ignored_for_codex() {
                 ..Footer::default()
             }
         ),
-        "-# ✅ 완료 (09:00)\n-# Fable 7d 22% (10/27 16:00)"
+        "-# ✅ 완료 (09:00)\n-# Fable 7d 22% (4d 7h, 10/27 16:00)"
+    );
+}
+
+#[test]
+fn same_minute_neighbours_share_one_reset_counted_from_the_fixed_now() {
+    let line = |resets: [i64; 3]| {
+        let rows = ["5h", "7d", "7d Fable"].into_iter().zip(resets).map(|(name, reset)| {
+            json!({"name":name, "used":0, "limit":100, "reset":now().timestamp() + reset})
+        });
+        let data = json!({"buckets": rows.collect::<Vec<_>>()}).to_string();
+        let quota = buckets(&data, now(), true);
+        render(Outcome::Completed, Some(1000), None, quota)
+    };
+    assert_eq!(
+        line([86_399, 86_400, 86_459]),
+        "-# ⏱️ 1초\n-# 5h 0% (23h 59m, 08:59) · 7d 0% · Fable 7d 0% (1d 0h, 10/24 09:00)"
+    );
+    assert_eq!(
+        line([3_600, 86_340, 86_400]),
+        "-# ⏱️ 1초\n-# 5h 0% (1h 0m, 10:00) · 7d 0% (23h 59m, 10/24 08:59) · Fable 7d 0% (1d 0h, 10/24 09:00)"
     );
 }
 
@@ -791,7 +814,7 @@ fn default_claude_fills_windows_from_usage_whose_weekly_reset_matches_the_sessio
     let (matched, other) = (footer(week + 30), footer(week + 3600));
     publish("claude", "default", "{}", now.timestamp());
     let _ = std::fs::remove_file(&path);
-    for wanted in ["\n-# 5h 40% (", " · 7d 91% (", " · Fable 7d 12% ("] {
+    for wanted in ["\n-# 5h 40% (", " · 7d 91%", " · Fable 7d 12% ("] {
         assert!(matched.contains(wanted), "{matched}");
     }
     assert!(

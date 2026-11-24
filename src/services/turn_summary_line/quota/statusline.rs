@@ -51,6 +51,7 @@ impl Record {
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
             fable_seven_day: None,
+            as_of: now,
         }
         .current(now)
     }

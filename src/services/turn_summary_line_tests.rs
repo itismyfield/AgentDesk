@@ -261,14 +261,15 @@ pub(crate) fn assert_completed_footer(footer: &str) {
         "{footer:?}"
     );
     if let Some(quota) = lines.next() {
-        let five = format!(r"5h {percent} \({time}\)");
-        let seven = format!(r"7d {percent} \({day_time}\)");
+        let left = r"(?:[1-9][0-9]*d (?:1?[0-9]|2[0-3])h|(?:1?[0-9]|2[0-3])h [1-5]?[0-9]m)";
+        let five = format!(r"5h {percent}(?: \({left}, {time}\))?");
+        let seven = format!(r"7d {percent}(?: \({left}, {day_time}\))?");
         let fable = format!("Fable {seven}");
         let shape = format!(
             r"\A-# (?:{five}(?: · {seven})?(?: · {fable})?|{seven}(?: · {fable})?|{fable})\z"
         );
         assert!(
-            regex::Regex::new(&shape).unwrap().is_match(quota),
+            regex::Regex::new(&shape).unwrap().is_match(quota) && quota.ends_with(')'),
             "{footer:?}"
         );
     }
