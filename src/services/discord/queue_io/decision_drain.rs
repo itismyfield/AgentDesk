@@ -376,11 +376,23 @@ pub(crate) async fn hand_idle(
     result
 }
 
-/// Settles every unsettled event of `channel` from its owner's records. The owner's notice drain
-/// runs this first, so a failed Decision original is gone before any resend notice is posted.
-pub(crate) async fn settle_channel(pool: &PgPool, mailbox: &ChannelMailboxHandle, channel: u64) {
-    if !OPEN.load(Ordering::Relaxed) {
-        return;
+/// Settles every unsettled event of `channel` from its owner's records, then removes each
+/// original the owner still holds of an event PG already closed: a close recorded before the
+/// owner held the channel, or whose removal failed, is found again here. The owner's requeue and
+/// notice drain run this first. Returns the originals whose removal is still owed, so their
+/// notices wait while every other input's is posted.
+pub(crate) async fn settle_channel(
+    pool: &PgPool,
+    mailbox: &ChannelMailboxHandle,
+    channel: u64,
+) -> Vec<u64> {
+    let tickets = mailbox.v2_request(|slot| {
+        Ok((slot.as_ref()).map_or_else(Vec::new, |owner| owner.decision_tickets()))
+    });
+    let tickets = tickets.await.unwrap_or_default();
+    // Without an approved event met here or a Decision original held, nothing reads PG.
+    if !OPEN.load(Ordering::Relaxed) && tickets.is_empty() {
+        return Vec::new();
     }
     let rows = decisions::unsettled(pool, Some(channel), RUN.get()).await;
     for row in rows.unwrap_or_default() {
@@ -388,6 +400,26 @@ pub(crate) async fn settle_channel(pool: &PgPool, mailbox: &ChannelMailboxHandle
             tracing::warn!(event_id = %row.event_id, %error, "decision input left unsettled");
         }
     }
+    if tickets.is_empty() {
+        return Vec::new();
+    }
+    let closed = decisions::closed_under(pool, &tickets).await;
+    let mut owed = Vec::new();
+    for (origin, channel_id) in closed.unwrap_or_default() {
+        let row = Unsettled {
+            event_id: Uuid::nil(),
+            origin,
+            agent_id: String::new(),
+            channel_id,
+            state: AttemptState::Failed,
+            stale: false,
+        };
+        if let Err(error) = discard(Some(mailbox), &row).await {
+            tracing::warn!(origin = %row.origin, %error, "closed decision original still held");
+            owed.push(message_of(row.channel_id, &row.origin));
+        }
+    }
+    owed
 }
 
 /// Settles, without a second write, every row whose holder's run is over for this node's run

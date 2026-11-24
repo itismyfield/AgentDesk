@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 /// The input source only the Decision service uses; a request that names it proves nothing.
 pub(crate) const SOURCE: &str = "decision";
+/// The tag of every ticket an event's original is admitted under.
+pub(crate) const TICKET_TAG: &str = "dcsn";
 
 /// The event an origin of the form `decision:<uuid>[:opinion:<message id>]` names.
 pub(crate) fn event_of_origin(origin: &str) -> Option<Uuid> {
@@ -346,6 +348,25 @@ pub(crate) async fn unsettled(
                 stale,
             })
         };
+    Ok(rows.into_iter().filter_map(read).collect())
+}
+
+/// The origin and channel of every event that reached its end among those reserved under
+/// `tickets`: what an owner still holding one of these originals has left to remove.
+pub(crate) async fn closed_under(
+    pool: &PgPool,
+    tickets: &[String],
+) -> Result<Vec<(String, u64)>, sqlx::Error> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT e.origin, e.logical_channel_id
+         FROM decision_delivery_attempts a JOIN decision_input_events e USING (event_id)
+         WHERE a.workflow_ticket = ANY($1)
+           AND a.state IN ('delivered', 'failed', 'unknown_closed')",
+    )
+    .bind(tickets)
+    .fetch_all(pool)
+    .await?;
+    let read = |(origin, channel): (String, String)| Some((origin, channel.parse().ok()?));
     Ok(rows.into_iter().filter_map(read).collect())
 }
 

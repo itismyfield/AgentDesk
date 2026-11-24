@@ -51,6 +51,20 @@ impl Owner {
         }
     }
 
+    /// The Decision tickets whose originals this owner still holds queued, attempted or kept:
+    /// what a settlement checks against the events PG already closed.
+    pub(crate) fn decision_tickets(&self) -> Vec<String> {
+        let tag = format!("{}-", crate::db::decisions::TICKET_TAG);
+        let held = (self.snapshot.admission_binds.iter())
+            .filter(|bind| !matches!(bind.at, BindAt::Settled { .. }))
+            .filter_map(|bind| bind.receipt.strip_prefix("tk:")?.split(':').next())
+            .filter(|ticket| ticket.starts_with(&tag));
+        let mut tickets: Vec<String> = held.map(str::to_string).collect();
+        tickets.sort();
+        tickets.dedup();
+        tickets
+    }
+
     /// Ends the event's original unrun: a queued copy leaves the queue alone, a kept one leaves
     /// with its body whatever kept it, and every record of it stops owing its notice. An attempted
     /// head is not touched, and a unit that also carries another input stays kept.
