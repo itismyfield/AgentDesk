@@ -1,6 +1,6 @@
 use super::super::Fixture;
 use super::*;
-use crate::db::dispatched_session_canonical_identity::pg_tests as canonical_fixture;
+use crate::krx_db_tests::canonical_identity_pg as canonical_fixture;
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced as recovery;
 use crate::services::discord::recovery_engine::herdr_reader::{

@@ -3,6 +3,7 @@ pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_recovery;
 pub mod agents;
+pub(crate) mod agy_acp;
 pub mod analytics;
 pub mod api_friction;
 pub mod auto_queue;
@@ -185,6 +186,14 @@ pub use remote_stub as remote;
 
 #[cfg(test)]
 mod krx_claude_tests;
+#[cfg(test)]
+mod krx_config_tests;
+#[cfg(test)]
+mod krx_db_b_tests;
+#[cfg(test)]
+mod krx_db_tests;
+#[cfg(test)]
+mod krx_tui_o_tests;
 #[cfg(test)]
 mod provider_output_guard_tests;
 

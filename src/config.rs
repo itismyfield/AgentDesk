@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub(crate) mod decision_gate;
 pub(crate) mod decisions;
 mod runtime_settings;
-mod runtime_validation;
+pub(crate) mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_memory;
@@ -127,6 +127,11 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::services::agy_acp::AgyAcpConfig::is_default"
+    )]
+    pub agy_acp: crate::services::agy_acp::AgyAcpConfig,
     /// Validated file edits update the snapshot when true (default); false keeps the boot value.
     /// Failed edits/watchers retain the last value; `reload_classes::FIELDS` lists when fields act.
     #[serde(default = "default_true")]
@@ -2449,6 +2454,7 @@ impl Default for Config {
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
             tui_o: None,
             session_hosts: SessionHostsConfig::default(),
+            agy_acp: Default::default(),
             config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()
@@ -2915,9 +2921,9 @@ pub(crate) mod test_env_lock {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_env;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.

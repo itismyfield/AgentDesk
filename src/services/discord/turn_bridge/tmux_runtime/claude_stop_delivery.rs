@@ -773,6 +773,11 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    /// How long a wait for something that must happen polls before failing: a hang detector, not a
+    /// bound of the contract, so a slow runner only makes a broken build fail later.
+    #[cfg(unix)]
+    const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
+
     fn reserved_decision(
         token: &CancelToken,
         delivery: ClaudeTurnInterruptDelivery,
@@ -1203,7 +1208,7 @@ mod tests {
             );
         });
         holding_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(LIVENESS)
             .expect("compact must acquire the composer lock first");
 
         let escape_session = session.clone();
@@ -1222,7 +1227,7 @@ mod tests {
         );
         release_tx.send(()).expect("release compact");
         escape_ran_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(LIVENESS)
             .expect("the stop Escape proceeds once the composer lock releases");
     }
 
@@ -1269,7 +1274,7 @@ mod tests {
             );
         });
         compact_holding_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(LIVENESS)
             .expect("compact must acquire the composer lock first");
 
         // Drive the production stop routing for `session`. It must block on the
@@ -1317,13 +1322,13 @@ mod tests {
                 .expect("signal other-session bind done");
         });
         bind_done_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(LIVENESS)
             .expect("a different pane's registry op must not block on the parked composer wait");
 
         // Release `/compact`; the parked stop now proceeds and commits the fence.
         release_compact_tx.send(()).expect("release compact");
         let delivered = delivery_done_rx
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(LIVENESS)
             .expect("the stop Escape proceeds once the composer lock releases");
         assert_eq!(delivered, Ok(()));
         assert!(

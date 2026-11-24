@@ -31,10 +31,6 @@ use crate::config::reload_classes::ReloadClass;
 #[path = "config/readers_live_reload_tests.rs"]
 mod readers_tests;
 
-#[cfg(all(test, unix))]
-#[path = "config/daemon_snapshot_pg_tests.rs"]
-mod daemon_snapshot_pg_tests;
-
 #[cfg(test)]
 #[path = "config/poll_watcher_tests.rs"]
 mod poll_watcher_tests;
@@ -49,10 +45,10 @@ static LIVE_UPDATES: OnceLock<tokio::sync::watch::Sender<Option<Arc<Config>>>> =
 
 /// Debounce window for collapsing bursts of filesystem events (editors emit
 /// several per save). Matches the policies watcher.
-const DEBOUNCE: Duration = Duration::from_millis(500);
+pub(crate) const DEBOUNCE: Duration = Duration::from_millis(500);
 
 // Keep edits responsive while scanning only the immediate config directory.
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.

@@ -1,5 +1,6 @@
-use super::*;
-use crate::db::server_campaigns::tests::Harness;
+use crate::db::server_campaigns::evidence_store::*;
+use crate::domain::campaign::evidence::EvidenceDecision;
+use crate::domain::campaign::evidence::EvidenceStatus;
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence::EvidenceEnvelope,
@@ -8,7 +9,9 @@ use crate::services::campaign_execution::{
         tests::{OUTPUT, claim, seal, workspace},
     },
 };
+use crate::services::krx_db_tests::server_campaigns_storage::Harness;
 use sqlx::PgPool;
+use sqlx::types::Json;
 
 fn envelope(output: &str) -> EvidenceEnvelope {
     claim(&domain::binding(&domain::running()), output)

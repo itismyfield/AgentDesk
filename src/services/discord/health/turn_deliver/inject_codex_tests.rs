@@ -68,7 +68,7 @@ completed = {"type": "event_msg", "payload": {"type": "item_completed", "turn_id
         "content": [{"type": "text", "text": body, "text_elements": []}]}}}
 with (d / "rollout.jsonl").open("a") as stream:
     for record in (response, completed):
-        stream.write(json.dumps(record) + "\n")
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 PY
     [ -f "$d/fail.enter" ] && exit 1
     ;;

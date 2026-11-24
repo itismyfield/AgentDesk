@@ -142,13 +142,15 @@ use self::rebind_reap::{
     reap_dead_watcher_rebind_origin_locked_in_root, should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+#[cfg(all(test, unix))]
+use removal::persist_native_boot_record;
 #[cfg(test)]
 pub(in crate::services::discord) use removal::{
     invalidate_stale_generation_scoped, load_inflight_probe_scoped,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use removal::{
-    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+    native_boot_records, persist_native_boot_record_off_worker, preserve_native_before_discard,
 };
 mod restart_mark;
 #[cfg(test)]
@@ -767,7 +769,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
 /// draining watcher advanced between the unlocked enumeration and this write is
 /// preserved) and persists it with only `restart_mode` / `restart_generation`
 /// changed, under the same lock-then-read pattern as the other row clears.
-/// A row holding a policy receipt is left byte-identical. Deliberately does NOT route through
+/// A row holding a policy or terminal receipt is left byte-identical. Deliberately does NOT route through
 /// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
 /// whole point is to keep the on-disk frontier rather than carry a stale one.
 fn set_inflight_restart_mode_under_lock(
@@ -788,6 +790,10 @@ fn set_inflight_restart_mode_under_lock(
     let Some(mut state) = read_inflight_state_content(path) else {
         return Failed;
     };
+    // An execution whose terminal awaits its receipt has nothing to resume after the restart.
+    if state.terminal_receipt.is_some() {
+        return SkippedPolicyReceipt;
+    }
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();

@@ -30,6 +30,12 @@ export interface UsageMeterLabels {
   nearLimit: string;
   /** Footer heading close to the limit. */
   nearLimitStatus: string;
+  /** Warning dot name and spoken suffix at or over `dangerAt`. */
+  danger: string;
+  /** Footer heading at or over `dangerAt`. */
+  dangerStatus: string;
+  /** Polite announcement when the reading reaches the `dangerAt` level. */
+  announceDanger: (title: string, actual: string, percent: number) => string;
   /** Footer tail over the limit, from the formatted amount with unit. */
   over: (amount: ReactNode) => ReactNode;
   /** Footer tail with what is left, from the formatted amount with unit. */
@@ -91,7 +97,15 @@ export interface UsageMeterProps {
   title?: string;
   plan?: string;
   unit?: string;
+  /** Ratio (0–1) where the warning level starts. Defaults to 0.8. */
   warnAt?: number;
+  /**
+   * Optional ratio between `warnAt` and the limit where a stronger danger level starts, for example an auto-pause rule at
+   * 0.9: red fill, value and dot, a threshold tick on limit bars, its own footer heading and announcement. Values at or below
+   * `warnAt` start it at `warnAt`; 1 or more never reach it. Omitted keeps the two levels. `onUpgrade` and
+   * `labels.announce` still receive `'warn'` for it.
+   */
+  dangerAt?: number;
   upgradeLabel?: string;
   topUpLabel?: string;
   /** Number and absolute-date formatting locale. Defaults to ko-KR. */
@@ -102,11 +116,16 @@ export interface UsageMeterProps {
 }
 
 type UsageState = UsageMeterState;
+/** `danger` only exists with `dangerAt`; it is a stronger `warn`. */
+type UsageLevel = UsageState | 'danger';
 
 export const usageMeterDefaultLabels: UsageMeterLabels = {
   limitReached: '한도 도달',
   nearLimit: '한도에 가까움',
   nearLimitStatus: '한도 임박',
+  danger: '위험 기준 이상',
+  dangerStatus: '위험 기준 이상',
+  announceDanger: (title, _actual, percent) => `${title}, 위험 기준 이상이에요. ${percent}%.`,
   over: (amount) => <>{amount} 초과</>,
   remaining: (amount) => <>{amount} 남음</>,
   resetToday: '오늘 초기화',
@@ -202,12 +221,14 @@ function useUsageNumbers(target: NumericSnapshot, root: RefObject<HTMLElement | 
   return { numbers, entered };
 }
 
-function WarningDot({ state, decorative = false, labels }: { state: UsageState; decorative?: boolean; labels: UsageMeterLabels }) {
+const levelName = (level: UsageLevel, labels: UsageMeterLabels) => level === 'limit' ? labels.limitReached : level === 'danger' ? labels.danger : level === 'warn' ? labels.nearLimit : '';
+
+function WarningDot({ state, decorative = false, labels }: { state: UsageLevel; decorative?: boolean; labels: UsageMeterLabels }) {
   if (state === 'ok') return null;
-  return <span key={state} className="aui-usage-meter-warning-dot" data-state={state} role={decorative ? undefined : 'img'} aria-hidden={decorative || undefined} aria-label={decorative ? undefined : state === 'limit' ? labels.limitReached : labels.nearLimit} />;
+  return <span key={state} className="aui-usage-meter-warning-dot" data-state={state} role={decorative ? undefined : 'img'} aria-hidden={decorative || undefined} aria-label={decorative ? undefined : levelName(state, labels)} />;
 }
 
-export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter', periods = [], period, defaultPeriod, onPeriodChange, resetAt, daily = [], onUpgrade, title = '사용량', plan, unit = '크레딧', warnAt = 0.8, upgradeLabel = '업그레이드', topUpLabel = '크레딧 추가', locale = 'ko-KR', labels: labelsProp, className = '' }: UsageMeterProps) {
+export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter', periods = [], period, defaultPeriod, onPeriodChange, resetAt, daily = [], onUpgrade, title = '사용량', plan, unit = '크레딧', warnAt = 0.8, dangerAt, upgradeLabel = '업그레이드', topUpLabel = '크레딧 추가', locale = 'ko-KR', labels: labelsProp, className = '' }: UsageMeterProps) {
   const text: UsageMeterLabels = { ...usageMeterDefaultLabels, ...labelsProp };
   const limitsLayout = layout === 'limits';
   const id = useId();
@@ -245,6 +266,8 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
   // A zero plan with positive usage is already over its limit.
   const ratio = knownTotal ? amount / maximum : amount > 0 ? Infinity : 0;
   const meterState = usageState(ratio, threshold);
+  const dangerLine = typeof dangerAt === 'number' && Number.isFinite(dangerAt) ? clamp(dangerAt, threshold, 1) : null;
+  const levelOf = (state: UsageState, reading: number): UsageLevel => state === 'warn' && dangerLine !== null && reading >= dangerLine ? 'danger' : state;
   // Days without an explicit value are still to come; malformed numbers count as measured zeros.
   // Finite daily numbers keep their sign for the average and the selected reading; bar heights floor at 4%.
   const measured = daily.filter((day) => day.value !== null && day.value !== undefined);
@@ -273,11 +296,15 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
     const actualUsed = measured ? format(usedValue, decimals, true) : '–';
     const actualMaximum = infinite ? '∞' : format(limitTotal, Number.isInteger(limitTotal) ? 0 : decimals, true);
     const actualValue = `${actualUsed} / ${actualMaximum}${!infinite && limit.unit ? `\u00a0${limit.unit}` : ''}`;
-    return { limit, key, measured, infinite, limitTotal, usedValue, limitRatio, limitState, decimals, actualUsed, actualMaximum, actualValue };
+    const limitLevel = levelOf(limitState, limitRatio);
+    return { limit, key, measured, infinite, limitTotal, usedValue, limitRatio, limitState, limitLevel, decimals, actualUsed, actualMaximum, actualValue };
   });
   const worstLimit = limitModels.reduce<(typeof limitModels)[number] | null>((worst, model) => model.measured && !model.infinite && (!worst || model.limitRatio > worst.limitRatio) ? model : worst, null);
   const state: UsageState = limitsLayout ? worstLimit?.limitState ?? 'ok' : meterState;
-  const previousState = useRef(state);
+  const level: UsageLevel = limitsLayout ? worstLimit?.limitLevel ?? 'ok' : levelOf(meterState, ratio);
+  const previousLevel = useRef(level);
+  /** Threshold tick on single-fill limit bars when a danger level is set. */
+  const dangerTick = (finiteBar: boolean) => dangerLine !== null && dangerLine < 1 && finiteBar ? <span className="aui-usage-meter-danger-tick" aria-hidden="true" style={{ left: `${dangerLine * 100}%` }} /> : null;
 
   // Removed rows stay at their previous index. Reappearing names cancel their exit timer.
   useLayoutEffect(() => {
@@ -334,13 +361,14 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
   }, [currentPeriod]);
   useEffect(() => { setSelectedDay((index) => index !== null && index >= daily.length ? null : index); }, [daily.length]);
   useEffect(() => {
-    if (previousState.current === state) return;
-    previousState.current = state;
+    if (previousLevel.current === level) return;
+    previousLevel.current = level;
     const actual = limitsLayout ? worstLimit?.actualValue ?? '' : `${withUnit(amount)} / ${withUnit(maximum)}`;
-    setAnnouncement(text.announce(state, title, actual, Math.round((limitsLayout ? worstLimit?.limitRatio ?? 0 : ratio) * 100)));
-    // Announcements follow status changes only, never the numeric animation or period alone.
+    const percent = Math.round((limitsLayout ? worstLimit?.limitRatio ?? 0 : ratio) * 100);
+    setAnnouncement(level === 'danger' ? text.announceDanger(title, actual, percent) : text.announce(state, title, actual, percent));
+    // Announcements follow level changes only, never the numeric animation or period alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
+  }, [level]);
 
   // An observed inner box gives the outer card an animatable explicit height.
   useLayoutEffect(() => {
@@ -485,10 +513,10 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
   };
 
   const limitTiles = limitsLayout ? null : limitModels.length > 0 && <ul className="aui-usage-meter-limits" aria-label={text.limits} style={{ '--aui-usage-meter-limit-columns': Math.min(3, limitModels.length) } as CSSProperties}>
-    {limitModels.map(({ limit, key, measured, infinite, limitTotal, usedValue, limitState, decimals, actualUsed, actualValue }) => <li key={key} className="aui-usage-meter-limit">
-      <div className="aui-usage-meter-limit-heading"><span title={limit.label} dir="auto">{limit.label}</span><WarningDot state={limitState} labels={text} /></div>
+    {limitModels.map(({ limit, key, measured, infinite, limitTotal, usedValue, limitLevel, decimals, actualUsed, actualValue }) => <li key={key} className="aui-usage-meter-limit" data-state={limitLevel}>
+      <div className="aui-usage-meter-limit-heading"><span title={limit.label} dir="auto">{limit.label}</span><WarningDot state={limitLevel} labels={text} /></div>
       <div className="aui-usage-meter-limit-value">{measured ? format(value(nkey('limit', key)), decimals, true) : '–'}<span> / {infinite ? '∞' : format(value(nkey('maximum', key)), Number.isInteger(limitTotal) ? 0 : decimals, true)}{!infinite && limit.unit ? `\u00a0${limit.unit}` : ''}</span></div>
-      <div className="aui-usage-meter-limit-track" data-unlimited={infinite || undefined} role={infinite || !measured ? 'img' : 'meter'} aria-label={!measured ? `${limit.label}: ${text.notMeasured}` : infinite ? `${limit.label}: ${actualUsed}, ${text.unlimited}` : limit.label} aria-valuemin={infinite || !measured ? undefined : 0} aria-valuemax={infinite || !measured ? undefined : limitTotal} aria-valuenow={infinite || !measured ? undefined : Math.min(usedValue, limitTotal)} aria-valuetext={infinite || !measured ? undefined : actualValue}>{!infinite && measured && <span className="aui-usage-meter-limit-fill" style={{ width: `${Math.min(100, value(nkey('limit', key)) / Math.max(limitTotal, 0.000000001) * 100)}%` }} />}</div>
+      <div className="aui-usage-meter-limit-track" data-unlimited={infinite || undefined} role={infinite || !measured ? 'img' : 'meter'} aria-label={!measured ? `${limit.label}: ${text.notMeasured}` : infinite ? `${limit.label}: ${actualUsed}, ${text.unlimited}` : limit.label} aria-valuemin={infinite || !measured ? undefined : 0} aria-valuemax={infinite || !measured ? undefined : limitTotal} aria-valuenow={infinite || !measured ? undefined : Math.min(usedValue, limitTotal)} aria-valuetext={infinite || !measured ? undefined : actualValue}>{!infinite && measured && <span className="aui-usage-meter-limit-fill" style={{ width: `${Math.min(100, value(nkey('limit', key)) / Math.max(limitTotal, 0.000000001) * 100)}%` }} />}{dangerTick(!infinite && measured)}</div>
     </li>)}
   </ul>;
 
@@ -503,14 +531,15 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
     {limitGroups.map((group) => <div key={group.name} className="aui-usage-meter-mini-group" role={group.name ? 'group' : undefined} aria-label={group.name || undefined}>
       {group.name && <h4 className="aui-usage-meter-mini-name" dir="auto">{group.name}</h4>}
       <ul className="aui-usage-meter-mini-rows">
-        {group.rows.map(({ limit, key, measured, infinite, limitTotal, usedValue, limitRatio, limitState, actualUsed, actualValue }) => {
+        {group.rows.map(({ limit, key, measured, infinite, limitTotal, usedValue, limitRatio, limitLevel, actualUsed, actualValue }) => {
           const name = group.name ? `${group.name} ${limit.label}` : limit.label;
-          return <li key={key} className="aui-usage-meter-mini-row" data-state={limitState} data-detail={limit.detail ? '' : undefined} title={`${name}: ${measured ? actualValue : text.notMeasured}`}>
+          return <li key={key} className="aui-usage-meter-mini-row" data-state={limitLevel} data-detail={limit.detail ? '' : undefined} title={`${name}: ${measured ? actualValue : text.notMeasured}`}>
             <span className="aui-usage-meter-mini-label" dir="auto" aria-hidden="true">{limit.label}</span>
-            <span className="aui-usage-meter-mini-track" data-unlimited={infinite || undefined} data-unmeasured={!measured || undefined} role={infinite || !measured ? 'img' : 'meter'} aria-label={!measured ? `${name}: ${text.notMeasured}` : infinite ? `${name}: ${actualUsed}, ${text.unlimited}` : name} aria-valuemin={infinite || !measured ? undefined : 0} aria-valuemax={infinite || !measured ? undefined : limitTotal} aria-valuenow={infinite || !measured ? undefined : Math.min(usedValue, limitTotal)} aria-valuetext={infinite || !measured ? undefined : `${actualValue} (${percentText(Math.min(limitRatio * 100, 1000))})${limitState === 'limit' ? `, ${text.limitReached}` : limitState === 'warn' ? `, ${text.nearLimit}` : ''}`}>
+            <span className="aui-usage-meter-mini-track" data-unlimited={infinite || undefined} data-unmeasured={!measured || undefined} role={infinite || !measured ? 'img' : 'meter'} aria-label={!measured ? `${name}: ${text.notMeasured}` : infinite ? `${name}: ${actualUsed}, ${text.unlimited}` : name} aria-valuemin={infinite || !measured ? undefined : 0} aria-valuemax={infinite || !measured ? undefined : limitTotal} aria-valuenow={infinite || !measured ? undefined : Math.min(usedValue, limitTotal)} aria-valuetext={infinite || !measured ? undefined : `${actualValue} (${percentText(Math.min(limitRatio * 100, 1000))})${limitLevel === 'ok' ? '' : `, ${levelName(limitLevel, text)}`}`}>
               {!infinite && measured && <span className="aui-usage-meter-mini-fill" style={{ width: `${Math.min(100, value(nkey('limit-percent', key)))}%` }} />}
+              {dangerTick(!infinite && measured)}
             </span>
-            <span className="aui-usage-meter-mini-value" aria-hidden="true"><WarningDot state={limitState} decorative labels={text} />{!measured ? '–' : infinite ? '∞' : percentText(value(nkey('limit-percent', key)))}</span>
+            <span className="aui-usage-meter-mini-value" aria-hidden="true"><WarningDot state={limitLevel} decorative labels={text} />{!measured ? '–' : infinite ? '∞' : percentText(value(nkey('limit-percent', key)))}</span>
             {limit.detail && <span className="aui-usage-meter-mini-detail" dir="auto">{limit.detail}</span>}
           </li>;
         })}
@@ -518,7 +547,7 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
     </div>)}
   </div>;
 
-  return <section ref={root} className={`aui-usage-meter ${className}`} aria-labelledby={`${id}-title`} data-entered={entered || undefined} data-layout={layout}>
+  return <section ref={root} className={`aui-usage-meter ${className}`} aria-labelledby={`${id}-title`} data-entered={entered || undefined} data-layout={layout} data-danger-scale={dangerLine !== null || undefined}>
     <style>{usageMeterStyles}</style>
     <div ref={card} className="aui-usage-meter-card">
       <div ref={content} className="aui-usage-meter-content">
@@ -536,7 +565,7 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
         {!limitsLayout && <>
         <div className="aui-usage-meter-summary">
           <div className="aui-usage-meter-amount"><strong className="aui-usage-meter-number">{format(value('amount'))}</strong><span className="aui-usage-meter-total">/ {withUnit(value('total'))}</span></div>
-          <span className="aui-usage-meter-ratio" data-state={state}><WarningDot state={state} decorative labels={text} />{percentText(value('percent'))}</span>
+          <span className="aui-usage-meter-ratio" data-state={level}><WarningDot state={level} decorative labels={text} />{percentText(value('percent'))}</span>
         </div>
         <div className="aui-usage-meter-bar-area" role="group" tabIndex={0} aria-label={text.barHint(`${withUnit(amount)} / ${withUnit(maximum)}`)} onKeyDown={categoryKeys} onBlur={(event) => { if (!focusesCurrentPeriod(event.relatedTarget)) setActiveCategory(null); }} onPointerDown={(event) => { categoryPress.current = { x: event.clientX, y: event.clientY }; }} onPointerCancel={() => { categoryPress.current = null; }} onPointerMove={(event) => { if (event.pointerType === 'mouse') setActiveCategory(categoryAt(event.clientX, event.currentTarget)); }} onPointerLeave={(event) => { if (event.pointerType === 'mouse') setActiveCategory(null); }} onPointerUp={(event) => {
           const press = categoryPress.current; categoryPress.current = null;
@@ -577,7 +606,7 @@ export function UsageMeter({ total = 0, used = [], limits = [], layout = 'meter'
       </div>
     </div>
     {(!limitsLayout || onUpgrade) && <footer className="aui-usage-meter-footer">
-      {!limitsLayout && <div key={state} className="aui-usage-meter-status" data-state={state}><WarningDot state={state} decorative labels={text} />{state === 'limit' ? <><strong>{text.limitReached}</strong>{amount > maximum && <span className="aui-usage-meter-status-tail">{text.over(withUnit(value('over')))}</span>}</> : state === 'warn' ? <><strong>{text.nearLimitStatus}</strong><span className="aui-usage-meter-status-tail">{text.remaining(withUnit(value('remaining')))}</span></> : <span className="aui-usage-meter-status-tail">{text.remaining(<><strong>{format(value('remaining'))}</strong> {unit}</>)}</span>}</div>}
+      {!limitsLayout && <div key={level} className="aui-usage-meter-status" data-state={level}><WarningDot state={level} decorative labels={text} />{state === 'limit' ? <><strong>{text.limitReached}</strong>{amount > maximum && <span className="aui-usage-meter-status-tail">{text.over(withUnit(value('over')))}</span>}</> : state === 'warn' ? <><strong>{level === 'danger' ? text.dangerStatus : text.nearLimitStatus}</strong><span className="aui-usage-meter-status-tail">{text.remaining(withUnit(value('remaining')))}</span></> : <span className="aui-usage-meter-status-tail">{text.remaining(<><strong>{format(value('remaining'))}</strong> {unit}</>)}</span>}</div>}
       {onUpgrade && <button ref={upgrade} type="button" className="aui-usage-meter-upgrade" title={toggledLabel} data-urgent={state !== 'ok' || undefined} onClick={() => { onUpgrade(state); }}><span ref={upgradeCopy} key={toggledLabel} className="aui-usage-meter-upgrade-copy">{toggledLabel}</span></button>}
     </footer>}
     {feedback && <p className="aui-usage-meter-feedback" role="status">{feedback}</p>}
@@ -594,6 +623,8 @@ const usageMeterStyles = `
   --aui-usage-meter-hover: var(--aui-usage-meter-hover-bg, #f4f4f5); --aui-usage-meter-track: var(--aui-usage-meter-track-bg, #efeff1);
   --aui-usage-meter-fill: var(--aui-usage-meter-meter-fill, #4a4a4f); --aui-usage-meter-day: var(--aui-usage-meter-day-bg, #dcdce0);
   --aui-usage-meter-accent: var(--aui-accent, #4fb0fe); --aui-usage-meter-warning: var(--aui-warn, #e8b000);
+  --aui-usage-meter-danger: var(--aui-err, #d92d20); --aui-usage-meter-danger-text: var(--aui-usage-meter-danger-fg, var(--aui-err, #b42318));
+  --aui-usage-meter-danger-ring: color-mix(in srgb, var(--aui-usage-meter-danger) 22%, transparent);
   --aui-usage-meter-warning-text: var(--aui-usage-meter-warn-fg, #b25e00); --aui-usage-meter-warning-ring: var(--aui-usage-meter-warn-ring, color-mix(in srgb, var(--aui-usage-meter-warning) 22%, transparent));
   --aui-usage-meter-color-1: var(--aui-accent, #4fb0fe); --aui-usage-meter-color-2: var(--aui-usage-meter-category-2, #4fb0fe);
   --aui-usage-meter-color-3: var(--aui-usage-meter-category-3, #b4deff); --aui-usage-meter-color-4: var(--aui-usage-meter-category-4, #a8a8ae); --aui-usage-meter-color-5: var(--aui-usage-meter-category-5, #d4d4d8);
@@ -607,6 +638,7 @@ const usageMeterStyles = `
   color: var(--aui-usage-meter-text); font: 13px/1.45 var(--aui-font-sans, Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); font-variant-numeric: tabular-nums; word-break: keep-all; overflow-wrap: anywhere; -webkit-tap-highlight-color: transparent;
 }
 :where(.dark,[data-theme="dark"]) .aui-usage-meter {
+  --aui-usage-meter-danger: var(--aui-err, #ff6b5f); --aui-usage-meter-danger-text: var(--aui-usage-meter-danger-fg, var(--aui-err, #ff8a7a));
   --aui-usage-meter-tray: var(--aui-bg-2, #111113); --aui-usage-meter-card: var(--aui-bg-1, #19191b); --aui-usage-meter-line: var(--aui-line, #2a2a2e); --aui-usage-meter-ink: var(--aui-fg, #ededed); --aui-usage-meter-text: var(--aui-fg-dim, #c8c8cc); --aui-usage-meter-muted: var(--aui-fg-muted, #8b8b92); --aui-usage-meter-faint: var(--aui-fg-faint, #5c5c63); --aui-usage-meter-well: var(--aui-bg-3, #111113); --aui-usage-meter-hover: var(--aui-usage-meter-hover-bg, #232326); --aui-usage-meter-track: var(--aui-usage-meter-track-bg, #2a2a2e); --aui-usage-meter-fill: var(--aui-usage-meter-meter-fill, #b4b4ba); --aui-usage-meter-day: var(--aui-usage-meter-day-bg, #3a3a40); --aui-usage-meter-accent: var(--aui-accent, #4fb0fe); --aui-usage-meter-warning: var(--aui-warn, #e6c24d); --aui-usage-meter-warning-text: var(--aui-usage-meter-warn-fg, #f2a15c); --aui-usage-meter-color-1: var(--aui-accent, #4fb0fe); --aui-usage-meter-color-2: var(--aui-usage-meter-category-2, #0190fe); --aui-usage-meter-color-3: var(--aui-usage-meter-category-3, #0070d6); --aui-usage-meter-color-4: var(--aui-usage-meter-category-4, #6b6b72); --aui-usage-meter-color-5: var(--aui-usage-meter-category-5, #45454b); --aui-usage-meter-pill-bg: var(--aui-usage-meter-pill, #2a2a2e); --aui-usage-meter-pill-border: var(--aui-usage-meter-pill-line, #ffffff0f); --aui-usage-meter-tooltip-bg: var(--aui-usage-meter-tooltip, #2a2a2d); --aui-usage-meter-tooltip-border: var(--aui-usage-meter-tooltip-line, #ffffff1a); --aui-usage-meter-tooltip-shadow: 0 8px 24px -6px #00000080, 0 2px 6px #00000059; --aui-usage-meter-focus: var(--aui-usage-meter-focus-ring, var(--aui-focus, rgb(77 141 255 / .8)));
 }
 .aui-usage-meter *, .aui-usage-meter *::before, .aui-usage-meter *::after { box-sizing: border-box; }
@@ -709,6 +741,13 @@ const usageMeterStyles = `
 .aui-usage-meter-mini-row[data-state="limit"] .aui-usage-meter-mini-fill { background: var(--aui-usage-meter-warning-text); }
 .aui-usage-meter-mini-value { grid-area: value; display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--aui-usage-meter-ink); font-size: 12.5px; font-weight: 500; line-height: 18px; white-space: nowrap; }
 .aui-usage-meter-mini-row[data-state="warn"] .aui-usage-meter-mini-value { color: var(--aui-usage-meter-warning-text); }
+.aui-usage-meter-ratio[data-state="danger"], .aui-usage-meter-mini-row[data-state="danger"] .aui-usage-meter-mini-value { color: var(--aui-usage-meter-danger-text); }
+.aui-usage-meter-warning-dot[data-state="danger"] { background: var(--aui-usage-meter-danger); }
+.aui-usage-meter[data-danger-scale] .aui-usage-meter-warning-dot[data-state="limit"] { background: var(--aui-usage-meter-danger); box-shadow: 0 0 0 3px var(--aui-usage-meter-danger-ring); }
+.aui-usage-meter-mini-row[data-state="danger"] .aui-usage-meter-mini-fill, .aui-usage-meter[data-danger-scale] .aui-usage-meter-mini-row[data-state="limit"] .aui-usage-meter-mini-fill { background: var(--aui-usage-meter-danger); }
+.aui-usage-meter-limit[data-state="danger"] .aui-usage-meter-limit-fill, .aui-usage-meter[data-danger-scale] .aui-usage-meter-limit[data-state="limit"] .aui-usage-meter-limit-fill { background: var(--aui-usage-meter-danger); }
+.aui-usage-meter-mini-track, .aui-usage-meter-limit-track { position: relative; }
+.aui-usage-meter-danger-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--aui-usage-meter-card); pointer-events: none; }
 .aui-usage-meter-mini-detail { grid-area: detail; min-width: 0; color: var(--aui-usage-meter-muted); font-size: 11.5px; line-height: 16px; overflow-wrap: anywhere; }
 .aui-usage-meter-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-height: 44px; padding: 6px 2px 2px 12px; }
 .aui-usage-meter-status { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: 7px; color: var(--aui-usage-meter-muted); font-size: 12.5px; white-space: nowrap; animation: aui-usage-meter-rise-in 260ms var(--aui-usage-meter-ease) both; }
@@ -774,7 +813,7 @@ const usageMeterStyles = `
 :where(.dark,[data-theme="dark"]) .aui-usage-meter-demo-feedback { color: var(--aui-fg-muted, #a3a3a3); }
 `;
 
-export type UsageMeterDemoState = 'ok' | 'warning' | 'over' | 'empty' | 'periods' | 'extreme' | 'no-plan' | 'long' | 'narrow' | 'single-period' | 'fractional' | 'boundaries' | 'negative-day' | 'read-only' | 'limits';
+export type UsageMeterDemoState = 'ok' | 'warning' | 'over' | 'empty' | 'periods' | 'extreme' | 'no-plan' | 'long' | 'narrow' | 'single-period' | 'fractional' | 'boundaries' | 'negative-day' | 'read-only' | 'limits' | 'danger';
 
 /** Small amounts, a reset more than 60 days away, 130 daily bars and long limit numbers. */
 function UsageMeterBoundaryDemo() {
@@ -832,16 +871,32 @@ function UsageMeterLimitsDemo() {
   </div>;
 }
 
+/** dangerAt 0.9 adds a third level between the 80% warning and the limit, e.g. a rule that pauses automatic work at 90%. */
+function UsageMeterDangerDemo() {
+  const limits: UsageLimit[] = [
+    { group: 'Claude', label: '5시간', used: 62, total: 100, unit: '%' },
+    { group: 'Claude', label: '주간', used: 84, total: 100, unit: '%', detail: '경고 단계예요' },
+    { group: 'Codex', label: '5시간', used: 90, total: 100, unit: '%', detail: '90%부터 자동 진행을 멈춰요' },
+    { group: 'Codex', label: '주간', used: 97, total: 100, unit: '%' },
+    { group: 'Gemini', label: '일간', used: 100, total: 100, unit: '%', detail: '한도에 닿았어요' },
+  ];
+  return <div className="aui-usage-meter-demo" style={{ display: 'grid', gap: 12 }}>
+    <UsageMeter layout="limits" title="공급자 한도 · 멈춤 기준 90%" limits={limits} dangerAt={0.9} />
+    <UsageMeter title="Claude 5시간 사용량" plan="AgentDesk Team" unit="토큰" total={1_000_000} used={[{ label: '에이전트 대화', value: 610_000 }, { label: '도구 호출', value: 310_000 }]} dangerAt={0.9} limits={[{ label: '동시 세션', used: 9, total: 10, unit: '개' }, { label: '실행 로그', used: 4.1, total: 5, unit: 'GB' }]} />
+  </div>;
+}
+
 /** The host owns period snapshots; this example includes a name disappearing and another appearing. */
 export function UsageMeterDemo({ state = 'ok' }: { state?: UsageMeterDemoState }) {
   if (state === 'boundaries') return <UsageMeterBoundaryDemo />;
   if (state === 'negative-day') return <UsageMeterNegativeDayDemo />;
   if (state === 'read-only') return <UsageMeterReadOnlyDemo />;
   if (state === 'limits') return <UsageMeterLimitsDemo />;
+  if (state === 'danger') return <UsageMeterDangerDemo />;
   return <UsageMeterHostDemo state={state} />;
 }
 
-function UsageMeterHostDemo({ state }: { state: Exclude<UsageMeterDemoState, 'boundaries' | 'negative-day' | 'read-only' | 'limits'> }) {
+function UsageMeterHostDemo({ state }: { state: Exclude<UsageMeterDemoState, 'boundaries' | 'negative-day' | 'read-only' | 'limits' | 'danger'> }) {
   const [period, setPeriod] = useState('month');
   const [request, setRequest] = useState('');
   const empty = state === 'empty';

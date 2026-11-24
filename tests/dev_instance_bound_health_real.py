@@ -21,8 +21,15 @@ from tests.test_dev_instance import profile
 from scripts.dev_instance.manifest import prepare
 
 NAMES = ('announce_bot_token', 'claude_bot_token', 'codex_bot_token', 'notify_bot_token')
-SELECTOR = 'config::test_instance::bound_health_tests::b2a_native_bound_health_child'
+SELECTOR = 'krx_config_unix_tests::bound_health_tests::b2a_native_bound_health_child'
 REPO = Path(__file__).resolve().parents[1]
+
+
+def selected_tests(binary, selector=SELECTOR):
+    """Test IDs the native binary runs for `--exact selector`; a moved test ID selects none."""
+    listed = subprocess.run([str(binary), '--list', '--exact', selector], capture_output=True,
+                            text=True, timeout=60, check=True).stdout
+    return [line.removesuffix(': test') for line in listed.splitlines() if line.endswith(': test')]
 
 
 def wrapper():
@@ -132,6 +139,8 @@ class BoundHealthRealTests(RealKeeperTests):
         self.assertEqual(self.binary.stat().st_ino,Path(native).stat().st_ino,
                          'the actual lane artifact must be the explicitly pinned native fixture')
         self.digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        self.assertEqual(selected_tests(self.binary), [SELECTOR],
+                         'the native child selector must name exactly one test in this binary')
         self.frame = {'kind':'admission','schema':1,
                       'identities':dict(zip(NAMES, ('900003','900001','900002','900006')))}
         self.tokens = {}

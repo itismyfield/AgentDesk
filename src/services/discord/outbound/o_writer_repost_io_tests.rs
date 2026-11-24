@@ -7,8 +7,17 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::*;
+use crate::services::tui_o::repost::io::*;
+use crate::services::tui_o::repost::send::{
+    AttemptGuard, BoundedTransport, RepostEnvelope, WireOutcome,
+};
 use crate::services::tui_o::repost::send::{DispatchReport, RepostIds, hand_over, send_within};
+use poise::serenity_prelude as serenity;
+use serenity::ChannelId;
+use serenity::http::Route;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) const CHANNEL: u64 = 63250101;
 const MARKER: &str = "o:63250101:claude:msg_01:body:0";
@@ -73,6 +82,8 @@ pub(crate) fn route_429(retry_after: &str) -> Reply {
 pub(crate) struct Mock {
     pub(crate) base: String,
     seen: Seen,
+    // Read only by the unix-gated local retry test.
+    #[cfg(unix)]
     probes: Arc<AtomicUsize>,
 }
 
@@ -114,7 +125,12 @@ impl Mock {
                 }
             }
         });
-        Self { base, seen, probes }
+        Self {
+            base,
+            seen,
+            #[cfg(unix)]
+            probes,
+        }
     }
 
     pub(crate) fn requests(&self) -> Vec<(String, Vec<u8>)> {

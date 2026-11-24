@@ -64,7 +64,7 @@ fn spawn(o: &OStore, port: Arc<Port>) -> (watch::Sender<bool>, Run) {
     let writer = ChannelWriter::new(store, gate, port, Lease, Alarms::default());
     let bindings = Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude));
     let (stop, stopped) = watch::channel(false);
-    let run = tokio::spawn(super::super::super::run_channel_at(
+    let run = tokio::spawn(crate::services::tui_o::writer::actor::run_channel_at(
         writer,
         ShadowProvider::Claude,
         bindings,

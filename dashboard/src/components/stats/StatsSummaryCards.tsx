@@ -1,6 +1,6 @@
 import type { TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
-import { KpiChart } from "../../kit/pro/kpi-chart";
+import { KpiChart, type KpiChartText } from "../../kit/pro/kpi-chart";
 import { Cap, SectionCard } from "../common/KitPrimitives";
 import {
   formatAxisCurrency,
@@ -24,6 +24,21 @@ function SummaryFact({ testId, label, value, note }: { testId: string; label: st
       </dd>
     </div>
   );
+}
+
+/** Kit chart texts besides the empty notice, which the cards pass as `emptyLabel`. */
+function kpiText(t: TFunction): Partial<KpiChartText> {
+  return {
+    guidance: t(msg("그래프를 탭하거나 방향키로 날짜를 고르면 그날 값이 보여요.", "Tap the chart or use the arrow keys to pick a date and read its value.")),
+    increase: t(msg("증가", "up")),
+    decrease: t(msg("감소", "down")),
+    plot: (title, count) => t(msg(`${title}. 좌우 방향키로 ${count}일의 값을 읽어요.`, `${title}. Use the left and right arrow keys to read ${count} dates.`)),
+    help: (idle) => t(msg(
+      `초점만으로는 날짜를 고르지 않아요. 좌우 방향키로 날짜를 옮기고 Home·End로 처음과 끝을 골라요. Escape를 누르거나 초점이나 포인터가 벗어나면 ${idle === null ? "상세를 숨겨요" : `${idle}로 돌아가요`}. 탭으로 고른 날짜는 손을 떼도 남고 같은 날짜를 다시 탭하면 풀려요.`,
+      `Focus alone does not pick a date. Arrow keys move between dates and Home and End jump to the ends. Escape, leaving focus or moving the pointer away ${idle === null ? "hides the details" : `returns to ${idle}`}. A tapped date stays after lifting the finger; tap it again to let it go.`,
+    )),
+    noValue: t(msg("값 없음", "No value")),
+  };
 }
 
 /** Usage summary: tokens and spend as kit KPI charts over the range's days, then active days and the peak day.
@@ -67,6 +82,7 @@ export function StatsSummaryGrid({
     ? t(msg(` · 앞 절반 대비 ${tokenMomentumDelta.value}`, ` · ${tokenMomentumDelta.value} vs first half`, ` · 前半比 ${tokenMomentumDelta.value}`, ` · 较前半 ${tokenMomentumDelta.value}`))
     : "";
   const savingsRate = cacheSavingsDelta ? `(${cacheSavingsDelta.value.replace("-", "")})` : "";
+  const text = kpiText(t);
 
   return (
     <SectionCard title={t(msg(`사용량 · 최근 ${rangeDays}일`, `Usage · last ${rangeDays} days`, `使用量 · 直近${rangeDays}日`, `用量 · 最近 ${rangeDays} 天`))} testId="stats-usage">
@@ -82,6 +98,7 @@ export function StatsSummaryGrid({
               series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: daily.map((day) => day.total_tokens), color: "var(--aui-accent)" }]}
               format={formatTokens}
               emptyLabel={notice}
+              text={text}
               footer={t(msg(
                 `${days}일 누적 · 입력·출력·캐시 읽기/쓰기 합계${momentum}`,
                 `${days} day total · input + output + cache read / write${momentum}`,
@@ -99,6 +116,7 @@ export function StatsSummaryGrid({
               series={[{ id: "cost", label: t(msg("비용", "Cost", "コスト", "成本")), values: daily.map((day) => day.cost), color: "var(--aui-info)" }]}
               format={formatAxisCurrency}
               emptyLabel={notice}
+              text={text}
               footer={summary
                 ? t(msg(
                     `캐시 할인 반영 · ${formatCurrency(summary.cache_discount)}${savingsRate} 절감`,

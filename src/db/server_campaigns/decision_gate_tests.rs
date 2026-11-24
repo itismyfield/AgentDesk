@@ -1,6 +1,10 @@
-use super::tests::{Harness, applied, envelope, execute, render, send};
-use super::*;
+use crate::db::server_campaigns::*;
+use crate::domain::campaign::definition::DefinitionInput;
+use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::control::{self, tests as domain};
+use crate::services::krx_db_tests::server_campaigns_storage::{
+    Harness, applied, envelope, execute, render, send,
+};
 use serde_json::{Value, json};
 
 fn options(implementation: bool) -> Value {
@@ -123,7 +127,7 @@ async fn concurrent_distinct_keys_accept_one_approval_and_restore_book_pg() {
 
 #[tokio::test]
 async fn legacy_edit_success_replays_before_missing_options_guard_pg() {
-    use super::command_transaction::{Preparation, StoreRequest};
+    use crate::db::server_campaigns::command_transaction::{Preparation, StoreRequest};
     use crate::domain::campaign::definition::validate_definition;
 
     let h = Harness::new().await;

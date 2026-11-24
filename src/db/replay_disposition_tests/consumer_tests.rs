@@ -1,4 +1,7 @@
-use super::*;
+use crate::db::intake_outbox::{self, FailedPreAcceptSweepOutcome};
+use crate::db::replay_disposition::tests::*;
+use crate::db::replay_disposition::*;
+use sqlx::PgPool;
 
 #[tokio::test]
 async fn held_dispatch_claim_autoqueue_history_outbox_and_atomic_rollback_pg() {
@@ -77,14 +80,15 @@ async fn held_dispatch_claim_autoqueue_history_outbox_and_atomic_rollback_pg() {
                 .await
                 .unwrap();
         }
-        let unchanged = crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
-            &pool,
-            &entry,
-            3,
-            "held-policy",
-        )
-        .await
-        .expect("held reducer returns a no-op");
+        let unchanged =
+            crate::services::auto_queue::transactions::record_entry_dispatch_failure_on_pg(
+                &pool,
+                &entry,
+                3,
+                "held-policy",
+            )
+            .await
+            .expect("held reducer returns a no-op");
         assert!(
             !unchanged.changed,
             "AutoQueue must explicitly consume {state}"

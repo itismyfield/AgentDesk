@@ -27,17 +27,9 @@ pub(crate) use force_kill::{
 };
 #[path = "dispatched_sessions/thread_gc.rs"]
 mod thread_gc;
-#[cfg(test)]
-pub(crate) use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg;
 pub(crate) use thread_gc::{
     delete_stale_thread_cleanup_row_pg, load_stale_thread_cleanup_rows_pg, thread_session_exists_pg,
 };
-
-#[cfg(test)]
-#[path = "dispatched_sessions/tests.rs"]
-mod tests;
-#[cfg(test)]
-pub(crate) use crate::services::auto_queue::transactions::create_retry_dispatch_pg;
 
 async fn resolve_session_locator_pg(
     pool: &PgPool,
@@ -294,7 +286,7 @@ struct RetryOwnerCandidate {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct RetryAutoQueueOwner {
+pub(crate) struct RetryAutoQueueOwner {
     entry_id: String,
     run_id: String,
     entry_status: String,
@@ -363,7 +355,7 @@ async fn select_retry_owner_on_pg_tx(
     }
 }
 
-async fn prepare_retry_owner_on_pg_tx(
+pub(crate) async fn prepare_retry_owner_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
 ) -> Result<Option<RetryAutoQueueOwner>, String> {
@@ -666,16 +658,16 @@ pub(crate) async fn attach_retry_dispatch_on_pg_tx(
 }
 
 #[cfg(test)]
-mod selector_cleanup_tests {
+pub(crate) mod selector_cleanup_tests {
     use super::{
         HookSessionUpsert, clear_session_id_by_key_pg, clear_stale_session_id_pg,
-        disconnect_session_and_prepare_retry_pg, disconnect_stale_fixed_session_by_key_pg,
-        gc_stale_fixed_working_sessions_db_pg, load_provider_session_ids_pg,
-        mark_raw_provider_transcript_growth_if_observed_pg, reconcile_orphaned_tmuxless_session_pg,
-        update_raw_provider_transcript_len_watermark_pg, upsert_hook_session_pg,
+        disconnect_stale_fixed_session_by_key_pg, gc_stale_fixed_working_sessions_db_pg,
+        load_provider_session_ids_pg, mark_raw_provider_transcript_growth_if_observed_pg,
+        reconcile_orphaned_tmuxless_session_pg, update_raw_provider_transcript_len_watermark_pg,
+        upsert_hook_session_pg,
     };
 
-    struct TestPostgresDb {
+    pub(crate) struct TestPostgresDb {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -683,7 +675,7 @@ mod selector_cleanup_tests {
     }
 
     impl TestPostgresDb {
-        async fn create() -> Self {
+        pub(crate) async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
             let base = crate::db::postgres::postgres_test_database_url_base()
                 .expect("POSTGRES_TEST_DATABASE_URL_BASE required for selector cleanup tests"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
@@ -713,7 +705,7 @@ mod selector_cleanup_tests {
             }
         }
 
-        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+        pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
             crate::db::postgres::connect_test_pool_and_migrate(
                 &self.database_url,
                 "selector cleanup tests",
@@ -722,7 +714,7 @@ mod selector_cleanup_tests {
             .expect("apply selector cleanup postgres migrations") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         }
 
-        async fn drop(self) {
+        pub(crate) async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,
@@ -733,7 +725,7 @@ mod selector_cleanup_tests {
         }
     }
 
-    async fn seed_session_with_selectors(
+    pub(crate) async fn seed_session_with_selectors(
         pool: &sqlx::PgPool,
         session_key: &str,
         status: &str,
@@ -755,7 +747,7 @@ mod selector_cleanup_tests {
         .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
     }
 
-    async fn session_state(
+    pub(crate) async fn session_state(
         pool: &sqlx::PgPool,
         session_key: &str,
     ) -> (String, Option<String>, Option<String>, Option<String>) {
@@ -770,7 +762,7 @@ mod selector_cleanup_tests {
         .unwrap() // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
     }
 
-    async fn assert_cleanup_preserved_selectors(pool: &sqlx::PgPool, session_key: &str) {
+    pub(crate) async fn assert_cleanup_preserved_selectors(pool: &sqlx::PgPool, session_key: &str) {
         let (status, active_dispatch_id, claude_session_id, raw_provider_session_id) =
             session_state(pool, session_key).await;
 
@@ -819,30 +811,6 @@ mod selector_cleanup_tests {
     #[cfg(test)]
     mod session_authority_pg_tests {
         use super::*;
-
-        #[tokio::test]
-        async fn disconnect_session_and_prepare_retry_pg_preserves_provider_selectors() {
-            let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate().await;
-            let session_key = "host:selector-force-kill";
-
-            seed_session_with_selectors(&pool, session_key, "idle", Some("dispatch-1841")).await;
-
-            let retry_meta = disconnect_session_and_prepare_retry_pg(
-                &pool,
-                session_key,
-                None,
-                false,
-                crate::dispatch::set_dispatch_status_on_pg_boxed,
-            )
-            .await
-            .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-            assert!(retry_meta.is_none());
-            assert_cleanup_preserved_selectors(&pool, session_key).await;
-
-            pool.close().await;
-            pg_db.drop().await;
-        }
 
         #[tokio::test]
         async fn gc_stale_fixed_working_sessions_db_pg_preserves_provider_selectors() {
@@ -1330,79 +1298,6 @@ mod selector_cleanup_tests {
                 let (status, _, _, _) = session_state(&pool, &session_key).await;
                 assert_eq!(status, non_idle, "non-idle status must not be rewritten");
             }
-
-            pool.close().await;
-            pg_db.drop().await;
-        }
-
-        /// #2045 Finding 4 cancelled→failed guard:
-        /// force-kill on a session whose active dispatch is already `cancelled`
-        /// must NOT overwrite the dispatch status, and must NOT synthesize a retry.
-        /// The session row itself is still disconnected (operator intent).
-        #[tokio::test]
-        async fn disconnect_session_and_prepare_retry_pg_skips_cancelled_dispatch() {
-            let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate().await;
-            let session_key = "host:selector-cancelled-guard";
-            let dispatch_id = "dispatch-2045-cancelled-guard";
-            let card_id = "card-2045-cancelled-guard";
-
-            // Seed: card + cancelled dispatch + session pointing at it.
-            sqlx::query(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-             VALUES ($1, 'guard card', 'backlog', NOW(), NOW())",
-            )
-            .bind(card_id)
-            .execute(&pool)
-            .await
-            .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-            sqlx::query(
-                "INSERT INTO task_dispatches
-             (id, kanban_card_id, dispatch_type, status, title, context,
-              created_at, updated_at, completed_at)
-             VALUES ($1, $2, 'implementation', 'cancelled', 'guard',
-                     '{}', NOW(), NOW(), NOW())",
-            )
-            .bind(dispatch_id)
-            .bind(card_id)
-            .execute(&pool)
-            .await
-            .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-            seed_session_with_selectors(&pool, session_key, "idle", Some(dispatch_id)).await;
-
-            // Caller asks for retry=true. Guard must reject both the failure
-            // overwrite and the retry creation.
-            let retry_meta = disconnect_session_and_prepare_retry_pg(
-                &pool,
-                session_key,
-                Some(dispatch_id),
-                true,
-                crate::dispatch::set_dispatch_status_on_pg_boxed,
-            )
-            .await
-            .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-            assert!(
-                retry_meta.is_none(),
-                "cancelled dispatch must not produce retry metadata"
-            );
-
-            // Dispatch status remains 'cancelled' (NOT overwritten to 'failed').
-            let dispatch_status: String =
-                sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
-                    .bind(dispatch_id)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-            assert_eq!(
-                dispatch_status, "cancelled",
-                "force-kill must not overwrite cancelled → failed"
-            );
-
-            // Session row is still disconnected (force-kill side effect is fine).
-            let (session_status, active_dispatch_id, _, _) =
-                session_state(&pool, session_key).await;
-            assert_eq!(session_status, "disconnected");
-            assert_eq!(active_dispatch_id, None);
 
             pool.close().await;
             pg_db.drop().await;

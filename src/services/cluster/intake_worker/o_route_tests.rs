@@ -1,9 +1,12 @@
 //! A worker leaves an O channel's rows to its ready gateway and keeps draining other channels.
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{InsertPendingPayload, insert_pending};
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+use crate::services::cluster::intake_worker::*;
 use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
+use sqlx::PgPool;
+use std::sync::Arc;
+use std::time::Duration;
 
 const O: u64 = 4_380_001;
 const LEGACY: u64 = 4_380_002;
@@ -76,7 +79,7 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
             "claude",
             "o",
             &not_cancelled,
-            super::test_executor::PORT,
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
         )
     };
 
@@ -162,7 +165,7 @@ async fn readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_l
         "claude",
         "o",
         &not_cancelled,
-        super::test_executor::PORT,
+        crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
     );
     assert!(matches!(outcome.await, Ok(TickOutcome::Held)));
     let (status, owner, error): (String, Option<String>, Option<String>) = state(&pool, row).await;
@@ -287,7 +290,7 @@ async fn canary_topology(commit: bool) {
     if !commit {
         refuse_accepts(&pool).await;
     }
-    let turns = super::test_executor::record();
+    let turns = crate::services::cluster::intake_worker::test_executor::record();
     let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
     let (_registry, shared) = owner.await;
     let not_cancelled = || false;
@@ -299,7 +302,7 @@ async fn canary_topology(commit: bool) {
             "claude",
             "o",
             &not_cancelled,
-            super::test_executor::PORT,
+            crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
         )
     };
     let ran = |outcome: Result<TickOutcome, sqlx::Error>| match commit {

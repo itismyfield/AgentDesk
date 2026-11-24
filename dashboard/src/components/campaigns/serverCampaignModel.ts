@@ -1,5 +1,5 @@
-import type {
-  ServerCampaignCommand, ServerCampaignDefinition, ServerCampaignEvent, ServerCampaignView,
+import {
+  DEFAULT_WORKFLOW_OPTIONS, type ServerCampaignCommand, type ServerCampaignDefinition, type ServerCampaignEvent, type ServerCampaignView,
 } from "../../api/serverCampaigns";
 import type { Tr } from "./campaignPresentation";
 import { parseScope, scopeParams, type EditScope } from "./relationsEditorModel";
@@ -8,6 +8,7 @@ type View = ServerCampaignView;
 type NodeView = View["nodes"][number];
 type Runtime = NodeView["runtime"];
 type Reason = View["reasons"][number]["code"];
+type Rejection = NonNullable<View["commands"][number]["rejection"]>;
 export type CommandName = View["commands"][number]["command"];
 type Label = [string, string];
 
@@ -65,8 +66,10 @@ export const COMMAND_LABELS = {
   resume: ["재개", "Resume"],
   prepare_retry: ["다시 시도 준비", "Prepare retry"],
 } satisfies Record<CommandName, Label>;
-export const REJECTION_LABELS: Record<string, Label> = {
+export const REJECTION_LABELS = {
   invalid_definition: ["정의가 올바르지 않습니다", "The definition is not valid"],
+  definition_schema_upgrade_required: ["저장된 파이프라인이 요청에 빠졌어요", "The request left out the saved pipeline"],
+  state_in_use: ["실행 중인 작업이 아직 이 상태에 있어요", "Work in the run still uses this state"],
   stale_definition: ["정의가 다른 곳에서 바뀌었습니다", "The definition changed elsewhere"],
   stale_run: ["대상 실행이 바뀌었습니다", "The target run changed"],
   stale_binding: ["대상 시도가 바뀌었습니다", "The target attempt changed"],
@@ -77,15 +80,17 @@ export const REJECTION_LABELS: Record<string, Label> = {
   fence_incomplete: ["중단 확정이 끝나지 않았습니다", "The stop is not confirmed yet"],
   stale_fence: ["중단 확정 기준이 바뀌었습니다", "The stop fence changed"],
   idempotency_conflict: ["같은 요청 키를 다른 내용에 썼습니다", "The request key was used for another request"],
+  gate_not_passed: ["필요한 승인을 아직 받지 않았어요", "A required approval has not been given yet"],
   missing_change_reason: ["요구사항이나 수용조건을 바꾸려면 근거 링크와 변경 설명이 필요합니다", "Changing requirements or acceptance needs a reference link and an explanation"],
   completed_node_changed: ["완료한 작업은 바꿀 수 없습니다", "A completed task cannot change"],
   already_exists: ["같은 ID의 캠페인이 이미 있습니다", "A campaign with this ID already exists"],
   disconnected: ["연결이 끊겨 최신 상태를 확인할 수 없습니다", "Disconnected: the latest state is unknown"],
   not_offered: ["서버가 제공하지 않는 명령입니다", "The server does not offer this command"],
-};
+} satisfies Record<Rejection | "disconnected" | "not_offered", Label>;
 
 export function rejectionText(code: string, tr: Tr): string {
-  return REJECTION_LABELS[code] ? tr(...REJECTION_LABELS[code]) : code;
+  const label = (REJECTION_LABELS as Record<string, Label | undefined>)[code];
+  return label ? tr(...label) : code;
 }
 
 export function displayText(view: Pick<View, "display" | "stop_mode" | "failed_count" | "blocked_count">, tr: Tr): string {
@@ -220,6 +225,15 @@ export function changedDefinitionValues(base: ServerCampaignDefinition, latest: 
   }
   for (const [id, node] of after) if (!base.nodes.some((candidate) => candidate.id === id)) changed.push({ field: `${id} (added)`, value: nodeDefinitionText(node) });
   return changed;
+}
+
+/** The draft with its base revision's workflow_options and pipeline, which the form never edits: an edit must
+ * carry both, so an older definition without workflow_options sends the server's default. */
+export function editedDefinition(draft: ServerCampaignDefinition, base: ServerCampaignDefinition | null): ServerCampaignDefinition {
+  const { workflow_options = DEFAULT_WORKFLOW_OPTIONS, pipeline } = base ?? draft;
+  const definition: ServerCampaignDefinition = { ...draft, workflow_options: { ...workflow_options }, pipeline };
+  if (!pipeline) delete definition.pipeline;
+  return definition;
 }
 
 /** One task's whole definition as read-only lines: title, link, group, dependencies and every acceptance. */

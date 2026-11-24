@@ -176,7 +176,3 @@ impl Drop for CleanupState {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).cleanup = false;
     }
 }
-
-#[cfg(test)]
-#[path = "replacement_tests.rs"]
-mod tests;

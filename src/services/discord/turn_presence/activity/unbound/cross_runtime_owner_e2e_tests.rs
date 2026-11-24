@@ -57,6 +57,7 @@ pub(super) fn isolated(test: &str) -> bool {
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .unwrap_or(test);
     if std::env::var(CHILD).ok().as_deref() == Some(test) {
+        crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
         return true;
     }
     use std::io::Read;

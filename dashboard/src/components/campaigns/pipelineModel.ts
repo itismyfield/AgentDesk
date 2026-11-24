@@ -1,11 +1,11 @@
-import type { PipelineComparison as Comparison, PipelineCondition, PipelineDefinition, PipelineGate, PipelineState, PipelineTransition } from "../../api/serverCampaignPipeline";
+import type { PipelineComparison as Comparison, PipelineCondition, PipelineDefinition, PipelineState, PipelineTransition } from "../../api/serverCampaignPipeline";
 import { LAYER, layoutGroups, type Point } from "./campaignGroupLayout";
 import { GATE_LABELS } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import { STAGE_LABELS } from "./serverCampaignModel";
 
 type Label = [string, string];
-export const KIND_LABELS: Record<PipelineState["kind"], Label> = {
+export const KIND_LABELS: Record<string, Label> = {
   agent_task: ["에이전트 작업", "Agent task"], auto_check: ["자동 검사", "Auto check"], auto_action: ["자동 동작", "Auto action"], human_decision: ["사람 판단", "Human decision"],
   wait: ["대기", "Wait"], end_success: ["끝 · 성공", "End · success"], end_failure: ["끝 · 실패", "End · failure"],
 };
@@ -16,11 +16,13 @@ const EVENTS: Record<string, Label> = {
 };
 /** Template states carry no title, so their ids take the stage board's names. */
 const STATE_NAMES: Record<string, Label> = { ...STAGE_LABELS, failed: ["작업 실패", "Task failed"] };
-const OPS: Record<string, string> = { eq: "=", ne: "≠", lt: "<", le: "≤", gt: ">", ge: "≥" };
+export const OPS: Record<string, string> = { eq: "=", ne: "≠", lt: "<", le: "≤", gt: ">", ge: "≥" };
 
 export const stateName = (state: PipelineState | undefined, id: string, tr: Tr) => state?.title || (STATE_NAMES[id] ? tr(...STATE_NAMES[id]) : id);
+/** A kind or gate this build does not know shows by its id. */
+export const kindName = (kind: string, tr: Tr) => KIND_LABELS[kind] ? tr(...KIND_LABELS[kind]) : kind;
 export const eventName = (type: string, tr: Tr) => EVENTS[type] ? tr(...EVENTS[type]) : type;
-export const gateName = (gate: PipelineGate, tr: Tr) => tr(`${GATE_LABELS[gate][0]} 승인`, `${GATE_LABELS[gate][1]} approval`);
+export const gateName = (gate: string, tr: Tr) => { const [ko, en] = GATE_LABELS[gate as keyof typeof GATE_LABELS] ?? [gate, gate]; return tr(`${ko} 승인`, `${en} approval`); };
 export const comparisons = (condition: PipelineCondition): Comparison[] => Array.isArray(condition.all) ? (condition.all as PipelineCondition[]).flatMap(comparisons) : [condition as Comparison];
 export const comparisonText = ({ field, op, value }: Comparison) => `${field} ${OPS[op] ?? op} ${String(value)}`;
 export const durationText = (seconds: number, tr: Tr) => seconds % 3600 === 0 ? tr(`${seconds / 3600}시간`, `${seconds / 3600} h`) : seconds % 60 === 0 ? tr(`${seconds / 60}분`, `${seconds / 60} min`) : tr(`${seconds}초`, `${seconds} s`);
@@ -55,11 +57,18 @@ const PITCH = PIPE_WIDTH + 64;
 export const cardHeight = (pins: number) => 94 + 24 * Math.max(1, pins);
 const LANE = 16;
 
+/** A run's task: the state the server puts it in and its disposition. */
+export type PipelineTask = { state: string | null; disposition?: string };
+const HELD = new Set(["blocked", "interrupted"]);
+
 /** The graph laid out as the relations view lays out groups: the main flow (states on a start-to-success path that
- * takes no failure or retry) left to right by depth, then the states off it in a row below, each under its sources. */
-export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, stateIds: Record<string, string | null> | null) {
+ * takes no failure or retry) left to right by depth, then the states off it in a row below, each under its sources.
+ * `approvals` (a server campaign's workflow options) marks the gates the campaign leaves off. */
+export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, tasks: Record<string, PipelineTask> | null, approvals: Record<string, boolean> | null = null, editing = false) {
   const states = new Map(pipeline.states.map((state) => [state.id, state]));
   const pins = new Map(pipeline.states.map((state) => [state.id, pinsOf(state.id, pipeline.transitions, tr)]));
+  // While editing, a state that can leave has one more row: its '+ 전환' pin.
+  const rows = new Map(pipeline.states.map((state) => [state.id, pins.get(state.id)!.length + Number(editing && !state.kind.startsWith("end_"))]));
   // Two pins with one label on a card also name where they go.
   for (const list of pins.values()) for (const pin of list) if (list.filter((other) => other.label === pin.label).length > 1) pin.hint = stateName(states.get(pin.target), pin.target, tr);
   const flow = pipeline.transitions.filter((value) => value.from !== value.to && !value.retry && states.has(value.to) && toneOf(value) !== "fail");
@@ -74,18 +83,20 @@ export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, stateId
   const mainSet = new Set(both.length ? both : forward);
   const main = [pipeline.start, ...pipeline.states.map((state) => state.id).filter((id) => id !== pipeline.start && mainSet.has(id))].filter((id) => states.has(id));
   const off = pipeline.states.map((state) => state.id).filter((id) => !mainSet.has(id));
-  const height = Math.max(...pipeline.states.map((state) => cardHeight(pins.get(state.id)!.length)));
+  const height = Math.max(0, ...pipeline.states.map((state) => cardHeight(rows.get(state.id)!)));
   const links = flow.filter((value) => mainSet.has(value.from) && mainSet.has(value.to)).map((value) => [value.from, value.to] as const);
   const { placed, below } = layoutGroups(main, links, height);
   const positions = new Map<string, Point>(main.map((id) => [id, { x: placed.get(id)!.x / LAYER * PITCH, y: placed.get(id)!.y }]));
   const column = (id: string) => Math.round(positions.get(id)!.x / PITCH);
+  // Lists number the flow as it is drawn, whatever order the states array holds.
+  main.sort((a, b) => positions.get(a)!.x - positions.get(b)!.x || positions.get(a)!.y - positions.get(b)!.y);
 
   const lines: Line[] = [];
   let above = 0, under = 0;
   for (const [id, list] of pins) for (const pin of list) {
     if (pin.target === id || !states.has(pin.target) || !states.has(id)) continue;
     const line: Line = { id: pin.id, source: id, handle: pin.id, target: pin.target, tone: pin.tone, retry: pin.exhausted ? undefined : pin.transition.retry?.max };
-    if (!mainSet.has(pin.target)) line.drop = true;
+    if (mainSet.has(id) && !mainSet.has(pin.target)) line.drop = true;
     else if (mainSet.has(id) && column(pin.target) <= column(id)) line.lane = below + 28 + LANE * under++;
     else if (mainSet.has(id) && column(pin.target) > column(id) + 1) line.lane = -60 - LANE * above++;
     lines.push(line);
@@ -104,16 +115,30 @@ export function buildPipelineGraph(pipeline: PipelineDefinition, tr: Tr, stateId
     lines.push({ id: `event:${event.id}`, source: `event:${event.id}`, handle: "event", target: event.state_id, tone: "event" });
   }
   for (const line of lines) if (line.drop) line.lane = top - 24;
-  const gates = new Map<string, PipelineGate[]>();
+  const gates = new Map<string, string[]>();
   for (const value of pipeline.transitions) if (value.gate && value.from !== value.to) gates.set(value.to, [...new Set([...gates.get(value.to) ?? [], value.gate])]);
-  // Only a run's own state ids count: a node before its run (null) or on a state this graph lacks is left out.
-  const occupancy = stateIds && new Map(pipeline.states.map((state) => [state.id, Object.values(stateIds).filter((value) => value === state.id).length]));
+  // Only a run's own state ids count: a node before its run (null) or on a state this graph lacks is left out. A failed
+  // task has left its stage for the failure end; a blocked or interrupted one is counted apart as held.
+  const failure = pipeline.states.find((state) => state.kind === "end_failure")?.id ?? "";
+  const occupancy = tasks && new Map(pipeline.states.map((state) => [state.id, { here: 0, held: 0 }]));
+  for (const { state, disposition = "" } of occupancy ? Object.values(tasks!) : []) {
+    const at = occupancy!.get(disposition === "failed" ? failure : state ?? "");
+    if (at && HELD.has(disposition)) at.held += 1; else if (at) at.here += 1;
+  }
   const xs = [...positions.values()].map((point) => point.x), ys = [...positions.values()].map((point) => point.y);
   // Room above for the start and gate badges and the skip lanes; below for the tallest card in the last row.
   const bounds = { x0: Math.min(0, ...xs), x1: Math.max(0, ...xs) + PIPE_WIDTH, y0: Math.min(0, ...ys) - 44 - LANE * above, y1: Math.max(0, ...ys) + height };
-  return { states, pins, main, off, events, positions, lines, gates, occupancy, bounds };
+  return { states, pins, rows, main, off, events, positions, lines, gates, occupancy, approvals, bounds };
 }
 export type PipelineGraph = ReturnType<typeof buildPipelineGraph>;
+
+/** A gate's name; one the campaign's workflow options leave off reads as only in the definition. */
+export const gateText = (graph: PipelineGraph, gate: string, tr: Tr) => graph.approvals && !graph.approvals[gate] ? tr(`정의상 ${gateName(gate, tr)}`, `${gateName(gate, tr)} (definition only)`) : gateName(gate, tr);
+/** A state's tasks as badge texts: those in it, then those held there. */
+export function occupancyTexts(graph: PipelineGraph, id: string, tr: Tr) {
+  const { here = 0, held = 0 } = graph.occupancy?.get(id) ?? {};
+  return [here > 0 && { text: tr(`작업 ${here}`, `${here} tasks`), held: false }, held > 0 && { text: tr(`막힘 ${held}`, `${held} held`), held: true }].filter((value) => value !== false);
+}
 
 /** One line per state for lists: each result and where it goes, a retry as `↻n`. */
 export function pinSummary(graph: PipelineGraph, id: string, tr: Tr) {

@@ -37,7 +37,7 @@ fn test_instance_projection_never_trusts_an_unadmitted_input_block() {
 #[test]
 fn test_instance_projection_allows_only_the_nine_and_seven_public_fields() {
     let original = witness();
-    let projected = project_test_instance(&json!({"test_instance":original}), true).unwrap();
+    let projected = project_test_instance(&json!({"test_instance":original}), Some(4)).unwrap();
     assert_eq!(projected.as_object().unwrap().len(), 9);
     assert_eq!(projected["live_ready"], false);
     for identity in projected["identities"].as_array().unwrap() {
@@ -47,5 +47,10 @@ fn test_instance_projection_allows_only_the_nine_and_seven_public_fields() {
     assert!(!projected.to_string().contains("synthetic-secret"));
     let mut invalid = witness();
     invalid["live_ready"] = json!(true);
-    assert!(project_test_instance(&json!({"test_instance":invalid}), true).is_none());
+    assert!(project_test_instance(&json!({"test_instance":invalid}), Some(4)).is_none());
+    // The identity count follows the admitted profile: three bots for agy, four for TUI live.
+    let mut three = witness();
+    three["identities"].as_array_mut().unwrap().pop();
+    assert!(project_test_instance(&json!({"test_instance":three}), Some(3)).is_some());
+    assert!(project_test_instance(&json!({"test_instance":witness()}), Some(3)).is_none());
 }

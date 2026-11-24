@@ -68,6 +68,20 @@ async fn bind_row(rig: &HerdrRig, pool: &sqlx::PgPool, token: &str, channel: u64
     .unwrap();
 }
 
+/// The attempt tag a pasted busy frame ends its header with; herdr keeps no hidden buffer name.
+fn tag(pasted: &str) -> &str {
+    let inner = pasted
+        .split_once("[User: ")
+        .and_then(|(_, rest)| rest.split_once(']'));
+    let (_, nonce) = crate::services::tui_input::human_frame::untagged(inner.unwrap().0);
+    assert_eq!(
+        nonce.len(),
+        8,
+        "a busy frame carries its attempt tag: {pasted}"
+    );
+    nonce
+}
+
 /// A Bound Claude execution `nonce` on the rig's pane, owned by the channel's `logical` session.
 fn bound(
     rig: &HerdrRig,
@@ -197,7 +211,10 @@ fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
         let pasted = sends[0]["text"].as_str().unwrap();
         assert_eq!(
             pasted,
-            "\u{1b}[200~[User: imessage:200 (ID: 200)] status?\u{1b}[201~"
+            format!(
+                "\u{1b}[200~[User: imessage:200 (ID: 200) · {}] status?\u{1b}[201~",
+                tag(pasted)
+            )
         );
         assert_eq!(sends[1]["keys"], json!(["enter"]));
         assert_eq!(pane.tmux_calls(), 0);
@@ -375,7 +392,10 @@ fn queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg() {
         let pasted = sends[0]["text"].as_str().unwrap();
         assert_eq!(
             pasted,
-            "\u{1b}[200~[User: ann (ID: 200)] status?\u{1b}[201~"
+            format!(
+                "\u{1b}[200~[User: ann (ID: 200) · {}] status?\u{1b}[201~",
+                tag(pasted)
+            )
         );
         assert_eq!(sends[1]["keys"], json!(["enter"]));
         assert_eq!(pane.tmux_calls(), 0);

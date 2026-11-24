@@ -42,6 +42,7 @@ impl Probe {
         }
     }
 
+    #[cfg(test)]
     fn observe(&mut self, expected: &Snapshot, actual: &Snapshot) {
         self.observe_changes(expected, actual, None);
     }
@@ -305,6 +306,7 @@ fn exercise_unwind(
     );
 }
 
+#[cfg(test)]
 fn check_protocol(mode: Mode) {
     let snapshot = |value: &str| vec![("ROOT", Some(OsString::from(value)))];
     let complete = || match mode {

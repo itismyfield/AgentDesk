@@ -1,4 +1,9 @@
-use super::*;
+use crate::config::test_instance::login_test_support::{
+    bind_claude_login, claude_login_fixture, review_fixture,
+};
+use crate::config::test_instance::*;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[test]
 fn instance_startup_rejects_home_api_label_memento_and_old_declarations() {
@@ -7,7 +12,7 @@ fn instance_startup_rejects_home_api_label_memento_and_old_declarations() {
         return;
     }
     let (_temp, root) = tests::fixture();
-    let name = "config::test_instance::environment_tests::instance_startup_rejects_home_api_label_memento_and_old_declarations";
+    let name = "krx_config_unix_tests::environment_tests::instance_startup_rejects_home_api_label_memento_and_old_declarations";
     let run = |changes: &[(&str, &str)]| {
         let mut child = tests::command(&root);
         child
@@ -204,13 +209,13 @@ fn instance_reentry_accepts_yaml_org_with_same_scope() {
     let mut child = tests::command(&root);
     std::fs::write(&path, serde_yaml::to_string(&org).unwrap()).unwrap();
     let result = child
-        .args(["--exact", "config::test_instance::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope", "--nocapture"])
+        .args(["--exact", "krx_config_unix_tests::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope", "--nocapture"])
         .env(CHILD, "1")
         .output()
         .unwrap();
     tests::assert_single_test_passed(
         &result,
-        "config::test_instance::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope",
+        "krx_config_unix_tests::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope",
     );
     let mut changed = org;
     changed["provider_auth_profiles"]["test-codex"]["home"] =
@@ -263,7 +268,7 @@ fn unscoped_initialization_does_not_read_org() {
     let result = child
         .args([
             "--exact",
-            "config::test_instance::environment_tests::unscoped_initialization_does_not_read_org",
+            "krx_config_unix_tests::environment_tests::unscoped_initialization_does_not_read_org",
             "--nocapture",
         ])
         .env(CHILD, "1")
@@ -272,75 +277,9 @@ fn unscoped_initialization_does_not_read_org() {
         .unwrap();
     tests::assert_single_test_passed(
         &result,
-        "config::test_instance::environment_tests::unscoped_initialization_does_not_read_org",
+        "krx_config_unix_tests::environment_tests::unscoped_initialization_does_not_read_org",
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid: [");
-}
-
-pub(super) fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (temp, previous) = tests::fixture();
-    let home = temp.path().canonicalize().unwrap();
-    let home = if quoted {
-        home.join("login home 'active'")
-    } else {
-        home
-    };
-    let root = home
-        .join(".adk/dev/instances")
-        .join(previous.file_name().unwrap());
-    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
-    std::fs::rename(&previous, &root).unwrap();
-    for name in [
-        "manifest.json",
-        "receipt.json",
-        "config/agentdesk.yaml",
-        "config/org.yaml",
-    ] {
-        let path = root.join(name);
-        let body = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace(previous.to_str().unwrap(), root.to_str().unwrap());
-        std::fs::write(path, body).unwrap();
-    }
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    for binary in [
-        home.join(".local/bin/claude"),
-        root.join("fixture-worktree/target/debug/claude"),
-    ] {
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, "#!/bin/sh\nprintf '2.1.325\\n'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-    }
-    std::fs::write(home.join("active-slot"), "3").unwrap();
-    let cswap = home.join(".local/bin/cswap");
-    std::fs::write(&cswap, format!("#!/bin/sh\nvalue=$(/bin/cat {})\n[ \"$value\" != unavailable ] || exit 1\nprintf '{{\"activeAccountNumber\":%s}}\\n' \"$value\"\n", crate::services::process::shell_escape(&home.join("active-slot").to_string_lossy()))).unwrap();
-    let metadata = home.join("metadata-probe");
-    std::fs::write(&metadata, "#!/bin/sh\nexit 0\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    for path in [cswap, metadata] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    (temp, root, home)
-}
-
-fn bind_claude_login(root: &Path, home: &Path) {
-    let login = serde_json::json!({"mode":"default_active","account_slot":3,
-        "login_home":home,"config_dir":root.join("home/.adk/profiles/claude/test-claude"),"cli":home.join(".local/bin/claude")});
-    for name in ["manifest.json", "receipt.json"] {
-        let path = root.join(name);
-        let mut value = read_json(&path).unwrap();
-        value["claude_login"] = login.clone();
-        std::fs::write(path, value.to_string()).unwrap();
-    }
-    let path = root.join("config/org.yaml");
-    let mut org = read_json(&path).unwrap();
-    org["provider_auth_profiles"]["test-claude"]["home"] =
-        serde_json::json!(root.join("home/.adk/profiles/claude/test-claude"));
-    std::fs::write(path, org.to_string()).unwrap();
 }
 
 #[test]
@@ -711,28 +650,6 @@ fn claude_login_rejects_slot_one_unknown_keys_and_receipt_drift() {
     }
 }
 
-pub(super) fn review_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (temp, root, home) = claude_login_fixture(true);
-    bind_claude_login(&root, &home);
-    let sentinel = root.join("runtime/provider-started");
-    let body = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.325\\n'; exit 0; fi\ntouch {}\nprintf 'fixture-ai\\n'\n",
-        crate::services::process::shell_escape(&sentinel.to_string_lossy())
-    );
-    std::fs::write(home.join(".local/bin/claude"), body).unwrap();
-    let slot = home.join("active-slot");
-    std::fs::write(&slot, "3").unwrap();
-    let cswap = home.join(".local/bin/cswap");
-    std::fs::write(&cswap, format!("#!/bin/sh\nvalue=$(/bin/cat {})\n[ \"$value\" != unavailable ] || exit 1\nprintf '{{\"activeAccountNumber\":%s}}\\n' \"$value\"\n",crate::services::process::shell_escape(&slot.to_string_lossy()))).unwrap();
-    let meta = home.join("metadata-probe");
-    std::fs::write(&meta, "#!/bin/sh\nexit 0\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    for p in [cswap, meta] {
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    (temp, root, home)
-}
-
 #[test]
 fn review_simple_onboarding_uses_template_in_opt_in() {
     const CASE: &str = "ADK_REVIEW_SIMPLE_CHILD";
@@ -806,7 +723,7 @@ fn review_simple_onboarding_uses_template_in_opt_in() {
         } else {
             tests::command(&root)
         };
-        let selector = "config::test_instance::environment_tests::review_simple_onboarding_uses_template_in_opt_in";
+        let selector = "krx_config_unix_tests::environment_tests::review_simple_onboarding_uses_template_in_opt_in";
         let out = child
             .args(["--exact", selector, "--nocapture"])
             .env(CASE, mode)
@@ -884,7 +801,7 @@ fn review_codex_override_is_never_executed_in_opt_in() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let selector = "config::test_instance::environment_tests::review_codex_override_is_never_executed_in_opt_in";
+    let selector = "krx_config_unix_tests::environment_tests::review_codex_override_is_never_executed_in_opt_in";
     let out = tests::command(&root)
         .args(["--exact", selector, "--nocapture"])
         .env(CASE, "1")
@@ -939,7 +856,7 @@ fn review_tui_script_rechecks_slot_at_exec() {
     }
     let (_temp, root, _) = review_fixture();
     let selector =
-        "config::test_instance::environment_tests::review_tui_script_rechecks_slot_at_exec";
+        "krx_config_unix_tests::environment_tests::review_tui_script_rechecks_slot_at_exec";
     let out = tests::command(&root)
         .args(["--exact", selector, "--nocapture"])
         .env(CASE, "1")
@@ -1088,7 +1005,7 @@ fn review_builder_purposes_and_metadata_admission() {
             value["cluster"]["enabled"] = serde_json::json!(true);
             std::fs::write(path, value.to_string()).unwrap();
         }
-        let selector = "config::test_instance::environment_tests::review_builder_purposes_and_metadata_admission";
+        let selector = "krx_config_unix_tests::environment_tests::review_builder_purposes_and_metadata_admission";
         let mut child = if mode == "operating" {
             let mut c = Command::new(std::env::current_exe().unwrap());
             c.env_clear()
@@ -1115,7 +1032,7 @@ fn review_builder_purposes_and_metadata_admission() {
 #[test]
 fn review_legacy_streaming_and_process_backend_do_not_start_opt_in_cli() {
     const CASE: &str = "ADK_REVIEW_LEGACY_CHILD";
-    let selector = "config::test_instance::environment_tests::review_legacy_streaming_and_process_backend_do_not_start_opt_in_cli";
+    let selector = "krx_config_unix_tests::environment_tests::review_legacy_streaming_and_process_backend_do_not_start_opt_in_cli";
     if let Ok(mode) = std::env::var(CASE) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         initialize().unwrap();
@@ -1218,7 +1135,7 @@ mod login_admission_tests {
     #[test]
     fn slot_and_metadata_refuse_new_bound_pending_before_host_or_input() {
         const CASE: &str = "ADK_REVIEW_HERDR_CHILD";
-        let selector = "config::test_instance::environment_tests::login_admission_tests::slot_and_metadata_refuse_new_bound_pending_before_host_or_input";
+        let selector = "krx_config_unix_tests::environment_tests::login_admission_tests::slot_and_metadata_refuse_new_bound_pending_before_host_or_input";
         if std::env::var_os(CASE).is_none() {
             let (_temp, root, _) = environment::login_fixture_for_tests();
             let out = tests::command(&root)
@@ -1379,7 +1296,7 @@ mod login_admission_tests {
     #[test]
     fn slot_recheck_protects_created_existing_pending_first_input() {
         const CASE: &str = "ADK_REVIEW_INPUT_CHILD";
-        let selector = "config::test_instance::environment_tests::login_admission_tests::slot_recheck_protects_created_existing_pending_first_input";
+        let selector = "krx_config_unix_tests::environment_tests::login_admission_tests::slot_recheck_protects_created_existing_pending_first_input";
         if std::env::var_os(CASE).is_none() {
             let (_temp, root, _) = environment::login_fixture_for_tests();
             let out = tests::command(&root)
@@ -1420,7 +1337,7 @@ mod login_admission_tests {
     #[test]
     fn new_herdr_script_admits_only_the_still_active_declared_slot() {
         const CASE: &str = "ADK_REVIEW_HERDR_SCRIPT_CHILD";
-        let selector = "config::test_instance::environment_tests::login_admission_tests::new_herdr_script_admits_only_the_still_active_declared_slot";
+        let selector = "krx_config_unix_tests::environment_tests::login_admission_tests::new_herdr_script_admits_only_the_still_active_declared_slot";
         if std::env::var_os(CASE).is_none() {
             let (_temp, root, _) = environment::login_fixture_for_tests();
             let out = tests::command(&root)
@@ -1504,7 +1421,7 @@ fn keychain_case(selector: &str, check: impl FnOnce(&Path, &Path)) {
 
 #[test]
 fn keychain_readiness_uses_login_home_without_changing_core_home() {
-    let name = "config::test_instance::environment_tests::keychain_readiness_uses_login_home_without_changing_core_home";
+    let name = "krx_config_unix_tests::environment_tests::keychain_readiness_uses_login_home_without_changing_core_home";
     keychain_case(name, |root, home| {
         assert_eq!(
             std::env::var("HOME").unwrap(),
@@ -1527,7 +1444,7 @@ fn keychain_readiness_uses_login_home_without_changing_core_home() {
 #[test]
 fn keychain_admission_uses_login_home_for_presence() {
     let name =
-        "config::test_instance::environment_tests::keychain_admission_uses_login_home_for_presence";
+        "krx_config_unix_tests::environment_tests::keychain_admission_uses_login_home_for_presence";
     keychain_case(name, |root, _| {
         assert!(environment::claude_launch_admission().is_ok());
         assert_eq!(
@@ -1539,7 +1456,7 @@ fn keychain_admission_uses_login_home_for_presence() {
 
 #[test]
 fn keychain_tui_pre_exec_separates_login_home_and_data() {
-    let name = "config::test_instance::environment_tests::keychain_tui_pre_exec_separates_login_home_and_data";
+    let name = "krx_config_unix_tests::environment_tests::keychain_tui_pre_exec_separates_login_home_and_data";
     keychain_case(name, |root, home| {
         let output = root.join("runtime/provider-context");
         let cli = home.join(".local/bin/claude");
@@ -1580,7 +1497,7 @@ fn keychain_tui_pre_exec_separates_login_home_and_data() {
 #[test]
 fn keychain_herdr_overlay_is_scoped_and_global_data_is_refused() {
     const BAD: &str = "ADK_KEYCHAIN_GLOBAL_DATA_CHILD";
-    let name = "config::test_instance::environment_tests::keychain_herdr_overlay_is_scoped_and_global_data_is_refused";
+    let name = "krx_config_unix_tests::environment_tests::keychain_herdr_overlay_is_scoped_and_global_data_is_refused";
     if std::env::var_os(BAD).is_some() {
         assert!(initialize().is_err());
         return;
@@ -1861,7 +1778,7 @@ printf 'PINNED_KEY_APPLIED\n'
 #[test]
 fn claude_login_username_comes_from_effective_user_only() {
     const CASE: &str = "ADK_LOGIN_USERNAME_CHILD";
-    const NAME: &str = "config::test_instance::environment_tests::claude_login_username_comes_from_effective_user_only";
+    const NAME: &str = "krx_config_unix_tests::environment_tests::claude_login_username_comes_from_effective_user_only";
     if let Ok(mode) = std::env::var(CASE) {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         if mode != "operating" {
@@ -1874,6 +1791,10 @@ fn claude_login_username_comes_from_effective_user_only() {
         command.args(["unchanged", "arguments"]);
         if let Some(overlay) = overlay {
             command.envs(overlay.env);
+        }
+        // Outside an instance an agy-marked child stays as given even beside a key file.
+        if mode == "operating" {
+            command.env("AGENTDESK_TEST_AGY_LOGIN", "1");
         }
         environment::configure_child_command(&mut command).unwrap();
         let values = command
@@ -1901,7 +1822,7 @@ fn claude_login_username_comes_from_effective_user_only() {
             assert!(!values.contains_key(std::ffi::OsStr::new("USER")));
             assert!(!values.contains_key(std::ffi::OsStr::new("LOGNAME")));
             if mode == "operating" {
-                assert!(values.is_empty());
+                assert_eq!(values.len(), 1, "{values:?}");
             }
         }
         assert_eq!(command.get_program(), std::ffi::OsStr::new("/usr/bin/true"));
@@ -1924,6 +1845,8 @@ fn claude_login_username_comes_from_effective_user_only() {
             .env("LOGNAME", "forged-parent-logname");
         if mode == "operating" {
             child.env_remove("AGENTDESK_TEST_MANIFEST");
+            std::fs::create_dir_all(root.join("credential")).unwrap();
+            std::fs::write(root.join("credential/gemini_api_key"), "SYNTHETIC_GEMINI").unwrap();
         }
         tests::assert_single_test_passed(&child.output().unwrap(), NAME);
     }

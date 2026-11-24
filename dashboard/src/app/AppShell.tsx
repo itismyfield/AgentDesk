@@ -77,7 +77,6 @@ export default function AppShell({
   const {
     agents,
     departments,
-    setSessions,
     visibleDispatchedSessions,
     agentsWithDispatched,
     refreshAgents,
@@ -374,7 +373,6 @@ export default function AppShell({
                   openDefaultAgentInfo,
                   pushNotification,
                   setAgentsPageTab,
-                  setSessions,
                   settings,
                   stats,
                   updateNotification,

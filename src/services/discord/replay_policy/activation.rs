@@ -44,11 +44,35 @@ static PROCESS: LazyLock<Settings> = LazyLock::new(|| {
 });
 
 pub(crate) fn requested(channel: &str) -> bool {
-    #[cfg(test)]
-    if crate::services::discord::router::replay_test_activation::active(channel) {
+    #[cfg(any(test, feature = "test-support"))]
+    if test_activation::active(channel) {
         return true;
     }
     production_requested(channel)
+}
+
+/// The activation supplier of tests: producers turn on only for the channels a guard names.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_activation {
+    static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn active(channel: &str) -> bool {
+        let channels = ACTIVE.lock().unwrap().join(",");
+        super::Settings::parse(true, Some(&channels)).selected(channel)
+    }
+
+    pub(crate) struct Activated(String);
+
+    pub(crate) fn activate(channel: u64) -> Activated {
+        ACTIVE.lock().unwrap().push(channel.to_string());
+        Activated(channel.to_string())
+    }
+
+    impl Drop for Activated {
+        fn drop(&mut self) {
+            ACTIVE.lock().unwrap().retain(|active| active != &self.0);
+        }
+    }
 }
 
 pub(crate) fn production_requested(channel: &str) -> bool {

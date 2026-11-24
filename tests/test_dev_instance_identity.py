@@ -237,7 +237,7 @@ class SharedWriterTests(unittest.TestCase):
         from tests.test_dev_instance_credential import InstanceCredentialCliTests
         fixture = InstanceCredentialCliTests(methodName='runTest')
         fixture.setUp(); self.addCleanup(fixture.doCleanups)
-        for index, name in enumerate(('announce_bot_token', 'notify_bot_token', 'antigravity_bot_token')):
+        for index, name in enumerate(('announce_bot_token', 'notify_bot_token', 'antigravity_bot_token', 'gemini_api_key')):
             token = ('SYNTHETIC_UTILITY_STDIN_ONLY_'+str(index)).encode()
             result = fixture.credential(name, token+b'\n')
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -274,6 +274,9 @@ class AgyIdentityAdmissionTests(unittest.TestCase):
             self.root, frame, time.monotonic()+2, request=lambda t, d: self.answer(t, d, mismatch),
             declared_roles=self.manifest['profile']['bots'])
         self.assertEqual({item['application_id'] for item in probe()}, set(AGY_IDS.values()))
+        (self.root/'credential/gemini_api_key').write_text('SYNTHETIC_KEY')
+        (self.root/'credential/gemini_api_key').chmod(0o600)
+        self.assertEqual({item['name'] for item in probe()}, set(AGY_IDS))  # never sent to Discord
         tui = {'kind': 'admission', 'schema': 1, 'identities': dict(zip(NAMES, ('900003','900001','900002','900006')))}
         foreign = {**self.frame, 'identities': {**AGY_IDS, 'antigravity_bot_token': '900099'}}
         for frame, mismatch in [(self.frame, 'antigravity_bot_token'), (self.frame, 'silent'), (foreign, None),

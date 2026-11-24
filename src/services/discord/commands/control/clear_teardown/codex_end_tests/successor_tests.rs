@@ -10,6 +10,7 @@ mod reader_retirement_tests;
 fn isolated(test: &str) -> bool {
     const CHILD: &str = "ADK_CODEX_SUCCESSOR_CHILD";
     if std::env::var_os(CHILD).is_some() {
+        crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         return true;
     }
     let _spawn_environment = crate::config::test_env_lock::acquire_shared_test_env_lock();

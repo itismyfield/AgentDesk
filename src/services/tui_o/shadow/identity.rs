@@ -108,7 +108,7 @@ fn claude_blocks(record: &Value, identity_version: u32) -> Vec<RecordFact> {
     let index = record.get("apiBlockIndex").and_then(Value::as_u64);
     let mut facts = Vec::new();
     for (position, block) in (0u64..).zip(blocks) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if V5_RULE.get() && str_at(block, "type") == Some("thinking") {
             continue;
         }
@@ -163,16 +163,16 @@ impl Drop for V3Rule {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static V5_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct V5Rule(());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl V5Rule {
     pub(crate) fn hold() -> Self {
         V5_RULE.set(true);
@@ -180,7 +180,7 @@ impl V5Rule {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for V5Rule {
     fn drop(&mut self) {
         V5_RULE.set(false);

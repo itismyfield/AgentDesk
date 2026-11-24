@@ -160,8 +160,7 @@ pub async fn is_recent_cluster_worker(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "health_diagnostics/pg_wire_proxy_tests.rs"]
-pub(crate) mod pg_wire_proxy;
+pub(crate) use crate::db::pg_wire_proxy;
 mod request_batch;
 mod session_state;
 #[cfg(test)]

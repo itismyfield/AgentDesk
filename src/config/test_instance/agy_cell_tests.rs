@@ -1,4 +1,4 @@
-use super::super::environment_tests::claude_login_fixture;
+use super::super::login_test_support::claude_login_fixture;
 use super::super::tests as fixture;
 use super::super::*;
 use serde_json::json;
@@ -8,7 +8,7 @@ const CHILD: &str = "ADK_AGY_CELL_CHILD";
 
 /// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI
 /// that appends `ADK_CHILD <first arg>` and its env for every launch.
-pub(in crate::config::test_instance) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub(crate) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, root, home) = claude_login_fixture(false);
     let login = home.join(".adk/dev/agy-login");
     let cli = home.join("agy-bin/agy");
@@ -39,6 +39,15 @@ pub(in crate::config::test_instance) fn agy_fixture() -> (tempfile::TempDir, Pat
         "provider_auth_profiles":{"test-antigravity":{"provider":"antigravity","home":login,"env":{}}},
         "provider_auth_primary_profiles":{"antigravity":"test-antigravity"}}).to_string()).unwrap();
     (temp, root, home)
+}
+
+fn write_credential(root: &Path, name: &str) -> String {
+    let value = format!("SYNTHETIC_GEMINI_{name}");
+    let path = root.join("credential").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &value).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    value
 }
 
 fn spawn_agy() -> Result<(), String> {
@@ -76,17 +85,24 @@ fn agy_child_gets_only_declared_env_and_the_mcp_free_login_home() {
         let _ = spawn_agy();
         return;
     }
-    for with_mcp in [false, true] {
+    // agy itself leaves a zero-byte MCP config behind; the key file reaches only the turn.
+    for case in ["plain", "mcp", "empty_mcp", "key"] {
+        let with_mcp = case == "mcp";
         let (_temp, root, home) = agy_fixture();
         let login = home.join(".adk/dev/agy-login");
-        if with_mcp {
+        if case.ends_with("mcp") {
             std::fs::create_dir_all(login.join(".gemini/config")).unwrap();
             std::fs::write(
                 login.join(".gemini/config/mcp_config.json"),
-                r#"{"mcpServers":{"memento":{"url":"http://127.0.0.1:1/mcp"}}}"#,
+                if with_mcp {
+                    r#"{"mcpServers":{"memento":{"url":"http://127.0.0.1:1/mcp"}}}"#
+                } else {
+                    ""
+                },
             )
             .unwrap();
         }
+        let key = (case == "key").then(|| write_credential(&root, "gemini_api_key"));
         let mut child = fixture::command(&root);
         let output = child
             .args(["--exact", name, "--nocapture"])
@@ -95,6 +111,8 @@ fn agy_child_gets_only_declared_env_and_the_mcp_free_login_home() {
             .output()
             .unwrap();
         fixture::assert_single_test_passed(&output, name);
+        let printed = [output.stdout.as_slice(), &output.stderr].concat();
+        assert!(!String::from_utf8_lossy(&printed).contains("SYNTHETIC_GEMINI"));
         let mut runs: Vec<(String, std::collections::BTreeMap<String, String>)> = Vec::new();
         for line in std::fs::read_to_string(root.join("runtime/agy-env"))
             .unwrap_or_default()
@@ -128,6 +146,8 @@ fn agy_child_gets_only_declared_env_and_the_mcp_free_login_home() {
             };
             assert_eq!(env.get("HOME").map(String::as_str), home.to_str(), "{kind}");
             assert_eq!(env.get("PATH"), Some(&path), "{kind}");
+            let turn_key = key.as_ref().filter(|_| kind != "--version");
+            assert_eq!(env.get("GEMINI_API_KEY"), turn_key, "{case} {kind}");
             assert!(
                 !env.contains_key("SYNTHETIC_AMBIENT"),
                 "dcserver env leaked into {kind}: {env:?}"

@@ -351,10 +351,6 @@ pub(crate) fn critical_atomic_write(
 /// Test-only view of every directory flush and injected step failure, scoped by target path so
 /// parallel tests in separate temp directories never see each other's events.
 #[cfg(test)]
-#[path = "durable_publish_tests.rs"]
-mod tests;
-
-#[cfg(test)]
 pub(crate) mod flush_probe {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};

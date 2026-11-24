@@ -113,6 +113,42 @@ pub(super) fn no_answer(full_response: &str, response_sent_offset: usize, delive
             .is_empty()
 }
 
+fn is_agy(provider: &ProviderKind) -> bool {
+    matches!(provider, ProviderKind::Antigravity)
+}
+
+/// agy's Done joins the same Text deltas the bridge composed; composition only adds or trims `\n`,
+/// so the prefix check skips newlines and nothing else.
+fn starts_with_posted(done: &str, posted: &str) -> bool {
+    let mut done = done.chars().filter(|c| *c != '\n');
+    posted
+        .chars()
+        .filter(|c| *c != '\n')
+        .all(|c| done.next() == Some(c))
+}
+
+/// agy posts rollover parts as final text; Done keeps them only when its body starts with them.
+pub(super) fn rollover_parts_stay_posted(
+    provider: &ProviderKind,
+    posted: Option<&str>,
+    done_result: &str,
+) -> bool {
+    is_agy(provider) && posted.is_some_and(|posted| starts_with_posted(done_result, posted))
+}
+
+/// An agy Done that does not start with its already posted parts replaces the whole answer.
+pub(super) fn done_replaces_posted_parts(
+    provider: &ProviderKind,
+    posted: Option<&str>,
+    response_sent_offset: usize,
+    done_result: &str,
+) -> bool {
+    is_agy(provider)
+        && response_sent_offset > 0
+        && !done_result.trim().is_empty()
+        && !rollover_parts_stay_posted(provider, posted, done_result)
+}
+
 pub(super) fn done_result_requires_full_terminal_replay(
     full_response: &str,
     result: &str,

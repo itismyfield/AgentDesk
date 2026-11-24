@@ -13,7 +13,7 @@ fn snapshot_order_diagnostic_uses_published_manager_channel_pg() {
             .enable_all()
             .build()
             .unwrap();
-        let (_, values) = crate::config::snapshot_reader_tests::capture_identity(|| {
+        let (_, values) = crate::api_caller_observability::capture_identity(|| {
             rt.block_on(async {
                 let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
                 let pool = db.connect_and_migrate().await;

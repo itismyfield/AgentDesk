@@ -169,7 +169,7 @@ fn read_capture(mut output: Output, geometry: &Geometry) -> Option<String> {
 
 #[cfg(test)]
 mod protocol_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod transport_tests;
 
 #[cfg(unix)]

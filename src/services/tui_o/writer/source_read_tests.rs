@@ -38,19 +38,19 @@ use tokio::sync::watch;
 
 const A: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 const B: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
-const PROMPT: &str = "read verified source";
+pub(crate) const PROMPT: &str = "read verified source";
 
-struct Fixture {
+pub(crate) struct Fixture {
     fake: crate::services::provider_teardown::tests::test_support::FakeTmux,
-    context: BindingContext,
-    root: tempfile::TempDir,
+    pub(crate) context: BindingContext,
+    pub(crate) root: tempfile::TempDir,
     _env: [TestEnvVarGuard; 2],
     _dedupe: std::sync::MutexGuard<'static, ()>,
     _shared: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 impl Fixture {
-    fn new(verified: bool) -> Self {
+    pub(crate) fn new(verified: bool) -> Self {
         let shared = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -104,7 +104,7 @@ impl Fixture {
             _shared: shared,
         }
     }
-    fn path(&self, id: &str) -> PathBuf {
+    pub(crate) fn path(&self, id: &str) -> PathBuf {
         self.context
             .provider_root
             .as_ref()
@@ -114,7 +114,7 @@ impl Fixture {
     fn header(&self, id: &str) {
         self.header_at(id, self.time(1));
     }
-    fn header_at(&self, id: &str, time: DateTime<Utc>) {
+    pub(crate) fn header_at(&self, id: &str, time: DateTime<Utc>) {
         let time = time.to_rfc3339();
         let meta = json!({"type":"session_meta", "timestamp":time, "payload":{"id":id,"timestamp":time,"cwd":self.root.path(),"source":"cli","originator":"codex_cli_rs"}});
         fs::write(self.path(id), format!("{meta}\n")).unwrap();
@@ -147,7 +147,7 @@ impl Fixture {
     fn time(&self, n: i64) -> DateTime<Utc> {
         self.context.created_at + Duration::seconds(n)
     }
-    fn log_bytes(&self) -> Vec<u8> {
+    pub(crate) fn log_bytes(&self) -> Vec<u8> {
         fs::read(
             self.root
                 .path()
@@ -177,7 +177,7 @@ impl Fixture {
         assert!(self.fold().verified.is_none());
         previous
     }
-    fn fold(&self) -> binding_events::codex::Fold {
+    pub(crate) fn fold(&self) -> binding_events::codex::Fold {
         binding_events::codex::read_ownership(&self.context).unwrap()
     }
     fn current(&self) -> dedupe::TuiRuntimeBinding {
@@ -191,7 +191,7 @@ impl Fixture {
         ))
         .unwrap()
     }
-    fn log(&self) -> ChannelBindingLog {
+    pub(crate) fn log(&self) -> ChannelBindingLog {
         ChannelBindingLog::new(self.context.channel_id.unwrap(), ShadowProvider::Codex)
     }
     fn store(&self) -> (OStore, ChannelStore) {
@@ -220,7 +220,7 @@ impl Fixture {
         let opened = store.open_channel(&era, channel).unwrap().unwrap();
         (store, opened)
     }
-    fn reopened(&self, store: &OStore) -> ChannelStore {
+    pub(crate) fn reopened(&self, store: &OStore) -> ChannelStore {
         store
             .open_channel(
                 &store.read_era().unwrap().unwrap(),
@@ -251,7 +251,7 @@ fn unit(id: &str, text: &str) -> String {
         json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":id,"content":[{"type":"output_text","text":text}]}})
     )
 }
-fn response(path: &Path, id: &str, text: &str) {
+pub(crate) fn response(path: &Path, id: &str, text: &str) {
     append(path, &unit(id, text));
     append(
         path,
@@ -261,7 +261,7 @@ fn response(path: &Path, id: &str, text: &str) {
         ),
     );
 }
-async fn polls() {
+pub(crate) async fn polls() {
     tokio::time::sleep(actor::POLL_INTERVAL * 3).await;
 }
 
@@ -951,13 +951,10 @@ fn immediate_followup(f: &Fixture) {
     assert!(spy.calls().iter().all(|call| !call.contains("kill")));
 }
 
-fn posted(store: &ChannelStore) -> usize {
+pub(crate) fn posted(store: &ChannelStore) -> usize {
     let ledger = store.ledger();
     (0..ledger.next_serial())
         .filter_map(|serial| ledger.piece(serial))
         .filter(|piece| matches!(piece.outcome, Some(PieceOutcome::Posted(_))))
         .count()
 }
-
-#[path = "executed_resume_tests.rs"]
-mod executed_resume;

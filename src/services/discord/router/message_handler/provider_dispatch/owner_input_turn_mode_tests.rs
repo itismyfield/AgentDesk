@@ -106,6 +106,7 @@ fn dispatches() -> usize {
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_codex_input_runs_once_on_one_owner_drive_after_the_unseen_takeover_turn_is_gone_pg()
 {
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -453,6 +454,7 @@ fn until(mut done: impl FnMut() -> bool) -> impl std::future::Future<Output = ()
 #[tokio::test(flavor = "current_thread")]
 async fn a_held_codex_input_runs_once_after_its_live_busy_pane_turns_idle_pg() {
     use crate::services::discord::turn_presence::{activity, supervisor};
+    crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = Fixture::after_shared_test_env_lock();
     let db = TestPostgresDb::create().await;

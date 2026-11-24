@@ -166,6 +166,7 @@ src/
 │   │   ├── host_scope_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
+│   │   ├── login_test_support.rs
 │   │   └── run_identity_tests.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
@@ -219,6 +220,7 @@ src/
 │   │   ├── queries.rs
 │   │   ├── run_admission.rs
 │   │   ├── run_admission_pg_tests.rs
+│   │   ├── run_completion_barrier_tests.rs
 │   │   ├── run_completion_contract_tests.rs
 │   │   ├── run_completion_pg_tests.rs
 │   │   ├── run_owner_guard.rs
@@ -387,6 +389,7 @@ src/
 │   ├── decisions_support_tests.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
+│   ├── dispatch_test_db_tests.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
 │   ├── idempotency.rs
@@ -618,6 +621,10 @@ src/
 │   └── transition_core.rs
 ├── krx_claude_tests/
 │   └── tui_session_launch_tests.rs
+├── krx_config_tests/
+│   ├── runtime_validation_tests.rs
+│   ├── settings_cli_tests.rs
+│   └── skill_sync_shipped_tree_tests.rs
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
@@ -955,6 +962,14 @@ src/
 │   │   ├── query.rs
 │   │   ├── serialization.rs
 │   │   └── turn.rs
+│   ├── agy_acp/
+│   │   ├── actor.rs
+│   │   ├── child.rs
+│   │   ├── lifecycle_tests.rs
+│   │   ├── mod.rs
+│   │   ├── rpc.rs
+│   │   ├── turn.rs
+│   │   └── wire.rs
 │   ├── analytics/
 │   │   ├── api_usage.rs
 │   │   ├── dispatch_metrics.rs
@@ -1220,6 +1235,7 @@ src/
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── reaping_tests.rs
 │   │   │   ├── recovery_pace.rs
+│   │   │   ├── relay_probe_tests.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -1837,6 +1853,7 @@ src/
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
 │   │   │   │   ├── runtime_stop/
+│   │   │   │   │   ├── agy_acp_stop_tests.rs
 │   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
@@ -1928,6 +1945,7 @@ src/
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   └── live_bridge_guard_tests.rs
+│   │   │   ├── boot_hold.rs
 │   │   │   ├── channel_home_seed.rs
 │   │   │   ├── consumer_ports.rs
 │   │   │   ├── headless_turn.rs
@@ -1984,6 +2002,9 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   └── root_replaced.rs
+│   │   ├── host_liveness/
+│   │   │   ├── krx_discord_dl_tests.rs
+│   │   │   └── krx_discord_dl_unix_tests.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
 │   │   ├── inflight/
@@ -2027,6 +2048,7 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── native_custody_wait_tests.rs
 │   │   │   │   ├── native_input_custody.rs
 │   │   │   │   ├── native_input_tests.rs
 │   │   │   │   ├── restart_marker_lifetime_tests.rs
@@ -2115,6 +2137,12 @@ src/
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
+│   │   ├── krx_config_tests/
+│   │   │   ├── codex_submission_tests.rs
+│   │   │   ├── codex_warm_followup_tests.rs
+│   │   │   ├── compact_trigger_tests.rs
+│   │   │   ├── observability_cancel_tests.rs
+│   │   │   └── provider_cli_session_guard_tests.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests.rs
 │   │   │   └── log_flood_tests.rs
@@ -2126,6 +2154,9 @@ src/
 │   │   │   └── effort.rs
 │   │   ├── org_schema/
 │   │   │   └── auth_selection_tests.rs
+│   │   ├── org_writer/
+│   │   │   ├── krx_discord_root_tests.rs
+│   │   │   └── krx_discord_root_unix_tests.rs
 │   │   ├── outbound/
 │   │   │   ├── completed_turn_ledger/
 │   │   │   │   ├── o_pending.rs
@@ -2836,6 +2867,7 @@ src/
 │   │   │   │   └── agy_shadow.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
+│   │   │   ├── boot_sigterm.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
@@ -2853,6 +2885,7 @@ src/
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── native_input.rs
+│   │   │   ├── native_input_tests.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
@@ -2887,6 +2920,11 @@ src/
 │   │   │   ├── durable_stores_tests.rs
 │   │   │   ├── record_lock.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── session_canonical_identity/
+│   │   │   ├── krx_services_dl_tests/
+│   │   │   │   ├── intake_worker_executor_tests.rs
+│   │   │   │   └── message_outbox_source_contract_tests.rs
+│   │   │   └── krx_services_dl_tests.rs
 │   │   ├── session_notice/
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── input_notice.rs
@@ -3577,6 +3615,7 @@ src/
 │   │   │   ├── native_key_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
+│   │   │   ├── native_receipt_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
@@ -3732,6 +3771,8 @@ src/
 │   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
+│   │   ├── bot_runtime.rs
+│   │   ├── bot_settings_state.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
 │   │   ├── codex_absence.rs
@@ -3780,8 +3821,11 @@ src/
 │   │   ├── jsonl_watcher.rs
 │   │   ├── krx_claude_tests.rs
 │   │   ├── krx_claude_unix_tests.rs
+│   │   ├── krx_config_tests.rs
+│   │   ├── krx_tui_o_test_host.rs
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
+│   │   ├── mailbox_ops.rs
 │   │   ├── mailbox_probe.rs
 │   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
@@ -3797,6 +3841,7 @@ src/
 │   │   ├── placeholder_controller.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── queue_dispatch.rs
+│   │   ├── queue_exit.rs
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
 │   │   ├── queue_overflow_dlq.rs
@@ -3851,7 +3896,9 @@ src/
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
 │   │   ├── session_transition.rs
+│   │   ├── session_transition_tests.rs
 │   │   ├── settings.rs
+│   │   ├── shared_data.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
 │   │   ├── sidecar_interaction.rs
@@ -3871,6 +3918,7 @@ src/
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_delivery_custody.rs
+│   │   ├── test_fixtures.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
@@ -4028,6 +4076,17 @@ src/
 │   │   └── transport_tests.rs
 │   ├── kanban_cards/
 │   │   └── entry_transactions.rs
+│   ├── krx_config_tests/
+│   │   ├── logging_filter_tests.rs
+│   │   └── tmux_readiness_tests.rs
+│   ├── krx_db_b_tests/
+│   │   ├── auto_queue_dispatch_failure_tests.rs
+│   │   ├── auto_queue_entries_tests.rs
+│   │   ├── auto_queue_phase_gate_verdict_tests.rs
+│   │   └── session_transcripts_clear_fence_tests.rs
+│   ├── krx_db_tests/
+│   │   ├── dispatched_sessions_authority_tests.rs
+│   │   └── dispatches_outbox_delivery_tests.rs
 │   ├── legacy_body_census/
 │   │   ├── cache.rs
 │   │   ├── collector.rs
@@ -5024,6 +5083,7 @@ src/
 │   │   ├── exact_pg.rs
 │   │   ├── exact_pg_tests.rs
 │   │   ├── exact_submission.rs
+│   │   ├── exact_submission_tests.rs
 │   │   ├── gates_m1.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
@@ -5305,6 +5365,10 @@ src/
 │   ├── kanban_cards.rs
 │   ├── kanban_cards_snapshot_tests.rs
 │   ├── krx_claude_tests.rs
+│   ├── krx_config_tests.rs
+│   ├── krx_db_b_tests.rs
+│   ├── krx_db_tests.rs
+│   ├── krx_tui_o_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
@@ -5430,6 +5494,13 @@ src/
 ├── intake_consent_authority.rs
 ├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
+├── krx_config_tests.rs
+├── krx_config_unix_tests.rs
+├── krx_db_b_tests.rs
+├── krx_db_tests.rs
+├── krx_services_tests.rs
+├── krx_tui_o_tests.rs
+├── krx_tui_o_unix_tests.rs
 ├── launch.rs
 ├── lib.rs
 ├── logging.rs
@@ -5466,6 +5537,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
+| `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
@@ -5488,6 +5560,13 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_config_unix_tests.rs` | Test-only host for KRX config tests (config_live_reload, test_instance) declared under cfg(all(test, unix)) that call root-crate items. |
+| `src/krx_db_b_tests.rs` | Test-only host that declares the second slice of KRX db tests calling root-crate items. |
+| `src/krx_db_tests.rs` | Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_services_tests.rs` | Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate. |
+| `src/krx_tui_o_tests.rs` | Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate. |
+| `src/krx_tui_o_unix_tests.rs` | Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/lib.rs` | Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |

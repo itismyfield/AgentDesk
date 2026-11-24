@@ -184,18 +184,23 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
         sent.member = Some(Box::new(serde_json::from_value(member).unwrap()));
         busy.rt.h.spawn_message(sent).await.unwrap().unwrap();
         let buffer = busy.pane.read("buffer").unwrap_or_default();
+        let nonce = busy.pane.nonce().unwrap();
         busy.rt.finish().await;
         let shown = nick.or(global_name).unwrap();
-        assert_eq!(buffer, format!("[User: {shown} (ID: {USER_ID})] status?"));
+        assert_eq!(
+            buffer,
+            format!("[User: {shown} (ID: {USER_ID}) · {nonce}] status?")
+        );
     }
     let busy = busy().await;
     let rt = &busy.rt;
     let message = fresh_id();
     rt.h.deliver_user_message(message, "status?").await.unwrap();
     let buffer = busy.pane.read("buffer").unwrap_or_default();
+    let nonce = busy.pane.nonce().unwrap();
     assert_eq!(
         buffer,
-        format!("[User: queue-user (ID: {USER_ID})] status?")
+        format!("[User: queue-user (ID: {USER_ID}) · {nonce}] status?")
     );
     let observed = (
         busy.pane.keys(),

@@ -1,333 +1,123 @@
-import { useState } from "react";
-import type { Agent, Department, DispatchedSession } from "../../types";
-import { Monitor, MapPin, Clock, Wifi, WifiOff } from "lucide-react";
-import { useI18n } from "../../i18n";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceEmptyState,
-  SurfaceListItem,
-  SurfaceMetaBadge,
-} from "../common/SurfacePrimitives";
-import TooltipLabel from "../common/TooltipLabel";
-import {
-  compareSessions,
-  formatTimeAgo,
-  isStaleIdleSession,
-  linkedAgentLabel,
-  normalizeTimestamp,
-  sessionDisplayName,
-  sessionProviderLabel,
-  sessionProviderTone,
-  sessionPersona,
-} from "./SessionPanelModel";
+import { useId, useMemo, useState } from "react";
+import { ChevronDown, X } from "lucide-react";
+import type { Department, DispatchedSession } from "../../types";
+import { getProviderMeta } from "../../app/providerTheme";
+import { formatRelativeTime } from "../../app/shellFormatting";
+import { Button } from "../../kit/free/button-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
 import AgentPersona from "../AgentPersona";
+import { Cap, Chip, RowButton, cn } from "../common/KitPrimitives";
+import { agentStateLabel } from "../home/homeModel";
+import { AgentOverlay } from "../agent-manager/AgentOverlay";
+import type { Translator } from "../agent-manager/types";
 import { SessionInfoCard } from "./SessionInfoCard";
+import { compareSessions, isStaleIdleSession, sessionLastActivityTs, sessionPersona, sessionState, sessionTitle } from "./SessionPanelModel";
 
 interface Props {
   sessions: DispatchedSession[];
   departments: Department[];
-  agents: Agent[];
-  onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  locale: string;
+  tr: Translator;
+  isKo: boolean;
 }
 
-export function SessionPanel({ sessions, departments, agents, onAssign }: Props) {
-  const active = [...sessions.filter((s) => s.status !== "disconnected")].sort(compareSessions);
-  const disconnected = [...sessions.filter((s) => s.status === "disconnected")].sort(compareSessions);
-  const workingCount = active.filter((s) => s.status === "working").length;
-  const staleIdleCount = active.filter((s) => isStaleIdleSession(s)).length;
-  const [showDisconnected, setShowDisconnected] = useState(false);
-  const [infoSession, setInfoSession] = useState<DispatchedSession | null>(null);
-  const { t, language } = useI18n();
-  const isKo = language === "ko";
+/** "Working 1 · Resting 5": live sessions per home state, in home's order. */
+function stateCounts(sessions: DispatchedSession[], tr: Translator): string {
+  return (["working", "background", "resting"] as const)
+    .map((state) => [state, sessions.filter((session) => sessionState(session) === state).length] as const)
+    .filter(([, count]) => count > 0)
+    .map(([state, count]) => `${agentStateLabel(state, tr)} ${count}`)
+    .join(" · ");
+}
 
+/** Live sessions no agent owns, one row each; a row opens what the server knows about it. Read-only: the server takes
+ * no agent or department for a session (`PATCH /api/dispatched-sessions/{id}` ignores both). */
+export function SessionPanel({ sessions, departments, locale, tr, isKo }: Props) {
+  const baseId = useId();
+  const [open, setOpen] = useState<string | null>(null);
+  const sorted = useMemo(() => [...sessions].sort(compareSessions), [sessions]);
   return (
-    <div data-testid="agents-sessions" className="space-y-4 min-w-0 [overflow-wrap:anywhere]">
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <Monitor className="shrink-0" size={24} style={{ color: "var(--th-accent-primary)" }} />
-        <h1 className="text-xl sm:text-2xl font-bold truncate">{t({ ko: "파견 인력", en: "Dispatched Sessions" })}</h1>
-        <SurfaceMetaBadge tone="success" className="shrink-0">
-          {active.length} {t({ ko: "활성", en: "Active" })}
-        </SurfaceMetaBadge>
-        <SurfaceMetaBadge tone="info" className="shrink-0">
-          {workingCount} {t({ ko: "작업 중", en: "Working" })}
-        </SurfaceMetaBadge>
-        {staleIdleCount > 0 && (
-          <SurfaceMetaBadge tone="warn" className="shrink-0">
-            {staleIdleCount} {t({ ko: "오래 멈춤", en: "stale" })}
-          </SurfaceMetaBadge>
+    <div data-testid="agents-sessions" className="flex min-w-0 flex-col gap-3">
+      <Cap className="block">
+        {tr(
+          "에이전트에 연결되지 않은 채 열려 있는 세션이에요. 세션을 에이전트나 부서에 붙이는 저장은 아직 서버가 받지 않아요.",
+          "Open sessions no agent owns. The server does not yet save a session's agent or department.",
         )}
-      </div>
-
-      <p className="text-th-text-muted text-sm">
-        {t({
-          ko: "AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다. 각 세션을 부서에 배치할 수 있습니다.",
-          en: "Detected AgentDesk sessions are registered as dispatched staff. Assign each session to a department.",
+      </Cap>
+      <ul className="m-0 min-w-0 list-none overflow-hidden rounded-(--r-md) border border-(--line-soft) bg-(--bg-2) p-0">
+        {sorted.map((session) => {
+          const { title, child } = sessionTitle(session);
+          const state = sessionState(session);
+          const last = sessionLastActivityTs(session);
+          const info = session.session_info?.split("\n")[0]?.trim();
+          const line = [
+            agentStateLabel(state, tr),
+            child ? tr("백그라운드 작업", "Background job") : null,
+            info || (last === null ? null : tr(`마지막 신호 ${formatRelativeTime(last, isKo)}`, `Last signal ${formatRelativeTime(last, isKo)}`)),
+          ].filter(Boolean).join(" · ");
+          const expanded = open === session.id;
+          const detailId = `${baseId}-${session.id}`;
+          return (
+            <li key={session.id} className="border-t border-(--line-soft) first:border-t-0">
+              <RowButton
+                data-session-row={session.id}
+                aria-expanded={expanded}
+                aria-controls={expanded ? detailId : undefined}
+                onClick={() => setOpen(expanded ? null : session.id)}
+                className="min-h-14 py-2.5 text-[13px]"
+              >
+                <span aria-hidden className="flex"><AgentPersona {...sessionPersona(session)} size={32} /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm leading-5 font-medium" title={session.session_key}>{title}</span>
+                  <span className="block truncate text-xs leading-4 text-(--fg-muted)" title={line}>{line}</span>
+                </span>
+                {isStaleIdleSession(session) ? <Chip tone="warn">{tr("7일 넘게 멈춤", "Idle 7+ days")}</Chip> : null}
+                <span className="hidden w-20 shrink-0 truncate text-right text-xs text-(--fg-dim) sm:block">{getProviderMeta(session.provider).label}</span>
+                <ChevronDown size={16} aria-hidden className={cn("shrink-0 text-(--fg-muted) transition-transform motion-reduce:transition-none", expanded && "rotate-180")} />
+              </RowButton>
+              {expanded ? <SessionInfoCard id={detailId} session={session} departments={departments} locale={locale} tr={tr} isKo={isKo} /> : null}
+            </li>
+          );
         })}
-      </p>
-
-      {active.length === 0 && disconnected.length === 0 && (
-        <SurfaceEmptyState className="py-12 text-center">
-          <Monitor size={48} className="mx-auto mb-4 opacity-30" />
-          <p>{t({ ko: "현재 활성 세션이 없습니다", en: "No active sessions" })}</p>
-          <p className="mt-1 text-sm">{t({ ko: "AgentDesk 세션이 실행되면 자동으로 표시됩니다", en: "Sessions will appear automatically when AgentDesk starts" })}</p>
-        </SurfaceEmptyState>
-      )}
-
-      {/* Active sessions */}
-      {active.length > 0 && (
-        <div className="space-y-3">
-          {active.map((s) => (
-            <SessionCard
-              key={s.id}
-              session={s}
-              departments={departments}
-              agents={agents}
-              onAssign={onAssign}
-              onSelect={() => setInfoSession(s)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Disconnected sessions */}
-      {disconnected.length > 0 && (
-        <>
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold text-th-text-muted flex items-center gap-2">
-              <WifiOff size={14} />
-              {t({ ko: "종료된 세션", en: "Disconnected" })} ({disconnected.length})
-            </h2>
-            <SurfaceActionButton
-              onClick={() => setShowDisconnected((prev) => !prev)}
-              tone="neutral"
-              compact
-              className="shrink-0"
-            >
-              {showDisconnected
-                ? t({ ko: "숨기기", en: "Hide" })
-                : t({ ko: "표시", en: "Show" })}
-            </SurfaceActionButton>
-          </div>
-          {showDisconnected && (
-            <div className="space-y-2 opacity-60">
-              {disconnected.slice(0, 10).map((s) => {
-                const lastSeenAt = normalizeTimestamp(s.last_seen_at);
-
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className="block w-full text-left"
-                    onClick={() => setInfoSession(s)}
-                  >
-                    <SurfaceListItem
-                      className="transition-opacity hover:opacity-100"
-                      style={{
-                        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                        background: "color-mix(in srgb, var(--th-bg-surface) 84%, transparent)",
-                      }}
-                      trailing={
-                        lastSeenAt ? (
-                          <span className="text-[11px] whitespace-nowrap" style={{ color: "var(--th-text-muted)" }}>
-                            {formatTimeAgo(lastSeenAt, isKo)}
-                          </span>
-                        ) : undefined
-                      }
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <AgentPersona {...sessionPersona(s)} size={28} />
-                        <div className="min-w-0 flex-1">
-                          <span className="block min-w-0 truncate text-sm text-th-text-muted" title={sessionDisplayName(s).full}>
-                            {sessionDisplayName(s).label}
-                          </span>
-                          <div className="mt-1 flex flex-wrap gap-2">
-                            <SurfaceMetaBadge>{s.model || "unknown"}</SurfaceMetaBadge>
-                            <SurfaceMetaBadge>{t({ ko: "연결 종료", en: "Disconnected" })}</SurfaceMetaBadge>
-                          </div>
-                        </div>
-                      </div>
-                    </SurfaceListItem>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
-
-      {infoSession && (
-        <SessionInfoCard
-          session={infoSession}
-          departments={departments}
-          agents={agents}
-          onClose={() => setInfoSession(null)}
-        />
-      )}
+      </ul>
     </div>
   );
 }
 
-function SessionCard({
-  session: s,
-  departments,
-  agents,
-  onAssign,
-  onSelect,
-}: {
-  session: DispatchedSession;
-  departments: Department[];
-  agents: Agent[];
-  onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
-  onSelect: () => void;
-}) {
-  const [assigning, setAssigning] = useState(false);
-  const [selectedDept, setSelectedDept] = useState(s.department_id || "");
-  const { t, language } = useI18n();
-  const isKo = language === "ko";
-  const connectedAt = normalizeTimestamp(s.connected_at);
-  const staleIdle = isStaleIdleSession(s);
-  const linkedAgent = linkedAgentLabel(s, agents);
-  const statusTone = s.status === "working" ? "success" : staleIdle ? "warn" : "info";
-  const statusLabel = s.status === "working"
-    ? t({ ko: "작업 중", en: "Working" })
-    : staleIdle
-      ? t({ ko: "오래된 대기", en: "Stale Idle" })
-      : t({ ko: "대기", en: "Idle" });
-  const assignDisabled = assigning || selectedDept === (s.department_id || "");
-
-  const handleAssign = async () => {
-    setAssigning(true);
-    try {
-      await onAssign(s.id, {
-        department_id: selectedDept || null,
-      } as Partial<DispatchedSession>);
-    } finally {
-      setAssigning(false);
-    }
-  };
-
-  const statusColor = s.status === "working" ? "bg-emerald-500" : staleIdle ? "bg-slate-500" : "bg-amber-500";
-
+/** One line with the count of sessions no agent owns, and the sheet that lists them. Nothing when there are none. */
+export function UnlinkedSessions({ className, ...props }: Props & { className?: string }) {
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const { sessions, tr } = props;
+  if (sessions.length === 0) return null;
+  const label = tr("연결되지 않은 세션", "Unlinked sessions");
   return (
-    <SurfaceCard
-      className="rounded-lg p-3 sm:p-4"
-      style={{
-        borderColor: staleIdle
-          ? "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)"
-          : s.status === "working"
-            ? "color-mix(in srgb, var(--th-accent-primary) 20%, var(--th-border) 80%)"
-            : "color-mix(in srgb, var(--th-border) 68%, transparent)",
-        background: staleIdle
-          ? "linear-gradient(180deg, color-mix(in srgb, var(--th-badge-amber-bg) 28%, var(--th-card-bg) 72%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
-          : s.status === "working"
-            ? "linear-gradient(180deg, color-mix(in srgb, var(--th-badge-emerald-bg) 24%, var(--th-card-bg) 76%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
-            : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-      }}
-    >
-      <div className="flex items-start gap-3">
-        {/* Avatar + status */}
-        <button type="button" className="relative min-h-11 min-w-11 shrink-0" onClick={onSelect}>
-          <AgentPersona {...sessionPersona(s)} size={40} />
-        </button>
-
-        {/* Info */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <TooltipLabel
-              className="min-w-0 flex-1 font-medium transition-opacity hover:opacity-80 [&_button]:min-h-11"
-              text={sessionDisplayName(s).label}
-              tooltip={sessionDisplayName(s).full}
-              onClick={onSelect}
-            />
-            <Wifi size={14} className="text-emerald-400 shrink-0" />
-            <SurfaceMetaBadge tone={statusTone} className="shrink-0">
-              {statusLabel}
-            </SurfaceMetaBadge>
-          </div>
-
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-th-text-muted">
-            {s.model && (
-              <SurfaceMetaBadge className="shrink-0">
-                {s.model}
-              </SurfaceMetaBadge>
-            )}
-            <SurfaceMetaBadge tone={sessionProviderTone(s.provider)} className="shrink-0">
-              {sessionProviderLabel(s.provider)}
-            </SurfaceMetaBadge>
-            {linkedAgent && (
-              <SurfaceMetaBadge tone="info" className="shrink-0">
-                {t({ ko: "연결", en: "Linked" })}: {linkedAgent}
-              </SurfaceMetaBadge>
-            )}
-            {staleIdle && (
-              <SurfaceMetaBadge tone="warn" className="shrink-0">
-                {t({ ko: "7일+ stale", en: "7d+ stale" })}
-              </SurfaceMetaBadge>
-            )}
-          </div>
-
-          {s.session_info && (
-            <p className="mt-2 truncate text-xs leading-relaxed text-th-text-muted" title={s.session_info}>
-              {s.session_info}
-            </p>
-          )}
-
-          {connectedAt && (
-            <div className="flex items-center gap-1 text-xs text-th-text-muted mt-1">
-              <Clock size={10} className="shrink-0" />
-              <span className="whitespace-nowrap">{t({ ko: "접속", en: "Connected" })}: {formatTimeAgo(connectedAt, isKo)}</span>
+    <section aria-label={label} className={cn("flex min-w-0 items-center gap-3", className)}>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm leading-5 font-medium text-(--fg)">
+          {tr(`에이전트에 연결되지 않은 세션 ${sessions.length}`, `Sessions without an agent: ${sessions.length}`)}
+        </span>
+        <Cap className="mt-0.5 block">{stateCounts(sessions, tr)}</Cap>
+      </span>
+      <Button variant="secondary" size="lg" onClick={() => setSheetOpen(true)}>{tr("보기", "View")}</Button>
+      {sheetOpen ? (
+        <AgentOverlay
+          variant="sheet"
+          ariaLabel={label}
+          widthClassName="sm:max-w-2xl"
+          onClose={() => setSheetOpen(false)}
+          header={(
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-baseline gap-1.5 text-sm font-semibold">
+                {label}
+                <span className="font-display text-xs font-normal text-(--fg-muted) tabular-nums">{sessions.length}</span>
+              </span>
+              <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={() => setSheetOpen(false)} />
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Department assignment (mobile-safe row) */}
-      <div className="mt-3 flex items-center gap-2 flex-wrap pl-0 sm:pl-11">
-        <MapPin size={14} className="text-th-text-muted shrink-0" />
-        <select
-          value={selectedDept}
-          onChange={(e) => setSelectedDept(e.target.value)}
-          className="min-h-11 min-w-[148px] flex-1 rounded-md border px-3 py-2 text-sm text-th-text-primary"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-          }}
         >
-          <option value="">{t({ ko: "부서 미배정", en: "Dept Unassigned" })}</option>
-          {departments.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.icon} {d.name_ko || d.name}
-            </option>
-          ))}
-        </select>
-        <SurfaceActionButton
-          onClick={handleAssign}
-          disabled={assignDisabled}
-          className="shrink-0"
-        >
-          {assigning ? "..." : t({ ko: "배치", en: "Assign" })}
-        </SurfaceActionButton>
-      </div>
-
-      {/* Current department badge */}
-      {s.department_id && s.department_name_ko && (
-        <div className="mt-2 sm:ml-11">
-          <SurfaceMetaBadge
-            className="text-white"
-            style={{ backgroundColor: s.department_color || "var(--th-accent-primary)" }}
-          >
-            {t({ ko: `${s.department_name_ko}에 배치됨`, en: `Assigned to ${s.department_name_ko}` })}
-          </SurfaceMetaBadge>
-        </div>
-      )}
-      {!s.department_id && (
-        <div className="mt-2 sm:ml-11">
-          <SurfaceMetaBadge>
-            {t({ ko: "부서 미배정", en: "Dept Unassigned" })}
-          </SurfaceMetaBadge>
-        </div>
-      )}
-    </SurfaceCard>
+          <SessionPanel {...props} />
+        </AgentOverlay>
+      ) : null}
+    </section>
   );
 }

@@ -1,9 +1,10 @@
-use super::*;
+use crate::services::discord::codex_absence::replacement::*;
 use crate::services::discord::inflight::{
     InflightTurnIdentity, load_inflight_state_read_only_result,
 };
 use crate::services::discord::save_actual_episode_for_tests;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
+use std::sync::Arc;
 
 const CHANNEL: u64 = 7_250_101;
 const TMUX: &str = "AgentDesk-codex-replacement-unit";
@@ -17,6 +18,7 @@ fn token() -> Arc<CancelToken> {
 #[test]
 fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
     let guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
@@ -54,6 +56,7 @@ fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel(
 #[test]
 fn replacement_begin_and_terminal_cleanup_have_one_winner() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
     let cleanup = probe.cleanup().unwrap();
@@ -78,7 +81,7 @@ fn replacement_begin_and_terminal_cleanup_have_one_winner() {
         .unwrap()
         .unwrap();
     let identity = InflightTurnIdentity::from_state(&row);
-    super::super::super::inflight::clear_inflight_state_if_matches_identity(
+    crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
         &ProviderKind::Codex,
         CHANNEL,
         &identity,
@@ -98,6 +101,7 @@ fn replacement_begin_and_terminal_cleanup_have_one_winner() {
 #[test]
 fn replacement_requires_its_exact_turn_and_unwinds_on_panic() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let stranger = Arc::new(CancelToken::new());
     assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&stranger)).is_err());
@@ -107,13 +111,13 @@ fn replacement_requires_its_exact_turn_and_unwinds_on_panic() {
         .unwrap();
     let mut legacy = original.clone();
     legacy.turn_nonce = None;
-    super::super::super::inflight::save_inflight_state(&legacy).unwrap();
+    crate::services::discord::inflight::save_inflight_state(&legacy).unwrap();
     assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err());
     legacy = original.clone();
     legacy.request_owner_user_id = 0;
-    super::super::super::inflight::save_inflight_state(&legacy).unwrap();
+    crate::services::discord::inflight::save_inflight_state(&legacy).unwrap();
     assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err());
-    super::super::super::inflight::save_inflight_state(&original).unwrap();
+    crate::services::discord::inflight::save_inflight_state(&original).unwrap();
     let probe = Probe::new(CHANNEL, TMUX);
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))

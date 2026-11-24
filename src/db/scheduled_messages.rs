@@ -42,8 +42,6 @@ pub use outbox::outbox_statuses_for_deliveries_pg;
 pub use writes::{insert_scheduled_message_pg, insert_scheduled_message_tx};
 
 #[cfg(test)]
-mod attachments_pg_tests;
-#[cfg(test)]
 mod postgres_tests;
 
 pub const STATUS_SCHEDULED: &str = "scheduled";
@@ -59,7 +57,7 @@ pub const DELIVERY_INTERRUPTED: &str = "interrupted";
 pub const KIND_PUSH: &str = "push";
 pub const KIND_AGENT: &str = "agent";
 
-const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, \
+pub(crate) const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, \
      agent_id, agent_instruction, on_agent_failure, scheduled_at, schedule, timezone, \
      expires_at, status, in_flight_delivery_id, fire_count, last_fired_at, last_error, \
      source, created_by, dedupe_key, provider_targets, provider_target_summary, \

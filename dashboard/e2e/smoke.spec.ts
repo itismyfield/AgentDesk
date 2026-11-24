@@ -14,7 +14,7 @@ const ROUTES = [
 // Removed pages keep their links working by redirecting into the new IA.
 const LEGACY_REDIRECTS = [
   { path: "/kanban", to: /\/campaigns\?tab=queue$/ },
-  { path: "/meetings", to: /\/agents$/ },
+  { path: "/meetings", to: /\/agents\?tab=skills$/ },
   { path: "/achievements", to: /\/stats$/ },
   { path: "/voice", to: /\/home$/ },
   { path: "/ops", to: /\/settings\?category=connections$/ },
@@ -811,7 +811,7 @@ async function mockAgentsHubApis(page: Page) {
     });
   });
 
-  await page.route(/\/api\/skills\/ranking\?window=30d&limit=120$/, async (route) => {
+  await page.route(/\/api\/skills\/ranking\?window=30d&limit=\d+$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1713,6 +1713,19 @@ test.describe("Dashboard smoke tests", () => {
     await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
   });
 
+  test("home: the limit list marks a row past the auto-run pause once, in the meter", async ({ page }) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "5h", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "7d", limit: 100, used: 83, remaining: 17, reset: 0 }] },
+    ] } }));
+    await page.goto("/home");
+
+    const usage = page.getByTestId("home-usage");
+    await expect(usage.getByRole("meter", { name: "Claude 5시간" })).toHaveAttribute("aria-valuetext", /자동 진행 멈춤 기준 이상/, { timeout: 15000 });
+    await expect(usage.locator(".aui-usage-meter-mini-row").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-state")))).resolves.toEqual(["danger", "warn"]);
+    await expect(usage.locator(".aui-usage-meter-mini-detail")).toHaveCount(0);
+  });
+
   test("home: after empty lists a failed campaign poll reads unknown on both cards until it recovers", async ({ page }) => {
     let down = false;
     await page.clock.install();
@@ -1989,15 +2002,18 @@ test.describe("Dashboard smoke tests", () => {
       await route.fulfill({ json: { default_node_id: saved, routing_enforced: true } });
     });
     await page.goto("/agents");
-    // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
     // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
     const dialog = testInfo.project.name === "desktop"
       ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
       : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
+    // Phones fold the run settings with every section but "now".
+    const openRunSettings = async () => {
+      if (testInfo.project.name !== "desktop") await dialog.getByRole("button", { name: /^(실행 설정|Run settings)/ }).click();
+    };
+    await openRunSettings();
     await expect(device).toBeEnabled();
     await expect(device).toHaveValue("");
     await expect(device.locator('option[value="fixture-hub"]')).toContainText(/(?:허브|Hub) · macOS/);
@@ -2008,7 +2024,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
     await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
+    await openRunSettings();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
     await device.selectOption("linux-2");
@@ -2029,16 +2046,12 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/agents");
 
     await expect(page.getByTestId("agents-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("agents-tab-bar")).toBeVisible();
-    await expect(page.getByTestId("agents-tab-button-agents")).toHaveAttribute("aria-selected", "true");
+    const sections = page.getByRole("tablist", { name: /에이전트 관리 화면|Agent manager views/ });
+    await expect(sections.getByRole("tab", { name: /^(에이전트|Agents)/ })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("agents-tab")).toBeVisible();
-    await expect(page.getByTestId("agents-view-grid")).toBeVisible();
-    await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
+    await expect(page.getByTestId("agents-list")).toBeVisible();
 
-    await page.getByRole("radio", { name: /리스트|List/ }).click();
-    await expect(page.getByTestId("agents-view-list")).toBeVisible();
-
-    await page.getByTestId("agents-card-agent-ada").click();
+    await page.getByTestId("agents-row-agent-ada").click();
     const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
@@ -2049,22 +2062,23 @@ test.describe("Dashboard smoke tests", () => {
     const addButton = page.getByRole("button", { name: /에이전트 추가|Add agent/ });
     const before = await addButton.boundingBox();
 
-    await page.getByTestId("agents-tab-button-departments").click();
+    await sections.getByRole("tab", { name: /^(부서|Departments)/ }).click();
     await expect(page.getByTestId("agents-departments-tab")).toBeVisible();
-    await expect(page.getByTestId("agents-department-card-dept-platform")).toBeVisible();
+    await expect(page.getByTestId("agents-department-row-dept-platform")).toBeVisible();
+    await expect(page).toHaveURL(/\/agents\?tab=departments$/);
     expect(await addButton.boundingBox()).toEqual(before);
 
-    await page.getByTestId("agents-tab-button-skills").click();
+    await sections.getByRole("tab", { name: /^(스킬|Skills)/ }).click();
     await expect(page.getByPlaceholder(/스킬 검색|Search skills/).first()).toBeVisible();
     expect(await addButton.boundingBox()).toEqual(before);
-    await expect(page.getByTestId("agents-tab-button-backlog")).toHaveCount(0);
+    await expect(sections.getByRole("tab")).toHaveCount(3);
   });
 
   test("agents: old meetings link opens the skills tab", async ({ page }) => {
     await mockAgentsHubApis(page);
     await page.goto("/meetings");
-    await expect(page).toHaveURL(/\/agents$/);
-    await expect(page.getByTestId("agents-tab-button-skills")).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\/agents\?tab=skills$/);
+    await expect(page.getByRole("tab", { name: /^(스킬|Skills)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   test("connections: server status carries the old ops signals and bottlenecks", async ({ page }, testInfo) => {

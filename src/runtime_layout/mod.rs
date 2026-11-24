@@ -3,7 +3,7 @@ mod config_merge;
 mod legacy_migration;
 mod paths;
 mod skill_refresh;
-mod skill_sync;
+pub(crate) mod skill_sync;
 #[cfg(windows)]
 mod windows_links;
 

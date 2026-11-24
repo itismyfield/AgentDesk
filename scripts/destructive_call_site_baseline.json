@@ -227,6 +227,7 @@
         "src/server/dashboard_provision.rs": 1,
         "src/server/routes/agents_setup.rs": 2,
         "src/server/worker_recovery.rs": 1,
+        "src/services/agy_acp/child.rs": 1,
         "src/services/claude.rs": 7,
         "src/services/claude/herdr_turn.rs": 1,
         "src/services/claude/herdr_turn/first_input.rs": 1,

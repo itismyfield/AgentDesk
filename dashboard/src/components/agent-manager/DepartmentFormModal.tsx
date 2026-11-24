@@ -1,525 +1,173 @@
-import { createPortal } from "react-dom";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
+import { useState, type BaseSyntheticEvent } from "react";
+import { X } from "lucide-react";
 import type { Department } from "../../types";
-import { useI18n } from "../../i18n";
 import * as api from "../../api";
-import { DEPT_BLANK, DEPT_COLORS } from "./constants";
+import { Button } from "../../kit/free/button-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
+import { TextField } from "../../kit/free/text-field-clean";
+import { Cap } from "../common/KitPrimitives";
+import { AgentOverlay } from "./AgentOverlay";
+import { DEPT_COLORS } from "./constants";
 import EmojiPicker from "./EmojiPicker";
 import type { Translator } from "./types";
-import { useFocusTrap } from "../common/overlay/useFocusTrap";
-import { useReturnFocus } from "../common/overlay/useReturnFocus";
-import {
-  SurfaceActionButton,
-  SurfaceNotice,
-  SurfaceSubsection,
-} from "../common/SurfacePrimitives";
 
-const departmentFormSchema = z.object({
-  id: z.string(),
-  name: z.string().trim().min(1, "required"),
-  name_ko: z.string(),
-  name_ja: z.string(),
-  name_zh: z.string(),
-  icon: z.string().trim().min(1, "required"),
-  color: z.string().trim().min(1, "required"),
-  description: z.string(),
-  prompt: z.string(),
-});
-
-type DepartmentFormValues = z.infer<typeof departmentFormSchema>;
-
-function getDepartmentFormDefaults(department: Department | null): DepartmentFormValues {
-  if (department) {
-    return {
-      id: department.id,
-      name: department.name,
-      name_ko: department.name_ko || "",
-      name_ja: department.name_ja || "",
-      name_zh: department.name_zh || "",
-      icon: department.icon,
-      color: department.color,
-      description: department.description || "",
-      prompt: department.prompt || "",
-    };
-  }
-  return { ...DEPT_BLANK };
-}
-
+/**
+ * Department create/edit window. The server stores only `name` on create and on PATCH, so the icon, color, Korean name
+ * and description show read-only until it takes them; delete says how many agents lose their department.
+ */
 export default function DepartmentFormModal({
   locale,
   tr,
   department,
-  departments,
+  memberCount,
   onSave,
   onClose,
-  onSaveDepartment,
-  onDeleteDepartment,
 }: {
   locale: string;
   tr: Translator;
   department: Department | null;
-  departments: Department[];
+  /** Agents whose department this is; deleting leaves them unassigned. */
+  memberCount: number;
   onSave: () => void;
   onClose: () => void;
-  onSaveDepartment?: (input: {
-    mode: "create" | "update";
-    id: string;
-    payload: {
-      name: string;
-      name_ko: string;
-      name_ja: string | null;
-      name_zh: string | null;
-      icon: string;
-      color: string;
-      description: string | null;
-      prompt: string | null;
-      sort_order: number;
-    };
-  }) => Promise<void>;
-  onDeleteDepartment?: (departmentId: string) => Promise<void>;
 }) {
-  const { t } = useI18n();
-  const isEdit = !!department;
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    watch,
-    formState: { errors },
-  } = useForm<DepartmentFormValues>({
-    resolver: zodResolver(departmentFormSchema),
-    defaultValues: getDepartmentFormDefaults(department),
-    mode: "onChange",
-  });
-  const form = watch();
-  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState(department?.name ?? "");
+  const [touched, setTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const overlayRef = useFocusTrap(true);
-  useReturnFocus(true);
-  const colorButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [error, setError] = useState<string | null>(null);
+  const trimmed = name.trim();
+  const unchanged = department !== null && trimmed === department.name;
+  const title = department ? tr("부서 편집", "Edit department") : tr("새 부서", "New department");
 
-  // sort_order 기반 다음 순번 계산
-  const nextSortOrder = (() => {
-    const orders = departments.map((d) => d.sort_order).filter((n) => typeof n === "number" && !isNaN(n));
-    return Math.max(0, ...orders) + 1;
-  })();
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-
-  const handleSave = handleSubmit(async (values) => {
-    setSaving(true);
+  const run = async (action: () => Promise<unknown>, failure: string) => {
+    setBusy(true);
+    setError(null);
     try {
-      const payload = {
-        name: values.name,
-        name_ko: values.name_ko.trim(),
-        name_ja: values.name_ja.trim() || null,
-        name_zh: values.name_zh.trim() || null,
-        icon: values.icon,
-        color: values.color,
-        description: values.description.trim() || null,
-        prompt: values.prompt.trim() || null,
-        sort_order: department?.sort_order ?? nextSortOrder,
-      };
-      if (isEdit) {
-        if (onSaveDepartment) {
-          await onSaveDepartment({
-            mode: "update",
-            id: department!.id,
-            payload: { ...payload, sort_order: department!.sort_order },
-          });
-        } else {
-          await api.updateDepartment(department!.id, {
-            name: payload.name,
-            name_ko: payload.name_ko,
-            name_ja: payload.name_ja,
-            name_zh: payload.name_zh,
-            icon: payload.icon,
-            color: payload.color,
-            description: payload.description,
-            prompt: payload.prompt,
-          });
-        }
-      } else {
-        // name 기반 slug 생성, 비라틴 문자만인 경우 dept-N fallback
-        const slug = values.name
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "");
-        let deptId = slug || `dept-${nextSortOrder}`;
-        // 기존 ID와 충돌 시 숫자 접미사 추가
-        const existingIds = new Set(departments.map((d) => d.id));
-        let suffix = 2;
-        while (existingIds.has(deptId)) {
-          deptId = `${slug || "dept"}-${suffix++}`;
-        }
-        if (onSaveDepartment) {
-          await onSaveDepartment({
-            mode: "create",
-            id: deptId,
-            payload: { ...payload, sort_order: nextSortOrder },
-          });
-        } else {
-          await api.createDepartment({
-            id: deptId,
-            name: payload.name,
-            name_ko: payload.name_ko,
-            name_ja: payload.name_ja ?? "",
-            name_zh: payload.name_zh ?? "",
-            icon: payload.icon,
-            color: payload.color,
-            description: payload.description ?? undefined,
-            prompt: payload.prompt ?? undefined,
-          });
-        }
-      }
+      await action();
       onSave();
-      onClose();
-    } catch (e: any) {
-      console.error("Dept save failed:", e);
-      if (api.isApiRequestError(e) && e.code === "department_id_exists") {
-        alert(tr("이미 존재하는 부서 ID입니다.", "Department ID already exists."));
-      } else if (api.isApiRequestError(e) && e.code === "sort_order_conflict") {
-        alert(
-          tr(
-            "부서 정렬 순서가 충돌합니다. 잠시 후 다시 시도해주세요.",
-            "Department sort order conflict. Please retry.",
-          ),
-        );
-      }
+    } catch (cause) {
+      console.error("Department change failed:", cause);
+      setError(failure);
     } finally {
-      setSaving(false);
-    }
-  });
-
-  const handleDelete = async () => {
-    setSaving(true);
-    try {
-      if (onDeleteDepartment) {
-        await onDeleteDepartment(department!.id);
-      } else {
-        await api.deleteDepartment(department!.id);
-      }
-      onSave();
-      onClose();
-    } catch (e: any) {
-      console.error("Dept delete failed:", e);
-      if (api.isApiRequestError(e) && e.code === "department_has_agents") {
-        alert(tr("소속 직원이 있어 삭제할 수 없습니다.", "Cannot delete: department has agents."));
-      } else if (api.isApiRequestError(e) && e.code === "department_has_tasks") {
-        alert(tr("연결된 업무(Task)가 있어 삭제할 수 없습니다.", "Cannot delete: department has tasks."));
-      } else if (api.isApiRequestError(e) && e.code === "department_protected") {
-        alert(tr("기본 시스템 부서는 삭제할 수 없습니다.", "Cannot delete: protected system department."));
-      }
-    } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
-
-  const inputCls =
-    "w-full min-h-11 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
-  const inputStyle = {
-    background: "var(--th-input-bg)",
-    borderColor: "var(--th-input-border)",
-    color: "var(--th-text-primary)",
+  const submit = (event?: BaseSyntheticEvent) => {
+    event?.preventDefault();
+    setTouched(true);
+    if (!trimmed || unchanged || busy) return;
+    void run(
+      () => (department ? api.updateDepartment(department.id, { name: trimmed }) : api.createDepartment({ name: trimmed })),
+      tr("저장하지 못했어요. 잠시 뒤 다시 해 보세요.", "Could not save. Try again in a moment."),
+    );
   };
-  const selectedColorIndex = Math.max(0, DEPT_COLORS.indexOf(form.color));
-  const selectColor = (color: string) => {
-    setValue("color", color, { shouldDirty: true, shouldValidate: true });
-  };
-  const moveColorFocus = (index: number) => {
-    const nextIndex = (index + DEPT_COLORS.length) % DEPT_COLORS.length;
-    selectColor(DEPT_COLORS[nextIndex]);
-    colorButtonRefs.current[nextIndex]?.focus();
-  };
-  const handleColorKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
-    switch (event.key) {
-      case "ArrowRight":
-      case "ArrowDown":
-        event.preventDefault();
-        moveColorFocus(index + 1);
-        break;
-      case "ArrowLeft":
-      case "ArrowUp":
-        event.preventDefault();
-        moveColorFocus(index - 1);
-        break;
-      case "Home":
-        event.preventDefault();
-        moveColorFocus(0);
-        break;
-      case "End":
-        event.preventDefault();
-        moveColorFocus(DEPT_COLORS.length - 1);
-        break;
-    }
+  const remove = () => {
+    if (!department) return;
+    void run(() => api.deleteDepartment(department.id), tr("지우지 못했어요. 잠시 뒤 다시 해 보세요.", "Could not delete. Try again in a moment."));
   };
 
-  return createPortal(
-    <>
-    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
-    <div
-      ref={overlayRef}
-      className="fixed inset-0 z-[80] flex items-end justify-center p-0 sm:items-center sm:p-4"
-      style={{
-        paddingTop: "calc(1rem + env(safe-area-inset-top))",
-      }}
-      onClick={(e) => {
-        if (e.target === overlayRef.current) onClose();
-      }}
-    >
-      <form
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="dept-modal-title"
-        className="w-full max-w-2xl max-h-full overflow-y-auto rounded-t-lg p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[85vh] sm:rounded-lg sm:p-6"
-        style={{
-          background:
-            "var(--th-bg-surface)",
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
-        }}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between mb-5">
-          <h3 id="dept-modal-title" className="text-base font-bold flex items-center gap-2" style={{ color: "var(--th-text-heading)" }}>
-            <span className="text-lg" aria-hidden="true">{form.icon}</span>
-            {isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
-          </h3>
-          <SurfaceActionButton
-            onClick={onClose}
-            tone="neutral"
-            compact
-            className="h-11 w-11"
-            style={{ padding: 0 }}
-            aria-label={tr("닫기", "Close")}
-          >
-            ✕
-          </SurfaceActionButton>
-        </div>
-
-        <div className="space-y-4">
-          <SurfaceSubsection
-            title={tr("기본 정보", "Identity")}
-            description={tr("부서 이름과 시각 표현을 먼저 정리합니다.", "Set the department identity and visual accent first.")}
-          >
-            <div className="space-y-4">
-              <div className="flex items-start gap-3">
-                <div>
-                  <label htmlFor="department-icon" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    {tr("아이콘", "Icon")}
-                  </label>
-                  <EmojiPicker
-                    id="department-icon"
-                    value={form.icon}
-                    onChange={(emoji) => setValue("icon", emoji, { shouldDirty: true, shouldValidate: true })}
-                  />
-                </div>
-                <div className="flex-1">
-                  <label
-                    htmlFor="department-name"
-                    className="block text-xs mb-1.5 font-medium"
-                    style={{ color: "var(--th-text-secondary)" }}
-                  >
-                    {tr("영문 이름", "Name")} <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    id="department-name"
-                    type="text"
-                    {...register("name")}
-                    placeholder="Development"
-                    aria-invalid={errors.name ? "true" : "false"}
-                    aria-describedby={errors.name ? "department-name-error" : undefined}
-                    className={inputCls}
-                    style={inputStyle}
-                  />
-                  {errors.name && (
-                    <p id="department-name-error" className="mt-1 text-xs text-red-400">
-                      {tr("영문 이름을 입력해주세요.", "Enter a department name.")}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <div role="radiogroup" aria-labelledby="dept-theme-color-label">
-                <div id="dept-theme-color-label" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("테마 색상", "Theme Color")}
-                </div>
-                <div className="flex gap-2 flex-wrap">
-                  {DEPT_COLORS.map((c, index) => (
-                    <button
-                      key={c}
-                      ref={(node) => {
-                        colorButtonRefs.current[index] = node;
-                      }}
-                      type="button"
-                      role="radio"
-                      aria-label={t({ ko: `색상 ${c}`, en: `Color ${c}` })}
-                      aria-checked={form.color === c}
-                      tabIndex={index === selectedColorIndex ? 0 : -1}
-                      onKeyDown={(event) => handleColorKeyDown(event, index)}
-                      onClick={() => selectColor(c)}
-                      className="w-11 h-11 rounded-full transition-all hover:scale-110"
-                      style={{
-                        background: c,
-                        outline: form.color === c ? `2px solid ${c}` : "2px solid transparent",
-                        outlineOffset: "3px",
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {locale.startsWith("ko") && (
-                <div>
-                  <label htmlFor="dept-name-ko" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    {tr("한글 이름", "Korean Name")}
-                  </label>
-                  <input
-                    id="dept-name-ko"
-                    type="text"
-                    {...register("name_ko")}
-                    placeholder="개발팀"
-                    className={inputCls}
-                    style={inputStyle}
-                  />
-                </div>
-              )}
-              {locale.startsWith("ja") && (
-                <div>
-                  <label htmlFor="dept-name-ja" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    {t({ ko: "일본어 이름", en: "Japanese Name", ja: "日本語名", zh: "日语名" })}
-                  </label>
-                  <input
-                    id="dept-name-ja"
-                    type="text"
-                    {...register("name_ja")}
-                    placeholder="開発チーム"
-                    className={inputCls}
-                    style={inputStyle}
-                  />
-                </div>
-              )}
-              {locale.startsWith("zh") && (
-                <div>
-                  <label htmlFor="dept-name-zh" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    {t({ ko: "중국어 이름", en: "Chinese Name", ja: "中国語名", zh: "中文名" })}
-                  </label>
-                  <input
-                    id="dept-name-zh"
-                    type="text"
-                    {...register("name_zh")}
-                    placeholder="开发部"
-                    className={inputCls}
-                    style={inputStyle}
-                  />
-                </div>
-              )}
-
-              <div>
-                <label htmlFor="dept-description" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("부서 설명", "Description")}
-                </label>
-                <input
-                  id="dept-description"
-                  type="text"
-                  {...register("description")}
-                  placeholder={tr("부서의 역할 간단 설명", "Brief description of the department")}
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </div>
-            </div>
-          </SurfaceSubsection>
-
-          <SurfaceSubsection
-            title={tr("운영 프롬프트", "Department Prompt")}
-            description={tr("소속 에이전트가 공통으로 따르는 부서 지침을 적습니다.", "Write the shared instruction applied to agents in this department.")}
-          >
-            <div className="space-y-3">
-              <label htmlFor="dept-prompt" className="sr-only">
-                {tr("운영 프롬프트", "Department Prompt")}
-              </label>
-              <textarea
-                id="dept-prompt"
-                {...register("prompt")}
-                rows={4}
-                placeholder={tr(
-                  "이 부서 소속 에이전트의 공통 시스템 프롬프트...",
-                  "Shared system prompt for agents in this department...",
-                )}
-                className={`${inputCls} resize-none`}
-                style={inputStyle}
-              />
-              <SurfaceNotice tone="neutral" compact>
-                {tr(
-                  "소속 에이전트의 작업 실행 시 공통으로 적용되는 시스템 프롬프트",
-                  "Applied as shared system prompt when agents in this department execute tasks",
-                )}
-              </SurfaceNotice>
-            </div>
-          </SurfaceSubsection>
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center gap-2 mt-5 pt-4" style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
-          <SurfaceActionButton
-            type="submit"
-            disabled={saving || !form.name.trim()}
-            tone="accent"
-            className="flex-1 text-sm"
-          >
-            {saving
-              ? tr("처리 중...", "Saving...")
-              : isEdit
-                ? tr("변경사항 저장", "Save Changes")
-                : tr("부서 추가", "Add Department")}
-          </SurfaceActionButton>
-          {isEdit &&
-            (confirmDelete ? (
-              <div className="flex items-center gap-1">
-                <SurfaceActionButton
-                  onClick={handleDelete}
-                  disabled={saving}
-                  tone="danger"
-                >
-                  {tr("삭제 확인", "Confirm")}
-                </SurfaceActionButton>
-                <SurfaceActionButton
-                  onClick={() => setConfirmDelete(false)}
-                  tone="neutral"
-                >
-                  {tr("취소", "No")}
-                </SurfaceActionButton>
-              </div>
-            ) : (
-              <SurfaceActionButton
-                onClick={() => setConfirmDelete(true)}
-                tone="danger"
-                className="text-sm"
-              >
-                {tr("삭제", "Delete")}
-              </SurfaceActionButton>
-            ))}
-          <SurfaceActionButton
-            onClick={onClose}
-            tone="neutral"
-            className="text-sm"
-          >
-            {tr("취소", "Cancel")}
-          </SurfaceActionButton>
-        </div>
-      </form>
+  const footer = confirmDelete && department ? (
+    <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <span className="min-w-0 flex-1 text-sm text-(--fg)">
+        {memberCount > 0
+          ? tr(`이 부서를 지울까요? 소속 에이전트 ${memberCount}명은 미배정이 돼요.`, `Delete this department? Its ${memberCount} agents become unassigned.`)
+          : tr("이 부서를 지울까요?", "Delete this department?")}
+      </span>
+      <div className="flex flex-col-reverse gap-2 sm:flex-row">
+        <Button variant="secondary" size="md" onClick={() => setConfirmDelete(false)} disabled={busy}>
+          {tr("취소", "Cancel")}
+        </Button>
+        <Button variant="destructive" size="md" onClick={remove} loading={busy}>
+          {tr("삭제", "Delete")}
+        </Button>
+      </div>
     </div>
-    </>,
-    document.body,
+  ) : (
+    <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
+      {/* Kit buttons own their margins, so the wrapper pushes the delete button to the start. */}
+      {department ? (
+        <span className="flex flex-col sm:mr-auto">
+          <Button variant="ghost" size="md" onClick={() => setConfirmDelete(true)} disabled={busy}>
+            {tr("부서 삭제", "Delete department")}
+          </Button>
+        </span>
+      ) : null}
+      <Button variant="secondary" size="md" onClick={onClose}>
+        {tr("취소", "Cancel")}
+      </Button>
+      <Button type="submit" variant="primary" size="md" loading={busy} disabled={!trimmed || unchanged}>
+        {department ? tr("이름 저장", "Save name") : tr("부서 추가", "Add department")}
+      </Button>
+    </div>
+  );
+
+  return (
+    <AgentOverlay
+      as="form"
+      variant="sheet"
+      ariaLabelledBy="dept-modal-title"
+      onClose={onClose}
+      onSubmit={submit}
+      widthClassName="sm:max-w-xl"
+      testId="department-form-overlay"
+      header={(
+        <div className="flex items-center gap-3">
+          <span aria-hidden className="size-3 shrink-0 rounded-full" style={{ background: department?.color || "var(--fg-faint)" }} />
+          <div className="min-w-0 flex-1">
+            <h2 id="dept-modal-title" className="m-0 text-[15px] leading-6 font-semibold text-(--fg)">{title}</h2>
+            {department ? <p className="m-0 truncate font-mono text-xs leading-4 text-(--fg-muted)">{department.id}</p> : null}
+          </div>
+          <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={onClose} />
+        </div>
+      )}
+      footer={(
+        <div className="flex min-w-0 flex-col gap-2">
+          {error ? <p role="alert" className="m-0 text-sm text-(--err)">{error}</p> : null}
+          {footer}
+        </div>
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-5">
+        <TextField
+          id="department-name"
+          data-autofocus
+          label={<>{tr("영문 이름", "Name")} <span className="text-(--err)">*</span></>}
+          placeholder="Platform"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          error={touched && !trimmed ? tr("이름을 적어 주세요.", "Enter a name.") : undefined}
+          hint={locale.startsWith("ko") && department?.name_ko ? tr("한국어 화면에는 아래 한글 이름이 먼저 보여요.", "Korean screens show the Korean name below first.") : undefined}
+        />
+        {department ? (
+          <fieldset disabled data-testid="department-readonly" className="m-0 flex min-w-0 flex-col gap-4 rounded-(--r-md) border border-(--line-soft) p-3 sm:p-4">
+            <legend className="px-1 text-xs leading-4 font-medium text-(--fg-muted)">{tr("보기만 하는 항목", "Read-only")}</legend>
+            <Cap>{tr("아이콘·색·한글 이름·설명은 지금 서버가 저장하지 않아요. 서버가 받게 되면 여기에서 바꿀 수 있어요.", "The server does not store the icon, color, Korean name or description yet. They become editable here once it does.")}</Cap>
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-3">
+              <div className="pointer-events-none">
+                <span className="mb-1.5 block text-[13px] font-medium text-(--fg)">{tr("아이콘", "Icon")}</span>
+                <EmojiPicker id="department-icon" value={department.icon ?? ""} onChange={() => undefined} aria-label={tr(`아이콘 ${department.icon ?? ""}`, `Icon ${department.icon ?? ""}`)} />
+              </div>
+              <TextField id="department-name-ko" label={tr("한글 이름", "Korean name")} value={department.name_ko ?? ""} readOnly />
+            </div>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium text-(--fg)">{tr("테마 색", "Theme color")}</span>
+              <div role="img" aria-label={tr(`테마 색 ${department.color || "없음"}`, `Theme color ${department.color || "none"}`)} className="flex flex-wrap gap-2">
+                {DEPT_COLORS.map((color) => (
+                  <span
+                    key={color}
+                    className="size-7 rounded-full"
+                    style={{ background: color, outline: color === department.color ? `2px solid ${color}` : "none", outlineOffset: 2 }}
+                  />
+                ))}
+              </div>
+            </div>
+            <TextField id="department-description" label={tr("설명", "Description")} value={department.description ?? ""} readOnly />
+          </fieldset>
+        ) : (
+          <Cap>{tr("새 부서는 이름만 저장돼요. 아이콘·색·한글 이름은 아직 서버가 받지 않아요.", "A new department keeps only its name. The server does not take an icon, color or Korean name yet.")}</Cap>
+        )}
+      </div>
+    </AgentOverlay>
   );
 }

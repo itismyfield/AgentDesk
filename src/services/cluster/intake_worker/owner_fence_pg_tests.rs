@@ -1,8 +1,10 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::owner_fence_pg_tests::{move_owner, owners, seed, snapshot};
+use crate::services::cluster::intake_worker::*;
 use serde_json::Value;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use test_executor::Checkpoint;
 
 async fn transfer_at(point: Checkpoint, fail: bool, channel: u64) {
@@ -36,7 +38,7 @@ async fn transfer_at(point: Checkpoint, fail: bool, channel: u64) {
         "claude",
         "token",
         &|| false,
-        super::test_executor::PORT,
+        crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
     )
     .await
     .unwrap();
@@ -110,7 +112,7 @@ async fn owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg() {
                 "claude",
                 "token",
                 &|| cancelled.load(Ordering::SeqCst),
-                super::test_executor::PORT,
+                crate::services::discord::session_canonical_identity::krx_services_dl_tests::intake_worker_executor_tests::PORT,
             )
             .await
             .unwrap();

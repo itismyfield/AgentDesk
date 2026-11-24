@@ -30,36 +30,12 @@ pub(in crate::services::discord) fn with_owner_publication<R>(
         return Err("owner_epoch");
     }
     #[cfg(test)]
-    let _scope = PublicationScope::enter();
+    let _scope = crate::services::platform::owner_publication_fence::Scope::enter();
     Ok(publish(&guard))
 }
 
 #[cfg(test)]
-thread_local! {
-    static PUBLICATION_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-struct PublicationScope(bool);
-
-#[cfg(test)]
-impl PublicationScope {
-    fn enter() -> Self {
-        Self(PUBLICATION_HELD.replace(true))
-    }
-}
-
-#[cfg(test)]
-impl Drop for PublicationScope {
-    fn drop(&mut self) {
-        PUBLICATION_HELD.set(self.0);
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn owner_publication_fence_held_for_tests() -> bool {
-    PUBLICATION_HELD.get()
-}
+pub(crate) use crate::services::platform::owner_publication_fence::held as owner_publication_fence_held_for_tests;
 
 #[cfg(test)]
 mod tests;

@@ -34,7 +34,7 @@ pub enum EvidenceStoreError {
     Transition,
 }
 
-type Result<T> = std::result::Result<T, EvidenceStoreError>;
+pub(crate) type Result<T> = std::result::Result<T, EvidenceStoreError>;
 
 impl StoredEvidence {
     pub fn recorded(envelope: EvidenceEnvelope) -> Self {
@@ -194,7 +194,3 @@ pub async fn decide(
     .await?;
     Ok(next)
 }
-
-#[cfg(test)]
-#[path = "evidence_store_tests.rs"]
-mod tests;

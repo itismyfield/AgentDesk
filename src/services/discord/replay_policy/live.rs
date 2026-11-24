@@ -67,7 +67,7 @@ impl Seen {
 pub(crate) struct RawObservation {
     receipt_id: i64,
     nonce: String,
-    seen: Vec<Seen>,
+    pub(crate) seen: Vec<Seen>,
     seal: seal::Seal,
 }
 
@@ -103,7 +103,7 @@ impl RawObservation {
         self.seal.closed || self.seen.contains(&Seen::Broken)
     }
 
-    fn complete(&self) -> bool {
+    pub(crate) fn complete(&self) -> bool {
         self.seal.complete()
             && [
                 Seen::StdoutEof,
@@ -122,7 +122,7 @@ impl RawObservation {
         self.seen.iter().filter_map(Seen::terminal).collect()
     }
 
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.seen.iter().any(Seen::activity)
     }
 
@@ -172,8 +172,8 @@ pub(crate) enum Verdict {
 /// spent its start permit carries one, so a restored or foreign turn never decides with it.
 #[derive(Debug)]
 pub(crate) struct LiveAttempt {
-    attempt: Mutex<Option<ExactAttempt>>,
-    observation: Mutex<RawObservation>,
+    pub(crate) attempt: Mutex<Option<ExactAttempt>>,
+    pub(crate) observation: Mutex<RawObservation>,
     recorded: tokio::sync::Notify,
     verdict: Mutex<Option<Verdict>>,
     /// The bridge saw a stale resume; only the stale-resume decision may judge this attempt.
@@ -281,12 +281,8 @@ impl LiveAttempt {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
-
-#[cfg(all(test, unix))]
-#[path = "live/observer_tests.rs"]
-mod observer_tests;
 
 pub(crate) use seal::can_activate;

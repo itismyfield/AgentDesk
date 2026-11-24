@@ -215,6 +215,3 @@ pub async fn mutate(pool: &PgPool, mutation: Mutation<'_>) -> Result<Receipt, Ca
         status: "accepted",
     })
 }
-
-#[cfg(test)]
-mod postgres_tests;

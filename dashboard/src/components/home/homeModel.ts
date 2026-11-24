@@ -522,12 +522,21 @@ export function autoPauseRule(config: RuntimeConfigResponse | null): { enabled: 
   return { enabled, pct: typeof pct === "number" ? pct : null };
 }
 
+/** The pause threshold as the kit meter's danger step. The kit never starts danger below its warning step (0.8), so
+ * a lower pause moves that step down; a rule at 100% or more stays out, as the kit would only recolor the limit there. */
+export function pauseMeterScale(rule: ReturnType<typeof autoPauseRule>): { warnAt?: number; dangerAt?: number } {
+  if (!rule?.enabled || rule.pct === null || rule.pct >= 100) return {};
+  const dangerAt = Math.max(0, rule.pct) / 100;
+  return { warnAt: Math.min(0.8, dangerAt), dangerAt };
+}
+
 /** The line under a usage row: why it has no value, how old the value is, and whether it reached the auto-run pause.
- * The kit meter has no step past its warning color, so the pause threshold is spelled out. */
+ * Below 100% the kit meter marks the pause itself (`dangerAt`), so the line names it only for a rule at 100% or more. */
 export function usageDetail(row: UsageRow, rule: ReturnType<typeof autoPauseRule>, tr: Tr): string | undefined {
   if (row.unmeasured) return tr("측정 안 됨", "Not measured");
   if (row.pct === null) return row.note ?? tr("확인 불가", "Unknown");
   const old = row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : null;
-  const paused = rule?.enabled && rule.pct !== null && row.pct >= rule.pct ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : null;
+  const shown = pauseMeterScale(rule).dangerAt !== undefined;
+  const paused = !shown && rule?.enabled && rule.pct !== null && row.pct >= rule.pct ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : null;
   return join(old, paused) || undefined;
 }

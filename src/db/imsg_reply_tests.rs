@@ -1,5 +1,5 @@
 use super::*;
-use crate::dispatch::test_support::DispatchPostgresTestDb;
+use crate::db::dispatch_test_db::DispatchPostgresTestDb;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

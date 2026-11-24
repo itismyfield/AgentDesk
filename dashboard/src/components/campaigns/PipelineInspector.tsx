@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { Cap, Desc, Eyebrow, InspSection, Num } from "../common/KitPrimitives";
 import type { Tr } from "./campaignPresentation";
-import { KIND_ICONS, TONE_COLORS } from "./PipelineCanvas";
+import { TONE_COLORS, kindIcon } from "./PipelineCanvas";
 import { PinText } from "./PipelineStateList";
-import { KIND_LABELS, comparisonText, comparisons, durationText, eventName, gateName, stateName, type PipelineGraph } from "./pipelineModel";
+import { comparisonText, comparisons, durationText, eventName, gateText, kindName, stateName, type PipelineGraph } from "./pipelineModel";
 
 const ASIDE = "min-h-0 overflow-y-auto border-[var(--line-soft)] bg-[var(--bg-1)] max-[1279px]:border-t min-[1280px]:border-l";
 
@@ -12,7 +12,7 @@ const ASIDE = "min-h-0 overflow-y-auto border-[var(--line-soft)] bg-[var(--bg-1)
 export default function PipelineInspector({ graph, id, summary, tr }: { graph: PipelineGraph; id: string | null; summary: ReactNode; tr: Tr }) {
   const state = id === null ? undefined : graph.states.get(id);
   if (!state) return <aside aria-label={tr("파이프라인 요약", "Pipeline summary")} className={ASIDE}>{summary}</aside>;
-  const Icon = KIND_ICONS[state.kind];
+  const Icon = kindIcon(state.kind);
   const name = (target: string) => stateName(graph.states.get(target), target, tr);
   const pins = graph.pins.get(state.id)!;
   const incoming = [...graph.pins.entries()].flatMap(([from, list]) => list.filter((pin) => pin.target === state.id && from !== state.id).map((pin) => ({ from, pin })));
@@ -21,16 +21,17 @@ export default function PipelineInspector({ graph, id, summary, tr }: { graph: P
     [tr("담당", "Owner"), state.owner ?? tr("없음", "None")],
     [tr("시간 제한", "Timeout"), state.timeout ? `${durationText(state.timeout.after_seconds, tr)} → ${state.timeout.transition_id}` : tr("없음", "None")],
     [tr("실행기", "Executor"), state.executor ? <span className="font-mono text-xs">{state.executor.id} v{state.executor.version}</span> : tr("없음", "None")],
-    ...state.executor?.parameters?.effect_gates?.length ? [[tr("동작 승인", "Action approval"), state.executor.parameters.effect_gates.map((gate) => gateName(gate, tr)).join(" · ")] as [string, ReactNode]] : [],
+    ...state.executor?.parameters?.effect_gates?.length ? [[tr("동작 승인", "Action approval"), state.executor.parameters.effect_gates.map((gate) => gateText(graph, gate, tr)).join(" · ")] as [string, ReactNode]] : [],
     [tr("지시", "Instructions"), state.instructions ? <span className="line-clamp-4 whitespace-pre-wrap">{state.instructions}</span> : tr("없음", "None")],
   ];
   return <aside aria-label={tr("선택 상태", "Selected state")} className={ASIDE}>
     <InspSection className="border-t-0">
       <div className="flex min-w-0 items-center gap-2.5">
         <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--bg-3)] text-[var(--fg-dim)]"><Icon aria-hidden className="size-4" /></span>
-        <span className="grid min-w-0"><h3 className="m-0 truncate text-base text-[var(--fg)]">{name(state.id)}</h3><Cap className="truncate">{tr(...KIND_LABELS[state.kind])} · <span className="font-mono">{state.id}</span></Cap></span>
+        <span className="grid min-w-0"><h3 className="m-0 truncate text-base text-[var(--fg)]">{name(state.id)}</h3><Cap className="truncate">{kindName(state.kind, tr)} · <span className="font-mono">{state.id}</span></Cap></span>
       </div>
-      {graph.occupancy && <Cap><Num>{tr(`지금 머무는 작업 ${graph.occupancy.get(state.id)}개`, `${graph.occupancy.get(state.id)} tasks here now`)}</Num></Cap>}
+      {graph.occupancy && <Cap><Num>{[tr(`지금 머무는 작업 ${graph.occupancy.get(state.id)!.here}개`, `${graph.occupancy.get(state.id)!.here} tasks here now`),
+        graph.occupancy.get(state.id)!.held > 0 && tr(`막힘 ${graph.occupancy.get(state.id)!.held}개`, `${graph.occupancy.get(state.id)!.held} held`)].filter(Boolean).join(" · ")}</Num></Cap>}
     </InspSection>
     <InspSection as="dl" className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px]">
       {fields.map(([label, value]) => <div key={label} className="contents"><dt>{label}</dt><dd className="m-0 min-w-0 text-[var(--fg)] [overflow-wrap:anywhere]">{value}</dd></div>)}

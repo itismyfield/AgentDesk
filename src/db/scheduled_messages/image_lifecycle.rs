@@ -38,7 +38,3 @@ pub async fn reclaim_terminal_images_pg(
     .await?;
     Ok(result.rows_affected() as i64)
 }
-
-#[cfg(test)]
-#[path = "image_lifecycle_tests.rs"]
-mod tests;

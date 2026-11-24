@@ -7,6 +7,8 @@ import { pollWhileVisible } from "../../lib/pollWhileVisible";
 import { Cap, CardNote, CardSkeleton, InspSection, SectionCard } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import type { TFunction } from "../dashboard/model";
+import { autoPauseRule, pauseMeterScale } from "../home/homeModel";
+import { loadRuntimeConfig, usePolled } from "../home/useHomeData";
 import { msg } from "./statsModel";
 
 interface ClaudeWindow { pct?: number | null; resetsAt?: string | null }
@@ -64,7 +66,8 @@ export function accountLimits(data: ClaudeAccountsResponse | null, t: TFunction,
   });
 }
 
-function limitLabels(t: TFunction): Partial<UsageMeterLabels> {
+/** Kit texts for the account list. The pause line names only its value: the gate reads provider usage, not an account. */
+function limitLabels(t: TFunction, pausePct: number | null): Partial<UsageMeterLabels> {
   return {
     limits: t(msg("계정별 한도", "Limits by account", "アカウント別の上限", "按账号划分的上限")),
     limitReached: t(msg("한도 도달", "Limit reached")),
@@ -74,15 +77,21 @@ function limitLabels(t: TFunction): Partial<UsageMeterLabels> {
     announce: (state, title, actual, percent) => state === "limit"
       ? t(msg(`${title}, 한도 도달. ${actual}.`, `${title}, limit reached. ${actual}.`))
       : t(msg(`${title}, ${percent}% 썼어요.`, `${title}, ${percent}% used.`)),
+    ...(pausePct === null ? {} : {
+      danger: t(msg(`멈춤 기준 ${pausePct}% 이상`, `At or past the ${pausePct}% pause line`)),
+      announceDanger: (title: string, _actual: string, percent: number) => t(msg(`${title}, 멈춤 기준 ${pausePct}% 이상이에요. ${percent}%.`, `${title}, at or past the ${pausePct}% pause line. ${percent}%.`)),
+    }),
   };
 }
 
-/** Claude account limits from cswap as the kit limit list home uses for provider limits. Polls every 30 seconds
- * while visible; the button rereads at once. */
+/** Claude account limits from cswap as the kit limit list home uses for provider limits, with home's auto-run pause line.
+ * Polls every 30 seconds while visible; the button rereads at once. */
 export function StatsAccountLimits({ t, locale, className }: { t: TFunction; locale: string; className?: string }) {
   const [load, setLoad] = useState<Load>({ status: "loading", data: null, error: null, hint: null });
   const [busy, setBusy] = useState(true);
   const [nonce, setNonce] = useState(0);
+  const pauseScale = pauseMeterScale(autoPauseRule(usePolled(loadRuntimeConfig, 300_000).data));
+  const pausePct = pauseScale.dangerAt === undefined ? null : Math.round(pauseScale.dangerAt * 100);
 
   useEffect(() => {
     let controller: AbortController | null = null;
@@ -169,7 +178,17 @@ export function StatsAccountLimits({ t, locale, className }: { t: TFunction; loc
               {data?.staleReason ?? error ? ` · ${data?.staleReason ?? error}` : ""}
             </Cap>
           ) : null}
-          <UsageMeter layout="limits" title={t(msg("계정별 한도", "Limits by account", "アカウント別の上限", "按账号划分的上限"))} locale={locale} limits={limits} labels={limitLabels(t)} />
+          <UsageMeter
+            layout="limits"
+            title={t(msg("계정별 한도", "Limits by account", "アカウント別の上限", "按账号划分的上限"))}
+            locale={locale}
+            limits={limits}
+            {...pauseScale}
+            labels={limitLabels(t, pausePct)}
+          />
+          {pausePct !== null ? (
+            <Cap>{t(msg("자동 진행 멈춤은 공급자 사용량으로 판정해요", "Auto-run pauses are judged by provider usage"))}</Cap>
+          ) : null}
         </InspSection>
       )}
     </SectionCard>

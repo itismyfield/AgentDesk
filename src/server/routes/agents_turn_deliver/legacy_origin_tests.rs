@@ -416,12 +416,28 @@ async fn legacy_http_without_origin_preserves_response_and_reply_authority_pg() 
     );
     assert_eq!(f.call(&body).await, expected);
     assert_eq!(f.call(&body).await, expected);
+    // Each call is its own attempt: the same text under that attempt's tag, the last one the pane's.
+    let records = pane.records();
+    let tags: Vec<&str> = records
+        .iter()
+        .map(|record| {
+            record
+                .split_once(" · ")
+                .unwrap()
+                .1
+                .split_once(']')
+                .unwrap()
+                .0
+        })
+        .collect();
+    assert_eq!(tags.len(), 2);
+    assert_ne!(tags[0], tags[1]);
+    assert_eq!(tags[1], pane.nonce().unwrap());
     assert_eq!(
-        pane.records(),
-        [
-            "[User: external:200 (ID: 200)] status?",
-            "[User: external:200 (ID: 200)] status?",
-        ]
+        records,
+        tags.iter()
+            .map(|tag| format!("[User: external:200 (ID: 200) · {tag}] status?"))
+            .collect::<Vec<_>>()
     );
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imsg_reply_obligations")
         .fetch_one(&f.pool)

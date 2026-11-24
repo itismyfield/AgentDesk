@@ -28,7 +28,7 @@ async fn thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg(
     // direct TUI turn starts during the probe while relay failure leaves the
     // DB heartbeat/status idle. Present must preserve the canonical row.
     let deleted =
-        crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
+        crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
             std::fs::write(
                 native.path(),
                 "{\"type\":\"user\",\"message\":{\"content\":\"new turn\"}}\n",
@@ -55,7 +55,7 @@ async fn thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg(
         )
         .unwrap();
         assert!(
-            crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
+            crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
                 std::future::ready(presence)
             },)
             .await
@@ -74,7 +74,7 @@ async fn thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg(
         );
     }
     assert_eq!(
-        crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
+        crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_with_probe_pg(&pool, |_| {
             std::future::ready(SessionPresence::Missing)
         },)
         .await,

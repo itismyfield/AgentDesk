@@ -59,6 +59,7 @@ fn write_credential(root: &Path, name: &str, input: impl Read) -> io::Result<()>
             | "antigravity_bot_token"
             | "announce_bot_token"
             | "notify_bot_token"
+            | "gemini_api_key"
     ) || !root.is_absolute()
         || root
             .components()

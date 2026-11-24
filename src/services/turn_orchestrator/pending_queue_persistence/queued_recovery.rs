@@ -85,15 +85,16 @@ pub(crate) fn load_pending_queues_checked(
     recovery
 }
 
-/// Channels whose V2 queue file still holds an input, for the boot recovery that re-adopts them.
-/// An input-free file stays on disk untouched, and the channel's next input adopts it on demand.
+/// Channels whose V2 queue file still holds an input, or for Claude a pre-key source pin, for the
+/// boot recovery that re-adopts them. Any other file stays untouched until the channel's next input.
 #[cfg(unix)]
 pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<ChannelId> {
     let snapshots = read_catalog(provider, token_hash).snapshots.into_iter();
     // Receipts and the admission sequence are history the untouched file keeps for that owner.
     let v2 = snapshots.filter(|(_, snapshot)| {
         snapshot.v2_holds_input()
-            || (*provider == ProviderKind::Claude && snapshot.unfinished_claude_handoff())
+            || (*provider == ProviderKind::Claude
+                && (snapshot.unfinished_claude_handoff() || snapshot.v2_owes_source_ack()))
     });
     v2.map(|(channel, _)| channel).collect()
 }

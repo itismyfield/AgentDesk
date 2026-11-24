@@ -1,8 +1,6 @@
 use super::*;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 
-#[path = "fresh_resume_tests/authority_contention_tests.rs"]
-mod authority_contention;
 #[path = "fresh_deriver_compat_tests.rs"]
 mod deriver_compat;
 #[path = "fresh_gc_waiting_tests.rs"]
@@ -12,26 +10,26 @@ mod negative;
 #[path = "fresh_obligation_tests.rs"]
 mod obligations;
 
-pub(super) struct DedupeGuard {
+pub(crate) struct DedupeGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl DedupeGuard {
-    pub(super) fn acquire() -> Self {
+    pub(crate) fn acquire() -> Self {
         Self {
             _guard: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
         }
     }
 }
 
-struct ScopeFixture {
+pub(crate) struct ScopeFixture {
     previous: crate::config::Config,
     _hosting: std::sync::MutexGuard<'static, ()>,
     _instance: crate::config::TestEnvVarGuard,
 }
 
 impl ScopeFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let instance = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
             std::ffi::OsStr::new("b1b-scoped-writer-test"),
