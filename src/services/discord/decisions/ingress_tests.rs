@@ -10,9 +10,8 @@ fn age(forums: &Forums) {
     read.as_mut().unwrap().0 = old;
 }
 
-/// A thread is guarded only under a forum recorded ready or configured; a forum whose create is
-/// unknown or failed has no id to match. A forum recorded later is known at the next read, and a
-/// failed read keeps what was known.
+/// Only a ready or configured forum is guarded; one recorded later is known at the next read,
+/// and a failed read keeps what was known.
 #[tokio::test(flavor = "current_thread")]
 async fn decision_forum_guard_knows_ready_and_configured_forums_pg() {
     let db = TestPostgresDb::create().await;
