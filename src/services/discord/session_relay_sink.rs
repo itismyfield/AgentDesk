@@ -26,7 +26,7 @@ use super::outbound::{
     current_census,
 };
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
-use super::{DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseHolder, task_supervisor, tmux};
+use super::{DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseHolder, task_supervisor};
 use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };

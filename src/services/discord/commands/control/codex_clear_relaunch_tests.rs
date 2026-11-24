@@ -267,7 +267,11 @@ impl CanaryFixture {
             fs::write(directory.join(format!("{CANARY_CHANNEL}.log")), history).unwrap();
         }
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
-        crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            CANARY_TMUX,
+            Some(&prepared),
+        )
+        .unwrap();
         dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
         let native = context
             .provider_root

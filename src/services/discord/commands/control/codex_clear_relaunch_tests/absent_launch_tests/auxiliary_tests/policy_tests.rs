@@ -418,7 +418,11 @@ async fn synthetic_ordinary_verified_pin_does_not_receive_canary_launch_authorit
     context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
     context.created_at = chrono::Utc::now();
     let prepared = PreparedIncarnation::create(context.clone()).unwrap();
-    crate::services::discord::stamp_spawn_markers(&context.tmux_session, Some(&prepared)).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+        &context.tmux_session,
+        Some(&prepared),
+    )
+    .unwrap();
     dedupe::register_tmux_channel(&context.tmux_session, channel);
     let path = context
         .provider_root

@@ -528,10 +528,9 @@ pub(super) fn d1_execution_proof(
     let prepared =
         PreparedIncarnation::prepare("claude", name, Some(channel), Some(&sid), false).unwrap();
     prepared
-        .finish_spawn(crate::services::discord::stamp_spawn_markers(
-            name,
-            Some(&prepared),
-        ))
+        .finish_spawn(
+            crate::services::tmux_common::spawn_markers::stamp_spawn_markers(name, Some(&prepared)),
+        )
         .unwrap();
     prepared
 }

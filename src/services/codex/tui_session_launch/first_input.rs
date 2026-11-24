@@ -83,10 +83,12 @@ pub(crate) fn create(input: Create<'_>) -> Result<Submitted, String> {
         session_selection,
     )?;
     fence.validate_tmux_publisher(tmux_session_name)?;
-    prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
-        tmux_session_name,
-        Some(&prepared),
-    ))?;
+    prepared.finish_spawn(
+        crate::services::tmux_common::spawn_markers::stamp_spawn_markers(
+            tmux_session_name,
+            Some(&prepared),
+        ),
+    )?;
 
     end_observation.spawned(&prepared.context);
     drop(fence);

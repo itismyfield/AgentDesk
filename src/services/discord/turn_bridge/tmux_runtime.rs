@@ -55,7 +55,7 @@ pub(in crate::services::discord) use interrupt_policy::ANONYMOUS_TURN_BRIDGE_TEA
 
 #[cfg(unix)]
 pub(in crate::services::discord) fn tmux_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
-    super::super::tmux::read_generation_file_mtime_ns(tmux_session_name)
+    crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(tmux_session_name)
 }
 
 #[cfg(not(unix))]

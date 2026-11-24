@@ -1003,7 +1003,9 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create runtime sessions dir");
         }
         std::fs::write(&generation_path, "test-generation").expect("touch generation marker");
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
+        crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(
+            tmux_session_name,
+        )
     }
 
     #[cfg(unix)]
@@ -1016,7 +1018,9 @@ mod tests {
         panel_msg_id: u64,
     ) {
         let generation_mtime_ns =
-            crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
+            crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(
+                tmux_session_name,
+            );
         assert_ne!(
             generation_mtime_ns, 0,
             "test generation marker must exist before writing a current anchor"

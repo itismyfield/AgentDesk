@@ -124,7 +124,7 @@ async fn codex_runtime_ready_replaces_paused_incumbent_and_old_exit_keeps_succes
     let fake = FakeTmux::install(tmux);
     let transcript = root.path().join("native.jsonl");
     std::fs::write(&transcript, "{}\n").unwrap();
-    crate::services::discord::stamp_spawn_markers(tmux, None).unwrap();
+    crate::services::tmux_common::spawn_markers::stamp_spawn_markers(tmux, None).unwrap();
     let offset = std::fs::metadata(&transcript).unwrap().len();
     let api = Recorder::start().await;
     let _rest = test_rest::install(api.http.clone());

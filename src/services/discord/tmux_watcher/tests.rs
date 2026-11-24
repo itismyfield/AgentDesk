@@ -5387,10 +5387,8 @@ mod s2a1_frontier_tests {
                 Err(std::sync::TryLockError::WouldBlock)
             ));
         });
-        crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(
-            session,
-        )
-        .expect("generation");
+        crate::services::tmux_common::spawn_markers::stamp_session_generation_marker(session)
+            .expect("generation");
         discord::tmux::advance_watcher_confirmed_end(
             &shared,
             &ProviderKind::Claude,
@@ -5407,9 +5405,7 @@ mod s2a1_frontier_tests {
             coord.frontier_tuple_for_tests(),
             (
                 300,
-                crate::services::discord::tmux::tmux_session_files::read_generation_file_mtime_ns(
-                    session
-                ),
+                crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(session),
                 0,
                 false
             )
@@ -5482,7 +5478,7 @@ mod s2a1_frontier_tests {
             ),
             "Unmeasured"
         );
-        crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(
+        crate::services::tmux_common::spawn_markers::stamp_session_generation_marker(
             "s2a1-late-high",
         )
         .expect("managed source change");
@@ -5518,7 +5514,7 @@ mod s2a1_frontier_tests {
         let output = expected_rollout_path_for(&session);
         std::fs::write(&output, [b'x'; 512]).expect("source");
         let generation =
-            discord::tmux::tmux_session_files::stamp_session_generation_marker(&session)
+            crate::services::tmux_common::spawn_markers::stamp_session_generation_marker(&session)
                 .expect("generation");
         let shared = discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(channel);

@@ -95,7 +95,7 @@ R2의 두 번째 지적 — *"assistant 블록이 있다"와 "라이브 턴이 �
 
 | 사이드카 | 쓰는 곳 | 읽는 곳 | 행 독립? | `ExactJsonlSourceIdentity` 매핑 |
 |---|---|---|---|---|
-| `.generation` **mtime** | 스폰 시 1회 (`claude.rs`/`codex.rs`가 `tmux::create_session` 직후), 이후 라이브 wrapper가 **절대 안 건드림** [확인 `tmux_session_files.rs:12-15`] | `read_generation_file_mtime_ns(tmux_session_name)` [확인 `:19-36`] ← `current_generation_mtime_ns` [확인 `delivery_record.rs:1277-1287`] | **YES** — 키가 `tmux_session_name` | **`generation_mtime_ns` 그 자체.** 즉 영수증 좌표의 이 필드는 **이미 행 독립이다** |
+| `.generation` **mtime** | 스폰 시 1회 (`claude.rs`/`codex.rs`가 `tmux::create_session` 직후), 이후 라이브 wrapper가 **절대 안 건드림** [확인 `tmux_common/spawn_markers.rs:10-13`] | `read_generation_file_mtime_ns(tmux_session_name)` [확인 `:17-34`] ← `current_generation_mtime_ns` [확인 `delivery_record.rs:1277-1287`] | **YES** — 키가 `tmux_session_name` | **`generation_mtime_ns` 그 자체.** 즉 영수증 좌표의 이 필드는 **이미 행 독립이다** |
 | `.spawn_nonce` **content** | `write_spawn_nonce()` 스폰당 1회, v4 UUID, atomic rename [확인 `:69-91`] | `read_spawn_nonce(tmux_session_name)` [확인 `:100-111`] | **YES** | 매핑 없음 (신규 좌표 항으로 추가) |
 | `.owner` / `.runtime-kind` | 스폰 시 | — | YES | 미사용 |
 | `tmux_session_name` | — | `authoritative_tmux_session(enriched, mailbox_cancel_session)` [확인 `snapshot.rs:391-398`] | **YES — 이중 출처** (워처 레지스트리 + mailbox cancel token) | `tmux_session_name` |
@@ -109,7 +109,7 @@ R2의 두 번째 지적 — *"assistant 블록이 있다"와 "라이브 턴이 �
 
 `.generation`이 스폰 후 절대 재기록되지 않고(그래서 mtime이 wrapper 인스턴스를 유일하게
 식별하고 #1270 rotation 대응), adoption이 내용을 고칠 때조차 **mtime을 보존**한다는 것도
-확인했다 [확인 `tmux_session_files.rs:141-150`]. 화신 identity로 쓰기에 적합하다.
+확인했다 [확인 `tmux_common/spawn_markers.rs:140-149`]. 화신 identity로 쓰기에 적합하다.
 
 **단, 코디네이터 단서 중 하나는 범주 오류다 [확인]:**
 `born_generation`(=50)은 `.generation` 파일의 **내용**(=49)과 비교 대상이 아니다.
@@ -196,7 +196,7 @@ enum ReachabilityVerdict {
 - **#4974**: 의무는 화신 구간이고 `user_msg_id`/anchor identity를 참조하지 않는다.
   `restart_mode`, `drain_restart`, zero-origin 여부와 **무관하게** 성립한다.
 - **#4986-1**: `generation_mtime_ns`는 `tmux_session_name`으로 `.generation`을 stat하므로
-  [확인 `tmux_session_files.rs:19-36`] 행의 깨진 `output_path`와 **무관하게** 해결된다.
+  [확인 `tmux_common/spawn_markers.rs:17-34`] 행의 깨진 `output_path`와 **무관하게** 해결된다.
   이것이 1라운드가 놓친 진짜 독립 좌표다.
   **[추정]** 사고 시점 레지스트리 `output_path`가 실제로 native였는지는 이슈 본문의
   진술만 있고 값 자체는 덤프되지 않았다. 그러나 위 표대로 이 추정이 틀려도
@@ -271,7 +271,7 @@ enum ReachabilityVerdict {
 **GO 근거 (개정):**
 1. 화신 identity의 행 독립 권위가 **코드로 실재 확인**됐다 —
    `generation_mtime_ns`는 이미 `tmux_session_name`으로 해결되는 영수증 좌표다
-   [확인 `delivery_record.rs:1277-1287` → `tmux_session_files.rs:19-36`].
+   [확인 `delivery_record.rs:1277-1287` → `tmux_common/spawn_markers.rs:17-34`].
 2. 극성 반전 덕에 **수용 기준이 "non-GREEN"** 이므로 discovery 실패도 검출이다(§-1.4).
    R1의 "좌표가 같이 틀릴 수 있다"가 검출을 무력화하지 못한다.
 3. 세 형상 모두 **행·턴 identity 없이** non-GREEN에 도달한다(§-1.4 표).

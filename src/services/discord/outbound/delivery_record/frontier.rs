@@ -108,7 +108,9 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
 pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_name: &str) -> i64 {
     #[cfg(unix)]
     {
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
+        crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(
+            tmux_session_name,
+        )
     }
     #[cfg(not(unix))]
     {

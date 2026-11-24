@@ -19,6 +19,7 @@ use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tm
 use crate::services::session_backend::{
     StreamLineState, classify_task_notification_kind, observe_stream_context,
 };
+use crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns;
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
 };
@@ -109,13 +110,9 @@ use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;
 use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
 pub(in crate::services::discord) use self::tmux_session_files::committed_frontier_for_current_generation;
-pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 pub(in crate::services::discord) use self::tmux_session_files::reset_relay_watermark_on_generation_change;
 pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay_watermark_if_output_regressed;
 pub(super) use self::tmux_session_files::session_panel_instance_key;
-pub(crate) use self::tmux_session_files::stamp_spawn_markers;
-#[cfg(test)]
-pub(crate) use self::tmux_session_files::write_spawn_nonce;
 use self::tmux_session_files::{
     preserve_session_generation_mtime_after_write,
     reset_stale_local_relay_offset_if_output_regressed, sweep_orphan_session_files,

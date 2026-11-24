@@ -171,14 +171,10 @@ pub(crate) use test_fixtures::resume_owner_channel_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use test_fixtures::revoke_notice_author_for_test;
 
+mod tmux_error_detect;
 mod turn_completion_events;
 mod turn_end_summary;
 pub(in crate::services::discord) mod turn_end_wip_warning;
-#[cfg(unix)]
-pub(crate) use tmux::stamp_spawn_markers;
-#[cfg(all(test, unix))]
-pub(crate) use tmux::write_spawn_nonce;
-mod tmux_error_detect;
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 mod live_bridge;
 #[cfg(unix)]
