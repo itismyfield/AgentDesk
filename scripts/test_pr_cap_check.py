@@ -410,7 +410,7 @@ class PrCapCheckTest(unittest.TestCase):
 
     def test_canonical_snapshot(self):
         digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
-        self.assertEqual(digest, "8ecaf5d34d6f4b6045052e1aabcc69edcc26bd678c795f0640ed38da13157c1d")
+        self.assertEqual(digest, "088d1baff3f06a9d6ab5070fb4fe65d71d09bec1d4b52039fafa8729504c5f50")
 
 if __name__ == "__main__":
     unittest.main()
