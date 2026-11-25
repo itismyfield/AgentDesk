@@ -128,6 +128,13 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 json!({"type":"last-prompt"}),
             ]),
         }
+        if case == Case::RestartedOld {
+            // The tail a day-idle Claude 2.1.330+ leaves after its turn.
+            rows(&[
+                json!({"type":"data-flow-records","records":[{"response_id":"r1"}],"v":1}),
+                json!({"type":"system","subtype":"away_summary","content":"recap","timestamp":old}),
+            ]);
+        }
         let moves = matches!(case, Moved | MovedRunning | MovedFenced | MovedBusy);
         let resumed = case != Case::StartRefused;
         let context: binding_context::BindingContext = serde_json::from_value(json!({
