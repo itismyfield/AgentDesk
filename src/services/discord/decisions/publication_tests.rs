@@ -791,3 +791,33 @@ async fn decision_activation_that_did_not_finish_is_not_answered_as_open_pg() {
     assert_eq!(rig.posts(), 1, "the same ask posted again");
     rig.close().await;
 }
+
+/// An open that moves no row is not answered as open: a writer outside the card lock moved the
+/// request on while the ask, which read it disabled, was editing the card.
+#[tokio::test]
+async fn decision_open_that_moved_no_row_is_not_answered_as_open_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_850_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    assert_eq!(
+        rig.publish(request_id, "r1", CHANNEL).await,
+        Outcome::Activating(thread)
+    );
+    rig.edits();
+    let (reached, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    rig.mock.lock().unwrap().hold = Some((reached.clone(), release.clone()));
+    let late = ask_again(&rig, request_id);
+    wait::await_within(reached.notified(), wait::WAIT_CAP).await;
+    let moved = "UPDATE decision_requests SET lifecycle = 'closed' WHERE request_id = $1";
+    sqlx::query(moved)
+        .bind(request_id)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    release.notify_one();
+    let late = wait::await_within(late, wait::WAIT_CAP).await.unwrap();
+    assert_eq!(late, Outcome::Activating(thread), "PG did not open it here");
+    assert_eq!(rig.edits().len(), 1, "the card edit went out");
+    rig.close().await;
+}
