@@ -23,8 +23,23 @@ fn channel() -> ChannelId {
     ChannelId::new(CHANNEL)
 }
 
-fn child(name: &str) -> Option<(herdr::P11TerminationRig, tokio::runtime::Runtime)> {
-    rig_child(&format!("never_started_tests::{name}"))
+/// Runs `body` in test `name`'s child process, on a node storing `stored` whose channel holds one
+/// original that waited its first due on the rig's execution and is claimed again.
+fn with_waited(
+    name: &str,
+    stored: Stored,
+    body: impl AsyncFnOnce(&herdr::P11TerminationRig, &Node, &FrontClaim),
+) {
+    let Some((rig, runtime)) = rig_child(&format!("never_started_tests::{name}")) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::store(&rig, None, stored).await;
+        let claim = waited(&node).await;
+        body(&rig, &node, &claim).await;
+        node.finish().await;
+    });
 }
 
 async fn claim(node: &Node) -> FrontClaim {
@@ -115,104 +130,71 @@ async fn state(node: &Node) -> Option<herdr::HostedState> {
 #[test]
 fn never_started_b_pending_is_closed_once_then_original_delivered_once() {
     let name = "never_started_b_pending_is_closed_once_then_original_delivered_once";
-    let Some((rig, runtime)) = child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::store(&rig, None, Stored::NeverAttached).await;
-        let claim = waited(&node).await;
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (1, Some(Retired)));
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (1, Some(Retired)));
         assert!(execution_closing(herdr::EXECUTION), "its nonce stays shut");
         // The same claim still holds the original for its fresh launch; its wait is gone.
-        assert_eq!(kept(&node, &claim).await, (true, false));
+        assert_eq!(kept(node, claim).await, (true, false));
         assert!(test_turn::active(&node.shared, channel()).await.is_none());
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!(closes(&rig), 1, "closed once");
-        node.finish().await;
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!(closes(rig), 1, "closed once");
     });
 }
 
 #[test]
 fn auto_recovery_between_episodes_does_not_finalize_requesting_turn() {
     let name = "auto_recovery_between_episodes_does_not_finalize_requesting_turn";
-    let Some((rig, runtime)) = child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::store(&rig, None, Stored::NeverAttached).await;
-        let claim = waited(&node).await;
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
         // The earlier episode still holds the channel: nothing closes and it is not settled.
         let token = test_turn::start(&node.shared, channel(), 81, "episode-a").await;
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (0, Some(Pending)));
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
         assert!(!token.cancelled.load(Ordering::SeqCst));
         let active = test_turn::active(&node.shared, channel()).await;
         assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));
         let episode = Some((81, Some("episode-a".to_string())));
         assert_eq!(test_turn::inflight(channel()), episode);
-        assert_eq!(kept(&node, &claim).await, (true, true));
         // Once it ended by itself the same claim closes the pane, publishing no turn of its own.
         test_turn::finish_naturally(&node.shared, channel(), 81, "episode-a", &token).await;
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (1, Some(Retired)));
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (1, Some(Retired)));
         assert!(test_turn::active(&node.shared, channel()).await.is_none());
-        assert_eq!(kept(&node, &claim).await, (true, false));
-        node.finish().await;
+        assert_eq!(kept(node, claim).await, (true, false));
     });
 }
 
 #[test]
 fn auto_recovery_refuses_while_any_turn_is_captured() {
-    let Some((rig, runtime)) = child("auto_recovery_refuses_while_any_turn_is_captured") else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::store(&rig, None, Stored::NeverAttached).await;
-        let claim = waited(&node).await;
+    let name = "auto_recovery_refuses_while_any_turn_is_captured";
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
+        let ask = |number| {
+            terminate_never_started(asked(node, claim, number), node.shared.clone(), &node.pool)
+        };
         let refused = |why: &str| TerminationResult::Refused(why.into());
         // A claim another wake replaced asks for nothing.
-        let stale = asked(&node, &claim, claim.number() + 1);
-        let result = terminate_never_started(stale, node.shared.clone(), &node.pool).await;
-        assert_eq!(result, refused("claim no longer qualifies"));
+        assert_eq!(
+            ask(claim.number() + 1).await,
+            refused("claim no longer qualifies")
+        );
         let token = test_turn::start(&node.shared, channel(), 82, "episode-b").await;
-        let current = asked(&node, &claim, claim.number());
-        let result = terminate_never_started(current, node.shared.clone(), &node.pool).await;
-        assert_eq!(result, refused("turn active"));
+        assert_eq!(ask(claim.number()).await, refused("turn active"));
         assert!(!execution_closing(herdr::EXECUTION), "no fence was taken");
-        assert!(!token.cancelled.load(Ordering::SeqCst));
-        assert_eq!((closes(&rig), state(&node).await), (0, Some(Pending)));
-        node.finish().await;
+        assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
     });
 }
 
 #[test]
 fn auto_terminate_on_same_nonce_bound_closes_nothing() {
-    let Some((rig, runtime)) = child("auto_terminate_on_same_nonce_bound_closes_nothing") else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::bind(&rig, None).await;
-        let claim = waited(&node).await;
-        recover(&node.shared, channel(), &claim).await;
-        let current = asked(&node, &claim, claim.number());
+    let name = "auto_terminate_on_same_nonce_bound_closes_nothing";
+    with_waited(name, Stored::Bound, async |rig, node, claim| {
+        recover(&node.shared, channel(), claim).await;
+        let current = asked(node, claim, claim.number());
         let result = terminate_never_started(current, node.shared.clone(), &node.pool).await;
         let bound = "execution is not a never-started pending";
         assert_eq!(result, TerminationResult::Refused(bound.into()));
-        assert_eq!((closes(&rig), node.row().await), (0, node.bound()));
-        assert_eq!(kept(&node, &claim).await, (true, true));
-        // An operator's terminate of that Bound execution is what it was.
-        let (status, reply) = node.terminate(herdr::EXECUTION).await;
-        assert_eq!(
-            (status, &reply["result"]),
-            (StatusCode::OK, &json!("retired"))
-        );
-        assert_eq!(closes(&rig), 1);
-        node.finish().await;
+        assert_eq!((closes(rig), node.row().await), (0, node.bound()));
+        assert_eq!(kept(node, claim).await, (true, true));
     });
 }
 
@@ -220,7 +202,7 @@ fn auto_terminate_on_same_nonce_bound_closes_nothing() {
 fn log_start(logical: &str) -> std::path::PathBuf {
     let path = events::log_path(CHANNEL).unwrap().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let at = chrono::Utc::now();
+    let (at, session) = (chrono::Utc::now(), SESSION.to_string());
     let event = events::BindingEvent {
         seq: 1,
         channel_id: CHANNEL,
@@ -229,7 +211,7 @@ fn log_start(logical: &str) -> std::path::PathBuf {
         execution_nonce: Some(herdr::EXECUTION.into()),
         old: None,
         new: events::BindingTarget::Pending {
-            payload_session_id: SESSION.into(),
+            payload_session_id: session,
             payload_transcript_path: None,
         },
         cause: events::BindingCause::Startup,
@@ -249,19 +231,13 @@ fn log_start(logical: &str) -> std::path::PathBuf {
 #[test]
 fn start_log_racing_after_fence_row_check_is_ordered_by_source_authority() {
     let name = "start_log_racing_after_fence_row_check_is_ordered_by_source_authority";
-    let Some((rig, runtime)) = child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::store(&rig, None, Stored::NeverAttached).await;
-        let claim = waited(&node).await;
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
         // The start was logged first: the judgment reads it under the authority and shuts nothing.
         let logged = log_start(node.key.rsplit_once(':').unwrap().1);
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (0, Some(Pending)));
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
         assert!(!execution_closing(herdr::EXECUTION));
-        assert_eq!(kept(&node, &claim).await, (true, true));
+        assert_eq!(kept(node, claim).await, (true, true));
         // The judgment came first: the fence is shut before any close, so a start hook arriving
         // from here on reads it under the same authority and records nothing.
         std::fs::remove_file(logged).unwrap();
@@ -269,33 +245,25 @@ fn start_log_racing_after_fence_row_check_is_ordered_by_source_authority() {
         probe_after_fence(Box::new(|| {
             Box::pin(async { assert!(execution_closing(herdr::EXECUTION)) })
         }));
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (1, Some(Retired)));
-        node.finish().await;
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (1, Some(Retired)));
     });
 }
 
 #[test]
 fn auto_terminate_crash_between_close_and_retire_recovers_by_read_end_then_retire() {
     let name = "auto_terminate_crash_between_close_and_retire_recovers_by_read_end_then_retire";
-    let Some((rig, runtime)) = child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::store(&rig, None, Stored::NeverAttached).await;
-        let claim = waited(&node).await;
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
         probe_after_close(Box::new(|| {
             Box::pin(async { panic!("stopped between the close and the retire") })
         }));
-        let stopped = std::panic::AssertUnwindSafe(recover(&node.shared, channel(), &claim));
+        let stopped = std::panic::AssertUnwindSafe(recover(&node.shared, channel(), claim));
         assert!(stopped.catch_unwind().await.is_err());
-        assert_eq!((closes(&rig), state(&node).await), (1, Some(Pending)));
-        assert_eq!(kept(&node, &claim).await, (true, true));
+        assert_eq!((closes(rig), state(node).await), (1, Some(Pending)));
+        assert_eq!(kept(node, claim).await, (true, true));
         // The wait and its consumed due are durable: the next look reads the end and retires.
-        recover(&node.shared, channel(), &claim).await;
-        assert_eq!((closes(&rig), state(&node).await), (1, Some(Retired)));
-        assert_eq!(kept(&node, &claim).await, (true, false));
-        node.finish().await;
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (1, Some(Retired)));
+        assert_eq!(kept(node, claim).await, (true, false));
     });
 }

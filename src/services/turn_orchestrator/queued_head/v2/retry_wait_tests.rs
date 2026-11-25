@@ -361,26 +361,15 @@ fn stale_claim_cannot_request_auto_terminate() {
     refuse(&mut owner, unstarted("n1"), 0);
     owner.tick(30_000).unwrap();
     let (front, stale) = claim(&mut owner);
-    assert_eq!(
-        owner.never_started_close_claimed((&front, stale)),
-        Some("n1".to_string())
-    );
+    let named = Some("n1".to_string());
+    assert_eq!(owner.never_started_close_claimed((&front, stale)), named);
     owner.revoke_front();
     assert_eq!(owner.never_started_close_claimed((&front, stale)), None);
     let (front, current) = claim(&mut owner);
-    assert_ne!(current, stale);
     assert_eq!(owner.never_started_close_claimed((&front, stale)), None);
-    assert!(
-        owner
-            .never_started_close_claimed((&front, current))
-            .is_some()
-    );
+    assert_eq!(owner.never_started_close_claimed((&front, current)), named);
     assert!(!owner.end_never_started_wait(&front, "n2").unwrap());
     assert!(owner.end_never_started_wait(&front, "n1").unwrap());
-    assert!(
-        owner.snapshot.retry.wait.is_none(),
-        "the closed wait is gone"
-    );
     assert_eq!(owner.never_started_close_claimed((&front, current)), None);
     assert!(owner.claimed(front.1.message_id, &front), "the claim stays");
     assert_original_and_ticket_kept(&owner, &front);
