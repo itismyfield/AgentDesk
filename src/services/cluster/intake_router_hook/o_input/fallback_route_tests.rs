@@ -48,7 +48,7 @@ fn active(channel: &str) -> impl FnOnce(&mut crate::config::ClusterIntakeRouting
     }
 }
 fn entered(channel: &str) -> usize {
-    crate::services::cluster::intake_router_hook::o_input::fallback_route::ENTERED
+    crate::services::cluster::intake_router_hook::ENTERED
         .lock()
         .unwrap()
         .iter()
@@ -343,7 +343,7 @@ async fn input_fallback_replans_head_when_observation_changes_before_plan_pg() {
     let _config = install(active(CHANNEL));
     let f = Fixture::new(CHANNEL).await;
     offline(&f, "mac-a").await;
-    *crate::services::cluster::intake_router_hook::o_input::fallback_route::BEFORE_PLAN
+    *crate::services::cluster::intake_router_hook::BEFORE_PLAN
         .lock()
         .unwrap() =
         Some("UPDATE worker_nodes SET last_heartbeat_at=NOW() WHERE instance_id='mac-a'".into());

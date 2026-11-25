@@ -56,12 +56,17 @@ pub(super) fn filter(
     summary
 }
 
-pub(in crate::services) fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
+pub(super) fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
     if !*pending || ledger.unresolved().is_some() || ledger.violation().is_some() {
         return false;
     }
     *pending = false;
     true
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn after_open_for_test(pending: &mut bool, ledger: &LedgerState) -> bool {
+    after_open(pending, ledger)
 }
 
 pub(super) struct Budget {

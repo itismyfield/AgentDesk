@@ -60,18 +60,44 @@ pub struct DispatchTerminalEntrySyncResult {
     pub finalized_run_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct EntryStatusRow {
-    run_id: String,
-    card_id: String,
-    agent_id: String,
-    pub(crate) status: String,
-    pub(crate) dispatch_id: Option<String>,
-    retry_count: i64,
-    pub(crate) slot_index: Option<i64>,
-    thread_group: i64,
-    batch_phase: i64,
-    pub(crate) completed_at: Option<String>,
+// Defined in a private child so default builds name it only inside `entries`, as before.
+mod entry_status_row {
+    #[derive(Debug, Clone)]
+    pub(crate) struct EntryStatusRow {
+        pub(super) run_id: String,
+        pub(super) card_id: String,
+        pub(super) agent_id: String,
+        pub(super) status: String,
+        pub(super) dispatch_id: Option<String>,
+        pub(super) retry_count: i64,
+        pub(super) slot_index: Option<i64>,
+        pub(super) thread_group: i64,
+        pub(super) batch_phase: i64,
+        pub(super) completed_at: Option<String>,
+    }
+}
+#[cfg(not(any(test, feature = "test-support")))]
+use entry_status_row::EntryStatusRow;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use entry_status_row::EntryStatusRow;
+
+#[cfg(any(test, feature = "test-support"))]
+impl EntryStatusRow {
+    pub(crate) fn status_for_test(&self) -> &str {
+        &self.status
+    }
+
+    pub(crate) fn dispatch_id_for_test(&self) -> Option<&str> {
+        self.dispatch_id.as_deref()
+    }
+
+    pub(crate) fn slot_index_for_test(&self) -> Option<i64> {
+        self.slot_index
+    }
+
+    pub(crate) fn completed_at_for_test(&self) -> Option<&str> {
+        self.completed_at.as_deref()
+    }
 }
 
 pub async fn reactivate_done_entry_on_pg(
@@ -1219,7 +1245,12 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
+    resume_session_id_from_context(context)
+}
+
+pub(super) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
     let context = context
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .filter(|value| value.is_object())?;
@@ -1297,10 +1328,15 @@ pub async fn latest_entry_phase_codex_session_id_pg(
     Ok(None)
 }
 
-pub(crate) async fn load_entry_status_row_pg(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn load_entry_status_row_pg_for_test(
     pool: &PgPool,
     entry_id: &str,
 ) -> Result<EntryStatusRow, String> {
+    load_entry_status_row_pg(pool, entry_id).await
+}
+
+async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
                 COALESCE(kanban_card_id, '') AS kanban_card_id,

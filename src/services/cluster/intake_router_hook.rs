@@ -36,7 +36,9 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
-pub(crate) mod o_input;
+mod o_input;
+#[cfg(test)]
+pub(crate) use o_input::{BEFORE_PLAN, ENTERED};
 #[cfg(test)]
 mod o_route_tests;
 pub(crate) mod owner_record;

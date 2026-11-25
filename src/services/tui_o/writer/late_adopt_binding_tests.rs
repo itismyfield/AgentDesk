@@ -404,7 +404,7 @@ async fn late_adopt_binding_pending_then_resolved_uses_resolved_seq_and_posts_ne
         ),
     ];
     assert_eq!(
-        crate::services::tui_o::writer::late_adopt::first_bound(&events),
+        crate::services::tui_o::writer::late_adopt::first_bound_for_test(&events),
         Some((source, 2)),
         "Resolved's own seq, not its Pending seq, starts the baseline"
     );
@@ -484,7 +484,7 @@ async fn late_adopt_binding_first_bound_or_resolved_rejects_coalesced_rotation_b
             audit(6),
         ];
         assert_eq!(
-            crate::services::tui_o::writer::late_adopt::first_bound(&events),
+            crate::services::tui_o::writer::late_adopt::first_bound_for_test(&events),
             Some((a, 3)),
             "the actual first binding event owns the baseline seq"
         );
@@ -887,7 +887,9 @@ async fn late_adopt_binding_legacy_send_while_the_boundary_reads_custody_keeps_t
 
 #[test]
 fn late_adopt_binding_baseline_at_boundary_zero_is_the_first_bind_ever_logged() {
-    use crate::services::tui_o::writer::late_adopt::{baseline, first_bound};
+    use crate::services::tui_o::writer::late_adopt::{
+        baseline_for_test as baseline, first_bound_for_test as first_bound,
+    };
     let dir = tempfile::tempdir().unwrap();
     let source = |name: &str| {
         let path = dir.path().join(format!("{name}.jsonl"));
