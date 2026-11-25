@@ -220,9 +220,8 @@ struct Found {
 /// The one key a failed discovery holds; a later complete scan takes up the debt it hid.
 const DISCOVERY: &str = "discovery";
 
-/// Route rows and unfinished journals, joined on the full turn key. A retry (`only`) decides
-/// nothing about a key it did not leave open, and never takes a route this process wrote for debt;
-/// an incomplete scan proves no key gone.
+/// Route rows and unfinished journals by full turn key; a retry (`only`) decides nothing about a key
+/// it did not leave open or a route this process wrote, and an incomplete scan proves nothing gone.
 fn judge(root: &Path, only: Option<&BTreeSet<String>>) -> BTreeMap<String, Job> {
     let mut found = BTreeMap::<String, Found>::new();
     let (mut held_rows, mut failed) = (Vec::new(), Vec::new());
