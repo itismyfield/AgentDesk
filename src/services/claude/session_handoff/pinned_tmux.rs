@@ -247,7 +247,24 @@ where
         .map_err(|e| e.to_string())?;
     end_with(command, logical, channel, expected, authorize).await
 }
-pub(crate) async fn end_with<F, Fut>(
+
+/// The pinned end against an injected tmux command, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn end_with_for_test<F, Fut>(
+    command: std::process::Command,
+    logical: &str,
+    channel: u64,
+    expected: Option<&Pin>,
+    authorize: F,
+) -> Result<(), String>
+where
+    F: FnMut(Pin) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
+    end_with(command, logical, channel, expected, authorize).await
+}
+
+async fn end_with<F, Fut>(
     command: std::process::Command,
     logical: &str,
     channel: u64,

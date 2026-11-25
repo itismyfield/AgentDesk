@@ -1503,6 +1503,7 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
+│   │   ├── launch_script.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs

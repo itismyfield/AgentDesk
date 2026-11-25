@@ -1,7 +1,9 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
-pub(crate) mod herdr;
+mod herdr;
 mod tmux;
 pub(crate) use herdr::observe as observe_herdr;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use herdr::{Context, Source};
 pub(crate) use tmux::{cause, loads};
 
 use std::path::{Path, PathBuf};
@@ -139,9 +141,21 @@ pub(crate) enum BusyState {
 /// The immutable target read for this front and the source its later key must still name.
 #[derive(Clone)]
 pub(crate) struct BusyObservation {
-    pub(crate) context: Option<Arc<herdr::Context>>,
+    context: Option<Arc<herdr::Context>>,
     state: BusyState,
     source: Option<herdr::Source>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl BusyObservation {
+    /// The Herdr read this observation captured, for tests outside this module.
+    pub(crate) fn context_for_test(&self) -> Option<&Arc<herdr::Context>> {
+        self.context.as_ref()
+    }
+
+    pub(crate) fn admits_for_test(&self, request: &Request<'_>) -> bool {
+        self.admits(request)
+    }
 }
 
 impl BusyObservation {
@@ -228,7 +242,7 @@ impl BusyObservation {
         }
     }
 
-    pub(crate) fn admits(&self, request: &Request<'_>) -> bool {
+    fn admits(&self, request: &Request<'_>) -> bool {
         let Some(expected) = self
             .source
             .as_ref()
