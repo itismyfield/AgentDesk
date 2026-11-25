@@ -1,23 +1,25 @@
 # #8422 설계 — 죽은 Bound 실행이 있는 Herdr 채널에서 synthetic 입력이 claim 전에 영구 보류된다
 
+- 개정: **rev2**(WebGPT pro 설계 리뷰 `review-design-1.out.md`의 P1 3·P2 2 반영). rev1 대비 바뀐 곳은 0절, 1절 4단계, 3절 사람·HttpStart 행, 4절, 5~7절이다.
 - 코드 기준: `82b96fa94b`(#8399 S3b-1 w3. `refs/review/i8399-s3b1-w4`는 아직 없다). 아래 file:line은 모두 이 SHA에서 다시 확인했다.
 - 상태 차트: [`HerdrSyntheticStart.tla`](../statecharts/input-single-path/HerdrSyntheticStart.tla), [결과 보고](../statecharts/input-single-path/herdr-synthetic-start.report.md).
 - 구현은 이 문서에 넣지 않았다. 설계만 담는다.
 
 ## 0. 한 줄 결론
 
-synthetic start의 claim 전 판독(`start_wait::observe`)이 #8212가 사람 입력에 쓰는 '죽은 Bound 판정·retire'를 **같은 공통 함수로** 묻게 한다.
-증명은 CLI `herdr retire`와 같은 `retire::observed(Scope::Ended)`를 쓴다.
+synthetic start의 claim 전 판독(`start_wait::observe`)이 **provider와 상관없이**(Claude·Codex) #8212가 사람 입력에 쓰는 '죽은 Bound 판정·retire'를 **같은 공통 함수로** 묻게 한다.
+공통 함수는 요청한 provider를 받아 owner와 비교한다. 증명은 CLI `herdr retire`와 같은 `retire::observed(Scope::Ended)`를 쓴다.
+마지막 무턴 판독부터 CAS까지 channel transition lease를 쥔다. claim 전·watch 호출은 `try_acquire`로 얻고, 이미 transition 안에 있는 사람 입력은 그 guard를 `borrow`해서 넘긴다. lease를 못 얻거나, token이 있거나, inflight 판독이 정확히 `Ok(None)`이 아니면 Reobserve다.
 retire가 되면 같은 판독이 Ready를 내고, start는 claim한 뒤 새 실행(Cold)으로 전달된다.
-끝내 retire할 수 없는 이유(소유자·endpoint 불일치, 행 판독 불가)가 나오면 이유를 남기고 거절·정산한다.
-turn이 잡고 있는 채널(active cancel token, inflight 행)에서는 retire를 거절하고, 그 턴 경계의 wake를 기다린다.
+끝내 retire할 수 없는 이유(소유자·endpoint 불일치, 행 판독 불가)가 나오면 새 `fail_claimed_locally`로 정산한다. 원 origin의 outcome은 **Failed**, 사유는 채널 또는 durable outbox에 남기고, 반환은 `NotSent(..)`다.
 
 ## 1. 정체 경로(82b96fa94b)
 
 1. `admit_start`(owner_input.rs:713) → `start::admit_synthetic` → drive → `start_idle`(owner_input.rs:943).
 2. `start_idle`은 `!joins_running_turn()`인 출처(RestartSeed 제외)를 `start_waits`로 보낸다(owner_input.rs:963-971).
 3. `start_waits`(owner_input.rs:770): boot·inflight·rest 검사를 지난 뒤 `start_wait::observe`(owner_input_start_wait.rs:33)를 부른다.
-4. `observe`: Bound 행이면 `claude_handoff::observe_busy`(claude_handoff.rs:569) → `busy::observe_herdr` → `Context::read`(busy/herdr.rs:303-306) `!execution_alive() → Reading::held()`.
+4. `observe`: Claude는 Bound 행이면 `claude_handoff::observe_busy`(claude_handoff.rs:569) → `busy::observe_herdr` → `Context::read`(busy/herdr.rs:303-306) `!execution_alive() → Reading::held()`.
+   Codex는 그보다 먼저 `activity_now`로 조기 반환한다(owner_input_start_wait.rs:67-76). watcher가 없는 채널은 unbound 판독이 Bound 행을 `Hold("hosted_active_or_unknown")`으로 남겨(turn_presence/activity/unbound.rs:319-329) `Activity::Unknown → Screen::Unknown`이 된다. 끝난 rollout의 마지막 턴이 Open이면 Busy를 거쳐 Unknown("open_without_progress")으로 남는 경로도 있다(리뷰 P1-1 근거).
 5. `BusyState::Held → Screen::Unknown`(owner_input_start_wait.rs:91-95) → `Wait::Watch`(owner_input.rs:791-803) → `held_watch::arm` + `hold_start` → `Err(START_WAITS)`(owner_input.rs:974-978).
 6. held_watch는 2초마다 같은 `observe`를 다시 부른다. Unknown이면 Keep, Gone이면 **wake 없이** End다(held_watch.rs:65-71).
    herdr 판독은 Gone을 내지 않으므로 Keep이 끝없이 이어진다.
@@ -97,12 +99,12 @@ inflight 행이 없는 채널의 Bound 행을, 사람 입력 없이 자동으로
 
 | 출처 | 만드는 곳 | `start_waits`를 타나 | 수리 영향 |
 |---|---|---|---|
-| HttpStart(wake-watch 재개·`agents/turn/start`) | headless_turn/admission.rs:111 → owner_input.rs:713, context `origin:"headless"`(start.rs:95) | 탄다. `keyed_to_channel=Some(true)`(owner_input_start_wait.rs:24-30) | **주 대상**: 죽은 Bound를 retire하고 Cold로 전달 |
+| HttpStart(wake-watch 재개·`agents/turn/start`) | headless_turn/admission.rs:111 → owner_input.rs:713, context `origin:"headless"`(start.rs:95) | 탄다. `keyed_to_channel=Some(true)`(owner_input_start_wait.rs:24-30) | **주 대상**: Claude·Codex 모두 죽은 Bound를 retire하고 Cold로 전달 |
 | Routine | routines/agent_executor/owner_input.rs, scheduled_messages/owner_input.rs | 탄다. 채널 키 여부는 `owner_start_takes_channel` | 채널 키면 같은 수리, 아니면 Legacy(변화 없음) |
 | EffortContinue | v2_types/effort_restart.rs:64 | `start_idle`에서는 탄다(owner_drive가 handoff만 건너뛴다, owner_input.rs:235-237) | 같은 수리 |
-| Decision | decision_drain | 탄다(`is_person`이지만 `joins_running_turn=false`, origin.rs:36-38) | 같은 수리 |
+| Decision | decision_drain | 탄다(`is_person`이지만 `joins_running_turn=false`, origin.rs:36-38) | 같은 수리. 거절 시 원 event 실패 정산을 지킨다(`NotSent` 반환, decision_drain.rs:172-179) |
 | RestartSeed | restart_seed.rs:95 | 안 탄다(owner_input.rs:964-967 `Wait::Go`, greeting permit이 판정) | 없음. 재시작 뒤 Bound는 S3b-2 범위 |
-| Discord·iMessage(사람) | intake | 안 탄다(`joins_running_turn`, Wait::Go) → claim 뒤 `OwnerTurn::early` | 공통 함수로 바뀐 #8212 경로. 증명 범위가 Missing→Ended로 넓어진다(5.3) |
+| Discord·iMessage(사람) | intake | 안 탄다(`joins_running_turn`, Wait::Go) → claim 뒤 `OwnerTurn::early` | 공통 함수로 바뀐 #8212 경로(Claude만, owned_busy.rs:111). 증명 범위가 Missing→Ended로 넓어지고, transition guard를 borrow한다. Refused 정산도 Completed→Failed로 바뀐다(T10) |
 
 ## 4. 재시작·부팅·incarnation과 인접 소비 경로
 
@@ -112,82 +114,132 @@ inflight 행이 없는 채널의 Bound 행을, 사람 입력 없이 자동으로
 - S3b-1 `pending_recovery`(B9): Pending만 받는다. 이 설계는 그 계약을 바꾸지 않는다(Bound는 계속 받지 않는다).
 - Cancel(HTTP force B8)·Terminate(B5·B6)·clear(B7): `capture_turn`으로 턴을 잡고 retire하고 RetiredWake로 깨운다. 공통 함수는 이 기계를 부르지 않는다. 다만 같은 행을 두고 경합할 때는 둘 다 nonce CAS(`retire_pg`)를 쓰므로 한쪽만 Written이 된다. 공통 함수 쪽이 Stale이면 Retry로 watch에 남고, B5의 RetiredWake가 깨운다.
 - stop(`/stop`): 활성 턴의 cancel token을 끊는다. hosted 행을 바꾸지 않는다. 턴이 끝나면 turn 경계 wake(C4·C6)가 front를 다시 판정한다.
-- turn_presence `unbound/herdr_bound.rs`(로그 'unbound hold leaf hosted_active_or_unknown'): 표시용 판독이다. 행을 바꾸지 않는다.
+- turn_presence unbound 판독(`activity/unbound.rs:319-329`, `unbound/herdr_bound.rs`): 행을 바꾸지 않는다. 다만 Codex start 판독(`activity_now`)의 입력이므로, Codex 죽은 Bound가 Unknown으로 오는 출처다(P1-1).
+- channel transition lock: headless claim은 lock을 얻은 뒤 token을 등록한다(router/turn_start.rs:142-179, 획득 :151). 사람 입력은 intake에서 guard를 얻어(intake_turn.rs:663, runtime_transition.rs:4-60, turn_start.rs:577-605) `OwnerTurn::early`(intake_turn.rs:985)를 지나 mailbox claim(:1010 `complete_mailbox_claim`)까지 쥔다. 공통 recovery는 이 lock에 참여한다(5.1 계약 L).
 
 ## 5. 수리안 비교
 
-### 안 A(권함) — 공통 '죽은 Bound retire'를 claim 전 판독이 묻는다(코디 ②+#8212 공통화, ①·③ 없음)
+### 안 A(권함, 리뷰도 유지 권고) — 공통 '죽은 Bound recovery'를 provider와 상관없이 claim 전 판독이 묻는다
 
-- 흐름: `observe`가 Bound 행에서 Held를 읽으면 공통 함수 `dead_bound::retire`를 부른다.
-  Retired면 행을 다시 읽어 Ready → `Wait::Go` → claim → `read_as`의 `bound_herdr`가 None → `Phase::Absent` → 새 실행 launch(Cold).
-  Reobserve·Retry(증명 안 됨, CAS Stale, endpoint 없음)면 지금처럼 Unknown → watch. watch probe가 `observe`를 다시 부르므로 매 판독에서 retire를 다시 묻는다.
-  Refused(소유자·endpoint 불일치, 행 판독 불가)면 이유를 담아 거절·정산한다.
-- retire를 같은 드라이브 판정 안에서 하므로 깨울 것이 필요 없다. watch에서 retire되면 다음 판독이 Ready → C1이 한 번 깨운다.
-- 비용: 새 child 1개(owned_busy.rs:220-301 블록을 옮김), observe +30, start_idle에 거절 arm 1개, retire.rs bookkeeping 몇 줄.
-- 위험: 살아 있는 실행 오판 → `view.ended` 증명(CLI와 같음)만 받는다. 턴과 경합 → active token·inflight 행 검사를 공통 함수 안에서 CAS 직전에 다시 본다.
+- 흐름: `observe`가 Bound 행의 provider 판독에서 보류(Claude `BusyState::Held|Legacy`, Codex `Activity::Unknown`)를 얻으면 공통 함수 `dead_bound::recover`를 부른다. busy(Blocked)·Ready는 지금의 빠른 길을 그대로 탄다.
+  - `Retired`면 행을 다시 읽어 Ready → `Wait::Go` → claim → `read_as`의 `bound_herdr`가 None → `Phase::Absent` → 새 실행(새 nonce) launch(Cold).
+  - `Reobserve`·`Retry`(증명 안 됨, token·inflight 있음, lease 못 얻음, CAS Stale, endpoint 없음)면 지금처럼 Unknown → watch. watch probe가 `observe`를 다시 부르므로 판독마다 recovery를 다시 묻는다.
+  - `Refused`(소유자·endpoint 불일치, 행 판독 불가)면 `Wait::Reject(reason)` → claim → `fail_claimed_locally` → Failed 정산.
+- 비용·위험은 5.3에 정리했다.
 
-### 안 B — 판독이 Gone을 내고 S3b-1 terminate 기계로 끝낸다(코디 ①+② 문자 그대로)
+### 안 B — 판독이 Gone을 내고 S3b-1 terminate 기계로 끝낸다(rev1과 같이 기각)
 
-- 흐름: busy/herdr.rs:304에서 `provider_absent()==Ok(true) && !execution_alive()`를 Gone으로 내고, `start_waits`가 Gone이면 `terminate_scoped`(B5)를 Bound용 요청으로 부른 뒤 RetiredWake로 깨운다.
-- 문제: (1) held_watch는 Gone을 wake 없이 끝낸다(C2). 모델 `GoneNoRetire` 변이가 RED로 이를 보인다. retire가 실패하면 깨울 것이 없다. (2) S3b-1 `NeverStartedTerminate::admits`는 "a Bound one never is"가 계약이다. Bound용 자동 terminate를 넣으면 그 계약을 바꾼다(DESIGN_DELTA 대상). (3) 이미 죽은 실행에 close를 보내는 단계가 더해져 Indeterminate 결과가 늘어난다. (4) `provider_absent`는 기록된 provider 프로세스만 본다. 기록된 root shell 대조가 없어 CLI 증명보다 약하다.
-- 비용: busy/herdr.rs·start_waits·herdr_terminate.rs·never_started.rs 계열 수정. A보다 크다.
+held_watch는 Gone을 wake 없이 끝낸다(held_watch.rs:65-71, 모델 `GoneNoRetire` RED). 또 S3b-1 `NeverStartedTerminate::admits`의 "a Bound one never is" 계약을 바꿔야 한다. 이미 죽은 실행에 close를 보내 Indeterminate가 늘고, `provider_absent`에는 root shell 대조가 없다.
 
-**권함: A.** S3b-1 계약은 그대로 두고 그 위에 쌓는다. retire 판정은 #8212·CLI와 같은 하나의 증명을 쓴다.
-③(owner_input.rs:101 alive를 execution_alive로)은 하지 않는다. retire가 claim 전에 끝나 `read_as`가 이미 Absent를 고른다. 거꾸로 Bound 행을 둔 채 Absent로 launch하면 launch CAS와 충돌한다.
-④(tmux `Wait::Event`)는 해당 없음이다. 근거: busy→idle에서 turn_presence가 owned 채널에 WakeOwner를 낸다(supervisor.rs:691-701). 죽은 pane은 `native_wait`이 Gone→Go로 보낸다(owner_input.rs:866-871). 모델 `TmuxBusy`·`TmuxDead` GREEN, `TmuxNoPresenceWake` 변이 RED. 남는 점: Event 대기 중 tmux pane이 죽는 경우는 모델에 넣지 않았다. 구현 시험 T8에서 확인한다.
+③(owner_input.rs:101 alive를 execution_alive로)은 하지 않는다. claim 전에 행이 Retired가 되면 `read_as`가 이미 Absent를 고른다(리뷰도 확인).
+④ tmux `Wait::Event`는 해당 없음이다. Event 뒤 pane이 죽으면 pane 사망 감지 → watcher 종료 → registry binding 제거 → unbound 부재 판독 Idle → turn_presence WakeOwner 순서로 깨어난다(리뷰가 소스로 확인). T8에서 이 순서 전체를 고정한다. 모델 `TmuxDead`는 처음부터 죽은 경우만 다루므로 이 순서의 증거로 쓰지 않는다.
 
-### 5.1 수정 지점 전수표(안 A)
+### 5.1 공통 함수 계약
 
-| 파일 | 변경 | 추정 |
+`dead_bound::recover(shared, provider, (channel, key, logical), host, mailbox, lease: LeaseRef<'_>) -> Result<Retired, DeadBound>`
+`DeadBound = Refused(String) | Reobserve(String) | Retry(String)`
+
+- **P(provider, 리뷰 P1-1)**: 요청한 `ProviderKind`를 받는다. owner 검사(지금 owned_busy.rs:239-253)의 `record.owner.provider != "claude"`를 `record.owner.provider != provider.as_str()`로 바꾼다. 나머지 8항(token hash, channel, logical key, runtime root, local node, endpoint 4항)은 그대로 둔다.
+  종료 증명은 provider와 상관없는 `retire::observed(pool, row, Scope::Ended)`다(herdr_gate.rs:914-945 `ended_across`: Missing이거나, 기록된 root shell만 남고 provider가 끝남). provider마다 retire 함수를 따로 만들지 않는다.
+- **L(transition lease, 리뷰 P1-2)**: 마지막 무턴 판독부터 CAS까지 `SessionTransitionLease`(session_transition.rs:17-77)를 쥔다.
+  - `LeaseRef::Acquire`: claim 전 판독과 held_watch probe가 쓴다. `try_acquire`(:29-44)이 `SessionTransitionBusy`이면 곧바로 `Reobserve("transition busy")`다. 기다리지 않는다.
+  - `LeaseRef::Borrow(&OwnedMutexGuard<()>)`: 이미 intake transition 안에 있는 사람 입력이 쓴다(`borrow`, :46-62). guard는 `IntakeRuntimeTransition`의 private `_guard`(turn_start.rs:577-581)라서 `fn guard(&self) -> &OwnedMutexGuard<()>` accessor를 더하고, `OwnerTurn::early`에 인자로 넘긴다(intake_turn.rs:985 호출 교체). 자기 lock에 막히지 않는다.
+  - lease 아래 순서: ① lease 획득 → ② `mailbox.has_active_turn()==Ok(false)` → ③ `load_inflight_state_read_only_result(provider, channel)==Ok(None)` → ④ `root_replaced::current` → ⑤ `retire::observed(Scope::Ended)`(pane 판독 + nonce CAS) → ⑥ hold 해제 확인·`withhold_herdr_execution` → ⑦ lease 해제 → ⑧ host 재판정. ②~⑤가 한 lease 안에 있어야 한다.
+  - 배제 근거: headless claim은 같은 lock을 `acquire`한 뒤에야 token을 등록한다(turn_start.rs:151 → :161-172). 사람 입력은 guard를 쥔 채 mailbox claim을 한다(intake_turn.rs:1010). 그래서 ② 뒤 ⑤ 전에 이 두 경로의 새 token이 끼어들 수 없다. 반대로 headless claim이 먼저 lock을 쥐면 ①이 Busy로 Reobserve가 된다. 다만 headless claim의 `acquire`는 최대 3초 기다리므로(session_transition.rs:4-5) ①~⑦은 짧아야 한다. ⑤는 pane snapshot과 process 판독뿐이고 close를 보내지 않는다.
+  - lock 밖 token 등록 경로 감사(구현 레그 첫 단계): `mailbox_try_start_turn*` prod 호출자 중 위 두 경로 밖에 있는 것은 mailbox_ops.rs, recovery_engine/runtime.rs, tmux_reaper.rs, relay_recovery_auto_heal_apply.rs, idle_detector.rs, turn_finalizer/{finalize.rs, cleanup/terminal_release.rs}, tui_prompt_relay/synthetic_start/bridge_handoff.rs(admission_fence가 lease를 씀, admission_fence.rs:40-44), outbound/o_writer_io/agy.rs다. 각 호출이 lock 아래인지, 아니면 증명된 죽은 Herdr 실행에 token을 걸 수 없는 경로(tmux·살아 있는 watcher 복원)인지 표로 남긴다. 둘 다 아니면 그 호출에 lease를 더하는 것까지 이 조각에 넣는다.
+  - held_watch 순서(held_watch.rs:121-132: probe(:123) → `leads`(:125) → generation(:130)): recovery의 부작용은 lead·generation 확인보다 먼저 일어날 수 있다. 그래도 안전 조건(무턴·inflight·증명)은 모두 lease 안 ②~⑤에서 다시 보므로, front가 더는 선두가 아니어도 retire 자체는 맞다(죽은 실행만 Retired). lead·generation은 wake 여부만 정한다. 다음 front는 Retired 행을 읽고 Cold로 간다.
+- **T(무턴 판독, 리뷰 P2-1)**: inflight는 `load_inflight_state_read_only_result`(inflight.rs:922-937)로 읽는다. `Ok(None)`만 통과한다. `Ok(Some(_))`는 `Reobserve("inflight row")`, `Err(_)`는 `Reobserve("inflight unreadable")`다. `.ok().flatten()`인 `load_inflight_state_read_only`(:912-920)는 쓰지 않는다. `start_waits`의 non-Managed 검사(owner_input.rs:778-783)는 지금처럼 둔다. 판독 오류는 거기서 None으로 지나가도 recovery에서 다시 막힌다.
+- **R(거절 정산, 리뷰 P1-3)**: `Failure::discard`(start_failure.rs:117-176) → `complete_claimed_locally`(control.rs:337-363, 항상 `TerminalOutcome::Completed`)는 쓰지 않는다.
+  - control.rs: `complete_claimed_locally`의 몸통을 `fn take_claimed(&mut self, (front, number), followers, outcome: TerminalOutcome)`로 옮긴다. `complete_claimed_locally`는 `Completed`로, 새 `fail_claimed_locally`는 `Failed`로 그것을 부른다. 성공 의미는 그대로다. `owe_queued(.., Failed)`의 선례는 readiness_hold.rs:124에 있다.
+  - start_failure.rs: 안내·outbox 블록(:143-175)을 `fn notify(..)`로 떼어 `discard`와 새 `fail`이 같이 쓴다. `fail`은 정확한 claim(`claim_number`·`claimed`)을 확인한 뒤 `fail_claimed_locally`로 원본과 follower를 제거한다. 사유는 채널 안내, 실패하면 recovery_notice outbox로 남긴다. 반환은 `Err("NotSent(\"hosted_recovery_refused\")")`다.
+  - Decision: `decision_drain`은 `Some(Ok(()))`를 전달로 센다(decision_drain.rs:172-173). `NotSent` 오류는 `unsent`로 판정되어 `fail`로 정산된다(:174, :180-182).
+  - 사람 입력의 Refused 분기(owned_busy.rs:304-313, 지금은 `Failure::owner(..).discard`)도 같은 `fail`로 바꾼다. 같은 공통 recovery의 같은 결과라서 두 경로의 outcome이 갈리지 않게 한다.
+- **C(로그, 리뷰 P2-2)**: watch probe는 `start_wait`의 probe 생성 함수 안에 마지막 사유(`Option<String>`)를 붙든 `FnMut` closure로 만든다. 사유가 바뀔 때만 `decided(..)`(owned_busy.rs:582-590) 수준의 info를 남기고, 같은 사유는 debug로 낮춘다. 캐시·backoff·새 감시는 더하지 않는다.
+
+### 5.2 수정 지점 전수표(안 A, rev2)
+
+| 파일 | 변경 | 추정(순) |
 |---|---|---|
-| `src/services/discord/router/message_handler/intake_turn/owned_busy/dead_bound.rs`(새 child) | `pub(in crate::services::discord) async fn retire(shared, (provider, channel, key, logical), host, mailbox) -> Result<(), DeadBound>`. owned_busy.rs:220-301 블록(소유자·endpoint 9항, `root_replaced::current`, `retire::observed`, hold 해제, `withhold_herdr_execution`, 재판정)을 옮긴다. 더하는 것: CAS 직전 `mailbox.has_active_turn()==Ok(false)`와 `load_inflight_state_read_only(provider, channel).is_none()`. 하나라도 거짓이거나 판독 실패면 `Reobserve("turn holds the channel")`. Scope는 `Ended` | +125(이동 85 포함) |
-| `.../intake_turn/owned_busy.rs`(813줄) | `recover_or_discard`의 recovery 블록을 `dead_bound::retire` 호출로 바꾼다. 오류 분류(Refused/Reobserve/Retry)는 공통 enum으로. `mod dead_bound;` 1줄(FILES_AUTO) | −85/+12 |
-| `.../provider_dispatch/owner_input_start_wait.rs`(108줄) | `observe`: Bound + `observation.state()==Held`면 `dead_bound::retire` 호출. Ok → `Native(Ready)`, Refused(why) → 새 `Observed::Reject(why)`, 그 밖은 `Native(Unknown)`. `native()`는 Reject를 None으로 → watch probe의 `unwrap_or(Ready)`가 한 번 깨운다 | +32 |
-| `.../provider_dispatch/owner_input.rs`(1795줄, giant) | 호출 교체만: `start_waits`에 `Observed::Reject(why) => Wait::Reject(why)` arm, `start_idle`에 `Wait::Reject` arm 1개(claim 뒤 `start_failure::Failure::claimed(..).discard(reason)`, owned_busy.rs:304-313와 같은 정산. 본체는 start_wait child의 `reject` helper) | +10 |
+| `src/services/discord/router/message_handler/intake_turn/owned_busy/dead_bound.rs`(새 child) | 5.1 계약 P·L·T 본체. owned_busy.rs:220-301 블록(82줄)을 옮기고, provider 인자, `LeaseRef`, lease 안 ②③ 판독, 오류 분류를 더한다 | +170(이동 82 포함) |
+| `.../intake_turn/owned_busy.rs`(813줄) | `recover_or_discard`의 블록을 `dead_bound::recover(.., LeaseRef::Borrow(guard))` 호출로 바꾼다. `early`가 guard 인자를 받는다. Refused 분기는 `Failure::fail`. `mod dead_bound;`(FILES_AUTO) | −82/+18 |
+| `src/services/discord/router/message_handler/intake_turn.rs`(2262줄, giant) | 호출 교체만: `OwnerTurn::early(.., intake_runtime_transition.guard())` 인자 1개 | +1 |
+| `src/services/discord/router/turn_start.rs`(670줄) | `IntakeRuntimeTransition::guard()` accessor | +4 |
+| `.../provider_dispatch/owner_input_start_wait.rs`(108줄) | `observe`: Codex 조기 반환(:67-76)을 'Bound 행이 아니거나 Unknown이 아니면 반환'으로 좁히고, Bound+보류면 두 provider 모두 `dead_bound::recover(.., LeaseRef::Acquire)`. 새 `Observed::Reject(String)`. watch probe 생성 함수(사유 변화만 info) | +55 |
+| `.../provider_dispatch/owner_input.rs`(1795줄, giant) | 호출 교체만: `start_waits`의 Watch closure 블록(:794-803)을 `start_wait::probe(..)` 호출로 바꾸고, `Observed::Reject → Wait::Reject`, `start_idle`에 `Wait::Reject` arm(claim 뒤 `Failure::claimed(..).fail(..)`) | +12/−9 |
+| `.../provider_dispatch/start_failure.rs`(579줄) | 안내·outbox 블록을 `notify`로 떼고 `fail` 추가(5.1 R) | +32/−12 |
+| `src/services/turn_orchestrator/queued_head/v2/control.rs`(416줄) | `take_claimed` 공유 + `fail_claimed_locally` | +16/−6 |
 | `src/services/herdr_launch/retire.rs` | MISSING bookkeeping을 'scope==Missing'에서 'reading==Missing'으로(`recovered_missing` 의미 유지) | +2/−2 |
-| 시험(새) `owner_input_start_wait_tests.rs`, `owned_busy/dead_bound_tests.rs` | 5.2 표 | 시험 +350 안팎 |
+| lock 밖 token 등록 경로(5.1 L 감사 결과) | 감사에서 lock도 없고 죽은 Herdr에 token을 걸 수 있는 호출이 나오면 lease 추가 | 0~+30(감사 결과에 따름) |
 
-추정: prod 5파일(+새 child 1 = 수정 4 + 신규 1), 순 코드 증가 약 +95(+181/−87). 상한 30파일/+1500, 정지선 +1200 안에 넉넉히 든다.
-giant 규칙: owner_input.rs에는 arm 두 개(호출)만 넣는다. 본체는 child(`dead_bound.rs`, `owner_input_start_wait.rs`)에 둔다.
+추정: prod 9파일(신규 1 + 수정 8), 순 코드 증가 약 **+190**(+310/−119). 감사 결과에 따라 최대 11파일/+220. 상한 30파일/+1500, 정지선 +1200 안이다.
+giant 규칙: intake_turn.rs(인자 1개)와 owner_input.rs(closure 블록 이동·arm 호출)에는 호출 교체만 넣는다. 본체는 `dead_bound.rs`·`owner_input_start_wait.rs`·`start_failure.rs`·`control.rs`에 둔다.
+시험 추정: +600 안팎(새 `owner_input_start_wait_tests.rs`, `owned_busy/dead_bound_tests.rs`, control·start_failure 단위 시험).
 
-### 5.2 수용 시험(수정 전 RED → 수정 후 GREEN)
+### 5.3 수용 시험(수정 전 RED → 수정 후 GREEN)
 
 | # | 시험 | 수정 전 | 수정 후 |
 |---|---|---|---|
-| T1 | Herdr Bound + 실행 죽음(pane Missing) + HttpStart(wake-watch context) + inflight 없음 → `start_idle_for_test` | `Err(synthetic_waits_idle)`, front held, 행 Bound (RED) | 행 Retired(CAS 1회), claim, 새 실행 launch(Cold), 전달 1회 |
-| T2 | T1과 같되 lone root shell(provider 끝, pane 남음) | RED | GREEN(Scope::Ended 증명) |
-| T3 | Bound + 살아 있는 idle 실행 | 전달(GREEN) | 전달, 행 Bound 그대로, `retire_pg` 호출 0 |
-| T4 | Bound + 살아 있으나 판독 불가(output not ready) | watch | watch, 행 Bound(안전) → 판독 회복 뒤 전달 |
-| T5 | Bound + 죽음 + active cancel token(managed 턴) | watch | retire 거절·watch 유지 → TurnEnd wake 뒤 retire → Cold 전달 |
-| T6 | Bound + 죽음 + non-Managed inflight 행 | Event | Event 그대로(retire 0) → row end wake 뒤 전달 |
-| T7 | Bound + 소유자 불일치(token hash 다름) | 영구 watch (RED) | 이유와 함께 거절·정산, 대기열 0 |
-| T8 | tmux transcript_turns busy → Event → native idle → turn_presence WakeOwner | 전달(GREEN) | 전달(GREEN). ④ 근거 고정. Event 대기 중 pane 소멸도 함께 본다 |
-| T9 | held_watch 판독 중 실행 소멸: Unknown watch → 다음 판독에서 retire → Ready wake | RED | GREEN |
-| T10 | #8212 사람 입력 시험(기존) | GREEN | GREEN(공통 함수로 옮긴 뒤 회귀 없음). lone root shell 사람 입력은 Reobserve → retire로 바뀐다 |
+| T1c / T1x | Claude / Codex. Bound + pane Missing + HttpStart(wake-watch context) + 무턴. Codex는 `hosted_active_or_unknown`에서 출발 | `Err(synthetic_waits_idle)`, front held, 행 Bound (RED) | Retired CAS 1, 새 execution nonce, Cold 전달 1 |
+| T2c / T2x | 위와 같되 lone root shell | RED | GREEN(Scope::Ended) |
+| T3 | Claude·Codex 살아 있는 idle 실행 | 전달 | 전달, `retire_pg` 0, 행 Bound |
+| T4c / T4x | 살아 있으나 판독 불가(Claude output not ready, Codex `Activity::Unknown` + provider ExactAlive) | watch | watch, retire 0 → 판독 회복 뒤 전달 |
+| T5 | 죽음 + 처음부터 active token(managed) | watch | Reobserve, retire 0 → TurnEnd wake 뒤 retire → Cold |
+| T6 | 죽음 + non-Managed inflight 행 | Event | Event, retire 0 → row end wake 뒤 전달 |
+| T7 | 소유자 불일치 + `origin_id`가 있는 HttpStart, 같은 조건의 Decision | 영구 watch (RED) | provider write 0, 큐 0, 안내 또는 outbox 1. owed receipt 상태·PG 반영 뒤·재시작 뒤 모두 `terminal.outcome=="failed"`. Decision은 Delivered가 아니다. 반환 `NotSent("hosted_recovery_refused")` |
+| T8 | tmux busy → Event → (a) native idle, (b) pane 사망 → watcher 종료 → binding 제거 → unbound Idle → WakeOwner | 전달 | 전달. ④ 근거 고정 |
+| T9c / T9x | Claude / Codex. 판독 불가로 watch 중 실행 소멸 → 다음 probe에서 retire → Ready wake | RED | GREEN |
+| T11 (barrier) | ② 무턴 판독과 ⑤ CAS 사이 barrier. (a) barrier 전에 headless claim이 lock을 쥐고 token 등록 → ①이 Busy → CAS 0. (b) helper가 lease를 먼저 얻음 → `claim_reserved_headless_turn`이 CAS와 lease 해제 뒤에야 token을 등록하고, 그 start는 Retired 행을 읽어 Cold로 간다. (c) Borrow 경로는 자기 guard에 막히지 않는다 | (설계 1 계약에는 lease가 없음) | (a) CAS 0 (b) 순서 고정 (c) 통과 |
+| T12 | inflight 판독 오류 주입(`Err`) | (설계 1: `.ok().flatten()`이라 retire) | CAS 0, hosted 행·inflight 파일 보존, 판독 회복 뒤 다음 probe에서 retire |
+| T13 | 증명 불가 상태로 probe 여러 번 | — | DB 쓰기 0, 사용자 알림 0, 조회 횟수 계측(probe당 root_replaced 3회 + pane 판독), 같은 사유 info 로그 1회 |
+| T10 | 사람 입력(#8212) 회귀: (a) Missing → 기존처럼 retire·Cold (b) lone root shell → Reobserve에서 retire·Cold로 바뀜 (c) borrowed lease로 자기 transition 안에서 통과 (d) inflight 행·판독 오류면 Reobserve (e) Refused면 Failed 정산 | (a) GREEN (b)~(e) 지금과 다름 | 모두 GREEN |
 
-### 5.3 남는 위험
+뮤턴트(구현 시험에서 RED를 확인할 것): Codex 조기 반환 복원, owner provider를 `"claude"`로 고정, lease 제거, Borrow 대신 무조건 `try_acquire`, `.ok().flatten()` 복원, 거절 outcome을 Completed로 되돌림.
 
-- 사람 입력 경로가 Scope::Missing에서 Ended로 넓어진다. 증명은 CLI와 같고, 운영에서 사람이 수동으로 쓰던 판정을 자동화하는 것이다.
-- watch probe(2초)가 판독마다 retire를 다시 묻는다. 증명이 안 되면 읽기만 하고 쓰지 않는다. PG 읽기 한 번과 pane 판독이 늘어난다.
-- `has_active_turn`과 inflight 판독 뒤 CAS 전에 새 턴이 시작될 수 있다. 새 턴은 Bound 행을 launch하거나 attach해야 하는데, 그 실행은 증명으로 이미 죽었다. 같은 nonce에 attach하면 gate가 거절하고, 새 launch는 nonce가 달라 CAS가 Stale이 된다. 남는 창은 구현 리뷰에서 다시 본다.
+### 5.4 비용과 남는 위험
 
-### 5.4 '대형 가드레일·운영자 수동 기능' 해당 여부
+- probe 비용(리뷰 P2-2 정정): Held가 남은 동안 probe(2초)마다 다음을 한다. `turn_host::for_observation` 판독, `root_replaced::current`의 DB 조회 3회(canonical hosted 행, canonical session row/key resolve, session key로 hosted 행 재조회, root_replaced.rs:285-306), `retire::observed`의 pane 판독(snapshot + foreground process, 상태에 따라 provider 증명 추가, herdr_gate.rs:836-908). 채널 하나에 분당 약 30회 probe, 이 세 조회만 분당 약 90회다. CAS와 host 재판정은 retire가 성공할 때만 더해진다. 개인 운영 규모에서 문제가 될 근거는 없어 캐시·backoff는 넣지 않는다. 사유가 바뀔 때만 info를 남긴다.
+- lease를 쥔 시간 동안 headless claim이 최대 3초 기다린다. ①~⑦에 close·네트워크 대기가 없으니 이 창은 pane 판독 시간과 같다. 3초를 넘기면 headless claim은 Conflict로 실패한다(기존 동작).
+- lock 밖 token 등록 경로는 구현 레그의 감사로 닫는다(5.1 L). 감사 전까지는 이 창이 열려 있을 수 있다고 본다.
+- 사람 입력 경로의 동작 변화: 증명 범위 Missing→Ended, transition guard borrow, Refused 정산 Completed→Failed. 모두 T10으로 고정한다.
 
-해당하지 않는다. 새 운영자 명령·설정·감시 루프를 만들지 않는다. 사람 입력 경로(#8212)에 이미 있는 자동 retire를 synthetic 경로가 같은 함수로 쓰게 하는 것뿐이다.
+### 5.5 '대형 가드레일·운영자 수동 기능' 해당 여부
 
-## 6. 상태 차트 요약
+해당하지 않는다. 새 운영자 명령·설정·감시 루프를 만들지 않는다. #8212에 이미 있는 자동 retire를 synthetic 경로와 Codex가 같은 함수로 쓰게 한다. 기존 transition lease와 실패 정산 경계를 재사용할 뿐이다.
 
-| 설정 | 수정 전/후 | 결과 |
+## 6. 상태 차트 요약(rev2)
+
+모델에 넣은 축: provider(Claude·Codex), origin(synthetic·person), 실행 소멸 두 꼴(missing·shell), 판독→CAS 분리(`retiring` 단계)와 그 사이 다른 start의 token 등록(`TurnStart`, transition lock을 먼저 얻어야 함), inflight 판독 오류, 거절 outcome.
+
+| 설정 | 구분 | 결과 |
 |---|---|---|
-| `Before` | 수정 전 | `SyntheticSettles` RED(죽은 Bound watch에서 영원히 Keep) |
-| `BeforeForeign` | 수정 전 | `SyntheticSettles` RED |
-| `Fixed` | 수정 후 | GREEN(retire → Cold 전달) |
-| `FixedForeign` | 수정 후 | GREEN(거절·정산) |
-| `FixedLive`·`FixedBusy`·`FixedUnreadable`·`FixedManagedTurn`·`FixedExternalTurn` | 수정 후 | GREEN(안전 불변식 유지) |
-| `RetireOnHeld`(③식 증명 없는 retire) | 변이 | `NoAutoRetireLive` 깨짐 |
-| `RetireUnderTurn`(턴 검사 없음) | 변이 | `NoAutoRetireUnderTurn` 깨짐 |
-| `GoneNoRetire`(① 단독) | 변이 | `SyntheticSettles` RED |
-| `TmuxBusy`·`TmuxDead` | 현행 | GREEN(④ 해당 없음) |
-| `TmuxNoPresenceWake` | 변이 | `SyntheticSettles`·`NoDeadlock` 깨짐 |
+| Before / BeforeShell / BeforeCodex / BeforeForeign | 수정 전 synthetic | `SyntheticSettles`·`OwnedStartDelivered` RED |
+| BeforePersonShell | 수정 전 사람(#8212 Missing만) | 같은 두 규칙 RED |
+| BeforePersonMissing | 수정 전 사람 Missing | GREEN(#8212 회귀 기준) |
+| Fixed / FixedShell / FixedCodex / FixedCodexShell / FixedForeign / FixedPersonShell / FixedPersonMissing | 수정 후 | GREEN |
+| FixedCodexLive / FixedCodexUnreadable / FixedLive / FixedBusy / FixedUnreadable | 살아 있거나 판독 불가 | GREEN(retire 0) |
+| FixedManagedTurn / FixedExternalTurn / FixedInflightUnreadable | 턴·inflight·판독 오류 | GREEN(retire 거절 뒤 전달) |
+| FixedRace / FixedRaceLive / FixedPersonRace | 판독→CAS 사이 token 등록 경합 | GREEN |
+| CodexEarlyReturn | 뮤턴트 | 두 liveness RED |
+| OwnerClaudeConst | 뮤턴트 | `OwnedStartDelivered` RED(Codex를 거절함) |
+| NoLease | 뮤턴트 | `NoAutoRetireUnderTurn` 깨짐 |
+| NoBorrow | 뮤턴트(사람 경로가 자기 lock에 막힘) | 두 liveness RED |
+| RejectAsCompleted | 뮤턴트 | `RejectedIsFailed` 깨짐 |
+| OkFlatten | 뮤턴트 | `NoAutoRetireUnderTurn` 깨짐 |
+| RetireOnHeld / RetireUnderTurn | 뮤턴트 | `NoAutoRetireLive` / `NoAutoRetireUnderTurn` 깨짐 |
+| GoneNoRetire | 뮤턴트(① 단독) | 두 liveness RED |
+| TmuxBusy / TmuxDead / TmuxNoPresenceWake | tmux | GREEN / GREEN / `NoDeadlock`·두 liveness |
 
-RED 2 → GREEN 2. 15개 설정 모두 `scripts/ci/statecharts_tlc.py`의 기대와 일치한다(PASS 15/15).
+수정 전 RED 5(Before, BeforeShell, BeforeCodex, BeforeForeign, BeforePersonShell) → 수정 후 GREEN 5(Fixed, FixedShell, FixedCodex, FixedForeign, FixedPersonShell).
+설계 1의 빈틈(P1 3·P2 1)은 뮤턴트 `CodexEarlyReturn`·`OwnerClaudeConst`·`NoLease`·`RejectAsCompleted`·`OkFlatten`이 RED로 보인다.
+36개 설정 모두 `scripts/ci/statecharts_tlc.py`의 기대와 일치한다(PASS 36/36).
+
+## 7. rev1 → rev2 리뷰 대응
+
+| 리뷰 | 대응 | 위치 |
+|---|---|---|
+| P1-1 Codex가 공통 retire에 도달하지 않음 | observe가 두 provider 모두 recovery로 잇고, owner는 요청 provider와 비교. T1·T2·T4·T9 provider별 | 1절 4단계, 5.1 P, 5.2, 5.3 |
+| P1-2 무턴 판독과 CAS 사이 token 등록 창 | transition lease 계약(Acquire/Borrow, ②~⑤ 한 lease), held_watch 순서 설명, lock 밖 등록 경로 감사, T11 barrier | 4절, 5.1 L, 5.3 T11 |
+| P1-3 거절을 Completed로 정산 | `fail_claimed_locally` + `Failure::fail`, `NotSent` 반환, 사람 Refused도 같이. T7 확장 | 5.1 R, 5.2, 5.3 T7·T10e |
+| P2-1 inflight 판독 fail-open | `_result` API, `Ok(None)`만 통과. T12 | 5.1 T |
+| P2-2 비용 과소 기재 | 실제 경로로 정정, 사유 변화만 info. T13 | 5.1 C, 5.4 |
+| 사람 입력 영향 | T10 (a)~(e) | 3절, 5.3 |

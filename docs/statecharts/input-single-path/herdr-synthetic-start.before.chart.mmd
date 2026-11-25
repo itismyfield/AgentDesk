@@ -1,10 +1,10 @@
 ---
-title: "8422: 죽은 Bound 실행과 synthetic start"
+title: "8422: 죽은 Bound 실행과 synthetic start (rev2)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Path to the SyntheticSettles bug
-    lg1: Repeats forever, so SyntheticSettles breaks
+    lg0: Path to the OwnedStartDelivered or SyntheticSettles bug
+    lg1: Repeats forever, so OwnedStartDelivered or SyntheticSettles breaks
   }
   class lg0 bugPath
   class lg1 repeats

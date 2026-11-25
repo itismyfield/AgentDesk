@@ -1,0 +1,33 @@
+---
+title: "8422: 죽은 Bound 실행과 synthetic start (rev2)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoAutoRetireUnderTurn
+    lg1: Path to the NoAutoRetireUnderTurn bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: start front 도착(claim 전)
+  s1: retire 뒤 재판정 대기
+  s2: lease 없이 retire 진행
+  s3: claim 됨
+  s4: 죽은 Bound에 held_watch 보류
+  s5: 턴이 잡은 실행을 자동 retire함
+  s6: 새 실행(Cold)으로 전달
+  [*] --> s0
+  s0 --> s1: 운영자 terminate(retired wake)
+  s0 --> s2: start_waits 판정
+  s0 --> s4: start_waits 판정
+  s1 --> s3: start_waits 판정
+  s2 --> s3: retire CAS
+  s2 --> s2: 다른 start의 token 등록
+  s3 --> s6: claim 뒤 실행
+  s4 --> s0: 턴 경계 wake
+  s4 --> s1: 운영자 terminate(retired wake)
+  s2 --> s5: retire CAS
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s5 breaks
+  class s5 bugPath
