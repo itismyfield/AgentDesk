@@ -1379,6 +1379,7 @@ src/
 │   │   │   │   ├── fallback.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
+│   │   │   │   ├── output_fixture_tests.rs
 │   │   │   │   ├── output_tests.rs
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
@@ -1474,6 +1475,7 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   ├── pg_tests/
 │   │   │   │   │   └── pending_lookup_tests.rs
+│   │   │   │   ├── pending_lookup_probe_tests.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -1502,6 +1504,7 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
+│   │   ├── launch_script.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
@@ -2137,6 +2140,7 @@ src/
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
 │   │   ├── krx_claude_tests/
+│   │   │   ├── claude_readiness_tests.rs
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
@@ -4416,6 +4420,7 @@ src/
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
 │   │   ├── probe/
+│   │   │   ├── fixture_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── trusted_target/
 │   │   │   └── loopback_seam_tests.rs
@@ -4770,7 +4775,8 @@ src/
 │   │   │   │   ├── input_notices/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
-│   │   │   │   └── input_notices.rs
+│   │   │   │   ├── input_notices.rs
+│   │   │   │   └── test_access.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4834,6 +4840,7 @@ src/
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
 │   │   │   │   ├── scoped_transition_tests.rs
+│   │   │   │   ├── test_access.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
@@ -4855,6 +4862,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
+│   │   │   │   ├── test_access.rs
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
 │   │   │   │   └── authority_contention_tests.rs

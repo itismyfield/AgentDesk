@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::codex::{Observe, Submitted, observe_for_test};
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::channel_policy::first_prompt_digest;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
@@ -129,13 +130,8 @@ esac
             .admit_first(channel, token.turn_nonce().unwrap(), "hi", name, || Ok(0))
             .unwrap();
         candidate.attach_first_execution(&worker_context, "hi", token.turn_nonce());
-        let result = observe(Observe {
-            submitted: Submitted {
-                prepared,
-                validated_tail: tail,
-                rollout_modified_since: std::time::UNIX_EPOCH,
-                handoff,
-            },
+        let result = observe_for_test(Observe {
+            submitted: Submitted::for_test(prepared, tail, std::time::UNIX_EPOCH, handoff),
             working_dir: &cwd,
             sender,
             cancel_token: Some(token),

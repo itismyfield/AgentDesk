@@ -8,7 +8,7 @@ use super::ReplaySummary;
 use crate::services::tui_o::shadow::ShadowProvider;
 
 #[derive(Clone)]
-pub(crate) struct Trace(Arc<Run>);
+pub(super) struct Trace(Arc<Run>);
 
 struct Run {
     channel: u64,
@@ -22,16 +22,25 @@ struct Run {
     done: AtomicU64,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Details {
-    pub records: u64,
-    pub done: u64,
-    pub prepared: u64,
-    pub serial: u64,
-    pub msg_id: u64,
-    pub epoch: u64,
-    pub replay: ReplaySummary,
+// Writer-private; test builds also name it, as the field type of the captured `Event` below.
+mod details {
+    use super::ReplaySummary;
+
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Details {
+        pub records: u64,
+        pub done: u64,
+        pub prepared: u64,
+        pub serial: u64,
+        pub msg_id: u64,
+        pub epoch: u64,
+        pub replay: ReplaySummary,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) use details::Details;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use details::Details;
 
 impl Trace {
     pub(super) fn new(
@@ -79,7 +88,7 @@ impl Trace {
         self.0.done.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn done(&self) -> u64 {
+    pub(super) fn done(&self) -> u64 {
         self.0.done.load(Ordering::Relaxed)
     }
 

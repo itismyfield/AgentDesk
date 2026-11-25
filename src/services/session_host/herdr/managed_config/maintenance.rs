@@ -19,7 +19,7 @@ pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const STALE_AFTER: Duration = Duration::from_secs(90);
 /// E7 needs a start strictly after the barrier plus one second; Linux reads starts up to 1s early.
 const START_WAIT: Duration = Duration::from_millis(2_100);
-pub(crate) const RESTART: &str = "herdr_config_restart_required";
+const RESTART: &str = "herdr_config_restart_required";
 const JOB_ENV: &str = "herdr_job_env_mismatch";
 
 /// The latest upkeep of one dedicated endpoint's home, as health shows it.
@@ -46,11 +46,26 @@ impl Record {
     }
 }
 
-pub(crate) static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
+static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
 static TASK: OnceLock<()> = OnceLock::new();
 
 pub(crate) fn records() -> BTreeMap<String, Record> {
     RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Test seam: the cause a pass records for a home whose server must restart.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn restart_cause_for_test() -> &'static str {
+    RESTART
+}
+
+/// Test seam: forgets `home`'s record, as a new process starts without one.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn forget_record_for_test(home: &str) {
+    RECORDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(home);
 }
 
 enum File {
@@ -167,7 +182,17 @@ pub(crate) struct Fault {
     cause: Option<&'static str>,
     /// Every endpoint read a fresh `Off`: only then does a pass without a cause end the episode.
     cleared: bool,
-    pub(crate) notice: Option<OperatorNotice>,
+    notice: Option<OperatorNotice>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Fault {
+    /// Test seam: keeps the receipts of the notice this fault moves under `root`.
+    pub(crate) fn set_notice_receipt_root_for_test(&mut self, root: &std::path::Path) {
+        if let Some(notice) = self.notice.as_mut() {
+            notice.root = Some(root.to_path_buf());
+        }
+    }
 }
 
 /// One upkeep pass over the booted dedicated homes. A refused or failing home never blocks
@@ -178,7 +203,17 @@ pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: b
     })
 }
 
-pub(crate) fn pass_with(
+/// Test seam: one pass with `read` standing in for the E7 read of each home.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn pass_with_for_test(
+    boot: &BootSessionHosts,
+    personal: &PersonalPaths,
+    read: &dyn Fn(&str) -> Option<RestoreResume>,
+) -> Vec<Fault> {
+    pass_with(boot, personal, read)
+}
+
+fn pass_with(
     boot: &BootSessionHosts,
     personal: &PersonalPaths,
     read: &dyn Fn(&str) -> Option<RestoreResume>,

@@ -1,4 +1,8 @@
-use super::*;
+use crate::services::legacy_body_census::*;
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[path = "review_tests.rs"]
 mod review;
 #[path = "window_tests.rs"]
@@ -248,7 +252,7 @@ async fn blocked_writer_times_out_without_stalling_the_async_runtime() {
 fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
     use sha2::Digest;
     let raw = include_str!("../../../scripts/tui_o_body_probes.json");
-    let actual = manifest::inspect(raw);
+    let actual = inspect_for_test(raw);
     assert_eq!(actual["coverage"], false);
     assert_eq!(actual["pending"], 0);
     assert_eq!(actual["instrumentation_complete"], true);
@@ -259,18 +263,18 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
     for row in data["claim_probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
-    let complete = manifest::inspect(&serde_json::to_string(&data).unwrap());
+    let complete = inspect_for_test(&serde_json::to_string(&data).unwrap());
     assert_eq!(complete["coverage"], false);
     assert_eq!(complete["instrumentation_complete"], true);
     assert_ne!(actual["census_hash"], complete["census_hash"]);
     data["probes"][0]["status"] = json!("PENDING_0b1");
-    assert_eq!(manifest::inspect(&data.to_string())["coverage"], false);
+    assert_eq!(inspect_for_test(&data.to_string())["coverage"], false);
     assert_eq!(
-        manifest::inspect(&data.to_string())["instrumentation_complete"],
+        inspect_for_test(&data.to_string())["instrumentation_complete"],
         false
     );
-    assert_eq!(manifest::inspect("{}")["coverage"], false);
-    assert_eq!(manifest::inspect("not json")["coverage"], false);
+    assert_eq!(inspect_for_test("{}")["coverage"], false);
+    assert_eq!(inspect_for_test("not json")["coverage"], false);
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/legacy_body_census_evidence.json"
     ))
@@ -304,7 +308,7 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
         for edit in case["edits"].as_array().unwrap() {
             *proof.pointer_mut(edit[0].as_str().unwrap()).unwrap() = edit[1].clone();
         }
-        let result = manifest::inspect_with_evidence(
+        let result = inspect_with_evidence_for_test(
             &raw,
             (case["missing"] != true).then_some(&proof),
             Some(&identity),
@@ -389,7 +393,7 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
             }
             std::fs::write(&source_path, source.to_string()).unwrap();
             let result =
-                manifest::packaged(dir.path(), bundle["raw"].as_str().unwrap(), &binary, &head);
+                packaged_for_test(dir.path(), bundle["raw"].as_str().unwrap(), &binary, &head);
             assert_eq!(result["coverage"], case == "valid", "{case}");
         }
     }

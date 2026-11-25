@@ -6,8 +6,8 @@ fn retained(c: &Case, actor: &mut Host, id: &str, prompt: &str) {
     let raw = row(id, prompt);
     let raw_record = raw[..raw.len() - 1].to_vec();
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(NoticeEvidence {
                     record: crate::services::tui_o::shadow::SourceRange {
@@ -34,15 +34,15 @@ async fn retained_machine_policy_settles_without_origin_and_replays() {
     let prompt = "<command-name>/clear</command-name>";
     assert!(crate::services::discord::input_notice_content(prompt).is_none());
     retained(&c, &mut actor, "policy", prompt);
-    actor.prepare_notices(&[]).await;
-    assert_eq!(actor.notice_debt_extra(), 0);
+    actor.prepare_notices_for_test(&[]).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     assert_eq!(c.notices(), 0);
     let ledger = std::fs::read_to_string(notice_ledger(c._runtime.path())).unwrap();
     assert!(ledger.contains("\"kind\":\"settled\""));
     drop(actor);
     let mut actor = c.open();
-    actor.prepare_notices(&[]).await;
-    assert_eq!(actor.notice_debt_extra(), 0);
+    actor.prepare_notices_for_test(&[]).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -56,12 +56,12 @@ async fn pending_mismatch_reuses_work_on_unchanged_prepare() {
         .unwrap();
     c.input("mismatch", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
-    assert_eq!(actor.notice_debt_extra(), 1);
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     EVALUATIONS.with(|c| c.set((0, 0)));
     for _ in 0..8 {
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
     }
     eprintln!(
         "NOTICE_PENDING_COST kind=mismatch prepares=8 evaluated_records={}",
@@ -82,9 +82,9 @@ async fn pending_reason_rotation_and_eligible_roundtrip_log_once() {
     c.input("owned", &frame);
     c.input("direct", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     let e = actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .ledger()
         .input_notices()
@@ -100,16 +100,21 @@ async fn pending_reason_rotation_and_eligible_roundtrip_log_once() {
         "history_snapshot_changed",
         "registration_source_mismatch",
     ] {
-        actor.defer_notice(id.clone(), reason);
+        actor.defer_notice_for_test(id.clone(), reason);
     }
-    actor.prepare_notices(&fresh).await;
-    actor.defer_notice(id.clone(), "authority_busy");
+    actor.prepare_notices_for_test(&fresh).await;
+    actor.defer_notice_for_test(id.clone(), "authority_busy");
     assert_eq!(EVALUATIONS.with(|c| c.get().1), 1);
-    assert!(actor.writer.notice_pending.contains_key(&id));
+    assert!(
+        actor
+            .writer_for_test()
+            .notice_pending_for_test()
+            .contains_key(&id)
+    );
     drop(actor);
     let mut actor = c.open();
     EVALUATIONS.with(|c| c.set((0, 0)));
-    actor.defer_notice(id, "native_census_unavailable");
+    actor.defer_notice_for_test(id, "native_census_unavailable");
     assert_eq!(
         EVALUATIONS.with(|c| c.get().1),
         1,
@@ -126,30 +131,30 @@ async fn retained_direct_full_frame_twin_survives_history_failure() {
     let mut actor = c.open();
     c.run(&mut actor).await;
     c.input("direct", &frame);
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     let path = c._guard.path().join("runtime/injected_frames.json");
     let original = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"unreadable history").unwrap();
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("direct"))
             .is_none()
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     assert_eq!(c.notices(), 0);
     std::fs::write(&path, original).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     assert_eq!(c.notices(), 1);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -164,8 +169,8 @@ async fn pending_scope_rechecks_once_for_each_dependency_change() {
         .unwrap();
     c.input("mismatch", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     let history_path = c._guard.path().join("runtime/injected_frames.json");
     let binding_path = crate::services::tui_prompt_dedupe::binding_events::log_path(CHANNEL)
         .unwrap()
@@ -176,7 +181,7 @@ async fn pending_scope_rechecks_once_for_each_dependency_change() {
         EVALUATIONS.with(|c| c.set((0, 0)));
         history::notice_owner::SNAPSHOT_READS.with(|c| c.set(0));
         for _ in 0..4 {
-            actor.prepare_notices(&[]).await;
+            actor.prepare_notices_for_test(&[]).await;
         }
         assert_eq!(EVALUATIONS.with(|c| c.get().0), 0, "before {dependency}");
         assert_eq!(history::notice_owner::SNAPSHOT_READS.with(|c| c.get()), 0);
@@ -194,7 +199,7 @@ async fn pending_scope_rechecks_once_for_each_dependency_change() {
             }
             _ => unreachable!(),
         }
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert_eq!(
             EVALUATIONS.with(|c| c.get().0),
             1,
@@ -205,14 +210,14 @@ async fn pending_scope_rechecks_once_for_each_dependency_change() {
             1,
             "one scope snapshot after {dependency}"
         );
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert_eq!(
             EVALUATIONS.with(|c| c.get().0),
             1,
             "no repeated work after {dependency}"
         );
     }
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
 }
 
 /// Each native append reopens a pending notice, yet an unchanged history is neither read nor
@@ -232,20 +237,20 @@ async fn native_appends_do_not_reread_an_unchanged_history() {
     let file = std::fs::File::options().write(true).open(&history_path);
     file.unwrap().set_modified(at).unwrap();
     let mut actor = c.open();
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     history::HISTORY_READS.with(|reads| reads.set(0));
     crate::services::discord::INPUT_NOTICE_RUNS.with(|runs| runs.set(0));
     for _ in 0..4 {
         EVALUATIONS.with(|c| c.set((0, 0)));
         append(&c.path, b" ");
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert_eq!(EVALUATIONS.with(|c| c.get().0), 1, "the append reopens it");
     }
     assert_eq!(history::HISTORY_READS.with(|reads| reads.get()), 0);
     let runs = crate::services::discord::INPUT_NOTICE_RUNS.with(|runs| runs.get());
     assert_eq!(runs, 0, "the same prompt is not classified again");
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -255,31 +260,31 @@ async fn unavailable_scope_reuses_work_and_retries_after_five_seconds() {
     c.register(&frame);
     c.input("missing", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     EVALUATIONS.with(|c| c.set((0, 0)));
     history::notice_owner::SNAPSHOT_READS.with(|c| c.set(0));
     for _ in 0..8 {
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
     }
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 0);
     assert_eq!(history::notice_owner::SNAPSHOT_READS.with(|c| c.get()), 0);
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 1);
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 1);
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     std::fs::rename(parked, &c.path).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     c.excluded(&mut actor, "missing");
 }
 
 async fn evaluations(actor: &mut Host) -> usize {
     EVALUATIONS.with(|c| c.set((0, 0)));
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     EVALUATIONS.with(|c| c.get().0)
 }
 
@@ -290,10 +295,10 @@ async fn unchanged_unavailable_scope_retries_less_often_until_its_inputs_change(
     c.register(&frame);
     c.input("missing", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     // Each retry on the same inputs waits twice as long: 5, 10, 20, 40, then a 60 second cap.
     for wait in [5, 10, 20, 40, 60, 60] {
         tokio::time::advance(std::time::Duration::from_secs(wait - 1)).await;
@@ -320,10 +325,10 @@ async fn unchanged_unavailable_scope_retries_less_often_until_its_inputs_change(
         1,
         "the wait is back to five seconds"
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     std::fs::remove_file(&c.path).unwrap();
     std::fs::rename(parked, &c.path).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     c.excluded(&mut actor, "missing");
 }
 
@@ -336,12 +341,12 @@ async fn materialized_enrichment_reopens_only_its_changed_generation() {
     start_migration(&mut actor);
     c.input("enrich", &frame);
     retained(&c, &mut actor, "enrich", &frame);
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     EVALUATIONS.with(|c| c.set((0, 0)));
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 0);
     let mut evidence = actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .ledger()
         .input_notices()
@@ -353,18 +358,18 @@ async fn materialized_enrichment_reopens_only_its_changed_generation() {
     evidence.unit_key = Some(input_key("enrich"));
     evidence.payload = crate::services::discord::input_notice_content(&frame);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(evidence),
             }),
         })
         .unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 1);
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(EVALUATIONS.with(|c| c.get().0), 1);
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -375,9 +380,15 @@ async fn old_source_owned_record_expires_but_direct_obligation_posts() {
     c.input("owned", &frame);
     c.input("direct", "still owes a direct notice");
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     assert_eq!(
-        actor.writer.store().ledger().input_notices().evidence.len(),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .evidence
+            .len(),
         2
     );
     let next_path = c.path.with_extension("successor");
@@ -402,9 +413,9 @@ async fn old_source_owned_record_expires_but_direct_obligation_posts() {
             .unwrap(),
         crate::services::tui_prompt_dedupe::binding_events::Committed::Appended
     );
-    actor.prepare_notices(&fresh).await;
-    let history = actor.bindings.binding_history(CHANNEL);
-    let state = actor.writer.store().ledger().input_notices();
+    actor.prepare_notices_for_test(&fresh).await;
+    let history = actor.bindings_for_test().binding_history(CHANNEL);
+    let state = actor.writer_mut_for_test().store().ledger().input_notices();
     assert!(
         state.settled.values().any(|s| s.expired_after.is_some()),
         "history={history:?} settled={:?} evidence={:?}",
@@ -417,21 +428,21 @@ async fn old_source_owned_record_expires_but_direct_obligation_posts() {
     );
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("direct"))
             .is_none()
     );
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     assert_eq!(c.notices(), 1);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     let before = actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .ledger()
         .input_notices()
@@ -439,9 +450,14 @@ async fn old_source_owned_record_expires_but_direct_obligation_posts() {
         .clone();
     drop(actor);
     let mut actor = c.open();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     assert_eq!(
-        actor.writer.store().ledger().input_notices().settled,
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .settled,
         before
     );
     assert_eq!(c.notices(), 1);
@@ -468,10 +484,13 @@ async fn retained_356_record_fixture_settles_311_and_stops_repeated_heavy_work()
             end: start + raw.len() as u64,
             line: raw[..raw.len() - 1].to_vec(),
         };
-        let origin = actor.sources.notice_origin(&c.source, &record).unwrap();
+        let origin = actor
+            .sources_for_test()
+            .notice_origin(&c.source, &record)
+            .unwrap();
         actor
-            .writer
-            .record(LedgerEntry::InputNotice {
+            .writer_mut_for_test()
+            .record_for_test(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::Materialized {
                     evidence: Box::new(NoticeEvidence {
                         record: origin.record.clone(),
@@ -489,13 +508,19 @@ async fn retained_356_record_fixture_settles_311_and_stops_repeated_heavy_work()
     for i in 0..45 {
         c.input(&format!("direct-{i}"), &format!("direct input {i}"));
     }
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     assert_eq!(
-        actor.writer.store().ledger().input_notices().evidence.len(),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .evidence
+            .len(),
         356
     );
-    actor.prepare_notices(&fresh).await;
-    let ledger = actor.writer.store().ledger();
+    actor.prepare_notices_for_test(&fresh).await;
+    let ledger = actor.writer_mut_for_test().store().ledger();
     let state = ledger.input_notices();
     assert_eq!(state.settled.len(), 311);
     assert_eq!(
@@ -509,20 +534,26 @@ async fn retained_356_record_fixture_settles_311_and_stops_repeated_heavy_work()
     EVALUATIONS.with(|c| c.set((0, 0)));
     history::notice_owner::SNAPSHOT_READS.with(|c| c.set(0));
     for _ in 0..10 {
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
     }
     assert_eq!(EVALUATIONS.with(|c| c.get()), (0, 0));
     assert_eq!(history::notice_owner::SNAPSHOT_READS.with(|c| c.get()), 0);
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     assert_eq!(c.notices(), 45);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     eprintln!(
         "NOTICE_SETTLE_FIXTURE records=356 settled={} open_after_settle=45 repeated_prepares=10 evaluated_records={} snapshot_reads={} pending_logs={} posts={}",
-        actor.writer.store().ledger().input_notices().settled.len(),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .settled
+            .len(),
         EVALUATIONS.with(|c| c.get().0),
         history::notice_owner::SNAPSHOT_READS.with(|c| c.get()),
         EVALUATIONS.with(|c| c.get().1),
@@ -568,11 +599,17 @@ async fn retained_fresh_execution_of_same_native_source_uses_its_immutable_proof
         .prepare(NAMESPACE, &registered_input(&key, &frame))
         .unwrap();
     c.input("fresh-owned", &frame);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     c.excluded(&mut actor, "fresh-owned");
     assert_eq!(
-        actor.writer.store().ledger().input_notices().settled.len(),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .settled
+            .len(),
         1
     );
     c.input("fresh-direct-twin", &frame);
@@ -580,7 +617,7 @@ async fn retained_fresh_execution_of_same_native_source_uses_its_immutable_proof
     assert_eq!(c.notices(), 1);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("fresh-direct-twin"))
@@ -645,7 +682,7 @@ async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks()
         );
         assert!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .latest_piece(&input_key("context-a-direct"), 0)
@@ -653,7 +690,7 @@ async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks()
         );
         assert!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .latest_piece(&input_key("context-b-uncertain"), 0)
@@ -661,29 +698,29 @@ async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks()
         );
         assert!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(&input_key("context-b-uncertain"))
                 .is_none()
         );
         assert_eq!(
-            actor.notice_debt_extra(),
+            actor.notice_debt_extra_for_test(),
             1,
             "same-hash B remains pending, including planned registrations"
         );
         EVALUATIONS.with(|c| c.set((0, 0)));
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert_eq!(EVALUATIONS.with(|c| c.get().0), 0);
         std::fs::write(&prepared.path, bytes).unwrap();
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert!(
             EVALUATIONS.with(|c| c.get().0) > 0,
             "restoring the watched context must re-evaluate B"
         );
         if planned {
             assert_eq!(
-                actor.notice_debt_extra(),
+                actor.notice_debt_extra_for_test(),
                 1,
                 "a recovered planned registration still needs its source"
             );
@@ -702,17 +739,17 @@ async fn unrelated_missing_context_blocks_only_its_frame_and_recovery_rechecks()
                     },
                 )
                 .unwrap();
-            actor.prepare_notices(&[]).await;
+            actor.prepare_notices_for_test(&[]).await;
         }
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(&input_key("context-b-uncertain")),
             Some("input_notice_source")
         );
-        assert_eq!(actor.notice_debt_extra(), 0);
+        assert_eq!(actor.notice_debt_extra_for_test(), 0);
         assert_eq!(c.notices(), 1);
     }
 }

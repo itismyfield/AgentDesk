@@ -1,6 +1,9 @@
 //! Codex draft-notice PG test that checks discord dispatch provenance, moved out of KRX codex_tui.
 
-use crate::services::codex_tui::input::submission::{draft_notice_event, enqueue_draft_notice};
+use crate::services::codex_tui::input::{
+    draft_notice_event_for_test as draft_notice_event,
+    enqueue_draft_notice_for_test as enqueue_draft_notice,
+};
 
 #[tokio::test]
 async fn codex_draft_notice_is_one_non_turn_outbox_event_pg() {

@@ -34,7 +34,7 @@ const BATCH: usize = 4;
 /// Prefix bytes one inspection may hash: two probes of every candidate at 32 MiB each.
 const HASH_BUDGET: u64 = 2 * CANDIDATES as u64 * (32 << 20);
 
-pub(crate) struct Transitions {
+pub(super) struct Transitions {
     receiver: Option<Receiver>,
     job: Option<Job>,
     /// The actor's stop, read again just before each retirement write.
@@ -52,7 +52,7 @@ impl Transitions {
     pub(super) fn has_apply_job(&self) -> bool {
         self.job.as_ref().is_some_and(|job| job.apply)
     }
-    pub(crate) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
+    pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
         let job = None;
         Self {
             receiver,

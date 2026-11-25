@@ -68,7 +68,7 @@ fn now_millis() -> i64 {
 /// Keep history, absolute indices, and overflow state under one mutex so a
 /// snapshot cannot skip a concurrently pushed event.
 #[derive(Debug, Default)]
-pub(crate) struct EventLogInner {
+struct EventLogInner {
     buffer: VecDeque<StructuredEvent>,
     next_logical_idx: u64,
     last_flushed_idx: u64,
@@ -82,7 +82,7 @@ pub(crate) struct EventLogInner {
 #[derive(Debug)]
 pub struct EventLog {
     capacity: usize,
-    pub(crate) inner: Mutex<EventLogInner>,
+    inner: Mutex<EventLogInner>,
 }
 
 impl EventLog {
@@ -194,8 +194,22 @@ impl EventLog {
     }
 }
 
-pub(crate) static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
+static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
 static FLUSHER_STARTED: OnceLock<()> = OnceLock::new();
+
+// Test seams for the capture stress tests mounted in the services test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn install_global_for_test(log: Arc<EventLog>) -> Result<(), Arc<EventLog>> {
+    GLOBAL_EVENT_LOG.set(log)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl EventLog {
+    /// Holds the buffer lock (poisoned or not), so a panic while held poisons it as a failed append would.
+    pub(crate) fn hold_lock_for_test(&self) -> impl Sized + '_ {
+        self.inner.lock()
+    }
+}
 
 pub fn global() -> Arc<EventLog> {
     GLOBAL_EVENT_LOG

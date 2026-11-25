@@ -44,9 +44,19 @@ fn resumed_session(
     Ok(Some(session.to_owned()))
 }
 
+/// The launch and attach of a turn's source, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn launched_source_for_test(
+    turn: &HerdrTurn<'_>,
+    runtime: &Handle,
+    ports: &dyn HerdrTurnPorts,
+) -> Result<Attached, String> {
+    launched_source(turn, runtime, ports)
+}
+
 /// A new execution: create, evidence, SessionStart, then attach; no prompt before the attach.
 /// A resume closes only its verified old pane, then reads the latest native binding again.
-pub(crate) fn launched_source(
+pub(super) fn launched_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,

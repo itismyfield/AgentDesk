@@ -5,8 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::Screen;
-use crate::services::claude_tui::host_input::busy::BusyState;
-use crate::services::claude_tui::host_input::busy::herdr::*;
+use crate::services::claude_tui::host_input::busy::{BusyState, Context, Source};
 use crate::services::discord::observe_owned_claude_busy_for_test as observe_busy;
 use crate::services::herdr_admission::{Admission, force_for_test};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
@@ -119,7 +118,7 @@ fn pane_with_context(rig: &HerdrRig, context: &std::path::Path) {
 
 fn current(context: &Context) -> Option<Source> {
     crate::services::tmux_common::with_tmux_source_authority(LOGICAL, |authority| {
-        context.current_source(authority)
+        context.current_source_for_test(authority)
     })
 }
 
@@ -131,17 +130,17 @@ fn current_source_requires_the_bound_nonce_and_current_runtime_binding() {
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
     let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
-    let context = observation.context.as_ref().unwrap();
-    assert_eq!(current(context).unwrap().id, source);
-    let wrong_nonce = Context {
-        channel: CHANNEL,
-        logical: LOGICAL.into(),
-        nonce: N2.into(),
-        output_ready: context.output_ready,
-        target: context.target.clone(),
-        writer: context.writer.clone(),
-        attempt_target: context.attempt_target.clone(),
-    };
+    let context = observation.context_for_test().unwrap();
+    assert_eq!(current(context).unwrap().id_for_test(), source);
+    let wrong_nonce = Context::for_test(
+        CHANNEL,
+        LOGICAL.into(),
+        N2.into(),
+        context.output_ready_for_test(),
+        context.target_for_test().clone(),
+        context.writer_for_test().to_owned(),
+        context.attempt_target_for_test().clone(),
+    );
     assert!(
         current(&wrong_nonce).is_none(),
         "another nonce cannot use the global pin"
@@ -163,8 +162,8 @@ fn current_source_rejects_a_replaced_transcript_inode() {
     let _registry = rig.registry_on_this_thread();
     pane(&rig);
     let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
-    let context = observation.context.as_ref().unwrap();
-    assert_eq!(current(context).unwrap().id, source);
+    let context = observation.context_for_test().unwrap();
+    assert_eq!(current(context).unwrap().id_for_test(), source);
     let replacement = source.path.with_extension("replacement");
     std::fs::copy(&source.path, &replacement).unwrap();
     std::fs::rename(&replacement, &source.path).unwrap();
@@ -191,9 +190,9 @@ fn an_owned_live_source_waits_while_its_actual_output_writer_is_absent() {
         CHANNEL
     ));
     let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
-    let context = observation.context.as_ref().unwrap();
-    assert!(context.target.execution_alive());
-    assert_eq!(current(context).unwrap().id, source);
+    let context = observation.context_for_test().unwrap();
+    assert!(context.target_for_test().execution_alive());
+    assert_eq!(current(context).unwrap().id_for_test(), source);
     assert!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.path).is_busy()
     );
@@ -212,14 +211,14 @@ fn a_captured_target_rejects_the_other_execution_running_in_its_pane() {
     let _admission = force_for_test(Admission::new(true, Some(stop)));
     pane(&rig);
     let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
-    let context = observation.context.as_ref().unwrap();
-    assert!(context.target.execution_alive());
-    context.target.pin(HerdrMutation::Input).unwrap();
-    context.target.discard_pin();
+    let target = observation.context_for_test().unwrap().target_for_test();
+    assert!(target.execution_alive());
+    target.pin(HerdrMutation::Input).unwrap();
+    target.discard_pin();
     rig.run_provider(&rig.context(N2), false);
-    assert!(!context.target.execution_alive());
+    assert!(!target.execution_alive());
     assert_eq!(
-        context.target.pin(HerdrMutation::Input),
+        target.pin(HerdrMutation::Input),
         Err(crate::services::session_host::HerdrGateRefusal::OtherNonce)
     );
     assert!(matches!(observation.probe()(), Screen::Unknown));
@@ -381,7 +380,9 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
         "a different relay's Idle proof cannot delegate this busy input path"
     );
     assert_eq!(
-        current(observation.context.as_ref().unwrap()).unwrap().id,
+        current(observation.context_for_test().unwrap())
+            .unwrap()
+            .id_for_test(),
         source
     );
     assert!(rig.sends().is_empty());

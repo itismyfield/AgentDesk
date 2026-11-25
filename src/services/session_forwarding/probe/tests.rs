@@ -1,63 +1,18 @@
-use super::*;
+use crate::services::session_forwarding::ForwardCallerContext;
+use crate::services::session_forwarding::probe::{
+    TrustedForwardTargetForTest as TrustedForwardTarget, probe_for_test as probe,
+    probe_target_for_test as probe_target,
+};
 use axum::Router;
 use axum::extract::{ConnectInfo, Request};
 use axum::http::header;
 use axum::middleware::{Next, from_fn, from_fn_with_state, map_request};
 use axum::routing::get;
+use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-pub(crate) struct ScopedReadinessProbe {
-    id: String,
-    previous: Option<CachedProbe>,
-}
-
-impl ScopedReadinessProbe {
-    pub(crate) fn verified(id: &str, origin: &str, expires_at_ms: i64) -> Self {
-        let previous = CACHE
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                id.to_owned(),
-                CachedProbe {
-                    origin: Some(origin.to_owned()),
-                    report: json!({
-                        "expires_at_ms": expires_at_ms,
-                        "reachability_verified": true,
-                        "reachability_status": "verified",
-                    }),
-                },
-            );
-        Self {
-            id: id.to_owned(),
-            previous,
-        }
-    }
-
-    pub(crate) fn expire(&self) {
-        if let Some(probe) = CACHE
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&self.id)
-        {
-            probe.report["expires_at_ms"] = json!(0);
-        }
-    }
-}
-
-impl Drop for ScopedReadinessProbe {
-    fn drop(&mut self) {
-        let mut cache = CACHE
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(previous) = self.previous.take() {
-            cache.insert(self.id.clone(), previous);
-        } else {
-            cache.remove(&self.id);
-        }
-    }
-}
 
 fn context() -> ForwardCallerContext {
     let mut config = crate::config::Config::default();
@@ -130,9 +85,7 @@ async fn reachability_checks_authenticated_response_identity_and_protocol() {
             let body = body.to_string();
             connection.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
         });
-        let target =
-            super::super::trusted_target::TrustedForwardTarget::for_test("worker", &origin)
-                .unwrap();
+        let target = TrustedForwardTarget::for_test("worker", &origin).unwrap();
         assert_eq!(probe_target(&context(), &target).await, expected);
         server.await.unwrap();
     }
@@ -157,7 +110,7 @@ fn tokenless_context() -> ForwardCallerContext {
 async fn probe_receiver(
     peer: Option<SocketAddr>,
 ) -> (
-    super::super::TrustedForwardTarget,
+    TrustedForwardTarget,
     Arc<Mutex<Vec<ReceiverObservation>>>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -222,7 +175,7 @@ async fn probe_receiver(
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let target = super::super::TrustedForwardTarget::for_test("worker", &origin).unwrap();
+    let target = TrustedForwardTarget::for_test("worker", &origin).unwrap();
     let server = tokio::spawn(async move {
         // No listener-derived ConnectInfo: a missing test injection must fail closed.
         axum::serve(listener, app.into_make_service())

@@ -1,5 +1,4 @@
 #![cfg(unix)]
-use crate::services::claude::CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS;
 use crate::services::claude::first_input::*;
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};
@@ -58,7 +57,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     );
     let submitted = outcome
         .unwrap_or_else(|error| panic!("cold physical submit must finish without Source: {error}"));
-    assert_eq!(submitted.start_offset, 0);
+    assert_eq!(submitted.start_offset_for_test(), 0);
     assert!(
         !transcript.exists(),
         "cold submit must not wait for a transcript"
@@ -116,7 +115,7 @@ fn fresh_submit_held_never_retries_or_writes_payload() {
         ..Default::default()
     });
     let mut attempts = 0;
-    let result = submit_using(
+    let result = submit_using_for_test(
         "/not-created",
         0,
         || {
@@ -151,7 +150,7 @@ fn fresh_readiness_exhaustion_keeps_error_and_exact_attempt_budget() {
     let detail = "timeout waiting for claude tui fresh prompt input readiness after 120s";
     let mut attempts = 0;
     let mut sleeps = 0;
-    let result = submit_using(
+    let result = submit_using_for_test(
         "/not-created",
         0,
         || {
@@ -167,7 +166,8 @@ fn fresh_readiness_exhaustion_keeps_error_and_exact_attempt_budget() {
         panic!("readiness exhaustion must stay Legacy");
     };
     assert_eq!(
-        attempts, CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS,
+        attempts,
+        claude_tui_fresh_prompt_max_ready_attempts_for_test(),
         "readiness uses MAX_READY_ATTEMPTS"
     );
     assert_eq!(sleeps, attempts - 1);
@@ -177,7 +177,7 @@ fn fresh_readiness_exhaustion_keeps_error_and_exact_attempt_budget() {
         "exhaustion must preserve readiness context"
     );
     assert_eq!(
-        exhausted(None),
+        exhausted_for_test(None),
         format!("claude tui fresh prompt readiness attempts exhausted ({attempts} attempts)"),
         "fallback exhaustion message must remain explicit"
     );
@@ -214,7 +214,7 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
             assert_eq!(source["expected_session_id"], "owned-sid");
             submit(prompt.into()).map_err(|error| format!("{error:?}"))
         });
-    let submitted = submit_owned(
+    let submitted = submit_owned_for_test(
         hook,
         transcript.to_str().unwrap(),
         0,
@@ -223,7 +223,7 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
         "owned-sid",
     )
     .unwrap_or_else(|error| panic!("the owner's submit keeps its ticket: {error:?}"));
-    assert_eq!(submitted.start_offset, 0);
+    assert_eq!(submitted.start_offset_for_test(), 0);
     let pane = f.root.path().join(name);
     assert_eq!(std::fs::read(pane.join("payloads")).unwrap().len(), 1);
     assert_eq!(std::fs::read(pane.join("enters")).unwrap().len(), 1);
@@ -278,7 +278,7 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
                 .map_err(|error| format!("{error:?}"))
         });
     let token = std::sync::Arc::new(CancelToken::new());
-    submit_owned(
+    submit_owned_for_test(
         hook,
         path.to_str().unwrap(),
         0,

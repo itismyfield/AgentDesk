@@ -1,6 +1,5 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude::herdr_turn::Attached;
-use crate::services::claude::herdr_turn::first_input::*;
+use crate::services::claude::herdr_turn::{Attached, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::discord::{
@@ -125,15 +124,15 @@ impl Source {
         );
     }
     fn attached(&self, target: HerdrTarget) -> Attached {
-        Attached {
-            nonce: NONCE.into(),
-            session_id: self.path.file_stem().unwrap().to_str().unwrap().into(),
-            transcript: self.path.clone(),
+        Attached::for_test(
+            NONCE.into(),
+            self.path.file_stem().unwrap().to_str().unwrap().into(),
+            self.path.clone(),
             target,
-            bound: true,
-            awaiting_clear: true,
-            physical: None,
-        }
+            true,
+            true,
+            None,
+        )
     }
 }
 impl Drop for Source {
@@ -196,7 +195,7 @@ fn run(case: Case) {
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
     let attempt = json!({"nonce":"clear-held-1","provider":"claude",
         "target":{"host":"herdr","owner":logical,"root":rig.socket().display().to_string(),"execution_nonce":NONCE},
-        "source":{"kind":"pre_source","expected_session_id":attached.session_id,
+        "source":{"kind":"pre_source","expected_session_id":attached.session_id_for_test(),
             "expected_transcript":source.path,"binding_watermark":null}});
     runtime
         .block_on(mailbox.v2_cold_fixture(
@@ -226,12 +225,13 @@ fn run(case: Case) {
                 );
                 if !matches!(case, Case::Capture) {
                     let pane = attached
-                        .target
+                        .target_for_test()
                         .capture_ansi(-80)
                         .expect("owned draft capture exists");
                     assert!(!readiness::empty_draft(&pane));
                 }
-                let result = write(logical, None, attached, &frame, &sender, None).map(drop);
+                let result =
+                    write_for_test(logical, None, attached, &frame, &sender, None).map(drop);
                 match case {
                     Case::CommonDraft => readiness::watch_draft(logical, Some(&watched_path)),
                     Case::CommonCurrent => readiness::watch_current(logical, Some(&watched_path)),
@@ -319,7 +319,7 @@ fn run(case: Case) {
                     Box::new(move |frame| {
                         guarded_outcome::capture_preparation(|| {
                             let (sender, _receiver) = std::sync::mpsc::channel();
-                            write(logical, None, attached, &frame, &sender, None).map(drop)
+                            write_for_test(logical, None, attached, &frame, &sender, None).map(drop)
                         })
                     }),
                     Some(writer),

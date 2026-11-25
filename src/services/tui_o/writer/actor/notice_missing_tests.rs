@@ -28,14 +28,14 @@ async fn missing_evidence_waits_across_polls_and_a_fresh_writer_until_a_real_cha
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     for incarnation in 0..2 {
         let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
-        actor.owed.push_back(piece(&evidence));
+        actor.owed_mut_for_test().push_back(piece(&evidence));
         reset_calls();
-        actor.deliver_owed(&progress).await;
+        actor.deliver_owed_for_test(&progress).await;
         assert_eq!(calls(), (1, 1), "boot observes the debt once");
         for poll in 0..20 {
             tokio::time::advance(std::time::Duration::from_secs(1)).await;
-            actor.prepare_notices(&[]).await;
-            actor.deliver_owed(&progress).await;
+            actor.prepare_notices_for_test(&[]).await;
+            actor.deliver_owed_for_test(&progress).await;
             assert_eq!(
                 calls(),
                 (1, 1),
@@ -43,7 +43,11 @@ async fn missing_evidence_waits_across_polls_and_a_fresh_writer_until_a_real_cha
             );
         }
         assert!(port.posts.lock().unwrap().is_empty());
-        assert_eq!(actor.owed.len(), 1, "unknown evidence must not be lost");
+        assert_eq!(
+            actor.owed_for_test().len(),
+            1,
+            "unknown evidence must not be lost"
+        );
     }
     drop(binding);
     drop(runtime_guard);
@@ -57,38 +61,38 @@ async fn missing_evidence_arrival_wakes_and_posts_exactly_once() {
     let port = Arc::new(Port::default());
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     start_migration(&mut actor);
-    actor.owed.push_back(piece(&evidence));
+    actor.owed_mut_for_test().push_back(piece(&evidence));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert!(port.posts.lock().unwrap().is_empty());
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(evidence.clone()),
             }),
         })
         .unwrap();
-    actor.prepare_notices(&[]).await;
-    actor.deliver_owed(&progress).await;
+    actor.prepare_notices_for_test(&[]).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(
         *port.posts.lock().unwrap(),
         [evidence.payload.clone().unwrap()]
     );
-    assert!(actor.owed.is_empty());
+    assert!(actor.owed_for_test().is_empty());
     for _ in 0..10 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        actor.prepare_notices(&[]).await;
-        actor.deliver_owed(&progress).await;
+        actor.prepare_notices_for_test(&[]).await;
+        actor.deliver_owed_for_test(&progress).await;
     }
     assert_eq!(port.posts.lock().unwrap().len(), 1);
     drop(actor);
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
-    actor.deliver_owed(&progress).await;
-    assert!(actor.owed.is_empty());
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
+    actor.deliver_owed_for_test(&progress).await;
+    assert!(actor.owed_for_test().is_empty());
     assert_eq!(
         port.posts.lock().unwrap().len(),
         1,
@@ -105,20 +109,20 @@ async fn missing_evidence_terminal_ledger_wakes_without_materialization() {
     let (o, evidence, binding) = rerender_fixture(runtime.path());
     let port = Arc::new(Port::default());
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
-    actor.owed.push_back(piece(&evidence));
+    actor.owed_mut_for_test().push_back(piece(&evidence));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     actor
-        .writer
-        .record(LedgerEntry::Excluded {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::Excluded {
             unit_key: evidence.unit_key.clone().unwrap(),
             reason: "input_notice_source".into(),
         })
         .unwrap();
-    actor.deliver_owed(&progress).await;
-    assert!(actor.owed.is_empty());
+    actor.deliver_owed_for_test(&progress).await;
+    assert!(actor.owed_for_test().is_empty());
     assert!(port.posts.lock().unwrap().is_empty());
-    assert_eq!(actor.progress().debt, 0);
+    assert_eq!(actor.progress_for_test().debt, 0);
     drop(binding);
     drop(runtime_guard);
 }
@@ -134,11 +138,11 @@ async fn proven_floor_replay_without_a_live_session_closes_and_clears_health() {
     ));
     let alarms = Alarms(Default::default(), Some(router.clone()));
     let mut previous = host(&o, port.clone(), Alarms::default(), u64::MAX);
-    previous.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    *previous.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     resume(&mut previous);
-    previous.read_sources();
+    previous.read_sources_for_test();
     let captured = previous
-        .writer
+        .writer_mut_for_test()
         .store()
         .cursor(&evidence.record.source)
         .unwrap()
@@ -146,17 +150,17 @@ async fn proven_floor_replay_without_a_live_session_closes_and_clears_health() {
     assert_eq!(captured.captured_through, evidence.record.end);
     assert!(
         previous
-            .writer
+            .writer_mut_for_test()
             .store()
             .retained_segments(&evidence.record.source)
             > 0
     );
-    assert!(previous.owed.is_empty());
+    assert!(previous.owed_for_test().is_empty());
     drop(previous);
     let mut actor = host(&o, port.clone(), alarms.clone(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 snapshot: MigrationSnapshot {
                     sources: vec![MigrationSource {
@@ -191,26 +195,26 @@ async fn proven_floor_replay_without_a_live_session_closes_and_clears_health() {
         let waiting_reason = format!("tui_o:waiting_too_long:{CHANNEL}");
         assert!(crate::services::tui_o::alarm::health_reasons().contains(&waiting_reason));
         resume(&mut actor);
-        actor.read_sources();
-        actor.prepare_notices(&[]).await;
-        actor.deliver_owed(&progress).await;
+        actor.read_sources_for_test();
+        actor.prepare_notices_for_test(&[]).await;
+        actor.deliver_owed_for_test(&progress).await;
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(evidence.unit_key.as_ref().unwrap()),
             Some("input_notice_migration_floor"),
             "incarnation {incarnation}"
         );
-        assert!(actor.owed.is_empty());
-        assert_eq!(actor.progress().debt, 0);
-        tokio::time::advance(WAIT_LIMIT + std::time::Duration::from_secs(1)).await;
-        actor.observe_waiting(true);
-        assert!(actor.waiting.ready.is_empty());
-        assert!(actor.waiting.incident.is_none());
+        assert!(actor.owed_for_test().is_empty());
+        assert_eq!(actor.progress_for_test().debt, 0);
+        tokio::time::advance(WAIT_LIMIT_FOR_TEST + std::time::Duration::from_secs(1)).await;
+        actor.observe_waiting_for_test(true);
+        assert!(actor.waiting_ready_for_test().is_empty());
+        assert!(actor.waiting_incident_for_test().is_none());
         assert!(!crate::services::tui_o::alarm::health_reasons().contains(&waiting_reason));
-        assert_eq!(actor.undelivered(1).unwrap().notice_owed, 0);
+        assert_eq!(actor.undelivered_for_test(1).unwrap().notice_owed, 0);
     }
     assert!(port.posts.lock().unwrap().is_empty());
     assert!(
@@ -232,7 +236,7 @@ async fn missing_evidence_does_not_block_the_later_body() {
     let (o, evidence, binding) = rerender_fixture(runtime.path());
     let port = Arc::new(Port::default());
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
-    actor.owed.push_back(piece(&evidence));
+    actor.owed_mut_for_test().push_back(piece(&evidence));
     let mut body = match piece(&evidence) {
         Derived::Piece(piece) => piece,
         _ => unreachable!(),
@@ -241,14 +245,14 @@ async fn missing_evidence_does_not_block_the_later_body() {
     body.unit_key.native_key = "body-after-missing".into();
     body.notice_origin = None;
     body.payload = "later answer".into();
-    actor.owed.push_back(Derived::Piece(body));
+    actor.owed_mut_for_test().push_back(Derived::Piece(body));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     reset_calls();
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(*port.posts.lock().unwrap(), ["later answer"]);
-    assert_eq!(actor.owed.len(), 1);
-    actor.prepare_notices(&[]).await;
-    actor.deliver_owed(&progress).await;
+    assert_eq!(actor.owed_for_test().len(), 1);
+    actor.prepare_notices_for_test(&[]).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(calls(), (1, 1));
     drop(binding);
     drop(runtime_guard);
@@ -261,8 +265,8 @@ async fn floored_evidence_does_not_exclude_a_piece_with_another_origin() {
     let (o, evidence, binding) = rerender_fixture(runtime.path());
     let mut actor = host(&o, Arc::new(Port::default()), Alarms::default(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 snapshot: MigrationSnapshot {
                     sources: vec![MigrationSource {
@@ -285,16 +289,16 @@ async fn floored_evidence_does_not_exclude_a_piece_with_another_origin() {
         end: evidence.record.end,
         line: evidence.raw_record.clone(),
     };
-    let derived = actor.deriver.derive_scoped(
+    let derived = actor.deriver_mut_for_test().derive_scoped(
         &record,
         &evidence.record.source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(*evidence.origin.clone().unwrap()),
         || None,
     );
-    actor.owed = derived.into();
-    assert_eq!(actor.owed.len(), 1);
-    let Derived::Piece(queued) = actor.owed.front_mut().unwrap() else {
+    *actor.owed_mut_for_test() = derived.into();
+    assert_eq!(actor.owed_for_test().len(), 1);
+    let Derived::Piece(queued) = actor.owed_mut_for_test().front_mut().unwrap() else {
         panic!("notice piece required");
     };
     queued
@@ -303,16 +307,16 @@ async fn floored_evidence_does_not_exclude_a_piece_with_another_origin() {
         .unwrap()
         .logical_session
         .push_str("-other-owner");
-    actor.persist_notice_evidence();
+    actor.persist_notice_evidence_for_test();
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(evidence.unit_key.as_ref().unwrap())
             .is_none()
     );
-    assert_eq!(actor.owed.len(), 1);
+    assert_eq!(actor.owed_for_test().len(), 1);
     drop(binding);
     drop(runtime_guard);
 }
@@ -341,8 +345,8 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
         let port = Arc::new(Port::default());
         let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
         actor
-            .writer
-            .record(LedgerEntry::InputNotice {
+            .writer_mut_for_test()
+            .record_for_test(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::MigrationStarted {
                     snapshot: MigrationSnapshot {
                         sources: if known_source {
@@ -369,8 +373,8 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
             end: evidence.record.end,
             line: evidence.raw_record.clone(),
         };
-        actor.owed = actor
-            .deriver
+        *actor.owed_mut_for_test() = actor
+            .deriver_mut_for_test()
             .derive_scoped(
                 &record,
                 &evidence.record.source,
@@ -379,10 +383,10 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
                 || None,
             )
             .into();
-        assert_eq!(actor.owed.len(), 1);
-        actor.persist_notice_evidence();
+        assert_eq!(actor.owed_for_test().len(), 1);
+        actor.persist_notice_evidence_for_test();
         let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-        actor.deliver_owed(&progress).await;
+        actor.deliver_owed_for_test(&progress).await;
         assert_eq!(
             *port.posts.lock().unwrap(),
             [evidence.payload.unwrap()],
@@ -390,7 +394,7 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
         );
         assert!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(evidence.unit_key.as_ref().unwrap())
@@ -411,8 +415,8 @@ async fn an_old_binding_without_a_timestamp_does_not_prove_a_new_rows_floor() {
     let port = Arc::new(Port::default());
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 snapshot: MigrationSnapshot {
                     sources: Vec::new(),
@@ -429,26 +433,40 @@ async fn an_old_binding_without_a_timestamp_does_not_prove_a_new_rows_floor() {
     native.push(b'\n');
     append(&evidence.record.source.path, &native);
     resume(&mut actor);
-    actor.read_sources();
+    actor.read_sources_for_test();
     assert_eq!(
-        actor.owed.len(),
+        actor.owed_for_test().len(),
         1,
         "the row was actually captured after the freeze"
     );
     let key = evidence.unit_key.as_ref().unwrap();
-    assert!(actor.writer.store().ledger().excluded(key).is_none());
+    assert!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .excluded(key)
+            .is_none()
+    );
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     reset_calls();
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     for _ in 0..20 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        actor.prepare_notices(&[]).await;
-        actor.deliver_owed(&progress).await;
+        actor.prepare_notices_for_test(&[]).await;
+        actor.deliver_owed_for_test(&progress).await;
     }
     assert_eq!(calls(), (1, 1));
-    assert!(actor.writer.store().ledger().excluded(key).is_none());
+    assert!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .excluded(key)
+            .is_none()
+    );
     assert_eq!(
-        actor.owed.len(),
+        actor.owed_for_test().len(),
         1,
         "uncertain historical input must stay recoverable"
     );

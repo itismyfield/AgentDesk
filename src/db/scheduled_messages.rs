@@ -57,12 +57,18 @@ pub const DELIVERY_INTERRUPTED: &str = "interrupted";
 pub const KIND_PUSH: &str = "push";
 pub const KIND_AGENT: &str = "agent";
 
-pub(crate) const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, \
+const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, \
      agent_id, agent_instruction, on_agent_failure, scheduled_at, schedule, timezone, \
      expires_at, status, in_flight_delivery_id, fire_count, last_fired_at, last_error, \
      source, created_by, dedupe_key, provider_targets, provider_target_summary, \
      context_strategy, context_snapshot_id, \
      on_context_failure, created_at, updated_at";
+
+/// Test seam: the definition column list every row read selects.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn definition_columns_for_test() -> &'static str {
+    DEFINITION_COLUMNS
+}
 
 pub const CONTEXT_STRATEGY_FRESH: &str = "fresh";
 pub const CONTEXT_STRATEGY_SNAPSHOT: &str = "snapshot";

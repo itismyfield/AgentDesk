@@ -81,7 +81,7 @@ async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector()
         cancel: None,
         bootstrap: false,
     };
-    let launch = launch_of(
+    let launch = launch_of_for_test(
         &turn,
         Some(Path::new("/test")),
         &Owed(None),
@@ -213,7 +213,7 @@ mod greeting {
         let operation = greeting.then(|| "restart-operation".to_string());
         let ports = super::Owed(effort);
         restart_intent::scope(operation, || {
-            launch_of(
+            launch_of_for_test(
                 &turn,
                 Some(Path::new("/test")),
                 &ports,

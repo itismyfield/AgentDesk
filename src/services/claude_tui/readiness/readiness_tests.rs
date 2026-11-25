@@ -7,15 +7,15 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::Duration;
 
-struct Rig {
+pub(crate) struct Rig {
     _dir: tempfile::TempDir,
-    session: String,
-    path: PathBuf,
-    root: PathBuf,
-    ctx: BindingContext,
+    pub(crate) session: String,
+    pub(crate) path: PathBuf,
+    pub(crate) root: PathBuf,
+    pub(crate) ctx: BindingContext,
 }
 impl Rig {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::for_channel(None)
     }
     fn for_channel(channel: Option<u64>) -> Self {
@@ -82,11 +82,11 @@ impl Rig {
         )
         .unwrap();
     }
-    fn assistant(&self, text: &str) {
+    pub(crate) fn assistant(&self, text: &str) {
         self.append(json!({"type":"assistant","timestamp":Utc::now(),
             "message":{"role":"assistant","content":[{"type":"text","text":text}]}}));
     }
-    fn terminal(&self) {
+    pub(crate) fn terminal(&self) {
         self.append(json!({"type":"system","subtype":"turn_duration"}));
     }
     fn hook(&self, source: &str) {
@@ -100,10 +100,10 @@ impl Rig {
             false,
         );
     }
-    fn ready(&self) -> bool {
+    pub(crate) fn ready(&self) -> bool {
         observe(&self.session, Some(&self.path)).is_some()
     }
-    fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
+    pub(crate) fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
         super::super::input::send_warm_followup_owned(&self.session, "one original", None)
     }
 }
@@ -623,106 +623,6 @@ pub(crate) fn after_first_look(
         }
         act();
     })
-}
-
-// A restarted idle pane appends one metadata row while the owner's input waits: no key, the
-// input refused for good with its notice owed, and a restart brings nothing of it back.
-#[cfg(unix)]
-#[test]
-fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() {
-    use super::super::input::submission::tests::{ScriptedTmux, view};
-    use crate::services::discord::owner_effect_for_test as effect;
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let r = Rig::new();
-    r.assistant("old answer");
-    r.terminal();
-    daemon_restart(&r.session);
-    let tmux = ScriptedTmux::new(&view("", false));
-    tmux.set_dead(false);
-    let channel = 821_701u64;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let _entered = runtime.enter();
-    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
-    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
-    let attempt = json!({"nonce":"moved-once","provider":"claude",
-        "target":{"host":"tmux","owner":r.session,
-            "root":crate::services::tmux_common::current_tmux_owner_marker(),
-            "execution_nonce":r.ctx.execution_nonce},
-        "source":{"kind":"pre_source","expected_session_id":null,
-            "expected_transcript":null,"binding_watermark":null}});
-    let queue = crate::config::runtime_root().unwrap();
-    let queue = queue.join("runtime/moved-once.json");
-    let fixture = mailbox.v2_cold_fixture(queue.clone(), attempt, "one original".into(), channel);
-    runtime.block_on(fixture).unwrap();
-    let (path, native) = (r.path.clone(), r.ctx.expected_native_session_id.clone());
-    let moved = after_first_look(&r.session, move || {
-        let mut file = OpenOptions::new().append(true).open(path).unwrap();
-        writeln!(file, "{}", json!({"type":"ai-title","sessionId":native})).unwrap();
-    });
-    let pane = super::super::busy_inject::Pane::with_program(
-        &r.session,
-        crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
-            "tmux".into(),
-        ),
-    )
-    .unwrap();
-    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-    let send = effect::idle_claude(pane, r.session.clone(), channel, token);
-    let leaf: effect::Leaf = Box::new(move |frame| {
-        // The budget and its windows run out on the leaf's own thread.
-        let budget = Some(Duration::from_millis(900));
-        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(budget));
-        let result = send(frame);
-        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
-        result
-    });
-    let result = runtime
-        .block_on(effect::run(&mailbox, std::sync::Arc::new(|| 10_000), leaf))
-        .unwrap();
-    crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
-    assert!(
-        matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven")),
-        "{result:?}"
-    );
-    assert!(tmux.sends().is_empty(), "no key reaches the pane");
-    // The daemon restarts before the notice went out.
-    drop((mailbox, registry));
-    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
-    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
-    let history = crate::services::tui_input::human_frame::history::v2::Registry::at(
-        r.root.join("history.json"),
-    );
-    let recovered = crate::services::discord::owner_recovery_for_test::recover(
-        &mailbox,
-        (queue, format!("cold-scope-{channel}")),
-        history,
-        None,
-        ("claude", channel, 20_000),
-    );
-    assert_eq!(runtime.block_on(recovered), Ok(0));
-    let snapshot = runtime
-        .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
-        .unwrap();
-    assert!(
-        snapshot["items"].as_array().unwrap().is_empty(),
-        "a refused input never returns to the queue: {snapshot}"
-    );
-    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
-    let refused = snapshot["refused_inputs"].as_array().unwrap();
-    assert_eq!(refused.len(), 1, "{snapshot}");
-    assert_eq!(
-        refused[0]["notice"],
-        json!({"kind":"readiness_unproven","enqueued":false}),
-        "one notice is owed"
-    );
-    assert!(
-        !snapshot.to_string().contains("one original"),
-        "no body is kept: {snapshot}"
-    );
 }
 
 // Evidence inside a window delivers the waiting input; Cancel ends the wait even when no
@@ -1589,7 +1489,7 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
-mod compact_tests;
+pub(crate) mod compact_tests;
 
 // A process restart forgets volatile readiness without deleting durable hook evidence.
 pub(crate) fn forget_session(session: &str) {

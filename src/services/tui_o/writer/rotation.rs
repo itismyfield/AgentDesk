@@ -243,7 +243,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-pub(in crate::services) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -252,6 +252,11 @@ pub(in crate::services) fn bound_source(event: &BindingEvent) -> Option<&SourceI
         | BindingRecord::Resolved { source, .. } => Some(source),
         _ => None,
     }
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn bound_source_for_test(event: &BindingEvent) -> Option<&SourceId> {
+    bound_source(event)
 }
 
 /// The last event binding a source `attached` accepts; the binding checkpoint starts there.

@@ -13,7 +13,7 @@ use crate::domain::campaign::model::*;
 pub(crate) mod command_transaction;
 pub mod evidence_store;
 mod read;
-pub(crate) mod write;
+mod write;
 pub use read::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +60,16 @@ fn evidence_error(error: evidence_store::EvidenceStoreError) -> StoreError {
         evidence_store::EvidenceStoreError::Json(e) => StoreError::Json(e),
         _ => StoreError::InconsistentState,
     }
+}
+
+/// Test seam: persists one decision through the private campaign writer.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn persist_for_test(
+    tx: &mut Transaction<'_, Postgres>,
+    previous: Option<&CampaignState>,
+    decision: &Decision,
+) -> StoreResult<()> {
+    write::persist(tx, previous, decision).await
 }
 
 // Writes one evidence row of a decision; an ID that already holds something else fails the transaction.

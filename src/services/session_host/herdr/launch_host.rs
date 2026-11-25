@@ -49,7 +49,7 @@ pub(crate) struct ReplacedServer {
 }
 
 pub(crate) struct SocketHerdrLaunchHost {
-    pub(crate) endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
+    endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
     #[cfg(test)]
@@ -59,9 +59,9 @@ pub(crate) struct SocketHerdrLaunchHost {
     grants: Mutex<GrantCache>,
     grant_store: super::policy::grant_store::FileGrantStore,
     next_id: AtomicU64,
-    pub(crate) read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
-    pub(crate) os: Box<dyn ProcessOs>,
-    pub(crate) provider_window: Duration,
+    read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
+    os: Box<dyn ProcessOs>,
+    provider_window: Duration,
 }
 
 struct CachedGrant {
@@ -517,6 +517,45 @@ impl SocketHerdrLaunchHost {
         self
     }
 
+    /// Test seam: replaces the E7 read every endpoint check goes through.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_read_restore_for_test(
+        &mut self,
+        read: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
+    ) {
+        self.read_restore = read;
+    }
+
+    /// Test seam: replaces the process table and the provider window the pane probe reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_process_os_for_test(&mut self, os: Box<dyn ProcessOs>, window: Duration) {
+        self.os = os;
+        self.provider_window = window;
+    }
+
+    /// Test seam: the transport of the endpoint at `index`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn endpoint_transport_for_test(&self, index: usize) -> &Arc<HerdrSocketTransport> {
+        &self.endpoints[index].1
+    }
+
+    /// Test seam: takes the last endpoint and its transport out of this host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pop_endpoint_for_test(
+        &mut self,
+    ) -> Option<(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
+        self.endpoints.pop()
+    }
+
+    /// Test seam: a create that skips the launch admission, as an admitted create runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn create_eligible_for_test(
+        &self,
+        request: &HerdrCreateRequest,
+    ) -> HerdrCreateOutcome {
+        self.create_eligible(request)
+    }
+
     fn call(&self, request: HerdrRequest) -> HerdrCall {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         HerdrCall {
@@ -616,7 +655,7 @@ impl SocketHerdrLaunchHost {
             other => unconfirmed(format!("command input: {other:?}")),
         }
     }
-    pub(crate) fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.create_checked(
             PaneCommand {
                 endpoint: &request.endpoint,

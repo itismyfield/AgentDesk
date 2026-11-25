@@ -2,8 +2,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedOwner, HostedState, SourceRef,
 };
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::claude::herdr_turn::first_input::*;
-use crate::services::claude::herdr_turn::{Attached, HerdrTurn, not_held};
+use crate::services::claude::herdr_turn::{
+    Attached, HerdrTurn, not_held, submit_for_test, submit_owned_for_test,
+};
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::HerdrTarget;
@@ -112,15 +113,15 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
     let transcript = root.path().join("not-created.jsonl");
     crate::services::claude_tui::readiness::tests::pre_source(logical, &transcript);
     let prompt = "reply _ literal\nattachment + voice";
-    let attached = Attached {
-        nonce: NONCE.into(),
-        session_id: "cold-native".into(),
-        transcript: transcript.clone(),
+    let attached = Attached::for_test(
+        NONCE.into(),
+        "cold-native".into(),
+        transcript.clone(),
         target,
-        bound: true,
-        awaiting_clear: false,
-        physical: worker_clear.then(|| (rig.socket().display().to_string(), PANE.into())),
-    };
+        true,
+        false,
+        worker_clear.then(|| (rig.socket().display().to_string(), PANE.into())),
+    );
     let (tx, rx) = std::sync::mpsc::channel();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727398));
@@ -143,7 +144,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     "actual Claude Herdr submit requires owner scope"
                 );
                 use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
-                let mut preparation = HerdrInput::new(&attached.target);
+                let mut preparation = HerdrInput::new(attached.target_for_test());
                 InputTransport::load_buffer(&mut preparation, "memory-only", "not submitted")
                     .unwrap();
                 drop(preparation);
@@ -235,7 +236,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                                 std::time::Duration::from_secs(10),
                             )
                         });
-                    submit_owned(
+                    submit_owned_for_test(
                         &turn,
                         hook,
                         (
@@ -247,7 +248,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     )
                     .map(Some)
                 } else {
-                    let result = submit(&turn, attached, &tx);
+                    let result = submit_for_test(&turn, attached, &tx);
                     if !clear_first && result.is_ok() {
                         let clear = crate::services::herdr_launch::clear_epoch::begin_clear(
                             &turn.owner.provider,
@@ -316,7 +317,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
     let submitted = result
         .unwrap()
         .expect("physical Herdr submit returns its observer");
-    assert_eq!(submitted.before, 0);
+    assert_eq!(submitted.before_for_test(), 0);
     assert!(!transcript.exists(), "Herdr submit cannot wait for Source");
     assert!(
         matches!(rx.try_recv(), Ok(StreamMessage::Init { .. })),

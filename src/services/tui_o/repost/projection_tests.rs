@@ -656,7 +656,10 @@ async fn d4d_legacy_ledger_receipt_overlay_is_read_only_pg() {
     let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
     let (lease, alarms) = (Arc::clone(&harness.lease), harness.alarms.clone());
     let writer = ChannelWriter::hosted(store, gate, port, lease, alarms, Some(hook)).await;
-    let applied = (writer.stop_cause().is_none(), writer.resume_pieces().len());
+    let applied = (
+        writer.stop_cause().is_none(),
+        writer.resume_pieces_for_test().len(),
+    );
     drop(writer);
     let read = pg.receipt_reads();
     let after = persisted(&harness, &pool).await;

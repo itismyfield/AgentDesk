@@ -24,7 +24,10 @@ pub mod watcher_latency;
 // boundaries (helpers / emit / worker / retention / pg I/O) without
 // changing the public API. Global state (`OnceLock` runtime) stays in this
 // module to avoid relocating the singleton.
-pub(crate) mod emit;
+mod emit;
+/// Emit-surface scenarios for the capture stress tests mounted in the services test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use emit::tests as emit_fixtures;
 mod helpers;
 mod pg_io;
 mod relay_signal_alert;
