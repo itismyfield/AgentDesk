@@ -73,8 +73,9 @@ cannot apply for lack of its opener still closes the image turn, after row prepa
 | cfg | Setting | Broken rules | Note |
 |---|---|---|---|
 | ToolImageS2bPersistA/B/C/E/EFail/F, MidPrompt, LateCall, ForeignIdle, Unresolved | persist + cut | - | the wired rule |
+| ToolImageS2bPersistLateSameHash | o1 c i o2 h1 s: the call's image-less turn ends, the next turn posts h1, then the late result carries h1 | - | the late result keeps its own turn and upload |
 | ToolImageS2bPersistMutNoCut | persist, no cut | NoSilentLoss | the cut is required once openers are collected |
-| ToolImageS2bSpanE / S2bSpanMidPrompt | S2b w1 rule: only a turn with an image span keeps its opener | AttributionTrue (+AtMostOnce) | opener collected before the first image, restart: the image falls to the edge turn |
+| ToolImageS2bSpanE / S2bSpanMidPrompt / S2bSpanLateSameHash | S2b w1 rule: only a turn with an image span keeps its opener | AttributionTrue (+AtMostOnce or NoSilentLoss) | opener or call collected before restart: the image falls to the edge or the next turn |
 
 ## Limits
 

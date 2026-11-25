@@ -1995,10 +1995,12 @@ tui-o-writer/ToolImageS2bPersistEFail.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistF.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistForeignIdle.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistLateCall.cfg	ToolImage	-	-
+tui-o-writer/ToolImageS2bPersistLateSameHash.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistMidPrompt.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistMutNoCut.cfg	ToolImage	NoSilentLoss	-
 tui-o-writer/ToolImageS2bPersistUnresolved.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bSpanE.cfg	ToolImage	AttributionTrue	-
+tui-o-writer/ToolImageS2bSpanLateSameHash.cfg	ToolImage	AttributionTrue,NoSilentLoss	-
 tui-o-writer/ToolImageS2bSpanMidPrompt.cfg	ToolImage	AtMostOnce,AttributionTrue	-
 tui-o-writer/ToolImageUnresolved.cfg	ToolImage	-	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-

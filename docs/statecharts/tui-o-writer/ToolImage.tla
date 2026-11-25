@@ -6,7 +6,8 @@ EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Rec,            \* records: "o1"/"o2" opener, "p" prompt (ignored inside a turn), "h1" image,
                           \* "b1"/"b2" over-limit images (same length), "c" tool call, "r" its late
-                          \* image result (h2), "i" native idle, "x" another turn's named idle,
+                          \* image result (h2), "s" its late result carrying h1, "i" native idle,
+                          \* "x" another turn's named idle,
                           \* "e" physical end
           Mode,           \* "before" | "design"
           SpanRestore,    \* durable turn spans used on replay (FALSE = mutant)
@@ -29,8 +30,8 @@ CONSTANTS Rec,            \* records: "o1"/"o2" opener, "p" prompt (ignored insi
 
 N == Len(Rec)
 Imgs == {"h1", "h2", "b1", "b2"}
-IsImg(i) == Rec[i] \in Imgs \/ Rec[i] = "r"
-ImgOf(i) == IF Rec[i] = "r" THEN "h2" ELSE Rec[i]
+IsImg(i) == Rec[i] \in Imgs \/ Rec[i] \in {"r", "s"}
+ImgOf(i) == CASE Rec[i] = "r" -> "h2" [] Rec[i] = "s" -> "h1" [] OTHER -> Rec[i]
 Big(h) == h \in {"b1", "b2"}
 RECURSIVE FirstOpener(_, _)
 FirstOpener(o, j) == IF j > N THEN 0 ELSE IF Rec[j] = o THEN j ELSE FirstOpener(o, j + 1)
@@ -39,7 +40,7 @@ CallPos == FirstOpener("c", 1)
 RECURSIVE TT(_)
 TT(i) == IF i = 0 THEN "none"
          ELSE CASE Rec[i] = "o1" -> "t1" [] Rec[i] = "o2" -> "t2"
-                [] Rec[i] = "r" -> TT(CallPos)
+                [] Rec[i] \in {"r", "s"} -> TT(CallPos)
                 [] Rec[i] \in {"i", "e"} -> "none" [] OTHER -> TT(i - 1)
 Turns == {"t1", "t2", "tp"}
 Tids == Turns \cup {"edge"}
@@ -109,7 +110,7 @@ Derive ==
           [] IsImg(i) /\ Mode = "design" ->
               LET h == ImgOf(i)
                   cov == Covering(i)
-                  callT == IF r # "r" THEN "none"
+                  callT == IF r \notin {"r", "s"} THEN "none"
                            ELSE IF callTurn \in Turns THEN callTurn
                            ELSE IF DurableCall /\ dcall \in Turns THEN dcall ELSE "none"
                   tid == IF callT \in Turns THEN callT
@@ -124,7 +125,7 @@ Derive ==
               \* First image of a live turn persists its span; inside another span it is a violation.
               /\ IF opens THEN spanFrom' = [spanFrom EXCEPT ![ts0] = openPos] ELSE UNCHANGED spanFrom
               /\ viol' = (viol \/ (opens /\ Inside(ts0, openPos)))
-              /\ pending' = IF r = "r" THEN FALSE ELSE pending
+              /\ pending' = IF r \in {"r", "s"} THEN FALSE ELSE pending
               /\ UNCHANGED <<spanTo, callTurn, dcall>>
               /\ IF st[k] # "none" THEN UNCHANGED <<st, keyRec, ns>>
                  ELSE /\ keyRec' = [keyRec EXCEPT ![k] = i]
@@ -304,5 +305,8 @@ RecE == <<"o1", "h1", "h1", "e", "o2", "h1", "h1">>
 RecF == <<"o1", "b1", "h1", "e", "o2">>
 RecMid == <<"o1", "h1", "p", "h1", "i", "o2", "h1">>
 RecLate == <<"o1", "c", "h1", "i", "r">>
+\* S2b w4: the call's turn ends without images; the next turn posts h1 first, then the late
+\* result "s" of the old call carries the same h1.
+RecLateSame == <<"o1", "c", "i", "o2", "h1", "s">>
 RecForeign == <<"o1", "h1", "x", "h1", "i">>
 ====
