@@ -2182,7 +2182,8 @@ src/
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_io/
-│   │   │   │   └── agy.rs
+│   │   │   │   ├── agy.rs
+│   │   │   │   └── attachment.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -2201,6 +2202,8 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── image_format.rs
+│   │   │   ├── image_format_tests.rs
 │   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
@@ -5065,6 +5068,8 @@ src/
 │   │   │   ├── tool_card_replay_tests.rs
 │   │   │   ├── tool_card_tests.rs
 │   │   │   ├── tool_cards.rs
+│   │   │   ├── tool_images.rs
+│   │   │   ├── tool_images_tests.rs
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs

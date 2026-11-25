@@ -2,6 +2,7 @@
 //! and one hold on the channel's shared delivery lease per piece.
 
 mod agy;
+mod attachment;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -96,6 +97,51 @@ fn refusal(status: Option<u16>) -> Option<u16> {
     status.filter(|status| matches!(status, 400 | 403 | 404))
 }
 
+fn outcome(channel: u64, sent: Result<serenity::Message, serenity::Error>) -> PostOutcome {
+    match sent {
+        Ok(message) => {
+            crate::services::legacy_body_census::transport::record_o_created(
+                channel,
+                message.id.get(),
+                None,
+            );
+            PostOutcome::Created(seen(message))
+        }
+        Err(error) => refusal(http_status(&error)).map_or_else(
+            || PostOutcome::Uncertain(error.to_string()),
+            PostOutcome::Refused,
+        ),
+    }
+}
+
+/// Starts `request` only under the execution owner's guard for `content`.
+fn owner_guarded(
+    scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+    channel: u64,
+    content: String,
+    origin: Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    request: impl Future<Output = PostOutcome> + Send + 'static,
+) -> impl Future<Output = PostOutcome> + Send + 'static {
+    async move {
+        use crate::services::cluster::intake_router_hook::owner_record::output;
+        let guard = match output::acquire(
+            scope.as_ref(),
+            &channel.to_string(),
+            &content,
+            origin.as_ref(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(error) => return PostOutcome::Withheld(error.to_string()),
+        };
+        guard
+            .run(request)
+            .await
+            .unwrap_or_else(PostOutcome::Uncertain)
+    }
+}
+
 impl DiscordPort for GatewayPort {
     fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
         self.owner.as_ref().map(|scope| &scope.pool)
@@ -136,18 +182,7 @@ impl DiscordPort for GatewayPort {
                         "agy Discord response lacks exact receipt evidence".into(),
                     )
                 }
-                Ok(message) => {
-                    crate::services::legacy_body_census::transport::record_o_created(
-                        channel,
-                        message.id.get(),
-                        None,
-                    );
-                    PostOutcome::Created(seen(message))
-                }
-                Err(error) => refusal(http_status(&error)).map_or_else(
-                    || PostOutcome::Uncertain(error.to_string()),
-                    PostOutcome::Refused,
-                ),
+                sent => outcome(channel, sent),
             }
         }
     }
@@ -160,25 +195,8 @@ impl DiscordPort for GatewayPort {
             crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
         >,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        let (scope, request) = (self.owner.clone(), self.post(channel, content.clone()));
-        async move {
-            use crate::services::cluster::intake_router_hook::owner_record::output;
-            let guard = match output::acquire(
-                scope.as_ref(),
-                &channel.to_string(),
-                &content,
-                origin.as_ref(),
-            )
-            .await
-            {
-                Ok(guard) => guard,
-                Err(error) => return PostOutcome::Withheld(error.to_string()),
-            };
-            guard
-                .run(request)
-                .await
-                .unwrap_or_else(PostOutcome::Uncertain)
-        }
+        let request = self.post(channel, content.clone());
+        owner_guarded(self.owner.clone(), channel, content, origin, request)
     }
 
     fn post_unit(
@@ -194,6 +212,40 @@ impl DiscordPort for GatewayPort {
         policy::scoped(
             policy::unit_class(kind),
             self.post_origin(channel, content, origin),
+        )
+    }
+
+    fn post_unit_attachment(
+        &self,
+        channel: u64,
+        caption: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+        bytes: Vec<u8>,
+        filename: String,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        use super::notification_policy as policy;
+        // Antigravity receipts are matched on correlated text posts only.
+        let upload = self.agy_correlation.is_none().then(|| {
+            attachment::post(
+                Arc::clone(&self.http),
+                channel,
+                caption.clone(),
+                bytes,
+                filename,
+            )
+        });
+        let request = async move {
+            match upload {
+                Some(upload) => upload.await,
+                None => PostOutcome::Withheld("agy output has no attachment receipt".into()),
+            }
+        };
+        policy::scoped(
+            policy::unit_class(kind),
+            owner_guarded(self.owner.clone(), channel, caption, origin, request),
         )
     }
 
