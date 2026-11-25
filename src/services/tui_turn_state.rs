@@ -614,6 +614,8 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         "permission-mode" => Some(TuiTurnState::Unknown),
         "system" => match json.get("subtype").and_then(Value::as_str) {
             Some("turn_duration" | "stop_hook_summary" | "init") => Some(TuiTurnState::Idle),
+            // A scheduled task starts its turn before its first conversation record lands.
+            Some("scheduled_task_fire") => Some(TuiTurnState::UserSubmitted),
             _ => None,
         },
         _ => None,
@@ -633,6 +635,7 @@ fn claude_partial_turn_state(line: &str) -> Option<TuiTurnState> {
         "permission-mode" => Some(TuiTurnState::Unknown),
         "system" => match top_level_string_field_fragment(line, "subtype")?.as_str() {
             "turn_duration" | "stop_hook_summary" | "init" => Some(TuiTurnState::Idle),
+            "scheduled_task_fire" => Some(TuiTurnState::UserSubmitted),
             _ => None,
         },
         // As with `claude_envelope_turn_state`, the broader mode-family

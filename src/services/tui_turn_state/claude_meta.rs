@@ -43,9 +43,11 @@ fn window(path: &Path) -> Option<(JsonlTailWindow, bool)> {
         .iter()
         .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
         .collect();
-    let (closed, open) = closed_compactions(&records);
+    // A torn last line cannot close a compaction it may belong to, so it is read after it.
+    let torn = records.last().is_some_and(Value::is_null);
+    let (closed, open) = closed_compactions(&records[..records.len() - usize::from(torn)]);
     let mut closed = closed.into_iter();
-    window.lines.retain(|_| closed.next() == Some(false));
+    window.lines.retain(|_| closed.next() != Some(true));
     (window.lines.is_empty() == records.is_empty()).then_some((window, open))
 }
 
@@ -66,15 +68,15 @@ fn completed_tail(window: &JsonlTailWindow) -> bool {
     false
 }
 
-/// Which `records` belong to an idle compaction its notice closed, read forward, and whether one
-/// is still open after the last record.
+/// Which `records` belong to an idle compaction its notice closed, up to that notice itself, which
+/// stays as metadata; and whether one is still open after the last record.
 pub(crate) fn closed_compactions(records: &[Value]) -> (Vec<bool>, bool) {
     let (mut compaction, mut open) = (IdleCompaction::default(), None);
     let mut closed = vec![false; records.len()];
     for (index, record) in records.iter().enumerate() {
         match compaction.step(record) {
             CompactionStep::Open => open = Some(index),
-            CompactionStep::Closed => closed[open.take().unwrap_or(index)..=index].fill(true),
+            CompactionStep::Closed => closed[open.take().unwrap_or(index)..index].fill(true),
             CompactionStep::Broken => open = None,
             CompactionStep::Outside | CompactionStep::Inside => {}
         }
