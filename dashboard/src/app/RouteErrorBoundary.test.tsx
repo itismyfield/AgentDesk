@@ -1,13 +1,23 @@
 // @vitest-environment happy-dom
 
-import { act, createRef } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, createRef, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { requireAuthentication, resolveAuthentication } from "../api/authState";
+import { OverlayProvider } from "../components/common/overlay";
+import { Step1BotConnection } from "../components/onboarding/Step1BotConnection";
+import { KanbanProvider } from "../contexts/KanbanContext";
+import { SettingsProvider, useSettings } from "../contexts/SettingsContext";
+import { WorkspaceProvider } from "../contexts/WorkspaceContext";
+import { DEFAULT_SETTINGS } from "../types";
+import AppShell from "./AppShell";
 import { AppTopBar } from "./AppTopBar";
+import { DashboardAuthGate } from "./DashboardAuthGate";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { findRouteByPath } from "./routes";
-import { Step1BotConnection } from "../components/onboarding/Step1BotConnection";
+import { THEME_STORAGE_KEY } from "./themePreferences";
 
 describe("RouteErrorBoundary & shell audit fixes", () => {
   let container: HTMLDivElement;
@@ -16,6 +26,7 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    window.localStorage.clear();
     const dialog = HTMLDialogElement.prototype as HTMLDialogElement & {
       showModal?: () => void;
       show?: () => void;
@@ -39,6 +50,8 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    window.localStorage.clear();
+    resolveAuthentication(0, true, false);
     consoleErrorSpy.mockRestore();
   });
 
@@ -204,5 +217,104 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     expect(flowWrap.style.getPropertyValue("--adk-hub-title")).toBe('"AgentDesk 허브"');
     expect(flowWrap.style.getPropertyValue("--adk-hub-sub")).toBe('"Discord 실행·통신 봇 오케스트레이션"');
     expect(flowWrap.textContent).toContain("Antigravity");
+  });
+
+  it("preserves localStorage dark theme across server hydration and dismisses TweaksPanel on Escape, outside click, and modals", async () => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
+
+    function HydrateServerLightTheme() {
+      const { setSettings } = useSettings();
+      useEffect(() => {
+        setSettings((prev) => ({ ...prev, theme: "light" }));
+      }, [setSettings]);
+      return null;
+    }
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={["/logs"]}>
+            <OverlayProvider>
+              <WorkspaceProvider
+                initialAgents={[]}
+                initialDepartments={[]}
+                initialSessions={[]}
+                pushNotification={() => ""}
+              >
+                <SettingsProvider initialSettings={DEFAULT_SETTINGS} initialStats={null}>
+                  <HydrateServerLightTheme />
+                  <KanbanProvider initialCards={[]} initialDispatches={[]}>
+                    <AppShell
+                      wsConnected={true}
+                      wsLastEventTs={null}
+                      notifications={[]}
+                      pushNotification={() => ""}
+                      updateNotification={() => {}}
+                      dismissNotification={() => {}}
+                    />
+                  </KanbanProvider>
+                </SettingsProvider>
+              </WorkspaceProvider>
+            </OverlayProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    });
+
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    const tweaksTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="topbar"] button[aria-label="화면 꾸미기"]',
+    )!;
+    await act(async () => {
+      tweaksTrigger.click();
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).toBeNull();
+
+    await act(async () => {
+      tweaksTrigger.click();
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).toBeNull();
+
+    await act(async () => {
+      tweaksTrigger.click();
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="tweaks-panel"]')).toBeNull();
+    expect(document.body.textContent).toContain("키보드 단축키");
+  });
+
+  it("renders DashboardAuthGate with semantic theme tokens instead of hardcoded dark gray classes", async () => {
+    requireAuthentication("토큰을 입력해 주세요.");
+    await act(async () => {
+      root.render(
+        <DashboardAuthGate>
+          <div>authenticated</div>
+        </DashboardAuthGate>,
+      );
+    });
+
+    const main = container.querySelector("main")!;
+    const form = container.querySelector("form")!;
+    expect(main.className).toContain("bg-[var(--bg)]");
+    expect(form.className).toContain("bg-[var(--bg-2)]");
+    expect(form.className).toContain("border-[var(--line)]");
+    expect(container.innerHTML).not.toMatch(/bg-gray-|text-gray-|border-gray-/);
   });
 });

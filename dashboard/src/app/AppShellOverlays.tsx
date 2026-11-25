@@ -117,7 +117,7 @@ export default function AppShellOverlays({ ctx }: { ctx: AppShellOverlaysContext
         )}
       </Suspense>
 
-      {showTweaksPanel && !focused && (
+      {showTweaksPanel && !focused && !showCommandPalette && !showShortcutHelp && !infoAgent && (
         <AppTweaksPanel
           accentPreset={accentPreset}
           isKo={isKo}

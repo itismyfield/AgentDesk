@@ -27,13 +27,13 @@ import { AppSidebar } from "./AppSidebar";
 import { AppTopBar } from "./AppTopBar";
 import {
   DEFAULT_ACCENT_PRESET,
+  THEME_STORAGE_KEY,
   applyThemeAccentDataset,
   isThemePreference,
   persistAccentPreset,
   persistThemePreference,
   readStoredAccentPreset,
   readStoredThemePreference,
-  readThemePreferenceFromPatch,
   resolveThemePreference,
   type AccentPreset,
   type ThemePreference,
@@ -102,15 +102,80 @@ export default function AppShell({
 
   const mainRef = useRef<HTMLElement>(null);
   const [agentInfoAgent, setAgentInfoAgent] = useState<Agent | null>(null);
-  const [showCommandPalette, setShowCommandPalette] = useState(false);
-  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
-  const [showNotificationPanel, setShowNotificationPanel] = useState(false);
-  const [showTweaksPanel, setShowTweaksPanel] = useState(false);
+  const [showCommandPalette, setShowCommandPaletteState] = useState(false);
+  const [showShortcutHelp, setShowShortcutHelpState] = useState(false);
+  const [showNotificationPanel, setShowNotificationPanelState] = useState(false);
+  const [showTweaksPanel, setShowTweaksPanelState] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
+  const overlayOpenRef = useRef({
+    commandPalette: false,
+    shortcutHelp: false,
+    notificationPanel: false,
+    tweaksPanel: false,
+  });
+  overlayOpenRef.current = {
+    commandPalette: showCommandPalette,
+    shortcutHelp: showShortcutHelp,
+    notificationPanel: showNotificationPanel,
+    tweaksPanel: showTweaksPanel,
+  };
+
+  const setShowCommandPalette = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.commandPalette) : action;
+    overlayOpenRef.current.commandPalette = next;
+    setShowCommandPaletteState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      overlayOpenRef.current.notificationPanel = false;
+      setShowTweaksPanelState(false);
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
+  const setShowShortcutHelp = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.shortcutHelp) : action;
+    overlayOpenRef.current.shortcutHelp = next;
+    setShowShortcutHelpState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      overlayOpenRef.current.notificationPanel = false;
+      setShowTweaksPanelState(false);
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
+  const setShowNotificationPanel = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.notificationPanel) : action;
+    overlayOpenRef.current.notificationPanel = next;
+    setShowNotificationPanelState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      setShowTweaksPanelState(false);
+    }
+  }, []);
+
+  const setShowTweaksPanel = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.tweaksPanel) : action;
+    overlayOpenRef.current.tweaksPanel = next;
+    setShowTweaksPanelState(next);
+    if (next) {
+      overlayOpenRef.current.notificationPanel = false;
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
   const mobileMoreMenuRef = useFocusTrap(showMobileMoreMenu);
   const [agentsPageTab, setAgentsPageTab] = useState<AgentManagerTab>("agents");
+  const hadStoredThemeAtBootRef = useRef(
+    typeof window !== "undefined" &&
+      typeof window.localStorage?.getItem === "function" &&
+      isThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY)),
+  );
   const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
-    readStoredThemePreference(window.localStorage, settings.theme),
+    readStoredThemePreference(
+      window.localStorage,
+      isThemePreference(settings.theme) ? settings.theme : DEFAULT_SETTINGS.theme,
+    ),
   );
   const [accentPreset, setAccentPreset] = useState<AccentPreset>(() =>
     readStoredAccentPreset(window.localStorage, DEFAULT_ACCENT_PRESET),
@@ -184,11 +249,11 @@ export default function AppShell({
 
   const themePreferenceRef = useRef(themePreference);
   themePreferenceRef.current = themePreference;
-  const prevSettingsThemeRef = useRef(settings.theme);
+  const initialSettingsThemeRef = useRef(settings.theme);
 
   useEffect(() => {
-    if (prevSettingsThemeRef.current === settings.theme) return;
-    prevSettingsThemeRef.current = settings.theme;
+    if (hadStoredThemeAtBootRef.current || settings.theme === initialSettingsThemeRef.current) return;
+    hadStoredThemeAtBootRef.current = true;
     if (isThemePreference(settings.theme)) {
       themePreferenceRef.current = settings.theme;
       setThemePreference(settings.theme);
@@ -298,13 +363,13 @@ export default function AppShell({
 
   const handleSettingsSave = useCallback(
     async (patch: Record<string, unknown>) => {
-      const requestedThemePreference = readThemePreferenceFromPatch(patch);
-      if (requestedThemePreference) {
-        prevSettingsThemeRef.current = requestedThemePreference;
-        themePreferenceRef.current = requestedThemePreference;
-        setThemePreference(requestedThemePreference);
+      if (typeof patch.theme === "string" && isThemePreference(patch.theme)) {
+        const nextTheme = patch.theme;
+        hadStoredThemeAtBootRef.current = true;
+        themePreferenceRef.current = nextTheme;
+        setThemePreference(nextTheme);
         setSettings((prev) =>
-          prev.theme === requestedThemePreference ? prev : { ...prev, theme: requestedThemePreference },
+          prev.theme === nextTheme ? prev : { ...prev, theme: nextTheme },
         );
       }
       await persistSettingsPatch(patch);
@@ -313,8 +378,10 @@ export default function AppShell({
   );
 
   const openDefaultAgentInfo = useCallback((agent: Agent) => {
+    setShowTweaksPanel(false);
+    setShowNotificationPanel(false);
     setAgentInfoAgent(agent);
-  }, []);
+  }, [setShowNotificationPanel, setShowTweaksPanel]);
 
   const closeAgentInfo = useCallback(() => {
     setAgentInfoAgent(null);
@@ -404,13 +471,13 @@ export default function AppShell({
       const current = themePreferenceRef.current;
       const next = typeof action === "function" ? action(current) : action;
       if (next === current) return;
-      prevSettingsThemeRef.current = next;
+      hadStoredThemeAtBootRef.current = true;
       themePreferenceRef.current = next;
       setThemePreference(next);
       setSettings((prev) => (prev.theme === next ? prev : { ...prev, theme: next }));
-      void handleSettingsSave({ theme: next }).catch(() => {});
+      void persistSettingsPatch({ theme: next }).catch(() => {});
     },
-    [handleSettingsSave, setSettings],
+    [persistSettingsPatch, setSettings],
   );
 
   const toggleShellTheme = useCallback(() => {
