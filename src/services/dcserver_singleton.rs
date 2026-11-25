@@ -60,7 +60,7 @@ impl Singleton {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn acquire_for_tests(root: &Path) -> Result<OwnedRuntimeRoot, String> {
     Singleton::acquire(Some(root))?
         .recovery_root()

@@ -14,7 +14,7 @@ impl<B: BindingEvents> Sources<B> {
         self.resume_with_clock(writer, deriver, owed, SystemTime::now(), &SystemTime::now)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn resume_at<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,

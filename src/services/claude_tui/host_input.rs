@@ -838,13 +838,13 @@ pub(crate) fn classify(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use spy::{FakeDraftPane, watch_actions};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use spy::{SpyGuard, SpyState};
 
 /// Recording transport the Claude TUI input tests install in place of tmux.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;

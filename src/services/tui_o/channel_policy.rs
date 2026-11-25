@@ -21,7 +21,7 @@ pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
     LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use adoption::{
     body_check::{BodyCheck, SinkOp},
     stored,
@@ -628,7 +628,7 @@ impl BootChannels {
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn adopted(mut self, state: Adoption) -> Self {
         self.candidates = self
             .channels

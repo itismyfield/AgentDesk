@@ -555,6 +555,6 @@ pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_ta
 #[path = "test_instance/host_scope_tests.rs"]
 pub(crate) mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/login_test_support.rs"]
 pub(crate) mod login_test_support;

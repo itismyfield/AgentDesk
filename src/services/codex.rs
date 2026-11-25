@@ -1067,7 +1067,7 @@ pub fn execute_command_simple_cancellable(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,

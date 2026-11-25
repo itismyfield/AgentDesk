@@ -780,7 +780,7 @@ pub(crate) fn provider_resolution_allowed(provider: &str) -> Result<bool, String
 #[cfg(test)]
 static METADATA_TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_metadata_program_for_tests(path: PathBuf) {
     *METADATA_TEST_PROGRAM.lock().unwrap() = Some(path);
 }
@@ -915,7 +915,7 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
     configure_child_command(command)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
     super::login_test_support::review_fixture()
 }

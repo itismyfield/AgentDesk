@@ -73,7 +73,7 @@ static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
 // Tests that also mutate process env must acquire `shared_test_env_lock()` before
 // this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn run_serial_test(future: impl std::future::Future<Output = ()>) {
     crate::test_support::serial_runtime::run(
         || TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
@@ -375,14 +375,14 @@ pub(crate) use handoff::{
 };
 #[cfg(unix)]
 pub(crate) use handoff::{codex_replay_restored_handoff_inputs, codex_restore_has_custody};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
 pub(crate) use injected_steer::retain_injected_steer;
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
 pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use prompt_identity::age_observed_prompt_records_for_tests;
 pub use prompt_identity::{
     ClaudePromptId, extract_claude_transcript_prompt_id, extract_prompt_id_from_hook_payload,
@@ -390,14 +390,14 @@ pub use prompt_identity::{
 };
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use runtime_binding::{
     codex_restore_observation_for_tests, codex_restore_settled_for_tests,
 };
 #[cfg(test)]
 pub(crate) use state::assert_marker_publication_unlocked_for_tests;
 // Only the unix-gated codex_verified tests in the discord layer call these.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use state::{expired_session_mapping_stamp_for_tests, with_tmux_entries_for_tests};
 
 #[cfg(test)]

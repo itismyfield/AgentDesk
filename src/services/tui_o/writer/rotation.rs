@@ -869,7 +869,7 @@ impl<B: BindingEvents> Sources<B> {
         readers.map(|r| (r.source.clone(), keep(r))).collect()
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod probe {
     //! Reads a live reader's rotation start, which no store row or alarm shows.
     use super::{Instant, SourceId, Sources};

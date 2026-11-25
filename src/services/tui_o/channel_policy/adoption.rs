@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
@@ -248,7 +248,7 @@ impl Candidate {
     }
 
     /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mark_turn_admitted(
         &self,
         channel: u64,
@@ -323,7 +323,7 @@ impl Candidate {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),

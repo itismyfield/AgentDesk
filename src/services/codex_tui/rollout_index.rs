@@ -624,7 +624,7 @@ thread_local! {
 }
 
 /// Test seam: strict header reads of `path` still open the file, then every read fails.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fail_header_reads_for_tests(path: Option<PathBuf>) {
     FAILING_HEADER_READ.with(|slot| *slot.borrow_mut() = path);
 }
@@ -728,7 +728,7 @@ static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// isolated, freshly-reset process-global index (REQ-004 / TEST-004). Exposed
 /// (not module-private) so `session.rs` tests share the exact same lock instead
 /// of running unsynchronized against the same global state.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn lock_cache_for_tests() -> std::sync::MutexGuard<'static, ()> {
     let guard = CACHE_TEST_LOCK
         .lock()

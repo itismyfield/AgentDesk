@@ -299,7 +299,7 @@ impl ChannelStore {
     }
 
     /// Test seam for a new execution's empty sidecar; its real caller belongs to P4-2.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn init_codex_provenance(&mut self) -> Result<(), StoreError> {
         if self.codex_provenance() != Sidecar::Missing {
             return Err(StoreError::Rejected("codex provenance exists".into()));
@@ -320,7 +320,7 @@ impl ChannelStore {
     }
 
     /// Publish the returned span only after its durable replace succeeds.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn persist_codex_span(
         &mut self,
         span: CodexEpisodeSpan,

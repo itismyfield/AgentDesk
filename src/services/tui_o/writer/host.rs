@@ -324,7 +324,7 @@ impl Readiness {
         locked(&self.live).get(&channel)?.submission.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn drop_submission_for_tests(&self, channel: u64) {
         if let Some(live) = locked(&self.live).get_mut(&channel) {
             live.submission = None;
@@ -354,7 +354,7 @@ impl Readiness {
     }
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn track_owed_for_test(&self, channel: u64, owed: OwedView) {
         let gate = Arc::new(OwnershipGate::default());
         self.track(
@@ -414,7 +414,7 @@ thread_local! {
 }
 
 /// Reports `unsettled` for every channel on this thread until dropped, as a running actor would.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
     struct Restore(Option<Option<usize>>);
     impl Drop for Restore {
@@ -483,25 +483,25 @@ pub struct WriterStopped {
 }
 
 impl ManagedWriterHandle {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn channel(&self) -> u64 {
         self.channel
     }
 
     /// Whether the host task still runs and was not told to stop.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn live(&self) -> bool {
         !self.host.is_finished() && !*self.stop.signal.borrow()
     }
 
     /// Leaves the late reservation unsettled when this host ends, for a successor that takes it
     /// over; set before the stop is signalled.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn keep_reservation(&self) {
         self.keep.store(true, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn generation(&self) -> u64 {
         self.generation
     }

@@ -350,7 +350,7 @@ thread_local! {
 }
 
 /// Answers every execution read on this thread with `read` until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
     struct Restore(Option<Execution>);
     impl Drop for Restore {

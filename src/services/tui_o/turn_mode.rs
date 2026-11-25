@@ -310,7 +310,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_tick {
     static TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
         std::sync::Mutex::new(None);

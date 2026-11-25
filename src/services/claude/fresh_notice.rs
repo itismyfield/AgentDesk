@@ -98,14 +98,14 @@ fn claim(channel: u64, requested: &str) -> Option<String> {
 static POSTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// How many notices this process posted for the lost session `requested`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn posted_for_tests(requested: &str) -> usize {
     let posted = POSTED.lock().unwrap_or_else(PoisonError::into_inner);
     posted.iter().filter(|posted| *posted == requested).count()
 }
 
 /// Forgets the in-process claim on `requested`, as a restart does.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn forget_for_tests(requested: &str) {
     let mut announced = ANNOUNCED.lock().unwrap_or_else(PoisonError::into_inner);
     announced.retain(|(_, lost)| lost != requested);

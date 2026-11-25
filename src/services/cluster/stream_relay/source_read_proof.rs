@@ -92,7 +92,7 @@ pub(crate) struct SourceCertificate {
 }
 
 impl SourceCertificate {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn prefix_is_current(&self) -> bool {
         self.seal.is_current()
     }
@@ -104,7 +104,7 @@ impl SourceCertificate {
             && self.pin.is_current()
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn confirmed(
         seal: &PrefixSeal,
         end: u64,
@@ -126,7 +126,7 @@ impl SourceCertificate {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReadVersion {
     identity: (u64, u64),
@@ -135,7 +135,7 @@ pub(crate) struct ReadVersion {
     changed: (i64, i64),
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl ReadVersion {
     pub(crate) fn from_fd(file: &std::fs::File) -> Option<Self> {
         #[cfg(unix)]
@@ -157,7 +157,7 @@ impl ReadVersion {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
 pub(crate) struct SourceReadProof {
     file: std::sync::Arc<std::fs::File>,
@@ -170,7 +170,7 @@ pub(crate) struct SourceReadProof {
     digest: [u8; 32],
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl SourceReadProof {
     pub(crate) fn capture(
         file: std::sync::Arc<std::fs::File>,
@@ -221,7 +221,7 @@ impl SourceReadProof {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
 pub(crate) struct PrefixSeal {
     file: std::sync::Arc<std::fs::File>,

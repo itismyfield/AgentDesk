@@ -764,7 +764,7 @@ impl<E: TuiActionExecutor> CodexWrites for ExecutorWrites<'_, E> {
 }
 
 /// Recording transport and gate the Codex TUI tests install in place of tmux.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;

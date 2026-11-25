@@ -203,7 +203,7 @@ impl HerdrRegistry {
         Self::EMPTY
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_transport(
         endpoint: HerdrEndpoint,
         transport: Arc<dyn HerdrTransport>,
@@ -214,13 +214,13 @@ impl HerdrRegistry {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
         self.launch = Some(host);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_reads(self, reads: TestReads) -> Self {
         Self {
             reads: Some(reads),
@@ -451,10 +451,10 @@ thread_local! {
 }
 
 /// Installs `registry` on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedRegistry(Option<&'static HerdrRegistry>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_for_test(registry: HerdrRegistry) -> ForcedRegistry {
     let leaked: &'static HerdrRegistry = Box::leak(Box::new(registry));
     ForcedRegistry(FORCED.with(|forced| forced.replace(Some(leaked))))

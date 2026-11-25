@@ -401,7 +401,7 @@ impl HerdrTarget {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_reads(
         self,
         read_restore: fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume,
@@ -796,7 +796,7 @@ impl HerdrPaneView {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_os(self, os: Arc<dyn ProcessOs>) -> Self {
         Self { os, ..self }
     }

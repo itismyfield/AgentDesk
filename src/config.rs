@@ -2959,7 +2959,7 @@ pub(crate) struct PinnedRuntimeHost {
 /// runtime root here because it takes that mutex itself, and re-acquiring it on
 /// one thread panics by design — which is why the root's env key is spelled out
 /// below rather than reached through that helper.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[track_caller]
 pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     let env_lock = test_env_lock::acquire_shared_test_env_lock();

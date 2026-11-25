@@ -54,7 +54,7 @@ pub(crate) struct ServerWitness {
     pub start: StartIdentity,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ServerWitness {
     /// A server for tests outside this module, which cannot build a start identity.
     pub(crate) fn for_test(pid: u32) -> Self {
