@@ -8,101 +8,19 @@ const FIRST_WAIT_MS: u64 = 30_000;
 #[cfg(unix)]
 const MAX_WAIT_MS: u64 = 300_000;
 #[cfg(unix)]
-const REFUSED: &str = "NotSent(\"pending_unattached:";
+pub(super) use super::super::v2_types::retry_wait::RetryCause;
+pub(super) use super::super::v2_types::retry_wait::RetryWait;
 
-/// Why a front waits: a Claude Pending execution's typed refusal, or a held root recovery.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum RetryCause {
-    PendingUnplaced { nonce: String },
-    PendingUnstarted { nonce: String },
-    PendingUnproven { nonce: String },
-    OwnLaunchTimeout { nonce: String },
-    RootRecoveryHeld,
-}
-
-impl RetryCause {
-    #[cfg(unix)]
-    fn pending(&self) -> Option<(&str, &'static str)> {
-        match self {
-            Self::PendingUnplaced { nonce } => Some((nonce, "unplaced")),
-            Self::PendingUnstarted { nonce } => Some((nonce, "unstarted")),
-            Self::PendingUnproven { nonce } => Some((nonce, "unproven")),
-            Self::OwnLaunchTimeout { nonce } => Some((nonce, "own_timeout")),
-            Self::RootRecoveryHeld => None,
-        }
-    }
-
-    /// The execution a Pending cause names; attempts carry over only within it.
-    #[cfg(unix)]
-    pub(crate) fn nonce(&self) -> Option<&str> {
-        self.pending().map(|(nonce, _)| nonce)
-    }
-
-    /// The typed refusal a Claude turn returns for a Pending cause, ahead of its notice.
-    #[cfg(unix)]
-    pub(crate) fn refusal(&self, detail: &str) -> String {
-        match self.pending() {
-            Some((nonce, kind)) => format!("{REFUSED}{nonce}:{kind}\"): {detail}"),
-            None => detail.to_owned(),
-        }
-    }
-
-    /// The Pending cause a typed refusal names; any other error names none.
-    #[cfg(unix)]
-    pub(crate) fn from_refusal(error: &str) -> Option<Self> {
-        let (label, _) = error.strip_prefix(REFUSED)?.split_once("\")")?;
-        let (nonce, kind) = label.rsplit_once(':')?;
-        let nonce = (!nonce.is_empty()).then(|| nonce.to_owned())?;
-        match kind {
-            "unplaced" => Some(Self::PendingUnplaced { nonce }),
-            "unstarted" => Some(Self::PendingUnstarted { nonce }),
-            "unproven" => Some(Self::PendingUnproven { nonce }),
-            "own_timeout" => Some(Self::OwnLaunchTimeout { nonce }),
-            _ => None,
-        }
-    }
-}
-
-/// One front's wait, kept across restarts; callbacks name it by front and `wait_seq` alone.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RetryWait {
-    pub(crate) ticket: Option<String>,
-    pub(crate) front: RefusedMember,
-    pub(crate) wait_seq: u64,
-    pub(crate) cause: RetryCause,
-    pub(crate) due_at_ms: u64,
-    /// The dues this front consumed for the same execution.
-    pub(crate) attempts: u32,
-    pub(crate) armed: bool,
-}
-
-impl RetryWait {
-    fn holds(&self, front: &Front) -> bool {
-        self.ticket == front.0 && self.front == refused::refused_member(&front.1)
-    }
-}
-
-/// The current wait and the last wait number issued; a number is never issued twice.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Waits {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) wait: Option<RetryWait>,
-    #[serde(default)]
-    pub(crate) seq: u64,
-}
-
-impl Waits {
-    pub(crate) fn is_unused(&self) -> bool {
-        self.wait.is_none() && self.seq == 0
-    }
+/// Whether `wait` is the wait of exactly this front: its slot's ticket and original.
+fn holds(wait: &RetryWait, front: &Front) -> bool {
+    wait.ticket == front.0 && wait.front == refused::refused_member(&front.1)
 }
 
 impl Owner {
     /// Whether `front` sits in an armed wait, which its grant waits out.
     pub(crate) fn retry_waiting(&self, front: &Front) -> bool {
         let wait = self.snapshot.retry.wait.as_ref();
-        wait.is_some_and(|wait| wait.armed && wait.holds(front))
+        wait.is_some_and(|wait| wait.armed && holds(wait, front))
     }
 
     /// The grant `grant` of `front`, refused before any claim, waits as `cause`; it is spent.
@@ -150,7 +68,7 @@ impl Owner {
         let mut next = self.snapshot.clone();
         // The same execution keeps its consumed dues; another one starts over.
         let attempts = (next.retry.wait.as_ref())
-            .filter(|wait| wait.holds(front) && wait.cause.nonce() == cause.nonce())
+            .filter(|wait| holds(wait, front) && wait.cause.nonce() == cause.nonce())
             .map_or(0, |wait| wait.attempts);
         next.retry.seq += 1;
         let wait_seq = next.retry.seq;
@@ -210,7 +128,7 @@ impl Owner {
     #[cfg(all(test, unix))]
     pub(crate) fn never_started_close_qualified(&self, front: &Front, nonce: &str) -> bool {
         self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
-            wait.holds(front)
+            holds(wait, front)
                 && wait.attempts >= 1
                 && matches!(&wait.cause, RetryCause::PendingUnstarted { nonce: n }
                     | RetryCause::OwnLaunchTimeout { nonce: n } if n == nonce)
