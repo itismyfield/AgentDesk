@@ -1,12 +1,17 @@
 import { ArrowLeft, Monitor, PencilLine, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import type { Campaign } from "../../api/campaigns";
 import { getDefaultPipelineTemplate, getServerCampaignPipeline, type CampaignPipeline as Detail, type PipelineDefinition, type PipelineDiagnostic } from "../../api/serverCampaignPipeline";
 import { Button } from "../../kit/free/button-clean";
 import { Dialog } from "../../kit/free/dialog-clean";
+import { AgentMetroMap, type MetroLine, type MetroStation } from "../../kit/pro/agent-metro-map";
+import { AgentStateMachine, type MachineEdge, type MachineState } from "../../kit/pro/agent-state-machine";
 import { Cap, Chip, Desc, InspSection, Num } from "../common/KitPrimitives";
 import { useShellFocus } from "../../app/shellFocus";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { WidgetState } from "../common/WidgetState";
+import { campaignStageStep } from "./campaignModel";
+import { legacyTask, type OverviewTask } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import PipelineCanvas, { type PinDrop, type StateNodeData } from "./PipelineCanvas";
 import { changesText, connect, connectNew, diagnosticState, draftChanges } from "./pipelineEdit";
@@ -24,13 +29,176 @@ type Loaded = { pipeline: PipelineDefinition; detail: Detail | null; template: {
 /** The find-or-make window: for a pin (`from`), or for the canvas tools' 상태 추가; `at` when a pin was let go on the canvas. */
 type Picking = { from: { state: string; pin: string } | null; anchor: RefObject<HTMLElement | null>; at?: PinDrop };
 
+const METRO_COLORS = ["#0190fe", "#10b981", "#f59e0b", "#06b6d4", "#ec4899", "#3b82f6"];
+
+type StageBucket = "plan" | "build" | "review" | "repair" | "merge" | "done" | "blocked";
+
+function taskStageBucket(task: OverviewTask): StageBucket {
+  if (task.status === "completed" || task.status === "skipped") return "done";
+  if (task.status === "failed" || task.status === "blocked") return "blocked";
+  const step = campaignStageStep(task.stage).index;
+  if (step === 4) return "repair";
+  if (step >= 5) return "merge";
+  if (step === 3) return "review";
+  if (step === 2) return "build";
+  return "plan";
+}
+
+function metroStationForTask(task: OverviewTask): string {
+  if (task.status === "blocked" || task.status === "failed") return "held";
+  const step = campaignStageStep(task.stage).index;
+  if (step === 4) return "move";
+  if (step === 6 || task.gate) return "wsl";
+  if (step === 5) return "push";
+  if (step === 3) return "check";
+  if (step === 2) return "edit";
+  return "brief";
+}
+
+/** Compact stage state-machine & active-task metro-map summary for ledger campaigns. */
+function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; tasks?: OverviewTask[]; tr: Tr }) {
+  const resolved = useMemo(
+    () => tasks ?? (campaign ? campaign.nodes.map((node) => legacyTask(node)) : []),
+    [tasks, campaign],
+  );
+
+  const { states, edges, current, activeLines, stations } = useMemo(() => {
+    const byBucket: Record<StageBucket, OverviewTask[]> = {
+      plan: [], build: [], review: [], repair: [], merge: [], done: [], blocked: [],
+    };
+    for (const task of resolved) byBucket[taskStageBucket(task)].push(task);
+
+    const detailFor = (bucket: StageBucket) => {
+      const list = byBucket[bucket];
+      if (!list.length) return tr("작업 0개", "0 tasks");
+      const running = list.filter((t) => t.status === "running").length;
+      return running > 0
+        ? tr(`작업 ${list.length}개 · 진행 ${running}`, `${list.length} tasks · ${running} running`)
+        : tr(`작업 ${list.length}개`, `${list.length} tasks`);
+    };
+    const waitingTone = (bucket: StageBucket) => byBucket[bucket].some((t) => t.gate !== null) ? ("waiting" as const) : ("normal" as const);
+
+    const states: MachineState[] = [
+      { id: "plan", title: tr("조사·설계", "Plan & Design"), column: 0, row: 0, count: byBucket.plan.length, detail: detailFor("plan"), tone: waitingTone("plan") },
+      { id: "build", title: tr("구현", "Build"), column: 1, row: 0, count: byBucket.build.length, detail: detailFor("build"), tone: waitingTone("build") },
+      { id: "review", title: tr("리뷰", "Review"), column: 2, row: 0, count: byBucket.review.length, detail: detailFor("review"), tone: waitingTone("review") },
+      { id: "merge", title: tr("머지·배포", "Merge & Check"), column: 3, row: 0, count: byBucket.merge.length, detail: detailFor("merge"), tone: waitingTone("merge") },
+      { id: "done", title: tr("완료", "Done"), column: 4, row: 0, count: byBucket.done.length, detail: detailFor("done"), tone: "final" },
+      { id: "repair", title: tr("수리·재작업", "Fix & Rework"), column: 2, row: 1, count: byBucket.repair.length, detail: detailFor("repair"), tone: byBucket.repair.length > 0 ? "waiting" : "normal" },
+      { id: "blocked", title: tr("막힘·실패", "Blocked & Failed"), column: 3, row: 1, count: byBucket.blocked.length, detail: detailFor("blocked"), tone: byBucket.blocked.length > 0 ? "error" : "normal" },
+    ];
+
+    const pastMerge = byBucket.done.length;
+    const pastReview = pastMerge + byBucket.merge.length;
+    const pastBuild = pastReview + byBucket.review.length + byBucket.repair.length;
+    const pastPlan = pastBuild + byBucket.build.length;
+
+    const edges: MachineEdge[] = [
+      { from: "plan", to: "build", label: tr("설계 통과", "planned"), count: pastPlan },
+      { from: "build", to: "review", label: tr("구현 완료", "built"), count: pastBuild },
+      { from: "review", to: "merge", label: tr("리뷰 통과", "reviewed"), count: pastReview },
+      { from: "merge", to: "done", label: tr("착지 완료", "landed"), count: pastMerge },
+      { from: "review", to: "repair", label: tr("재작업", "rework"), count: byBucket.repair.length },
+      { from: "repair", to: "review", label: tr("재리뷰", "re-review"), count: byBucket.repair.length },
+      { from: "build", to: "blocked", label: tr("막힘·실패", "blocked"), count: byBucket.blocked.length },
+    ];
+
+    const gated = (["merge", "review", "build", "plan"] as StageBucket[]).find((b) => byBucket[b].some((t) => t.gate !== null));
+    const mostActive = (["merge", "review", "repair", "build", "plan"] as StageBucket[])
+      .map((b) => ({ b, r: byBucket[b].filter((t) => t.status === "running").length }))
+      .sort((a, b) => b.r - a.r)[0];
+    const current = gated
+      ?? (mostActive && mostActive.r > 0 ? mostActive.b : null)
+      ?? (byBucket.blocked.length > 0 ? "blocked" : byBucket.done.length > 0 && byBucket.done.length === resolved.length ? "done" : "plan");
+
+    const runningTasks = resolved.filter((t) => t.status === "running");
+    const byStation = new Map<string, OverviewTask[]>();
+    for (const task of resolved) {
+      if (task.status === "completed" || task.status === "skipped") continue;
+      const stationId = metroStationForTask(task);
+      byStation.set(stationId, [...(byStation.get(stationId) ?? []), task]);
+    }
+    const stationMeta = (id: string, ko: string, en: string, column: number, row: number): MetroStation => {
+      const here = byStation.get(id) ?? [];
+      const base = tr(ko, en);
+      return {
+        id,
+        name: here.length > 0 ? `${base} (${here.length})` : base,
+        column,
+        row,
+        waiting: id === "held" ? here.length > 0 : here.some((t) => t.gate !== null),
+        note: here.length > 0
+          ? here.slice(0, 4).map((t) => `${t.number ?? t.id} ${t.title}`).join(" · ")
+          : tr("머무는 작업 없음", "No tasks at this station"),
+      };
+    };
+    const stations: MetroStation[] = [
+      stationMeta("brief", "조사·설계", "Plan", 0, 1),
+      stationMeta("edit", "구현", "Build", 1, 0),
+      stationMeta("check", "리뷰", "Review", 2, 0),
+      stationMeta("push", "머지", "Merge", 3, 0),
+      stationMeta("move", "수리", "Fix", 1, 2),
+      stationMeta("wsl", "배포 확인", "Verify", 2, 2),
+      stationMeta("held", "막힘", "Held", 0, 3),
+    ];
+
+    const activeLines: MetroLine[] = runningTasks.slice(0, 6).map((task, idx) => {
+      const here = metroStationForTask(task);
+      const lower = here === "move" || here === "wsl";
+      const label = `${task.number ? `${task.number} ` : ""}${task.title}`;
+      return {
+        id: task.id,
+        name: label.length > 22 ? `${label.slice(0, 21)}…` : label,
+        stations: lower ? ["brief", "edit", "move", "wsl", "push"] : ["brief", "edit", "check", "push"],
+        here,
+        status: "running",
+        color: METRO_COLORS[idx % METRO_COLORS.length],
+      };
+    });
+    if (activeLines.length > 0 && (byStation.get("held")?.length ?? 0) > 0) {
+      const heldCount = byStation.get("held")!.length;
+      activeLines.push({
+        id: "held-line",
+        name: tr(`막힘·보류 ${heldCount}`, `${heldCount} held`),
+        stations: ["held"],
+        here: "held",
+        status: "idle",
+        color: "#e5a000",
+      });
+    }
+
+    return { states, edges, current, activeLines, stations };
+  }, [resolved, tr]);
+
+  return (
+    <div className={`grid min-w-0 gap-3 p-3 sm:p-4 ${activeLines.length > 0 ? "min-[1280px]:grid-cols-2" : ""}`}>
+      <AgentStateMachine
+        title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
+        agent={tr(`작업 ${resolved.length}개`, `${resolved.length} tasks`)}
+        current={current}
+        states={states}
+        edges={edges}
+      />
+      {activeLines.length > 0 && (
+        <AgentMetroMap
+          title={tr("활성 작업 위치 노선도", "Active task stage map")}
+          lines={activeLines}
+          stations={stations}
+        />
+      )}
+    </div>
+  );
+}
+
 /** 파이프라인: the campaign's state graph. Server campaigns show their own (with the tasks in each state) and, when the
- * server allows, edit it on wide screens in a full-window editor; ledger campaigns show the built-in template and say so.
- * Phones get the numbered list. */
-export default function CampaignPipeline({ source, title, dispositions, approvals = null, leave, onEditing, tr }: {
+ * server allows, edit it on wide screens in a full-window editor; ledger campaigns show a visual stage summary + template preview. */
+export default function CampaignPipeline({ source, title, campaign, tasks: ledgerTasks, dispositions, approvals = null, leave, onEditing, tr }: {
   source: PipelineSource; tr: Tr;
   /** The campaign's name, at the head of the editor. */
   title?: string;
+  /** Ledger campaign and its live-resolved overview tasks for stage occupancy & active metro map. */
+  campaign?: Campaign;
+  tasks?: OverviewTask[];
   /** A server campaign's task dispositions by node, and its workflow options' approvals by gate. */
   dispositions?: Record<string, string>; approvals?: Record<string, boolean> | null;
   /** Set while the draft has unsaved changes, so the page asks before leaving. */
@@ -162,7 +330,8 @@ export default function CampaignPipeline({ source, title, dispositions, approval
       </header>}
       {status}
       {error && <WidgetState kind="stale" title={tr("파이프라인을 갱신하지 못했어요.", "Could not refresh the pipeline.")} description={error} />}
-      {!detail && !templatePreviewOpen ? <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs text-[var(--fg-muted)]">
+      {!detail && <LedgerStageSummary campaign={campaign} tasks={ledgerTasks} tr={tr} />}
+      {!detail && !templatePreviewOpen ? <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line-soft)] px-4 py-3 text-xs text-[var(--fg-muted)]">
         <span>{tr("원장 캠페인은 작업별 상태·선행 DAG로 진행되며 서버 파이프라인 런타임을 실행하지 않아요. 필요할 때 위 버튼으로 기본 9단계 템플릿 구조를 펼쳐 볼 수 있어요.", "Ledger campaigns run on the task DAG rather than the server pipeline runtime. Expand the preview above to inspect the built-in 9-stage template.")}</span>
       </div> : phone ? <div className="grid gap-3 p-3">
         <p className="m-0 flex items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--bg-2)] px-3 py-2 text-[13px] text-[var(--fg-dim)]"><Monitor aria-hidden className="size-4 shrink-0" />{detail ? tr("상태와 전환은 넓은 화면에서 고쳐요. 폰에서는 보기만 해요.", "States and transitions are edited on wider screens. Phones only show them.")

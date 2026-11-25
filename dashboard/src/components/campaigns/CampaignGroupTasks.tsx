@@ -83,9 +83,20 @@ export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, 
     const outside = node.dependencies.filter((dep) => byId.has(dep) && campaignGroup(byId.get(dep)!) !== group).length;
     const error = graph.components.some((part) => part.has(node.id));
     const data: ViewTaskData = {
-      title: campaignTaskTitle(node), meta: `${taskLabel(node)} · ${label(group)}`, ...nodeMarker(node.status, node.stage), pins: [tr("선행", "Needs"), tr("다음", "Next")],
+      title: campaignTaskTitle(node),
+      code: taskLabel(node),
+      meta: label(group),
+      status: node.status,
+      statusLabel: tr(...LABELS[node.status]),
+      ...nodeMarker(node.status, node.stage),
       summary: [tr(`수용조건 ${node.acceptance.length}`, `${node.acceptance.length} acceptance`), outside > 0 && tr(`범위 밖 선행 ${outside}`, `${outside} outside the scope`)].filter(Boolean).join(" · "),
-      note: error ? { tone: "err", text: tr("순환 오류", "Cycle") } : node.status === "blocked" ? { tone: "err", text: tr("막힘", "Blocked") } : null,
+      note: error
+        ? { tone: "err", text: tr("순환 오류", "Cycle") }
+        : node.status === "blocked"
+          ? { tone: "warn", text: tr("막힘", "Blocked") }
+          : node.status === "failed"
+            ? { tone: "err", text: tr("실패", "Failed") }
+            : null,
       locked: false, error, picked: false, cover: taskName(node), far: tr(...LABELS[node.status]),
     };
     return { id: node.id, type: "relationsTask", position: graph.positions.get(node.id)!, data, draggable: false, selected: node.id === chosen,

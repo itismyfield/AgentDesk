@@ -1,6 +1,6 @@
 import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { Background, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
+import { Background, MarkerType, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { getCampaignDetail, saveCampaignNodes, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
@@ -9,7 +9,8 @@ import { Button } from "../../kit/free/button-clean";
 import { Dialog } from "../../kit/free/dialog-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
-import { Select } from "../common/Select";
+import { Select } from "../../kit/free/select-clean";
+import { GRAPH_DIM_OPACITY, GraphMiniMap, computeConnectedSubgraph } from "../common/graph/GraphChrome";
 import { campaignRawEdges, rawEdgeId, type RawEdgeKey } from "./campaignGraphRouting";
 import { campaignTaskTitle, groupCampaignNodes } from "./campaignModel";
 import { LEDGER_STATUS_LABELS } from "./campaignOverviewModel";
@@ -81,6 +82,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const panel = useRef<HTMLDivElement>(null);
   const scopeBar = useRef<HTMLDivElement>(null);
   const flow = useRef<ReactFlowInstance | null>(null);
+  const [minimapOpen, setMinimapOpen] = useState(true);
+  const [flowReady, setFlowReady] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tool, setTool] = useState<"select" | "connect" | "tie">("select");
   const [from, setFrom] = useState<string | null>(null);
   /** Lines chosen with the tie tool, as raw edge ids; the chosen tie, its original-line preview and its drag. */
@@ -272,21 +276,35 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const cycleEdges = new Map<string, string[]>();
   for (const path of cycles) path.slice(1).forEach((to, index) => cycleEdges.set(`${path[index]}->${to}`, path));
   const labelled = new Set<string[]>();
+  const selectedNodeId = tool === "select" && selection?.kind === "node" ? selection.id : null;
+  const activeNodeId = selectedNodeId ?? hoveredId;
+  const rawScopeEdges: [string, string][] = ids.flatMap((id) =>
+    byId.get(id)!.dependencies.filter((dep) => inScope.has(dep)).map((dep): [string, string] => [dep, id]),
+  );
+  const connected = computeConnectedSubgraph(activeNodeId, rawScopeEdges);
   const graphNodes: Node[] = ids.map((id) => {
     const node = byId.get(id)!;
     const outside = node.dependencies.filter((dep) => !inScope.has(dep)).length;
     const looped = cycles.some((path) => path.includes(id));
     const bad = invalid.some((entry) => entry.id === id);
     const lock = lockOf(id);
+    const dimmed = activeNodeId !== null && !connected.has(id);
     const data: TaskNodeData = {
-      title: campaignTaskTitle(node), meta: `${taskLabel(node)} · ${node.group || tr("미분류", "Ungrouped")}`, ...nodeMarker(node.status, node.stage),
-      pins: [tr("선행", "Needs"), tr("다음", "Next")],
+      title: campaignTaskTitle(node),
+      code: taskLabel(node),
+      meta: node.group || tr("미분류", "Ungrouped"),
+      status: node.status,
+      statusLabel: tr(...LABELS[node.status]),
+      ...nodeMarker(node.status, node.stage),
       summary: [tr(`수용조건 ${node.acceptance.length}`, `${node.acceptance.length} acceptance`), outside > 0 && tr(`범위 밖 선행 ${outside}`, `${outside} outside the scope`)].filter(Boolean).join(" · "),
-      note: looped ? { tone: "err", text: tr("순환 오류", "Cycle") } : bad ? { tone: "err", text: tr("입력 오류", "Invalid field") } : lock ? { tone: "lock", text: lock } : null,
+      note: looped ? { tone: "err", text: tr("순환 오류", "Cycle") } : bad ? { tone: "err", text: tr("입력 오류", "Invalid field") } : lock ? { tone: "lock", text: lock } : node.status === "blocked" ? { tone: "warn", text: tr("막힘", "Blocked") } : null,
       locked: lock !== null, error: looped || bad, picked: from === id,
     };
-    return { id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, measured: measured[id], data, draggable: false, deletable: false,
-      selected: tool === "select" && selection?.kind === "node" && selection.id === id, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}` };
+    return {
+      id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, measured: measured[id], data, draggable: false, deletable: false,
+      style: dimmed ? { opacity: GRAPH_DIM_OPACITY } : undefined,
+      selected: selectedNodeId === id, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}`,
+    };
   });
   // A tied line runs through its ties in stored order; its first piece keeps the plain id, so focus and checks find it.
   const routeOf = new Map(tieView.routes.map((route) => [rawEdgeId(route.edge), route.via]));
@@ -296,17 +314,26 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     const via = (routeOf.get(rawEdgeId([dep, id])) ?? []).filter((tie) => tieById.has(tie));
     via.forEach((tie) => through.set(tie, [...through.get(tie) ?? [], [dep, id]]));
     const path = cycleEdges.get(`${dep}->${id}`);
+    const edgeConnected = activeNodeId === null || (connected.has(dep) && connected.has(id));
     const chosen = tool !== "tie" && selection?.kind === "edge" && selection.source === dep && selection.target === id;
-    const lit = chosen || (tool === "tie" && bundle.includes(rawEdgeId([dep, id]))) || (chosenTie !== null && via.includes(chosenTie));
+    const lit = chosen || (tool === "tie" && bundle.includes(rawEdgeId([dep, id]))) || (chosenTie !== null && via.includes(chosenTie)) || (activeNodeId !== null && edgeConnected && !path);
     const first = path && !labelled.has(path);
     if (path) labelled.add(path);
     const chain = [dep, ...via.map((tie) => TIE + tie), id];
-    return chain.slice(1).map((target, index) => ({
-      id: index ? `${dep}->${id}#${index}` : `${dep}->${id}`, source: chain[index], target, data: { dep, id } satisfies Line, selected: chosen, deletable: lockOf(id) === null,
-      ariaLabel: tr(`선행 ${label(dep)} → ${label(id)}`, `Dependency ${label(dep)} → ${label(id)}`),
-      style: path ? { stroke: "var(--err)", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke: lit ? "var(--info)" : "var(--fg-muted)", strokeWidth: lit ? 2.5 : 1.5 },
-      ...first && !index ? { label: cycleText(path), labelStyle: { fill: "var(--err)", fontSize: 12 }, labelBgStyle: { fill: "var(--th-card-bg)" }, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 6 } : {},
-    }));
+    const stroke = path ? "var(--err)" : lit ? "var(--info)" : "var(--fg-muted)";
+    return chain.slice(1).map((target, index) => {
+      const last = index === chain.length - 2;
+      return {
+        id: index ? `${dep}->${id}#${index}` : `${dep}->${id}`, source: chain[index], target, data: { dep, id } satisfies Line, selected: chosen, deletable: lockOf(id) === null,
+        ariaLabel: tr(`선행 ${label(dep)} → ${label(id)}`, `Dependency ${label(dep)} → ${label(id)}`),
+        style: {
+          ...(path ? { stroke: "var(--err)", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke, strokeWidth: lit ? 2.25 : 1.75 }),
+          ...(!edgeConnected ? { opacity: GRAPH_DIM_OPACITY } : {}),
+        },
+        ...(last ? { markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } } : {}),
+        ...(first && !index ? { label: cycleText(path), labelStyle: { fill: "var(--err)", fontSize: 12 }, labelBgStyle: { fill: "var(--th-card-bg)" }, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 6 } : {}),
+      };
+    });
   }));
   const chosenLines = bundle.map((edge) => JSON.parse(edge) as RawEdgeKey).filter(([dep, id]) => inScope.has(dep) && !!byId.get(id)?.dependencies.includes(dep) && inScope.has(id));
   const activeTie = chosenTie && through.has(chosenTie) ? chosenTie : null;
@@ -326,15 +353,23 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     setTool("select");
   };
   // Original-line preview: the chosen tie's lines also drawn on their own paths, dashed.
-  if (activeTie && previewing) edges.push(...through.get(activeTie)!.map(([dep, id]) => ({ id: `preview:${dep}->${id}`, source: dep, target: id, selectable: false, focusable: false, deletable: false, style: { stroke: "var(--fg-muted)", strokeDasharray: "4 4" } })));
+  if (activeTie && previewing) edges.push(...through.get(activeTie)!.map(([dep, id]) => ({
+    id: `preview:${dep}->${id}`, source: dep, target: id, selectable: false, focusable: false, deletable: false,
+    markerEnd: { type: MarkerType.ArrowClosed, color: "var(--fg-muted)", width: 12, height: 12 },
+    style: { stroke: "var(--fg-muted)", strokeDasharray: "4 4" },
+  })));
   for (const [tieId, lines] of through) {
+    const tieActive = activeNodeId === null || lines.some(([dep, id]) => connected.has(dep) && connected.has(id));
     const menu: TieMenu | null = tieId !== activeTie || drag ? null : {
       labels: { menu: tr("케이블타이 메뉴", "Cable tie menu"), remove: tr("타이 풀기", "Untie"), detach: tr("선 하나만 빼기", "Take one line out"), preview: tr("원래 선 미리 보기", "Preview original lines") },
       strands: lines.map(([dep, id]) => ({ key: rawEdgeId([dep, id]), label: `${label(dep)} → ${label(id)}` })), previewing,
       act: { remove: () => untie(tieId), detach: (edge) => tieCommit({ kind: "detach", tieId, edge: JSON.parse(edge) as RawEdgeKey }), preview: () => setPreviewing(!previewing) },
     };
-    graphNodes.push({ id: TIE + tieId, type: "relationsTie", position: drag?.id === tieId ? drag.position : tieById.get(tieId)!.position, measured: measured[TIE + tieId], draggable: !saving, deletable: false,
-      selected: tieId === activeTie, ariaLabel: tr(`케이블타이, 선 ${lines.length}개`, `Cable tie, ${lines.length} lines`), data: { count: lines.length, menu } satisfies TieNodeData });
+    graphNodes.push({
+      id: TIE + tieId, type: "relationsTie", position: drag?.id === tieId ? drag.position : tieById.get(tieId)!.position, measured: measured[TIE + tieId], draggable: !saving, deletable: false,
+      style: tieActive ? undefined : { opacity: GRAPH_DIM_OPACITY },
+      selected: tieId === activeTie, ariaLabel: tr(`케이블타이, 선 ${lines.length}개`, `Cable tie, ${lines.length} lines`), data: { count: lines.length, menu } satisfies TieNodeData,
+    });
   }
   const chosen = selection?.kind === "node" ? byId.get(selection.id) ?? null : null;
   const problems = [...cycles.map(cycleText), ...invalid.map(({ id, field }) => `${label(id)} ${field === "title" ? tr("제목", "title") : tr("이슈 주소", "issue link")}`)];
@@ -343,6 +378,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   /** First view: every task while that stays legible, else the chosen task (or the scope's start) at a legible zoom. */
   const firstView = (instance: ReactFlowInstance) => {
     flow.current = instance;
+    setFlowReady(true);
     const box = canvas.current?.getBoundingClientRect();
     const placed = ids.flatMap((id) => positions.get(id) ?? []);
     if (!box || placed.length === 0) return;
@@ -392,12 +428,21 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       focus: () => chosen && onScope({ kind: "task", id: chosen.id, depth: 1 }),
     }} />;
 
+  const scopeOptions = [
+    ...(scope.kind === "task" ? [{ value: `task:${scope.id}`, label: tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`) }] : []),
+    ...groups.map((group) => ({ value: `group:${group.key}`, label: tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`) })),
+  ];
+  const stepOptions = Array.from({ length: MAX_DEPTH }, (_, index) => ({
+    value: String(index + 1),
+    label: tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`),
+  }));
+
   return <section ref={root} aria-label={tr("작업 관계도 편집", "Edit task relations")}
     className="campaign-relations-editor grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden bg-[var(--th-bg-primary)]"
     onKeyDown={(event) => {
       if (!event.currentTarget.contains(event.target as HTMLElement)) return;
       // The tie keys answer only on the canvas and its chrome, never while typing; Escape closes whatever is open.
-      const typing = !!(event.target as HTMLElement).closest("input, textarea, select") || event.metaKey || event.ctrlKey || event.altKey;
+      const typing = !!(event.target as HTMLElement).closest('input, textarea, select, [role="combobox"], [role="listbox"]') || event.metaKey || event.ctrlKey || event.altKey;
       const letter = event.key.toLowerCase();
       if (!typing && activeTie && (event.key === "Delete" || event.key === "Backspace")) { event.preventDefault(); untie(activeTie); }
       else if (!typing && activeTie && letter === "h") setPreviewing(!previewing);
@@ -432,18 +477,19 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       </div>}
     </div>
     <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_22.5rem]" : ""}`}>
-      <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0">
+      <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0 bg-[var(--bg)]">
         <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} proOptions={{ hideAttribution: true }}
           minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false} snapToGrid snapGrid={[GRID, GRID]}
           nodesConnectable={!saving} deleteKeyCode={saving ? null : ["Delete", "Backspace"]}
           onConnect={({ source, target }) => source && target && link(source, target)}
           isValidConnection={({ target }) => lockOf(target) === null}
-          // Selection arrives as a change for a click and for Enter on a focused task, tie or line alike.
           onNodesChange={(changes) => {
             const sized = changes.flatMap((change) => change.type === "dimensions" && change.dimensions ? [[change.id, change.dimensions] as const] : []);
             if (sized.length) setMeasured((current) => ({ ...current, ...Object.fromEntries(sized) }));
             const picked = changes.find((change) => change.type === "select" && change.selected); if (picked && "id" in picked) pick(picked.id);
           }}
+          onNodeMouseEnter={(_, node) => { if (!node.id.startsWith(TIE)) setHoveredId(node.id); }}
+          onNodeMouseLeave={() => setHoveredId(null)}
           onEdgesChange={(changes) => {
             const line = edges.find((edge) => changes.some((change) => change.type === "select" && change.selected && change.id === edge.id))?.data as Line | undefined;
             if (!line) return;
@@ -451,7 +497,6 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
             if (tool === "tie") setBundle(bundle.includes(raw) ? bundle.filter((edge) => edge !== raw) : [...bundle, raw]);
             else { setSelection({ kind: "edge", source: line.dep, target: line.id }); setChosenTie(null); }
           }}
-          // Narrower than 1280px a clicked line is lit at once, but the overlay waits out a double-click that would land on it.
           onEdgeClick={() => { if (wide || tool === "tie") return; clearTimeout(clickWait.current); setWaiting(true); clickWait.current = setTimeout(() => setWaiting(false), DOUBLE_CLICK_MS); }}
           onEdgeDoubleClick={(event, edge) => {
             clearTimeout(clickWait.current); setWaiting(false);
@@ -466,17 +511,18 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           }}
           onPaneClick={() => { setSelection(null); setFrom(null); setChosenTie(null); setPreviewing(false); }}
           onEdgesDelete={(deleted) => { unlink(deleted.flatMap((edge) => edge.data ? [[(edge.data as Line).dep, (edge.data as Line).id] as [string, string]] : [])); setSelection(null); }}>
-          <Background />
+          <Background gap={20} size={1.6} color="var(--line)" />
+          <GraphMiniMap open={minimapOpen} ready={flowReady} ariaLabel={tr("편집 미니맵", "Editor minimap")} chosenId={selectedNodeId} />
         </ReactFlow>
         <div ref={scopeBar} data-editor-chrome="scope" className={`${FLOAT} top-3 left-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-3 gap-y-1.5 p-1.5`}>
-          <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-64 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
-            onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
-            {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
-            {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
-          </Select>
-          {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
-            {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
-          </Select>}
+          <div className="w-64 max-w-full">
+            <Select aria-label={tr("편집 범위", "Scope")} size="md" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
+              options={scopeOptions} onChange={(value) => { const next = parseScope(value, "1"); if (next) onScope(next); }} />
+          </div>
+          {scope.kind === "task" && <div className="w-28 shrink-0">
+            <Select aria-label={tr("단계", "Steps")} size="md" value={String(scope.depth)} options={stepOptions}
+              onChange={(value) => onScope({ ...scope, depth: Number(value) })} />
+          </div>}
           {total > ids.length && <span role="status" className="text-xs text-[var(--warn)]">{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</span>}
           {ids.length === 0 && <span role="status" className="text-xs text-[var(--fg-muted)]">{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</span>}
           {tool === "connect" && <span role="status" className="text-xs text-[var(--fg)]">{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</span>}
@@ -491,7 +537,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           <IconButton icon={<Cable aria-hidden />} className={TOOL} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
           <IconButton icon={<LayoutGrid aria-hidden />} className={TOOL} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
         </div>
-        <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fitLabel={tr("전체 보기", "Show every task")} tr={tr} />
+        <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fitLabel={tr("전체 보기", "Show every task")}
+          minimap={{ open: minimapOpen, onToggle: () => setMinimapOpen((v) => !v) }} tr={tr} />
       </div>
       {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
       {wide ? <div className="flex min-h-0 flex-col bg-[var(--bg-1)]">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">

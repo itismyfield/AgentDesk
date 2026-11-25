@@ -63,16 +63,29 @@ export default function CampaignGroupOverview({ campaignId, nodes, chosen, onCho
   const graphNodes = useMemo(() => overview.groups.map((group): Node => {
     const { counts, percent, total } = group.progress;
     const finished = total > 0 && counts.completed + counts.skipped === total;
+    const statusLabel = finished
+      ? tr("완료", "Done")
+      : counts.blocked
+        ? tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)
+        : counts.running
+          ? tr(`진행 ${counts.running}`, `${counts.running} running`)
+          : tr("대기", "Pending");
     const data: GroupNodeData = {
-      title: group.key || tr("미분류", "Ungrouped"), meta: tr(`작업 ${total}개 · 완료 ${percent}%`, `${total} tasks · ${percent}% done`),
-      tone: finished ? "done" : counts.blocked ? "warn" : counts.running ? "progress" : "open", ratio: percent / 100, pins: [tr("선행", "Needs"), tr("다음", "Next")],
-      summary: tr(`진행 ${counts.running} · 막힘 ${counts.blocked} · 그룹 안 연결 ${group.internalDependencies}`, `${counts.running} running · ${counts.blocked} blocked · ${group.internalDependencies} inside`),
+      title: group.key || tr("미분류", "Ungrouped"),
+      code: `#${total}`,
+      meta: `${percent}%`,
+      statusLabel,
+      tone: finished ? "done" : counts.blocked ? "warn" : counts.running ? "progress" : "open",
+      ratio: percent / 100,
+      summary: tr(`진행 ${counts.running} · 그룹 안 연결 ${group.internalDependencies}`, `${counts.running} running · ${group.internalDependencies} inside`),
       blocked: counts.blocked ? tr(`막힌 작업 ${counts.blocked}개`, `${counts.blocked} blocked tasks`) : null,
       far: [`${percent}%`, counts.blocked > 0 && tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)].filter(Boolean).join(" · "),
+      openLabel: tr("열기 →", "Open →"),
+      onOpen: () => onOpenGroup(group.key),
     };
     return { id: group.id, type: "relationsGroup", position: group.position, data, draggable: false, selected: group.key === chosen,
       ariaLabel: tr(`${data.title}, 작업 ${total}개, 완료 ${percent}%, 진행 ${counts.running}, 막힘 ${counts.blocked}`, `${data.title}, ${total} tasks, ${percent}% completed, ${counts.running} running, ${counts.blocked} blocked`) };
-  }), [overview, chosen, tr]);
+  }), [overview, chosen, onOpenGroup, tr]);
   const cycleText = useCallback((path: string[]) => groupCycleText(overview, path, tr), [overview, tr]);
   const lineLabel = useCallback((line: ViewLine) => tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), [tr]);
   return <RelationsViewCanvas label={tr("그룹별 전체 관계", "All campaign group relationships")} nodes={graphNodes} lines={overview.connections} ties={overview.ties}

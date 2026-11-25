@@ -1,9 +1,9 @@
 import { Lock, TriangleAlert, X } from "lucide-react";
 import type { CampaignNode } from "../../api/campaigns";
 import { Button } from "../../kit/free/button-clean";
+import { Select } from "../../kit/free/select-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { Cap, Desc, Eyebrow, InspSection, Num, RowButton, RuleItem } from "../common/KitPrimitives";
-import { Select } from "../common/Select";
 import type { Tr } from "./campaignPresentation";
 import { taskLabel, taskName } from "./relationsEditorModel";
 
@@ -97,10 +97,9 @@ export default function RelationsInspector({ node, edge, lock, busy, nodes, cycl
           </span>
         </li>)}
       </ul> : <Desc>{tr("선행 작업이 없어요.", "No dependencies.")}</Desc>}
-      {!locked && <Select aria-label={tr("선행 추가", "Add a dependency")} disabled={busy} value="" onChange={(event) => event.target.value && act.add(event.target.value)}>
-        <option value="">{tr("+ 선행 추가", "+ Add a dependency")}</option>
-        {candidates.map((other) => <option key={other.id} value={other.id}>{taskName(other)}</option>)}
-      </Select>}
+      {!locked && <Select aria-label={tr("선행 추가", "Add a dependency")} placeholder={tr("+ 선행 추가", "+ Add a dependency")} size="lg"
+        disabled={busy} value={null} options={candidates.map((other) => ({ value: other.id, label: taskName(other) }))}
+        onChange={(value) => value && act.add(value)} />}
     </InspSection>
     <InspSection>
       <div className="flex items-center justify-between"><Eyebrow>{tr("수용조건", "Acceptance")}</Eyebrow><Cap><Num>{tr(`${node.acceptance.length}개`, String(node.acceptance.length))}</Num></Cap></div>
