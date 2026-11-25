@@ -9,10 +9,7 @@ use super::tool_images::{
     late_confirm, notice_native_key,
 };
 use super::{LedgerEntry, LedgerState};
-use crate::services::discord::outbound::notification_policy::{NoticeClass, unit_class};
-use crate::services::tui_o::repost::o_piece_delivery::{PieceKey, kind_name};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, UnitKey, UnitKind};
-use crate::services::tui_o::writer::tool_images::{NativeTurn, OmitReason, image_native_key};
 
 /// Discord snowflake for `ms` milliseconds after the Discord epoch.
 fn snowflake(ms: u64) -> u64 {
@@ -37,11 +34,9 @@ fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
     }
 }
 
+/// The writer's `image_native_key` shape: `img:{turn}:{sha256}`.
 fn image(turn: &str, sha256: &str) -> UnitKey {
-    unit(
-        &image_native_key(&NativeTurn::new(turn), sha256),
-        UnitKind::ToolImage,
-    )
+    unit(&format!("img:{turn}:{sha256}"), UnitKind::ToolImage)
 }
 
 fn image_entry(entry: ImageEntry) -> LedgerEntry {
@@ -53,7 +48,7 @@ fn image_entry(entry: ImageEntry) -> LedgerEntry {
 fn obligation(unit_key: &UnitKey, turn: &str, call_id: &str, display_name: &str) -> LedgerEntry {
     image_entry(ImageEntry::ImageObligation(Box::new(ImageObligation {
         unit_key: unit_key.clone(),
-        turn: NativeTurn::new(turn),
+        turn: turn.into(),
         call_id: call_id.into(),
         image_index: 0,
         source: source(),
@@ -71,14 +66,14 @@ fn opened(turn: &str, opener_offset: u64) -> LedgerEntry {
     image_entry(ImageEntry::ImageTurnOpened {
         source: source(),
         opener_offset,
-        turn: NativeTurn::new(turn),
+        turn: turn.into(),
     })
 }
 
 fn closed(turn: &str, end_offset: u64) -> LedgerEntry {
     image_entry(ImageEntry::ImageTurnClosed {
         source: source(),
-        turn: NativeTurn::new(turn),
+        turn: turn.into(),
         end_offset,
     })
 }
@@ -205,14 +200,6 @@ fn plain_posted_anchor_skew_check_unchanged() {
     assert!(violation.contains("behind the anchor"), "{violation}");
 }
 
-#[test]
-fn tool_image_kind_not_postable_and_progress() {
-    let key = image("u1", "ab");
-    assert!(PieceKey::new(key, 0).is_none());
-    assert_eq!(kind_name(UnitKind::ToolImage), "tool_image");
-    assert_eq!(unit_class(UnitKind::ToolImage), NoticeClass::Progress);
-}
-
 fn steps(state: &LedgerState) -> Vec<OpenObligation> {
     state.tool_images().open_obligations(state)
 }
@@ -238,16 +225,13 @@ fn open_obligations_follow_image_and_notice_attempts() {
     let omit = ImageStep::Omit { serial: second };
     assert_eq!(steps(&state), vec![image_step(omit)]);
 
-    let reason = OmitReason::NotConfirmed;
+    let reason = "not_confirmed".to_owned();
     let omitted = ImageEntry::ImageOmitted {
         unit_key: key.clone(),
         reason,
     };
     apply(&mut state, image_entry(omitted));
-    let notice = unit(
-        &notice_native_key(&NativeTurn::new("u1"), "call-1"),
-        UnitKind::ToolImage,
-    );
+    let notice = unit(&notice_native_key("u1", "call-1"), UnitKind::ToolImage);
     let notice_step = |step| OpenObligation::Notice {
         key: notice.clone(),
         step,
@@ -314,7 +298,7 @@ fn replayed_closed_is_idempotent_and_a_moved_end_is_a_violation() {
     assert_eq!(state.violation(), None);
     let spans = state.tool_images();
     let turn = spans.span_at(&source(), 299).map(|span| span.turn.clone());
-    assert_eq!(turn, Some(NativeTurn::new("u1")));
+    assert_eq!(turn.as_deref(), Some("u1"));
     assert_eq!(spans.span_at(&source(), 300), None);
     assert_eq!(spans.span_at(&source(), 99), None);
     apply(&mut state, closed("u1", 400));

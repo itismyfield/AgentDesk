@@ -42,14 +42,14 @@ fn opened(id: &str, opener_offset: u64) -> ImageEntry {
     ImageEntry::ImageTurnOpened {
         source: source(),
         opener_offset,
-        turn: turn(id),
+        turn: id.into(),
     }
 }
 
 fn closed(id: &str, end_offset: u64) -> ImageEntry {
     ImageEntry::ImageTurnClosed {
         source: source(),
-        turn: turn(id),
+        turn: id.into(),
         end_offset,
     }
 }

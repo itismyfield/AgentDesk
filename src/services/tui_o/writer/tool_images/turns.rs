@@ -150,7 +150,7 @@ impl ImageTurns {
             && let Some(span) = spans.span_at(&self.source, offset)
         {
             self.state = State::Open(OpenTurn {
-                turn: span.turn.clone(),
+                turn: NativeTurn::new(span.turn.clone()),
                 opener_offset: span.opener_offset,
                 closes_at: span.end_offset,
             });
@@ -167,11 +167,13 @@ impl ImageTurns {
             .or_else(|| {
                 spans
                     .span_at(&self.source, offset)
-                    .map(|span| span.turn.clone())
+                    .map(|span| NativeTurn::new(span.turn.clone()))
             })
             .unwrap_or_else(|| self.edge_turn());
         let open_span = open
-            .filter(|open| open.turn == turn && spans.span_of(&self.source, &turn).is_none())
+            .filter(|open| {
+                open.turn == turn && spans.span_of(&self.source, turn.as_str()).is_none()
+            })
             .map(|open| TurnEdge::Opened {
                 turn: turn.clone(),
                 opener_offset: open.opener_offset,
@@ -191,7 +193,7 @@ impl ImageTurns {
             return false;
         }
         spans
-            .span_of(&self.source, turn)
+            .span_of(&self.source, turn.as_str())
             .is_none_or(|span| span.end_offset.is_some())
     }
 }

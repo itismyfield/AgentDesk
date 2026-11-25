@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{LedgerState, PieceOutcome};
 use crate::services::tui_o::shadow::{SourceId, UnitKey, UnitKind};
-use crate::services::tui_o::writer::tool_images::{NativeTurn, OmitReason};
 
 /// Image attempts that count; a proven-unsent attempt (`NotSent`) does not.
 pub(crate) const IMAGE_ATTEMPTS: usize = 2;
@@ -21,13 +20,14 @@ pub enum ImageEntry {
     ImageTurnOpened {
         source: SourceId,
         opener_offset: u64,
-        turn: NativeTurn,
+        /// The native turn id (`NativeTurn` in the writer).
+        turn: String,
     },
     /// The turn ended (native idle or verified physical end); records at `end_offset` and later
     /// belong to a later turn.
     ImageTurnClosed {
         source: SourceId,
-        turn: NativeTurn,
+        turn: String,
         end_offset: u64,
     },
     /// One image owed to Discord; the first record for a key stands.
@@ -35,7 +35,8 @@ pub enum ImageEntry {
     /// The image ends without an attachment; its result's omission notice is owed instead.
     ImageOmitted {
         unit_key: UnitKey,
-        reason: OmitReason,
+        /// The writer's `OmitReason` name, e.g. `not_confirmed`.
+        reason: String,
     },
 }
 
@@ -43,7 +44,7 @@ pub enum ImageEntry {
 pub struct ImageObligation {
     /// `kind: ToolImage`, `native_key: img:{turn}:{sha256}` or `ref:{turn}:{call}:{index}`.
     pub unit_key: UnitKey,
-    pub turn: NativeTurn,
+    pub turn: String,
     /// Claude `tool_use_id` or Codex `call_id`; with `turn` it names the omission-notice group.
     pub call_id: String,
     pub image_index: u32,
@@ -64,7 +65,7 @@ pub struct ImageObligation {
 /// One turn's span in a source: `opener_offset <= offset < end_offset`, open-ended until Closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnSpan {
-    pub turn: NativeTurn,
+    pub turn: String,
     pub opener_offset: u64,
     pub end_offset: Option<u64>,
 }
@@ -74,7 +75,7 @@ pub struct ImageState {
     /// Per source, ordered by opener offset and never overlapping.
     spans: HashMap<SourceId, Vec<TurnSpan>>,
     obligations: BTreeMap<UnitKey, ImageObligation>,
-    omitted: BTreeMap<UnitKey, OmitReason>,
+    omitted: BTreeMap<UnitKey, String>,
 }
 
 /// Replays one entry; an inconsistent entry is an ownership violation like any other.
@@ -85,8 +86,8 @@ pub(super) fn apply(ledger: &mut LedgerState, entry: ImageEntry) {
 }
 
 /// The omission notice's unit for one tool result: `omit:{turn}:{call}`.
-pub(crate) fn notice_native_key(turn: &NativeTurn, call_id: &str) -> String {
-    format!("omit:{}:{call_id}", turn.as_str())
+pub(crate) fn notice_native_key(turn: &str, call_id: &str) -> String {
+    format!("omit:{turn}:{call_id}")
 }
 
 impl ImageState {
@@ -125,8 +126,7 @@ impl ImageState {
                 match self.omitted.get(&unit_key) {
                     Some(old) if *old != reason => Err(format!(
                         "image {} omitted again as {}",
-                        unit_key.native_key,
-                        reason.as_str()
+                        unit_key.native_key, reason
                     )),
                     Some(_) => Ok(()),
                     None => {
@@ -145,19 +145,19 @@ impl ImageState {
         })
     }
 
-    pub(crate) fn span_of(&self, source: &SourceId, turn: &NativeTurn) -> Option<&TurnSpan> {
+    pub(crate) fn span_of(&self, source: &SourceId, turn: &str) -> Option<&TurnSpan> {
         self.spans
             .get(source)?
             .iter()
-            .find(|span| span.turn == *turn)
+            .find(|span| span.turn == turn)
     }
 
     pub(crate) fn obligation(&self, key: &UnitKey) -> Option<&ImageObligation> {
         self.obligations.get(key)
     }
 
-    pub(crate) fn omitted(&self, key: &UnitKey) -> Option<OmitReason> {
-        self.omitted.get(key).copied()
+    pub(crate) fn omitted(&self, key: &UnitKey) -> Option<&str> {
+        self.omitted.get(key).map(String::as_str)
     }
 
     /// Image and notice units this ledger owes, so a piece of `key` is never settled by the
@@ -211,19 +211,12 @@ impl ImageState {
     }
 }
 
-fn open_span(
-    spans: &mut Vec<TurnSpan>,
-    turn: NativeTurn,
-    opener_offset: u64,
-) -> Result<(), String> {
+fn open_span(spans: &mut Vec<TurnSpan>, turn: String, opener_offset: u64) -> Result<(), String> {
     if let Some(span) = spans.iter().find(|span| span.turn == turn) {
         if span.opener_offset == opener_offset {
             return Ok(());
         }
-        return Err(format!(
-            "image turn {} reopened at {opener_offset}",
-            turn.as_str()
-        ));
+        return Err(format!("image turn {} reopened at {opener_offset}", turn));
     }
     // A new span starts after every recorded one and outside any of them.
     let blocked = spans.iter().any(|span| {
@@ -232,7 +225,7 @@ fn open_span(
     if blocked {
         return Err(format!(
             "image turn {} opens at {opener_offset} inside or before another turn",
-            turn.as_str()
+            turn
         ));
     }
     spans.push(TurnSpan {
@@ -243,9 +236,9 @@ fn open_span(
     Ok(())
 }
 
-fn close_span(spans: &mut [TurnSpan], turn: &NativeTurn, end_offset: u64) -> Result<(), String> {
-    let Some(position) = spans.iter().position(|span| span.turn == *turn) else {
-        return Err(format!("image turn {} closed unopened", turn.as_str()));
+fn close_span(spans: &mut [TurnSpan], turn: &str, end_offset: u64) -> Result<(), String> {
+    let Some(position) = spans.iter().position(|span| span.turn == turn) else {
+        return Err(format!("image turn {} closed unopened", turn));
     };
     let (opener, end) = (spans[position].opener_offset, spans[position].end_offset);
     // No later turn may start inside the closed range.
@@ -257,12 +250,11 @@ fn close_span(spans: &mut [TurnSpan], turn: &NativeTurn, end_offset: u64) -> Res
         Some(end) if end == end_offset => Ok(()),
         Some(end) => Err(format!(
             "image turn {} closed at {end_offset} after {end}",
-            turn.as_str()
+            turn
         )),
-        None if end_offset <= opener || overlaps => Err(format!(
-            "image turn {} cannot close at {end_offset}",
-            turn.as_str()
-        )),
+        None if end_offset <= opener || overlaps => {
+            Err(format!("image turn {} cannot close at {end_offset}", turn))
+        }
         None => {
             spans[position].end_offset = Some(end_offset);
             Ok(())
