@@ -2,7 +2,7 @@
 mod source;
 use super::{closed_turn, evidence::Stamp, source::Source};
 use crate::services::tui_turn_state::{
-    CompactionStep, IdleCompaction, claude_completed_reply, claude_idle_metadata,
+    claude_closed_compactions, claude_completed_reply, claude_idle_metadata,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -15,7 +15,7 @@ pub(super) fn current(source: &Source, stamp: &Stamp) -> bool {
 fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
     let launched = source::launched(source, stamp)?;
     let records = records(source, stamp)?;
-    let compacted = closed_compactions(&records);
+    let (compacted, _) = claude_closed_compactions(&records);
     let mut summaries = HashSet::new();
     let mut stops = HashSet::new();
     for (record, compacted) in records.iter().zip(compacted).rev() {
@@ -84,20 +84,6 @@ fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
         }
     }
     None
-}
-/// Which records belong to an idle compaction its notice closed, read forward.
-fn closed_compactions(records: &[Value]) -> Vec<bool> {
-    let (mut compaction, mut open) = (IdleCompaction::default(), None);
-    let mut closed = vec![false; records.len()];
-    for (index, record) in records.iter().enumerate() {
-        match compaction.step(record) {
-            CompactionStep::Open => open = Some(index),
-            CompactionStep::Closed => closed[open.take().unwrap_or(index)..=index].fill(true),
-            CompactionStep::Broken => open = None,
-            CompactionStep::Outside | CompactionStep::Inside => {}
-        }
-    }
-    closed
 }
 fn records(source: &Source, stamp: &Stamp) -> Option<Vec<Value>> {
     let mut file = std::fs::File::open(&source.path).ok()?;

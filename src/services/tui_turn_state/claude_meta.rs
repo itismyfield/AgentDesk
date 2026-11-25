@@ -5,50 +5,81 @@ use super::*;
 /// A completed reply survives a non-conversation tail or finished idle compaction; old terminals
 /// across a session marker still cannot prove Idle, while a pending tool call remains Streaming.
 pub(super) fn observe(path: &Path) -> TuiTurnState {
-    let (completed, compacting) = completed_tail(path);
-    let state = match walk(path, claude_envelope_turn_state, claude_partial_turn_state) {
+    let Some((window, open)) = window(path) else {
+        return TuiTurnState::Unknown;
+    };
+    let state = match walk(
+        &window,
+        claude_envelope_turn_state,
+        claude_partial_turn_state,
+    ) {
         // A terminal beneath a compaction its notice has not closed yet proves nothing.
-        TuiTurnState::Idle if compacting => TuiTurnState::Unknown,
+        TuiTurnState::Idle if open => TuiTurnState::Unknown,
         state => state,
     };
     if matches!(
         state,
         TuiTurnState::Unknown | TuiTurnState::Streaming | TuiTurnState::UserSubmitted
-    ) && completed
+    ) && completed_tail(&window)
     {
         return TuiTurnState::Idle;
     }
     if state != TuiTurnState::Unknown {
         return state;
     }
-    match walk(path, past_marker_envelope, past_marker_partial) {
+    match walk(&window, past_marker_envelope, past_marker_partial) {
         TuiTurnState::Streaming => TuiTurnState::Streaming,
         _ => TuiTurnState::Unknown,
     }
 }
 
-/// Whether metadata alone follows the newest completed reply, and whether a compaction is open.
-fn completed_tail(path: &Path) -> (bool, bool) {
-    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
-        return (false, false);
-    };
-    // Whether metadata followed the newest completed reply; `None` once anything else did.
-    let (mut after, mut segment) = (None, IdleCompaction::default());
-    for line in window.lines.iter().filter(|line| !line.trim().is_empty()) {
-        let record = serde_json::from_str::<Value>(line).ok();
-        if record.as_ref().is_some_and(completed_reply) {
-            (after, segment) = (Some(false), IdleCompaction::default());
-            continue;
+/// The recent records with each idle compaction its notice closed taken out, and whether one is
+/// still open; `None` when nothing but closed compactions was read.
+fn window(path: &Path) -> Option<(JsonlTailWindow, bool)> {
+    let mut window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
+    window.lines.retain(|line| !line.trim().is_empty());
+    let records: Vec<Value> = window
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
+        .collect();
+    let (closed, open) = closed_compactions(&records);
+    let mut closed = closed.into_iter();
+    window.lines.retain(|_| closed.next() == Some(false));
+    (window.lines.is_empty() == records.is_empty()).then_some((window, open))
+}
+
+fn completed_tail(window: &JsonlTailWindow) -> bool {
+    let mut metadata = false;
+    for line in window.lines.iter().rev() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            return false;
+        };
+        if completed_reply(&record) {
+            return metadata;
         }
-        let keeps = record.is_some_and(|record| match segment.step(&record) {
-            CompactionStep::Outside => idle_metadata(&record),
-            CompactionStep::Broken => false,
-            CompactionStep::Open | CompactionStep::Inside | CompactionStep::Closed => true,
-        });
-        after = after.filter(|_| keeps).map(|_| true);
+        if !idle_metadata(&record) {
+            return false;
+        }
+        metadata = true;
     }
-    let open = segment != IdleCompaction::Outside;
-    (after == Some(true) && !open, open)
+    false
+}
+
+/// Which `records` belong to an idle compaction its notice closed, read forward, and whether one
+/// is still open after the last record.
+pub(crate) fn closed_compactions(records: &[Value]) -> (Vec<bool>, bool) {
+    let (mut compaction, mut open) = (IdleCompaction::default(), None);
+    let mut closed = vec![false; records.len()];
+    for (index, record) in records.iter().enumerate() {
+        match compaction.step(record) {
+            CompactionStep::Open => open = Some(index),
+            CompactionStep::Closed => closed[open.take().unwrap_or(index)..=index].fill(true),
+            CompactionStep::Broken => open = None,
+            CompactionStep::Outside | CompactionStep::Inside => {}
+        }
+    }
+    (closed, open.is_some())
 }
 
 /// A record's place in an idle compaction read forward: its boundary opens it, and only its
@@ -178,11 +209,21 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
 /// For a writer that adds input to a running turn: past the markers Claude writes after each
 /// prompt, a typed prompt or tool result is also still running. Never a new Idle.
 pub(super) fn observe_running(path: &Path) -> TuiTurnState {
-    let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
+    let Some((window, open)) = window(path) else {
+        return TuiTurnState::Unknown;
+    };
+    let state = match walk(
+        &window,
+        claude_envelope_turn_state,
+        claude_partial_turn_state,
+    ) {
+        TuiTurnState::Idle if open => TuiTurnState::Unknown,
+        state => state,
+    };
     if state != TuiTurnState::Unknown {
         return state;
     }
-    match walk(path, past_marker_running, past_marker_partial) {
+    match walk(&window, past_marker_running, past_marker_partial) {
         state if state.is_busy() => state,
         _ => TuiTurnState::Unknown,
     }
@@ -207,12 +248,12 @@ fn past_marker_running(json: &Value) -> Option<TuiTurnState> {
 }
 
 fn walk(
-    path: &Path,
+    window: &JsonlTailWindow,
     classify: fn(&Value) -> Option<TuiTurnState>,
     classify_partial: fn(&str) -> Option<TuiTurnState>,
 ) -> TuiTurnState {
-    observe_jsonl_turn_state(
-        path,
+    observe_jsonl_window_turn_state(
+        window,
         classify,
         classify_partial,
         MalformedJsonlLinePolicy::FallbackToPrevious,

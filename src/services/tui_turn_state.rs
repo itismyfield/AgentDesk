@@ -10,8 +10,8 @@ const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
 #[path = "tui_turn_state/claude_meta.rs"]
 mod claude_meta;
 pub(crate) use claude_meta::{
-    CompactionStep, IdleCompaction, completed_reply as claude_completed_reply,
-    idle_metadata as claude_idle_metadata,
+    CompactionStep, IdleCompaction, closed_compactions as claude_closed_compactions,
+    completed_reply as claude_completed_reply, idle_metadata as claude_idle_metadata,
 };
 #[path = "tui_turn_state/completion_scan.rs"]
 mod completion_scan;
@@ -417,25 +417,6 @@ enum MalformedJsonlLinePolicy {
     ReturnUnknown,
 }
 
-fn observe_jsonl_turn_state(
-    path: &Path,
-    classify: fn(&Value) -> Option<TuiTurnState>,
-    classify_partial: fn(&str) -> Option<TuiTurnState>,
-    malformed_policy: MalformedJsonlLinePolicy,
-    conservative_truncated: bool,
-) -> TuiTurnState {
-    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
-        return TuiTurnState::Unknown;
-    };
-    observe_jsonl_window_turn_state(
-        &window,
-        classify,
-        classify_partial,
-        malformed_policy,
-        conservative_truncated,
-    )
-}
-
 fn observe_jsonl_window_turn_state(
     window: &JsonlTailWindow,
     classify: impl Fn(&Value) -> Option<TuiTurnState>,
@@ -619,7 +600,7 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         //
         // NOTE (#3030): we intentionally do NOT generalize this to the whole
         // `is_interactive_mode_housekeeping_type` family here. In the *standard*
-        // observer (`observe_jsonl_turn_state`) `None` means "walk back to the
+        // observer (`observe_jsonl_window_turn_state`) `None` means "walk back to the
         // prior envelope" while `Unknown` means "stop and report Unknown". A
         // completed turn legitimately trails housekeeping like `{"type":"mode"}`
         // (see `structured_jsonl_ready_terminator_with_trailing_housekeeping`),
