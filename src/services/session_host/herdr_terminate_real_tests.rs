@@ -919,7 +919,7 @@ fn a_p11_m2_confirmation_required_has_no_escalation() {
         let target = launch(
             &mut s2,
             &pool,
-            &shared.token_hash,
+            shared.token_hash_for_test(),
             CHANNEL,
             "AgentDesk-claude-x2",
             repo.clone(),

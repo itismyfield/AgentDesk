@@ -2,11 +2,11 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOw
 use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, SourceRef};
 use crate::services::claude::herdr_turn::not_held;
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
-use crate::services::codex::herdr_turn::first_input::pending_lookup_probe;
-use crate::services::codex::herdr_turn::first_input::{
-    submit_for_test as submit, submit_owned_for_test as submit_owned,
+use crate::services::codex::herdr_turn::pending_lookup_probe;
+use crate::services::codex::herdr_turn::{
+    CodexHerdrTurn, logged_source_for_test as logged_source, submit_for_test as submit,
+    submit_owned_for_test as submit_owned,
 };
-use crate::services::codex::herdr_turn::{CodexHerdrTurn, logged_source};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;

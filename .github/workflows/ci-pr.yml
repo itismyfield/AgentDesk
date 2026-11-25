@@ -331,6 +331,7 @@ jobs:
               # restart-v2 per-platform fs backend, listed by hand until now.
               - 'src/services/discord/admin_host_guard.rs'
               - 'src/services/discord/agentdesk_config.rs'
+              - 'src/services/discord/bot_runtime.rs'
               - 'src/services/discord/busy_followup_retry_store/**'
               - 'src/services/discord/catch_up/**'
               - 'src/services/discord/codex_absence.rs'
@@ -396,6 +397,7 @@ jobs:
               - 'src/services/discord/session_locator.rs'
               - 'src/services/discord/session_runtime/**'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/shared_data.rs'
               - 'src/services/discord/status_panel_orphan_store_tests.rs'
               - 'src/services/discord/status_panel_singleton_store.rs'
               - 'src/services/discord/task_notification_delivery/**'

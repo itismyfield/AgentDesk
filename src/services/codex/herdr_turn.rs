@@ -4,9 +4,11 @@
 
 #[cfg(unix)]
 pub(crate) mod busy;
-pub(crate) mod first_input;
+mod first_input;
 #[cfg(unix)]
 pub(crate) mod restart_intent;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use first_input::{pending_lookup_probe, submit_for_test, submit_owned_for_test};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -336,7 +338,7 @@ fn hook_logged(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<bool, String> {
 
 /// The source execution `nonce`'s own startup/resume hook recorded, while it is the pane's
 /// latest record; refusal audits do not move the pane.
-pub(crate) fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
+fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
     let logical = turn.owner.logical_key.as_str();
     let events = binding_events_since(turn.channel_id, 0).ok()?;
     let moved = |event: &_| !matches!(event, BindingTarget::Rejected { .. });
@@ -471,6 +473,12 @@ pub(crate) fn pane_command_for_test(
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn kept_options_for_test(nonce: &str, options: &CodexLaunchOptions) -> String {
     kept_options(nonce, options)
+}
+
+/// The Source execution `nonce`'s own hook recorded, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn logged_source_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
+    logged_source(turn, nonce)
 }
 
 /// The launch-options check of a later prompt, for tests outside this module.
