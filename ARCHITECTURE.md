@@ -1157,6 +1157,7 @@ src/
 │   │   │   ├── hold_resolve_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
+│   │   │   ├── pending.rs
 │   │   │   ├── provider_terminal_tests.rs
 │   │   │   ├── retry_probe.rs
 │   │   │   ├── start_offset.rs
