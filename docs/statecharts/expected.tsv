@@ -1980,13 +1980,17 @@ tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterAgyAbandon.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
 tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyBootHold.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAgyBootHoldRelease.cfg	WriterAdoption	HoldWhileUnresolved	-
 tui-o-writer/WriterAgyCustody.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyCustodyForceStop.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,HeldVisible,ProbeErrorVisible
 tui-o-writer/WriterAgyCustodyGenericSettle.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,ProbeErrorVisible
+tui-o-writer/WriterAgyCustodyKillReused.cfg	WriterAdoption	NoForeignSignal	-
 tui-o-writer/WriterAgyCustodyLegacyAsAgy.cfg	WriterAdoption	LegacyRecoveryKept	LegacyResolves
 tui-o-writer/WriterAgyCustodyLegacyFallback.cfg	WriterAdoption	NoAbandonUnproven	-
 tui-o-writer/WriterAgyCustodyNoLaunchGate.cfg	WriterAdoption	NoAbandonUnproven	-
 tui-o-writer/WriterAgyCustodyOneShot.cfg	WriterAdoption	-	AgyCustodyResolves,ProbeErrorVisible
+tui-o-writer/WriterAgyCustodyRouteOnly.cfg	WriterAdoption	-	JournalCompletes
 tui-o-writer/WriterAgyCustodyUnprovenLost.cfg	WriterAdoption	NoAbandonUnproven	-
 tui-o-writer/WriterAgyDoubleEnd.cfg	WriterAdoption	AgyEndOnce	-
 tui-o-writer/WriterAgyDoubleRelease.cfg	WriterAdoption	AgyEndOnce	-

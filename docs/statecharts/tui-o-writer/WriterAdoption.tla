@@ -846,9 +846,16 @@ CustodyProbes == {"same", "goneOrReused", "probeError"}
 CustodyBoot == <<"reap", "observe", "queue", "invalidate", "restore", "markers", "held", "idle">>
 CustodyLive(route, stage) ==
     route = "agy" /\ (stage = "started" \/ (stage = "launched" /\ Mut = "noLaunchGate"))
+\* pid/group: GoneOrReused split as agy_acp sweep_group does (reused PID, or a dead leader's group).
+\* journal: delivery teardown left mid-way by a restart after ClearInflight removed the row.
 CustodyInit ==
     /\ LegacyIdle /\ QuietLate
-    /\ \E route \in {"legacy", "agy", "held"}, stage \in CustodyStages, probe \in CustodyProbes :
+    /\ \E route \in {"legacy", "agy", "held"}, stage \in CustodyStages, probe \in CustodyProbes,
+          pid \in {"gone", "reused"}, group \in {"live", "gone"},
+          mid \in {"none", "cleared", "released"} :
+       LET reused == CustodyLive(route, stage) /\ probe = "goneOrReused"
+           journal == IF route = "agy" /\ stage = "sealed" THEN mid ELSE "none"
+       IN
        agy = [route |-> route,
               stage |-> IF route = "agy" THEN stage ELSE "none",
               probe |-> IF CustodyLive(route, stage) THEN probe ELSE "none",
@@ -856,8 +863,11 @@ CustodyInit ==
               executed |-> route = "agy" /\ (stage \in {"started", "sealed"}
                            \/ CustodyLive(route, stage)
                            \/ (stage = "noSlot" /\ Mut = "legacyFallback")),
-              step |-> 1, ends |-> 0, generic |-> 0, legacy |-> 0,
-              visibleHold |-> FALSE, unprovenAbandon |-> FALSE, judged |-> FALSE]
+              step |-> 1, ends |-> IF journal = "none" THEN 0 ELSE 1, generic |-> 0, legacy |-> 0,
+              visibleHold |-> FALSE, unprovenAbandon |-> FALSE, judged |-> FALSE,
+              pid |-> IF reused THEN pid ELSE "none", group |-> IF reused THEN group ELSE "none",
+              foreign |-> FALSE, journal |-> journal,
+              row |-> IF journal = "none" THEN "present" ELSE "gone"]
 CustodyPhase == CustodyBoot[agy.step]
 \* end_authority: every generic end skips a row that is not Legacy.
 CustodySkipsGeneric == agy.route \in {"agy", "held"} \/ Mut = "legacyAsAgy"
@@ -896,7 +906,10 @@ CustodyHoldVisible ==
 CustodyRetry ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ agy.probe = "probeError" /\ agy.visibleHold
-    /\ \E probe \in {"same", "goneOrReused"} : agy' = [agy EXCEPT !.probe = probe]
+    /\ \E probe \in {"same", "goneOrReused"}, pid \in {"gone", "reused"}, group \in {"live", "gone"} :
+          LET split == probe = "goneOrReused"
+          IN agy' = [agy EXCEPT !.probe = probe, !.pid = IF split THEN pid ELSE "none",
+                                !.group = IF split THEN group ELSE "none"]
 \* A same-identity orphan has its group killed. A group that outlives the deadline is a probe
 \* error; killing again eventually clears it (strong fairness on the cleared outcome).
 CustodyKillTarget ==
@@ -905,41 +918,76 @@ CustodyKillTarget ==
 CustodyKill ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyKillTarget
-    /\ agy' = [agy EXCEPT !.probe = "goneOrReused", !.judged = TRUE]
+    /\ agy' = [agy EXCEPT !.probe = "goneOrReused", !.pid = "gone", !.group = "gone", !.judged = TRUE]
 CustodyKillOutlived ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyKillTarget
     /\ agy' = [agy EXCEPT !.probe = "probeError", !.judged = TRUE]
+\* GoneOrReused: a dead leader's live group is swept; a PID now used by another process gets no
+\* signal, and the original producer is lost.
+CustodySweep ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded
+    /\ agy.stage = "started" /\ agy.probe = "goneOrReused" /\ agy.group = "live"
+    /\ agy.pid = "gone" \/ Mut = "killReused"
+    /\ agy' = [agy EXCEPT !.group = "gone", !.foreign = (agy.pid = "reused"), !.judged = TRUE]
+\* The owner's end posts, then clears the row (ClearInflight); release and Complete follow.
 CustodySettle ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded /\ agy.stage = "sealed"
-    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE]
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = "cleared", !.row = "gone"]
 \* Abandon needs proof that input never ran or that its producer is gone.
 CustodyAbandon ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded
     /\ \/ agy.stage \in {"none", "noSlot", "noCheckpoint", "openOnly", "launched"}
-       \/ agy.stage = "started" /\ (agy.probe = "goneOrReused" \/ Mut = "unprovenLost")
-    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE,
+       \/ agy.stage = "started"
+          /\ \/ agy.probe = "goneOrReused" /\ (agy.pid = "reused" \/ agy.group = "gone")
+             \/ Mut = "unprovenLost"
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = "cleared", !.row = "gone",
                            !.unprovenAbandon = agy.executed /\ agy.probe # "goneOrReused"]
+\* Boot discovery: route rows and delivery journals short of Complete; "routeOnly" finds rows only.
+CustodyFound == agy.row = "present" \/ (agy.journal \in {"cleared", "released"} /\ Mut # "routeOnly")
+CustodyResume ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.step >= 3 /\ CustodyFound /\ agy.journal \in {"cleared", "released"}
+    /\ agy' = [agy EXCEPT !.journal = IF @ = "cleared" THEN "released" ELSE "complete"]
 CustodyRest == UNCHANGED <<agy, vars, lateVars>>
 CustodyNext == CustodyAdvance \/ CustodyGenericEnd \/ CustodyForceStop \/ CustodyHoldVisible
-               \/ CustodyRetry               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
+               \/ CustodyRetry \/ CustodySweep \/ CustodyResume               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
                \/ CustodyRest
 AgyCustodySpec == CustodyInit /\ [][CustodyNext]_agy
     /\ WF_agy(CustodyAdvance) /\ WF_agy(CustodyGenericEnd) /\ WF_agy(CustodyHoldVisible)
     /\ WF_agy(CustodyRetry) /\ SF_agy(CustodyKill) /\ WF_agy(CustodySettle)
-    /\ WF_agy(CustodyAbandon)
+    /\ WF_agy(CustodyAbandon) /\ WF_agy(CustodySweep) /\ WF_agy(CustodyResume)
 
 LegacyRecoveryKept == agy.route = "legacy" => agy.ends = 0
 AgyEndOnlyByOwner == agy.route \in {"agy", "held"} => agy.generic = 0
 NoAbandonUnproven == ~agy.unprovenAbandon
 CustodyEndsOnce == agy.ends + agy.generic + agy.legacy <= 1
+NoForeignSignal == ~agy.foreign
+JournalCompletes == agy.journal \in {"cleared", "released"} ~> agy.journal = "complete"
 CustodyJudgedFirst == agy.step > 3 => (agy.judged \/ ~CustodyJudgeDue)
 AgyCustodyResolves == agy.route = "agy" => <>(agy.ends = 1)
 LegacyResolves == agy.route = "legacy" => <>(agy.legacy = 1)
 ProbeErrorVisible ==
     (agy.route = "agy" /\ agy.probe = "probeError") ~> (agy.visibleHold \/ agy.ends = 1)
 HeldVisible == agy.route = "held" => <>agy.visibleHold
+\* health::boot_hold is one reason per provider; the owner releases it only when no key it holds
+\* is unresolved. "releaseOnRow" releases on any one key's success.
+HoldKeys == {"a", "b"}
+BootHoldInit ==
+    /\ LegacyIdle /\ QuietLate
+    /\ \E st \in [HoldKeys -> {"held", "probeError", "resolved"}] :
+       agy = [st |-> st, hold |-> \E k \in HoldKeys : st[k] # "resolved"]
+BootHoldResolve ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ \E k \in HoldKeys :
+       /\ agy.st[k] = "probeError"
+       /\ LET st == [agy.st EXCEPT ![k] = "resolved"]
+          IN agy' = [st |-> st,
+                     hold |-> Mut # "releaseOnRow" /\ \E j \in HoldKeys : st[j] # "resolved"]
+BootHoldSpec == BootHoldInit /\ [][BootHoldResolve]_agy
+HoldWhileUnresolved == (\E k \in HoldKeys : agy.st[k] # "resolved") => agy.hold
 AgyDamagedVisible == (agy.slots = "damaged" /\ agy.verified) ~> agy.boot = "held"
 ====
