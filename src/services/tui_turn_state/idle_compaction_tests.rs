@@ -87,9 +87,13 @@ fn idle_compaction_metadata_does_not_finish_running_or_compacting_turns() {
         json!({"type":"user","isMeta":true,"origin":{"kind":"task-notification"},"message":{"content":"new task"}}),
         json!({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"tool_use","id":"tool","name":"Read","input":{}}]}}),
     ] {
-        let mut records = vec![end_turn(), active.clone()];
-        records.extend(tail());
-        assert_ne!(observe(records), TuiTurnState::Idle, "{active}");
+        for records in [
+            [vec![end_turn(), active.clone()], tail()].concat(),
+            [vec![end_turn(), active.clone()], compacted_tail()].concat(),
+            [vec![end_turn()], compacted_tail(), vec![active.clone()]].concat(),
+        ] {
+            assert_ne!(observe(records), TuiTurnState::Idle, "{active}");
+        }
     }
 }
 
@@ -119,31 +123,16 @@ fn idle_compaction_tail_does_not_cross_an_old_terminal_or_unknown_record() {
 }
 
 #[test]
-fn a_finished_idle_compaction_preserves_the_completed_reply() {
+fn only_a_finished_idle_compaction_preserves_the_completed_reply() {
     assert_eq!(
         observe([vec![end_turn()], compacted_tail()].concat()),
         TuiTurnState::Idle
     );
-}
-
-#[test]
-fn a_compaction_without_its_notice_or_with_work_around_it_is_not_idle() {
     let unclosed = compacted_tail()
         .into_iter()
         .filter(|r| r["subtype"] != "informational");
-    let prompt = json!({"type":"user","message":{"content":"next prompt"}});
-    let mut cases = vec![
-        [vec![end_turn()], unclosed.collect()].concat(),
-        [vec![end_turn(), prompt.clone()], compacted_tail()].concat(),
-    ];
-    for after in [
-        prompt,
-        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":"done"}]}}),
-        json!({"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"Working"}]}}),
-    ] {
-        cases.push([vec![end_turn()], compacted_tail(), vec![after]].concat());
-    }
-    for records in cases {
-        assert_ne!(observe(records.clone()), TuiTurnState::Idle, "{records:?}");
-    }
+    assert_ne!(
+        observe([vec![end_turn()], unclosed.collect()].concat()),
+        TuiTurnState::Idle
+    );
 }
