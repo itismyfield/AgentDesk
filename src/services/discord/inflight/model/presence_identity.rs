@@ -40,6 +40,7 @@ impl super::InflightTurnState {
             host_locator,
             hosted_record_id,
             hosted_execution_nonce,
+            herdr_turn_start: _,
             worktree_path: _,
             worktree_branch: _,
             base_commit: _,

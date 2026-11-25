@@ -31,6 +31,19 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     if finalizer_turn_id == 0 {
         return false;
     }
+    // This turn's Herdr row keeps its mailbox and token until its own end is proven.
+    let row = crate::services::discord::inflight::load_inflight_state_read_only(
+        provider,
+        channel_id.get(),
+    )
+    .filter(|row| row.effective_finalizer_turn_id() == finalizer_turn_id);
+    let logical = row.as_ref().and_then(|row| row.tmux_session_name.clone());
+    let logical = logical.unwrap_or_default();
+    if crate::services::discord::inflight::herdr_turn_held(shared, provider, row.as_ref(), &logical)
+        .await
+    {
+        return false;
+    }
 
     // #4106 review-fix (codex): snapshot the channel role override THIS turn owns
     // BEFORE any await. The removal below runs after awaits (mailbox finish +
@@ -226,6 +239,68 @@ mod tests {
                 .get(&channel)
                 .map(|entry| *entry.value());
             assert_eq!(kept, Some(override_b));
+        })
+        .await;
+    }
+
+    /// A Herdr row keeps its mailbox and token at the pre-panel release until its own end is
+    /// proven against the current Bound execution; that end releases them exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn herdr_pre_panel_release_waits_for_its_own_proven_end_pg() {
+        use crate::services::discord::inflight::herdr_turn_evidence_tests::{
+            HELD, OWN, mark_herdr,
+        };
+        with_isolated_runtime_root(|| async move {
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let mut shared = make_shared_data_for_tests();
+            Arc::get_mut(&mut shared).unwrap().pg_pool = Some(db.connect_and_migrate().await);
+            let (pool, provider) = (shared.pg_pool.clone().unwrap(), ProviderKind::Claude);
+            let dir = tempfile::tempdir().unwrap();
+            for (n, case) in HELD.into_iter().chain([OWN]).enumerate() {
+                let (channel, turn) = (ChannelId::new(8_399_300 + n as u64), 8_399_310 + n as u64);
+                let token = Arc::new(CancelToken::new());
+                let start = MessageId::new(turn);
+                assert!(
+                    mailbox_try_start_turn(&shared, channel, token.clone(), UserId::new(42), start)
+                        .await
+                );
+                let mut row = crate::services::discord::inflight::InflightTurnState::new(
+                    provider.clone(),
+                    channel.get(),
+                    None,
+                    42,
+                    turn,
+                    turn,
+                    String::new(),
+                    None,
+                    Some(format!("AgentDesk-claude-pre-panel-{n}")),
+                    None,
+                    None,
+                    0,
+                );
+                row.turn_nonce = token.turn_nonce().map(str::to_owned);
+                let path = dir.path().join(format!("{n}.jsonl"));
+                mark_herdr(&pool, &shared.token_hash, &mut row, &path, case).await;
+                crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+                let key = Some(TurnKey::new(
+                    channel,
+                    turn,
+                    shared.restart.current_generation,
+                ));
+                let released = super::release_restored_watcher_active_turn_before_panel_edit(
+                    &shared, &provider, key,
+                );
+                let own = case == OWN;
+                assert_eq!(released.await, own, "{case:?}");
+                assert_eq!(token.cancelled.load(Ordering::Relaxed), own, "{case:?}");
+                let live = mailbox_snapshot(&shared, channel).await.cancel_token;
+                assert_eq!(live.is_some(), !own, "{case:?}");
+                let again = super::release_restored_watcher_active_turn_before_panel_edit(
+                    &shared, &provider, key,
+                );
+                assert!(!again.await, "{case:?}: a second release finds nothing");
+            }
+            db.drop().await;
         })
         .await;
     }

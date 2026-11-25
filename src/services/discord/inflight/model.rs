@@ -238,6 +238,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub hosted_record_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosted_execution_nonce: Option<String>,
+    /// The Herdr turn's own start as recorded at its input; without it the watcher holds the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::services::discord) herdr_turn_start:
+        Option<super::herdr_turn_evidence::PersistedHerdrTurnStart>,
     #[serde(default)]
     pub worktree_path: Option<String>,
     #[serde(default)]
@@ -1116,6 +1120,7 @@ impl InflightTurnState {
             host_locator: None,
             hosted_record_id: None,
             hosted_execution_nonce: None,
+            herdr_turn_start: None,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,

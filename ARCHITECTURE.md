@@ -1999,6 +1999,7 @@ src/
 │   │   │   ├── http_force_hydrate_tests.rs
 │   │   │   ├── http_force_identity_tests.rs
 │   │   │   ├── http_force_purge_tests.rs
+│   │   │   ├── http_force_retired_wake_tests.rs
 │   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── http_force_v2_tests.rs
@@ -2007,6 +2008,7 @@ src/
 │   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
+│   │   │   ├── retired_wake.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_liveness/
 │   │   │   ├── krx_discord_dl_tests.rs
@@ -2106,6 +2108,8 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── herdr_turn_evidence.rs
+│   │   │   ├── herdr_turn_evidence_tests.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
@@ -3664,6 +3668,7 @@ src/
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
+│   │   │   │   │   ├── herdr_unsent_retire_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── inflight_bound.rs
@@ -3686,6 +3691,7 @@ src/
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
+│   │   │   │   │   ├── retired_unplaced_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
