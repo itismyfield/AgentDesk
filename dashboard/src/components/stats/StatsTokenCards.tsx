@@ -1,10 +1,12 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useState } from "react";
 import { BarChart3 } from "lucide-react";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Skeleton } from "../../kit/free/skeleton-clean";
 import type { TokenAnalyticsDailyPoint } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { Cap, SectionCard } from "../common/KitPrimitives";
-import { msg, type DailySeriesDescriptor } from "./statsModel";
+import type { DailyTokenViewMode } from "./DailyTokenCompositionChart";
+import { formatCurrency, formatTokens, msg, type DailySeriesDescriptor } from "./statsModel";
 import { StatsEmpty } from "./StatsCardPrimitives";
 
 const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionChart"));
@@ -12,7 +14,7 @@ const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionCha
 function ChartPlaceholder() {
   return (
     <div aria-hidden="true">
-      <Skeleton width="100%" height={232} radius={8} />
+      <Skeleton width="100%" height={208} radius={8} />
       <div className="mt-2 flex items-center gap-2">
         <Skeleton width={44} height={44} radius={8} />
         <Skeleton width="100%" height={12} line />
@@ -22,7 +24,7 @@ function ChartPlaceholder() {
   );
 }
 
-/** Daily stacked token breakdown using the vendored kit BreakdownChart inside a v3 SectionCard. */
+/** Daily stacked token breakdown & metering card inside a v3 SectionCard. */
 export function DailyTokenCompositionCard({
   t,
   localeTag,
@@ -40,25 +42,53 @@ export function DailyTokenCompositionCard({
   series: DailySeriesDescriptor[];
   className?: string;
 }) {
+  const [viewMode, setViewMode] = useState<DailyTokenViewMode>("breakdown");
   const allZero = daily.length > 0 && daily.every((day) => day.total_tokens <= 0);
+  const totalTokens = daily.reduce((sum, day) => sum + day.total_tokens, 0);
+  const totalCost = daily.reduce((sum, day) => sum + day.cost, 0);
 
   return (
     <SectionCard
       title={t(msg("일별 토큰 구성", "Daily Token Composition", "日次トークン構成", "每日 Token 构成"))}
       testId="stats-daily-token-chart"
       className={className}
+      aside={
+        <div className="w-44 max-w-full" data-testid="stats-daily-view-mode">
+          <SegmentedControl<DailyTokenViewMode>
+            kind="tabs"
+            variant="tray"
+            size="sm"
+            fullWidth
+            disabled={daily.length === 0}
+            value={viewMode}
+            onChange={setViewMode}
+            aria-label={t(msg("일별 토큰 보기 방식", "Daily token view mode", "日次トークン表示形式", "每日 Token 视图模式"))}
+            options={[
+              { value: "breakdown", label: t(msg("분포", "Breakdown", "内訳", "分布")) },
+              { value: "metering", label: t(msg("미터링", "Metering", "メーター", "计量")) },
+            ]}
+          />
+        </div>
+      }
     >
-      <div className="px-3 pb-3 sm:px-4 sm:pb-4">
-        <Cap className="mb-3 block">
-          {t(
-            msg(
-              "날짜·토큰 종류 기준과 토큰·비용 지표를 전환하며 비교해요",
-              "Switch dimensions and measures to compare daily tokens and cost",
-              "日付・トークン種別と指標を切り替えて比較します",
-              "切换日期、Token 类型与指标进行对比",
-            ),
-          )}
-        </Cap>
+      <div className="px-3 pb-3 sm:px-4 sm:pb-3.5">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <Cap>
+            {t(
+              msg(
+                "날짜·토큰 종류 기준과 토큰·비용 지표를 전환하며 비교해요",
+                "Switch dimensions and measures to compare daily tokens and cost",
+                "日付・トークン種別と指標を切り替えて比較します",
+                "切换日期、Token 类型与指标进行对比",
+              ),
+            )}
+          </Cap>
+          {daily.length > 0 && viewMode === "breakdown" ? (
+            <span className="font-display text-xs font-semibold text-[var(--fg)] tabular-nums" data-testid="stats-daily-compact-total">
+              {formatTokens(totalTokens)} · {formatCurrency(totalCost)}
+            </span>
+          ) : null}
+        </div>
 
         {daily.length === 0 ? (
           loading ? (
@@ -85,7 +115,7 @@ export function DailyTokenCompositionCard({
               </p>
             ) : null}
             <Suspense fallback={<ChartPlaceholder />}>
-              <DailyTokenCompositionChart t={t} daily={daily} localeTag={localeTag} series={series} />
+              <DailyTokenCompositionChart t={t} daily={daily} localeTag={localeTag} series={series} mode={viewMode} onModeChange={setViewMode} />
             </Suspense>
           </>
         )}

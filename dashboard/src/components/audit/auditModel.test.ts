@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../../api/httpClient";
-import { auditAgents, auditProviders, auditState, defaultAuditProvider, fullPromptText, sectionLabels, sourceShares } from "./auditModel";
+import { auditAgents, auditProviders, auditState, defaultAuditProvider, fullPromptText, isAuditTestAgent, sectionLabels, sourceShares } from "./auditModel";
 
 const agent = (id: string, cli_provider: string | undefined, channels: Record<string, string> = {}) => ({ id, cli_provider, ...channels }) as Parameters<typeof auditProviders>[0];
 const ko = (text: string) => text;
@@ -21,9 +21,16 @@ describe("audit bindings", () => {
     expect(defaultAuditProvider(agent("b", "antigravity", { discord_channel_cc: "1", discord_channel_cdx: "2" }))).toBe("claude");
   });
 
-  it("drops unbound agents and puts relay harness agents last", () => {
-    const list = [agent("relay-e2e", "claude", { discord_channel_cc: "9" }), agent("none", "claude"), agent("real", "claude", { discord_channel_cc: "1" })];
-    expect(auditAgents(list).map((item) => item.id)).toEqual(["real", "relay-e2e"]);
+  it("drops unbound agents, puts relay harness agents last, and filters e2e agents when includeTests is false", () => {
+    const list = [
+      agent("relay-e2e", "claude", { discord_channel_cc: "9" }),
+      { ...agent("named-harness", "claude", { discord_channel_cc: "8" }), name: "E2E Harness" },
+      agent("none", "claude"),
+      agent("real", "claude", { discord_channel_cc: "1" }),
+    ];
+    expect(auditAgents(list).map((item) => item.id)).toEqual(["real", "relay-e2e", "named-harness"]);
+    expect(auditAgents(list, false).map((item) => item.id)).toEqual(["real"]);
+    expect(isAuditTestAgent({ id: "named-harness", name: "E2E Harness" })).toBe(true);
   });
 });
 

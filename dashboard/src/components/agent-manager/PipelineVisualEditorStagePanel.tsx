@@ -1,4 +1,6 @@
 import { localeName } from "../../i18n";
+import { Select } from "../../kit/free/select-clean";
+import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import { isCounterProvider, type StageDraft } from "./pipeline-visual-editor-model";
 import {
   BUTTON_DANGER_STYLE,
@@ -13,8 +15,8 @@ import {
 } from "./pipeline-visual-editor-ui";
 
 interface Props {
-  ctx: any;
-  actions: any;
+  ctx: PipelineEditorCtx;
+  actions: PipelineEditorActions;
 }
 
 export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) {
@@ -72,7 +74,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
 
 function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; index: number }) {
   const tr = ctx.tr;
-  const assignedAgent = ctx.agents.find((agent: any) => agent.id === stage.agent_override_id);
+  const assignedAgent = ctx.agents.find((agent) => agent.id === stage.agent_override_id);
 
   return (
     <div className="min-w-0 rounded-lg border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
@@ -155,32 +157,31 @@ function ReadOnlyField(props: { label: string; value: string; note: string }) {
 function SelectField(props: { label: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
   return (
     <div>
-      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-        {props.label}
-      </label>
-      <select value={props.value} onChange={(event) => props.onChange(event.target.value)} className={INPUT_CLASS} style={INPUT_STYLE}>
-        {props.options.map(([value, label]) => (
-          <option key={value} value={value}>{label}</option>
-        ))}
-      </select>
+      <Select
+        label={props.label}
+        value={props.value}
+        onChange={(value) => props.onChange(value)}
+        options={props.options.map(([value, label]) => ({ value, label }))}
+      />
     </div>
   );
 }
 
-function AgentSelect(props: { ctx: any; label: string; value: string; emptyLabel: string; onChange: (value: string) => void }) {
+function AgentSelect(props: { ctx: PipelineEditorCtx; label: string; value: string; emptyLabel: string; onChange: (value: string) => void }) {
   return (
     <div>
-      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-        {props.label}
-      </label>
-      <select value={props.value} onChange={(event) => props.onChange(event.target.value)} className={INPUT_CLASS} style={INPUT_STYLE}>
-        <option value="">{props.emptyLabel}</option>
-        {props.ctx.agents.map((agent: any) => (
-          <option key={agent.id} value={agent.id}>
-            {localeName(props.ctx.locale, agent)}
-          </option>
-        ))}
-      </select>
+      <Select
+        label={props.label}
+        value={props.value}
+        onChange={(value) => props.onChange(value)}
+        options={[
+          { value: "", label: props.emptyLabel },
+          ...props.ctx.agents.map((agent) => ({
+            value: agent.id,
+            label: localeName(props.ctx.locale, agent),
+          })),
+        ]}
+      />
     </div>
   );
 }

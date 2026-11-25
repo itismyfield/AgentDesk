@@ -4,26 +4,39 @@ import { IconButton } from "../../kit/free/icon-button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Drawer } from "../common/overlay/Drawer";
 import { DrawerDockContext } from "../common/overlay/DrawerDock";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
+import type { CampaignDetailView } from "./serverCampaignModel";
 import { DetailDockPane, useDetailDock } from "./TaskListParts";
 import { TaskScreen } from "./TaskScreen";
 
-type View = "overview" | "relations" | "board" | "pipeline";
-
 /** The open campaign: title, chips and one status sentence, then 현황 (with 관계도, 단계 보드 and 파이프라인 when given), and the task
- * opened from it in the pinned pane on wide screens or its own screen on phones. */
-export default function CampaignDetail({ title, showTitle, chips, sentence, tracker, actions, notes, description, overview, relations, board, pipeline, task, onCloseTask, leave, focus = false, tr }: {
+ * opened from it in the pinned pane on wide screens, a slide-over drawer on medium screens, or its own screen on phones. */
+export default function CampaignDetail({ title, showTitle, chips, sentence, tracker, actions, notes, description, overview, relations, board, pipeline, view: viewProp, onViewChange, task, onCloseTask, leave, focus = false, tr }: {
   title: string; showTitle: boolean; chips?: ReactNode; sentence: string; tracker?: ReactNode; actions?: ReactNode; notes?: ReactNode;
   /** In the header on wide screens; below everything on phones, which lead with status and tasks. */
   description?: ReactNode;
   overview: (controls: string | undefined) => ReactNode; relations?: ReactNode; board?: (controls: string | undefined) => ReactNode; pipeline?: ReactNode;
+  view?: CampaignDetailView; onViewChange?: (view: CampaignDetailView) => void;
   task: { id: string; label: string; body: ReactNode } | null; onCloseTask: () => void;
   /** Asks before the view changes, while an editor below holds unsaved changes. */
   leave?: (proceed: () => void) => void;
   /** The pipeline's editor has the window: only it stays, so nothing behind it takes the focus. */
   focus?: boolean; tr: Tr;
 }) {
-  const [view, setView] = useState<View>("overview");
+  const [innerView, setInnerView] = useState<CampaignDetailView>("overview");
+  const requested = viewProp ?? innerView;
+  const view: CampaignDetailView =
+    (requested === "relations" && !relations) ||
+    (requested === "board" && !board) ||
+    (requested === "pipeline" && !pipeline)
+      ? "overview"
+      : requested;
+  const changeView = (next: CampaignDetailView) => {
+    if (viewProp === undefined) setInnerView(next);
+    onViewChange?.(next);
+  };
+  const phone = useIsMobile();
   const dock = useDetailDock();
   const controls = dock.dock ? dock.id : undefined;
   // Closing returns focus to the row or card that opened the task, when it is still on screen.
@@ -45,16 +58,16 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, trac
       {notes}
     </header>}
     {!focus && (relations || board || pipeline) && <div className="w-full sm:max-w-[30rem]">
-      <SegmentedControl<View> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 보기", "Campaign view")} value={view} onChange={(next) => leave ? leave(() => setView(next)) : setView(next)}
+      <SegmentedControl<CampaignDetailView> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 보기", "Campaign view")} value={view} onChange={(next) => leave ? leave(() => changeView(next)) : changeView(next)}
         options={[{ value: "overview", label: tr("현황", "Overview") }, ...relations ? [{ value: "relations" as const, label: tr("관계도", "Connections") }] : [],
           ...board ? [{ value: "board" as const, label: tr("단계 보드", "Stage board") }] : [], ...pipeline ? [{ value: "pipeline" as const, label: tr("파이프라인", "Pipeline") }] : []]} />
     </div>}
     {relations && view === "relations" ? relations : board && view === "board" ? board(controls) : pipeline && view === "pipeline" ? pipeline : overview(controls)}
     {!showTitle && !focus && description}
     {task && !focus && <DetailDockPane dock={dock} label={tr("선택 작업", "Selected task")} empty={null} />}
-    {task && !focus && !dock.dock && <TaskScreen campaign={title} label={task.label} onClose={onCloseTask} tr={tr}>{task.body}</TaskScreen>}
+    {task && !focus && phone && <TaskScreen campaign={title} label={task.label} onClose={onCloseTask} tr={tr}>{task.body}</TaskScreen>}
     <DrawerDockContext.Provider value={dock.dock}>
-      {task && !focus && dock.dock && <Drawer open onClose={close} ariaLabel={tr("선택 작업", "Selected task")} width="min(560px, 100vw)">
+      {task && !focus && !phone && <Drawer open onClose={close} ariaLabel={tr("선택 작업", "Selected task")} width="min(520px, 100vw)">
         <div className={`${CAMPAIGN_SCOPE} campaign-inspector min-w-0 gap-3 text-sm [overflow-wrap:anywhere]`}>
           <div className="campaign-inspector-header flex items-center justify-between gap-3 border-b border-[var(--line-soft)] pb-2 text-xs text-[var(--fg-muted)]">
             <span className="tabular-nums">{task.label}</span>

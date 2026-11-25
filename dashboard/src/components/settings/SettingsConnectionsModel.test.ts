@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HealthResponse, OnboardingConnectionStatus } from "../../api/settingsRuntime";
-import { connectionStatusRows } from "./SettingsConnectionsModel";
+import { buildConnectionSignalRows, connectionItems, connectionStatusRows, describeDegradedReason } from "./SettingsConnectionsModel";
 
 const tr = (ko: string) => ko;
 const ready = <T,>(data: T) => ({ data, isError: false, isPending: false });
@@ -43,6 +43,42 @@ describe("connection status rows", () => {
     expect([limited[0].value, limited[0].tone]).toEqual(["이 기기에서는 확인할 수 없어요", "unknown"]);
     expect(unknown.map((row) => [row.value, row.tone])).toEqual([
       ["확인 중…", "unknown"], ["확인하지 못했어요", "unknown"], ["확인하지 못했어요", "unknown"], ["확인하지 못했어요", "unknown"],
+    ]);
+  });
+
+  it("aggregates identical degraded labels into a single signal row with joined rawKey tooltip", () => {
+    expect(describeDegradedReason("db_slow", true)).toBe("데이터베이스 응답 지연");
+    const health: HealthResponse = {
+      status: "degraded",
+      degraded_reasons: [
+        "relay_verdict_unknown_antigravity_1490141479707086938",
+        "relay_verdict_unknown_antigravity_1490141479707086939",
+      ],
+    };
+    const signalRows = buildConnectionSignalRows(health, true);
+    expect(signalRows).toEqual([
+      expect.objectContaining({
+        label: "antigravity 응답 전달 확인 안 됨",
+        count: 2,
+        rawKey: "relay_verdict_unknown_antigravity_1490141479707086938, relay_verdict_unknown_antigravity_1490141479707086939",
+      }),
+    ]);
+    const items = connectionItems(
+      {
+        statusRows: [],
+        health: ready(health),
+        retention: { data: undefined, isError: false, isPending: true },
+        connectors: { data: undefined, isError: false, isPending: true },
+      },
+      tr,
+      true,
+    );
+    expect(items[0].status?.notes).toEqual([
+      expect.objectContaining({
+        title: "antigravity 응답 전달 확인 안 됨",
+        count: 2,
+        tooltip: "relay_verdict_unknown_antigravity_1490141479707086938, relay_verdict_unknown_antigravity_1490141479707086939",
+      }),
     ]);
   });
 });

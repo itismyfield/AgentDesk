@@ -203,14 +203,15 @@ fn history_v2_five_thousand_registrations_return_slots_and_keep_old_recognition(
         .append(true)
         .open(&path)
         .unwrap();
-    // A native submit check reparses the whole history, so it runs only for the first
-    // registration, both sides of the slot capacity and the last one.
-    let submits = [0, CAPACITY as u64 - 1, CAPACITY as u64, 5000];
+    // Probe the boundary and one registration further to catch a one-slot overrun.
+    let capacity = CAPACITY as u64;
+    let last = capacity + 1;
+    let submits = [0, capacity - 1, capacity, last];
     // Batches divide CAPACITY, so registration CAPACITY + 1 needs every earlier slot returned.
     const BATCH: usize = 64;
     let mut pending = Vec::with_capacity(BATCH);
     let started = std::time::Instant::now();
-    for id in 0..5001u64 {
+    for id in 0..=last {
         let k = key(10_000 + id, &path, false);
         let frame = super::super::super::idle("ann", "7", &format!("prompt {id}"));
         history.prepare("history-test", &input(&k, &frame)).unwrap();
@@ -228,11 +229,11 @@ fn history_v2_five_thousand_registrations_return_slots_and_keep_old_recognition(
             );
         }
         pending.push(k);
-        if pending.len() == BATCH || id == 5000 {
+        if pending.len() == BATCH || id == last {
             history.project(&projection(None, &[], &pending)).unwrap();
             pending.clear();
         }
-        if matches!(id, 0 | 32 | 256 | 1024 | 4096 | 5000) {
+        if matches!(id, 0 | 32 | 256 | 1024) || id >= capacity {
             println!(
                 "HISTORY_COST registered={} bytes={} elapsed_ms={}",
                 id + 1,
@@ -247,11 +248,11 @@ fn history_v2_five_thousand_registrations_return_slots_and_keep_old_recognition(
         0,
         "completed registrations return every live slot"
     );
-    assert_eq!(s["passive"].as_array().unwrap().len(), 5001);
+    assert_eq!(s["passive"].as_array().unwrap().len(), CAPACITY + 2);
     let first = super::super::super::idle("ann", "7", "prompt 0");
     assert!(
         super::super::known(&first),
-        "old frame recognition survives more than 4096 registrations"
+        "old frame recognition survives more registrations than the active capacity"
     );
     assert_eq!(
         history.receipt(

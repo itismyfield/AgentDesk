@@ -427,6 +427,8 @@ impl HealthRegistry {
     pub fn new() -> Self {
         // A live registry implies the observer hook, so every registry install path publishes.
         super::tui_prompt_relay::install_observer_publication();
+        // Recorded Herdr turn starts reach their durable rows through this writer.
+        super::inflight::install_turn_start_sink();
         // Runtime readers below Discord reach custody and the strict journal through these hooks.
         super::terminal_delivery_custody::install_runtime_reads();
         #[cfg(unix)]

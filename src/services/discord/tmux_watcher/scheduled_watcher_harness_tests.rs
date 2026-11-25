@@ -96,3 +96,48 @@ async fn a_restored_watcher_records_the_scheduled_outcome_before_its_release_pg(
     pool.close().await;
     db.drop().await;
 }
+
+/// A scheduled Herdr turn whose own end is unproven settles no outcome on the watcher's direct
+/// or fallback settle; its row stays for its own end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_herdr_scheduled_turn_settles_no_outcome_pg() {
+    use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, mark_herdr};
+    let test = "a_held_herdr_scheduled_turn_settles_no_outcome_pg";
+    if !isolated_in("scheduled_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    launch_agent_delivery(&pool, "i8399-watcher", TURN, true, "fail").await;
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(89, &seed, Some(pool.clone())).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let mut row = h.row_at(f);
+    row.turn_source = TurnSource::Managed;
+    row.user_msg_id = 8_399_000_089;
+    row.scheduled = ScheduledTurnMark::Scheduled {
+        turn_id: TURN.to_string(),
+        isolated: true,
+        outcome: None,
+    };
+    let source = std::path::PathBuf::from(format!("{}-herdr", h.path));
+    mark_herdr(&pool, &h.shared.token_hash, &mut row, &source, HELD[0]).await;
+    h.save(&row);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&row, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}{}", user("T1"), said(BODY), stop()).as_bytes());
+    h.drained("terminal frame").await;
+    assert!(h.showing(BODY), "the watcher delivered the answer");
+    assert!(h.row().is_some(), "the held row stays");
+    assert_eq!(
+        delivery_state(&pool, TURN).await.1,
+        None,
+        "no outcome settled"
+    );
+    h.cancel();
+    h.exited("watcher exit").await;
+    pool.close().await;
+    db.drop().await;
+}

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Repeat2, Send } from "lucide-react";
 import { ActionMenu } from "../common/ActionMenu";
-import { Select } from "../common/Select";
+import { StatusDot } from "../common/KitPrimitives";
 import { Drawer } from "../common/overlay/Drawer";
 import type {
   CardAuditLogEntry,
@@ -10,6 +10,7 @@ import type {
 } from "../../api";
 import { Badge, type BadgeTone } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
+import { Select } from "../../kit/free/select-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
 import CardIssueContent from "./CardIssueContent";
@@ -19,7 +20,6 @@ import KanbanCardActivitySections from "./KanbanCardActivitySections";
 import KanbanCardReviewPanel from "./KanbanCardReviewPanel";
 import { KIT_TOUCH_BUTTON, KIT_TOUCH_FIELD } from "./CardDetailParts";
 import { localeName } from "../../i18n";
-import { SurfaceNotice } from "../common/SurfacePrimitives";
 import type {
   Agent,
   KanbanCard,
@@ -340,9 +340,13 @@ export default function KanbanCardDetail({
         {extra}
 
         {actionError && (
-          <SurfaceNotice tone="danger">
-            {actionError}
-          </SurfaceNotice>
+          <div
+            role="alert"
+            className="flex min-w-0 items-start gap-2.5 rounded-[var(--r-md)] border border-[color-mix(in_oklch,var(--err)_40%,transparent)] bg-[var(--err-soft)] px-3.5 py-2.5 text-sm leading-5 text-[var(--fg)]"
+          >
+            <StatusDot tone="err" className="mt-1.5" />
+            <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{actionError}</span>
+          </div>
         )}
 
         {selectedCard.blocked_reason && (
@@ -392,29 +396,31 @@ export default function KanbanCardDetail({
             </div>
           </div>
           <div className="grid gap-3 @min-[36rem]/card:grid-cols-2 @min-[48rem]/card:grid-cols-3">
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("담당자", "Assignee")}</span>
-              <Select
-                value={editor.assignee_agent_id}
-                onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
-              >
-                <option value="">{tr("없음", "None")}</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-                ))}
-              </Select>
-            </label>
-            <label className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("우선순위", "Priority")}</span>
-              <Select
-                value={editor.priority}
-                onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
-              >
-                {PRIORITY_OPTIONS.map((priority) => (
-                  <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
-                ))}
-              </Select>
-            </label>
+            <Select
+              label={tr("담당자", "Assignee")}
+              size="lg"
+              className={KIT_TOUCH_FIELD}
+              value={editor.assignee_agent_id || ""}
+              onChange={(value) => setEditor((prev) => ({ ...prev, assignee_agent_id: value }))}
+              options={[
+                { value: "", label: tr("없음", "None") },
+                ...(editor.assignee_agent_id && !agentMap.has(editor.assignee_agent_id)
+                  ? [{ value: editor.assignee_agent_id, label: editor.assignee_agent_id }]
+                  : []),
+                ...agents.map((agent) => ({ value: agent.id, label: getAgentLabel(agent.id) })),
+              ]}
+            />
+            <Select
+              label={tr("우선순위", "Priority")}
+              size="lg"
+              className={KIT_TOUCH_FIELD}
+              value={editor.priority}
+              onChange={(value) => setEditor((prev) => ({ ...prev, priority: value as KanbanCardPriority }))}
+              options={PRIORITY_OPTIONS.map((priority) => ({
+                value: priority,
+                label: priorityLabel(priority, tr),
+              }))}
+            />
             <div className="flex min-w-0 flex-col gap-1.5">
               <span className="text-[13px] font-medium leading-5 text-th-text-primary">GitHub</span>
               <div className="flex min-h-11 items-center rounded-lg bg-surface-subtle px-3 text-sm text-th-text-primary shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
@@ -492,13 +498,16 @@ export default function KanbanCardDetail({
             <div className="grid gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto]">
               <Select
                 aria-label={tr("재시도 담당자", "Retry assignee")}
+                size="lg"
+                className={KIT_TOUCH_FIELD}
+                placeholder={tr("담당자 선택", "Choose assignee")}
                 value={retryAssigneeId}
-                onChange={(event) => setRetryAssigneeId(event.target.value)}
-              >
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-                ))}
-              </Select>
+                onChange={(value) => setRetryAssigneeId(value)}
+                options={agents.map((agent) => ({
+                  value: agent.id,
+                  label: getAgentLabel(agent.id),
+                }))}
+              />
               <Button
                 variant="secondary"
                 size="lg"

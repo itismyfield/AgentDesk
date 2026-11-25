@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { CardAuditLogEntry } from "../../api";
 import type { KanbanCard, TaskDispatch, UiLanguage } from "../../types";
 import { Badge } from "../../kit/free/badge-clean";
-import { SurfaceNotice } from "../common/SurfacePrimitives";
+import { StatusDot } from "../common/KitPrimitives";
 import { DetailHeading } from "./CardDetailParts";
 import { coerceTimestampMs, formatIso, parseCardMetadata } from "./kanban-utils";
 import { dispatchStatusPresentation } from "./card-detail-activity";
@@ -61,9 +61,13 @@ export default function KanbanCardActivitySections({
         {tr("실행 요약", "Execution summary")}
       </DetailHeading>
       {timedOut && (
-        <SurfaceNotice tone="warn" compact className="text-sm">
-          {timedOut}
-        </SurfaceNotice>
+        <div
+          role="status"
+          className="flex min-w-0 items-start gap-2.5 rounded-[var(--r-md)] border border-[color-mix(in_oklch,var(--warn)_40%,transparent)] bg-[var(--warn-soft)] px-3 py-2 text-sm leading-5 text-[var(--fg)]"
+        >
+          <StatusDot tone="warn" className="mt-1.5" />
+          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{timedOut}</span>
+        </div>
       )}
       <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[36rem]/summary:grid-cols-4">
         {cells.map((cell) => (
