@@ -154,11 +154,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy_imessage_source_sha256: Option<String>,
     /// The AGY output owner of this execution; absent on every Legacy row.
-    #[serde(
-        default,
-        deserialize_with = "agy_custody::present",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "agy_custody::present")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agy_custody: Option<agy_custody::AgyCustodyField>,
     /// A terminal this execution confirmed but could not commit; the row stays until boot or
     /// the next admission on its channel records it.
