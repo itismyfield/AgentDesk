@@ -138,6 +138,13 @@ pub(super) async fn handle_no_result_exits(
                     &watcher_provider,
                     channel_id.get(),
                 );
+            // A Herdr turn ends here only on its own terminal read from its saved start.
+            let fresh_idle_completion_signal =
+                crate::services::discord::inflight::herdr_fresh_idle_signal(
+                    pinned_pre_cleanup_inflight.as_ref(),
+                    &tmux_session_name,
+                    fresh_idle_completion_signal,
+                );
             // #3016 S3 / phase-5b1 (codex HIGH fix): the DEFER decision keys on
             // the STRUCTURAL TERMINATOR and — for non-JSONL `Unknown` runtimes —
             // on response EMPTINESS, NOT on the `mailbox_finalize_owed` flag. This

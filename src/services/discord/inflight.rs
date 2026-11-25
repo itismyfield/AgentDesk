@@ -9,6 +9,12 @@ pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
+mod herdr_turn_evidence;
+#[cfg(all(test, unix))]
+mod herdr_turn_evidence_tests;
+pub(in crate::services::discord) use herdr_turn_evidence::{
+    herdr_fresh_idle_signal, install_turn_start_sink,
+};
 mod host_locator;
 pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
@@ -628,6 +634,7 @@ fn bump_save_generation_for_write(
     super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
     native_stop_pin::carry_forward(existing.as_ref(), state);
+    herdr_turn_evidence::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)

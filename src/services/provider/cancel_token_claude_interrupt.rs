@@ -23,6 +23,17 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) own_start: Mutex<OwnStart>,
     /// The backstop's read of this turn from its own start, resumed poll to poll.
     pub(crate) own_turn: Mutex<OwnTurnCursor>,
+    /// The token's turn; a saved start names it so a successor turn never reuses it.
+    pub(crate) turn_nonce: Option<String>,
+}
+
+/// Writes a recorded turn start to that turn's durable row; the Discord layer installs it.
+pub(crate) type TurnStartSink =
+    fn(&crate::db::dispatched_sessions::hosted_execution::HostedOwner, &str, &HerdrTurnStart);
+static TURN_START_SINK: std::sync::OnceLock<TurnStartSink> = std::sync::OnceLock::new();
+
+pub(crate) fn install_turn_start_sink(sink: TurnStartSink) {
+    let _ = TURN_START_SINK.set(sink);
 }
 
 /// A stop's one late delivery attempt; it holds the token only weakly.
@@ -40,7 +51,7 @@ pub(crate) enum OwnStart {
 }
 
 /// The source and offset an executor observed at this token's input, never taken from a frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HerdrTurnStart {
     pub(crate) execution_nonce: String,
     pub(crate) source: std::path::PathBuf,
@@ -437,6 +448,7 @@ impl CancelToken {
             turn_start: std::sync::OnceLock::new(),
             own_start: Mutex::new(OwnStart::Unseen(None)),
             own_turn: Mutex::new(OwnTurnCursor::default()),
+            turn_nonce: self.turn_nonce().map(str::to_owned),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         if let Some(nonce) = self.turn_nonce() {
