@@ -196,7 +196,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             }
             tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
             if !matches!(case, Case::Recorded | Case::Continuing) {
-                readiness::tests::lose_resume_record(NONCE);
+                readiness::test_support::lose_resume_record(NONCE);
             }
             readiness::test_support::daemon_restart(&logical);
             attach();

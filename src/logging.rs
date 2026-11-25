@@ -705,7 +705,7 @@ mod rotation_tests {
 
 /// Test log capture: tracing-core's JustOne fast path caches the first hitting thread's
 /// interest, so a subscriber-less test thread can cache `never` under a live capture.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_capture {
     use std::sync::OnceLock;
 
@@ -754,6 +754,7 @@ pub(crate) mod test_capture {
         PINS.get_or_init(|| [Dispatch::new(InterestPin), Dispatch::new(InterestPin)]);
     }
 
+    #[cfg(test)]
     mod tests {
         use super::pin_callsite_interest;
         use std::sync::mpsc;

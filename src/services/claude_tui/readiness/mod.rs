@@ -806,7 +806,7 @@ fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
     let _ = (session, path, draft_required);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use source::CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]

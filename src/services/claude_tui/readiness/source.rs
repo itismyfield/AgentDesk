@@ -116,7 +116,7 @@ pub(crate) use clear::adopt as adopt_awaiting_clear;
 #[cfg(unix)]
 pub(super) use clear::note as note_clear;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]

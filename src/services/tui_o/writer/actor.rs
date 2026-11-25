@@ -437,7 +437,7 @@ where
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -511,7 +511,7 @@ where
 mod fresh_resume;
 mod notice_settlement;
 pub(crate) mod notice_work;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
