@@ -72,21 +72,20 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     />
   );
 
+  const homeView = (
+    <HomePageView
+      isMobileViewport={isMobileViewport}
+      isKo={isKo}
+      agents={agentsWithDispatched}
+      onOpenAgent={openDefaultAgentInfo}
+      onNotify={pushNotification}
+    />
+  );
+
   return (
     <Routes>
-      <Route path="/" element={<Navigate replace to={DEFAULT_ROUTE_PATH} />} />
-      <Route
-        path="/home"
-        element={
-          <HomePageView
-            isMobileViewport={isMobileViewport}
-            isKo={isKo}
-            agents={agentsWithDispatched}
-            onOpenAgent={openDefaultAgentInfo}
-            onNotify={pushNotification}
-          />
-        }
-      />
+      <Route path="/" element={homeView} />
+      <Route path="/home" element={homeView} />
       <Route path="/agents" element={agentManager(false)} />
       <Route path="/agents/new" element={agentManager(true)} />
       <Route

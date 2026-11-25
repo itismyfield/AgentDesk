@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { getCampaigns, type Campaign } from "../../api/campaigns";
+import { getCampaigns, type HomeLegacyCampaignSummary } from "../../api/campaigns";
 import { healthDetailBlocked, noteHealthDetailError } from "../../api/healthDetailAccess";
 import { ApiRequestError, request } from "../../api/httpClient";
 import type { RoutineRecord } from "../../api/routines";
@@ -55,7 +55,7 @@ export function usePolled<T>(load: () => Promise<T>, intervalMs: number, enabled
 export const DETAIL_CAMPAIGNS = 8;
 
 export interface HomeCampaigns {
-  legacy: Campaign[] | null;
+  legacy: HomeLegacyCampaignSummary[] | null;
   summaries: ServerCampaignSummary[] | null;
   documents: ServerCampaignDocument[];
   /** Open server campaigns whose detail read failed, and those past `DETAIL_CAMPAIGNS`: their to-dos are unknown. */
@@ -65,7 +65,7 @@ export interface HomeCampaigns {
 
 export async function loadHomeCampaigns(): Promise<HomeCampaigns> {
   const [legacy, summaries] = await Promise.allSettled([
-    getCampaigns().then((result) => result.campaigns),
+    getCampaigns({ view: "home" }).then((result) => result.campaigns),
     getServerCampaignSummaries(),
   ]);
   if (legacy.status === "rejected" && summaries.status === "rejected") throw legacy.reason;
