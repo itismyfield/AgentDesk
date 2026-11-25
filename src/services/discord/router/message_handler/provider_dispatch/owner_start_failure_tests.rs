@@ -615,10 +615,61 @@ async fn fixture(
         assert!(payloads.is_empty());
         assert_eq!(snapshot["items"].as_array().unwrap().len(), 2);
     }
+    if failure == OWN_TIMEOUT {
+        own_timeout_waits(&mailbox, &drive, &mut received, &starts, &cause_cleared).await;
+    }
     shared.mailboxes.remove_fixture_for_test(channel);
     server.abort();
     pool.close().await;
     db.drop().await;
+}
+
+const OWN_TIMEOUT: &str =
+    "NotSent(\"pending_unattached:fixture-own:own_timeout\"): herdr turn: no SessionStart of s";
+
+/// After the typed own timeout the original waits on its kept slot and ticket, counted as no failed
+/// start: a wake before the due starts nothing, and past the due it is delivered once, then B.
+async fn own_timeout_waits(
+    mailbox: &ChannelMailboxHandle,
+    drive: &Arc<Drive>,
+    received: &mut mpsc::UnboundedReceiver<Signal>,
+    starts: &AtomicUsize,
+    cleared: &AtomicBool,
+) {
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    let wait = snapshot["retry"]["wait"].clone();
+    assert_eq!(wait["cause"]["kind"], "own_launch_timeout", "{snapshot}");
+    assert!(wait["ticket"].is_string(), "{snapshot}");
+    assert_eq!(snapshot["items"][0]["text"], "입력 A — 원문 보존");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    let wake = || crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    wake();
+    while !matches!(
+        crate::test_support::wait::await_within(received.recv(), BUDGET).await,
+        Some(Signal::Pass)
+    ) {}
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(starts.load(Ordering::SeqCst), 1, "a wake before the due");
+    let due = wait["due_at_ms"].as_u64().unwrap();
+    let ticked = mailbox.v2_request(move |slot| slot.as_mut().ok_or("owner")?.tick(due));
+    ticked.await.unwrap();
+    cleared.store(true, Ordering::SeqCst);
+    wake();
+    let mut delivered = Vec::new();
+    tokio::time::timeout(BUDGET, async {
+        loop {
+            match received.recv().await.unwrap() {
+                Signal::Payload(id, _) => delivered.push(id),
+                Signal::Wake => wake(),
+                Signal::Closed(B) => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("A past its due, then B");
+    assert_eq!((starts.load(Ordering::SeqCst), delivered), (2, vec![A, B]));
 }
 
 fn isolated(test: &str) -> bool {
@@ -752,4 +803,18 @@ async fn start_failure_blocked_notice_does_not_block_b_pg() {
         std::env::set_var("I7787_NOTICE_BLOCKED", "1");
     }
     fixture("opaque before input", false, true, false, false, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_failure_own_timeout_waits_for_its_due_and_counts_no_failed_start_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_own_timeout_waits_for_its_due_and_counts_no_failed_start_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    fixture(OWN_TIMEOUT, true, false, false, false, 0).await;
 }
