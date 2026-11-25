@@ -308,12 +308,13 @@ export default function AgentsTab({
                   <SegmentedControl
                     kind="tabs"
                     variant="tray"
+                    size={isMobile ? "sm" : "md"}
                     aria-label={tr("에이전트 상태", "Agent status")}
                     value={statusFilter}
                     onChange={(value) => setStatusFilter(value as AgentStatusFilter)}
                     options={statusKeys.map((key) => ({
                       value: key,
-                      label: key === "all" ? tr("전체", "All") : agentStateLabel(key, tr),
+                      label: key === "all" ? tr("전체", "All") : isMobile && isKo && key === "background" ? "대기" : agentStateLabel(key, tr),
                       count: statusCounts[key] ?? 0,
                       controls: panelId,
                     }))}

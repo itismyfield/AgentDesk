@@ -9,6 +9,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent, Department, DispatchedSession } from "../../types";
 import AgentsTab from "./AgentsTab";
+import AgentFormModal from "./AgentFormModal";
 import AgentSetupWizard from "./AgentSetupWizard";
 import { AgentsUnlinkedSessions } from "./AgentsSummaryPane";
 import { agentSecondaryLine } from "./AgentRow";
@@ -449,6 +450,9 @@ describe("provider summary, attention header, and active provider resolution", (
     await flush();
 
     const wizard = document.querySelector('[data-testid="agent-setup-wizard"]')!;
+    const roleIdInput = wizard.querySelector<HTMLInputElement>("#wizard-role-id")!;
+    expect(roleIdInput).not.toBeNull();
+    expect(document.activeElement).toBe(roleIdInput);
     expect(wizard.textContent).not.toContain("역할 ID는 영문·숫자·_·- 2자 이상이어야 해요.");
     expect(Array.from(wizard.querySelectorAll("label"), (l) => l.textContent)).not.toContain("부서");
     const nextBtn = () => Array.from(wizard.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "다음")!;
@@ -477,6 +481,46 @@ describe("provider summary, attention header, and active provider resolution", (
     act(() => nextBtn().click());
     await flush();
     expect(wizard.textContent).not.toContain("채널 ID는 숫자여야 해요.");
+  });
+
+  it("uses sm segmented tabs with compact 대기 label on Korean mobile and deduplicates AgentFormModal personality label", async () => {
+    setViewport(true);
+    const ko = (k: string) => k;
+    const entries = classifyRoster(AGENTS, SESSIONS, false);
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <AgentsTab
+            tr={ko} locale="ko" isKo entries={entries} sortedEntries={entries.filter((e) => !isStandIn(e.agent))}
+            departments={[]} deptTab="all" setDeptTab={vi.fn()} search="" setSearch={vi.fn()}
+            statusFilter="all" setStatusFilter={vi.fn()} sortMode="status" setSortMode={vi.fn()}
+            includeTests={false} setIncludeTests={vi.fn()} selectedAgentId={null} onSelectAgent={vi.fn()}
+            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+            onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
+          />
+          <AgentFormModal
+            isKo locale="ko" tr={ko} isEdit={false} saving={false} departments={[]}
+            onSave={vi.fn()} onClose={vi.fn()}
+            form={{
+              name: "", name_ko: "", name_ja: "", name_zh: "", department_id: "",
+              cli_provider: "claude", avatar_emoji: "🤖", personality: "", prompt_content: "", auto_commit: false,
+            }}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const seg = container.querySelector<HTMLElement>(".aui-segmented-control-clean")!;
+    expect(seg.getAttribute("data-size")).toBe("sm");
+    const tabLabels = Array.from(seg.querySelectorAll(".aui-segmented-control-clean__label"), (el) => el.textContent);
+    expect(tabLabels).toEqual(["전체", "작업 중", "대기", "쉬는 중", "세션 없음"]);
+
+    const detailsHeading = document.body.querySelector("#agent-form-details")!;
+    expect(detailsHeading.textContent).toBe("역할 · 성격");
+    expect(document.body.querySelector('label[for="agent-personality"]')).toBeNull();
+    const personalityArea = document.body.querySelector<HTMLTextAreaElement>("#agent-personality")!;
+    expect(personalityArea.getAttribute("aria-label")).toBe("성격");
   });
 
   it("removes department copy and collapses idle toolu_* subagent sessions in AgentsUnlinkedSessions modal", async () => {

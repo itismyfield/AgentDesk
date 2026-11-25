@@ -76,7 +76,15 @@ describe("DailyTokenCompositionCard", () => {
     });
 
     expect(container.querySelector('[data-testid="stats-daily-token-chart"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="stats-daily-token-scroll"] .aui-breakdown-chart')).not.toBeNull();
+    const scrollWrap = container.querySelector<HTMLElement>('[data-testid="stats-daily-token-scroll"]')!;
+    expect(scrollWrap.querySelector(".aui-breakdown-chart")).not.toBeNull();
+    expect(scrollWrap.className).toContain("min-[560px]:[&_.aui-breakdown-chart-picker>span]:shrink-0!");
+    expect(scrollWrap.className).toContain("min-[560px]:[&_.aui-breakdown-chart-picker-button]:w-auto!");
+    expect(scrollWrap.className).toContain("min-[560px]:[&_.aui-breakdown-chart-picker-button]:min-w-0!");
+    expect(scrollWrap.className).toContain("min-[560px]:[&_.aui-breakdown-chart-picker-button]:flex-1!");
+    expect(
+      Array.from(scrollWrap.querySelectorAll(".aui-breakdown-chart-picker > span"), (el) => el.textContent),
+    ).toEqual(["집계 방식", "가로축 분류", "누적 구분"]);
     expect(container.querySelector('[data-testid="stats-daily-compact-total"]')?.textContent).toBe("3.5K · $3.50");
     expect(container.querySelector(".aui-metering-chart")).toBeNull();
 

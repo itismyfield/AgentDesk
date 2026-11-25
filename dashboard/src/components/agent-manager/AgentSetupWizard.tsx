@@ -218,7 +218,16 @@ export default function AgentSetupWizard({
                   description={tr("역할 ID와 표시 이름은 만든 뒤에도 관리 화면에서 고칠 수 있어요.", "The role ID and names stay editable after creation.")}
                 >
                   <div className="grid gap-4 md:grid-cols-2">
-                    {field(tr("역할 ID", "Role ID"), draft.agentId, (agentId) => { setRoleTouched(true); setDraft({ ...draft, agentId }); }, "adk-researcher", () => setRoleTouched(true))}
+                    <TextField
+                      id="wizard-role-id"
+                      data-autofocus
+                      label={tr("역할 ID", "Role ID")}
+                      type="text"
+                      value={draft.agentId}
+                      onChange={(event) => { setRoleTouched(true); setDraft({ ...draft, agentId: event.target.value }); }}
+                      onBlur={() => setRoleTouched(true)}
+                      placeholder="adk-researcher"
+                    />
                     {field(tr("표시 이름", "Display name"), draft.name, (name) => { setRoleTouched(true); setDraft({ ...draft, name }); }, "Researcher", () => setRoleTouched(true))}
                     {field(tr("한글 이름", "Korean name"), draft.nameKo, (nameKo) => setDraft({ ...draft, nameKo }), "리서처")}
                   </div>

@@ -134,8 +134,8 @@ export default function AgentFormModal({
           </section>
 
           <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-details">
-            <h3 id="agent-form-details" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("성격", "Personality")}</h3>
-            <TextArea id="agent-personality" label={tr("성격", "Personality")} placeholder={tr("전문 분야나 성격을 적어 주세요", "Expertise or personality")} minRows={7} maxRows={14} {...text("personality")} />
+            <h3 id="agent-form-details" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("역할 · 성격", "Role & personality")}</h3>
+            <TextArea id="agent-personality" aria-label={tr("성격", "Personality")} placeholder={tr("전문 분야나 성격을 적어 주세요", "Expertise or personality")} minRows={7} maxRows={14} {...text("personality")} />
           </section>
 
           {isEdit && (
