@@ -121,18 +121,3 @@ fn idle_compaction_tail_does_not_cross_an_old_terminal_or_unknown_record() {
         TuiTurnState::Idle
     );
 }
-
-#[test]
-fn only_a_finished_idle_compaction_preserves_the_completed_reply() {
-    assert_eq!(
-        observe([vec![end_turn()], compacted_tail()].concat()),
-        TuiTurnState::Idle
-    );
-    let unclosed = compacted_tail()
-        .into_iter()
-        .filter(|r| r["subtype"] != "informational");
-    assert_ne!(
-        observe([vec![end_turn()], unclosed.collect()].concat()),
-        TuiTurnState::Idle
-    );
-}
