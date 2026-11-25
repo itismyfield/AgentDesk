@@ -19,9 +19,25 @@ export type TaskNodeData = {
   locked: boolean;
   error: boolean;
   picked: boolean;
+  readOnly?: boolean;
 };
 
-/** One task on the relations canvas: compact blueprint card with left/right edge handles and status accent bar. */
+function edgeHandleStyle(side: "left" | "right", color = "var(--fg-dim)"): CSSProperties {
+  return {
+    ...graphHandleDot(color),
+    background: "var(--bg-1)",
+    [side]: -5,
+    ...(side === "right" ? { left: "auto" } : {}),
+    top: "50%",
+    transform: "translateY(-50%)",
+    zIndex: 2,
+  };
+}
+
+const LEFT_HANDLE_CLASS = "campaign-edge-handle-left !-left-[5px] !size-2.5 !border-2 !bg-[var(--bg-1)]";
+const RIGHT_HANDLE_CLASS = "campaign-edge-handle-right !-right-[5px] !size-2.5 !border-2 !bg-[var(--bg-1)]";
+
+/** One task on the relations canvas: compact 3-row blueprint card with outer-edge handles and status accent bar. */
 export function RelationsTaskNode({ data, selected }: NodeProps) {
   const task = data as TaskNodeData;
   const statusTone = getGraphStatusTone(task.error ? "failed" : task.status ?? task.tone);
@@ -44,7 +60,7 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
   return (
     <div
       data-quiet={statusTone.quiet || undefined}
-      className={`relative grid w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
+      className={`relative grid h-auto w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
         statusTone.quiet && !selected ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
       }`}
       style={{ borderColor, boxShadow: ringShadow }}
@@ -52,8 +68,9 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
       <Handle
         type="target"
         position={Position.Left}
-        isConnectable={!task.locked}
-        style={{ ...graphHandleDot(task.locked ? "var(--fg-faint)" : statusTone.pinColor), zIndex: 2 }}
+        isConnectable={!task.locked && !task.readOnly}
+        className={LEFT_HANDLE_CLASS}
+        style={edgeHandleStyle("left", task.locked ? "var(--fg-faint)" : statusTone.pinColor)}
       />
       <div className="relative grid overflow-hidden rounded-[13px]">
         <i
@@ -62,7 +79,7 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
           style={{ background: task.error ? "var(--err)" : statusTone.accent }}
         />
         <div
-          className="grid gap-1 border-b border-[var(--line-soft)] pt-2.5 pr-3 pb-2 pl-3.5"
+          className="grid min-h-[54px] h-auto gap-1.5 border-b border-[var(--line-soft)] py-2.5 px-4"
           style={{ background: statusTone.headerBg }}
         >
           <div className="flex min-w-0 items-center gap-1.5">
@@ -81,14 +98,14 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
           </div>
           <strong
             title={task.title}
-            className={`line-clamp-2 text-[13px] leading-[1.35] font-semibold [word-break:keep-all] [overflow-wrap:break-word] ${
+            className={`line-clamp-2 min-h-[2.5rem] text-[13px] leading-5 font-semibold [word-break:keep-all] [overflow-wrap:anywhere] ${
               statusTone.quiet ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
             }`}
           >
             {task.title}
           </strong>
         </div>
-        <div className="grid gap-1.5 py-2 pr-3 pl-3.5 text-[11px] leading-4">
+        <div className="grid gap-1.5 py-2 px-4 text-[11px] leading-4">
           {task.ratio > 0 && !statusTone.quiet && <MeterBar ratio={task.ratio} tone="info" className="h-1" />}
           <div className="flex min-w-0 items-center justify-between gap-2">
             <span className="min-w-0 truncate tabular-nums">{task.summary}</span>
@@ -112,7 +129,9 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
       <Handle
         type="source"
         position={Position.Right}
-        style={{ ...graphHandleDot(statusTone.pinColor), zIndex: 2 }}
+        isConnectable={!task.readOnly}
+        className={RIGHT_HANDLE_CLASS}
+        style={edgeHandleStyle("right", statusTone.pinColor)}
       />
     </div>
   );
@@ -133,38 +152,24 @@ export type GroupNodeData = {
   onOpen?: () => void;
 };
 
-/** Longest unbroken word width in `em` units so `dashboard`, `statechart`, or `클라우드감사` scales to one line cleanly. */
-function longestWordEm(text: string): number {
-  let max = 0;
-  for (const part of text.split(/[\s·/|-]+/)) {
-    let width = 0;
-    for (const ch of part) width += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 1.04 : 0.61;
-    if (width > max) max = width;
-  }
-  return max;
-}
-
-/** Zoomed out, a card's name, meter bar, and one state line cover it at a legible size. */
+/** Zoomed out, a group card's name, meter bar, and one state line cover it with generous vertical/horizontal clearance. */
 function FarCover({ scale, title, line, ratio, error, className }: {
-  scale: number; title: string; line: string; ratio?: number; error?: boolean; className: string;
+  scale: number; title: string; line: string; ratio?: boolean | number; error?: boolean; className: string;
 }) {
   const roomy = scale < 1.9;
-  const sidePad = Math.max(14, Math.round(6.5 * scale));
-  const innerWidth = Math.max(120, 240 - sidePad * 2 - 4);
-  const maxEm = longestWordEm(title);
-  const wordCap = maxEm > 0 ? Math.floor(innerWidth / maxEm) : 38;
-  const baseFont = Math.min(12 * scale, wordCap, roomy ? 24 : 38);
+  const sidePad = Math.max(16, Math.round(11 * scale));
+  const baseFont = Math.max(13, Math.min(Math.round(11 * scale), roomy ? 20 : 26));
   return <div data-far aria-hidden className={`absolute inset-0 flex flex-col justify-center gap-1.5 overflow-hidden rounded-[inherit] py-2.5 ${className}`} style={{ fontSize: baseFont, paddingInline: sidePad }}>
-    <strong className="line-clamp-2 pb-[0.12em] text-[1.02em] leading-[1.42] font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:break-word]">{title}</strong>
-    {ratio !== undefined && <MeterBar ratio={ratio} tone="ok" className="h-[0.28em] shrink-0" />}
-    {roomy && <span className={`truncate pb-[0.08em] leading-snug tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
+    <strong className="line-clamp-2 text-[1em] leading-[1.35] font-semibold text-[var(--fg)] [word-break:keep-all] [overflow-wrap:anywhere]">{title}</strong>
+    {typeof ratio === "number" && <MeterBar ratio={ratio} tone="ok" className="h-1.5 shrink-0" />}
+    {roomy && <span className={`truncate leading-snug tabular-nums ${error ? "text-[var(--err)]" : ""}`}>{line}</span>}
   </div>;
 }
 
-/** Edge handle pins scaled on screen over the shrunken handles when zoomed far out. */
+/** Outer-edge handle pins scaled on screen over the shrunken handles when zoomed far out, never overlapping text. */
 function FarPins({ scale, color = "var(--fg-muted)" }: { scale: number; color?: string }) {
-  const dot = (side: "left" | "right") => <i aria-hidden className="absolute z-[2] rounded-full border-solid bg-[var(--th-card-bg)]"
-    style={{ [side]: 0, top: "50%", width: 10 * scale, height: 10 * scale, borderWidth: 2 * scale, borderColor: color, transform: `translate(${side === "left" ? "-50%" : "50%"}, -50%)` }} />;
+  const dot = (side: "left" | "right") => <i aria-hidden className="absolute z-[2] rounded-full border-solid bg-[var(--bg-1)]"
+    style={{ [side]: -5 * scale, ...(side === "right" ? { left: "auto" } : {}), top: "50%", width: 10 * scale, height: 10 * scale, borderWidth: 2 * scale, borderColor: color, transform: "translateY(-50%)" }} />;
   return <>{dot("left")}{dot("right")}</>;
 }
 
@@ -182,7 +187,7 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
   return (
     <div
       data-quiet={statusTone.quiet || undefined}
-      className={`relative grid w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
+      className={`relative grid min-h-[156px] h-auto w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
         statusTone.quiet && !selected ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
       }`}
       style={{
@@ -191,10 +196,10 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
         ...(far ? farRing(scale, selected, !!group.blocked) : { boxShadow: nearShadow }),
       } as CSSProperties}
     >
-      <Handle type="target" position={Position.Left} isConnectable={false} style={{ ...graphHandleDot(statusTone.pinColor), zIndex: 2 }} />
+      <Handle type="target" position={Position.Left} isConnectable={false} className={LEFT_HANDLE_CLASS} style={edgeHandleStyle("left", statusTone.pinColor)} />
       <div className="relative grid overflow-hidden rounded-[13px]">
         <i aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-[3px]" style={{ background: statusTone.accent }} />
-        <div className="grid gap-1 border-b border-[var(--line-soft)] pt-2.5 pr-3 pb-2 pl-3.5" style={{ background: statusTone.headerBg }}>
+        <div className="grid min-h-[54px] h-auto gap-1.5 border-b border-[var(--line-soft)] py-2.5 px-4" style={{ background: statusTone.headerBg }}>
           <div className="flex min-w-0 items-center gap-1.5">
             <StatusMarker tone={group.tone} ratio={group.ratio} />
             {group.code && <span className="shrink-0 font-mono text-[11px] font-medium text-[var(--fg-muted)] tabular-nums">{group.code}</span>}
@@ -203,14 +208,14 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
           </div>
           <strong
             title={group.title}
-            className={`line-clamp-2 text-sm leading-[1.35] font-semibold [word-break:keep-all] [overflow-wrap:break-word] ${
+            className={`line-clamp-2 min-h-[2.5rem] text-sm leading-5 font-semibold [word-break:keep-all] [overflow-wrap:anywhere] ${
               statusTone.quiet ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
             }`}
           >
             {group.title}
           </strong>
         </div>
-        <div className="grid gap-2 py-2.5 pr-3 pl-3.5">
+        <div className="grid gap-2 py-2.5 px-4">
           <MeterBar ratio={group.ratio} tone={group.blocked ? "warn" : "ok"} />
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
             <span className="min-w-0 truncate tabular-nums">
@@ -233,24 +238,24 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
           </div>
         </div>
       </div>
-      <Handle type="source" position={Position.Right} isConnectable={false} style={{ ...graphHandleDot(statusTone.pinColor), zIndex: 2 }} />
+      <Handle type="source" position={Position.Right} isConnectable={false} className={RIGHT_HANDLE_CLASS} style={edgeHandleStyle("right", statusTone.pinColor)} />
       {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} color={statusTone.pinColor} /></>}
     </div>
   );
 }
 
-/** Zoomed out, `cover` (number and title) heads the card and `far` is its state line. */
-export type ViewTaskData = TaskNodeData & { cover: string; far: string };
+/** Read-only task node data unified with `TaskNodeData`. */
+export type ViewTaskData = TaskNodeData & { cover?: string; far?: string };
 
-/** A task on the read-only view: the editor's blueprint card, covered by its title and state once zoomed out. */
+/** A task on the read-only group view: uses the exact same 3-row blueprint card as the relations editor. */
 export function ViewTaskNode(props: NodeProps) {
   const task = props.data as ViewTaskData;
-  const scale = useLegible(), far = scale > FAR;
-  const statusTone = getGraphStatusTone(task.error ? "failed" : task.status ?? task.tone);
-  return <div className="relative rounded-[14px]" style={{ "--legible": scale, ...far ? farRing(scale, props.selected, task.error) : {} } as CSSProperties}>
-    <RelationsTaskNode {...props} selected={props.selected && !far} />
-    {far && <><FarCover scale={scale} title={task.cover} line={task.far} ratio={task.ratio > 0 ? task.ratio : undefined} error={task.error} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} color={statusTone.pinColor} /></>}
-  </div>;
+  const scale = useLegible();
+  return (
+    <div className="relative rounded-[14px]" style={{ "--legible": scale } as CSSProperties}>
+      <RelationsTaskNode {...props} data={{ ...task, readOnly: true }} />
+    </div>
+  );
 }
 
 /** `in` tails are dependencies outside the group, at its left; `out` tails depend on it, at its right. */
@@ -259,14 +264,14 @@ export type TailNodeData = { title: string; cover: string; group: string; side: 
 /** A task outside the group, faint at the canvas's edge with its group's name. */
 export function RelationsTailNode({ data }: NodeProps) {
   const tail = data as TailNodeData;
-  const scale = useLegible(), far = scale > FAR;
-  const tailPin = (shown: boolean): CSSProperties => ({ ...graphHandleDot("var(--fg-faint)"), zIndex: 2, opacity: shown ? 1 : 0 });
-  return <div className="relative grid w-60 gap-0.5 rounded-[14px] border border-dashed border-[var(--line)] bg-[var(--bg-1)] px-3.5 py-2.5 text-left text-xs text-[var(--fg-muted)]"
-    style={{ "--legible": scale, ...far ? { borderWidth: scale } : {} } as CSSProperties}>
-    <strong className="truncate text-[13px] font-medium text-[var(--fg-dim)]">{tail.title}</strong><span className="truncate">{tail.group}</span>
-    <Handle type="target" position={Position.Left} isConnectable={false} style={tailPin(tail.ends.enters)} />
-    <Handle type="source" position={Position.Right} isConnectable={false} style={tailPin(tail.ends.leaves)} />
-    {far && <FarCover scale={scale} title={tail.cover} line={tail.group} className="bg-[var(--bg)] text-[var(--fg-muted)]" />}
+  const scale = useLegible();
+  const tailPin = (side: "left" | "right", shown: boolean): CSSProperties => ({ ...edgeHandleStyle(side, "var(--fg-faint)"), opacity: shown ? 1 : 0 });
+  return <div className="relative grid min-h-[64px] h-auto w-60 content-center gap-1 rounded-[14px] border border-dashed border-[var(--line)] bg-[var(--bg-1)] py-2.5 px-4 text-left text-xs text-[var(--fg-muted)]"
+    style={{ "--legible": scale } as CSSProperties}>
+    <strong title={tail.title} className="line-clamp-2 text-[13px] leading-5 font-medium text-[var(--fg-dim)] [word-break:keep-all] [overflow-wrap:anywhere]">{tail.title}</strong>
+    <span className="truncate leading-4">{tail.group}</span>
+    <Handle type="target" position={Position.Left} isConnectable={false} className={LEFT_HANDLE_CLASS} style={tailPin("left", tail.ends.enters)} />
+    <Handle type="source" position={Position.Right} isConnectable={false} className={RIGHT_HANDLE_CLASS} style={tailPin("right", tail.ends.leaves)} />
   </div>;
 }
 

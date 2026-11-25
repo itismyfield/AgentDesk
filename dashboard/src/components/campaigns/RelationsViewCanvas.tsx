@@ -19,8 +19,16 @@ const NODE_TYPES = { relationsGroup: RelationsGroupNode, relationsTask: ViewTask
 const EDGE_TYPES = { relationsLine: RelationsLine };
 /** The canvas fills the window's height below the page header, never under 560px. */
 const CANVAS_HEIGHT = "max(560px, calc(100dvh - 21rem))";
-/** Fitting leaves the bottom strip to the legend and the zoom tools. */
-const FIT = { padding: { x: "32px", top: "24px", bottom: "72px" }, minZoom: 0.1, maxZoom: 1 } as const;
+/** Fitting leaves generous breathing room around outer handles, legend, and zoom tools. */
+const FIT = { padding: 0.16, minZoom: 0.1, maxZoom: 1 } as const;
+const MINIMAP_STYLE: CSSProperties = {
+  bottom: 64,
+  right: 16,
+  margin: 0,
+  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+  border: "1px solid var(--line)",
+  boxShadow: "var(--shadow-sm)",
+};
 
 /** The read-only canvas both relations views share: causal chain highlighting, arrowheads, and toggleable minimap. */
 export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles, components, cycleText, lineLabel, onSelect, onOpen, inspector, tr }: {
@@ -28,7 +36,7 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
   lineLabel: (line: ViewLine) => string; onSelect: (id: string | null) => void; onOpen?: (id: string) => void; inspector: ReactNode; tr: Tr;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
-  const [minimapOpen, setMinimapOpen] = useState(true);
+  const [showMiniMap, setShowMiniMap] = useState(false);
   const [flowReady, setFlowReady] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const sizes = useRef(new Map<string, NonNullable<Node["measured"]>>());
@@ -108,11 +116,11 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
         onNodeMouseLeave={() => setHoveredId(null)}
         onNodeDoubleClick={(_, node) => onOpen?.(node.id)} onPaneClick={() => onSelect(null)}>
         <Background gap={20} size={1.6} color="var(--line)" />
-        <GraphMiniMap open={minimapOpen} ready={flowReady} ariaLabel={tr("관계도 미니맵", "Relations minimap")} chosenId={selectedId} />
+        <GraphMiniMap open={showMiniMap} ready={flowReady} ariaLabel={tr("관계도 미니맵", "Relations minimap")} chosenId={selectedId} style={MINIMAP_STYLE} />
       </ReactFlow>
       <RelationsLegend className="max-w-[calc(100%-12rem)]" tr={tr} />
       <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")}
-        minimap={{ open: minimapOpen, onToggle: () => setMinimapOpen((v) => !v) }} tr={tr} />
+        minimap={{ open: showMiniMap, onToggle: () => setShowMiniMap((v) => !v) }} tr={tr} />
     </div>
     {inspector}
   </section>;

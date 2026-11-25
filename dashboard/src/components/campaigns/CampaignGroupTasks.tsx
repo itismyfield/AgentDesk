@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore, type HTMLAttributes } from "react";
 import type { Node } from "@xyflow/react";
-import type { Campaign, CampaignNode } from "../../api/campaigns";
+import type { Campaign, CampaignNode, CampaignNodeLive } from "../../api/campaigns";
 import CampaignGroupInspector, { TaskInspector } from "./CampaignGroupInspector";
 import { buildCampaignGroupOverview, groupCycleText } from "./CampaignGroupOverview";
 import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
 import { LAYER, TASK_HEIGHT, layoutGroups, placeLines } from "./campaignGroupLayout";
-import { campaignGroup, campaignTaskTitle } from "./campaignModel";
+import { CAMPAIGN_STAGES, campaignGroup, campaignStageStep, campaignTaskTitle } from "./campaignModel";
+import { legacyTask } from "./campaignOverviewModel";
 import { LABELS, type Tr } from "./campaignPresentation";
 import { editorViewScope, loadCampaignView, readStoredRaw, subscribeCampaignView } from "./campaignViewStorage";
 import type { TailNodeData, ViewTaskData } from "./RelationsTaskNode";
 import RelationsViewCanvas, { type ViewLine } from "./RelationsViewCanvas";
 import { cycleComponents, findCycles, scopeKey, taskLabel, taskName } from "./relationsEditorModel";
-import { nodeMarker } from "./StatusMarker";
 
 const tailId = (id: string) => `tail:${id}`;
 /** A tail card's height; tails stacked in one edge column keep `TAIL_PITCH`, a card plus a gap. */
-export const TAIL_HEIGHT = 60;
-const TAIL_PITCH = TAIL_HEIGHT + 16;
+export const TAIL_HEIGHT = 76;
+const TAIL_PITCH = TAIL_HEIGHT + 20;
 
 /** One group's tasks laid out like the group graph, with tails for the outside tasks they depend on (left edge) or hand
  * on to (right edge); lines go through the ties saved for the group's editor scope, loops are looped parts with a member. */
@@ -58,8 +58,8 @@ export function buildGroupTasks(nodes: CampaignNode[], key: string, settings: Gr
 
 /** The opened group's task graph, read only: task cards, faint tails that open their own group with that task chosen,
  * and the chosen task's summary (or the group's) beside it. */
-export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, tr }: {
-  campaign: Campaign; group: string; chosen: string | null; onChoose: (id: string | null) => void;
+export default function CampaignGroupTasks({ campaign, live, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, tr }: {
+  campaign: Campaign; live?: Record<string, CampaignNodeLive>; group: string; chosen: string | null; onChoose: (id: string | null) => void;
   /** Goes to a task's group with that task chosen. */
   onGoto: (id: string) => void; onGotoGroup: (group: string) => void; onOpenTask: (id: string) => void; tr: Tr;
 }) {
@@ -67,7 +67,7 @@ export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, 
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
   const view = useMemo(() => loadCampaignView(scope, raw).view, [scope, raw]);
   const graph = useMemo(() => buildGroupTasks(campaign.nodes, group, view), [campaign.nodes, group, view]);
-  const overview = useMemo(() => buildCampaignGroupOverview(campaign.nodes), [campaign.nodes]);
+  const overview = useMemo(() => buildCampaignGroupOverview(campaign.nodes, undefined, live), [campaign.nodes, live]);
   const byId = useMemo(() => new Map(campaign.nodes.map((node) => [node.id, node])), [campaign.nodes]);
   const label = useCallback((key: string) => key || tr("미분류", "Ungrouped"), [tr]);
   const name = useCallback((id: string) => { const node = byId.get(id.replace(/^tail:/, "")); return node ? taskLabel(node) : id; }, [byId]);
@@ -80,33 +80,43 @@ export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, 
 
   // Built once per graph and choice, so a live refresh that changes nothing hands React Flow the same cards and lines.
   const graphNodes = useMemo(() => [...graph.members.map((node): Node => {
-    const outside = node.dependencies.filter((dep) => byId.has(dep) && campaignGroup(byId.get(dep)!) !== group).length;
+    const deps = node.dependencies ?? [];
+    const outside = deps.filter((dep) => byId.has(dep) && campaignGroup(byId.get(dep)!) !== group).length;
     const error = graph.components.some((part) => part.has(node.id));
+    const taskView = legacyTask(node, live?.[node.id]);
+    const step = campaignStageStep(node.stage);
+    const stageInfo = step.index >= 0 ? tr(...CAMPAIGN_STAGES[step.index].label) : step.raw;
+    const depInfo = deps.length > 0
+      ? outside > 0
+        ? tr(`선행 ${deps.length} (외부 ${outside})`, `${deps.length} deps (${outside} ext)`)
+        : tr(`선행 ${deps.length}`, `${deps.length} deps`)
+      : tr(`수용조건 ${(node.acceptance ?? []).length}`, `${(node.acceptance ?? []).length} acceptance`);
+    const isBlocked = taskView.attention && !taskView.gate && taskView.status !== "failed";
     const data: ViewTaskData = {
       title: campaignTaskTitle(node),
       code: taskLabel(node),
       meta: label(group),
-      status: node.status,
-      statusLabel: tr(...LABELS[node.status]),
-      ...nodeMarker(node.status, node.stage),
-      summary: [tr(`수용조건 ${node.acceptance.length}`, `${node.acceptance.length} acceptance`), outside > 0 && tr(`범위 밖 선행 ${outside}`, `${outside} outside the scope`)].filter(Boolean).join(" · "),
+      status: taskView.status,
+      statusLabel: tr(...LABELS[taskView.status]),
+      ...taskView.marker,
+      summary: [stageInfo, depInfo].filter(Boolean).join(" · "),
       note: error
         ? { tone: "err", text: tr("순환 오류", "Cycle") }
-        : node.status === "blocked"
-          ? { tone: "warn", text: tr("막힘", "Blocked") }
-          : node.status === "failed"
-            ? { tone: "err", text: tr("실패", "Failed") }
+        : taskView.status === "failed"
+          ? { tone: "err", text: tr("실패", "Failed") }
+          : isBlocked
+            ? { tone: "warn", text: tr("막힘", "Blocked") }
             : null,
-      locked: false, error, picked: false, cover: taskName(node), far: tr(...LABELS[node.status]),
+      locked: false, error, picked: false,
     };
     return { id: node.id, type: "relationsTask", position: graph.positions.get(node.id)!, data, draggable: false, selected: node.id === chosen,
-      domAttributes: { "data-task-id": node.id } as HTMLAttributes<HTMLDivElement>, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}` };
+      domAttributes: { "data-task-id": node.id } as HTMLAttributes<HTMLDivElement>, ariaLabel: `${taskName(node)}, ${tr(...LABELS[taskView.status])}` };
   }), ...graph.tails.map((tail): Node => {
     const ends = { enters: graph.connections.some((line) => line.target === tail.id), leaves: graph.connections.some((line) => line.source === tail.id) };
     const data: TailNodeData = { title: taskName(tail.node), cover: taskLabel(tail.node), group: label(campaignGroup(tail.node)), side: tail.side, ends };
     return { id: tail.id, type: "relationsTail", position: graph.positions.get(tail.id)!, data, draggable: false, selected: false,
       ariaLabel: tr(`그룹 밖 작업 ${data.title}, ${data.group}`, `Task outside the group ${data.title}, ${data.group}`) };
-  })], [graph, byId, group, chosen, label, tr]);
+  })], [graph, byId, live, group, chosen, label, tr]);
   // The detail hands the focus back to what held it as it opened, so the card takes it first and closing returns there.
   const openDetail = (id: string) => { document.querySelector<HTMLElement>(`.react-flow__node[data-task-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); onOpenTask(id); };
   const pick = (id: string | null) => id?.startsWith("tail:") ? onGoto(id.slice(5)) : onChoose(id);
@@ -114,8 +124,8 @@ export default function CampaignGroupTasks({ campaign, group, chosen, onChoose, 
   return <RelationsViewCanvas key={group} label={tr(`그룹 ${label(group)}의 작업 관계`, `Task relations in ${label(group)}`)} nodes={graphNodes} lines={graph.connections} ties={graph.ties}
     cycles={graph.cycles} components={graph.components} cycleText={cycleText} lineLabel={lineLabel}
     onSelect={pick} onOpen={(id) => id.startsWith("tail:") ? pick(id) : onOpenTask(id)} tr={tr}
-    inspector={task ? <TaskInspector node={task} nodes={campaign.nodes} cycles={graph.cycles.filter((_, index) => graph.components[index].has(task.id)).map(cycleText)}
+    inspector={task ? <TaskInspector node={task} nodes={campaign.nodes} live={live?.[task.id]} cycles={graph.cycles.filter((_, index) => graph.components[index].has(task.id)).map(cycleText)}
       onChoose={(id) => byId.get(id) && campaignGroup(byId.get(id)!) === group ? onChoose(id) : onGoto(id)} onOpenTask={openDetail} tr={tr} />
-      : <CampaignGroupInspector overview={overview} nodes={campaign.nodes} chosen={group} opened cycleText={(path) => groupCycleText(overview, path, tr)}
+      : <CampaignGroupInspector overview={overview} nodes={campaign.nodes} live={live} chosen={group} opened cycleText={(path) => groupCycleText(overview, path, tr)}
         onChoose={onGotoGroup} onOpenGroup={onGotoGroup} onOpenTask={onChoose} tr={tr} />} />;
 }

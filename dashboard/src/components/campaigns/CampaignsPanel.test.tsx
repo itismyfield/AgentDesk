@@ -600,8 +600,28 @@ it("switches Connections to HandoffSwimlanes and opens a selected task from a la
 
 it("renders AgentStateMachine and AgentMetroMap for ledger campaigns with running tasks in the Pipeline tab", async () => {
   await render();
+  expect(container.querySelector('[aria-label="Summary"]')?.textContent).toContain("Running with PR");
+  expect(container.querySelector('[aria-label="Summary"]')?.textContent).not.toContain("Done");
   await act(async () => button("Pipeline").click());
   expect(container.querySelector(".aui-agent-state-machine")).not.toBeNull();
   expect(container.querySelector(".aui-agent-metro-map")).not.toBeNull();
   expect(page()).toContain("Preview built-in 9-stage template");
+});
+
+it("defaults large campaign swimlanes (>24 tasks) to active-only, hides finished lanes, and toggles to all tasks", async () => {
+  const nodes = [
+    ...Array.from({ length: 24 }, (_, i) => makeCampaignNode(`done-${i}`, { title: `Done ${i}`, group: "FinishedGroup", status: "completed" })),
+    makeCampaignNode("run-1", { title: "Active relay", group: "ActiveGroup", status: "running", dependencies: ["done-0"] }),
+  ];
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, nodes }], live: {}, read: 1 });
+  await render();
+  await act(async () => button("Connections").click());
+  await act(async () => button("Swimlanes").click());
+  expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')?.textContent).toContain("Hiding 1 completed/skipped groups and 24 tasks.");
+  const swimlanes = container.querySelector(".aui-handoff-swimlanes")!;
+  expect(swimlanes.textContent).toContain("ActiveGroup");
+  expect(swimlanes.textContent).not.toContain("FinishedGroup");
+  await act(async () => button("All (25)").click());
+  expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')).toBeNull();
+  expect(container.querySelector(".aui-handoff-swimlanes")?.textContent).toContain("FinishedGroup");
 });

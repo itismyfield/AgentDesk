@@ -268,10 +268,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const renderForm = (key: string, disabled: boolean) => serverDrafts[key] && <ServerCampaignForm key={key}
     draft={serverDrafts[key]} disabled={disabled} tr={tr}
     focus={focusRequest.current?.key === key ? focusRequest.current.n : 0} onFocused={() => { focusRequest.current = null; }}
-    onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => setServerDraft(key, () => null)} onConflict={() => refreshServer(key === NEW_DRAFT ? null : key.slice("edit:".length))}
+    onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => { if (key === NEW_DRAFT) setCreatingFocus(false); setServerDraft(key, () => null); }} onConflict={() => refreshServer(key === NEW_DRAFT ? null : key.slice("edit:".length))}
     onSaved={(id) => {
       // The form keeps edits made while a create was in flight; they continue as an edit of the new campaign.
       if (key === NEW_DRAFT) {
+        setCreatingFocus(false);
         setServerDrafts((current) => {
           // Only the draft the create came from moves; one opened after it stays a create.
           if (current[NEW_DRAFT]?.mode !== "edit" || current[NEW_DRAFT].id !== id) return current;
@@ -287,6 +288,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
 
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const [picking, setPicking] = useState(false);
+  const [creatingFocus, setCreatingFocus] = useState(false);
   const [pipelineEditing, setPipelineEditing] = useState(false);
   const autoRuns = useAutoQueueRequests();
   const campaign = selectedLegacy;
@@ -300,6 +302,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const selectedEntry = entries.find((entry) => entry.key === selectedKey);
   const select = (entry: CampaignEntry) => leaveEditor(() => {
     setPicking(false);
+    setCreatingFocus(false);
     if (editing) relationsHistory.releaseEntry();
     if (entry.kind === "server") selectServer(entry.id);
     else {
@@ -307,7 +310,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null);
     }
   });
-  const createNew = () => { setPicking(false); openDraft(NEW_DRAFT, () => createDraft(null)); };
+  const createNew = () => { setPicking(false); setCreatingFocus(true); openDraft(NEW_DRAFT, () => createDraft(null)); };
   const list = <CampaignList entries={entries} selectedKey={selectedKey} onSelect={select} onCreate={createNew} createDisabled={serverDown}
     onRefresh={refreshAll} refreshing={loading} tr={tr} />;
 
@@ -330,11 +333,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
       </summary>
       <p className="campaign-description mt-1 max-w-[72ch] px-1 text-[var(--fg-dim)]">{campaign.description}</p>
     </details>}
-    overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
+    overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr hasTracker={legacyTasks.length > 0} asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
       summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} held={autoRuns(campaign.id)} />}
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
-    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
+    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} live={live[campaign.id]} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
     board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
     pipeline={<CampaignPipeline source={{ kind: "legacy" }} campaign={campaign} tasks={legacyTasks} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
@@ -390,8 +393,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
     </div>
   </section>;
 
+  const hideDetailForCreate = Boolean(serverDrafts[NEW_DRAFT]) && (
+    mode === "legacy" || (creatingFocus && serverDoc?.view.control !== "succeeded")
+  );
   // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
-  const folded = !phone && !!openNode;
+  const folded = !phone && !!openNode && !hideDetailForCreate;
   const wideEditor = !phone && pipelineEditing;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
   return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={!wideEditor && <div className="w-full sm:w-56">
@@ -428,11 +434,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
         {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
         <div className="grid min-w-0 content-start gap-4">
           {/* Nothing is called empty until both lists have answered without an error. */}
-          {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
+          {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && !serverDrafts[NEW_DRAFT] && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
           {!wideEditor && renderForm(NEW_DRAFT, serverDown)}
-          {mode === "legacy" ? legacyDetail : serverSelected && (serverDetail
+          {!hideDetailForCreate && (mode === "legacy" ? legacyDetail : serverSelected && (serverDetail
             ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
-              : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}
+              : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />)))}
         </div>
       </div>
     </div>}

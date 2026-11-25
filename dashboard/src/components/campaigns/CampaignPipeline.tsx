@@ -1,5 +1,5 @@
 import { ArrowLeft, Monitor, PencilLine, Undo2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { getDefaultPipelineTemplate, getServerCampaignPipeline, type CampaignPipeline as Detail, type PipelineDefinition, type PipelineDiagnostic } from "../../api/serverCampaignPipeline";
 import { Button } from "../../kit/free/button-clean";
@@ -170,20 +170,38 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
     return { states, edges, current, activeLines, stations };
   }, [resolved, tr]);
 
+  const machineRef = useRef<HTMLDivElement>(null);
+  const [, setHeadSync] = useState(0);
+  const passed = useMemo(() => edges.reduce((sum, item) => sum + (item.count ?? 0), 0), [edges]);
+  const transitionsText = tr(`전환 ${passed.toLocaleString()}회`, `${passed} transitions`);
+  const waitingText = tr("승인 대기", "Waiting for you");
+  useLayoutEffect(() => {
+    const head = machineRef.current?.querySelector(".aui-agent-state-machine-head");
+    if (!head) return;
+    const countEl = Array.from(head.children).find((el) => el.tagName === "SPAN");
+    if (countEl) countEl.textContent = transitionsText;
+    const waitEl = head.querySelector(".aui-agent-state-machine-wait");
+    if (waitEl) waitEl.textContent = waitingText;
+  });
+
   return (
-    <div className={`grid min-w-0 gap-3 p-3 sm:p-4 ${activeLines.length > 0 ? "min-[1280px]:grid-cols-2" : ""}`}>
-      <AgentStateMachine
-        title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
-        agent={tr(`작업 ${resolved.length}개`, `${resolved.length} tasks`)}
-        current={current}
-        states={states}
-        edges={edges}
-      />
+    <div className="grid min-w-0 grid-cols-1 gap-4 p-3 sm:p-4">
+      <div ref={machineRef} className="min-w-0" onClick={() => setHeadSync((n) => n + 1)}>
+        <AgentStateMachine
+          title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
+          agent={tr(`작업 ${resolved.length}개`, `${resolved.length} tasks`)}
+          current={current}
+          states={states}
+          edges={edges}
+          className="[&_.aui-agent-state-machine-head]:flex-wrap [&_.aui-agent-state-machine-head_strong]:min-w-0 [&_.aui-agent-state-machine-head_strong]:truncate [&_.aui-agent-state-machine-head_em]:shrink-0 [&_.aui-agent-state-machine-head_em]:whitespace-nowrap"
+        />
+      </div>
       {activeLines.length > 0 && (
         <AgentMetroMap
           title={tr("활성 작업 위치 노선도", "Active task stage map")}
           lines={activeLines}
           stations={stations}
+          className="[&_.aui-agent-metro-map-head]:flex-wrap [&_.aui-agent-metro-map-head_strong]:shrink-0 [&_.aui-agent-metro-map-head_strong]:whitespace-nowrap"
         />
       )}
     </div>

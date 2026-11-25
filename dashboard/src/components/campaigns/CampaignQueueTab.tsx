@@ -131,7 +131,8 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
     else setNeedsAssignee(card);
   };
 
-  const loading = kanbanCardsState === "idle" || kanbanCardsState === "loading" || (!campaignsLoaded && !campaignsError);
+  const cardsLoading = kanbanCardsState === "idle" || kanbanCardsState === "loading";
+  const loading = cardsLoading || (!campaignsLoaded && !campaignsError);
   const refreshLabel = tr("새로고침", "Refresh");
   const repoName = (repo: string) => repo ? repo.split("/").pop() ?? repo : tr("저장소 없음", "No repository");
   return <div ref={detailDock.root} className="@container/tasks grid min-w-0 gap-3" style={hasSelection ? detailDock.rootStyle : undefined}>
@@ -154,9 +155,15 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
       </div>
     </div>
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-      <p role="status" className="m-0 text-xs text-[var(--fg-muted)]">{loading ? tr("카드를 불러오는 중…", "Loading cards…")
-        : shown.length === queued.length ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
-          : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
+      <p role="status" className="m-0 text-xs text-[var(--fg-muted)]">{!campaignsLoaded
+        ? campaignsError
+          ? tr("캠페인 제외 목록을 확인하지 못했어요.", "Could not check campaign exclusions.")
+          : tr("캠페인 제외 목록 확인 중…", "Checking campaign exclusions…")
+        : cardsLoading
+          ? tr("카드를 불러오는 중…", "Loading cards…")
+          : shown.length === queued.length
+            ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
+            : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
       {shown.length > 0 && !loading && (
         <Checkbox
           checked={allShownChecked}

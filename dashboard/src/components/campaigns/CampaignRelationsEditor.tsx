@@ -1,5 +1,5 @@
 import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { Background, MarkerType, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { getCampaignDetail, saveCampaignNodes, type Campaign } from "../../api/campaigns";
@@ -40,6 +40,15 @@ const UNDO_LIMIT = 50;
 /** Below this the first view stops fitting every task and centres the chosen one instead: smaller text is not legible. */
 const READABLE_ZOOM = 0.8;
 const NODE_HEIGHT = 150;
+const FIT = { padding: 0.16, minZoom: 0.1, maxZoom: 1 } as const;
+const MINIMAP_STYLE: CSSProperties = {
+  bottom: 64,
+  right: 16,
+  margin: 0,
+  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+  border: "1px solid var(--line)",
+  boxShadow: "var(--shadow-sm)",
+};
 const WIDE = "(min-width: 1280px)";
 const FIELD: Record<EditField, readonly [string, string]> = { dependencies: ["선행", "dependencies"], title: ["제목", "title"], issue_url: ["이슈", "issue"] };
 
@@ -82,7 +91,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const panel = useRef<HTMLDivElement>(null);
   const scopeBar = useRef<HTMLDivElement>(null);
   const flow = useRef<ReactFlowInstance | null>(null);
-  const [minimapOpen, setMinimapOpen] = useState(true);
+  const connecting = useRef(false);
+  const [showMiniMap, setShowMiniMap] = useState(false);
   const [flowReady, setFlowReady] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [tool, setTool] = useState<"select" | "connect" | "tie">("select");
@@ -386,7 +396,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     const bounds = { x: left, y: top, width: Math.max(...placed.map((point) => point.x)) + NODE_WIDTH - left, height: Math.max(...placed.map((point) => point.y)) + NODE_HEIGHT - top };
     // The scope bar and the tool row float over the canvas, so tasks are fitted into the band between them.
     const above = (scopeBar.current?.offsetHeight ?? 0) + 12, band = Math.max(box.height - above - 64, 1);
-    const all = getViewportForBounds(bounds, box.width, band, 0.1, 1, 0.08);
+    const all = getViewportForBounds(bounds, box.width, band, 0.1, 1, 0.16);
     const focus = scope.kind === "task" ? positions.get(scope.id) : undefined;
     if (all.zoom >= READABLE_ZOOM) void instance.setViewport({ ...all, y: all.y + above });
     else if (focus) void instance.setViewport({ x: box.width / 2 - (focus.x + NODE_WIDTH / 2) * READABLE_ZOOM, y: above + band / 2 - (focus.y + NODE_HEIGHT / 2) * READABLE_ZOOM, zoom: READABLE_ZOOM });
@@ -402,6 +412,35 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     element?.focus();
     requestAnimationFrame(() => requestAnimationFrame(() => element?.focus()));
   };
+  const exitGuard = useRef({ activeTie: null as string | null, overlayOpen: false, leavingOpen: false, dragging: false, connectingTool: false, saving: false, onExit });
+  exitGuard.current = {
+    activeTie,
+    overlayOpen: !wide && selection !== null,
+    leavingOpen: leaving !== null,
+    dragging: drag !== null,
+    connectingTool: from !== null,
+    saving,
+    onExit,
+  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const state = exitGuard.current;
+      if (state.leavingOpen || state.activeTie || state.overlayOpen || state.dragging || state.connectingTool || state.saving || connecting.current) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        target?.closest('input, textarea, select, [contenteditable="true"], [role="combobox"], [role="listbox"], [role="dialog"], [role="alertdialog"], [role="menu"]') ||
+        document.querySelector('[role="dialog"], [role="alertdialog"], [role="listbox"], [role="menu"]')
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (leave.current) leave.current(state.onExit);
+      else state.onExit();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [leave]);
   // The overlay covers the canvas's right side, so a chosen task under it slides left into view.
   useEffect(() => {
     if (wide || selection?.kind !== "node" || !flow.current) return;
@@ -447,8 +486,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       if (!typing && activeTie && (event.key === "Delete" || event.key === "Backspace")) { event.preventDefault(); untie(activeTie); }
       else if (!typing && activeTie && letter === "h") setPreviewing(!previewing);
       else if (!typing && tool === "tie" && letter === "b") tieBundle();
-      else if (event.key === "Escape" && activeTie) { setChosenTie(null); setPreviewing(false); }
-      else if (event.key === "Escape" && !wide && selection) { event.stopPropagation(); closeInspector(); }
+      else if (!typing && event.key === "Escape" && activeTie) { event.preventDefault(); event.stopPropagation(); setChosenTie(null); setPreviewing(false); }
+      else if (!typing && event.key === "Escape" && !wide && selection) { event.preventDefault(); event.stopPropagation(); closeInspector(); }
     }}>
     <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line-soft)] px-6 py-2">
       <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => request(onExit)}>{tr("캠페인", "Campaign")}</Button>
@@ -478,9 +517,11 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     </div>
     <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_22.5rem]" : ""}`}>
       <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0 bg-[var(--bg)]">
-        <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} proOptions={{ hideAttribution: true }}
+        <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} fitViewOptions={FIT} proOptions={{ hideAttribution: true }}
           minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false} snapToGrid snapGrid={[GRID, GRID]}
           nodesConnectable={!saving} deleteKeyCode={saving ? null : ["Delete", "Backspace"]}
+          onConnectStart={() => { connecting.current = true; }}
+          onConnectEnd={() => { connecting.current = false; }}
           onConnect={({ source, target }) => source && target && link(source, target)}
           isValidConnection={({ target }) => lockOf(target) === null}
           onNodesChange={(changes) => {
@@ -512,7 +553,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           onPaneClick={() => { setSelection(null); setFrom(null); setChosenTie(null); setPreviewing(false); }}
           onEdgesDelete={(deleted) => { unlink(deleted.flatMap((edge) => edge.data ? [[(edge.data as Line).dep, (edge.data as Line).id] as [string, string]] : [])); setSelection(null); }}>
           <Background gap={20} size={1.6} color="var(--line)" />
-          <GraphMiniMap open={minimapOpen} ready={flowReady} ariaLabel={tr("편집 미니맵", "Editor minimap")} chosenId={selectedNodeId} />
+          <GraphMiniMap open={showMiniMap} ready={flowReady} ariaLabel={tr("편집 미니맵", "Editor minimap")} chosenId={selectedNodeId} style={MINIMAP_STYLE} />
         </ReactFlow>
         <div ref={scopeBar} data-editor-chrome="scope" className={`${FLOAT} top-3 left-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-3 gap-y-1.5 p-1.5`}>
           <div className="w-64 max-w-full">
@@ -537,8 +578,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           <IconButton icon={<Cable aria-hidden />} className={TOOL} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
           <IconButton icon={<LayoutGrid aria-hidden />} className={TOOL} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
         </div>
-        <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fitLabel={tr("전체 보기", "Show every task")}
-          minimap={{ open: minimapOpen, onToggle: () => setMinimapOpen((v) => !v) }} tr={tr} />
+        <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fit={FIT} fitLabel={tr("전체 보기", "Show every task")}
+          minimap={{ open: showMiniMap, onToggle: () => setShowMiniMap((v) => !v) }} tr={tr} />
       </div>
       {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
       {wide ? <div className="flex min-h-0 flex-col bg-[var(--bg-1)]">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
