@@ -101,7 +101,9 @@ pub(crate) use v2::origin::{Waiting, waiting_origin};
 pub(crate) use v2::retry_wait_tests::assert_original_and_ticket_kept;
 pub(crate) use v2::routine_settlement::Disposition as RoutineInputSettlement;
 pub(crate) use v2::source_admission::TurnBind;
-pub(crate) use v2::source_admission::restart_seed::{SOURCE as RESTART_SEED_SOURCE, SeedStatus};
+pub(crate) use v2::source_admission::restart_seed::{
+    SOURCE as RESTART_SEED_SOURCE, SeedStatus, SeedStopAuthority,
+};
 pub(crate) use v2_types::OwedDrop;
 #[cfg(all(test, unix))]
 pub(crate) use v2_types::cold_source::BindingIntent;

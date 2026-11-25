@@ -383,6 +383,9 @@ impl Failure {
             .load(std::sync::atomic::Ordering::Acquire)
             || turn.cancel.native_stop.receipt_sink().stopped_before_key();
         let unsent = !self.recovery.repaired() && !bound && error.starts_with("NotSent(");
+        if self.herdr_seed_stopped(&turn.cancel) {
+            return Err(error);
+        }
         // A refusal typed by a cause a later look may clear waits; it counts no failed start.
         if unsent
             && !stopped
@@ -416,6 +419,25 @@ impl Failure {
     }
 }
 impl Failure {
+    /// A Herdr user stop before the reserve cancels the claimed restart greeting instead of its
+    /// retry or failure; another front, or no stop, keeps its failure path.
+    fn herdr_seed_stopped(&self, cancel: &crate::services::provider::CancelToken) -> bool {
+        let stop = cancel.herdr_interrupt_state();
+        if !stop.is_some_and(|s| s.user_stop.load(std::sync::atomic::Ordering::Acquire)) {
+            return false;
+        }
+        let (front, number) = (self.front.clone(), self.number);
+        let authority =
+            crate::services::turn_orchestrator::SeedStopAuthority::Claimed { front, number };
+        let cancelled = self.mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            owner.cancel_seed_not_sent(authority)
+        });
+        tokio::runtime::Handle::current()
+            .block_on(cancelled)
+            .is_ok()
+    }
+
     /// The exact claim waits as `cause`; `read` then watches that cause for the drive.
     fn wait_for_retry(&self, channel: u64, cause: RetryWaitCause, read: Option<CauseRead>) {
         let (front, number) = (self.front.clone(), self.number);
