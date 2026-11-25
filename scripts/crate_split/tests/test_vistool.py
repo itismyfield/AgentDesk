@@ -722,6 +722,24 @@ class LoopGuard(unittest.TestCase):
         # A crate-wide interface: rustc stops reporting, and the type stays at `pub(crate)`.
         ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
         self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
+
+    def test_upper_test_use_of_a_gated_lower_item_is_test_cfg(self):
+        # A method in a `#[cfg(test)] impl` (one shares its name with an ungated method) and a fn under
+        # `cfg(all(test, unix))`: lower builds none of them, so the shadow line and the list must count them.
+        def gated(repo):
+            core = repo / "src/core.rs"
+            core.write_text(core.read_text() + "\n#[cfg(test)]\nimpl Point {\n    pub(crate) fn probes_mut(&mut self) "
+                            "{}\n\n    pub(crate) fn limit(&self) {}\n}\n\n#[cfg(all(test, unix))]\npub(crate) fn fixture_unix() {}\n")
+
+        def use(code, msg):
+            return {"level": "error", "code": {"code": code}, "message": msg, "children": [], "_test": True,
+                    "spans": [{"is_primary": True, "file_name": "src/app.rs", "line_start": 30, "line_end": 30}]}
+
+        uses = [use("E0599", f"no method named `{n}` found for mutable reference `&mut Point` in the current scope")
+                for n in ("probes_mut", "limit")] + [use("E0425", "cannot find function `fixture_unix` in module `crate::core`")]
+        ok, line, *_, manifest = self.scripted([([], uses)], gated)
+        self.assertTrue(ok and " test_cfg=3 " in line, (line, manifest["residue"]))
+        self.assertEqual(manifest["test_cfg_list"]["count"], 3)
         # No declaration to widen: the lower error stands, it is never residue.
         gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
         ok, line, *_ = self.scripted([([gone], [])])

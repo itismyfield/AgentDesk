@@ -987,17 +987,20 @@ def module_path(segs, base):
 
 
 def restricted_defs(layout, read):
-    """Name -> [test_gated] for X items declared with a restricted or no visibility."""
+    """Name -> [test_gated] for X items declared with a restricted or no visibility.
+    An item inside a test-gated block (`#[cfg(test)] impl X {..}`, `cfg(all(test, unix))`) is gated too."""
+    import vistool_testcfg
     rx = re.compile(r"^\s*(?:(pub\s*\([^)]*\))\s+)?" + QUALS + r"(?:fn|struct|enum|union|trait|type|const|static|mod)\s+(\w+)")
     out = defaultdict(list)
     for rel in sorted(layout.x_files):
         lines = read(rel)
+        ranges = vistool_testcfg.gated_ranges(lines)
         for i, line in enumerate(lines):
             m = rx.match(line)
             if not m:
                 continue
-            gated = rel in layout.test_only or any("cfg(test)" in lines[j].replace(" ", "")
-                                                   for j in range(attr_start(lines, i), i))
+            gated = rel in layout.test_only or vistool_testcfg.gated_attr(lines, i) or \
+                any(a <= i + 1 <= b for a, b in ranges)
             out[m.group(2)].append(gated)
         for i, line in enumerate(lines):
             mm = re.match(r"^\s*macro_rules!\s+(\w+)", line)
@@ -1017,8 +1020,9 @@ def classify_residue(diag, restricted):
     if code == "E0408":
         # `use Enum::*` skipped restricted variants, so a pattern binds the variant name as a variable.
         return "glob_hidden"
-    if code in TEST_CFG_CODES and names and any(g is False for g in restricted.get(names[0], [])):
-        # A glob import silently skips a restricted item, so the use site reports "not found".
+    if code in TEST_CFG_CODES - {"E0599"} and names and any(g is False for g in restricted.get(names[0], [])):
+        # A glob import silently skips a restricted item, so the use site reports "not found"; a method or
+        # associated item (E0599) is never looked up through a glob.
         return "glob_hidden"
     if code in TEST_CFG_CODES and diag.get("_test"):
         return "test_cfg"
