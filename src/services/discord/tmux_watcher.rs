@@ -1453,7 +1453,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                (inflight_identity_before_relay.as_ref(), pin_held),
+                (inflight_identity_before_relay.as_ref(), pin_held, false),
                 &full_response,
                 turn_data_start_offset,
                 last_observed_generation_mtime_ns,

@@ -24,8 +24,9 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    (expected_identity, native_held): (
+    (expected_identity, native_held, _herdr_held): (
         Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+        bool,
         bool,
     ),
     full_response: &str,
