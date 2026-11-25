@@ -2674,7 +2674,8 @@ src/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
-│   │   │   │   │   │   └── native_input.rs
+│   │   │   │   │   │   ├── native_input.rs
+│   │   │   │   │   │   └── pending_attached.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2692,6 +2693,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_common_operation_tests.rs
 │   │   │   │   │   ├── owner_input_effort_refused_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_attached_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs

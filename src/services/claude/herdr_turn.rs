@@ -321,10 +321,9 @@ pub(crate) fn execute(
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
                 legacy_not_held(&record.execution_nonce)?;
-                (
-                    pending_source(&turn, &runtime, ports, record)?,
-                    Lineage::Pending,
-                )
+                first_input::pending_handover(record, |record| {
+                    pending_source(&turn, &runtime, ports, record)
+                })?
             }
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
