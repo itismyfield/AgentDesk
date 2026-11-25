@@ -6948,7 +6948,7 @@ mod finish_cancelled_turn_tests {
         );
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     #[test]
     fn cancelled_turn_cleanup_restores_env_after_panic_present() {
