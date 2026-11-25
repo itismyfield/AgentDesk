@@ -86,6 +86,8 @@ pub(crate) async fn started_under<F: std::future::Future>(
     origin: Option<String>,
     start: F,
 ) -> (F::Output, bool) {
+    // The start is large; held inline its caller's future overflowed a 2 MiB thread stack.
+    let start = Box::pin(start);
     let Some(origin) = origin else {
         return (start.await, false);
     };
