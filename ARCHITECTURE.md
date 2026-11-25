@@ -2029,6 +2029,7 @@ src/
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── outcome_tests.rs
 │   │   │   ├── model/
+│   │   │   │   ├── agy_custody.rs
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── legacy_replay_coordinate.rs
@@ -2099,6 +2100,8 @@ src/
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
 │   │   │   │   └── flake_isolation_4422.rs
+│   │   │   ├── agy_end_authority.rs
+│   │   │   ├── agy_end_authority_tests.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
 │   │   │   ├── circuit_evidence_tests.rs
@@ -2277,6 +2280,7 @@ src/
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
+│   │   │   ├── agy_custody_tests.rs
 │   │   │   ├── panel_shape.rs
 │   │   │   ├── rebind_resume_tests.rs
 │   │   │   ├── retirement_tests.rs
@@ -4788,6 +4792,7 @@ src/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── agy_delivery.rs
+│   │   │   ├── agy_delivery_root_tests.rs
 │   │   │   ├── agy_spool.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
