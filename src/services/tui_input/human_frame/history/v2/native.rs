@@ -125,6 +125,8 @@ impl Settlement {
             && (captured.source.is_none() || current.source == captured.source)
     }
 
+    /// Reads the snapshot alone unless a barrier is stored, which stats its transcript;
+    /// `read_stamp` keeps the result on that.
     pub(super) fn validate(&self, registration: &Registration) -> Result<(), String> {
         let ticket = &self.ticket;
         if ticket.key != registration.key
@@ -246,53 +248,7 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 }
 
 #[cfg(unix)]
-fn evidence_registrations(
-    state: &Snapshot,
-    classify: bool,
-) -> Result<Vec<EvidenceRegistration>, String> {
-    let registrations = state
-        .live
-        .iter()
-        .map(|b| (&b.registration, Some(&b.entry)))
-        .chain(state.planned.iter().map(|r| (r, None)))
-        .chain(
-            state
-                .passive
-                .iter()
-                .filter(|p| p.state != collision::ABANDONED)
-                .filter_map(|p| p.registration.as_ref().map(|r| (r, p.entry.as_ref()))),
-        );
-    registrations
-        .filter_map(|(registration, entry)| {
-            registration
-                .native_settlement
-                .as_ref()
-                .filter(|s| classify || (s.outcome.is_none() && !s.cleanup_complete))
-                .map(|s| (registration, entry, s))
-        })
-        .map(|(registration, entry, settlement)| {
-            settlement.validate(registration)?;
-            let open = settlement.outcome.is_none() && !settlement.cleanup_complete;
-            Ok(EvidenceRegistration {
-                namespace: registration.namespace.clone(),
-                candidate: open && !settlement.extra.contains_key("foreign_prompt_barrier"),
-                barrier: match open {
-                    true => settlement.known_barrier(&registration.namespace)?,
-                    false => None,
-                },
-                ticket: settlement.ticket.clone(),
-                frame_hash: registration.frame.class_hash.clone(),
-                exact_frame_hash: registration.frame.hash.clone(),
-                receipts: entry
-                    .into_iter()
-                    .flat_map(|e| e.events.iter())
-                    .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
-                    .filter_map(|e| e.row.clone())
-                    .collect(),
-            })
-        })
-        .collect()
-}
+use super::read_stamp::evidence_registrations;
 
 impl Registry {
     #[cfg(unix)]
@@ -519,14 +475,14 @@ impl Registry {
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect(|s| evidence_registrations(s, false))
+        self.inspect_cache(|cache| cache.evidence(false))
     }
 
     #[cfg(unix)]
     pub(crate) fn native_classification_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect(|s| evidence_registrations(s, true))
+        self.inspect_cache(|cache| cache.evidence(true))
     }
 
     /// The cold effect calls this before arming only when its payload carries explicit intent.
