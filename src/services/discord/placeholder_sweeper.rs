@@ -336,6 +336,9 @@ async fn run_placeholder_sweep_pass(
     report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
+        if !super::inflight::generic_may_end(&state) {
+            continue;
+        }
         if state.rebind_origin {
             // #3581: a rebind-origin inflight has no placeholder to edit (skipped)
             // — but an abandoned, never-progressed orphan (STALL-WATCHDOG respawn)

@@ -18,6 +18,7 @@ impl super::InflightTurnState {
             source_message_ids: _,
             input_origin_ids: _,
             agy_imessage_source_sha256: _,
+            agy_custody: _,
             terminal_receipt,
             intake_outbox_id,
             managed_submission: _,

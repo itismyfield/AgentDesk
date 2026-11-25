@@ -1,10 +1,10 @@
 use std::num::NonZeroU64;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ChannelStore, StoreError, damage, durable};
+use super::{OStore, STORE_DIR_NAME, StoreError, damage, durable};
 use crate::domain::file_sync::fsync_parent_dir;
 use uuid::Uuid;
 
@@ -51,6 +51,22 @@ pub(crate) struct Receipt {
     pub bot: NonZeroU64,
 }
 
+/// The original an AGY execution answers: a Discord message or an authenticated iMessage digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgyOriginal {
+    Discord { message: u64 },
+    Imessage { digest: String },
+}
+
+/// The nonce binding a journal carries once inflight custody hands its execution over.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgyBinding {
+    pub logical_channel: u64,
+    pub original: AgyOriginal,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
@@ -63,10 +79,72 @@ pub(crate) struct State {
     pub footer: Option<Receipt>,
     pub attempt: Option<Attempt>,
     pub ended: Option<Stage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<AgyBinding>,
+}
+
+/// AGY delivery custody under `o_store/<destination>`. It holds no pane state, so a pane `init`
+/// there, readable or not, is another owner and the journal refuses to open.
+pub(crate) struct AgyJournalRoot {
+    dir: PathBuf,
+    destination: u64,
+    /// The kind of the first I/O error, which leaves the journal refusing writes.
+    failed: Option<io::ErrorKind>,
+}
+
+impl AgyJournalRoot {
+    pub(crate) fn open(runtime_root: &Path, destination: NonZeroU64) -> Result<Self, StoreError> {
+        let store = OStore::existing(runtime_root)
+            .ok_or_else(|| StoreError::Rejected("agy delivery has no O store".into()))?;
+        if store.read_init(destination.get())?.is_some() {
+            return Err(damage("agy delivery destination holds a pane init"));
+        }
+        let dir = runtime_root
+            .join(STORE_DIR_NAME)
+            .join(destination.get().to_string());
+        durable::ensure_dir(&dir)?;
+        Ok(Self {
+            dir,
+            destination: destination.get(),
+            failed: None,
+        })
+    }
+
+    pub(crate) fn destination(&self) -> u64 {
+        self.destination
+    }
+
+    fn mutate<T>(&mut self, op: impl FnOnce() -> Result<T, StoreError>) -> Result<T, StoreError> {
+        if self.failed.is_some() {
+            return Err(StoreError::Rejected(
+                "reopen the agy journal after an I/O error".into(),
+            ));
+        }
+        let result = op();
+        if let Err(StoreError::Io(error)) = &result {
+            self.failed = Some(error.kind());
+        }
+        result
+    }
+}
+
+/// The turn key and binding a delivery journal recorded for one execution id, read without its lock.
+pub(crate) fn read_binding(
+    runtime_root: &Path,
+    destination: u64,
+    id: u64,
+) -> Result<Option<(TurnKey, AgyBinding)>, StoreError> {
+    let path = runtime_root
+        .join(STORE_DIR_NAME)
+        .join(destination.to_string())
+        .join("agy-delivery")
+        .join(format!("{id}.json"));
+    let saved = durable::read_json::<State>(&path)?;
+    Ok(saved.and_then(|state| state.binding.map(|binding| (state.key, binding))))
 }
 
 pub(crate) struct Journal<'a> {
-    store: &'a mut ChannelStore,
+    store: &'a mut AgyJournalRoot,
     path: PathBuf,
     state: State,
     _lock: durable::LockedFile,
@@ -74,12 +152,12 @@ pub(crate) struct Journal<'a> {
 
 impl<'a> Journal<'a> {
     pub(crate) fn open(
-        store: &'a mut ChannelStore,
+        store: &'a mut AgyJournalRoot,
         plan: PlanStamp,
         lease: Option<TurnLease>,
     ) -> Result<Self, StoreError> {
         if lease.is_some_and(|lease| lease.key != plan.key)
-            || plan.key.destination.get() != store.init().channel
+            || plan.key.destination.get() != store.destination
         {
             return Err(damage("agy delivery identity differs from custody"));
         }
@@ -135,6 +213,7 @@ impl<'a> Journal<'a> {
                 footer: None,
                 attempt: None,
                 ended: None,
+                binding: None,
             },
         };
         Ok(Self {
@@ -160,8 +239,9 @@ impl<'a> Journal<'a> {
         let mut next = self.state.clone();
         f(&mut next);
         let payload = serde_json::to_vec(&next)?;
+        let path = &self.path;
         self.store
-            .mutate(|_| Ok(durable::replace(&self.path, &payload)?))?;
+            .mutate(|| Ok(durable::replace(path, &payload)?))?;
         self.state = next;
         Ok(())
     }

@@ -58,6 +58,10 @@ pub(super) fn keep_owed_row_marked(
     path: &Path,
     row: &InflightTurnState,
 ) -> Option<InflightTurnState> {
+    // The AGY owner ends a custody row; a generic stale end keeps it unmarked.
+    if !super::generic_may_end(row) {
+        return Some(row.clone());
+    }
     if !row.owes_origin_receipt() {
         return None;
     }

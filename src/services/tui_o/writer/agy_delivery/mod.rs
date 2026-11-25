@@ -11,9 +11,11 @@ use std::task::Poll;
 pub(crate) use plan::{Piece, Plan, hash};
 
 use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::store::StoreError;
 pub(crate) use crate::services::tui_o::store::agy_delivery::TurnLease;
-use crate::services::tui_o::store::agy_delivery::{Attempt, Journal, Receipt, Stage, State};
-use crate::services::tui_o::store::{ChannelStore, StoreError};
+use crate::services::tui_o::store::agy_delivery::{
+    AgyJournalRoot, Attempt, Journal, Receipt, Stage, State,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Progress {
@@ -85,7 +87,7 @@ pub(crate) struct Replay<'a> {
 
 impl<'a> Replay<'a> {
     pub(crate) fn open(
-        store: &'a mut ChannelStore,
+        store: &'a mut AgyJournalRoot,
         gate: &'a OwnershipGate,
         epoch: u64,
         lease: TurnLease,
@@ -96,7 +98,7 @@ impl<'a> Replay<'a> {
 
     /// Reopens a durable obligation after its original mailbox row or lease has been cleared.
     pub(crate) fn recover(
-        store: &'a mut ChannelStore,
+        store: &'a mut AgyJournalRoot,
         gate: &'a OwnershipGate,
         epoch: u64,
         plan: &'a Plan,
@@ -105,7 +107,7 @@ impl<'a> Replay<'a> {
     }
 
     fn open_journal(
-        store: &'a mut ChannelStore,
+        store: &'a mut AgyJournalRoot,
         gate: &'a OwnershipGate,
         epoch: u64,
         plan: &'a Plan,

@@ -1,7 +1,8 @@
-//! Evidence for one iMessage execution: the PG row proves the original and destination, and only
-//! the inflight row names the nonce, so a PG row alone holds the slot.
+//! Evidence for one iMessage execution: the PG row proves the original and destination; only the
+//! inflight row or a delivery journal's binding names the nonce, so a PG row alone holds the slot.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -10,11 +11,32 @@ use crate::db::imsg_reply::Obligation;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::imsg_reply::{agy_input, episode};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::store::agy_delivery::{AgyBinding, AgyOriginal, TurnKey, read_binding};
 use crate::services::tui_o::store::agy_spool::replay::{AgyReplay, AgySlot, AgyTarget};
 use crate::services::tui_o::writer::host::agy_host::{AgyEvidence, AgyEvidenceHold};
 
 /// Each iMessage slot's PG admission row; `Err` when it could not be read.
 pub(super) type AdmissionRows = BTreeMap<AgySlot, Result<Option<Obligation>, ()>>;
+
+/// Each iMessage slot's delivery journal binding; `Err` when the journal could not be read.
+pub(super) type JournalBindings = BTreeMap<AgySlot, Result<Option<(TurnKey, AgyBinding)>, ()>>;
+
+pub(super) fn journal_bindings(
+    root: &Path,
+    destination: u64,
+    turns: &[AgyReplay],
+) -> JournalBindings {
+    turns
+        .iter()
+        .filter(|turn| matches!(turn.slot, AgySlot::Imessage(_)))
+        .map(|turn| {
+            let found = read_binding(root, destination, turn.key.id).map_err(|error| {
+                tracing::warn!(destination, %error, "[tui_o] agy delivery journal unreadable");
+            });
+            (turn.slot.clone(), found)
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PgOriginal {
@@ -60,6 +82,7 @@ pub(super) fn assemble(
     turns: &[AgyReplay],
     inflight: &Result<Option<InflightTurnState>, String>,
     rows: &AdmissionRows,
+    bindings: &JournalBindings,
 ) -> BTreeMap<AgySlot, AgyEvidence> {
     turns
         .iter()
@@ -67,12 +90,18 @@ pub(super) fn assemble(
             let AgySlot::Imessage(digest) = &turn.slot else {
                 return None;
             };
-            let found = match (inflight, rows.get(&turn.slot)) {
-                (Ok(inflight), Some(Ok(row))) => decide(
+            let binding = match bindings.get(&turn.slot) {
+                Some(Ok(binding)) => Ok(binding.as_ref()),
+                Some(Err(())) => Err(()),
+                None => Ok(None),
+            };
+            let found = match (inflight, rows.get(&turn.slot), binding) {
+                (Ok(inflight), Some(Ok(row)), Ok(binding)) => decide(
                     turn,
                     target,
                     digest,
                     inflight.as_ref(),
+                    binding,
                     pg_original(row.as_ref(), target, digest),
                 ),
                 _ => AgyEvidence::Held(AgyEvidenceHold::Unverifiable),
@@ -113,6 +142,7 @@ fn decide(
     target: AgyTarget,
     digest: &str,
     inflight: Option<&InflightTurnState>,
+    binding: Option<&(TurnKey, AgyBinding)>,
     pg: PgOriginal,
 ) -> AgyEvidence {
     let same_id = inflight
@@ -126,10 +156,24 @@ fn decide(
                 == Some(turn.key.nonce)
             && row.agy_imessage_source_sha256.as_deref() == Some(digest)
     });
-    match (same_id.is_some(), bound, pg) {
-        (true, true, PgOriginal::Proven) => AgyEvidence::Bound(turn.key.clone()),
-        (false, _, PgOriginal::Proven) => AgyEvidence::Held(AgyEvidenceHold::PgOnly),
-        (false, _, PgOriginal::Absent) => AgyEvidence::Held(AgyEvidenceHold::Missing),
+    let journal_bound = binding.is_some_and(|(key, binding)| {
+        key.destination.get() == target.destination
+            && key.id.get() == turn.key.id
+            && key.nonce == turn.key.nonce
+            && binding.logical_channel == target.logical_channel
+            && binding.original
+                == AgyOriginal::Imessage {
+                    digest: digest.to_owned(),
+                }
+    });
+    // A record that names this id with other values is an observed conflict, never evidence.
+    if (same_id.is_some() && !bound) || (binding.is_some() && !journal_bound) {
+        return AgyEvidence::Held(AgyEvidenceHold::Conflict);
+    }
+    match (bound || journal_bound, pg) {
+        (true, PgOriginal::Proven) => AgyEvidence::Bound(turn.key.clone()),
+        (false, PgOriginal::Proven) => AgyEvidence::Held(AgyEvidenceHold::PgOnly),
+        (false, PgOriginal::Absent) => AgyEvidence::Held(AgyEvidenceHold::Missing),
         _ => AgyEvidence::Held(AgyEvidenceHold::Conflict),
     }
 }

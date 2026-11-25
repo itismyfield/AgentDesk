@@ -290,7 +290,9 @@ pub(in crate::services::discord) async fn settle_marked_row(
     channel_id: u64,
 ) -> bool {
     match inflight::load_inflight_state_read_only(provider, channel_id) {
-        Some(row) if row.terminal_receipt.is_some() => settle_marked(shared, &row).await,
+        Some(row) if row.terminal_receipt.is_some() && inflight::generic_may_end(&row) => {
+            settle_marked(shared, &row).await
+        }
         _ => false,
     }
 }
@@ -306,6 +308,11 @@ pub(in crate::services::discord) async fn settle_boot(
     shared: &SharedData,
     states: Vec<InflightTurnState>,
 ) -> (Vec<InflightTurnState>, BootReceipts) {
+    // An AGY custody row is neither settled nor restored here; only its owner ends it.
+    let states: Vec<InflightTurnState> = states
+        .into_iter()
+        .filter(inflight::generic_may_end)
+        .collect();
     let pool = shared.pg_pool.as_ref();
     for state in states
         .iter()

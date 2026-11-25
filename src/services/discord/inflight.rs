@@ -141,9 +141,16 @@ use self::rebind_reap::{
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
     reap_dead_watcher_rebind_origin_locked_in_root, should_reap_dead_watcher_rebind_origin,
 };
+mod agy_end_authority;
 #[cfg(all(test, unix))]
 #[path = "inflight/agy_end_authority_tests.rs"]
 mod agy_end_authority_tests;
+pub(in crate::services::discord) use agy_end_authority::{
+    EndAuthority, end_authority, generic_may_end,
+};
+pub(in crate::services::discord) use model::agy_custody::{
+    AgyCustodyField, AgyCustodyRoute, AgyProducer,
+};
 mod removal;
 #[cfg(all(test, unix))]
 use removal::persist_native_boot_record;

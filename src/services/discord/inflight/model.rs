@@ -6,6 +6,7 @@
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
+pub(in crate::services::discord) mod agy_custody;
 mod circuit_evidence;
 use crate::services::discord::relay_recovery::circuit_evidence::CircuitPendingEvidence;
 use circuit_evidence::mix_finalizer_hash;
@@ -152,6 +153,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Durable evidence that recovery must retain this row for the agy reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy_imessage_source_sha256: Option<String>,
+    /// The AGY output owner of this execution; absent on every Legacy row (#8274 4a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agy_custody: Option<agy_custody::AgyCustodyField>,
     /// A terminal this execution confirmed but could not commit; the row stays until boot or
     /// the next admission on its channel records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1094,6 +1098,7 @@ impl InflightTurnState {
             source_message_ids: Vec::new(),
             input_origin_ids: Vec::new(),
             agy_imessage_source_sha256: None,
+            agy_custody: None,
             terminal_receipt: None,
             intake_outbox_id: None,
             managed_submission: None,

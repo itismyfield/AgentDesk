@@ -110,7 +110,16 @@ pub(super) async fn observe(http: &Http, pool: Option<&PgPool>, provider: &Provi
         };
         let target = held_by.target();
         let rows = evidence::admission_rows(pool, provider, target.destination, &first.turns).await;
-        let found = evidence::assemble(target, &first.turns, &inflight, &rows);
+        // A missing journal read never grants evidence; it only leaves the PG and inflight checks.
+        let bindings = {
+            let (root, turns) = (root.clone(), first.turns.clone());
+            tokio::task::spawn_blocking(move || {
+                evidence::journal_bindings(&root, target.destination, &turns)
+            })
+            .await
+            .unwrap_or_default()
+        };
+        let found = evidence::assemble(target, &first.turns, &inflight, &rows, &bindings);
         let settled = evidence::prior_legacy_settled(&inflight, &first.turns, &found);
         let second = tokio::task::spawn_blocking(move || {
             second_read(&host, held_by, &first, settled, &found)

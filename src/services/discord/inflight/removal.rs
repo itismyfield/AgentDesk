@@ -573,6 +573,9 @@ fn relock(
             }
             Ok(state) => Ok((state, lock)),
             Err(_) if raw_before_start_receipt(&locked) => Err(Box::new(RowVerdict::Skip(true))),
+            Err(_) if super::agy_end_authority::raw_names_custody(&locked) => {
+                Err(Box::new(RowVerdict::Skip(true)))
+            }
             Err(_) => Err(Box::new(RowVerdict::HideMalformed(
                 content.to_string(),
                 locked,
