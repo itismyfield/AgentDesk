@@ -83,17 +83,13 @@ impl Fixture {
         )
         .unwrap();
         case.input("context-owned", &frame);
-        crate::services::tui_o::writer::restart_end::refresh(
-            &mut actor.writer,
-            &mut actor.deriver,
-            actor.bindings.as_ref(),
-            ShadowProvider::Claude,
-        )
-        .await
-        .unwrap();
-        actor.read_sources();
+        actor
+            .refresh_for_test(ShadowProvider::Claude)
+            .await
+            .unwrap();
+        actor.read_sources_for_test();
         let origin = actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .input_notices()
@@ -128,7 +124,7 @@ async fn notice_owner_context_io_tracks_unique_paths_instead_of_registration_row
             io::take(path);
         }
         let began = std::time::Instant::now();
-        let batch = Batch::prepare(fixture.actor.writer.store());
+        let batch = Batch::prepare(fixture.actor.writer_mut_for_test().store());
         let elapsed = began.elapsed();
         let counts = fixture.paths.iter().map(|path| io::take(path)).fold(
             io::Counts::default(),
@@ -192,7 +188,7 @@ async fn notice_owner_rejects_context_changes_during_read_and_before_batch_confi
             let mut fixture = Fixture::new(64).await;
             let original = std::fs::read(&fixture.resumed.path).unwrap();
             let hook = io::mutate_once(stage, move |path| change_context(path, variant));
-            let batch = Batch::prepare(fixture.actor.writer.store());
+            let batch = Batch::prepare(fixture.actor.writer_mut_for_test().store());
             assert!(
                 hook.fired(),
                 "{stage:?}/{variant}: actual refresh reached the boundary"
@@ -237,7 +233,7 @@ async fn notice_owner_context_read_failures_are_shared_without_surviving_the_ref
             std::fs::write(&fixture.resumed.path, bytes).unwrap();
         }
         io::take(&fixture.resumed.path);
-        let refused = Batch::prepare(fixture.actor.writer.store());
+        let refused = Batch::prepare(fixture.actor.writer_mut_for_test().store());
         assert_eq!(io::take(&fixture.resumed.path).reads, 1, "{variant}");
         assert_eq!(
             fixture.decision(&refused),
@@ -246,7 +242,7 @@ async fn notice_owner_context_read_failures_are_shared_without_surviving_the_ref
         );
         std::fs::write(&fixture.resumed.path, &original).unwrap();
         io::take(&fixture.resumed.path);
-        let restored = Batch::prepare(fixture.actor.writer.store());
+        let restored = Batch::prepare(fixture.actor.writer_mut_for_test().store());
         assert_eq!(
             io::take(&fixture.resumed.path).reads,
             1,
@@ -264,7 +260,7 @@ async fn notice_owner_context_sharing_is_local_to_each_refresh() {
     for _ in 0..10 {
         io::take(&fixture.resumed.path);
         let began = std::time::Instant::now();
-        let batch = Batch::prepare(fixture.actor.writer.store());
+        let batch = Batch::prepare(fixture.actor.writer_mut_for_test().store());
         elapsed += began.elapsed();
         reads += io::take(&fixture.resumed.path).reads;
         assert_eq!(fixture.decision(&batch), Decision::Owned);
@@ -283,7 +279,7 @@ async fn notice_owner_changed_context_only_withholds_its_own_registered_frames()
     let hook = io::mutate_once(io::Stage::BeforeValidate, move |_| {
         std::fs::remove_file(other).unwrap();
     });
-    let batch = Batch::prepare(fixture.actor.writer.store());
+    let batch = Batch::prepare(fixture.actor.writer_mut_for_test().store());
     assert!(hook.fired());
     assert_eq!(fixture.decision(&batch), Decision::Owned);
 }

@@ -48,10 +48,10 @@ struct CachedMcpSession {
 }
 
 #[derive(Clone)]
-pub(crate) struct MementoRuntimeConfig {
-    pub(crate) endpoint: String,
-    pub(crate) access_key: String,
-    pub(crate) workspace_override: Option<String>,
+struct MementoRuntimeConfig {
+    endpoint: String,
+    access_key: String,
+    workspace_override: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -74,6 +74,24 @@ pub(crate) async fn with_memento_test_endpoint<T>(
             run,
         )
         .await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MementoBackend {
+    /// Resolves the workspace under a fixture runtime config with no workspace override.
+    pub(crate) fn resolve_workspace_for_test(
+        &self,
+        role_id: &str,
+        channel_id: u64,
+        channel_name: Option<&str>,
+    ) -> String {
+        let config = MementoRuntimeConfig {
+            endpoint: "fixture".into(),
+            access_key: "fixture".into(),
+            workspace_override: None,
+        };
+        self.resolve_workspace(role_id, channel_id, channel_name, &config)
+    }
 }
 
 struct ToolCallResult {
@@ -164,7 +182,7 @@ impl MementoBackend {
             .header("Content-Type", "application/json")
     }
 
-    pub(crate) fn resolve_workspace(
+    fn resolve_workspace(
         &self,
         role_id: &str,
         channel_id: u64,

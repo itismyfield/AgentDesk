@@ -9,6 +9,7 @@ interface SettingsContextValue {
   settings: CompanySettings;
   setSettings: React.Dispatch<React.SetStateAction<CompanySettings>>;
   stats: DashboardStats | null;
+  initialStatsPending?: boolean;
   refreshStats: () => void;
   /** True while stats refresh is in flight */
   refreshingStats: boolean;
@@ -24,15 +25,22 @@ const SettingsContext = createContext<SettingsContextValue | null>(null);
 interface SettingsProviderProps {
   initialSettings: CompanySettings;
   initialStats: DashboardStats | null;
+  initialStatsPending?: boolean;
   children: ReactNode;
 }
 
-export function SettingsProvider({ initialSettings, initialStats, children }: SettingsProviderProps) {
+export function SettingsProvider({ initialSettings, initialStats, initialStatsPending = false, children }: SettingsProviderProps) {
   const [settings, setSettings] = useState<CompanySettings>(initialSettings);
   const [stats, setStats] = useState<DashboardStats | null>(initialStats);
 
   const [refreshingStats, setRefreshingStats] = useState(false);
   const statsRead = useRef(0);
+
+  useEffect(() => {
+    if (initialStats !== null && statsRead.current === 0) {
+      setStats((prev) => prev ?? initialStats);
+    }
+  }, [initialStats]);
   const refreshStats = useCallback(() => {
     const read = ++statsRead.current;
     setRefreshingStats(true);
@@ -74,7 +82,7 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
   const tr = useCallback((ko: string, en: string) => (settings.language === "ko" ? ko : en), [settings.language]);
 
   return (
-    <SettingsContext.Provider value={{ settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr }}>
+    <SettingsContext.Provider value={{ settings, setSettings, stats, initialStatsPending, refreshStats, refreshingStats, isKo, locale, tr }}>
       {children}
     </SettingsContext.Provider>
   );

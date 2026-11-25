@@ -261,11 +261,13 @@ pub(super) async fn auto_restore_session_force(
     serenity_ctx: &serenity::prelude::Context,
     dm_hint: Option<bool>,
 ) {
+    crate::logging::intake_stage::mark_current("restore_start");
     // Resolve channel/category before taking the lock for mutation
     let (live_ch_name, cat_name) =
         resolve_channel_category(&serenity_ctx.http, Some(&serenity_ctx.cache), channel_id).await;
     let existing_channel_name = {
-        let data = shared.core.lock().await;
+        let data =
+            crate::logging::intake_stage::lock_wait("restore_lock", shared.core.lock()).await;
         data.sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
@@ -414,7 +416,8 @@ pub(super) async fn auto_restore_session_force(
         (last_path, provider)
     };
 
-    let mut data = shared.core.lock().await;
+    let lock = shared.core.lock();
+    let mut data = crate::logging::intake_stage::lock_wait("restore_lock_apply", lock).await;
     if let Some(session) = data.sessions.get_mut(&channel_id) {
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();

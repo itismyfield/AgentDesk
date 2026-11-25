@@ -126,7 +126,7 @@ fn writer_child(parent: SocketAddr) {
         .set_binding_checkpoint(checkpoint)
         .unwrap();
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test().clone();
     let (stop, stopped) = watch::channel(false);
     let (resumed, mut ready) = watch::channel(false);
     let mut boot_ready = ready.clone();

@@ -33,6 +33,12 @@ pub enum ImageEntry {
     },
     /// One image owed to Discord; the first record for a key stands.
     ImageObligation(Box<ImageObligation>),
+    /// A call still waiting for its result when its turn ended: a late result keeps this turn.
+    ImageCall {
+        source: SourceId,
+        call_id: String,
+        turn: String,
+    },
     /// The image ends without an attachment; its result's omission notice is owed instead.
     ImageOmitted {
         unit_key: UnitKey,
@@ -80,13 +86,42 @@ pub struct ImageState {
     /// Prepared serials of each tool-image key, oldest first, so the selector never scans all
     /// pieces on its per-poll read.
     attempts: HashMap<UnitKey, Vec<u64>>,
+    /// `(source, call id)` to the call's turn; one turn per call.
+    calls: HashMap<(SourceId, String), String>,
+}
+
+/// One omitted image of a notice's tool result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NoticeMember {
+    pub(crate) key: UnitKey,
+    pub(crate) reason: String,
+    pub(crate) source: SourceId,
+    pub(crate) record_start: u64,
+    pub(crate) record_end: u64,
 }
 
 /// Replays one entry; an inconsistent entry is an ownership violation like any other.
 pub(super) fn apply(ledger: &mut LedgerState, entry: ImageEntry) {
-    if let Err(detail) = ledger.tool_images.apply(entry) {
+    let conflict = match &entry {
+        ImageEntry::ImageOmitted { unit_key, .. } => omission_conflict(ledger, unit_key),
+        _ => None,
+    };
+    if let Some(detail) = conflict.or_else(|| ledger.tool_images.apply(entry).err()) {
         ledger.violate(detail);
     }
+}
+
+/// An omission may end an image only before any attempt, after a proven-unsent attempt, after
+/// the counted NotFound attempts, or after Discord refused the upload itself (400, 413).
+fn omission_conflict(ledger: &LedgerState, key: &UnitKey) -> Option<String> {
+    let attempts = attempts(ledger, key);
+    let allowed = match attempts.last() {
+        None | Some((_, Some(PieceOutcome::NotSent))) => true,
+        Some((_, Some(PieceOutcome::NotFound))) => counted(&attempts) >= IMAGE_ATTEMPTS,
+        Some((_, Some(PieceOutcome::Rejected(400 | 413)))) => true,
+        Some(_) => false,
+    };
+    (!allowed).then(|| format!("image {} omitted against its attempts", key.native_key))
 }
 
 /// The omission notice's unit for one tool result: `omit:{turn}:{call}`.
@@ -124,6 +159,18 @@ impl ImageState {
                     .or_insert(*obligation);
                 Ok(())
             }
+            ImageEntry::ImageCall {
+                source,
+                call_id,
+                turn,
+            } => match self.calls.get(&(source.clone(), call_id.clone())) {
+                Some(old) if *old != turn => Err(format!("call {call_id} moved to turn {turn}")),
+                Some(_) => Ok(()),
+                None => {
+                    self.calls.insert((source, call_id), turn);
+                    Ok(())
+                }
+            },
             ImageEntry::ImageOmitted { unit_key, reason } => {
                 if !self.obligations.contains_key(&unit_key) {
                     return Err(format!("image {} omitted unowed", unit_key.native_key));
@@ -162,6 +209,47 @@ impl ImageState {
             .get(source)?
             .iter()
             .find(|span| span.turn == turn)
+    }
+
+    /// The durable turn of a call whose result came after its turn ended.
+    pub(crate) fn call_turn(&self, source: &SourceId, call_id: &str) -> Option<&str> {
+        let key = (source.clone(), call_id.to_owned());
+        self.calls.get(&key).map(String::as_str)
+    }
+
+    /// The omitted images a notice key reports, with their reasons and source records.
+    pub(crate) fn notice_members(&self, notice: &UnitKey) -> Vec<NoticeMember> {
+        let members = self.obligations.iter().filter_map(|(key, obligation)| {
+            let reason = self.omitted.get(key)?;
+            (notice_key(obligation) == *notice).then(|| NoticeMember {
+                key: key.clone(),
+                reason: reason.clone(),
+                source: obligation.source.clone(),
+                record_start: obligation.record_start,
+                record_end: obligation.record_end,
+            })
+        });
+        members.collect()
+    }
+
+    /// Source records GC must keep: every open image obligation and every open notice's members.
+    pub(crate) fn protected_ranges(&self, ledger: &LedgerState) -> Vec<(SourceId, u64, u64)> {
+        let mut ranges = Vec::new();
+        for open in self.open_obligations(ledger) {
+            match open {
+                OpenObligation::Image { key, .. } => {
+                    let record = self.obligations.get(&key);
+                    ranges.extend(record.map(|o| (o.source.clone(), o.record_start, o.record_end)));
+                }
+                OpenObligation::Notice { key, .. } => {
+                    let members = self.notice_members(&key).into_iter();
+                    ranges.extend(members.map(|m| (m.source, m.record_start, m.record_end)));
+                }
+            }
+        }
+        ranges.sort_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)));
+        ranges.dedup();
+        ranges
     }
 
     pub(crate) fn obligation(&self, key: &UnitKey) -> Option<&ImageObligation> {

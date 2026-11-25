@@ -14,13 +14,48 @@ pub(crate) struct Create<'a> {
 }
 
 pub(crate) struct Submitted {
-    pub prepared: PreparedIncarnation,
-    pub validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
-    pub rollout_modified_since: std::time::SystemTime,
-    pub handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+    pub(in crate::services::codex) prepared: PreparedIncarnation,
+    pub(in crate::services::codex) validated_tail:
+        crate::services::codex_tui::tail_launch::ValidatedTail,
+    pub(in crate::services::codex) rollout_modified_since: std::time::SystemTime,
+    pub(in crate::services::codex) handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
-pub(crate) fn create(input: Create<'_>) -> Result<Submitted, String> {
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    /// A ticket as a create returns it, for tests outside this module.
+    pub(crate) fn for_test(
+        prepared: PreparedIncarnation,
+        validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
+        rollout_modified_since: std::time::SystemTime,
+        handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+    ) -> Self {
+        Self {
+            prepared,
+            validated_tail,
+            rollout_modified_since,
+            handoff,
+        }
+    }
+
+    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+        &self.prepared
+    }
+}
+
+/// The argv-bearing create, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn create_for_test(input: Create<'_>) -> Result<Submitted, String> {
+    create(input)
+}
+
+/// The response observation after a create, for tests outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn observe_for_test(input: Observe<'_>) -> Result<(), String> {
+    observe(input)
+}
+
+pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted, String> {
     let Create {
         tmux_session_name,
         working_dir,
@@ -157,7 +192,7 @@ pub(crate) struct Observe<'a> {
     pub prompt: &'a str,
 }
 
-pub(crate) fn observe(input: Observe<'_>) -> Result<(), String> {
+pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), String> {
     let Observe {
         submitted,
         working_dir,

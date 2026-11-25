@@ -2,8 +2,9 @@
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOwner};
 use crate::domain::provider_auth_profile::ProviderAuthOverlay;
-use crate::services::claude::herdr_turn::handoff::*;
-use crate::services::claude::herdr_turn::{AttachRequest, HerdrTurn, HerdrTurnPorts};
+use crate::services::claude::herdr_turn::{
+    AttachRequest, HerdrTurn, HerdrTurnPorts, launched_source_for_test,
+};
 use crate::services::claude_tui::hook_server::HookEvent;
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, HerdrLaunchHost};
 use crate::services::provider::ProviderKind;
@@ -85,7 +86,7 @@ fn test_instance_claude_herdr_default_profile_refuses_before_launch_subscription
                 cancel: None,
             };
             assert_eq!(
-                launched_source(&turn, runtime.handle(), &Ports)
+                launched_source_for_test(&turn, runtime.handle(), &Ports)
                     .err()
                     .as_deref(),
                 Some("herdr launch auth_overlay: test instance host declaration rejected")

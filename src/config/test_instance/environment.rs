@@ -8,7 +8,7 @@ use super::agy_cell::{self, AgyLogin};
 use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
-pub(crate) struct Environment {
+pub(super) struct Environment {
     api: String,
     claude_login: Option<ClaudeLogin>,
     agy_login: Option<AgyLogin>,
@@ -20,8 +20,14 @@ pub(crate) struct Environment {
     pub(super) flags: BTreeMap<String, String>,
 }
 
+/// Loads the environment for the instance tests mounted in the root test host.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn load_for_test(root: &Path, manifest: &Value, config: &Value) -> Result<(), String> {
+    Environment::load(root, manifest, config).map(drop)
+}
+
 impl Environment {
-    pub(crate) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
+    pub(super) fn load(root: &Path, manifest: &Value, config: &Value) -> Result<Self, String> {
         let id = manifest["instance_id"].as_str().ok_or_else(rejected)?;
         let port = manifest["api"]["port"].as_u64().ok_or_else(rejected)?;
         let api = format!("http://127.0.0.1:{port}");

@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
-use super::tool_images::{ImageBody, OmitReason, ToolImage, extract};
+use super::tool_images::{ImageBody, NativeTurn, OmitReason, ToolImage, extract, image_native_key};
 use crate::services::discord::outbound::image_format::MAX_IMAGE_BYTES;
 use crate::services::tui_o::shadow::ShadowProvider::{Claude, Codex};
 
@@ -112,4 +112,19 @@ fn tool_images_text_only_yields_nothing() {
     ] {
         assert!(extract(provider, &row).is_empty(), "{row}");
     }
+}
+
+#[test]
+fn image_native_key_is_per_turn_and_content() {
+    let u1 = NativeTurn::new("u1");
+    let key = image_native_key(&u1, PNG_SHA256);
+    assert_eq!(key, image_native_key(&NativeTurn::new("u1"), PNG_SHA256));
+    assert_eq!(key, format!("img:u1:{PNG_SHA256}"));
+    // A later turn reading the same bytes owes its own attachment.
+    assert_ne!(key, image_native_key(&NativeTurn::new("u2"), PNG_SHA256));
+    assert_ne!(key, image_native_key(&u1, &"0".repeat(64)));
+    let edge = NativeTurn::new("edge:source-key:4096");
+    let edge_key = image_native_key(&edge, PNG_SHA256);
+    assert_eq!(edge_key, format!("img:edge:source-key:4096:{PNG_SHA256}"));
+    assert_ne!(edge_key, key);
 }

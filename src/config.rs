@@ -8,8 +8,11 @@ use std::path::{Path, PathBuf};
 pub(crate) mod decision_gate;
 pub(crate) mod decisions;
 mod runtime_settings;
-pub(crate) mod runtime_validation;
+mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
+/// Runtime-validation fixtures for the tests mounted in the root test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use runtime_validation::tests as runtime_validation_fixtures;
 
 mod agent_memory;
 pub use agent_memory::{AgentDef, SharedKnowledgeInjection};

@@ -1,6 +1,6 @@
 //! Moved from src/db/dispatches/outbox/delivery.rs: seeds its dispatch through the KE test fixture.
 
-use crate::db::dispatches::outbox::delivery::*;
+use crate::db::dispatches::outbox::{DispatchOutboxLeaseUpdateError, mark_outbox_done_pg};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 

@@ -17,7 +17,7 @@ const FLOOR: &str = "thread_children.floor";
 const CONTENT: &[u8] = b"1\n";
 
 impl OStore {
-    pub(crate) fn init_channel_checked(
+    pub(super) fn init_channel_checked(
         &self,
         init: &Initialized,
         origin: InitOrigin,
@@ -71,6 +71,21 @@ impl OStore {
         // A failed init never lowers the durable deployment floor.
         File::open(self.root.join(FLOOR))?.sync_all()?;
         fsync_parent_dir(&path)
+    }
+}
+
+// Test seam for the child init tests mounted in the root test host.
+#[cfg(any(test, feature = "test-support"))]
+impl OStore {
+    pub(crate) fn init_channel_checked_for_test(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+        verified: Option<&VerifiedSurface>,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        self.init_channel_checked(init, origin, scope, verified, enabled)
     }
 }
 

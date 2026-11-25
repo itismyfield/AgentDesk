@@ -737,8 +737,12 @@ fn production_default_permission_reaches_claim_publication_and_getters() {
     crate::services::tmux_common::with_tmux_source_authority(
         &h.context.tmux_session,
         |authority| {
-            assert!(codex_verified::proof_for_binding(authority, &h.context, &binding).is_ok());
-            assert!(codex_verified::publication_allowed(authority, &binding));
+            assert!(
+                codex_verified::proof_for_binding_for_test(authority, &h.context, &binding).is_ok()
+            );
+            assert!(codex_verified::publication_allowed_for_test(
+                authority, &binding
+            ));
             assert!(runtime_binding_for_tmux_session_under_source_authority(authority).is_some());
         },
     );
@@ -1037,7 +1041,10 @@ fn episode_permission_does_not_block_getters_with_an_intact_proof_and_marker() {
         assert!(h.consumer().is_some());
         crate::services::tmux_common::with_tmux_source_authority(&h.context.tmux_session, |a| {
             assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_some());
-            assert!(codex_verified::publication_allowed(a, &h.binding()));
+            assert!(codex_verified::publication_allowed_for_test(
+                a,
+                &h.binding()
+            ));
         });
         assert!(!runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui).is_empty());
         assert!(

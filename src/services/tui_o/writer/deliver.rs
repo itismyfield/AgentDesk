@@ -36,6 +36,9 @@ mod notice_migration;
 #[path = "input_notices/retry.rs"]
 mod notice_retry;
 mod usage_footer;
+// Test seams for the writer tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+mod test_access;
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -205,13 +208,13 @@ impl<H> Drop for LeaseReturn<H> {
 }
 
 pub struct ChannelWriter<P, L, A> {
-    pub(crate) notice_owners: crate::services::tui_input::human_frame::history::notice_owner::Batch,
+    pub(super) notice_owners: crate::services::tui_input::human_frame::history::notice_owner::Batch,
     pub(super) notice_cache:
         crate::services::tui_input::human_frame::history::notice_owner::generation::WorkCache,
-    pub(crate) notice_pending: HashMap<(SourceId, u64, u64), String>,
+    pub(super) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) notice_missing: std::collections::HashSet<UnitKey>,
-    pub(crate) boot: super::boot::Trace,
-    pub(crate) suspension: super::suspension::Suspension,
+    pub(super) boot: super::boot::Trace,
+    pub(super) suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
@@ -382,7 +385,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// The ledger's approved retries less those a shared receipt already settled.
-    pub(in crate::services) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
+    pub(super) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
         let ledger = self.store.ledger();
         let open = |piece: &PieceRecord| {
             let at = (&piece.unit_key, piece.piece_index);
@@ -452,7 +455,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
-    pub(crate) fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
+    pub(super) fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
         let posted = match entry {
             LedgerEntry::Posted { serial, msg_id, .. } => Some((serial, msg_id)),
             _ => None,

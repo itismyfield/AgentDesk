@@ -27,15 +27,19 @@ use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session, unset_herdr_env_before_exec,
 };
-use crate::services::session_host::herdr::contract::{
+use crate::services::session_host::herdr_for_test::contract::{
     HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed,
 };
-use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint};
-use crate::services::session_host::herdr::observe::{CANONICAL_CONFIG, RestoreUnverified};
-use crate::services::session_host::herdr::pane_probe::start_text;
-use crate::services::session_host::herdr::provenance;
-use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
-use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
+use crate::services::session_host::herdr_for_test::model::{HerdrCall, HerdrEndpoint};
+use crate::services::session_host::herdr_for_test::observe::{CANONICAL_CONFIG, RestoreUnverified};
+use crate::services::session_host::herdr_for_test::pane_probe::start_text;
+use crate::services::session_host::herdr_for_test::provenance;
+use crate::services::session_host::herdr_for_test::transport::{
+    HerdrSocketConfig, HerdrSocketTransport,
+};
+use crate::services::session_host::herdr_registry_for_test::{
+    self as herdr_registry, HerdrRegistry,
+};
 
 const NODE: &str = "mac-mini";
 const SESSION: &str = "adk";
@@ -431,7 +435,7 @@ impl Witnessing {
             inner: HerdrSocketTransport::new(
                 endpoint,
                 HerdrSocketConfig::default(),
-                crate::services::session_host::herdr::wire::LineJsonFraming,
+                crate::services::session_host::herdr_for_test::wire::LineJsonFraming,
             ),
             seen: Arc::default(),
             writes: Arc::default(),
@@ -474,7 +478,7 @@ impl HerdrTransport for Witnessing {
         let outcome = self.inner.call_with_witness(call, expected);
         let unsent = matches!(
             &outcome,
-            Err(crate::services::session_host::herdr::contract::HerdrTransportError::NotSent(_))
+            Err(crate::services::session_host::herdr_for_test::contract::HerdrTransportError::NotSent(_))
         );
         let witness = if unsent {
             Err("not sent".into())
@@ -915,7 +919,7 @@ fn a_p11_m2_confirmation_required_has_no_escalation() {
         let target = launch(
             &mut s2,
             &pool,
-            &shared.token_hash,
+            shared.token_hash_for_test(),
             CHANNEL,
             "AgentDesk-claude-x2",
             repo.clone(),

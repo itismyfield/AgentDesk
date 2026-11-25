@@ -467,7 +467,7 @@ mod pg {
             std::fs::write(&marker, &nonce).unwrap();
             let owner = HostedOwner {
                 provider: "claude".into(),
-                discord_token_hash: shared.token_hash.clone(),
+                discord_token_hash: shared.token_hash_for_test().to_string(),
                 channel_id: CHANNEL.to_string(),
                 logical_key: chain.pane.clone(),
                 owner_node: NODE.into(),
@@ -643,7 +643,7 @@ mod pg {
             std::fs::write(&marker, &nonce).unwrap();
             let owner = HostedOwner {
                 provider: "claude".into(),
-                discord_token_hash: shared.token_hash.clone(),
+                discord_token_hash: shared.token_hash_for_test().to_string(),
                 channel_id: CHANNEL.to_string(),
                 logical_key: chain.pane.clone(),
                 owner_node: NODE.into(),
@@ -781,7 +781,7 @@ mod pg {
             let (shared, registry) = runtime(&pool).await;
             let owner = HostedOwner {
                 provider: "claude".into(),
-                discord_token_hash: shared.token_hash.clone(),
+                discord_token_hash: shared.token_hash_for_test().to_string(),
                 channel_id: CHANNEL.to_string(),
                 logical_key: pane.tmux.into(),
                 owner_node: NODE.into(),

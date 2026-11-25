@@ -61,7 +61,9 @@ async fn fresh_probe_failure_stands_only_for_a_found_legacy_row_pg() {
     let registry = Arc::new(HealthRegistry::new());
     for provider in ["claude", "qwen"] {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.to_string();
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .set_token_hash_for_test(TOKEN);
         registry.register(provider.to_string(), shared).await;
     }
     let channel = |n: u64| 1_479_671_301_387_061_000 + n;

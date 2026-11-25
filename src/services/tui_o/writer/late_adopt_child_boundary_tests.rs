@@ -41,7 +41,7 @@ impl LegacyView for Probe {
         _: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
         eof: u64,
     ) -> Option<u64> {
-        let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+        let source = crate::services::tui_o::writer::rotation::bound_source_for_test(binding)?;
         (source.path == self.initial
             && binding.execution_nonce == "binding-host"
             && !self.delivered.lock().unwrap().is_empty())
@@ -464,7 +464,7 @@ impl LegacyView for DebtProbe {
         _: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
         _eof: u64,
     ) -> Option<u64> {
-        let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+        let source = crate::services::tui_o::writer::rotation::bound_source_for_test(binding)?;
         (source.path == self.old
             && binding.execution_nonce == "binding-host"
             && self.ack.load(Ordering::SeqCst) != 0)

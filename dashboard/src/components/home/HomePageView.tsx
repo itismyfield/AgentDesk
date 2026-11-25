@@ -18,6 +18,7 @@ import {
 } from "./homeModel";
 import {
   campaignTodoSource,
+  cleanupStaleIdleSession,
   loadHomeCampaigns,
   loadHomeHealth,
   loadHomeUsage,
@@ -79,26 +80,46 @@ export default function HomePageView({
   const handleReconcileSession = useCallback(async (sessionKey: string) => {
     setBusyKeys((prev) => new Set(prev).add(sessionKey));
     try {
-      const result = await reconcileStaleSessionTurn(sessionKey);
-      setReconciledKeys((prev) => new Set(prev).add(sessionKey));
-      if (result.reconciled) {
-        setSessions((prev) =>
-          prev.map((session) =>
-            session.session_key === sessionKey
-              ? { ...session, status: "idle", last_seen_at: Date.now() }
-              : session,
-          ),
-        );
-        onNotify?.(tr("멈춘 세션을 정리했어요.", "Reconciled the stale session."), "success");
+      const target = sessions.find((session) => session.session_key === sessionKey);
+      if (target?.status === "idle") {
+        const result = await cleanupStaleIdleSession(sessionKey);
+        if (result.disconnected) {
+          setSessions((prev) =>
+            prev.map((session) =>
+              session.session_key === sessionKey ? { ...session, status: "disconnected" } : session,
+            ),
+          );
+          onNotify?.(tr("오래된 세션을 정리했어요.", "Cleaned up the stale session."), "success");
+        } else {
+          onNotify?.(
+            result.reason
+              ? tr(`세션 상태 확인 완료 (${result.reason})`, `Session checked (${result.reason})`)
+              : tr("아직 활성 상태라 세션을 유지했어요.", "Session is still active; kept as-is."),
+            "info",
+          );
+        }
       } else {
-        onNotify?.(
-          result.reason
-            ? tr(`세션 상태 확인 완료 (${result.reason})`, `Session checked (${result.reason})`)
-            : tr("멈춘 세션 상태를 정리했어요.", "Session state reconciled."),
-          "info",
-        );
+        const result = await reconcileStaleSessionTurn(sessionKey);
+        if (result.reconciled) {
+          setReconciledKeys((prev) => new Set(prev).add(sessionKey));
+          setSessions((prev) =>
+            prev.map((session) =>
+              session.session_key === sessionKey
+                ? { ...session, status: "idle", last_seen_at: Date.now() }
+                : session,
+            ),
+          );
+          onNotify?.(tr("멈춘 세션을 정리했어요.", "Reconciled the stale session."), "success");
+        } else {
+          onNotify?.(
+            result.reason
+              ? tr(`세션 상태 확인 완료 (${result.reason})`, `Session checked (${result.reason})`)
+              : tr("멈춘 세션 상태를 확인했어요.", "Checked session state."),
+            "info",
+          );
+        }
       }
-      void getDispatchedSessions().then(setSessions).catch(() => {});
+      void getDispatchedSessions(true, { suppressErrorToast: true, maxRetries: 0 }).then(setSessions).catch(() => {});
     } catch (error) {
       onNotify?.(
         error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
@@ -111,7 +132,7 @@ export default function HomePageView({
         return next;
       });
     }
-  }, [onNotify, setSessions, tr]);
+  }, [onNotify, sessions, setSessions, tr]);
 
   const handleStopAgentTurn = useCallback(async (agent: Agent) => {
     const name = agentName(agent, isKo);

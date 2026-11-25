@@ -6,11 +6,11 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use serde_json::Value;
 
-pub(crate) mod agy_cell;
+mod agy_cell;
 pub(crate) mod environment;
 pub(crate) mod lifecycle;
 
-pub(crate) const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
+const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -133,7 +133,7 @@ fn checked_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn read_json(path: &Path) -> Result<Value, String> {
+fn read_json(path: &Path) -> Result<Value, String> {
     checked_path(path)?;
     if !std::fs::metadata(path).map_err(|_| rejected())?.is_file() {
         return Err(rejected());
@@ -141,7 +141,7 @@ pub(crate) fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&std::fs::read(path).map_err(|_| rejected())?).map_err(|_| rejected())
 }
 
-pub(crate) fn load_instance_declaration(
+fn load_instance_declaration(
     path: &Path,
     root: &Path,
     config_path: &Path,
@@ -550,6 +550,27 @@ mod owner {
 
 #[cfg(unix)]
 pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_target};
+
+// Test seams over private declaration readers, for the instance tests in the root test host.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) const MARKER_FOR_TEST: &str = MARKER;
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn read_json_for_test(path: &Path) -> Result<Value, String> {
+    read_json(path)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn load_instance_declaration_for_test(
+    path: &Path,
+    root: &Path,
+    config_path: &Path,
+) -> Result<TestInstance, String> {
+    load_instance_declaration(path, root, config_path)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use agy_cell::tests::agy_fixture;
 
 #[cfg(all(test, unix))]
 #[path = "test_instance/host_scope_tests.rs"]

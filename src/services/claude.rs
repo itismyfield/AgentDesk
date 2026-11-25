@@ -82,7 +82,7 @@ use crate::services::{
 };
 
 #[cfg(unix)]
-pub(crate) const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -1863,6 +1863,8 @@ pub(crate) mod first_input;
 mod fresh_lifecycle;
 #[cfg(all(test, unix))]
 pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
 #[cfg(all(test, unix))]
@@ -1894,7 +1896,7 @@ pub(crate) fn tmux_tui_turn_for_tests(
 }
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_claude_tui_fresh_turn_and_finalize(
+fn run_claude_tui_fresh_turn_and_finalize(
     transcript_path: &std::path::Path,
     transcript_path_string: &str,
     sender: Sender<StreamMessage>,

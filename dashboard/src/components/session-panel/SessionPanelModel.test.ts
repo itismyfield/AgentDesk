@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DispatchedSession } from "../../types";
-import { canReconcileStaleSession, compareSessions, isStaleIdleSession, sessionState, sessionSummaryCounts, sessionTitle } from "./SessionPanelModel";
+import { canCleanupStaleIdleSession, canReconcileStaleSession, compareSessions, isStaleIdleSession, sessionState, sessionSummaryCounts, sessionTitle } from "./SessionPanelModel";
 
 const NOW = Date.now();
 const DAY = 86_400_000;
@@ -20,6 +20,9 @@ describe("SessionPanelModel", () => {
       .toEqual(["working", "working", "background", "resting", "resting", "closed"]);
     expect(isStaleIdleSession(row("old", "idle", 9 * DAY), NOW)).toBe(true);
     expect(canReconcileStaleSession(row("old", "idle", 9 * DAY), NOW)).toBe(false);
+    expect(canCleanupStaleIdleSession(row("old", "idle", 9 * DAY), NOW)).toBe(true);
+    expect(canCleanupStaleIdleSession({ ...row("old-dispatched", "idle", 9 * DAY), active_dispatch_id: "d-1" }, NOW)).toBe(false);
+    expect(canCleanupStaleIdleSession(row("fresh", "idle", DAY), NOW)).toBe(false);
     expect(isStaleIdleSession(row("reconciled-fresh", "idle", 60_000, KEY, "reconciled stale turn_active"), NOW)).toBe(false);
     expect(canReconcileStaleSession(row("reconciled-fresh", "idle", 60_000, KEY, "reconciled stale turn_active"), NOW)).toBe(false);
     expect(canReconcileStaleSession(row("stuck-turn", "turn_active", 45 * 60_000), NOW)).toBe(true);

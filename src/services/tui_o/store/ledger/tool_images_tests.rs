@@ -322,3 +322,215 @@ fn tool_image_entries_round_trip_through_the_ledger_line() {
     let back: LedgerEntry = serde_json::from_str(&text).expect("deserialize");
     assert_eq!(back, entry);
 }
+
+fn obligation_at(unit_key: &UnitKey, call_id: &str, record_start: u64) -> LedgerEntry {
+    image_entry(ImageEntry::ImageObligation(Box::new(ImageObligation {
+        unit_key: unit_key.clone(),
+        turn: "u1".into(),
+        call_id: call_id.into(),
+        image_index: 0,
+        source: source(),
+        record_start,
+        record_end: record_start + 10,
+        sha256: Some(unit_key.native_key.clone()),
+        media_type: Some("image/png".into()),
+        size: Some(4),
+        display_name: "a.png".into(),
+        marker: "marker".into(),
+    })))
+}
+
+fn omit(unit_key: &UnitKey, reason: &str) -> LedgerEntry {
+    let (unit_key, reason) = (unit_key.clone(), reason.to_owned());
+    image_entry(ImageEntry::ImageOmitted { unit_key, reason })
+}
+
+fn call(call_id: &str, turn: &str) -> LedgerEntry {
+    let (source, call_id, turn) = (source(), call_id.to_owned(), turn.to_owned());
+    image_entry(ImageEntry::ImageCall {
+        source,
+        call_id,
+        turn,
+    })
+}
+
+#[test]
+fn call_attribution_is_durable_and_one_turn_per_call() {
+    let mut state = LedgerState::default();
+    apply(&mut state, call("c1", "u1"));
+    apply(&mut state, call("c1", "u1"));
+    assert_eq!(state.violation(), None);
+    let images = state.tool_images();
+    assert_eq!(images.call_turn(&source(), "c1"), Some("u1"));
+    assert_eq!(images.call_turn(&source(), "c2"), None);
+    apply(&mut state, call("c1", "u2"));
+    assert!(state.violation().is_some());
+}
+
+/// A ledger owing `key`, with the attempts `attempt` adds before the omission.
+fn omission_after(attempt: impl FnOnce(&mut LedgerState, &UnitKey), reason: &str) -> LedgerState {
+    let mut state = LedgerState::starting_at(snowflake(BASE_MS));
+    let key = image("u1", "ab");
+    apply(&mut state, obligation(&key, "u1", "call-1", "a.png"));
+    attempt(&mut state, &key);
+    apply(&mut state, omit(&key, reason));
+    state
+}
+
+#[test]
+fn omission_after_posted_is_rejected() {
+    let state = omission_after(
+        |state, key| {
+            let serial = prepare(state, key);
+            posted(state, serial, snowflake(BASE_MS + 1_000));
+        },
+        "not_confirmed",
+    );
+    assert!(state.violation().is_some());
+}
+
+#[test]
+fn omission_while_prepared_or_unresolved_is_rejected() {
+    let open = omission_after(
+        |state, key| {
+            prepare(state, key);
+        },
+        "not_confirmed",
+    );
+    assert!(open.violation().is_some());
+    let unresolved_attempt = omission_after(
+        |state, key| {
+            let serial = prepare(state, key);
+            unresolved(state, serial);
+        },
+        "not_confirmed",
+    );
+    assert!(unresolved_attempt.violation().is_some());
+}
+
+#[test]
+fn omission_while_ambiguous_is_rejected() {
+    let state = omission_after(
+        |state, key| {
+            let serial = prepare(state, key);
+            let candidates = vec![snowflake(BASE_MS + 1), snowflake(BASE_MS + 2)];
+            apply(state, LedgerEntry::Ambiguous { serial, candidates });
+        },
+        "not_confirmed",
+    );
+    assert!(state.violation().is_some());
+}
+
+#[test]
+fn omission_before_any_attempt_is_accepted() {
+    let state = omission_after(|_, _| {}, "too_large");
+    assert_eq!(state.violation(), None);
+}
+
+#[test]
+fn omission_after_spent_not_found_is_accepted() {
+    let spent = omission_after(
+        |state, key| {
+            for _ in 0..2 {
+                let serial = prepare(state, key);
+                apply(state, LedgerEntry::NotFound { serial });
+            }
+        },
+        "not_confirmed",
+    );
+    assert_eq!(spent.violation(), None);
+    // One NotFound still owes the dedicated retry.
+    let early = omission_after(
+        |state, key| {
+            let serial = prepare(state, key);
+            apply(state, LedgerEntry::NotFound { serial });
+        },
+        "not_confirmed",
+    );
+    assert!(early.violation().is_some());
+}
+
+#[test]
+fn omission_after_rejected_upload_follows_the_status() {
+    let rejected = |status: u16| {
+        move |state: &mut LedgerState, key: &UnitKey| {
+            let serial = prepare(state, key);
+            apply(state, LedgerEntry::Rejected { serial, status });
+        }
+    };
+    // 400 and 413 refuse the upload itself: it ends as an omission with its notice.
+    for status in [400, 413] {
+        let state = omission_after(rejected(status), "unsupported_type");
+        assert_eq!(state.violation(), None, "{status}");
+    }
+    // 403 and 404 refuse the channel: the existing Rejected path owns them.
+    for status in [403, 404] {
+        let state = omission_after(rejected(status), "unsupported_type");
+        assert!(state.violation().is_some(), "{status}");
+    }
+}
+
+/// One tool result with two images omitted for different reasons.
+fn two_omitted() -> (LedgerState, UnitKey) {
+    let mut state = LedgerState::starting_at(snowflake(BASE_MS));
+    let (first, second) = (image("u1", "aa"), image("u1", "bb"));
+    apply(&mut state, obligation_at(&first, "call-1", 100));
+    apply(&mut state, obligation_at(&second, "call-1", 100));
+    apply(&mut state, omit(&first, "too_large"));
+    apply(&mut state, omit(&second, "unsupported_type"));
+    let notice = unit(&notice_native_key("u1", "call-1"), UnitKind::ToolImage);
+    assert_eq!(state.violation(), None);
+    (state, notice)
+}
+
+#[test]
+fn notice_members_list_each_omitted_image_with_reason_and_range() {
+    let (state, notice) = two_omitted();
+    let notices: Vec<_> = steps(&state)
+        .into_iter()
+        .filter(|open| matches!(open, OpenObligation::Notice { .. }))
+        .collect();
+    assert_eq!(notices.len(), 1);
+    let members = state.tool_images().notice_members(&notice);
+    let mut reasons: Vec<_> = members
+        .iter()
+        .map(|member| member.reason.as_str())
+        .collect();
+    reasons.sort_unstable();
+    assert_eq!(reasons, ["too_large", "unsupported_type"]);
+    for member in &members {
+        assert_eq!(
+            (member.source.clone(), member.record_start),
+            (source(), 100)
+        );
+        assert_eq!(member.record_end, 110);
+    }
+}
+
+#[test]
+fn protected_ranges_keep_notice_members_until_the_notice_posts() {
+    let (mut state, notice) = two_omitted();
+    let protects = |state: &LedgerState| {
+        let ranges = state.tool_images().protected_ranges(state);
+        ranges.contains(&(source(), 100, 110))
+    };
+    assert!(protects(&state), "Attempt");
+    let serial = prepare(&mut state, &notice);
+    assert!(protects(&state), "Waiting");
+    apply(&mut state, LedgerEntry::NotFound { serial });
+    for _ in 0..2 {
+        let serial = prepare(&mut state, &notice);
+        apply(&mut state, LedgerEntry::NotFound { serial });
+    }
+    let exhausted = matches!(
+        steps(&state).as_slice(),
+        [OpenObligation::Notice {
+            step: NoticeStep::Exhausted { .. },
+            ..
+        }]
+    );
+    assert!(exhausted && protects(&state), "Exhausted");
+    let serial = prepare(&mut state, &notice);
+    posted(&mut state, serial, snowflake(BASE_MS + 5_000));
+    assert!(!protects(&state), "posted");
+}

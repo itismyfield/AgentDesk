@@ -45,7 +45,7 @@ fn number(value: u64) -> StoreResult<i64> {
     i64::try_from(value).map_err(|_| StoreError::InconsistentState)
 }
 
-pub(crate) async fn persist(
+pub(super) async fn persist(
     tx: &mut Transaction<'_, Postgres>,
     previous: Option<&CampaignState>,
     decision: &Decision,

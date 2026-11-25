@@ -1,5 +1,6 @@
 //! Moved from src/db/auto_queue/entries.rs: these cases write entry status through the KE writer.
 
+use crate::db::auto_queue::entries::load_entry_status_row_pg_for_test as load_entry_status_row_pg;
 use crate::db::auto_queue::entries::tests::{
     begin_run_token_holder, entry_status, run_token_waiter_sample, seed_dispatch, setup_entry,
     transition_count,
@@ -207,10 +208,10 @@ async fn pool_status_retry_rejects_competing_dispatch_identity_pg() {
         .await
         .expect("load preserved competing dispatch identity");
     assert_eq!(
-        identity.dispatch_id.as_deref(),
+        identity.dispatch_id_for_test(),
         Some("dispatch-competing-status-update")
     );
-    assert_eq!(identity.slot_index, Some(1));
+    assert_eq!(identity.slot_index_for_test(), Some(1));
 
     drop(token_holder);
     pool.close().await;
@@ -269,7 +270,7 @@ async fn pool_status_retry_distinguishes_null_and_empty_dispatch_identity_pg() {
     let identity = load_entry_status_row_pg(&pool, "gate-entry")
         .await
         .expect("load preserved empty dispatch identity");
-    assert_eq!(identity.dispatch_id.as_deref(), Some(""));
+    assert_eq!(identity.dispatch_id_for_test(), Some(""));
 
     drop(token_holder);
     pool.close().await;
@@ -331,12 +332,12 @@ async fn pool_status_retry_absorbs_competing_status_change_pg() {
     let identity = load_entry_status_row_pg(&pool, "gate-entry")
         .await
         .expect("load attached dispatch identity");
-    assert_eq!(identity.status, ENTRY_STATUS_DISPATCHED);
+    assert_eq!(identity.status_for_test(), ENTRY_STATUS_DISPATCHED);
     assert_eq!(
-        identity.dispatch_id.as_deref(),
+        identity.dispatch_id_for_test(),
         Some("dispatch-requested-status-race")
     );
-    assert_eq!(identity.slot_index, Some(0));
+    assert_eq!(identity.slot_index_for_test(), Some(0));
 
     drop(token_holder);
     pool.close().await;
@@ -449,13 +450,13 @@ async fn pool_status_retry_reattaches_after_racing_done_pg() {
         .expect("pool status retry must converge onto the raced done row");
     assert!(result.changed);
     assert_eq!(result.from_status, ENTRY_STATUS_DONE);
-    assert_eq!(reattached.row.status, ENTRY_STATUS_DISPATCHED);
+    assert_eq!(reattached.row.status_for_test(), ENTRY_STATUS_DISPATCHED);
     assert_eq!(
-        reattached.row.dispatch_id.as_deref(),
+        reattached.row.dispatch_id_for_test(),
         Some("dispatch-requested-done-race")
     );
-    assert_eq!(reattached.row.slot_index, Some(0));
-    assert!(reattached.row.completed_at.is_none());
+    assert_eq!(reattached.row.slot_index_for_test(), Some(0));
+    assert!(reattached.row.completed_at_for_test().is_none());
     // Convergence runs through the canonical bookkeeping, not around it.
     assert_eq!(
         reattached.transitions,
@@ -482,9 +483,9 @@ async fn pool_status_retry_reattaches_after_racing_done_pg() {
         error.contains("invalid auto-queue entry transition for gate-entry: done -> dispatched"),
         "{error}"
     );
-    assert_eq!(unapproved.row.status, ENTRY_STATUS_DONE);
-    assert_eq!(unapproved.row.dispatch_id, None);
-    assert_eq!(unapproved.row.slot_index, None);
+    assert_eq!(unapproved.row.status_for_test(), ENTRY_STATUS_DONE);
+    assert_eq!(unapproved.row.dispatch_id_for_test(), None);
+    assert_eq!(unapproved.row.slot_index_for_test(), None);
     assert!(unapproved.transitions.is_empty());
     assert!(unapproved.dispatch_history.is_empty());
 
@@ -497,8 +498,8 @@ async fn pool_status_retry_reattaches_after_racing_done_pg() {
         .result
         .expect_err("a terminal dispatch must not be attached to a raced done entry");
     assert!(error.contains("is failed: refusing to attach"), "{error}");
-    assert_eq!(terminal_dispatch.row.status, ENTRY_STATUS_DONE);
-    assert_eq!(terminal_dispatch.row.dispatch_id, None);
+    assert_eq!(terminal_dispatch.row.status_for_test(), ENTRY_STATUS_DONE);
+    assert_eq!(terminal_dispatch.row.dispatch_id_for_test(), None);
     assert!(terminal_dispatch.transitions.is_empty());
     assert!(terminal_dispatch.dispatch_history.is_empty());
 }

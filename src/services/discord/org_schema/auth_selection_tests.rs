@@ -1,5 +1,9 @@
 use crate::domain::provider_auth_profile::{FallbackPolicy, ProfileOverrides};
 use crate::services::discord::org_schema::*;
+use crate::services::discord::org_schema::{
+    configured_launch_profile_for_test as configured_launch_profile,
+    launch_overlay_parts_for_test as launch_overlay_parts,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth_profile::ProviderAuthProfileDef;
 use crate::services::provider_auth_profile::fallback::FallbackPolicyRuntime;
