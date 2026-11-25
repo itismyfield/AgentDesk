@@ -2,12 +2,14 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -181,6 +183,44 @@ pub(crate) fn attr_twin() {}
 #[cfg(test)]
 pub(crate) fn attr_twin() {}
 """
+# A glob target and a macro-built path: the tool cannot follow them, so the declaration holds whole.
+GLOB_USE = """#[cfg(test)]
+pub(crate) mod extra {
+    pub(crate) fn fourth() {}
+}
+
+#[cfg(test)]
+pub(crate) use self::{gate::first, extra::*};
+"""
+MACRO_USE = """macro_rules! reexport {
+    ($name:ident) => {
+        pub(crate) use $crate::core::gate::$name;
+    };
+}
+"""
+HELD_DROP = """
+#[cfg(test)]
+pub(crate) struct Restore;
+
+#[cfg(all(test, test))]
+impl Drop for Restore {
+    fn drop(&mut self) {}
+}
+"""
+TWO_TYPES = """
+pub(crate) struct Alpha;
+pub(crate) struct Beta;
+
+impl Alpha {
+    #[cfg(test)]
+    pub(crate) fn probe() {}
+}
+
+impl Beta {
+    #[cfg(not(all(test, unix)))]
+    pub(crate) fn probe() {}
+}
+"""
 TESTS_MOD = """
 #[cfg(test)]
 pub(crate) mod tests {
@@ -203,7 +243,9 @@ def exclusions(*items, bundles=()):
     """Entries in src/core.rs: a label (one item gated `test`) or (label, [cfg of each item it must match])."""
     rows = [(i, ["test"]) if isinstance(i, str) else i for i in items]
     return {"entries": [{"file": "src/core.rs", "item": i, "cfg": c, "reason": "fixture"} for i, c in rows],
-            "bundles": [{"name": n, "file": "src/core.rs", "items": list(m)} for n, m in bundles]}
+            "bundles": [{"name": n, "file": "src/core.rs",
+                         "items": [{"item": i, "cfg": "test"} if isinstance(i, str) else {"item": i[0], "cfg": i[1]}
+                                   for i in m]} for n, m in bundles]}
 
 
 class Fixture:
@@ -237,10 +279,10 @@ class Fixture:
             rc = codemod.main(["--tree", str(self.repo), "--exclude", str(self.repo / verify.EXCLUDE), *args])
         return rc, out.getvalue()
 
-    def verify(self, base, head):
+    def verify(self, base, head, compile_package=None):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = verify.verify(self.repo, base, head)
+            rc = verify.verify(self.repo, base, head, compile_package)
         return rc, out.getvalue()
 
     def core(self):
@@ -347,13 +389,69 @@ class Codemod(unittest.TestCase):
                      f"    #[cfg({TS})]\n    pub(crate) fn third()", f"#[cfg({TS})]\npub(crate) use gate::{{"):
             self.assertIn(want, fx.core())
         # One excluded target holds the re-export and the other two with it.
-        fx = Fixture(Path(self.tmp.name) / "held", core=core, app=app, exclude=("fn kept", ("mod gate > fn second", ["all(test, unix)"])))
+        # Sol krxts-2 P1: a direct `gate::first()` next to the re-export must not open `first` on its own.
+        direct = app.replace("crate::core::first();", "crate::core::first();\n        crate::core::gate::first();")
+        fx = Fixture(Path(self.tmp.name) / "held", core=core, app=direct,
+                     exclude=("fn kept", ("mod gate > fn second", ["all(test, unix)"])))
         rc, out = fx.codemod()
         self.assertEqual(rc, 0, out)
         for kept in ("    #[cfg(test)]\n    pub(crate) fn first()", "    #[cfg(all(test, unix))]\n    pub(crate) fn second()",
                      "    #[cfg(test)]\n    pub(crate) fn third()"):
             self.assertIn(kept, fx.core())
         self.assertIn("#[cfg(test)]\npub(crate) use gate::{", fx.core())
+
+    def test_a_comment_semicolon_inside_the_use_does_not_end_it(self):
+        # Sol krxts-2 P1: `first, // note;` ended the declaration at the comment, so two targets stayed shut.
+        core = CORE + REEXPORT.replace("    first, second, third,", "    first, // note; see below\n    second, third,")
+        fx = Fixture(self.tmp.name, core=core, app=APP.replace("seeded();", "seeded();\n        crate::core::first();"))
+        self.assertEqual(fx.codemod()[0], 0)
+        for want in (f"    #[cfg({TS})]\n    pub(crate) fn first()", f"    #[cfg(all({TS}, unix))]\n    pub(crate) fn second()",
+                     f"    #[cfg({TS})]\n    pub(crate) fn third()"):
+            self.assertIn(want, fx.core())
+
+    def test_a_glob_or_macro_target_holds_the_whole_declaration(self):
+        app = APP.replace("seeded();", "seeded();\n        crate::core::first();")
+        fx = Fixture(self.tmp.name, core=CORE + REEXPORT.split("#[cfg(test)]\npub(crate) use")[0] + GLOB_USE, app=app)
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("use declaration: glob target `self::extra::*`", out)
+        self.assertIn("    #[cfg(test)]\n    pub(crate) fn first()", fx.core())
+        self.assertTrue(fx.core().endswith(GLOB_USE))
+        # A path a macro builds is never followed either.
+        (fx.repo / "src/core.rs").write_text(CORE + MACRO_USE)
+        line = (CORE + MACRO_USE).split("\n").index("        pub(crate) use $crate::core::gate::$name;") + 1
+        self.assertEqual(codemod.Tree(fx.repo).use_text("src/core.rs", line)[1], "path built by a macro (`$` / `!`)")
+
+    def test_a_drifted_bundle_member_holds_the_whole_bundle(self):
+        # Sol krxts-2 P2: RECORDS under `any(test, windows)` opened the reader and the record without the store.
+        core = CORE + BUNDLE.replace("#[cfg(test)]\nstatic RECORDS", "#[cfg(any(test, windows))]\nstatic RECORDS")
+        members = ("fn judged", ("static RECORDS", "test"), "fn record > stmt RECORDS.lock().unwrap().push(value);")
+        fx = Fixture(self.tmp.name, core=core, app=APP.replace("seeded();", "seeded();\n        crate::core::judged();"),
+                     bundles=[("records", members)])
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("static RECORDS has cfg `any(test, windows)`, recorded `test`", out)
+        self.assertTrue(fx.core().endswith(BUNDLE.replace("#[cfg(test)]\nstatic RECORDS",
+                                                          "#[cfg(any(test, windows))]\nstatic RECORDS")))
+
+    def test_an_automatically_held_drop_holds_its_type(self):
+        # Sol krxts-2 P2: the type opened while `impl Drop` under `all(test, test)` stayed shut.
+        app = APP.replace("seeded();", "seeded();\n        let _r = crate::core::Restore;")
+        fx = Fixture(self.tmp.name, core=CORE + HELD_DROP, app=app)
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("its impl Drop is held", out)
+        self.assertTrue(fx.core().endswith(HELD_DROP))
+
+    def test_an_opposite_gate_on_another_types_method_is_not_a_twin(self):
+        # Sol krxts-2 P2: `B::probe` under `not(all(test, unix))` held the `A::probe` upper tests use.
+        app = APP.replace("seeded();", "seeded();\n        crate::core::Alpha::probe();")
+        fx = Fixture(self.tmp.name, core=CORE + TWO_TYPES, app=app)
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("held=0", out)
+        self.assertIn(f"impl Alpha {{\n    #[cfg({TS})]\n    pub(crate) fn probe()", fx.core())
+        self.assertIn("impl Beta {\n    #[cfg(not(all(test, unix)))]\n    pub(crate) fn probe()", fx.core())
 
     def test_a_bundle_opens_its_reader_store_and_recording_statement_together(self):
         core, app = CORE + BUNDLE, APP.replace("seeded();", "seeded();\n        crate::core::judged();")
@@ -482,6 +580,73 @@ class Verify(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("only modified .rs files may change", out)
         self.assertIn("differs between the commits", out)
+
+
+FAKE_CARGO = """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+core = Path("src/core.rs")
+json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "target": os.environ.get("CARGO_TARGET_DIR"),
+           "core": core.read_text() if core.is_file() else None}, open(os.environ["FAKE_LOG"], "w"))
+sys.stderr.write(os.environ.get("FAKE_STDERR", ""))
+sys.exit(int(os.environ.get("FAKE_RC", "0")))
+"""
+
+
+class Compile(unittest.TestCase):
+    """Step e with a fake cargo: the command, where it runs, and how its rc and diagnostics are read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.fx = Fixture(self.tmp.name)
+        self.base = self.fx.git("rev-parse", "HEAD")
+        self.assertEqual(self.fx.codemod()[0], 0)
+        self.head = self.fx.commit("convert")
+        cargo = Path(self.tmp.name) / "fake-cargo"
+        cargo.write_text(FAKE_CARGO)
+        cargo.chmod(0o755)
+        self.log = Path(self.tmp.name) / "cargo.json"
+        self.env = {"TS_VERIFY_CARGO": str(cargo), "FAKE_LOG": str(self.log),
+                    "TS_VERIFY_TARGET_DIR": str(Path(self.tmp.name) / "tgt")}
+
+    def run_e(self, **env):
+        with mock.patch.dict(os.environ, {**self.env, **env}):
+            return self.fx.verify(self.base, self.head, "fx")
+
+    def test_it_builds_the_package_lib_with_test_support_on_a_checkout_of_head(self):
+        rc, out = self.run_e()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.startswith("TS_VERIFY PASS subs=11 scanned=12 excluded=1 idem=0 compile=0"), out)
+        self.assertIn("| e compile | PASS | rc=0 errors=0 cmd=`rustc -p fx --lib --profile check -- --cfg "
+                      "feature=\"test-support\"`", out)
+        call = json.loads(self.log.read_text())
+        self.assertEqual(call["argv"], ["rustc", "-p", "fx", "--lib", "--profile", "check", "--", "--cfg",
+                                        'feature="test-support"'])
+        self.assertEqual(call["target"], self.env["TS_VERIFY_TARGET_DIR"])
+        # The head commit's tree, not the working tree: a later uncommitted edit is not what gets built.
+        self.assertNotEqual(Path(call["cwd"]).resolve(), self.fx.repo.resolve())
+        self.assertIn(f"#[cfg({TS})]\npub(crate) fn helper()", call["core"])
+
+    def test_a_failed_build_or_an_error_line_fails_e(self):
+        stderr = "error[E0432]: unresolved import `gate::second`\nerror: could not compile `fx`\n"
+        for rc_text, want in (("101", "rc=101 errors=1"), ("0", "rc=0 errors=1")):
+            rc, out = self.run_e(FAKE_RC=rc_text, FAKE_STDERR=stderr)
+            self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL e"), out)
+            self.assertIn(f"| e compile | FAIL | {want} ", out)
+            self.assertIn("e  error[E0432]: unresolved import `gate::second`", out)
+        rc, out = self.run_e(FAKE_RC="1", FAKE_STDERR="warning: only a warning\n")
+        self.assertIn("| e compile | FAIL | rc=1 errors=0 ", out)
+
+    def test_a_cargo_that_does_not_start_fails_e_and_no_flag_runs_no_cargo(self):
+        rc, out = self.run_e(TS_VERIFY_CARGO=str(Path(self.tmp.name) / "missing-cargo"))
+        self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL e"), out)
+        self.assertIn("cargo did not start", out)
+        with mock.patch.dict(os.environ, self.env):
+            rc, out = self.fx.verify(self.base, self.head)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("e compile", out)
+        self.assertFalse(self.log.exists())
 
 
 class Equivalence(unittest.TestCase):

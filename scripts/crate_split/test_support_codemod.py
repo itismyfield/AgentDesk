@@ -281,6 +281,28 @@ class Tree:
         self._attrs[rel] = out
         return out
 
+    def use_text(self, rel, line):
+        """(`use ...;` text rebuilt from Rust tokens, None) for the declaration starting on a 1-based line, so a
+        `;` or name in a comment or string is not part of it; (text, reason) when the tool cannot read it."""
+        toks = rts.rust_tokens("\n".join(self.lines(rel)), extended=True)
+        i = next((k for k, t in enumerate(toks) if t.line == line and t.value == "use"), None)
+        if i is None:
+            return "", "no `use` token on its line"
+        out, k = [], i
+        while k < len(toks) and toks[k].value != ";":
+            t = toks[k]
+            if t.value == "$" or t.value == "!":
+                return "", "path built by a macro (`$` / `!`)"
+            if t.value == ":" and k + 1 < len(toks) and toks[k + 1].value == ":":
+                out.append("::")
+                k += 2
+                continue
+            out.append(t.value)
+            k += 1
+        if k == len(toks):
+            return "", "no closing `;`"
+        return " ".join(out) + ";", None
+
     def attr_gates(self, rel, index):
         """Indexes of the real test gates among the attributes directly above lines[index]."""
         lines, real = self.lines(rel), self.attr_lines(rel)
@@ -370,6 +392,7 @@ def krx_gated(tree):
     """KRX test-gated declarations: (items by name, gated modules {module: (rel, line, is_file)})."""
     lay = tree.layout
     by_name, mods = collections.defaultdict(list), {}
+    use_holds = tree.use_holds = {}
     for rel in sorted(r for r in lay.module_of if r.endswith(".rs") and tree.crate_of(r) == "KRX"):
         lines = tree.lines(rel)
         whole = rel in lay.test_only
@@ -413,15 +436,24 @@ def krx_gated(tree):
                     mods.setdefault(key, (rel, n, False))
                 continue
             if own and re.match(r"^\s*(?:(?:" + vt.VIS + r")\s+)?use\s", line):
-                end = next((k for k in range(i, len(lines)) if ";" in lines[k]), len(lines) - 1)
-                text = " ".join(lines[i:end + 1]).split(";")[0] + ";"
-                for path, orig, bound in vt.use_entries(text):
+                text, why = tree.use_text(rel, n)
+                entries = vt.use_entries(text) if why is None else []
+                targets = []
+                for path, orig, bound in entries:
                     if orig == "*":
+                        why = why or f"glob target `{'::'.join(path)}::*`"
                         continue
                     # What the `use` re-exports: a path relative to its module unless it starts at the crate.
                     segs = list(path) + [orig]
                     target = resolve(segs, module, {}) if segs[0] in ("crate", "self", "super") else \
                         list(module) + segs
+                    if target is None or not tree.layout.locate(tuple(target[:-1])):
+                        why = why or f"target `{'::'.join(segs)}` resolves to no module of the crate"
+                    targets.append((bound, target))
+                if why is not None:
+                    # One target the tool cannot follow holds the whole declaration (Sol krxts-2 P1).
+                    use_holds[(rel, n)] = why
+                for bound, target in targets:
                     by_name[bound].append({"name": bound, "kind": "use", "rel": rel, "line": n, "module": tuple(module),
                                            "type": None, "vis": "", "member_ok": False, "target": target})
                 continue
@@ -700,20 +732,71 @@ def plan(tree, exclude_entries, bundles=()):
     for _, target in found:
         if target not in chains:
             chains[target] = chain_of(target)
+
+    def local(chain, rel):
+        """The gates of a chain in `rel` itself: the item's own and its blocks', not the `mod` lines above the file."""
+        above = set(tree.file_chain(rel))
+        return [g for g in chain if g[0] == rel and g not in above]
+
+    def own_gates(target):
+        if target[0] == "mod":
+            rel, line, is_file = mods[target[1]]
+            if not is_file:
+                return local(tree.chain(rel, line), rel)
+            fc = tree.file_chain(rel)
+            return local(fc, fc[0][0]) if fc else []
+        return local(tree.chain(target[1], target[2]), target[1])
+
+    # Groups: gates that open or hold as one. A `use` line and the own gates of every target it re-exports
+    # (Sol krxts-2 P1: a direct reference to one target must not open it while its sibling is held), and the
+    # members of each bundle. Exclusions and holds spread to the whole group before any edit is chosen.
+    parent = {}
+
+    def find(g):
+        parent.setdefault(g, g)
+        while parent[g] != g:
+            parent[g] = parent[parent[g]]
+            g = parent[g]
+        return g
+
+    def union(gs):
+        gs = list(gs)
+        for g in gs[1:]:
+            parent[find(g)] = find(gs[0])
+
+    held = {}
+    for (rel, line), paths in uses.items():
+        group = own_gates(("item", rel, line))
+        for path in paths:
+            inner = [("mod", tuple(path[:n])) for n in range(len(path), 0, -1) if tuple(path[:n]) in mods][:1]
+            inner += [("item", g["rel"], g["line"]) for g in by_name.get(path[-1], [])
+                      if g["kind"] not in ("method", "field") and g["module"] == tuple(path[:-1])]
+            for t in inner:
+                group += own_gates(t)
+        union(group)
+    for (rel, line), why in getattr(tree, "use_holds", {}).items():
+        for g in own_gates(("item", rel, line)):
+            held[g] = f"use declaration: {why}"
     # Bundles: items that only work together (a reader, the static it reads, the statement that records into it).
     stale = []
     for bundle in bundles:
-        rel, members = bundle["file"], []
+        rel, members, drift = bundle["file"], [], []
         items = cfg_items(tree, rel) if (tree.root / rel).is_file() else {}
-        for item in bundle["items"]:
-            found_at = items.get(item, [])
+        for member in bundle["items"]:
+            found_at = items.get(member["item"], [])
             if len(found_at) != 1:
-                stale.append(f"bundle {bundle['name']}: {rel} :: {item} matches {len(found_at)} items, not 1")
+                stale.append(f"bundle {bundle['name']}: {rel} :: {member['item']} matches {len(found_at)} items, not 1")
                 continue
+            got = tree.item_cfgs(rel, found_at[0])
+            if got != member["cfg"]:
+                drift.append(f"{member['item']} has cfg `{got}`, recorded `{member['cfg']}`")
             members += [g for g in tree.chain(rel, found_at[0] + 1) if g not in members]
         for t, chain in chains.items():
             if any(g in members for g in chain):
                 chain += [g for g in members if g not in chain]
+        union(members)
+        for g in members if drift else []:
+            held[g] = f"bundle {bundle['name']}: " + "; ".join(drift)
     gates = {g for chain in chains.values() for g in chain}
     # A gated `impl Drop for T` goes with its gated `struct T` / `enum T`: it opens only when T opens.
     companions = {}
@@ -746,32 +829,36 @@ def plan(tree, exclude_entries, bundles=()):
             pinned.append((rel, e["item"]))
     if stale:
         raise CodemodError(2, stale)
-    # Held: no rewrite rule fits, or a namesake in the same module has a gate that can hold without `test`
-    # (`not(test)`, `not(all(test, unix))`, `cfg_attr(not(test), ..)`): opening one side would define it twice.
-    held = {}
+    # Held: no rewrite rule fits, or an item with the same label (same module, same impl type, same name) has a
+    # gate that can hold without `test` (`not(test)`, `not(all(test, unix))`, `cfg_attr(not(test), ..)`).
     for g in sorted(gates - excluded):
+        if g in held:
+            continue
         rel, j = g
         lines, real = tree.lines(rel), tree.attr_lines(rel)
         if rewrite(lines[j]) is None:
             held[g] = f"no rewrite rule: {lines[j].strip()}"
             continue
         index = item_index(lines, j)
-        name = tc.DECL.match(lines[index])
-        if not name:
+        if not tc.DECL.match(lines[index]):
             continue
         module = tree.module_at(rel, index + 1)
         for i, line in enumerate(lines):
             if i + 1 not in real or i == j or not mentions_test(line):
                 continue
             k = item_index(lines, i)
-            other = tc.DECL.match(lines[k]) if k < len(lines) and k != index else None
-            if other and other.group(1) == name.group(1) and tree.module_at(rel, k + 1) == module and \
-                    not tc.gated_attr(lines, k):
+            if k < len(lines) and k != index and tc.DECL.match(lines[k]) and tree.label(rel, k) == label[g] and \
+                    tree.module_at(rel, k + 1) == module and not tc.gated_attr(lines, k):
                 held[g] = f"namesake with an opposite gate at line {i + 1}: {line.strip()}"
                 break
-    blocked = excluded | set(held)
+    # An automatically held `impl Drop` holds its type too: a guard must never build without its restore.
+    for d, owner in companions.items():
+        if d in held and owner not in excluded:
+            held.setdefault(owner, f"its impl Drop is held ({held[d]})")
+    roots = {find(g) for g in excluded | set(held)}
+    blocked = {g for g in gates if find(g) in roots} | excluded | set(held)
     deferred_items = {t for t, chain in chains.items() if any(g in blocked for g in chain)}
-    wanted = {g for t, chain in chains.items() if t not in deferred_items for g in chain}
+    wanted = {g for t, chain in chains.items() if t not in deferred_items for g in chain} - blocked
     wanted |= {d for d, owner in companions.items() if owner in wanted and d not in blocked}
     deferred = gates - excluded - wanted
     problems = [f"opens a test module, not excluded: {g[0]} :: {label[g]}" for g in sorted(wanted)
@@ -783,7 +870,7 @@ def plan(tree, exclude_entries, bundles=()):
     dl = {g for site, t in found if tree.crate_of(site.rsplit(":", 1)[0]) == "DL" for g in chains[t]}
     counts = {"scanned": len(gates), "excluded": len(excluded) + len(deferred), "listed": len(excluded),
               "deferred": len(deferred), "subs": len(edits), "files": len({e["file"] for e in edits}),
-              "companions": len(companions), "pinned": len(pinned), "held": len(held), "dl_scanned": len(dl),
+              "companions": len(companions), "pinned": len(pinned), "held": len(set(held) & gates), "dl_scanned": len(dl),
               "dl_subs": len(wanted & dl)}
     state = lambda g: "excluded" if g in excluded else "deferred" if g in deferred else "edit"
     rows = [{"file": g[0], "line": g[1] + 1, "item": label[g], "state": state(g), "companion": g in companions}
@@ -791,7 +878,7 @@ def plan(tree, exclude_entries, bundles=()):
     return {"edits": edits, "counts": counts, "gates": rows,
             "excluded": sorted(f"{g[0]} :: {label[g]}" for g in excluded),
             "deferred": sorted(f"{g[0]} :: {label[g]}" for g in deferred), "pinned": pinned,
-            "held": [f"{g[0]}:{g[1] + 1} {label[g]} — {why}" for g, why in sorted(held.items())]}
+            "held": [f"{g[0]}:{g[1] + 1} {label[g]} — {why}" for g, why in sorted(held.items()) if g in gates]}
 
 
 def test_module_entries(tree):

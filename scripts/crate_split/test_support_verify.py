@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Machine check of a KRX-TS conversion commit (#7353): the diff is test_support_codemod.py's output, nothing else.
 
-    python3 scripts/crate_split/test_support_verify.py <base> <head> [--repo DIR]
+    python3 scripts/crate_split/test_support_verify.py <base> <head> [--repo DIR] [--compile PACKAGE]
 
 <base> is the commit the codemod ran on (the tool commit), <head> the conversion. PASS needs all four:
 
@@ -14,6 +14,12 @@
   c exclude   test_support_exclude.json is the same at both commits, and every item it lists has the same
               attribute block and first item line at <head> as at <base>.
   d idem      the codemod on <head> has no edit left.
+  e compile   (with --compile) the library of PACKAGE builds the way a dependent's tests will see it: `test`
+              off, `test-support` on. `cargo rustc -p PACKAGE --lib --profile check -- --cfg
+              'feature="test-support"'` runs in a full `git archive` of <head> (never the working tree), with
+              CARGO_TARGET_DIR=$TS_VERIFY_TARGET_DIR or <repo>/target and cargo from $TS_VERIFY_CARGO or `cargo`.
+              PASS needs rc 0 and no `error` diagnostic; a cargo that does not start is a FAIL. This is what
+              a-d cannot see: a parser miss leaves a re-export or reader whose target stayed test-only (E0432).
 
 The first output line is `TS_VERIFY PASS ...` or `TS_VERIFY FAIL <checks>`; exit 0 only on PASS.
 The trees are read from git (`git archive` into a temporary directory), never from the working tree.
@@ -22,6 +28,7 @@ The trees are read from git (`git archive` into a temporary directory), never fr
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -34,6 +41,7 @@ import test_support_codemod as codemod  # noqa: E402
 
 ATOM = 'any(test, feature = "test-support")'
 EXCLUDE = "scripts/crate_split/test_support_exclude.json"
+COMPILE_ERROR = re.compile(r"^error(?:\[E\d+\])?:(?! could not compile| aborting due to)")
 TREE_PATHS = ("Cargo.toml", "src", "crates", "scripts/crate_split/partition.json", EXCLUDE)
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -128,7 +136,33 @@ def item_texts(tree, entry):
     return [lines[codemod.vt.attr_start(lines, k):k + 1] for k in found] or None
 
 
-def verify(repo, base, head):
+def compile_command(cargo, package):
+    """The step-e command: the package's library with `test` off and `test-support` on."""
+    return [cargo, "rustc", "-p", package, "--lib", "--profile", "check", "--", "--cfg", 'feature="test-support"']
+
+
+def compile_head(repo, head, package, tmp):
+    """(result, detail, problems) of step e on a full checkout of <head>."""
+    tree = Path(tmp) / "compile"
+    tree.mkdir()
+    archive = subprocess.Popen(["git", "-C", str(repo), "archive", "--format=tar", head], stdout=subprocess.PIPE)
+    tar = subprocess.run(["tar", "-x", "-C", str(tree)], stdin=archive.stdout, capture_output=True)
+    archive.stdout.close()
+    if archive.wait() or tar.returncode:
+        return "FAIL", "extract failed", [tar.stderr.decode(errors="replace")[-300:]]
+    env = dict(os.environ, CARGO_TARGET_DIR=os.environ.get("TS_VERIFY_TARGET_DIR", str(Path(repo) / "target")))
+    cmd = compile_command(os.environ.get("TS_VERIFY_CARGO", "cargo"), package)
+    try:
+        proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
+    except OSError as err:
+        return "FAIL", f"cargo did not start ({err})", [" ".join(cmd)]
+    errors = [line for line in (proc.stderr + proc.stdout).splitlines() if COMPILE_ERROR.match(line)]
+    detail = f"rc={proc.returncode} errors={len(errors)} cmd=`{' '.join(cmd[1:])}`"
+    ok = proc.returncode == 0 and not errors
+    return ("PASS" if ok else "FAIL"), detail, errors[:40] or ([] if ok else proc.stderr.splitlines()[-20:])
+
+
+def verify(repo, base, head, compile_package=None):
     base = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").strip()
     head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
     rows, failed = [], []
@@ -184,11 +218,14 @@ def verify(repo, base, head):
             left = None
         rows.append(("d idem", "FAIL" if problems else "PASS", f"edits={'?' if left is None else len(left)}",
                      problems))
+        if compile_package:
+            rows.append(("e compile", *compile_head(repo, head, compile_package, tmp)))
     failed = [name.split()[0] for name, result, _, _ in rows if result != "PASS"]
     if failed:
         print(f"TS_VERIFY FAIL {','.join(failed)}")
     else:
-        print(f"TS_VERIFY PASS subs={len(pairs)} scanned={counts['scanned']} excluded={counts['excluded']} idem=0")
+        print(f"TS_VERIFY PASS subs={len(pairs)} scanned={counts['scanned']} excluded={counts['excluded']} idem=0"
+              + (" compile=0" if compile_package else ""))
     print(f"base={base} head={head}")
     print("| check | result | detail |\n|---|---|---|")
     for name, result, detail, _ in rows:
@@ -204,9 +241,10 @@ def main(argv=None):
     parser.add_argument("base")
     parser.add_argument("head")
     parser.add_argument("--repo", default=".")
+    parser.add_argument("--compile", metavar="PACKAGE", help="step e: build PACKAGE's lib with test-support on")
     args = parser.parse_args(argv)
     try:
-        return verify(Path(args.repo).resolve(), args.base, args.head)
+        return verify(Path(args.repo).resolve(), args.base, args.head, args.compile)
     except RuntimeError as err:
         print(f"TS_VERIFY FAIL git ({err})")
         return 2
