@@ -11,6 +11,10 @@ mod cluster_intake_worker_owner_fence_pg;
 mod cluster_intake_worker_replay_hold;
 #[path = "services/cluster/intake_router_hook/owner_record/event_tests.rs"]
 mod cluster_owner_record_event;
+#[path = "services/legacy_body_census/entry_tests.rs"]
+mod legacy_body_census;
+#[path = "services/session_forwarding/probe/tests.rs"]
+mod session_forwarding_probe;
 
 /// A hook relay worker handoff is served before argument parsing: each worker's own error returns.
 /// Each handoff runs in a child of this test, so the env change never reaches the test process.

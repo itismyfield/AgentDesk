@@ -11,19 +11,19 @@ use std::future::Future;
 pub(crate) struct Origin {
     pub(super) delivery: i64,
     pub(super) provider: String,
-    pub(super) channel: String,
+    pub(crate) channel: String,
     pub(super) executor: String,
-    pub(super) generation: i64,
-    pub(super) receipt: i64,
+    pub(crate) generation: i64,
+    pub(crate) receipt: i64,
     pub(super) nonce: String,
     pub(super) incarnation: String,
-    pub(super) binding: serde_json::Value,
+    pub(crate) binding: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
-    origin: Box<Origin>,
+    pub(crate) origin: Box<Origin>,
     payload_hash: String,
 }
 
@@ -232,5 +232,5 @@ pub(crate) async fn acquire_unstamped(
 }
 
 #[cfg(test)]
-#[path = "output_tests.rs"]
+#[path = "output_fixture_tests.rs"]
 pub(crate) mod tests;

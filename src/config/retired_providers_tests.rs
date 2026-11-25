@@ -26,7 +26,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredWarnings {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         let meta = event.metadata();
         if *meta.level() == tracing::Level::WARN
-            && meta.target() == module_path!().trim_end_matches("::tests")
+            && meta.target().ends_with("::config::retired_providers")
         {
             *self.0.lock().unwrap() += 1;
         }

@@ -25,7 +25,7 @@ fn problem(errors: &mut Vec<String>, reason: &str) {
 }
 
 impl Collector {
-    pub(super) fn collect(
+    pub(crate) fn collect(
         &mut self,
         root: &Path,
         current: &str,

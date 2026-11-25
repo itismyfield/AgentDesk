@@ -1,6 +1,6 @@
 //! Boot evidence is independent of output authority; failed observation cannot authorize a send.
 use serde_json::{Value, json};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::time::Duration;
 use std::{
     path::PathBuf,
@@ -11,30 +11,27 @@ mod cache;
 mod collector;
 mod evaluation;
 mod evidence;
-mod history;
-mod manifest;
+pub(crate) mod history;
+pub(crate) mod manifest;
 pub(crate) mod request_context;
-#[cfg(test)]
-#[path = "entry_tests.rs"]
-mod tests;
 pub(crate) mod transport;
-mod window;
-mod writer;
+pub(crate) mod window;
+pub(crate) mod writer;
 
-type Shared = Arc<Mutex<State>>;
+pub(crate) type Shared = Arc<Mutex<State>>;
 
-struct State {
+pub(crate) struct State {
     header: Value,
     ready: bool,
     invalid: bool,
     own_reasons: Vec<String>,
     history_problems: Vec<Value>,
-    window: window::Window,
+    pub(crate) window: window::Window,
     predecessor_window: Value,
 }
 
 impl State {
-    fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {
+    pub(crate) fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {
         let probes = manifest::snapshot();
         let mut state = Self {
             header: json!({"boot_id":boot.id,"host":host,"started_at_ms":boot.started_at_ms,
@@ -53,7 +50,7 @@ impl State {
         state
     }
 
-    fn mark(&mut self, reason: &str) {
+    pub(crate) fn mark(&mut self, reason: &str) {
         self.invalid = true;
         self.window.invalid = true;
         if !self.own_reasons.iter().any(|old| old == reason) {
@@ -74,7 +71,7 @@ impl State {
     }
 }
 
-fn invalidate(state: &Shared, reason: &str) {
+pub(crate) fn invalidate(state: &Shared, reason: &str) {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -91,7 +88,7 @@ fn inherited(state: &Shared, boot: Option<&str>, reason: &str) {
     }
 }
 
-pub(crate) struct Journal(writer::Writer);
+pub(crate) struct Journal(pub(crate) writer::Writer);
 
 impl Journal {
     pub(crate) async fn append(&self, record: Value) -> bool {
@@ -125,8 +122,8 @@ impl Journal {
         value
     }
 
-    #[cfg(test)]
-    async fn open(
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn open(
         root: &std::path::Path,
         boot: &crate::services::process_boot::Boot,
         doctor: Option<String>,
@@ -265,7 +262,7 @@ pub(crate) fn detail_json() -> Value {
 
 #[cfg(test)]
 pub(crate) use cache::ProjectionCache;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use collector::Collector;
 pub(crate) use evaluation::evaluate;
 #[cfg(test)]

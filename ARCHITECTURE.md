@@ -1378,6 +1378,7 @@ src/
 │   │   │   │   ├── fallback.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
+│   │   │   │   ├── output_fixture_tests.rs
 │   │   │   │   ├── output_tests.rs
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
@@ -1473,6 +1474,7 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   ├── pg_tests/
 │   │   │   │   │   └── pending_lookup_tests.rs
+│   │   │   │   ├── pending_lookup_probe_tests.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -2136,6 +2138,7 @@ src/
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
 │   │   ├── krx_claude_tests/
+│   │   │   ├── claude_readiness_tests.rs
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
@@ -4414,6 +4417,7 @@ src/
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
 │   │   ├── probe/
+│   │   │   ├── fixture_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── trusted_target/
 │   │   │   └── loopback_seam_tests.rs

@@ -4,7 +4,7 @@
 
 #[cfg(unix)]
 pub(crate) mod busy;
-mod first_input;
+pub(crate) mod first_input;
 #[cfg(unix)]
 pub(crate) mod restart_intent;
 
@@ -336,7 +336,7 @@ fn hook_logged(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<bool, String> {
 
 /// The source execution `nonce`'s own startup/resume hook recorded, while it is the pane's
 /// latest record; refusal audits do not move the pane.
-fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
+pub(crate) fn logged_source(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
     let logical = turn.owner.logical_key.as_str();
     let events = binding_events_since(turn.channel_id, 0).ok()?;
     let moved = |event: &_| !matches!(event, BindingTarget::Rejected { .. });
