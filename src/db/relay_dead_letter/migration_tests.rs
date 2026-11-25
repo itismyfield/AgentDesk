@@ -20,7 +20,7 @@ fn original_migrator_through_0150() -> Migrator {
         "ba6981fecb0e07c30dabf307d7b948e358ccfc9958ad6ab6c6f525cff62cf8a6",
         "the upgrade fixture must retain the originally applied migration bytes"
     );
-    let all = sqlx::migrate!("./migrations/postgres");
+    let all = sqlx::migrate!("../../migrations/postgres");
     let mut replaced = 0;
     let migrations = all
         .iter()
@@ -142,7 +142,7 @@ async fn state_validation_rejects_unknown_legacy_rows_pg() {
     let (fixture, pool) = original_database().await;
     let legacy_id = seed_unknown_legacy_row(&pool).await;
 
-    let error = sqlx::migrate!("./migrations/postgres")
+    let error = sqlx::migrate!("../../migrations/postgres")
         .run(&pool)
         .await
         .expect_err("validation must fail closed when a legacy state is unknown");

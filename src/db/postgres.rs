@@ -28,7 +28,7 @@ pub use agent_sync::sync_agents_from_config_pg;
 use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
 pub(crate) mod shared_config;
 
-static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
+static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("../../migrations/postgres");
 const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
 const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_PG_IDLE_TIMEOUT_SECS: u64 = 5 * 60;

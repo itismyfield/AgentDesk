@@ -15,7 +15,7 @@ pub(in crate::services::discord) mod delivery_frontier_probe;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
-pub(crate) mod notification_policy;
+pub(crate) use adk_runtime::services::discord::outbound::notification_policy;
 #[cfg(all(test, unix))]
 mod notification_policy_tests;
 #[cfg(unix)]

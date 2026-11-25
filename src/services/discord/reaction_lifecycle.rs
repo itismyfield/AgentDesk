@@ -312,8 +312,11 @@ pub(in crate::services::discord) async fn try_remove_reaction_raw_with_shared_de
     .await
 }
 
-// Dormant input reconciliation shares the existing reaction identity and channel fallback.
-impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for serenity::Http {
+/// Discord HTTP as the dormant input-reaction port; shares the existing reaction identity and channel fallback.
+/// A local wrapper because the port trait lives in the runtime crate and `serenity::Http` is foreign to both.
+pub(crate) struct HttpReactionPort<'a>(pub(crate) &'a serenity::Http);
+
+impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for HttpReactionPort<'_> {
     async fn set(
         &self,
         channel: u64,
@@ -330,7 +333,7 @@ impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for se
         } else {
             ReactionAction::Remove
         };
-        try_reaction_raw_on_channel_detailed(self, ChannelId::new(channel), message, emoji, action)
+        try_reaction_raw_on_channel_detailed(self.0, ChannelId::new(channel), message, emoji, action)
             .await
             .map_err(|error| error.to_string())
     }

@@ -26,9 +26,8 @@ pub use paths::{
     org_schema_path, resolve_memory_path, shared_agent_knowledge_dir, shared_prompt_path,
 };
 
-/// Source checkout root at build time. In-crate readers go through this so a manifest
-/// relocation only has to change this definition.
-pub(crate) const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+/// Source checkout root at build time, set by this crate's build script from its manifest location.
+pub(crate) const REPO_ROOT: &str = env!("ADK_REPO_ROOT");
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
 const DEFAULT_MEMORY_BACKEND: &str = "auto";

@@ -91,24 +91,24 @@ mod cli;
 pub(crate) mod compat;
 // Config helpers are shared by CLI/server/tests, with some provider-onboarding
 // helpers only called from rollout flows.
-mod config;
-pub(crate) mod config_live_reload;
-pub(crate) mod credential;
+use adk_runtime::config;
+pub(crate) use adk_runtime::config_live_reload;
+pub(crate) use adk_runtime::credential;
 // Database repositories intentionally expose cross-route helpers that are only
 // wired from selected API/maintenance paths.
-mod db;
+use adk_runtime::db;
 mod dispatch;
-mod domain;
-mod intake_consent_authority;
+use adk_runtime::domain;
+use adk_runtime::intake_consent_authority;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
 mod engine;
 // Error-code helpers are kept for API response boundaries that only some
 // routes currently surface.
-mod error;
+use adk_runtime::error;
 // In-process broadcast event bus shared by the WS server layer and background
 // services; lives at crate root to avoid a service→server backflow (#3037).
-mod eventbus;
+use adk_runtime::eventbus;
 mod github;
 // Shared HTTP route handler state; lives at crate root (below server+services)
 // so service-layer handlers reference it without a service→server backflow (#3037).
@@ -116,19 +116,19 @@ pub(crate) mod api_caller_observability;
 mod app_state;
 pub(crate) mod kanban;
 mod launch;
-mod logging;
+use adk_runtime::logging;
 pub(crate) mod manual_intervention;
 // Pipeline policy structs include retry/override fields retained for policy
 // compatibility across staged rollout paths.
-pub(crate) mod phase_gate;
-pub(crate) mod pipeline;
-pub(crate) mod queue_contract;
-pub(crate) mod receipt;
+pub(crate) use adk_runtime::phase_gate;
+pub(crate) use adk_runtime::pipeline;
+pub(crate) use adk_runtime::queue_contract;
+pub(crate) use adk_runtime::receipt;
 // Reconciliation sweep jobs are invoked by maintenance scheduling, not by every
 // compile target.
 pub(crate) mod reconcile;
 // Runtime layout exposes migration helpers used by setup and repair commands.
-pub(crate) mod runtime_layout;
+pub(crate) use adk_runtime::runtime_layout;
 mod server;
 // Service modules contain provider, Discord, maintenance, and observability
 // feature surfaces that are enabled by runtime config rather than all targets.
@@ -247,7 +247,9 @@ pub use services::claude_command::ClaudeBinary;
 pub(crate) mod supervisor;
 mod ui;
 // Utility detectors are shared opportunistically across provider paths.
-mod utils;
+use adk_runtime::utils;
+// `#[macro_export]` puts the macro at the runtime crate root; callers keep `crate::auto_queue_log!`.
+pub(crate) use adk_runtime::auto_queue_log;
 
 #[cfg(test)]
 mod high_risk_recovery;

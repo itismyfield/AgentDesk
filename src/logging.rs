@@ -18,18 +18,22 @@ const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 ///
 /// Exported because it is a CONTRACT on tracing targets, not a local detail: its
 /// target match is a path prefix, so any `tracing` target whose first segment is
-/// not `agentdesk` is dropped unless an operator edits `RUST_LOG`. Instrumented
+/// neither `agentdesk` nor `adk_runtime` is dropped unless an operator edits `RUST_LOG`. Instrumented
 /// call sites that must survive in `dcserver.stdout.log` filter a subscriber
 /// with this exact constant in their tests
 /// (`turn_bridge::…::body_mutation_telemetry_tests`), so a change here fails
 /// those tests instead of silently muting a production record.
-pub(crate) const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info";
+pub(crate) const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info,adk_runtime=info";
 
 pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
-    let directive = DEFAULT_TRACING_DIRECTIVE
-        .parse()
-        .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
-    Ok(EnvFilter::from_default_env().add_directive(directive))
+    let mut filter = EnvFilter::from_default_env();
+    for directive in DEFAULT_TRACING_DIRECTIVE.split(',') {
+        let directive = directive
+            .parse()
+            .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
+        filter = filter.add_directive(directive);
+    }
+    Ok(filter)
 }
 
 #[cfg(test)]
