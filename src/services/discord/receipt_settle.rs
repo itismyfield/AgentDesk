@@ -48,7 +48,8 @@ pub(in crate::services::discord) fn watcher_outcome(
 }
 
 /// Commits the terminal of the managed execution `state` ran, retrying briefly. True once it is
-/// durable or there is nothing to commit (no database, or a message-less execution).
+/// durable or there is nothing to commit (no database, or a message-less execution); an AGY
+/// custody row is never committed here, so it is false and the row stays.
 pub(in crate::services::discord) async fn record(
     pool: Option<&PgPool>,
     state: &InflightTurnState,
@@ -67,6 +68,10 @@ async fn commit_terminal(
     outcome: TerminalOutcome,
     confirmed_at: DateTime<Utc>,
 ) -> Option<bool> {
+    // An AGY custody row's terminal is its owner's: no generic end commits it.
+    if !inflight::generic_may_end(state) {
+        return Some(false);
+    }
     let (Some(pool), Some(provider)) = (pool, state.provider_kind()) else {
         return None;
     };
@@ -213,7 +218,8 @@ pub(in crate::services::discord) fn keep_marked(
     state: &InflightTurnState,
     stamp: TerminalReceiptStamp,
 ) -> bool {
-    if state.terminal_receipt.is_some() {
+    // An earlier mark stays; a custody row stays for its owner, unmarked.
+    if state.terminal_receipt.is_some() || !inflight::generic_may_end(state) {
         return true;
     }
     let Some(provider) = state

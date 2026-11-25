@@ -139,8 +139,10 @@ pub(crate) fn read_binding(
         .join(destination.to_string())
         .join("agy-delivery")
         .join(format!("{id}.json"));
-    let saved = durable::read_json::<State>(&path)?;
-    Ok(saved.and_then(|state| state.binding.map(|binding| (state.key, binding))))
+    match durable::read_json::<State>(&path)? {
+        Some(state) if state.version != 1 => Err(damage("agy delivery journal version unknown")),
+        saved => Ok(saved.and_then(|state| state.binding.map(|binding| (state.key, binding)))),
+    }
 }
 
 pub(crate) struct Journal<'a> {

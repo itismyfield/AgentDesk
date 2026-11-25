@@ -49,6 +49,14 @@ pub(in crate::services::discord) fn generic_may_end(state: &InflightTurnState) -
     end_authority(state) == EndAuthority::Legacy
 }
 
+/// Row bytes a generic end must keep: a row that is not Legacy, or damaged bytes naming custody.
+pub(super) fn generic_end_keeps(content: &str) -> bool {
+    match serde_json::from_str::<InflightTurnState>(content) {
+        Ok(state) => !generic_may_end(&state),
+        Err(_) => raw_names_custody(content),
+    }
+}
+
 /// Damaged bytes that name a custody route may be an AGY admission, so they are kept, not hidden.
 pub(super) fn raw_names_custody(content: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(content) {

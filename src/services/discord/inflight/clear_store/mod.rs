@@ -271,7 +271,9 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
             return GuardedClearOutcome::IoError;
         }
     };
-    if super::raw_before_start_receipt(&data) {
+    // An archive removes the row too, so an AGY custody row stays for its owner.
+    if super::raw_before_start_receipt(&data) || super::agy_end_authority::generic_end_keeps(&data)
+    {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {

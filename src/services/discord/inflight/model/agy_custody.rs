@@ -46,6 +46,13 @@ impl Serialize for AgyCustodyField {
     }
 }
 
+/// The row field's reader: a present field, `null` included, is custody; only absence is Legacy.
+pub(super) fn present<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<AgyCustodyField>, D::Error> {
+    AgyCustodyField::deserialize(deserializer).map(Some)
+}
+
 impl<'de> Deserialize<'de> for AgyCustodyField {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;

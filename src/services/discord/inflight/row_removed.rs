@@ -85,10 +85,15 @@ pub(super) fn removed(path: &Path, pin: Option<InflightEpisodePin>) {
         true
     });
 }
+/// Every inflight row delete; an AGY custody row is its owner's to remove, so it is kept here.
 pub(super) fn unlink(
     path: &Path,
     remove: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    let bytes = fs::read(path).unwrap_or_default();
+    if super::agy_end_authority::generic_end_keeps(&String::from_utf8_lossy(&bytes)) {
+        return Err(std::io::Error::other("AGY custody row kept for its owner"));
+    }
     #[cfg(unix)]
     let pin = capture(path);
     #[cfg(not(unix))]
