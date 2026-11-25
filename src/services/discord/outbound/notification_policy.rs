@@ -51,9 +51,11 @@ pub(crate) fn outbox_class(source: &str, reason_code: Option<&str>) -> NoticeCla
 pub(crate) fn unit_class(kind: UnitKind) -> NoticeClass {
     match kind {
         UnitKind::Body => NoticeClass::Answer,
-        UnitKind::Tool | UnitKind::ToolResult | UnitKind::InputNotice | UnitKind::Recap => {
-            NoticeClass::Progress
-        }
+        UnitKind::Tool
+        | UnitKind::ToolResult
+        | UnitKind::InputNotice
+        | UnitKind::Recap
+        | UnitKind::ToolImage => NoticeClass::Progress,
     }
 }
 

@@ -1,22 +1,29 @@
 //! Images inside tool results, read from raw transcript rows; nothing here records or posts.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::services::discord::outbound::image_format::{self, Rejected};
 use crate::services::tui_o::shadow::ShadowProvider;
 
+pub(crate) mod turns;
 #[cfg(test)]
 mod turns_tests;
 
 /// A settled native turn: its opener id, or `edge:{source}:{start}` when capture began mid-turn.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct NativeTurn(String);
 
 impl NativeTurn {
     pub(crate) fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -26,7 +33,8 @@ pub(crate) fn image_native_key(turn: &NativeTurn, sha256: &str) -> String {
 }
 
 /// Why an image is not attached; `NotConfirmed` comes from settlement, never from extraction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum OmitReason {
     TooLarge,
     UnsupportedType,
