@@ -24,5 +24,18 @@ pub(super) async fn post(
         ChannelId::new(channel).send_message(&*http, message),
     )
     .await;
-    super::outcome(channel, sent)
+    match sent {
+        Ok(message) => {
+            crate::services::legacy_body_census::transport::record_o_created(
+                channel,
+                message.id.get(),
+                None,
+            );
+            PostOutcome::Created(super::seen(message))
+        }
+        Err(error) => super::refusal(super::http_status(&error)).map_or_else(
+            || PostOutcome::Uncertain(error.to_string()),
+            PostOutcome::Refused,
+        ),
+    }
 }

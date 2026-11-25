@@ -97,23 +97,6 @@ fn refusal(status: Option<u16>) -> Option<u16> {
     status.filter(|status| matches!(status, 400 | 403 | 404))
 }
 
-fn outcome(channel: u64, sent: Result<serenity::Message, serenity::Error>) -> PostOutcome {
-    match sent {
-        Ok(message) => {
-            crate::services::legacy_body_census::transport::record_o_created(
-                channel,
-                message.id.get(),
-                None,
-            );
-            PostOutcome::Created(seen(message))
-        }
-        Err(error) => refusal(http_status(&error)).map_or_else(
-            || PostOutcome::Uncertain(error.to_string()),
-            PostOutcome::Refused,
-        ),
-    }
-}
-
 /// Starts `request` only under the execution owner's guard for `content`.
 fn owner_guarded(
     scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
@@ -182,7 +165,18 @@ impl DiscordPort for GatewayPort {
                         "agy Discord response lacks exact receipt evidence".into(),
                     )
                 }
-                sent => outcome(channel, sent),
+                Ok(message) => {
+                    crate::services::legacy_body_census::transport::record_o_created(
+                        channel,
+                        message.id.get(),
+                        None,
+                    );
+                    PostOutcome::Created(seen(message))
+                }
+                Err(error) => refusal(http_status(&error)).map_or_else(
+                    || PostOutcome::Uncertain(error.to_string()),
+                    PostOutcome::Refused,
+                ),
             }
         }
     }
