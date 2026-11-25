@@ -1,5 +1,5 @@
 {
- "about": "#7353 KRX-TS: gates test_support_codemod.py leaves as they are, keyed by file and item label (`impl Runner > fn probes_mut`, never a line number). The exception slice and the M-KRX split commit own them.",
+ "about": "#7353 KRX-TS: gates test_support_codemod.py leaves as they are, keyed by file and item label (`impl Runner > fn probes_mut`, never a line number). The exception slice and the M-KRX split commit own them. `cfg` lists the gate of every item an entry must match (count and kind); `bundles` are items that open or hold together.",
  "reasons": {
   "drop_guard": "gated `impl Drop` of a guard whose type the codemod opens; opening it changes restore behaviour, so it goes with its slice",
   "not_test_twin": "a `cfg(not(test))` item of the same name; both sides must flip together (`not(any(test, feature = \"test-support\"))`)",
@@ -11,352 +11,573 @@
   {
    "file": "src/config_live_reload.rs",
    "item": "impl Drop for TestLiveGuard",
-   "reason": "drop_guard"
+   "reason": "drop_guard",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host/herdr_registry.rs",
    "item": "impl Drop for ForcedRegistry",
-   "reason": "drop_guard"
+   "reason": "drop_guard",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tmux_diagnostics.rs",
    "item": "impl Drop for PaneLivenessOverrideGuard",
-   "reason": "drop_guard"
+   "reason": "drop_guard",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host/herdr_registry.rs",
    "item": "fn registry",
-   "reason": "not_test_twin"
+   "reason": "not_test_twin",
+   "cfg": [
+    "not(test)",
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/cutover.rs",
    "item": "mod test_override",
    "reason": "not_test_twin",
-   "also": "test_module"
+   "also": "test_module",
+   "cfg": [
+    "not(test)",
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host/herdr_registry.rs",
    "item": "thread_local!{FORCED}",
-   "reason": "fixture_reader"
+   "reason": "fixture_reader",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tmux_diagnostics.rs",
    "item": "fn pane_liveness_override_for_tests",
-   "reason": "fixture_reader"
+   "reason": "fixture_reader",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tmux_diagnostics.rs",
    "item": "fn probe_tmux_session_pane_liveness > stmt if let Some(forced) = pane_liveness_override_for_tests(tmux_session_name) {",
-   "reason": "fixture_reader"
+   "reason": "fixture_reader",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/relay_producer_registry.rs",
    "item": "impl RelayProducerRegistry > fn len",
-   "reason": "scan_false_positive"
+   "reason": "scan_false_positive",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_input/human_frame/history/notice_owner.rs",
    "item": "impl Batch > fn prepare",
-   "reason": "scan_false_positive"
+   "reason": "scan_false_positive",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/config.rs",
    "item": "mod snapshot_reader_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/config/runtime_validation.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/config/test_instance.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/config/test_instance/agy_cell.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/db/auto_queue/entries.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/dispatched_sessions.rs",
    "item": "mod selector_cleanup_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/dispatched_sessions/hosted_execution.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/intake_outbox.rs",
    "item": "mod owner_fence_pg_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/intake_outbox/consent_handoff.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/replay_disposition.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/db/session_transcripts.rs",
    "item": "mod clear_fence_pg_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/logging.rs",
    "item": "mod test_capture",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/logging.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/agy_acp/mod.rs",
    "item": "mod lifecycle_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/claude/capability_probe.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude/herdr_return.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude/herdr_turn/start_offset.rs",
    "item": "mod test_hooks",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude/session_handoff/pinned_tmux.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude_compact_trigger.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude_tui/hook_server.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude_tui/hook_server/observation_ingress.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/claude_tui/input/submission.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/claude_tui/readiness/mod.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/intake_router_hook.rs",
    "item": "mod pg_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/intake_router_hook/owner_record/cleanup.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/intake_router_hook/owner_record/output.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/intake_router_hook/owner_record/snapshot.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/cluster/stream_relay/source_read_proof.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/codex.rs",
    "item": "mod actual_submit_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/codex_tui/warm_followup/submit.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/discord/codex_absence.rs",
    "item": "mod test_setup",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/herdr_launch.rs",
    "item": "mod retired_durability_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test & unix"
+   ]
   },
   {
    "file": "src/services/herdr_launch/clear_epoch.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/observability/emit.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/observability/mod.rs",
    "item": "mod test_support",
    "reason": "test_module",
-   "via": "re-export"
+   "via": "re-export",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/platform/tmux.rs",
    "item": "mod session_identity_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/platform/tmux.rs",
    "item": "mod timeout_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/platform/tmux/session_inventory.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/provider_auth_profile.rs",
    "item": "mod instance_env_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/provider_teardown.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host.rs",
    "item": "mod herdr_socket_rig_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host/herdr/autostart.rs",
    "item": "mod real_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/session_host/herdr/autostart.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, target_os = \"macos\")"
+   ]
   },
   {
    "file": "src/services/session_host/herdr/launch_host.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/session_host/herdr/pane_probe.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/settings.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_input/human_frame/history/v2.rs",
    "item": "mod native_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/tui_o/exact_episode.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/ownership/execution.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/shadow/capture.rs",
    "item": "mod io_trace",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/store/codex_provenance/submit_floor.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/tui_o/writer/actor/transition.rs",
    "item": "mod scoped_tests",
    "reason": "test_module",
-   "via": "re-export"
+   "via": "re-export",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/tui_o/writer/mod.rs",
    "item": "mod source_read_tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/writer/mod.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_o/writer/owed.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/tui_prompt_dedupe/binding_context.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/tui_prompt_dedupe/handoff.rs",
    "item": "mod tests",
    "reason": "test_module",
-   "via": "re-export"
+   "via": "re-export",
+   "cfg": [
+    "test"
+   ]
   },
   {
    "file": "src/services/tui_prompt_dedupe/hosted_source.rs",
    "item": "mod tests",
-   "reason": "test_module"
+   "reason": "test_module",
+   "cfg": [
+    "all(test, unix)"
+   ]
   },
   {
    "file": "src/services/turn_summary_line.rs",
    "item": "mod tests",
    "reason": "test_module",
-   "via": "re-export"
+   "via": "re-export",
+   "cfg": [
+    "test"
+   ]
+  }
+ ],
+ "bundles": [
+  {
+   "name": "claims_judged",
+   "file": "src/services/tui_o/cutover/channel_gate.rs",
+   "items": [
+    "fn claims_judged",
+    "static CLAIMS",
+    "fn reserve_body > stmt CLAIMS"
+   ],
+   "why": "claims_judged reads CLAIMS, which only the gated record in reserve_body fills (Sol review krxts-1 P1); opening the reader alone builds but records nothing"
   }
  ]
 }

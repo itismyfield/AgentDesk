@@ -117,6 +117,70 @@ mod tests {
     fn t() {}
 }
 """
+# Three targets of one re-export under different gates (Sol krxts-1 P1 shape: cutover.rs:26-29).
+REEXPORT = """
+pub(crate) mod gate {
+    #[cfg(test)]
+    pub(crate) fn first() {}
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn second() {}
+
+    #[cfg(test)]
+    pub(crate) fn third() {}
+}
+
+#[cfg(test)]
+pub(crate) use gate::{
+    first, second, third,
+};
+"""
+# claims_judged shape: a reader, the static it reads and the gated statement that records into it.
+BUNDLE = """
+pub(crate) fn record(value: u64) {
+    #[cfg(test)]
+    RECORDS.lock().unwrap().push(value);
+    let _ = value;
+}
+
+#[cfg(test)]
+static RECORDS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn judged() -> Vec<u64> {
+    RECORDS.lock().unwrap().clone()
+}
+"""
+# A namesake of `helper` as macro tokens and raw string text: data, not attributes.
+FAKE = """
+pub(crate) fn text() -> &'static str {
+    stringify! {
+        #[cfg(test)]
+        pub(crate) fn helper() {}
+    }
+}
+
+pub(crate) const RAW: &str = r#"
+#[cfg(test)]
+pub(crate) fn helper() {}
+"#;
+"""
+COMPOUND = """
+#[cfg(all(test, test))]
+pub(crate) fn twice() {}
+
+#[cfg(not(all(test, unix)))]
+pub(crate) fn plat() {}
+
+#[cfg(all(test, unix))]
+pub(crate) fn plat() {}
+
+#[cfg_attr(not(test), cfg(unix))]
+pub(crate) fn attr_twin() {}
+
+#[cfg(test)]
+pub(crate) fn attr_twin() {}
+"""
 TESTS_MOD = """
 #[cfg(test)]
 pub(crate) mod tests {
@@ -135,20 +199,23 @@ pub(crate) fn registry() {}
 """
 
 
-def exclusions(*items):
-    return {"entries": [{"file": "src/core.rs", "item": i, "reason": "fixture"} for i in items]}
+def exclusions(*items, bundles=()):
+    """Entries in src/core.rs: a label (one item gated `test`) or (label, [cfg of each item it must match])."""
+    rows = [(i, ["test"]) if isinstance(i, str) else i for i in items]
+    return {"entries": [{"file": "src/core.rs", "item": i, "cfg": c, "reason": "fixture"} for i, c in rows],
+            "bundles": [{"name": n, "file": "src/core.rs", "items": list(m)} for n, m in bundles]}
 
 
 class Fixture:
     """A git repository with one KRX module (core) and one DL module (app) whose test uses core's gates."""
 
-    def __init__(self, root, core=CORE, app=APP, exclude=("fn kept",)):
+    def __init__(self, root, core=CORE, app=APP, exclude=("fn kept",), bundles=()):
         self.repo = Path(root) / "repo"
         files = {"Cargo.toml": '[package]\nname = "fx"\nversion = "0.1.0"\nedition = "2021"\n',
                  "src/lib.rs": "mod app;\nmod core;\nmod decoy;\n", "src/core.rs": core, "src/app.rs": app,
                  "src/decoy.rs": DECOY,
                  "scripts/crate_split/partition.json": json.dumps(PARTITION),
-                 verify.EXCLUDE: json.dumps(exclusions(*exclude))}
+                 verify.EXCLUDE: json.dumps(exclusions(*exclude, bundles=bundles))}
         for rel, text in files.items():
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / rel).write_text(text)
@@ -248,19 +315,96 @@ class Codemod(unittest.TestCase):
         self.assertIn("scanned=12 excluded=3 (listed=2 deferred=1) subs=9", out)
         self.assertIn("#[cfg(test)]\npub(crate) mod fixtures {\n    #[cfg(test)]\n    pub(crate) fn seeded()", fx.core())
 
-    def test_unlisted_test_module_or_not_test_twin_fails_closed(self):
+    def test_unlisted_test_module_fails_closed_and_a_not_test_twin_is_held(self):
         app = APP.replace("seeded();", "seeded();\n        crate::core::tests::rig();\n        crate::core::registry();")
         fx = Fixture(self.tmp.name, core=CORE + TESTS_MOD + TWIN, app=app)
         rc, out = fx.codemod()
         self.assertEqual(rc, 3, out)
         self.assertIn("opens a test module, not excluded: src/core.rs :: mod tests", out)
-        self.assertIn("has a cfg(not(test)) twin, not excluded: src/core.rs :: fn registry", out)
         self.assertEqual(fx.core(), CORE + TESTS_MOD + TWIN)
-        (fx.repo / verify.EXCLUDE).write_text(json.dumps(exclusions("fn kept", "mod tests", "fn registry")))
+        (fx.repo / verify.EXCLUDE).write_text(json.dumps(exclusions("fn kept", "mod tests")))
         rc, out = fx.codemod()
         self.assertEqual(rc, 0, out)
-        self.assertIn("listed=3", out)
-        self.assertIn("#[cfg(not(test))]\npub(crate) fn registry", fx.core())
+        self.assertIn("held=1", out)
+        self.assertIn("fn registry — namesake with an opposite gate", out)
+        self.assertIn("#[cfg(not(test))]\npub(crate) fn registry() {}\n\n#[cfg(test)]\npub(crate) fn registry", fx.core())
+        # Listing both sides with their gates is the other way; a wrong count is stale.
+        (fx.repo / verify.EXCLUDE).write_text(json.dumps(exclusions("fn kept", "mod tests",
+                                                                    ("fn registry", ["not(test)", "test"]))))
+        self.assertIn("held=0", fx.codemod()[1])
+        (fx.repo / verify.EXCLUDE).write_text(json.dumps(exclusions("fn kept", "mod tests", "fn registry")))
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("exclusion matches 2 items with cfg ['not(test)', 'test'], expected ['test']", out)
+
+    def test_every_target_of_one_reexport_opens_or_holds_together(self):
+        # Sol krxts-1 P1: `use gate::{a, b, c}` kept one path per line and opened only the last target.
+        core = CORE + REEXPORT
+        app = APP.replace("seeded();", "seeded();\n        crate::core::first();")
+        fx = Fixture(self.tmp.name, core=core, app=app)
+        self.assertEqual(fx.codemod()[0], 0)
+        for want in (f"    #[cfg({TS})]\n    pub(crate) fn first()", f"    #[cfg(all({TS}, unix))]\n    pub(crate) fn second()",
+                     f"    #[cfg({TS})]\n    pub(crate) fn third()", f"#[cfg({TS})]\npub(crate) use gate::{{"):
+            self.assertIn(want, fx.core())
+        # One excluded target holds the re-export and the other two with it.
+        fx = Fixture(Path(self.tmp.name) / "held", core=core, app=app, exclude=("fn kept", ("mod gate > fn second", ["all(test, unix)"])))
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        for kept in ("    #[cfg(test)]\n    pub(crate) fn first()", "    #[cfg(all(test, unix))]\n    pub(crate) fn second()",
+                     "    #[cfg(test)]\n    pub(crate) fn third()"):
+            self.assertIn(kept, fx.core())
+        self.assertIn("#[cfg(test)]\npub(crate) use gate::{", fx.core())
+
+    def test_a_bundle_opens_its_reader_store_and_recording_statement_together(self):
+        core, app = CORE + BUNDLE, APP.replace("seeded();", "seeded();\n        crate::core::judged();")
+        members = ("fn judged", "static RECORDS", "fn record > stmt RECORDS.lock().unwrap().push(value);")
+        fx = Fixture(self.tmp.name, core=core, app=app, bundles=[("records", members)])
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        for want in (f"#[cfg({TS})]\npub(crate) fn judged", f"#[cfg({TS})]\nstatic RECORDS",
+                     f"    #[cfg({TS})]\n    RECORDS"):
+            self.assertIn(want, fx.core())
+        # Without the bundle only the reader opens: the store and the record would stay test-only.
+        fx = Fixture(Path(self.tmp.name) / "loose", core=core, app=app)
+        self.assertEqual(fx.codemod()[0], 0)
+        self.assertIn("#[cfg(test)]\nstatic RECORDS", fx.core())
+        fx = Fixture(Path(self.tmp.name) / "stale", core=core, app=app, bundles=[("records", ("fn gone",))])
+        rc, out = fx.codemod()
+        self.assertEqual((rc, "bundle records: src/core.rs :: fn gone matches 0 items, not 1" in out), (2, True), out)
+
+    def test_an_excluded_type_holds_its_drop(self):
+        fx = Fixture(self.tmp.name, exclude=("fn kept", "struct Guard"))
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("#[cfg(test)]\npub(crate) struct Guard;\n\n#[cfg(test)]\nimpl Drop for Guard", fx.core())
+
+    def test_attribute_text_in_a_macro_or_raw_string_is_never_a_gate(self):
+        fx = Fixture(self.tmp.name, core=CORE + FAKE)
+        self.assertEqual(fx.codemod()[0], 0)
+        core = fx.core()
+        self.assertIn(f"#[cfg({TS})]\npub(crate) fn helper()", core)
+        self.assertTrue(core.endswith(FAKE), core[-300:])
+
+    def test_compound_predicates_and_opposite_gates_are_held(self):
+        app = APP.replace("seeded();", "seeded();\n        crate::core::twice();\n        crate::core::plat();\n"
+                                       "        crate::core::attr_twin();")
+        fx = Fixture(self.tmp.name, core=CORE + COMPOUND, app=app)
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("held=3", out)
+        for why in ("fn twice — no rewrite rule: #[cfg(all(test, test))]",
+                    "fn plat — namesake with an opposite gate at line", "fn attr_twin — namesake with an opposite gate"):
+            self.assertIn(why, out)
+        self.assertTrue(fx.core().endswith(COMPOUND))
+
+    def test_exclusion_rematch_survives_moves_but_not_a_namesake_of_another_gate(self):
+        fx = Fixture(self.tmp.name)
+        (fx.repo / "src/core.rs").write_text("// moved\n\n" + CORE)
+        self.assertEqual(fx.codemod("--count")[0], 0)
+        (fx.repo / "src/core.rs").write_text(CORE.replace("#[cfg(test)]\npub(crate) fn kept", "#[cfg(unix)]\npub(crate) fn kept"))
+        rc, out = fx.codemod("--count")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("exclusion matches 1 items with cfg ['unix'], expected ['test']: src/core.rs :: fn kept", out)
 
     def test_stale_exclusion_fails(self):
         fx = Fixture(self.tmp.name, exclude=("fn kept", "fn gone"))
@@ -318,8 +462,9 @@ class Verify(unittest.TestCase):
     def test_changing_an_excluded_item_fails_b_and_c(self):
         rc, out = self.fx.verify(self.base, self.converted(
             lambda t: t.replace("#[cfg(test)]\npub(crate) fn kept", f"#[cfg({TS})]\npub(crate) fn kept")))
-        self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL c,b"), out)
+        self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL c,b,d"), out)
         self.assertIn("excluded item changed or missing: src/core.rs :: fn kept", out)
+        self.assertIn("d  codemod on head failed (code 2)", out)
         gate = CORE.split("\n").index("pub(crate) fn kept() {}")  # 0-based item line = 1-based gate line
         self.assertIn(f"diff line the codemod does not make: src/core.rs:{gate}", out)
 
@@ -368,6 +513,8 @@ class Equivalence(unittest.TestCase):
                       '#[cfg(not(any(test, feature = "test-support")))]\nfn a() {}\n',
                       f'fn a() {{ let _ = "{TS}"; }}\n'):
             self.assertEqual(self.classify(before, after).klass, "C", after)
+        quoted = "fn a() -> &'static str {\n    stringify! {\n        #[cfg(test)]\n        fn h() {}\n    }\n}\n"
+        self.assertEqual(self.classify(quoted, quoted.replace("cfg(test)", f"cfg({TS})")).klass, "C")
         body = 'fn a() { m!(any(test, feature = "test-support")); }\n'
         self.assertEqual(self.classify(body.replace(f"{TS}", "test"), body).klass, "C")
 

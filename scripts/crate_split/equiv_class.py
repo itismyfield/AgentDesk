@@ -321,9 +321,15 @@ TEST_SUPPORT = ('"test-support"',)
 
 def test_equivalent_atoms(toks, close) -> set:
     """Token indexes to drop so each `any(test, feature = "test-support")` in a cfg predicate reads `test`."""
-    drop = set()
+    drop, inert = set(), set()
+    # Tokens of a macro invocation or `macro_rules!` body are data (`stringify!(#[cfg(test)])`), not attributes.
+    for i in range(len(toks) - 2):
+        if toks[i].kind == "id" and is_p(toks[i + 1], "!"):
+            k = i + 3 if toks[i + 2].kind == "id" else i + 2
+            if k < len(toks) and toks[k].kind == "p" and toks[k].text in PAIRS:
+                inert.update(range(k, close[k] + 1))
     for i in range(len(toks) - 3):
-        if not (is_p(toks[i], "#") and (is_p(toks[i + 1], "[") or is_p(toks[i + 1], "!"))):
+        if i in inert or not (is_p(toks[i], "#") and (is_p(toks[i + 1], "[") or is_p(toks[i + 1], "!"))):
             continue
         b = i + 1 if is_p(toks[i + 1], "[") else i + 2
         if b + 2 >= len(toks) or not is_p(toks[b], "[") or toks[b + 1].text != "cfg" or not is_p(toks[b + 2], "("):
