@@ -71,8 +71,9 @@ it("moves an assigned card to ready, and asks for an assignee first when it has 
 
   await act(async () => buttonIn(rowFor("open"), "To ready").click());
   const dialog = document.querySelector('[role="dialog"]')!;
-  const select = dialog.querySelector("select")!;
-  await act(async () => { select.value = "agent-1"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+  await act(async () => dialog.querySelector<HTMLElement>('[role="combobox"]')!.click());
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((el) => el.textContent?.includes("Builder"))!;
+  await act(async () => option.click());
   await act(async () => buttonIn(dialog, "Move to ready").click());
   expect(vi.mocked(updateKanbanCard).mock.calls.slice(1)).toEqual([["open", { assignee_agent_id: "agent-1" }], ["open", { status: "ready" }]]);
 });

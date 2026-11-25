@@ -6,7 +6,7 @@ import { AlertDialog } from "../../kit/free/dialog-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { Switch } from "../../kit/free/switch-clean";
 import { Cap, Desc, Eyebrow, InspSection, Num, cn } from "../common/KitPrimitives";
-import { Select } from "../common/Select";
+import { Select } from "../../kit/free/select-clean";
 import { GATE_LABELS } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import { TONE_COLORS, kindIcon } from "./PipelineCanvas";
@@ -49,22 +49,32 @@ function ConditionRow({ value, fields, busy, onChange, onRemove, tr }: {
   const type = spec?.type ?? (typeof value.value === "number" ? "integer" : typeof value.value);
   const set = (next: PipelineComparison["value"]) => onChange({ ...value, value: next });
   const label = tr(`${value.field} 값`, `${value.field} value`);
-  const input = type === "boolean" ? <Select aria-label={label} disabled={busy} value={String(value.value)} onChange={(event) => set(event.target.value === "true")}><option value="true">true</option><option value="false">false</option></Select>
-    : type === "integer" ? <input aria-label={label} type="number" step={1} className={FIELD} disabled={busy} value={Number(value.value)} onChange={(event) => set(Math.trunc(Number(event.target.value)) || 0)} />
-    : type === "enum" ? <Select aria-label={label} disabled={busy} value={String(value.value)} onChange={(event) => set(event.target.value)}>
-      {[...new Set([String(value.value), ...spec?.enum_values ?? []])].map((option) => <option key={option} value={option}>{option}</option>)}</Select>
-    : <input aria-label={label} className={FIELD} disabled={busy} value={String(value.value)} onChange={(event) => set(event.target.value)} />;
+  const input = type === "boolean"
+    ? <Select aria-label={label} size="lg" disabled={busy} value={String(value.value)}
+        options={[{ value: "true", label: "true" }, { value: "false", label: "false" }]} onChange={(next) => set(next === "true")} />
+    : type === "integer"
+      ? <input aria-label={label} type="number" step={1} className={FIELD} disabled={busy} value={Number(value.value)} onChange={(event) => set(Math.trunc(Number(event.target.value)) || 0)} />
+      : type === "enum"
+        ? <Select aria-label={label} size="lg" disabled={busy} value={String(value.value)}
+            options={[...new Set([String(value.value), ...spec?.enum_values ?? []])].map((option) => ({ value: option, label: option }))} onChange={(next) => set(next)} />
+        : <input aria-label={label} className={FIELD} disabled={busy} value={String(value.value)} onChange={(event) => set(event.target.value)} />;
+  const fieldOptions = [
+    ...(!spec ? [{ value: value.field, label: value.field }] : []),
+    ...fields.filter((field) => field.available || field.field === value.field).map((field) => ({
+      value: field.field,
+      label: `${field.field}${field.available ? "" : tr(" (이 종류에서 못 써요)", " (not for this kind)")}`,
+    })),
+  ];
   return <li className="grid gap-1.5">
     <div className="flex min-w-0 items-center gap-1">
-      <Select aria-label={tr("조건 필드", "Condition field")} className="font-mono text-[13px]" disabled={busy} value={value.field} onChange={(event) => onChange(freshComparison(fields.find((field) => field.field === event.target.value)!))}>
-        {!spec && <option value={value.field}>{value.field}</option>}
-        {fields.filter((field) => field.available || field.field === value.field).map((field) => <option key={field.field} value={field.field}>{field.field}{field.available ? "" : tr(" (이 종류에서 못 써요)", " (not for this kind)")}</option>)}
-      </Select>
+      <Select aria-label={tr("조건 필드", "Condition field")} size="lg" className="min-w-0 flex-1 font-mono" disabled={busy} value={value.field}
+        options={fieldOptions} onChange={(next) => { const found = fields.find((field) => field.field === next); if (found) onChange(freshComparison(found)); }} />
       {onRemove && <IconButton icon={<X aria-hidden />} label={tr("이 조건 빼기", "Remove this condition")} disabled={busy} onClick={onRemove} />}
     </div>
     <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-1.5">
-      <Select aria-label={tr("비교", "Comparison")} disabled={busy} value={value.op} onChange={(event) => onChange({ ...value, op: event.target.value })}>
-        {[...new Set([value.op, ...spec?.operators ?? []])].map((op) => <option key={op} value={op}>{OPS[op] ?? op}</option>)}</Select>
+      <Select aria-label={tr("비교", "Comparison")} size="lg" disabled={busy} value={value.op}
+        options={[...new Set([value.op, ...spec?.operators ?? []])].map((op) => ({ value: op, label: OPS[op] ?? op }))}
+        onChange={(next) => onChange({ ...value, op: next })} />
       {input}
     </div>
   </li>;
@@ -80,7 +90,10 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
   const setList = (next: PipelineComparison[]) => patch({ condition: conditionOf(next) });
   const { retry } = transition;
   const sharing = retry ? draft.transitions.filter((value) => value.retry?.budget_id === retry.budget_id).length : 0;
-  const options = draft.states.map((state) => <option key={state.id} value={state.id}>{state.id === transition.from ? tr("제자리", "In place") : stateName(state, state.id, tr)}</option>);
+  const stateOptions = draft.states.map((state) => ({
+    value: state.id,
+    label: state.id === transition.from ? tr("제자리", "In place") : stateName(state, state.id, tr),
+  }));
   return <li aria-label={tr(`전환 ${transition.id}`, `Transition ${transition.id}`)} className={cn("grid gap-2.5 rounded-xl border bg-[var(--th-card-bg)] p-3", flagged ? "border-[var(--err)]" : "border-[var(--line)]")}>
     <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
       <i aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: TONE_COLORS[pin?.tone ?? "other"] }} />
@@ -91,7 +104,9 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
     </div>
     <div className={GRID}>
       <Field label={tr("도착", "Goes to")}><span className="flex min-w-0 items-center gap-1">
-        <Select autoFocus={fresh} wrapperClassName="min-w-0 flex-1" disabled={busy} value={transition.to} onChange={(event) => patch({ to: event.target.value })}><option value="">{tr("골라 주세요", "Choose one")}</option>{options}</Select>
+        <Select ref={(el) => { if (fresh && el) el.focus(); }} aria-label={tr("도착", "Goes to")} size="lg" className="min-w-0 flex-1"
+          placeholder={tr("골라 주세요", "Choose one")} disabled={busy} value={transition.to || null} options={stateOptions}
+          onChange={(next) => patch({ to: next })} />
         <IconButton icon={<Search aria-hidden />} label={tr("상태 찾기·만들기", "Find or make a state")} disabled={busy} onClick={(event) => onFind(transition, event.currentTarget)} />
       </span></Field>
       <Field label={tr("우선순위", "Priority")}><input type="number" min={0} step={1} className={FIELD} disabled={busy} value={transition.priority} onChange={(event) => patch({ priority: whole(event.target.value) })} /></Field>
@@ -105,12 +120,14 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
     <Switch label={tr("재시도 한도", "Retry budget")} disabled={busy} checked={!!retry} onChange={(event) => patch({ retry: event.target.checked ? newRetry(draft, transition) : undefined })} />
     {retry && <div className={GRID}>
       <Field label={tr("횟수", "Times")}><input type="number" min={1} step={1} className={FIELD} disabled={busy} value={retry.max} onChange={(event) => update((current) => setRetryMax(current, retry.budget_id, whole(event.target.value, 1)))} /></Field>
-      <Field label={tr("다 쓰면", "Then")}><Select disabled={busy} value={retry.then_to} onChange={(event) => patch({ retry: { ...retry, then_to: event.target.value } })}><option value="">{tr("골라 주세요", "Choose one")}</option>{options}</Select></Field>
+      <Field label={tr("다 쓰면", "Then")}><Select aria-label={tr("다 쓰면", "Then")} size="lg" placeholder={tr("골라 주세요", "Choose one")} disabled={busy}
+        value={retry.then_to || null} options={stateOptions} onChange={(next) => patch({ retry: { ...retry, then_to: next } })} /></Field>
       {sharing > 1 && <Cap className="col-span-2">{tr(`한도 ${retry.budget_id}는 전환 ${sharing}개가 함께 써요.`, `Budget ${retry.budget_id} is shared by ${sharing} transitions.`)}</Cap>}
     </div>}
     <div className={GRID}>
-      <Field label={tr("승인", "Approval")}><Select disabled={busy} value={transition.gate ?? ""} onChange={(event) => patch({ gate: event.target.value || undefined })}>
-        <option value="">{tr("없음", "None")}</option>{Object.keys(GATE_LABELS).map((gate) => <option key={gate} value={gate}>{gateName(gate, tr)}</option>)}</Select></Field>
+      <Field label={tr("승인", "Approval")}><Select aria-label={tr("승인", "Approval")} size="lg" disabled={busy} value={transition.gate ?? ""}
+        options={[{ value: "", label: tr("없음", "None") }, ...Object.keys(GATE_LABELS).map((gate) => ({ value: gate, label: gateName(gate, tr) }))]}
+        onChange={(next) => patch({ gate: next || undefined })} /></Field>
     </div>
   </li>;
 }
@@ -142,13 +159,15 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
     </InspSection>
     <InspSection className={GRID}>
       <Field label={tr("이름", "Name")}><input className={FIELD} disabled={busy} value={state.title ?? ""} placeholder={stateName(undefined, state.id, tr)} onChange={(event) => patch({ title: event.target.value })} /></Field>
-      <Field label={tr("종류", "Kind")}><Select disabled={busy} value={state.kind} onChange={(event) => patch({ kind: event.target.value })}>
-        {[...new Set([state.kind, ...PIPELINE_KINDS])].map((kind) => <option key={kind} value={kind}>{kindName(kind, tr)}</option>)}</Select></Field>
+      <Field label={tr("종류", "Kind")}><Select aria-label={tr("종류", "Kind")} size="lg" disabled={busy} value={state.kind}
+        options={[...new Set([state.kind, ...PIPELINE_KINDS])].map((kind) => ({ value: kind, label: kindName(kind, tr) }))}
+        onChange={(next) => patch({ kind: next })} /></Field>
       <Field label={tr("담당", "Owner")}><input className={FIELD} disabled={busy} value={state.owner ?? ""} placeholder={tr("없음", "None")} onChange={(event) => patch({ owner: event.target.value })} /></Field>
       <Field label={tr("시간 초과(초)", "Timeout (s)")}><input type="number" min={1} step={1} className={FIELD} disabled={busy} value={state.timeout?.after_seconds ?? ""} placeholder={tr("없음", "None")}
         onChange={(event) => patch({ timeout: whole(event.target.value) ? { after_seconds: whole(event.target.value), transition_id: state.timeout?.transition_id ?? outgoing[0]?.id ?? "" } : undefined })} /></Field>
-      {state.timeout && <Field label={tr("그다음", "Then")}><Select disabled={busy} value={state.timeout.transition_id} onChange={(event) => patch({ timeout: { ...state.timeout!, transition_id: event.target.value } })}>
-        {[...new Set([state.timeout.transition_id, ...outgoing.map((value) => value.id)])].map((id) => <option key={id} value={id}>{id}</option>)}</Select></Field>}
+      {state.timeout && <Field label={tr("그다음", "Then")}><Select aria-label={tr("그다음", "Then")} size="lg" disabled={busy} value={state.timeout.transition_id}
+        options={[...new Set([state.timeout.transition_id, ...outgoing.map((value) => value.id)])].map((id) => ({ value: id, label: id }))}
+        onChange={(next) => patch({ timeout: { ...state.timeout!, transition_id: next } })} /></Field>}
       {state.timeout && <Cap className="col-span-2">{tr(`${durationText(state.timeout.after_seconds, tr)} 뒤에 이 전환으로 가요.`, `After ${durationText(state.timeout.after_seconds, tr)} it takes this transition.`)}</Cap>}
       <label className="col-span-2 grid gap-1 text-[13px] text-[var(--fg-muted)]">{tr("지시문", "Instructions")}
         <textarea rows={3} className={cn(FIELD, "resize-y")} disabled={busy} value={state.instructions ?? ""} onChange={(event) => patch({ instructions: event.target.value })} /></label>

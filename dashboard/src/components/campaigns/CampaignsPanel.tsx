@@ -37,7 +37,7 @@ import ServerCampaignSections, { ServerTaskDetails } from "./ServerCampaignDetai
 import ServerCampaignForm, { createDraft, editDraft, isUntouchedCreate, type DefinitionDraft } from "./ServerCampaignForm";
 import {
   DISPLAY_LABELS, campaignLocationQuery, commandAvailability, newIdempotencyKey, parseCampaignLocation, reconcileStop, rejectionText, stopRequest,
-  type CampaignLocation, type StopIntent,
+  type CampaignDetailView, type CampaignLocation, type StopIntent,
 } from "./serverCampaignModel";
 import { queueLocationQuery, parseQueueLocation } from "./campaignQueueModel";
 import { currentEditorToken, isOrphanedEditorEntry, useEditorHistory } from "./useEditorHistory";
@@ -89,6 +89,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
+  const [detailView, setDetailView] = useState<CampaignDetailView>(() => linked?.view ?? "overview");
   // The ledger relations editor's scope while it is open, tied to the campaign it opened on; an orphaned entry reached via
   // browser Back after navigating away stays closed (draft preserved in memory) so Back does not spin in place (P2-4).
   const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(() =>
@@ -159,13 +160,20 @@ export default function CampaignsPanel({ language }: { language: string }) {
     return changed ? next : current;
   }), [details, events]);
 
+  const selectedLegacy = mode === "legacy" ? campaigns.find((value) => value.id === selectedId) : undefined;
+  const effectiveView: CampaignDetailView =
+    (mode === "server" && detailView === "relations") ||
+    (mode === "legacy" && selectedLegacy !== undefined && selectedLegacy.nodes.length === 0 && detailView === "relations")
+      ? "overview"
+      : detailView;
+  const viewField = effectiveView !== "overview" ? { view: effectiveView } : {};
   const location: CampaignLocation | null = mode === "server"
-    ? serverSelected ? { mode, campaign: serverSelected, node } : null
-    : selectedId ? { mode, campaign: selectedId, node, ...editing ? { edit: editing } : {} } : null;
+    ? serverSelected ? { mode, campaign: serverSelected, node, ...viewField } : null
+    : selectedId ? { mode, campaign: selectedId, node, ...viewField, ...editing ? { edit: editing } : {} } : null;
   const query = tab === "queue" ? queueLocationQuery(queueCard) : location ? campaignLocationQuery(location) : null;
   const phone = useIsMobile();
   const targetEditorUrl = editing && selectedId
-    ? `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, edit: editing })}`
+    ? `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, ...viewField, edit: editing })}`
     : undefined;
   const restoreRelationsRef = useRef<() => void>(() => {});
   const relationsHistory = useEditorHistory({
@@ -185,17 +193,20 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const startEdit = (scope: EditScope) => {
     if (selectedId) setEditing(scope);
   };
-  // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
-  // once the address shows another page, the query is not this panel's to write.
   const [home] = useState(() => window.location.pathname);
+  const currentPathname = window.location.pathname;
+  const currentSearch = window.location.search;
   useEffect(() => {
     const { pathname, search, hash } = window.location;
     const onEditorEntry = currentEditorToken() !== null;
     if (!query || !samePage(pathname, home) || (editing && !phone && !onEditorEntry) || isOrphanedEditorEntry()) return;
     if (search !== query) window.history.replaceState(window.history.state, "", `${pathname}${query}${hash}`);
-  });
+  }, [query, home, editing, phone, currentPathname, currentSearch]);
 
-  const selectServer = (id: string) => { setMode("server"); setServerSelected(id); setNode(null); };
+  const selectServer = (id: string) => {
+    if (mode !== "server" || serverSelected !== id) setDetailView("overview");
+    setMode("server"); setServerSelected(id); setNode(null);
+  };
   const runCommand = async (doc: ServerCampaignDocument, name: ControlCommand, nodeId?: string) => {
     const { view } = doc;
     const campaign = view.campaign_id;
@@ -278,7 +289,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [picking, setPicking] = useState(false);
   const [pipelineEditing, setPipelineEditing] = useState(false);
   const autoRuns = useAutoQueueRequests();
-  const campaign = mode === "legacy" ? campaigns.find((value) => value.id === selectedId) : undefined;
+  const campaign = selectedLegacy;
   const entries: CampaignEntry[] = [
     ...campaigns.map((value) => legacyEntry(value, live[value.id], tr)),
     ...summaries.map((summary) => serverEntry(summary, details[summary.view.campaign_id]?.doc ?? null, tr)),
@@ -291,7 +302,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
     setPicking(false);
     if (editing) relationsHistory.releaseEntry();
     if (entry.kind === "server") selectServer(entry.id);
-    else { setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null); }
+    else {
+      if (mode !== "legacy" || selectedId !== entry.id) setDetailView("overview");
+      setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null);
+    }
   });
   const createNew = () => { setPicking(false); openDraft(NEW_DRAFT, () => createDraft(null)); };
   const list = <CampaignList entries={entries} selectedKey={selectedKey} onSelect={select} onCreate={createNew} createDisabled={serverDown}
@@ -302,6 +316,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const serverTaskViews = serverDoc ? serverTasks(serverDoc, serverEvents, tr) : [];
   const openNode = node && (campaign?.nodes.find((value) => value.id === node) ?? (mode === "server" ? serverDoc?.definition.nodes.find((value) => value.id === node) : undefined));
   const legacyDetail = campaign && <CampaignDetail key={`legacy:${campaign.id}`} title={campaign.title} showTitle={!phone} tr={tr}
+    view={effectiveView} onViewChange={setDetailView}
     chips={!phone && <span className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-muted)]">
       <Chip title={tr("작업 기록부로 관리하는 캠페인", "Campaign kept as a task ledger")}>{tr("원장", "Ledger")}</Chip>
       <Num>{tr("라운드", "Round")} {campaign.round}</Num>
@@ -321,7 +336,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
     board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
-    pipeline={<CampaignPipeline source={{ kind: "legacy" }} tr={tr} />}
+    pipeline={<CampaignPipeline source={{ kind: "legacy" }} campaign={campaign} tasks={legacyTasks} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
     onCloseTask={() => setNode(null)} />;
@@ -335,6 +350,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     const retry = commandAvailability(view, "prepare_retry", connection);
     const commands = <ServerCampaignControls view={view} connection={connection} stopIntent={stops[id] ?? null} busy={busy.has(id)} error={commandErrors[id] ?? null} onCommand={(name) => void runCommand(serverDoc, name)} tr={tr} />;
     return <CampaignDetail key={`server:${id}`} title={definition.title} showTitle={!phone} tr={tr}
+      view={effectiveView} onViewChange={setDetailView}
       chips={(!phone || view.unknown) && <span className="flex flex-wrap items-center gap-2 text-xs">
         {!phone && <><Chip>{tr("서버", "Server")}</Chip><Chip className="font-mono">{definition.repository}</Chip></>}
         {view.unknown && <Badge status="blocked" label={tr("확인 불가", "Unknown")} tr={tr} />}

@@ -18,6 +18,13 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
   getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("../../api/serverCampaignPipeline", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/serverCampaignPipeline")>()),
+  getDefaultPipelineTemplate: vi.fn().mockResolvedValue({
+    template: { id: "campaign-development-9", version: 1 },
+    pipeline: { start: "plan", states: [{ id: "plan", kind: "agent_task", title: "Plan" }], transitions: [], events: [] },
+  }),
+}));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodesChange }: { nodes: Array<{ id: string; domAttributes?: object }>; onNodesChange?: (changes: unknown[]) => void }) => (
     <div data-graph-nodes={nodes.length}>
@@ -544,4 +551,57 @@ it("opens a task in a pane docked beside the overview and gives focus back to it
   expect(pane()).toBeNull();
   expect(opener.getAttribute("aria-current")).toBeNull();
   expect(document.activeElement).toBe(opener);
+});
+
+it("filters campaigns by title or ID from the list search box", async () => {
+  const alpha = { ...campaign, id: "alpha-dag", title: "Alpha release" };
+  const beta = { ...campaign, id: "beta-ops", title: "Beta rollout" };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [alpha, beta], live: {}, read: 1 });
+  await render();
+  const search = container.querySelector<HTMLInputElement>('input[aria-label="Search campaigns"]')!;
+  await typeValue(search, "beta-ops");
+  expect([...container.querySelectorAll("[data-campaign-key]")].map((el) => el.getAttribute("data-campaign-key"))).toEqual(["legacy:beta-ops"]);
+  await typeValue(search, "nonexistent");
+  expect(page()).toContain("No matching campaigns.");
+});
+
+it("syncs the active campaign detail sub-tab with view= in the URL while omitting the default overview tab", async () => {
+  window.history.replaceState(null, "", "/campaigns?mode=legacy&campaign=ongoing&view=relations");
+  await render();
+  expect(container.querySelector(".campaign-relations")).not.toBeNull();
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing&view=relations");
+
+  await act(async () => button("Stage board").click());
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing&view=board");
+
+  await act(async () => button("Overview").click());
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing");
+});
+
+it("switches Connections to HandoffSwimlanes and opens a selected task from a lane", async () => {
+  const multi = {
+    ...campaign,
+    nodes: [
+      makeCampaignNode("g1", { title: "Gateway spec", group: "Gateway", status: "completed" }),
+      makeCampaignNode("r1", { title: "Relay handoff", group: "Relay", status: "blocked", dependencies: ["g1"], blocker: "Waiting on schema" }),
+    ],
+  };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [multi], live: {}, read: 1 });
+  await render();
+  await act(async () => button("Connections").click());
+  await act(async () => button("Swimlanes").click());
+  const swimlanes = container.querySelector(".aui-handoff-swimlanes");
+  expect(swimlanes).not.toBeNull();
+  expect(swimlanes?.textContent).toContain("Gateway");
+  expect(swimlanes?.textContent).toContain("Relay handoff");
+  await act(async () => swimlanes!.querySelector<HTMLButtonElement>('[data-item="r1"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay handoff");
+});
+
+it("renders AgentStateMachine and AgentMetroMap for ledger campaigns with running tasks in the Pipeline tab", async () => {
+  await render();
+  await act(async () => button("Pipeline").click());
+  expect(container.querySelector(".aui-agent-state-machine")).not.toBeNull();
+  expect(container.querySelector(".aui-agent-metro-map")).not.toBeNull();
+  expect(page()).toContain("Preview built-in 9-stage template");
 });
