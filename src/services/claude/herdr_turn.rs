@@ -5,6 +5,8 @@ mod first_input;
 mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
+#[cfg(all(test, unix))]
+pub(crate) use first_input::owned_pending_prompt_for_tests;
 #[cfg(test)]
 pub(crate) use first_input::regression_tests::regression_attached;
 #[cfg(any(test, feature = "test-support"))]
