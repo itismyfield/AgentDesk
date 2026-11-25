@@ -5,6 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wir
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedState, load_hosted_execution_pg,
 };
+use crate::services::discord::adk_session;
 use crate::services::discord::queue_io::cancel_backstop_test_support as wake_probe;
 use crate::services::tui_prompt_dedupe as dedupe;
 use crate::services::turn_orchestrator::{PendingQueueItem, v2_queue};
