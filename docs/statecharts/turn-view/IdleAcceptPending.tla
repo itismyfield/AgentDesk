@@ -1,71 +1,107 @@
 ------------------------ MODULE IdleAcceptPending ------------------------
 EXTENDS Naturals, FiniteSets
-\* One human input accepted by an idle channel owner (#8398). Early = TRUE puts the ⏳ on it at
-\* acceptance; the owner handoff then starts it or leaves through one exit, and the settle after
-\* the handoff returns retracts an early ⏳ that no start took over.
-CONSTANTS Early, RetractExits, RestartCleanup, StartTakesAttempt
-Exits == {"busy", "raceLoss", "replayRefused", "replayDeferred", "blocked", "writerBlocked",
-          "consumed"}
-\* Exits that leave the original in the owner queue; the others remove it.
-StillQueued == {"busy", "raceLoss", "replayDeferred", "writerBlocked"}
-VARIABLES phase, markers, adds, attempt, recorded, queued, restarted, exit
-vars == <<phase, markers, adds, attempt, recorded, queued, restarted, exit>>
+\* A person's input A accepted by an idle channel owner (#8398), with B arriving at the same time.
+\* Early = TRUE puts the ⏳ on A at acceptance. The settles that retract an early ⏳ no start took
+\* over are the links: "handoff" (its return), "recheck" (custody read after the note),
+\* "queueExit" (a cancel's exit feedback) and "boot" (the sweep of persisted early marks).
+\* HeadVerdict "actor" marks only the input the owner's own turn found as its sole head; "pre"
+\* is the old empty-owner check made before admission, which both A and B can pass.
+CONSTANTS Early, Links, StartTakesAttempt, HeadVerdict
+VARIABLES phase, markers, adds, attempt, recorded, persisted, queued, restarted, exit, bMarked
+vars == <<phase, markers, adds, attempt, recorded, persisted, queued, restarted, exit, bMarked>>
 
 Init == /\ phase = "new" /\ markers = {} /\ adds = 0 /\ attempt = "none"
-        /\ recorded = FALSE /\ queued = FALSE /\ restarted = FALSE /\ exit = "none"
+        /\ recorded = FALSE /\ persisted = FALSE /\ queued = FALSE /\ restarted = FALSE
+        /\ exit = "none" /\ bMarked = FALSE
 
-Accept == /\ phase = "new" /\ phase' = "accepted" /\ queued' = TRUE
-          /\ markers' = IF Early THEN {"hourglass"} ELSE {}
-          /\ adds' = IF Early THEN 1 ELSE 0
-          /\ attempt' = IF Early THEN "early" ELSE "none"
-          /\ recorded' = Early
-          /\ UNCHANGED <<restarted, exit>>
+\* The early ⏳ is still untaken and this process or the persisted record names it.
+Untaken == attempt = "early" /\ (recorded \/ persisted)
+Clear == /\ markers' = {} /\ attempt' = "none" /\ recorded' = FALSE /\ persisted' = FALSE
 
-\* A restart loses the in-memory record; the durable original replays into a new handoff.
-Restart == /\ phase \in {"accepted", "handing"} /\ ~restarted
-           /\ restarted' = TRUE /\ recorded' = FALSE /\ phase' = "accepted"
-           /\ UNCHANGED <<markers, adds, attempt, queued, exit>>
+\* A and B are admitted; B queues behind A as its follower.
+Admit == /\ phase = "new" /\ phase' = "admitted" /\ queued' = TRUE
+         /\ bMarked' = (Early /\ HeadVerdict = "pre")
+         /\ UNCHANGED <<markers, adds, attempt, recorded, persisted, restarted, exit>>
 
-Hand == /\ phase = "accepted" /\ phase' = "handing"
-        /\ UNCHANGED <<markers, adds, attempt, recorded, queued, restarted, exit>>
+\* The reaction lands, then the record (memory and persisted).
+Note == /\ phase = "admitted" /\ phase' = "noted"
+        /\ IF Early
+              THEN /\ markers' = {"hourglass"} /\ adds' = adds + 1 /\ attempt' = "early"
+                   /\ recorded' = TRUE /\ persisted' = TRUE
+              ELSE UNCHANGED <<markers, adds, attempt, recorded, persisted>>
+        /\ UNCHANGED <<queued, restarted, exit, bMarked>>
 
-\* The start site re-notes Pending: over an early ⏳ it only takes a fresh attempt (no add).
+Recheck == /\ phase = "noted" /\ phase' = "accepted"
+           /\ IF "recheck" \in Links /\ ~queued /\ Untaken
+                 THEN Clear ELSE UNCHANGED <<markers, attempt, recorded, persisted>>
+           /\ UNCHANGED <<adds, queued, restarted, exit, bMarked>>
+
+\* A cancel takes A and B out before any handoff; its exit feedback clears what is recorded.
+Cancel == /\ phase \in {"admitted", "noted", "accepted"} /\ queued /\ queued' = FALSE
+          /\ IF "queueExit" \in Links /\ Untaken
+                THEN Clear ELSE UNCHANGED <<markers, attempt, recorded, persisted>>
+          /\ bMarked' = (bMarked /\ "queueExit" \notin Links)
+          /\ UNCHANGED <<phase, adds, restarted, exit>>
+
+\* The drive finds no front: no handoff runs.
+DriveEmpty == /\ phase = "accepted" /\ ~queued /\ phase' = "settled"
+              /\ UNCHANGED <<markers, adds, attempt, recorded, persisted, queued, restarted, exit,
+                             bMarked>>
+
+Hand == /\ phase = "accepted" /\ queued /\ phase' = "handing"
+        /\ UNCHANGED <<markers, adds, attempt, recorded, persisted, queued, restarted, exit,
+                       bMarked>>
+
+\* The start submits A with B merged; over an early ⏳ it only takes a fresh attempt.
 Start == /\ phase = "handing" /\ phase' = "returned" /\ exit' = "started" /\ queued' = FALSE
-         /\ attempt' = "start"
+         /\ attempt' = "start" /\ persisted' = FALSE
          /\ IF "hourglass" \in markers /\ StartTakesAttempt
                THEN UNCHANGED <<markers, adds>>
                ELSE /\ markers' = {"hourglass"} /\ adds' = adds + 1
-         /\ UNCHANGED <<recorded, restarted>>
+         /\ UNCHANGED <<recorded, restarted, bMarked>>
 
-\* An exit's own queue marker is ignored over a started-looking ⏳; the settle publishes it.
-Leave(e) == /\ phase = "handing" /\ phase' = "returned" /\ exit' = e
-            /\ queued' = (e \in StillQueued)
-            /\ markers' = IF Early THEN markers
-                          ELSE IF e \in StillQueued THEN {"mailbox"} ELSE {}
-            /\ UNCHANGED <<adds, attempt, recorded, restarted>>
+\* Any exit without a start; custody decides the settle, not the exit's name. The exit's own
+\* queue marker is ignored over a ⏳ and kept otherwise. B, still a waiting input of its own, is
+\* settled by its own later handoff.
+Leave == /\ phase = "handing" /\ phase' = "returned" /\ exit' = "left"
+         /\ \E held \in BOOLEAN : queued' = held
+         /\ markers' = IF "hourglass" \in markers THEN markers
+                       ELSE IF queued' THEN {"mailbox"} ELSE {}
+         /\ bMarked' = (bMarked /\ "handoff" \notin Links)
+         /\ UNCHANGED <<adds, attempt, recorded, persisted, restarted>>
 
-\* After the handoff returns: an early attempt nobody took is rolled back to 📬 or cleared. A
-\* restart's record survives only in the persisted older-generation Pending state.
-Owned == recorded \/ (restarted /\ RestartCleanup)
 Settle == /\ phase = "returned" /\ phase' = "settled"
-          /\ IF attempt = "early" /\ Owned /\ exit \in RetractExits
+          /\ IF "handoff" \in Links /\ Untaken
                 THEN /\ markers' = IF queued THEN {"mailbox"} ELSE {}
-                     /\ attempt' = "none"
-                ELSE UNCHANGED <<markers, attempt>>
-          /\ recorded' = FALSE
-          /\ UNCHANGED <<adds, queued, restarted, exit>>
+                     /\ attempt' = "none" /\ recorded' = FALSE /\ persisted' = FALSE
+                ELSE UNCHANGED <<markers, attempt, recorded, persisted>>
+          /\ UNCHANGED <<adds, queued, restarted, exit, bMarked>>
 
-Next == Accept \/ Restart \/ Hand \/ Start \/ (\E e \in Exits : Leave(e)) \/ Settle
-Spec == Init /\ [][Next]_vars /\ WF_vars(Accept) /\ WF_vars(Hand) /\ WF_vars(Settle)
-        /\ WF_vars(Start \/ \E e \in Exits : Leave(e))
+\* A restart at any open step loses the record; boot may drop the original (an expired hold);
+\* the boot sweep clears a persisted early mark whose input is gone; a held input replays.
+Restart == /\ phase \in {"admitted", "noted", "accepted", "handing", "returned"} /\ ~restarted
+           /\ restarted' = TRUE
+           /\ \E drop \in BOOLEAN : queued' = (queued /\ ~drop)
+           /\ IF "boot" \in Links /\ persisted /\ attempt = "early" /\ ~queued'
+                 THEN Clear
+                 ELSE /\ recorded' = FALSE /\ UNCHANGED <<markers, attempt, persisted>>
+           /\ phase' = IF queued' THEN "accepted" ELSE "settled"
+           /\ UNCHANGED <<adds, exit, bMarked>>
 
-\* The rules: an accepted input is never invisible while the owner decides; a ⏳ stays only on
-\* a started turn; a queued leftover shows 📬; a start over an early ⏳ adds nothing.
-AcceptedPromptlyVisible == phase \in {"accepted", "handing"} => markers = {"hourglass"}
+Next == Admit \/ Note \/ Recheck \/ Cancel \/ DriveEmpty \/ Hand \/ Start \/ Leave \/ Settle
+        \/ Restart
+Spec == Init /\ [][Next]_vars /\ WF_vars(Admit) /\ WF_vars(Note) /\ WF_vars(Recheck)
+        /\ WF_vars(DriveEmpty) /\ WF_vars(Hand) /\ WF_vars(Start \/ Leave) /\ WF_vars(Settle)
+
+\* An accepted input waiting for its start shows ⏳ (a restart before the note never marks it).
+AcceptedPromptlyVisible == (phase \in {"accepted", "handing"} /\ queued /\ ~restarted)
+                           => markers = {"hourglass"}
 NoStuckPending == phase = "settled" => ("hourglass" \in markers => exit = "started")
+NoStuckFollower == phase = "settled" => ~bMarked
 QueuedLeftoverVisible == (phase = "settled" /\ queued) => markers = {"mailbox"}
 StartAddsOnce == exit = "started" => adds = 1
 OneMarker == Cardinality(markers) <= 1
-Converges == (phase = "accepted")
-             ~> (phase = "settled" /\ ("hourglass" \in markers => exit = "started"))
+Converges == (phase = "admitted")
+             ~> (phase = "settled" /\ ~bMarked
+                 /\ ("hourglass" \in markers => exit = "started"))
 =============================================================================

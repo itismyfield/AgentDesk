@@ -2166,10 +2166,12 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/IdleAcceptBefore.cfg	IdleAcceptPending	AcceptedPromptlyVisible	-
-turn-view/IdleAcceptMissRestartCleanup.cfg	IdleAcceptPending	NoStuckPending,QueuedLeftoverVisible	Converges
-turn-view/IdleAcceptMissRetractRaceLoss.cfg	IdleAcceptPending	NoStuckPending,QueuedLeftoverVisible	Converges
-turn-view/IdleAcceptMissRetractReplayRefused.cfg	IdleAcceptPending	NoStuckPending	Converges
-turn-view/IdleAcceptMissRetractWriterBlocked.cfg	IdleAcceptPending	NoStuckPending,QueuedLeftoverVisible	Converges
+turn-view/IdleAcceptMissBoot.cfg	IdleAcceptPending	NoStuckPending	Converges
+turn-view/IdleAcceptMissHandoff.cfg	IdleAcceptPending	NoStuckPending,QueuedLeftoverVisible	Converges
+turn-view/IdleAcceptMissQueueExit.cfg	IdleAcceptPending	NoStuckPending	Converges
+turn-view/IdleAcceptMissRecheck.cfg	IdleAcceptPending	NoStuckPending	Converges
+turn-view/IdleAcceptNoCleanup.cfg	IdleAcceptPending	NoStuckPending,QueuedLeftoverVisible	Converges
 turn-view/IdleAcceptPending.cfg	IdleAcceptPending	-	-
+turn-view/IdleAcceptPreHeadVerdict.cfg	IdleAcceptPending	NoStuckFollower	Converges
 turn-view/IdleAcceptStartReAdds.cfg	IdleAcceptPending	StartAddsOnce	-
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible

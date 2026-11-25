@@ -1,11 +1,13 @@
 stateDiagram-v2
-    [*] --> New
-    New --> AcceptedHourglass: idle owner accepts a person's input / ⏳ (early attempt)
-    New --> AcceptedUnmarked: before #8398 / no marker until the start
-    AcceptedHourglass --> AcceptedHourglass: restart / record lost, persisted Pending kept
-    AcceptedHourglass --> Handing: owner grants the front
-    Handing --> Started: start re-notes Pending / fresh attempt, no add
-    Handing --> Returned: busy, race loss, replay refused or deferred, blocked, writer held, consumed
-    Returned --> Mailbox: settle, owner still holds it / ⏳ → 📬
-    Returned --> Cleared: settle, input left the queue / ⏳ removed
-    Started --> [*]: turn result keeps today's ⏳ → ✅/⚠/🛑
+    [*] --> Admitted: owner turn admits A (head verdict) and B behind it
+    Admitted --> Noted: A was the sole head of an idle owner / ⏳, record + persisted mark
+    Admitted --> Admitted: cancel before the note / nothing recorded yet
+    Noted --> Accepted: recheck custody / ⏳ cleared if A already left
+    Noted --> Noted: cancel / queue exit clears the recorded ⏳
+    Accepted --> Settled: drive finds no front (cancelled)
+    Accepted --> Handing: owner grants A
+    Handing --> Returned: start (fresh attempt, no add, B merged) or exit (held or gone)
+    Returned --> Settled: handoff settle / ⏳ → 📬 while held, ⏳ removed when gone
+    Admitted --> Accepted: restart, input replays
+    Returned --> Accepted: restart before the settle, input still held
+    Returned --> Settled: restart, input gone or dropped by boot / boot sweep clears the persisted mark
