@@ -1158,6 +1158,7 @@ src/
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
+│   │   │   ├── retry_probe.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
@@ -2672,7 +2673,8 @@ src/
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
 │   │   │   │   │   │   ├── native_input.rs
-│   │   │   │   │   │   └── pending_attached.rs
+│   │   │   │   │   │   ├── pending_attached.rs
+│   │   │   │   │   │   └── preclaim_wait.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2725,7 +2727,8 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
 │   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
-│   │   │   │   │   └── clear_execute_tests.rs
+│   │   │   │   │   ├── clear_execute_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -5274,6 +5277,8 @@ src/
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── retry_wait.rs
+│   │   │   │   ├── retry_wait_tests.rs
 │   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs

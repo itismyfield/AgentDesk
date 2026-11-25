@@ -126,6 +126,8 @@ pub(crate) use queued_head::BindingIntent;
 pub(crate) use queued_head::HandoffHeld;
 #[cfg(unix)]
 pub(crate) use queued_head::PreKeyPin;
+#[cfg(unix)]
+pub(crate) use queued_head::RetryWaitCause;
 pub(crate) use queued_head::effort_intent;
 #[cfg(unix)]
 pub(crate) use queued_head::proves_not_sent;

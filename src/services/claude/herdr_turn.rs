@@ -432,12 +432,15 @@ fn cleared_source(
 
 /// A Pending execution from an earlier turn, only once the log holds its own record for the
 /// session its launch named: only an attach after SessionStart, or the pane's hooks, write one.
+/// A recorded pane without evidence is proven first, whatever its start; every refusal is typed
+/// by its cause, so the owner waits on it rather than counting a failed start.
 fn pending_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,
     record: &HostedExecution,
 ) -> Result<Attached, String> {
+    use crate::services::turn_orchestrator::RetryWaitCause as Cause;
     let nonce = &record.execution_nonce;
     let adopted = record.location.is_none() && record.expected.is_none();
     if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {
@@ -446,24 +449,73 @@ fn pending_source(
     let session_id = execution_context("claude", nonce)?
         .expected_native_session_id
         .ok_or("herdr turn: the pending launch named no session")?;
-    let started = latest_logged(turn).is_some_and(|event| {
-        event.execution_nonce.as_deref() == Some(nonce.as_str())
-            && logged_session(&event.new) == Some(session_id.as_str())
-    });
-    if !started && adopted {
-        return Err(format!(
-            "herdr turn: pending execution {nonce} took its launched pane; no start of \
-             {session_id} is logged yet"
-        ));
-    }
-    if !started {
-        let refused = never_attached::refusal(turn, runtime, ports, record, &session_id);
-        return Err(refused);
-    }
-    if record.expected.is_none() && !adopted {
-        never_attached::probe_again(turn, runtime, ports)?;
+    let refused =
+        |cause: Cause, detail: String| retry_probe::refused(turn, &session_id, cause, &detail);
+    let unproven = || Cause::PendingUnproven {
+        nonce: nonce.clone(),
+    };
+    let proven;
+    let record = match record.location {
+        Some(_) if record.expected.is_none() => {
+            if let Err(gap) = never_attached::probe_again(turn, runtime, ports) {
+                let detail = never_attached::refusal(turn, record, &session_id, Err(gap));
+                return Err(refused(unproven(), detail));
+            }
+            proven = reloaded(turn, runtime, nonce).map_err(|e| refused(unproven(), e))?;
+            &proven
+        }
+        _ => record,
+    };
+    let logical = turn.owner.logical_key.as_str();
+    if !start_logged(turn.channel_id, logical, nonce, &session_id) {
+        let (cause, detail) = match adopted {
+            true => (
+                Cause::PendingUnplaced {
+                    nonce: nonce.clone(),
+                },
+                format!(
+                    "herdr turn: pending execution {nonce} took its launched pane; no start of \
+                     {session_id} is logged yet"
+                ),
+            ),
+            false => {
+                let evidence = record
+                    .expected
+                    .as_ref()
+                    .map(drop)
+                    .ok_or("no evidence recorded");
+                let evidence = evidence.map_err(str::to_owned);
+                let detail = never_attached::refusal(turn, record, &session_id, evidence);
+                (
+                    Cause::PendingUnstarted {
+                        nonce: nonce.clone(),
+                    },
+                    detail,
+                )
+            }
+        };
+        return Err(refused(cause, detail));
     }
     attach(turn, runtime, ports, nonce, &session_id)
+}
+
+/// Pending execution `nonce` read again once its probe recorded the evidence it lacked.
+fn reloaded(
+    turn: &HerdrTurn<'_>,
+    runtime: &Handle,
+    nonce: &str,
+) -> Result<HostedExecution, String> {
+    match runtime.block_on(load(turn.pool, &turn.owner)) {
+        HostedLookup::Found(found) => match found.record {
+            HostedRecord::Known(record)
+                if record.execution_nonce == nonce && record.state == HostedState::Pending =>
+            {
+                Ok(record)
+            }
+            other => Err(format!("herdr turn: row moved on: {other:?}")),
+        },
+        other => Err(format!("herdr turn: row unreadable: {other:?}")),
+    }
 }
 
 /// The turn's resolution of its unplaced Pending `nonce`: adopted, or retired for a fresh launch.
@@ -486,10 +538,17 @@ fn unplaced_resolved(
     unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
 }
 
+/// Whether the pane's latest logged record is execution `nonce`'s start of `session_id`.
+fn start_logged(channel: u64, logical: &str, nonce: &str, session_id: &str) -> bool {
+    latest_logged(channel, logical).is_some_and(|event| {
+        event.execution_nonce.as_deref() == Some(nonce)
+            && logged_session(&event.new) == Some(session_id)
+    })
+}
+
 /// The pane's latest logged record that moved it; refusal audits do not.
-fn latest_logged(turn: &HerdrTurn<'_>) -> Option<BindingEvent> {
-    let logical = turn.owner.logical_key.as_str();
-    let events = binding_events_since(turn.channel_id, 0).ok()?;
+fn latest_logged(channel: u64, logical: &str) -> Option<BindingEvent> {
+    let events = binding_events_since(channel, 0).ok()?;
     events
         .into_iter()
         .rev()
@@ -665,19 +724,27 @@ pub(crate) fn launched(
     }
 }
 
-/// Waits for the launched session's SessionStart: its provider and hooks are up. A resume waits
-/// for its own execution's `source=resume` start, never for another start of the same session.
+/// Waits for execution `nonce`'s SessionStart: its provider and hooks are up. A resume waits for
+/// its own execution's `source=resume` start, never for another start of the same session. A wait
+/// that ran out, not one cancelled, is refused as this launch's own timeout.
 fn session_started(
     runtime: &Handle,
     hooks: &mut broadcast::Receiver<HookEvent>,
-    (session_id, resume): (&str, Option<&str>),
+    (session_id, nonce, resume): (&str, &str, bool),
     cancel: Option<&CancelToken>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + SESSION_START_WAIT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        if cancel_requested(cancel) || left.is_zero() {
-            return Err(format!("herdr turn: no SessionStart of {session_id}"));
+        let missing = || format!("herdr turn: no SessionStart of {session_id}");
+        if cancel_requested(cancel) {
+            return Err(missing());
+        }
+        if left.is_zero() {
+            let cause = crate::services::turn_orchestrator::RetryWaitCause::OwnLaunchTimeout {
+                nonce: nonce.to_owned(),
+            };
+            return Err(cause.refusal(&missing()));
         }
         let poll = left.min(Duration::from_millis(200));
         match runtime.block_on(tokio::time::timeout(poll, hooks.recv())) {
@@ -685,9 +752,7 @@ fn session_started(
                 if event.provider == "claude"
                     && event.kind == HookEventKind::SessionStart
                     && event.session_id == session_id
-                    && resume.is_none_or(|nonce| {
-                        session_handoff::resumed_start(&event, session_id, nonce)
-                    }) =>
+                    && (!resume || session_handoff::resumed_start(&event, session_id, nonce)) =>
             {
                 return Ok(());
             }
@@ -919,7 +984,7 @@ fn is_turn_prompt(line: &str) -> bool {
 /// call bound it; until then it stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
     let logical = turn.owner.logical_key.as_str();
-    let logged = latest_logged(turn).is_some_and(|event| {
+    let logged = latest_logged(turn.channel_id, logical).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
             && matches!(
                 event.new,
@@ -941,7 +1006,9 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
 
 mod live_reader;
 mod never_attached;
+pub(crate) mod retry_probe;
 use live_reader::read_to_provider_terminal;
+pub(crate) use retry_probe::take as take_retry_probe;
 pub(crate) mod start_offset;
 mod terminal_replay;
 pub(crate) use terminal_replay::{

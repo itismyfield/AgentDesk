@@ -754,6 +754,7 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
 }
 
 mod pending_attached;
+mod preclaim_wait;
 #[path = "owner_input_start_wait.rs"]
 mod start_wait;
 
@@ -957,12 +958,7 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
-    crate::services::discord::herdr_terminate::root_replaced::preclaim::before_idle(
-        &shared,
-        &shared.provider,
-        channel,
-    )
-    .await?;
+    preclaim_wait::before_claim(&shared, channel, &front).await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
         // The greeting's permit, not a tmux pane read, decides when it may start.

@@ -145,10 +145,15 @@ pub(crate) fn launched_source(
     launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome).map_err(|e| launch_error("admit_create_evidence", e))?;
-    let resume = resumed.is_some().then_some(nonce.as_str());
     let cancel = turn.cancel.as_deref();
-    session_started(runtime, &mut hooks, (&session_id, resume), cancel)
-        .map_err(|e| launch_error("session_start", e))?;
+    session_started(
+        runtime,
+        &mut hooks,
+        (&session_id, &nonce, resumed.is_some()),
+        cancel,
+    )
+    .map_err(|e| super::retry_probe::armed(turn, &session_id, e))
+    .map_err(|e| launch_error("session_start", e))?;
     if let Some(captured) = fence {
         runtime
             .block_on(provider_resume_fence::release_pg(turn.pool, &captured))

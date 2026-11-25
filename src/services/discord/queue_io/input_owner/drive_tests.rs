@@ -389,7 +389,7 @@ async fn a_claimed_front_the_queue_took_reserves_nothing() {
         let front = (mailbox.v2_request(|slot| {
             let owner = slot.as_mut().ok_or("no owner")?;
             let front = owner.front().ok_or("no front")?;
-            owner.grant_front(&front).map(|()| front)
+            owner.grant_front(&front).map(|_| front)
         }))
         .await
         .unwrap();
@@ -543,7 +543,7 @@ async fn a_claim_reserves_only_as_its_owners_current_claim() {
         let granted = mailbox.v2_request(|slot| {
             let owner = slot.as_mut().ok_or("no owner")?;
             let front = owner.front().ok_or("no front")?;
-            owner.grant_front(&front).map(|()| front)
+            owner.grant_front(&front).map(|_| front)
         });
         let front = granted.await.unwrap();
         claim_turn(&mailbox, front.1.message_id, &front)
