@@ -22,6 +22,44 @@ pub(crate) fn submit(
         .map_err(SubmissionError::into_legacy)
 }
 
+/// What a Pending row's turn hands the owner: the source its attach returned, and the lineage
+/// read from that source, which may name a fresh launch after an unplaced Pending was retired.
+pub(super) fn pending_handover(
+    record: &HostedExecution,
+    source: impl FnOnce(&HostedExecution) -> Result<Attached, String>,
+) -> Result<(Attached, crate::services::claude_tui::owner_input::Lineage), String> {
+    let attached = source(record)?;
+    Ok((
+        attached,
+        crate::services::claude_tui::owner_input::Lineage::Pending,
+    ))
+}
+
+/// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
+/// read, the execution `attached` its attach returned, and the execution `target` the hook names.
+#[cfg(all(test, unix))]
+pub(crate) fn owned_pending_prompt_for_tests(
+    turn: &HerdrTurn<'_>,
+    (record, attached, target): (&HostedExecution, &HostedExecution, &HostedExecution),
+    (session_id, transcript): (&str, PathBuf),
+) -> Result<(), String> {
+    let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
+    let source = |record: &HostedExecution| {
+        Ok(Attached {
+            nonce: record.execution_nonce.clone(),
+            session_id: session_id.into(),
+            transcript: transcript.clone(),
+            target: gate(record)?,
+            bound: true,
+            awaiting_clear: false,
+            physical: physical(record),
+        })
+    };
+    let (_, lineage) = pending_handover(record, |_| source(attached))?;
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    submit_owned(turn, hook, (lineage, None), source(target)?, &sender).map(drop)
+}
+
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
 /// the driver observed, binds its pane, and runs this write as its effect; its settlement is final.
 pub(crate) fn submit_owned(

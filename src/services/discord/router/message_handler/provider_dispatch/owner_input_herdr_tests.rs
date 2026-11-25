@@ -15,6 +15,8 @@ use scope::Lineage;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "owner_input_herdr_attached_tests.rs"]
+mod attached;
 #[path = "owner_input_herdr_busy_operation_tests.rs"]
 mod busy_operation;
 #[path = "owner_input_herdr_pending_tests.rs"]
@@ -168,8 +170,19 @@ impl HerdrOwner {
         wanted: Lineage,
         prompt: &str,
     ) -> scope::LaunchHook {
+        created(
+            self.registration(provider, host),
+            prompt.into(),
+            wanted,
+            (None, reply_once(None)),
+        )
+    }
+
+    /// The registration of the original on `host`, prepared before any launch on a target that
+    /// names no execution the driver will observe.
+    fn registration(&self, provider: &str, host: &str) -> Registration {
         let nonce = format!("{:032x}", self.channel);
-        let registration = Registration {
+        Registration {
             native: None,
             mailbox: self.mailbox.clone(),
             execution: Execution::LocalTui,
@@ -192,13 +205,7 @@ impl HerdrOwner {
             native_pin_submitted: None,
             observation: None,
             recovery: Default::default(),
-        };
-        created(
-            registration,
-            prompt.into(),
-            wanted,
-            (None, reply_once(None)),
-        )
+        }
     }
 
     /// The owner's head as the pane saw it at each send.

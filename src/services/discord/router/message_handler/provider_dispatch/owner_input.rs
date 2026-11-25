@@ -1478,13 +1478,7 @@ fn take_owned(
         host,
         registration.phase,
     )?;
-    // A driver that hands its observed execution over writes the prompt as the owner's effect.
-    let wanted = match (route, turn.provider.as_str()) {
-        (target::Route::Cold, "claude" | "codex") => Some(scope::Lineage::Created),
-        (target::Route::HerdrIdle, "claude" | "codex") => Some(scope::Lineage::Existing),
-        _ => None,
-    };
-    if let Some(wanted) = wanted {
+    if let Some(wanted) = handed_over(route, turn.provider.as_str()) {
         let hook = created(registration, turn.prompt.into(), wanted, (front, reply));
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
@@ -1565,6 +1559,16 @@ fn take_owned(
     };
     drop(capacity);
     Some(Taken::Done(result))
+}
+
+/// The lineage a route whose driver hands its observed execution over waits for; that driver
+/// writes the prompt as the owner's effect.
+fn handed_over(route: target::Route, provider: &str) -> Option<scope::Lineage> {
+    match (route, provider) {
+        (target::Route::Cold, "claude" | "codex") => Some(scope::Lineage::Created),
+        (target::Route::HerdrIdle, "claude" | "codex") => Some(scope::Lineage::Existing),
+        _ => None,
+    }
 }
 
 /// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
