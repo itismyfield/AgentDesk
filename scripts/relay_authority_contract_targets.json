@@ -371,7 +371,7 @@
         "services::discord::tui_prompt_relay::local_model_queue_wake_e2e"
       ],
       "minimum": 5,
-      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This Rust production-path E2E drives the local Discord mock, mailbox lifecycle, durable queue wake, and production workers; dashboard Playwright is unrelated and nightly-only."
+      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This Rust production-path E2E drives the local Discord mock, mailbox lifecycle, durable queue wake, and production workers."
     },
     {
       "name": "relay-e2e-scenario-census",

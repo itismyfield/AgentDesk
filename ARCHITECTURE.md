@@ -3626,6 +3626,7 @@ src/
 │   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
 │   │   │   ├── native_key_tests.rs
+│   │   │   ├── native_memo_port_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_receipt_tests.rs
@@ -4638,6 +4639,8 @@ src/
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_receipt.rs
 │   │   │   │   │   ├── native_tests.rs
+│   │   │   │   │   ├── read_stamp.rs
+│   │   │   │   │   ├── read_stamp_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs
@@ -4906,6 +4909,9 @@ src/
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── owe/
+│   │   │   │   │   ├── observe_memo.rs
+│   │   │   │   │   └── observe_memo_tests.rs
 │   │   │   │   ├── archive_eof.rs
 │   │   │   │   ├── archive_eof_tests.rs
 │   │   │   │   ├── claude_boundary.rs
@@ -5002,6 +5008,7 @@ src/
 │   │   │   ├── local_retry_repost_tests.rs
 │   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── native_memo_actor_tests.rs
 │   │   │   ├── notice_retry_tests.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs

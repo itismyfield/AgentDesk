@@ -1048,5 +1048,8 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
 
 #[path = "local_retry_actor_tests.rs"]
 mod local_retry;
+#[cfg(unix)]
+#[path = "native_memo_actor_tests.rs"]
+mod native_memo;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;

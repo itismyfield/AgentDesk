@@ -42,7 +42,7 @@ function manualChunks(id: string) {
 
 export default defineConfig({
   test: {
-    exclude: ["e2e/**", "node_modules/**"],
+    exclude: ["node_modules/**"],
   },
   plugins: [react(), tailwindcss()],
   resolve: {
