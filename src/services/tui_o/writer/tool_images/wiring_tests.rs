@@ -495,7 +495,7 @@ async fn restored_notice_prepared_settles_on_its_own_poll() {
     );
     derive(&mut writer, &mut deriver, &source, 0);
     let ledger = writer.store().ledger();
-    let notice = ledger.tool_images().open_obligations(ledger).into_iter();
+    let mut notice = ledger.tool_images().open_obligations(ledger).into_iter();
     let unit_key = notice.find_map(|open| match open {
         crate::services::tui_o::store::ledger::tool_images::OpenObligation::Notice {
             key, ..
