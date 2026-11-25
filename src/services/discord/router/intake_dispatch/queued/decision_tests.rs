@@ -142,3 +142,34 @@ async fn decision_original_leaves_the_queue_unrun_unless_its_event_is_open_pg() 
     pool.close().await;
     db.drop().await;
 }
+
+/// A start that queues its input again rebuilds the entry from the request text. Inside a
+/// Decision start the rebuilt entry still names the event, unmerged, and the start reads as a
+/// wait; outside one nothing is stamped, and a start that queued nothing is no wait.
+#[tokio::test]
+async fn decision_start_that_queues_its_input_again_keeps_the_event_origin() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let origin = format!("decision:{}", uuid::Uuid::new_v4());
+    let rebuilt = || {
+        super::super::super::response_format::build_race_requeued_intervention(
+            serenity::UserId::new(ACTOR),
+            serenity::MessageId::new(9),
+            TEXT,
+            true,
+            None,
+            false,
+            true,
+            Vec::new(),
+        )
+    };
+    let start = async { (rebuilt(), decision_queue::starting_origin()) };
+    let ((entry, named), back) = decision_queue::started_under(Some(origin.clone()), start).await;
+    assert_eq!(decision_queue::origin(&entry), Some(origin.as_str()));
+    assert_eq!(
+        (named, back, entry.merge_consecutive),
+        (Some(origin), true, false)
+    );
+    assert_eq!(decision_queue::origin(&rebuilt()), None);
+    let (_, back) = decision_queue::started_under(Some("decision:x".into()), async {}).await;
+    assert!(!back);
+}

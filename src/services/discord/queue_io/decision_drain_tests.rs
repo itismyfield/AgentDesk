@@ -757,13 +757,12 @@ async fn decision_boot_recovery_leaves_a_live_nodes_attempts_alone_pg() {
         before,
         "the closing update ignored the holder"
     );
-    // A's run is over: the cluster lists it offline.
-    sqlx::query("UPDATE worker_nodes SET status = 'offline' WHERE instance_id = $1")
-        .bind(NODE_A)
-        .execute(&rig.pool)
-        .await
-        .unwrap();
-    assert_eq!(recover_before(&rig.pool, boot, |_| None).await.unwrap(), 3);
+    // A's run is over: its heartbeat stops, and the cluster's own maintenance listing it offline
+    // settles what it held, with no other boot or recovery call.
+    let stopped = "UPDATE worker_nodes SET last_heartbeat_at = NOW() - INTERVAL '1 hour'";
+    sqlx::query(stopped).execute(&rig.pool).await.unwrap();
+    let list_stale = crate::services::cluster::node_registry::mark_stale_worker_nodes_offline;
+    assert_eq!(list_stale(&rig.pool, 60, "decision-node-b").await, Ok(1));
     let ends = [
         ("failed", Some(INTERRUPTED)),
         ("failed", Some(INTERRUPTED)),
@@ -794,5 +793,90 @@ async fn decision_started_event_settles_only_on_the_receipt_of_its_turn_pg() {
     settle(&rig.pool, None, &failed, None).await.unwrap();
     assert_eq!(rig.state(&completed).await.0, "delivered");
     assert_eq!(rig.state(&failed).await.0, "unknown_closed");
+    rig.close().await;
+}
+
+/// Until the cluster bootstrap registered this node's name no attempt moves: one moved under a
+/// temporary name would read as abandoned to every peer. Once registered it runs under that name.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn decision_attempt_does_not_move_before_this_node_is_registered_pg() {
+    let rig = Rig::new().await;
+    let row = rig.event("normal_wait", true).await;
+    let (kept, front) = (context(&row), rig.front().await);
+    let (ready, calls, _) = idle(&rig.pool, &row, Ok(()));
+    let pool = Some(&rig.pool);
+    UNREGISTERED.with(|hidden| hidden.set(true));
+    let early = hand_idle(pool, &rig.mailbox, Some(&kept), front.clone(), &ready).await;
+    let boot = decisions::clock(&rig.pool).await.unwrap();
+    let recovered = recover_before(&rig.pool, boot, |_| None).await.unwrap();
+    UNREGISTERED.with(|hidden| hidden.set(false));
+    let unavailable = "NotSent(\"decision_store_unavailable\")".to_string();
+    assert_eq!((early, recovered), (Err(unavailable), 0));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "written before registration"
+    );
+    assert_eq!(rig.state(&row).await.0, "normal_wait");
+    assert_eq!(rig.queued_ids().await, [front.1.message_id]);
+    let sent = hand_idle(pool, &rig.mailbox, Some(&kept), front, &ready).await;
+    assert_eq!(
+        (sent, rig.state(&row).await.0),
+        (Ok(()), "delivered".into())
+    );
+    let holder: Option<String> = sqlx::query_scalar(
+        "SELECT holder_instance_id FROM decision_delivery_attempts WHERE event_id = $1",
+    )
+    .bind(row.event_id)
+    .fetch_one(&rig.pool)
+    .await
+    .unwrap();
+    let registered = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
+    assert_eq!(holder.as_ref(), registered);
+    rig.close().await;
+}
+
+/// A refusal drops its bind and keeps a notice. One left by an event PG already closed is still
+/// found through its ticket's receipt, so no notice asks to resend a closed Decision.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_refusal_of_a_closed_event_owes_no_notice_pg() {
+    let rig = Rig::new().await;
+    let drain = crate::services::discord::queue_io::input_owner::notice::drain;
+    rig.event("unknown_closed", true).await;
+    let refused = rig.mailbox.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let front = owner.front().ok_or("no front")?;
+        owner.grant_front(&front)?;
+        owner.claim_turn(front.1.message_id, &front);
+        let hold = owner.hold_readiness(&front, "missing_launch", 1_000)?;
+        owner.refuse_readiness_front(&hold, 11_000)
+    });
+    assert_eq!(refused.await, Ok(true));
+    let adopted = Rig::adopt(&rig.file).await;
+    assert_eq!(drain(&rig.pool, &adopted, "claude", CHANNEL).await, Ok(0));
+    assert_eq!(
+        rig.notices().await,
+        0,
+        "a closed decision asked for a resend"
+    );
+    rig.close().await;
+}
+
+/// A Decision whose session's execution is confirmed gone does not wait for a turn boundary that
+/// cannot come: it ends failed and its original leaves. A pane merely in use waits (above).
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn decision_front_whose_execution_is_missing_ends_instead_of_waiting_pg() {
+    let rig = Rig::new().await;
+    let row = rig.event("normal_wait", true).await;
+    let (kept, front) = (context(&row), rig.front().await);
+    let (gone, calls, _) = idle(&rig.pool, &row, Err(MISSING.to_string()));
+    let ended = hand_idle(Some(&rig.pool), &rig.mailbox, Some(&kept), front, &gone).await;
+    assert_eq!(ended, Err(MISSING.to_string()));
+    let failed = ("failed".to_string(), Some("herdr_execution_missing".into()));
+    assert_eq!(rig.state(&row).await, failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.queued_ids().await, [0u64; 0]);
     rig.close().await;
 }
