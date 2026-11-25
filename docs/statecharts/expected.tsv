@@ -222,6 +222,7 @@ decision-request/Provenance.cfg	DecisionRequest	PreservedNeedsApproval	-
 decision-request/RePost.cfg	DecisionRequest	OnePost	-
 decision-request/RetryClosed.cfg	DecisionRequest	NoRearmAfterClose	-
 decision-request/RunBeforeStore.cfg	DecisionRequest	StoredBeforeRun	-
+decision-request/Sealed.cfg	DecisionRequest	-	-
 decision-request/SnapshotRegister.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/TempHolderId.cfg	DecisionRequest	LiveHolderKeeps	-
 decision-request/TimeOnlyRecovery.cfg	DecisionRequest	LiveHolderKeeps	-
