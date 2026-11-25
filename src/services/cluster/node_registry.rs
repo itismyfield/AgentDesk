@@ -487,6 +487,10 @@ fn spawn_stale_claim_owner_reassignment_loop(
     });
 }
 
+/// What the layer above settles once nodes are listed offline; it registers at its start.
+pub(crate) type OfflineSettle = fn(PgPool) -> futures::future::BoxFuture<'static, ()>;
+pub(crate) static ON_NODES_OFFLINE: std::sync::OnceLock<OfflineSettle> = std::sync::OnceLock::new();
+
 pub(crate) async fn mark_stale_worker_nodes_offline(
     pool: &PgPool,
     stale_threshold_secs: u64,
@@ -511,7 +515,9 @@ pub(crate) async fn mark_stale_worker_nodes_offline(
             affected,
             "[cluster] flipped stale worker_nodes to offline"
         );
-        crate::services::discord::decision_drain::settle_abandoned(pool).await;
+        if let Some(settle) = ON_NODES_OFFLINE.get() {
+            settle(pool.clone()).await;
+        }
     }
     Ok(affected)
 }

@@ -761,6 +761,7 @@ async fn decision_boot_recovery_leaves_a_live_nodes_attempts_alone_pg() {
     // settles what it held, with no other boot or recovery call.
     let stopped = "UPDATE worker_nodes SET last_heartbeat_at = NOW() - INTERVAL '1 hour'";
     sqlx::query(stopped).execute(&rig.pool).await.unwrap();
+    settle_on_offline();
     let list_stale = crate::services::cluster::node_registry::mark_stale_worker_nodes_offline;
     assert_eq!(list_stale(&rig.pool, 60, "decision-node-b").await, Ok(1));
     let ends = [

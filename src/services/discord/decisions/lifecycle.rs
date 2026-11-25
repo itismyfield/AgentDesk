@@ -36,8 +36,15 @@ pub(crate) async fn show(
         serenity::MessageId::new(thread),
     );
     let starter = http.get_message(channel, message).await?;
-    let body = card::edit_body(&starter.content, status, &buttons, enabled);
-    let edited = http.edit_message(channel, message, &body, Vec::new());
+    let content = card::with_status(&starter.content, status);
+    let rows = card::buttons(&buttons, enabled);
+    let edited = crate::services::discord::http::edit_channel_message_with_components(
+        http,
+        channel,
+        message,
+        content.as_str(),
+        rows,
+    );
     edited.await.map(drop)
 }
 

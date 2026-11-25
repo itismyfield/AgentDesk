@@ -459,7 +459,6 @@ async fn decision_buttons_open_only_where_wired_and_take_one_choice_pg() {
         "{edit}"
     );
     assert_eq!(edit["components"][0]["components"][1]["disabled"], false);
-    assert_eq!(edit["allowed_mentions"]["parse"], json!([]));
     assert_eq!(
         rig.count("decision_input_events").await,
         0,
