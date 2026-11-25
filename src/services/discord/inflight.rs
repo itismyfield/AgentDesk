@@ -148,7 +148,7 @@ pub(in crate::services::discord) mod agy_end_authority_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) use agy_end_authority::{CustodyRow, custody_rows};
 pub(in crate::services::discord) use agy_end_authority::{
-    EndAuthority, end_authority, generic_may_end, owner_clear,
+    EndAuthority, as_route_owner, end_authority, generic_may_end,
 };
 pub(in crate::services::discord) use model::agy_custody::{
     AgyCustodyField, AgyCustodyRoute, AgyProducer,

@@ -1978,10 +1978,10 @@ tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterAgyAbandon.cfg	WriterAdoption	-	AgyAcceptedEnds
-tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
-tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyBootHold.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyBootHoldRelease.cfg	WriterAdoption	HoldWhileUnresolved	-
+tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
+tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyCustody.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyCustodyForceStop.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,HeldVisible,ProbeErrorVisible
 tui-o-writer/WriterAgyCustodyGenericSettle.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,ProbeErrorVisible

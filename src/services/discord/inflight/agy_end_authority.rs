@@ -1,7 +1,5 @@
 //! Who may end an inflight row: the one durable predicate every generic end consults.
 
-use std::fs;
-
 use uuid::Uuid;
 
 use super::{AgyCustodyField, AgyCustodyRoute, InflightTurnState};
@@ -83,7 +81,7 @@ pub(in crate::services::discord) fn custody_rows(
 ) -> Result<Vec<CustodyRow>, String> {
     let root = super::inflight_runtime_root().ok_or("inflight root unavailable")?;
     let dir = super::store::inflight_provider_dir(&root, provider);
-    let entries = match fs::read_dir(&dir) {
+    let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.to_string()),
@@ -97,7 +95,7 @@ pub(in crate::services::discord) fn custody_rows(
         else {
             continue;
         };
-        let content = match fs::read_to_string(&path) {
+        let content = match std::fs::read_to_string(&path) {
             Ok(content) if raw_names_custody(&content) => content,
             Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -113,31 +111,19 @@ pub(in crate::services::discord) fn custody_rows(
     Ok(rows)
 }
 
-/// The owner's end of the route row naming exactly this execution; any other row stays.
-pub(in crate::services::discord) fn owner_clear(
+/// Runs `clear` as the AGY owner when `row`'s route names this exact execution and `nonce`, so the
+/// custody guard lets that one row's delete through; any other row stays kept.
+pub(in crate::services::discord) fn as_route_owner<T>(
     provider: &ProviderKind,
-    destination: u64,
-    message: u64,
+    row: &InflightTurnState,
     nonce: Uuid,
-) -> Result<bool, String> {
-    let root = super::inflight_runtime_root().ok_or("inflight root unavailable")?;
-    let path = super::inflight_state_path(&root, provider, destination);
-    let _lock = super::lock_inflight_state_path(&path)?;
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    };
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
-        return Ok(false);
-    };
-    let owned = end_authority(&state) == EndAuthority::Agy
-        && matches!(&state.agy_custody, Some(AgyCustodyField::Route(route))
-            if route.destination == destination && route.message == message && route.nonce == nonce);
-    if !owned {
-        return Ok(false);
-    }
-    super::row_removed::unlink_owned(&path, || fs::remove_file(&path))
-        .map(|()| true)
-        .map_err(|error| error.to_string())
+    clear: impl FnOnce() -> T,
+) -> T {
+    let owned = end_authority(row) == EndAuthority::Agy
+        && matches!(&row.agy_custody, Some(AgyCustodyField::Route(route)) if route.nonce == nonce);
+    let path = owned
+        .then(super::inflight_runtime_root)
+        .flatten()
+        .map(|root| super::inflight_state_path(&root, provider, row.channel_id));
+    super::row_removed::with_owner(path, clear)
 }

@@ -98,10 +98,6 @@ impl Projection for Arc<SharedData> {
         match effect {
             Effect::ClearInflight => {
                 use inflight::GuardedClearOutcome::*;
-                // A route row naming this execution is the owner's to end; generic clears keep it.
-                if inflight::owner_clear(&provider, channel.get(), id, lease.key.nonce)? {
-                    return Ok(());
-                }
                 let Some(row) =
                     inflight::load_inflight_state_read_only_result(&provider, channel.get())?
                 else {
@@ -112,12 +108,15 @@ impl Projection for Arc<SharedData> {
                 {
                     return Ok(());
                 }
-                let result = inflight::clear_inflight_state_for_captured_episode(
-                    &provider,
-                    channel.get(),
-                    &inflight::InflightTurnIdentity::from_state(&row),
-                    Some(&nonce),
-                );
+                // Only this execution's own route row passes the custody guard, as its owner.
+                let result = inflight::as_route_owner(&provider, &row, lease.key.nonce, || {
+                    inflight::clear_inflight_state_for_captured_episode(
+                        &provider,
+                        channel.get(),
+                        &inflight::InflightTurnIdentity::from_state(&row),
+                        Some(&nonce),
+                    )
+                });
                 match result {
                     Cleared | Missing | UserMsgMismatch => Ok(()),
                     other => Err(format!("agy inflight projection held ({other:?})")),

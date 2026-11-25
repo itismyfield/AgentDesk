@@ -86,22 +86,29 @@ pub(super) fn removed(path: &Path, pin: Option<InflightEpisodePin>) {
     });
 }
 /// Every inflight row delete; an AGY custody row is its owner's to remove, so it is kept here.
+std::thread_local! {
+    /// The one row path the AGY owner may delete on this thread while its permit runs.
+    static OWNER: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `clear` with the owner's permit for `path` (none when `None`); it ends with `clear`.
+pub(super) fn with_owner<T>(path: Option<std::path::PathBuf>, clear: impl FnOnce() -> T) -> T {
+    let earlier = OWNER.with(|owner| owner.replace(path));
+    let result = clear();
+    OWNER.with(|owner| owner.replace(earlier));
+    result
+}
+
 pub(super) fn unlink(
     path: &Path,
     remove: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let bytes = fs::read(path).unwrap_or_default();
-    if super::agy_end_authority::generic_end_keeps(&String::from_utf8_lossy(&bytes)) {
+    if super::agy_end_authority::generic_end_keeps(&String::from_utf8_lossy(&bytes))
+        && !OWNER.with(|owner| owner.borrow().as_deref() == Some(path))
+    {
         return Err(std::io::Error::other("AGY custody row kept for its owner"));
     }
-    unlink_owned(path, remove)
-}
-
-/// The AGY owner's delete of a route row it verified under the row lock.
-pub(super) fn unlink_owned(
-    path: &Path,
-    remove: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
     #[cfg(unix)]
     let pin = capture(path);
     #[cfg(not(unix))]

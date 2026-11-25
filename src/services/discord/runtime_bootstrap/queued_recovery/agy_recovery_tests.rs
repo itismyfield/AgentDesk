@@ -185,7 +185,8 @@ async fn boot_ends_a_live_orphan_group_once() {
     // Reaped as init would reap it once this process is no longer its parent.
     let reaper = std::thread::spawn(move || child.wait());
     assert!(boot.recover().await.is_empty());
-    assert!(!reaper.join().unwrap().unwrap().success());
+    let ended = crate::test_support::wait::join_within(reaper, crate::test_support::wait::WAIT_CAP);
+    assert!(!ended.unwrap().success());
     assert_eq!(boot.posts(), [FAILED]);
     assert!(!path.exists());
     let lost = Plan::abandoned(key(&state), Abandon::ProducerLost).fingerprint;
