@@ -5286,6 +5286,8 @@ src/
 │   │   │   │   ├── control_tests.rs
 │   │   │   │   ├── decision.rs
 │   │   │   │   ├── effort_continue.rs
+│   │   │   │   ├── idle_head.rs
+│   │   │   │   ├── idle_head_tests.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   ├── origin.rs
