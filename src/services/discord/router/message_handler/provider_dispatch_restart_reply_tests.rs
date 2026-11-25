@@ -33,7 +33,7 @@ fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
         })
         .collect();
     append(&started.path, &records);
-    readiness::tests::forget_session(fx.logical());
+    readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let idle = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -27,7 +27,7 @@ pub mod watcher_latency;
 mod emit;
 /// Emit-surface scenarios for the capture stress tests mounted in the services test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use emit::tests as emit_fixtures;
+pub(crate) use emit::test_support as emit_fixtures;
 mod helpers;
 mod pg_io;
 mod relay_signal_alert;
@@ -479,7 +479,7 @@ pub(crate) fn reset_for_tests() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_support::{lock_env_then_runtime, test_runtime_lock};

@@ -921,7 +921,7 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
     configure_child_command(command)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
     super::login_test_support::review_fixture()
 }

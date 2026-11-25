@@ -33,7 +33,7 @@ pub(crate) mod surface_policy;
 pub(crate) mod thread_host;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use herdr_registry::HerdrRegistry;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod herdr_socket_rig_tests;
 pub(crate) mod legacy_collapse;
 mod model;

@@ -461,7 +461,7 @@ impl SocketHerdrLaunchHost {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_transport_for_test(mut self, transport: Arc<HerdrSocketTransport>) -> Self {
         self.endpoints[0].1 = transport;
         self
@@ -871,6 +871,11 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         )
     }
 }
+
+/// The socket launch host the composed upper-crate scenarios script (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "launch_host_support.rs"]
+mod support;
 
 #[cfg(test)]
 #[path = "launch_host_tests.rs"]

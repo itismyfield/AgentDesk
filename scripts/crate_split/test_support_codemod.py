@@ -904,7 +904,8 @@ def plan(tree, exclude_entries, bundles=()):
         if not matched:
             stale.append(f"exclusion matches nothing: {rel} :: {e['item']}")
             continue
-        if [norm_cfg(k) for k in kinds] != sorted(norm_cfg(k) for k in e["cfg"]):
+        # Compare normalised then sorted on both sides: an opened twin sorts `any(..)` before `not(..)`.
+        if sorted(norm_cfg(k) for k in kinds) != sorted(norm_cfg(k) for k in e["cfg"]):
             stale.append(f"exclusion matches {len(matched)} items with cfg {kinds}, expected {sorted(e['cfg'])}: "
                          f"{rel} :: {e['item']}")
             continue

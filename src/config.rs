@@ -12,7 +12,7 @@ mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 /// Runtime-validation fixtures for the tests mounted in the root test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use runtime_validation::tests as runtime_validation_fixtures;
+pub(crate) use runtime_validation::test_support as runtime_validation_fixtures;
 
 mod agent_memory;
 pub use agent_memory::{AgentDef, SharedKnowledgeInjection};

@@ -160,7 +160,7 @@
    {"file": "src/services/tui_o/writer/input_facts.rs", "item": "impl InputFacts > fn open_capture > field native_records", "cfg": "all(test, unix)"},
    {"file": "src/services/tui_o/writer/input_facts.rs", "item": "impl InputFacts > fn poll_inner > stmt if let Some(records) = &mut self.native_records", "cfg": "all(test, unix)"},
    {"file": "src/services/tui_o/writer/input_facts.rs", "item": "struct InputFacts > field native_records", "cfg": "all(test, unix)"},
-   {"file": "src/services/tui_o/writer/input_facts/native.rs", "item": "use tests::fold", "cfg": "all(test, unix)"}
+   {"file": "src/services/tui_o/writer/input_facts/native.rs", "item": "use test_support::fold", "cfg": "all(test, unix)"}
   ]},
   {"name": "SNAPSHOTS", "class": "A", "why": "step-e errors: src/services/tui_o/writer/replay.rs:100 E0425; src/services/tui_o/writer/replay.rs:105 E0425", "items": [
    {"file": "src/services/tui_o/writer/replay.rs", "item": "fn capture", "cfg": "test"},
