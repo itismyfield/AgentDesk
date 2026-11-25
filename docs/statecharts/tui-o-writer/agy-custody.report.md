@@ -19,6 +19,9 @@ TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`. Before = the same model with 
   lost either way.
 - Boot discovery is route rows plus delivery journals short of `Complete`, so a restart after
   `ClearInflight` removed the row still finishes release and `Complete` (`JournalCompletes`).
+- A retry judges only keys a pass left open, so a producer this process started after boot is
+  never disposed of (`RetryTouchesOnlyOpen`). The owner's ClearInflight ends its exact row even
+  with a planned restart's marker, so every owned turn reaches `Complete` (`AgyOwnerCompletes`).
 - `BootHoldSpec`: the provider's `boot_hold` stays while any key the owner holds is unresolved
   (`HoldWhileUnresolved`).
 - Boot runs in the real eight steps. The owner judges a row it holds once, synchronously after
@@ -35,12 +38,16 @@ TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`. Before = the same model with 
 | WriterAgyCustody, GoneOrReused kills any live group | RED `NoForeignSignal` | GREEN |
 | WriterAgyCustody, discovery from route rows only | RED `JournalCompletes` | GREEN |
 | WriterAgyBootHold, one key's success releases the provider | RED `HoldWhileUnresolved` | GREEN |
+| WriterAgyCustody, retry disposes of every key it found | RED `RetryTouchesOnlyOpen` | GREEN |
+| WriterAgyCustody, owner clear refused by a restart marker | RED `AgyOwnerCompletes` | GREEN |
 | WriterAgyOwnerCutover, WriterAgyOwnerShadow | RED `NoNewInputWithExistingDebt` | GREEN |
 | WriterAgyCustodyLegacyAsAgy | — | RED `LegacyRecoveryKept` (+`LegacyResolves`) |
 | WriterAgyCustodyGenericSettle | — | RED `AgyEndOnlyByOwner` (+`AgyCustodyResolves`, `ProbeErrorVisible`) |
 | WriterAgyCustodyKillReused | — | RED `NoForeignSignal` |
 | WriterAgyCustodyRouteOnly | — | RED `JournalCompletes` |
 | WriterAgyBootHoldRelease | — | RED `HoldWhileUnresolved` |
+| WriterAgyCustodyDecideBeforeFilter | — | RED `RetryTouchesOnlyOpen` |
+| WriterAgyCustodyOwnerNoRestartException | — | RED `AgyOwnerCompletes` |
 | WriterAgyCustodyForceStop | — | RED `AgyEndOnlyByOwner` (+`AgyCustodyResolves`, `HeldVisible`, `ProbeErrorVisible`) |
 | WriterAgyCustodyUnprovenLost | — | RED `NoAbandonUnproven` |
 | WriterAgyCustodyNoLaunchGate | — | RED `NoAbandonUnproven` |
@@ -48,7 +55,7 @@ TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`. Before = the same model with 
 | WriterAgyCustodyOneShot | — | RED `AgyCustodyResolves`, `ProbeErrorVisible` (first judgement kept, no later one) |
 | WriterAgyOwnerInputWithDebt | — | RED `NoNewInputWithExistingDebt` |
 
-All 75 `WriterAdoption` configs match `expected.tsv`.
+All 77 `WriterAdoption` configs match `expected.tsv`.
 
 ## Assumptions and limits
 

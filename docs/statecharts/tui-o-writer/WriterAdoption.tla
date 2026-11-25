@@ -852,7 +852,7 @@ CustodyInit ==
     /\ LegacyIdle /\ QuietLate
     /\ \E route \in {"legacy", "agy", "held"}, stage \in CustodyStages, probe \in CustodyProbes,
           pid \in {"gone", "reused"}, group \in {"live", "gone"},
-          mid \in {"none", "cleared", "released"} :
+          mid \in {"none", "cleared", "released"}, marked \in BOOLEAN :
        LET reused == CustodyLive(route, stage) /\ probe = "goneOrReused"
            journal == IF route = "agy" /\ stage = "sealed" THEN mid ELSE "none"
        IN
@@ -867,7 +867,10 @@ CustodyInit ==
               visibleHold |-> FALSE, unprovenAbandon |-> FALSE, judged |-> FALSE,
               pid |-> IF reused THEN pid ELSE "none", group |-> IF reused THEN group ELSE "none",
               foreign |-> FALSE, journal |-> journal,
-              row |-> IF journal = "none" THEN "present" ELSE "gone"]
+              row |-> IF journal = "none" THEN "present" ELSE "gone",
+              \* marked: a planned restart's marker on the row; fresh: a producer this process
+              \* started after boot, never boot debt.
+              marked |-> marked /\ journal = "none", fresh |-> "none"]
 CustodyPhase == CustodyBoot[agy.step]
 \* end_authority: every generic end skips a row that is not Legacy.
 CustodySkipsGeneric == agy.route \in {"agy", "held"} \/ Mut = "legacyAsAgy"
@@ -903,13 +906,21 @@ CustodyHoldVisible ==
     /\ CustodyOwnerTurn /\ ~agy.visibleHold /\ ~CustodyEnded
     /\ agy.route = "held" \/ (CustodyOwnsAgy /\ agy.probe = "probeError")
     /\ agy' = [agy EXCEPT !.visibleHold = TRUE, !.judged = TRUE]
+\* A retry judges only keys a pass left open; "decideBeforeFilter" also disposes of the rest.
 CustodyRetry ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ agy.probe = "probeError" /\ agy.visibleHold
     /\ \E probe \in {"same", "goneOrReused"}, pid \in {"gone", "reused"}, group \in {"live", "gone"} :
           LET split == probe = "goneOrReused"
           IN agy' = [agy EXCEPT !.probe = probe, !.pid = IF split THEN pid ELSE "none",
-                                !.group = IF split THEN group ELSE "none"]
+                                !.group = IF split THEN group ELSE "none",
+                                !.fresh = IF Mut = "decideBeforeFilter" /\ @ = "running"
+                                          THEN "killed" ELSE @]
+\* New input runs once boot is done.
+CustodyFreshStart ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyPhase = "idle" /\ agy.fresh = "none"
+    /\ agy' = [agy EXCEPT !.fresh = "running"]
 \* A same-identity orphan has its group killed. A group that outlives the deadline is a probe
 \* error; killing again eventually clears it (strong fairness on the cleared outcome).
 CustodyKillTarget ==
@@ -931,11 +942,16 @@ CustodySweep ==
     /\ agy.stage = "started" /\ agy.probe = "goneOrReused" /\ agy.group = "live"
     /\ agy.pid = "gone" \/ Mut = "killReused"
     /\ agy' = [agy EXCEPT !.group = "gone", !.foreign = (agy.pid = "reused"), !.judged = TRUE]
+\* The owner's ClearInflight ends its exact row across a restart marker; without that exception
+\* ("ownerNoRestartException") a marked row stays and the journal stops after its post.
+CustodyClearRefused == agy.marked /\ Mut = "ownerNoRestartException"
+CustodyCleared == IF CustodyClearRefused THEN "posted" ELSE "cleared"
+CustodyRowLeft == IF CustodyClearRefused THEN "present" ELSE "gone"
 \* The owner's end posts, then clears the row (ClearInflight); release and Complete follow.
 CustodySettle ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded /\ agy.stage = "sealed"
-    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = "cleared", !.row = "gone"]
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = CustodyCleared, !.row = CustodyRowLeft]
 \* Abandon needs proof that input never ran or that its producer is gone.
 CustodyAbandon ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -944,7 +960,7 @@ CustodyAbandon ==
        \/ agy.stage = "started"
           /\ \/ agy.probe = "goneOrReused" /\ (agy.pid = "reused" \/ agy.group = "gone")
              \/ Mut = "unprovenLost"
-    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = "cleared", !.row = "gone",
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE, !.journal = CustodyCleared, !.row = CustodyRowLeft,
                            !.unprovenAbandon = agy.executed /\ agy.probe # "goneOrReused"]
 \* Boot discovery: route rows and delivery journals short of Complete; "routeOnly" finds rows only.
 CustodyFound == agy.row = "present" \/ (agy.journal \in {"cleared", "released"} /\ Mut # "routeOnly")
@@ -954,7 +970,7 @@ CustodyResume ==
     /\ agy' = [agy EXCEPT !.journal = IF @ = "cleared" THEN "released" ELSE "complete"]
 CustodyRest == UNCHANGED <<agy, vars, lateVars>>
 CustodyNext == CustodyAdvance \/ CustodyGenericEnd \/ CustodyForceStop \/ CustodyHoldVisible
-               \/ CustodyRetry \/ CustodySweep \/ CustodyResume               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
+               \/ CustodyRetry \/ CustodySweep \/ CustodyResume \/ CustodyFreshStart               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
                \/ CustodyRest
 AgyCustodySpec == CustodyInit /\ [][CustodyNext]_agy
     /\ WF_agy(CustodyAdvance) /\ WF_agy(CustodyGenericEnd) /\ WF_agy(CustodyHoldVisible)
@@ -966,6 +982,8 @@ AgyEndOnlyByOwner == agy.route \in {"agy", "held"} => agy.generic = 0
 NoAbandonUnproven == ~agy.unprovenAbandon
 CustodyEndsOnce == agy.ends + agy.generic + agy.legacy <= 1
 NoForeignSignal == ~agy.foreign
+RetryTouchesOnlyOpen == agy.fresh # "killed"
+AgyOwnerCompletes == agy.route = "agy" => <>(agy.journal = "complete")
 JournalCompletes == agy.journal \in {"cleared", "released"} ~> agy.journal = "complete"
 CustodyJudgedFirst == agy.step > 3 => (agy.judged \/ ~CustodyJudgeDue)
 AgyCustodyResolves == agy.route = "agy" => <>(agy.ends = 1)
