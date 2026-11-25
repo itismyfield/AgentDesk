@@ -20,13 +20,20 @@ function scrollParent(node: HTMLElement): HTMLElement | null {
   return null;
 }
 
+interface DockState { frame: DockFrame | null; measuredNarrow: boolean }
+
+const EMPTY_DOCK_STATE: DockState = { frame: null, measuredNarrow: false };
+
 /** Where the detail pane sits on wide viewports: pinned to the right of the page's scroll area, from the list's top
  * (or the area's top once scrolled) to its bottom, with the list padded clear of it. */
-function useDockFrame(root: RefObject<HTMLElement | null>, enabled: boolean): DockFrame | null {
-  const [frame, setFrame] = useState<DockFrame | null>(null);
+function useDockFrame(root: RefObject<HTMLElement | null>, enabled: boolean, minContentWidth = 520): DockState {
+  const [state, setState] = useState<DockState>(EMPTY_DOCK_STATE);
   useLayoutEffect(() => {
     const node = root.current;
-    if (!enabled || !node) { setFrame(null); return; }
+    if (!enabled || !node) {
+      setState((current) => (current.frame === null && !current.measuredNarrow ? current : EMPTY_DOCK_STATE));
+      return;
+    }
     const scroller = scrollParent(node);
     let raf = 0;
     const measure = () => {
@@ -34,7 +41,11 @@ function useDockFrame(root: RefObject<HTMLElement | null>, enabled: boolean): Do
       const area = scroller?.getBoundingClientRect();
       const clientRight = scroller && area ? area.left + scroller.clientLeft + scroller.clientWidth : document.documentElement.clientWidth;
       const box = node.getBoundingClientRect();
-      const width = Math.round(Math.min(608, Math.max(320, window.innerWidth * 0.36)));
+      const width = Math.round(Math.min(480, Math.max(340, window.innerWidth * 0.3)));
+      if (box.width > 0 && clientRight - width - DOCK_GAP - box.left < minContentWidth) {
+        setState((current) => (current.frame === null && current.measuredNarrow ? current : { frame: null, measuredNarrow: true }));
+        return;
+      }
       const next: DockFrame = {
         portal: scroller ?? document.body,
         top: Math.max(area?.top ?? 0, box.top),
@@ -43,7 +54,13 @@ function useDockFrame(root: RefObject<HTMLElement | null>, enabled: boolean): Do
         width,
         pad: Math.max(0, Math.round(box.right - (clientRight - width) + DOCK_GAP)),
       };
-      setFrame((current) => current && (Object.keys(next) as Array<keyof DockFrame>).every((key) => current[key] === next[key]) ? current : next);
+      setState((current) =>
+        !current.measuredNarrow &&
+        current.frame &&
+        (Object.keys(next) as Array<keyof DockFrame>).every((key) => current.frame![key] === next[key])
+          ? current
+          : { frame: next, measuredNarrow: false },
+      );
     };
     const schedule = () => { if (!raf) raf = requestAnimationFrame(measure); };
     measure();
@@ -58,18 +75,20 @@ function useDockFrame(root: RefObject<HTMLElement | null>, enabled: boolean): Do
       window.removeEventListener("resize", schedule);
       observer?.disconnect();
     };
-  }, [root, enabled]);
-  return frame;
+  }, [root, enabled, minContentWidth]);
+  return state;
 }
 
 /** Wide viewports dock the detail in a pane beside the list (put `dock` in DrawerDockContext); narrower ones open
- * the same Drawer as a bottom sheet. Give `root` to the list's wrapper and `rootStyle` to keep it clear of the pane. */
-export function useDetailDock() {
+ * the same Drawer as a slide-over or bottom sheet. Give `root` to the list's wrapper and `rootStyle` to keep it clear of the pane. */
+export function useDetailDock(minContentWidth = 520) {
   const docked = !useIsMobile();
   const root = useRef<HTMLDivElement>(null);
-  const frame = useDockFrame(root, docked);
+  const { frame: rawFrame, measuredNarrow } = useDockFrame(root, docked, minContentWidth);
   const [host, setHost] = useState<HTMLElement | null>(null);
-  const dock = useMemo(() => (docked ? { host } : null), [docked, host]);
+  const canDock = docked && !measuredNarrow;
+  const frame = canDock ? rawFrame : null;
+  const dock = useMemo(() => (canDock ? { host } : null), [canDock, host]);
   const id = useId();
   const rootStyle: CSSProperties | undefined = frame ? { paddingRight: frame.pad } : undefined;
   return { root, rootStyle, frame, dock, id, setHost };

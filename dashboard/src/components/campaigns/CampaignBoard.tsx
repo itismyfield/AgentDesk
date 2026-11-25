@@ -231,7 +231,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
           className={cn(
             "flex flex-col gap-2 p-2",
             foldedDone
-              ? "w-auto min-w-[6.75rem] max-w-[8.5rem] shrink-0 @max-[46rem]/board:order-first @max-[46rem]/board:max-w-none @max-[46rem]/board:flex-row @max-[46rem]/board:items-center @max-[46rem]/board:py-1.5"
+              ? "w-auto min-w-[6.75rem] max-w-[10.5rem] shrink-0 @max-[46rem]/board:order-first @max-[46rem]/board:max-w-none @max-[46rem]/board:flex-row @max-[46rem]/board:items-center @max-[46rem]/board:py-1.5"
               : "min-h-[20rem] min-w-[11rem] flex-[1_1_12rem]",
           )}>
           <h3 className="m-0 flex items-center justify-between gap-2 px-1 pt-1 !text-[13px] !font-semibold text-[var(--fg)]">
@@ -253,6 +253,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
                 <Button
                   variant="ghost"
                   size="sm"
+                  className="whitespace-nowrap"
                   aria-expanded={false}
                   onClick={() => setShown((current) => ({ ...current, [column.key]: step }))}
                 >

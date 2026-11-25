@@ -625,3 +625,57 @@ it("defaults large campaign swimlanes (>24 tasks) to active-only, hides finished
   expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')).toBeNull();
   expect(container.querySelector(".aui-handoff-swimlanes")?.textContent).toContain("FinishedGroup");
 });
+
+it("uses a right-side slide-over drawer instead of squeezing CampaignDetail at 1440px, and docks inline on ultrawide viewports", async () => {
+  let viewportWidth = 1440;
+  const origInnerWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  const origClientWidth = Object.getOwnPropertyDescriptor(document.documentElement, "clientWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, get: () => viewportWidth });
+  Object.defineProperty(document.documentElement, "clientWidth", { configurable: true, get: () => viewportWidth });
+  const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.classList?.contains("campaign-detail")) {
+      const left = 540;
+      const right = viewportWidth - 40;
+      return { left, right, width: right - left, top: 80, bottom: 800, height: 720, x: left, y: 80, toJSON: () => ({}) } as DOMRect;
+    }
+    return { left: 0, right: 0, width: 0, top: 0, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+  });
+  try {
+    vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {}, read: 1 });
+    await render();
+    await selectTask("task-0");
+    expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).toBe("");
+    const slideOver = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Selected task"]');
+    expect(slideOver).not.toBeNull();
+    expect(slideOver?.hasAttribute("data-docked")).toBe(false);
+    expect(slideOver?.className).toContain("fixed");
+    expect(slideOver?.className).toContain("right-0");
+    expect(slideOver?.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 0");
+
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+    expect(document.querySelector('[role="dialog"][aria-label="Selected task"]')).toBeNull();
+
+    await act(async () => button("Stage board").click());
+    const folded = container.querySelector<HTMLElement>('[data-folded-column="true"]');
+    expect(folded?.className).toContain("max-w-[10.5rem]");
+    expect(folded?.querySelector('button[aria-expanded="false"]')?.className).toContain("whitespace-nowrap");
+
+    viewportWidth = 1800;
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    });
+    await act(async () => button("Overview").click());
+    await selectTask("task-0");
+    const dockedPane = document.querySelector<HTMLElement>('aside[aria-label="Selected task"]');
+    expect(dockedPane).not.toBeNull();
+    expect(dockedPane?.querySelector('[data-docked] .campaign-node-detail h3')?.textContent).toContain("Task 0");
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).not.toBe("");
+  } finally {
+    rectSpy.mockRestore();
+    if (origInnerWidth) Object.defineProperty(window, "innerWidth", origInnerWidth); else Reflect.deleteProperty(window, "innerWidth");
+    if (origClientWidth) Object.defineProperty(document.documentElement, "clientWidth", origClientWidth); else Reflect.deleteProperty(document.documentElement, "clientWidth");
+  }
+});
+
