@@ -2,9 +2,8 @@
 //! a busy writer's walk also reaches a prompt or tool result still owed a reply.
 use super::*;
 
-/// A completed reply survives a non-conversation tail, including a finished idle compaction; old
-/// terminals across a session marker still cannot prove Idle, while a pending tool call remains
-/// Streaming.
+/// A completed reply survives a non-conversation tail or finished idle compaction; old terminals
+/// across a session marker still cannot prove Idle, while a pending tool call remains Streaming.
 pub(super) fn observe(path: &Path) -> TuiTurnState {
     let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
     if matches!(
