@@ -163,6 +163,30 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
+        let started = std::time::Instant::now();
+        let delivery = self
+            .send_reaction(shared, target, emoji, add, identity, source)
+            .await;
+        if delivery == TurnViewDelivery::Delivered
+            && add
+            && emoji == '⏳'
+            && target.kind == TurnViewTargetKind::IntakeUserMessage
+        {
+            let wait_ms = Some(started.elapsed().as_millis() as u64);
+            crate::logging::intake_stage::defer(target.message_id.get(), "hourglass", wait_ms);
+        }
+        delivery
+    }
+
+    async fn send_reaction(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        emoji: char,
+        add: bool,
+        identity: &ResolvedIdentity,
+        source: &'static str,
+    ) -> TurnViewDelivery {
         debug_assert!(
             TURN_VIEW_REACTIONS.contains(&emoji)
                 || QUEUE_EXIT_FEEDBACK_REACTIONS.contains(&emoji)
@@ -170,7 +194,6 @@ impl TurnViewReconciler {
         );
         #[cfg(not(test))]
         {
-            let started = std::time::Instant::now();
             let result = if add {
                 reaction_lifecycle::try_add_reaction_raw_with_shared_detailed(
                     &identity.http,
@@ -203,10 +226,6 @@ impl TurnViewReconciler {
                     "turn view reaction apply failed"
                 );
                 return TurnViewDelivery::from_reaction_error_status(error.status());
-            }
-            if add && emoji == '⏳' && target.kind == TurnViewTargetKind::IntakeUserMessage {
-                let wait_ms = Some(started.elapsed().as_millis() as u64);
-                crate::logging::intake_stage::defer(target.message_id.get(), "hourglass", wait_ms);
             }
         }
         #[cfg(test)]
