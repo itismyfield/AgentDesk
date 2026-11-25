@@ -18,6 +18,8 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub mod input_notices;
+#[cfg(test)]
+mod tool_images_tests;
 
 /// Discord ids minted on different API nodes can trail creation order by about a second.
 const POST_ORDER_SKEW_MS: u64 = 30_000;

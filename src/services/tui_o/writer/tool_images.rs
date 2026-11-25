@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use crate::services::discord::outbound::image_format::{self, Rejected};
 use crate::services::tui_o::shadow::ShadowProvider;
 
+#[cfg(test)]
+mod turns_tests;
+
 /// A settled native turn: its opener id, or `edge:{source}:{start}` when capture began mid-turn.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct NativeTurn(String);
