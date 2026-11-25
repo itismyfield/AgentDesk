@@ -25,8 +25,8 @@ impl NeverStartedTerminate {
         record.state == HostedState::Pending && record.expected.is_some()
     }
 
-    /// Shuts the execution's fence unless its start was logged first. The log read and the shut
-    /// share the pane's source authority with every writer of a start, so one of them wins whole.
+    /// Shuts the execution's fence only when the log was read and holds no start. The read and the
+    /// shut share the pane's source authority with every writer of a start, so one wins whole.
     pub(super) async fn fence(
         &self,
         shared: &Arc<SharedData>,
@@ -52,13 +52,11 @@ impl NeverStartedTerminate {
         let logical = record.owner.logical_key.as_str();
         crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
             let (nonce, session) = (&self.execution_nonce, &self.session_id);
-            if crate::services::claude::herdr_turn::start_logged(
-                channel.get(),
-                logical,
-                nonce,
-                session,
-            ) {
-                return Err(Refused("execution started".into()));
+            let read = crate::services::claude::herdr_turn::start_log_read;
+            match read(channel.get(), logical, nonce, session) {
+                Ok(false) => {}
+                Ok(true) => return Err(Refused("execution started".into())),
+                Err(error) => return Err(Refused(format!("start log unreadable: {error}"))),
             }
             target
                 .termination_fence()
